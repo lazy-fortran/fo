@@ -24,20 +24,83 @@ contains
         character(len=*), intent(in) :: dir
         type(backend_t) :: b
         logical :: has_fpm, has_cmake
+        character(len=512) :: current, parent
+        integer :: depth
 
-        b%project_dir = dir
+        current = absolute_dir(dir)
 
-        inquire(file=trim(dir)//'/fpm.toml', exist=has_fpm)
-        inquire(file=trim(dir)//'/CMakeLists.txt', exist=has_cmake)
+        do depth = 1, 64
+            b%project_dir = current
 
-        if (has_fpm) then
-            b%kind = BACKEND_FPM
-        else if (has_cmake) then
-            b%kind = BACKEND_CMAKE
-        else
-            b%kind = BACKEND_NONE
-        end if
+            inquire (file=trim(current)//'/fpm.toml', exist=has_fpm)
+            inquire (file=trim(current)//'/CMakeLists.txt', exist=has_cmake)
+
+            if (has_fpm) then
+                b%kind = BACKEND_FPM
+                return
+            else if (has_cmake) then
+                b%kind = BACKEND_CMAKE
+                return
+            end if
+
+            call parent_dir(current, parent)
+            if (trim(parent) == trim(current)) exit
+            current = parent
+        end do
+
+        b%kind = BACKEND_NONE
     end function detect_backend
+
+    function absolute_dir(dir) result(absdir)
+        character(len=*), intent(in) :: dir
+        character(len=512) :: absdir
+
+        character(len=512) :: pwd
+
+        if (len_trim(dir) == 0) then
+            absdir = '.'
+        else if (dir(1:1) == '/') then
+            absdir = trim(dir)
+        else
+            call get_environment_variable('PWD', pwd)
+            if (len_trim(pwd) > 0) then
+                if (trim(dir) == '.') then
+                    absdir = trim(pwd)
+                else
+                    absdir = trim(pwd)//'/'//trim(dir)
+                end if
+            else
+                absdir = trim(dir)
+            end if
+        end if
+    end function absolute_dir
+
+    subroutine parent_dir(path, parent)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(out) :: parent
+
+        character(len=512) :: clean
+        integer :: n, last
+
+        clean = trim(path)
+        n = len_trim(clean)
+        do while (n > 1 .and. clean(n:n) == '/')
+            clean(n:n) = ' '
+            n = n - 1
+        end do
+
+        if (trim(clean) == '/') then
+            parent = '/'
+            return
+        end if
+
+        last = index(trim(clean), '/', back=.true.)
+        if (last <= 1) then
+            parent = '/'
+        else
+            parent = clean(1:last - 1)
+        end if
+    end subroutine parent_dir
 
     function detect_nproc() result(np)
         integer :: np
@@ -51,63 +114,64 @@ contains
         cmd = 'nproc > '//trim(tmpfile)//' 2>/dev/null'
         call execute_command_line(cmd, wait=.true.)
 
-        open(newunit=u, file=tmpfile, status='old', iostat=iostat)
+        open (newunit=u, file=tmpfile, status='old', iostat=iostat)
         if (iostat == 0) then
-            read(u, '(a)', iostat=iostat) buf
-            if (iostat == 0) read(buf, *, iostat=iostat) np
-            close(u)
+            read (u, '(a)', iostat=iostat) buf
+            if (iostat == 0) read (buf, *, iostat=iostat) np
+            close (u)
         end if
         call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
         if (np < 1) np = 1
     end function detect_nproc
 
-    subroutine backend_build(self, exitcode, flags)
+    subroutine backend_build(self, exitcode, flags, log_file)
         class(backend_t), intent(in) :: self
         integer, intent(out) :: exitcode
         character(len=*), intent(in), optional :: flags
+        character(len=*), intent(in), optional :: log_file
 
         integer :: cmdstat, np
         character(len=2048) :: cmd
         character(len=8) :: np_str
 
         np = detect_nproc()
-        write(np_str, '(i0)') np
+        write (np_str, '(i0)') np
 
         select case (self%kind)
         case (BACKEND_FPM)
             if (present(flags) .and. len_trim(flags) > 0) then
                 cmd = 'cd '//trim(self%project_dir)// &
-                    ' && fpm build --flag "'//trim(flags)//'" 2>&1'
+                      ' && fpm build --flag "'//trim(flags)//'"'
             else
-                cmd = 'cd '//trim(self%project_dir)//' && fpm build 2>&1'
+                cmd = 'cd '//trim(self%project_dir)//' && fpm build'
             end if
         case (BACKEND_CMAKE)
             if (present(flags) .and. len_trim(flags) > 0) then
                 cmd = 'cd '//trim(self%project_dir)// &
-                    ' && cmake -S . -B build -G Ninja'// &
-                    ' -DCMAKE_Fortran_FLAGS="'//trim(flags)//'"'// &
-                    ' 2>&1 && cmake --build build -j '// &
-                    trim(np_str)//' 2>&1'
+                      ' && cmake -S . -B build -G Ninja'// &
+                      ' -DCMAKE_Fortran_FLAGS="'//trim(flags)//'"'// &
+                      ' && cmake --build build -j '//trim(np_str)
             else
                 cmd = 'cd '//trim(self%project_dir)// &
-                    ' && cmake -S . -B build -G Ninja 2>&1'// &
-                    ' && cmake --build build -j '// &
-                    trim(np_str)//' 2>&1'
+                      ' && cmake -S . -B build -G Ninja'// &
+                      ' && cmake --build build -j '//trim(np_str)
             end if
         case default
-            write(error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             exitcode = 1
             return
         end select
 
+        call redirect_command(cmd, log_file)
         call execute_command_line(cmd, exitstat=exitcode, cmdstat=cmdstat, wait=.true.)
         if (cmdstat /= 0) exitcode = 1
     end subroutine backend_build
 
-    subroutine backend_test(self, exitcode, include_slow)
+    subroutine backend_test(self, exitcode, include_slow, log_file)
         class(backend_t), intent(in) :: self
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
+        character(len=*), intent(in), optional :: log_file
 
         integer :: cmdstat
         character(len=2048) :: cmd
@@ -118,32 +182,33 @@ contains
 
         select case (self%kind)
         case (BACKEND_FPM)
-            inquire(file=trim(self%project_dir)//'/test/.', exist=has_tests)
+            inquire (file=trim(self%project_dir)//'/test/.', exist=has_tests)
             if (.not. has_tests) then
                 exitcode = 0
                 return
             end if
-            cmd = 'cd '//trim(self%project_dir)//' && fpm test 2>&1'
+            cmd = 'cd '//trim(self%project_dir)//' && fpm test'
         case (BACKEND_CMAKE)
-            inquire(file=trim(self%project_dir)//'/build/CTestTestfile.cmake', &
-                exist=has_tests)
+            inquire (file=trim(self%project_dir)//'/build/CTestTestfile.cmake', &
+                     exist=has_tests)
             if (.not. has_tests) then
                 exitcode = 0
                 return
             end if
             if (slow) then
                 cmd = 'cd '//trim(self%project_dir)// &
-                    ' && cd build && ctest --output-on-failure 2>&1'
+                      ' && cd build && ctest --output-on-failure'
             else
                 cmd = 'cd '//trim(self%project_dir)// &
-                    ' && cd build && ctest --output-on-failure -LE slow 2>&1'
+                      ' && cd build && ctest --output-on-failure -LE slow'
             end if
         case default
-            write(error_unit, '(a)') 'fo: no build backend detected'
+            write (error_unit, '(a)') 'fo: no build backend detected'
             exitcode = 1
             return
         end select
 
+        call redirect_command(cmd, log_file)
         call execute_command_line(cmd, exitstat=exitcode, cmdstat=cmdstat, wait=.true.)
         if (cmdstat /= 0) exitcode = 1
     end subroutine backend_test
@@ -170,21 +235,32 @@ contains
             select case (self%kind)
             case (BACKEND_FPM)
                 cmd = 'cd '//trim(self%project_dir)// &
-                    ' && fpm test '//trim(names(i))//' 2>&1'
+                      ' && fpm test '//trim(names(i))//' 2>&1'
             case (BACKEND_CMAKE)
                 cmd = 'cd '//trim(self%project_dir)// &
-                    ' && cd build && ctest --output-on-failure -R '// &
-                    trim(names(i))//' 2>&1'
+                      ' && cd build && ctest --output-on-failure -R '// &
+                      trim(names(i))//' 2>&1'
             case default
                 exitcode = 1
                 return
             end select
 
             call execute_command_line(cmd, exitstat=sub_exit, &
-                cmdstat=cmdstat, wait=.true.)
+                                      cmdstat=cmdstat, wait=.true.)
             if (cmdstat /= 0) sub_exit = 1
             if (sub_exit /= 0) exitcode = sub_exit
         end do
     end subroutine backend_test_names
+
+    subroutine redirect_command(cmd, log_file)
+        character(len=*), intent(inout) :: cmd
+        character(len=*), intent(in), optional :: log_file
+
+        if (present(log_file) .and. len_trim(log_file) > 0) then
+            cmd = trim(cmd)//' > '//trim(log_file)//' 2>&1'
+        else
+            cmd = trim(cmd)//' 2>&1'
+        end if
+    end subroutine redirect_command
 
 end module fo_build_backend

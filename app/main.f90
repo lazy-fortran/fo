@@ -3,7 +3,7 @@ program fo_main
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, is_slow_test
     use fo_dag, only: dag_t, dag_build, dag_topo_order, MAX_NODES
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, &
-        BACKEND_FPM, BACKEND_CMAKE
+                                BACKEND_FPM, BACKEND_CMAKE
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules
     implicit none
 
@@ -40,11 +40,11 @@ program fo_main
     case ('lsp')
         call cmd_lsp()
     case ('version', '--version')
-        write(output_unit, '(a)') 'fo 0.1.0'
+        write (output_unit, '(a)') 'fo 0.1.0'
     case ('help', '--help', '-h')
         call print_usage()
     case default
-        write(error_unit, '(a)') 'fo: unknown command: '//trim(action)
+        write (error_unit, '(a)') 'fo: unknown command: '//trim(action)
         call print_usage()
         stop 1
     end select
@@ -71,14 +71,14 @@ contains
         ! 0. detect backend
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
-            write(output_unit, '(a)') 'fo: no Fortran project detected'
+            write (output_unit, '(a)') 'fo: no Fortran project detected'
             return
         end if
 
         ! 1. static: scan + DAG cycle check
-        call scan_dir('.', units, n_units, ierr)
+        call scan_dir(trim(b%project_dir), units, n_units, ierr)
         if (ierr /= 0) then
-            write(error_unit, '(a)') 'Static: FAIL scan error'
+            write (error_unit, '(a)') 'Static: FAIL scan error'
             stop 1
         end if
 
@@ -88,16 +88,20 @@ contains
         call dag_build(units, n_units, dag)
         call dag_topo_order(dag, order, n_order, ierr)
         if (ierr /= 0) then
-            write(error_unit, '(a,i0,a,i0,a)') &
+            write (error_unit, '(a,i0,a,i0,a)') &
                 'Static: warning: ', dag%n - n_order, ' of ', dag%n, &
                 ' modules in possible cycle (continuing with build)'
         end if
 
         ! compute changed modules
-        call fo_changed_modules('.', dag, changed_ids, n_changed, &
-            affected_ids, n_affected, n_cached, ierr)
+        call fo_changed_modules(trim(b%project_dir), dag, changed_ids, n_changed, &
+                                affected_ids, n_affected, n_cached, ierr)
+        if (ierr /= 0) then
+            write (error_unit, '(a)') 'Static: FAIL scan or dag error'
+            stop 1
+        end if
 
-        write(output_unit, '(a,i0,a,i0,a,i0,a)') &
+        write (output_unit, '(a,i0,a,i0,a,i0,a)') &
             'Static: OK (', dag%n, ' modules, ', n_changed, &
             ' changed, ', n_affected, ' affected)'
 
@@ -106,20 +110,20 @@ contains
             use fo_artifact_cache, only: artifact_restore, artifact_store
             integer :: n_restored, art_ierr
 
-            call artifact_restore('./build', n_restored, art_ierr)
+            call artifact_restore(trim(b%project_dir)//'/build', n_restored, art_ierr)
             call b%build(exitcode)
             if (exitcode /= 0) then
-                write(error_unit, '(a)') 'Build: FAIL'
+                write (error_unit, '(a)') 'Build: FAIL'
                 stop 1
             end if
-            call artifact_store('./build', art_ierr)
+            call artifact_store(trim(b%project_dir)//'/build', art_ierr)
         end block
-        write(output_unit, '(a)') 'Build: OK'
+        write (output_unit, '(a)') 'Build: OK'
 
         ! 3. test: skip if nothing changed, otherwise run affected tests only
         if (n_changed == 0) then
             call cpu_time(t1)
-            write(output_unit, '(a,f0.1,a)') &
+            write (output_unit, '(a,f0.1,a)') &
                 'Tests: skipped, all cached (', t1 - t0, 's)'
             return
         end if
@@ -138,45 +142,45 @@ contains
         if (n_test_names > 0) then
             call b%test_names(test_names, n_test_names, exitcode)
             if (exitcode /= 0) then
-                write(error_unit, '(a)') 'Tests: FAIL'
+                write (error_unit, '(a)') 'Tests: FAIL'
                 stop 1
             end if
         else
             ! no specific affected tests found; run all non-slow
             call b%test(exitcode)
             if (exitcode /= 0) then
-                write(error_unit, '(a)') 'Tests: FAIL'
+                write (error_unit, '(a)') 'Tests: FAIL'
                 stop 1
             end if
         end if
 
         call cpu_time(t1)
-        write(output_unit, '(a,f0.1,a)') 'Tests: OK (', t1 - t0, 's)'
+        write (output_unit, '(a,f0.1,a)') 'Tests: OK (', t1 - t0, 's)'
     end subroutine cmd_run
 
     subroutine print_usage()
-        write(output_unit, '(a)') 'fo - Fortran build driver'
-        write(output_unit, '(a)') ''
-        write(output_unit, '(a)') 'Run fo in a directory with fpm.toml or CMakeLists.txt.'
-        write(output_unit, '(a)') 'Scans modules, builds the DAG, caches by content hash.'
-        write(output_unit, '(a)') ''
-        write(output_unit, '(a)') 'usage: fo [command]'
-        write(output_unit, '(a)') ''
-        write(output_unit, '(a)') '  (none)     static -> build -> test (the default)'
-        write(output_unit, '(a)') '  build      build only (--flag "-O0" for fast debug)'
-        write(output_unit, '(a)') '  test       run tests (--only-changed, --all for slow)'
-        write(output_unit, '(a)') '  check      build + test, one-line status'
-        write(output_unit, '(a)') '  changed    list changed and affected modules'
-        write(output_unit, '(a)') '  graph      module dependency graph'
-        write(output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
-        write(output_unit, '(a)') '  clean      clear global cache (~/.cache/fo)'
-        write(output_unit, '(a)') '  info       backend, file count, module count'
-        write(output_unit, '(a)') ''
-        write(output_unit, '(a)') 'integration:'
-        write(output_unit, '(a)') '  mcp-server  MCP JSON-RPC on stdin/stdout'
-        write(output_unit, '(a)') '  lsp         LSP server (diagnostics on save)'
-        write(output_unit, '(a)') ''
-        write(output_unit, '(a)') 'fo version    print version'
+        write (output_unit, '(a)') 'fo - Fortran build driver'
+        write (output_unit, '(a)') ''
+        write (output_unit, '(a)') 'Run in or below fpm.toml or CMakeLists.txt.'
+        write (output_unit, '(a)') 'Scans modules, builds the DAG, caches by hash.'
+        write (output_unit, '(a)') ''
+        write (output_unit, '(a)') 'usage: fo [command]'
+        write (output_unit, '(a)') ''
+        write (output_unit, '(a)') '  (none)     static -> build -> test (the default)'
+        write (output_unit, '(a)') '  build      build only (--flag "-O0")'
+        write (output_unit, '(a)') '  test       run tests (--only-changed, --all)'
+        write (output_unit, '(a)') '  check      build + test, one-line status'
+        write (output_unit, '(a)') '  changed    list changed and affected modules'
+        write (output_unit, '(a)') '  graph      module dependency graph'
+        write (output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
+        write (output_unit, '(a)') '  clean      clear global cache (~/.cache/fo)'
+        write (output_unit, '(a)') '  info       backend, file count, module count'
+        write (output_unit, '(a)') ''
+        write (output_unit, '(a)') 'integration:'
+        write (output_unit, '(a)') '  mcp-server  MCP JSON-RPC on stdin/stdout'
+        write (output_unit, '(a)') '  lsp         LSP server (diagnostics on save)'
+        write (output_unit, '(a)') ''
+        write (output_unit, '(a)') 'fo version    print version'
     end subroutine print_usage
 
     subroutine cmd_check()
@@ -185,16 +189,16 @@ contains
         call fo_check_run('.', res)
 
         if (res%build_ok .and. res%tests_ok) then
-            write(output_unit, '(a,i0,a,i0,a,i0,a,i0,a,f0.1,a)') &
+            write (output_unit, '(a,i0,a,i0,a,i0,a,i0,a,f0.1,a)') &
                 'Build: OK (', res%n_modules, ' modules, ', &
                 res%n_cached, ' cached, ', res%n_changed, &
                 ' changed, ', res%n_affected, &
                 ' affected) Tests: pass (', res%elapsed, 's)'
         else if (.not. res%build_ok) then
-            write(output_unit, '(a,a)') 'Build: FAIL ', trim(res%error_msg)
+            write (output_unit, '(a,a)') 'Build: FAIL ', trim(res%error_msg)
             stop 1
         else
-            write(output_unit, '(a,i0,a,i0,a,i0,a,a)') &
+            write (output_unit, '(a,i0,a,i0,a,i0,a,a)') &
                 'Build: OK (', res%n_cached, ' cached, ', res%n_changed, &
                 ' changed, ', res%n_affected, &
                 ' affected) Tests: FAIL ', trim(res%error_msg)
@@ -210,27 +214,27 @@ contains
         integer :: n_cached, ierr, i, n_tests
 
         call fo_changed_modules('.', dag, changed_ids, n_changed, &
-            affected_ids, n_affected, n_cached, ierr)
+                                affected_ids, n_affected, n_cached, ierr)
         if (ierr /= 0) then
-            write(error_unit, '(a)') 'fo: scan or dag failed'
+            write (error_unit, '(a)') 'fo: scan or dag failed'
             stop 1
         end if
 
         if (n_changed == 0) then
-            write(output_unit, '(a,i0,a)') 'all ', n_cached, ' modules cached'
+            write (output_unit, '(a,i0,a)') 'all ', n_cached, ' modules cached'
             return
         end if
 
-        write(output_unit, '(a,i0,a)') 'changed (', n_changed, '):'
+        write (output_unit, '(a,i0,a)') 'changed (', n_changed, '):'
         do i = 1, n_changed
-            write(output_unit, '(a,a,a,a)') '  ', &
+            write (output_unit, '(a,a,a,a)') '  ', &
                 trim(dag%nodes(changed_ids(i))%name), &
                 '  ', trim(dag%nodes(changed_ids(i))%filename)
         end do
 
-        write(output_unit, '(a,i0,a)') 'affected (', n_affected, '):'
+        write (output_unit, '(a,i0,a)') 'affected (', n_affected, '):'
         do i = 1, n_affected
-            write(output_unit, '(a,a,a,a)') '  ', &
+            write (output_unit, '(a,a,a,a)') '  ', &
                 trim(dag%nodes(affected_ids(i))%name), &
                 '  ', trim(dag%nodes(affected_ids(i))%filename)
         end do
@@ -240,10 +244,10 @@ contains
             if (dag%nodes(affected_ids(i))%is_test) n_tests = n_tests + 1
         end do
         if (n_tests > 0) then
-            write(output_unit, '(a,i0,a)') 'affected tests (', n_tests, '):'
+            write (output_unit, '(a,i0,a)') 'affected tests (', n_tests, '):'
             do i = 1, n_affected
                 if (dag%nodes(affected_ids(i))%is_test) then
-                    write(output_unit, '(a,a,a,a)') '  ', &
+                    write (output_unit, '(a,a,a,a)') '  ', &
                         trim(dag%nodes(affected_ids(i))%name), &
                         '  ', trim(dag%nodes(affected_ids(i))%filename)
                 end if
@@ -258,7 +262,7 @@ contains
 
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
-            write(error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             stop 1
         end if
 
@@ -300,7 +304,7 @@ contains
 
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
-            write(error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             stop 1
         end if
 
@@ -314,14 +318,14 @@ contains
 
         if (only_changed) then
             call fo_changed_modules('.', dag, changed_ids, n_changed, &
-                affected_ids, n_affected, n_cached, ierr)
+                                    affected_ids, n_affected, n_cached, ierr)
             if (ierr /= 0) then
-                write(error_unit, '(a)') 'fo: scan or dag failed'
+                write (error_unit, '(a)') 'fo: scan or dag failed'
                 stop 1
             end if
 
             if (n_changed == 0) then
-                write(output_unit, '(a)') 'all cached, skipping tests'
+                write (output_unit, '(a)') 'all cached, skipping tests'
                 return
             end if
 
@@ -335,7 +339,7 @@ contains
             end do
 
             if (n_test_names == 0) then
-                write(output_unit, '(a)') 'no affected tests'
+                write (output_unit, '(a)') 'no affected tests'
                 return
             end if
 
@@ -350,11 +354,17 @@ contains
     subroutine cmd_graph()
         type(scan_unit_t) :: units(MAX_UNITS)
         type(dag_t) :: dag
+        type(backend_t) :: b
+        character(len=512) :: scan_root
         integer :: n_units, ierr, i, j
 
-        call scan_dir('.', units, n_units, ierr)
+        b = detect_backend('.')
+        scan_root = '.'
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+
+        call scan_dir(trim(scan_root), units, n_units, ierr)
         if (ierr /= 0) then
-            write(error_unit, '(a)') 'fo: scan failed'
+            write (error_unit, '(a)') 'fo: scan failed'
             stop 1
         end if
 
@@ -362,10 +372,10 @@ contains
 
         do i = 1, dag%n
             if (dag%nodes(i)%n_deps == 0) then
-                write(output_unit, '(a)') trim(dag%nodes(i)%name)
+                write (output_unit, '(a)') trim(dag%nodes(i)%name)
             else
                 do j = 1, dag%nodes(i)%n_deps
-                    write(output_unit, '(a,a,a)') trim(dag%nodes(i)%name), &
+                    write (output_unit, '(a,a,a)') trim(dag%nodes(i)%name), &
                         ' -> ', trim(dag%nodes(dag%nodes(i)%dep_ids(j))%name)
                 end do
             end if
@@ -380,7 +390,7 @@ contains
         call cache_init(c, ierr)
         if (ierr == 0) then
             call execute_command_line('rm -f '//trim(c%dir)//'/index', wait=.true.)
-            write(output_unit, '(a,a)') 'cache cleared: ', trim(c%dir)
+            write (output_unit, '(a,a)') 'cache cleared: ', trim(c%dir)
         end if
     end subroutine cmd_clean
 
@@ -388,24 +398,27 @@ contains
         type(scan_unit_t) :: units(MAX_UNITS)
         type(dag_t) :: dag
         type(backend_t) :: b
+        character(len=512) :: scan_root
         integer :: n_units, ierr
 
         b = detect_backend('.')
+        scan_root = '.'
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
 
         select case (b%kind)
         case (BACKEND_FPM)
-            write(output_unit, '(a)') 'backend: fpm'
+            write (output_unit, '(a)') 'backend: fpm'
         case (BACKEND_CMAKE)
-            write(output_unit, '(a)') 'backend: cmake'
+            write (output_unit, '(a)') 'backend: cmake'
         case default
-            write(output_unit, '(a)') 'backend: none'
+            write (output_unit, '(a)') 'backend: none'
         end select
 
-        call scan_dir('.', units, n_units, ierr)
+        call scan_dir(trim(scan_root), units, n_units, ierr)
         if (ierr == 0) then
             call dag_build(units, n_units, dag)
-            write(output_unit, '(a,i0)') 'files: ', n_units
-            write(output_unit, '(a,i0)') 'modules: ', dag%n
+            write (output_unit, '(a,i0)') 'files: ', n_units
+            write (output_unit, '(a,i0)') 'modules: ', dag%n
         end if
     end subroutine cmd_info
 

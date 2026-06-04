@@ -3,9 +3,9 @@ module fo_check
     use fo_scan, only: scan_unit_t, scan_file, scan_dir, MAX_NAME, MAX_UNITS
     use fo_dag, only: dag_t, dag_build, dag_topo_order, dag_reverse_deps, MAX_NODES
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, &
-        BACKEND_FPM, BACKEND_CMAKE
+                                BACKEND_FPM, BACKEND_CMAKE
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_store, &
-        cache_key_for, hash_mod_file, HASH_LEN
+                        cache_key_for, hash_mod_file, HASH_LEN
     use fo_artifact_cache, only: artifact_store, artifact_restore
     implicit none
     private
@@ -28,7 +28,7 @@ module fo_check
 contains
 
     subroutine fo_changed_modules(dir, dag, changed_ids, n_changed, &
-            affected_ids, n_affected, n_cached, ierr)
+                                  affected_ids, n_affected, n_cached, ierr)
         character(len=*), intent(in) :: dir
         type(dag_t), intent(out) :: dag
         integer, intent(out) :: changed_ids(MAX_NODES), n_changed
@@ -56,7 +56,13 @@ contains
         n_cached = 0
         n_ext = 0
 
-        call scan_dir(dir, units, n_units, ierr)
+        b = detect_backend(dir)
+        if (b%kind == BACKEND_NONE) then
+            ierr = 1
+            return
+        end if
+
+        call scan_dir(trim(b%project_dir), units, n_units, ierr)
         if (ierr /= 0) return
 
         call dag_build(units, n_units, dag)
@@ -68,9 +74,8 @@ contains
         if (ierr /= 0) return
 
         ! collect and hash external deps (modules used but not in DAG)
-        b = detect_backend(dir)
         call collect_external_dep_hashes(units, n_units, dag, b, &
-            ext_names, ext_keys, n_ext)
+                                         ext_names, ext_keys, n_ext)
 
         keys = ''
         do i = 1, n_order
@@ -88,11 +93,11 @@ contains
 
             ! add external dep hashes for any unresolved uses in this unit
             call add_ext_dep_keys(units, n_units, dag, node_id, &
-                ext_names, ext_keys, n_ext, dep_keys, n_dep_keys)
+                                  ext_names, ext_keys, n_ext, dep_keys, n_dep_keys)
 
             keys(node_id) = cache_key_for( &
-                dag%nodes(node_id)%filename, compiler, '', &
-                dag, dep_keys, n_dep_keys)
+                            dag%nodes(node_id)%filename, compiler, '', &
+                            dag, dep_keys, n_dep_keys)
 
             if (cache_lookup(c, dag%nodes(node_id)%name, keys(node_id))) then
                 n_cached = n_cached + 1
@@ -104,7 +109,7 @@ contains
 
         if (n_changed > 0) then
             call dag_reverse_deps(dag, changed_ids, n_changed, &
-                affected_ids, n_affected)
+                                  affected_ids, n_affected)
         end if
 
         do i = 1, n_order
@@ -114,7 +119,7 @@ contains
     end subroutine fo_changed_modules
 
     subroutine collect_external_dep_hashes(units, n_units, dag, b, &
-            ext_names, ext_keys, n_ext)
+                                           ext_names, ext_keys, n_ext)
         type(scan_unit_t), intent(in) :: units(:)
         integer, intent(in) :: n_units
         type(dag_t), intent(in) :: dag
@@ -188,25 +193,25 @@ contains
 
             tmpfile = '/tmp/fo_find_mod.tmp'
             cmd = 'find '//trim(b%project_dir)//'/build'// &
-                " -name '"//trim(lower_name)//".mod'"// &
-                ' -type f 2>/dev/null | head -1 > '//trim(tmpfile)
+                  " -name '"//trim(lower_name)//".mod'"// &
+                  ' -type f 2>/dev/null | head -1 > '//trim(tmpfile)
             call execute_command_line(cmd, wait=.true.)
 
-            open(newunit=u, file=tmpfile, status='old', iostat=iostat)
+            open (newunit=u, file=tmpfile, status='old', iostat=iostat)
             if (iostat == 0) then
-                read(u, '(a)', iostat=iostat) line
+                read (u, '(a)', iostat=iostat) line
                 if (iostat == 0 .and. len_trim(line) > 0) then
                     modpath = trim(line)
                     found = .true.
                 end if
-                close(u)
+                close (u)
             end if
             call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
         end block
     end subroutine find_mod_file
 
     subroutine add_ext_dep_keys(units, n_units, dag, node_id, &
-            ext_names, ext_keys, n_ext, dep_keys, n_dep_keys)
+                                ext_names, ext_keys, n_ext, dep_keys, n_dep_keys)
         type(scan_unit_t), intent(in) :: units(:)
         integer, intent(in) :: n_units
         type(dag_t), intent(in) :: dag
@@ -254,19 +259,22 @@ contains
         integer :: affected_ids(MAX_NODES), n_affected
         integer :: n_cached, ierr, exitcode
         real :: t0, t1
+        character(len=512) :: build_log, test_log
 
         call cpu_time(t0)
 
         backend = detect_backend(dir)
         if (backend%kind == BACKEND_NONE) then
-            res%error_msg = 'no fpm.toml or CMakeLists.txt in '//trim(dir)
+            res%error_msg = &
+                'no fpm.toml or CMakeLists.txt found in directory or parents: '// &
+                trim(dir)
             call cpu_time(t1)
             res%elapsed = t1 - t0
             return
         end if
 
-        call fo_changed_modules(dir, dag, changed_ids, n_changed, &
-            affected_ids, n_affected, n_cached, ierr)
+        call fo_changed_modules(trim(backend%project_dir), dag, changed_ids, &
+                                n_changed, affected_ids, n_affected, n_cached, ierr)
         if (ierr /= 0) then
             res%error_msg = 'scan or dag failed'
             call cpu_time(t1)
@@ -282,33 +290,127 @@ contains
         ! try restoring cached artifacts before build
         block
             integer :: n_restored, art_ierr
-            call artifact_restore(trim(dir)//'/build', n_restored, art_ierr)
+            call artifact_restore(trim(backend%project_dir)//'/build', &
+                                  n_restored, art_ierr)
         end block
 
-        call backend%build(exitcode)
+        call make_tmpfile('fo-build', build_log)
+        call backend%build(exitcode, log_file=build_log)
         if (exitcode /= 0) then
-            res%error_msg = 'build failed'
+            call summarize_backend_failure('build failed', build_log, &
+                                           'fo build', res%error_msg)
             call cpu_time(t1)
             res%elapsed = t1 - t0
             return
         end if
+        call delete_file(build_log)
         res%build_ok = .true.
 
         ! cache artifacts after successful build
         block
             integer :: art_ierr
-            call artifact_store(trim(dir)//'/build', art_ierr)
+            call artifact_store(trim(backend%project_dir)//'/build', art_ierr)
         end block
 
-        call backend%test(exitcode)
+        call make_tmpfile('fo-test', test_log)
+        call backend%test(exitcode, log_file=test_log)
         res%tests_ok = (exitcode == 0)
         if (.not. res%tests_ok) then
-            res%error_msg = 'tests failed'
+            call summarize_backend_failure('tests failed', test_log, &
+                                           'fo test', res%error_msg)
+        else
+            call delete_file(test_log)
         end if
 
         call cpu_time(t1)
         res%elapsed = t1 - t0
     end subroutine fo_check_run
+
+    subroutine make_tmpfile(prefix, path)
+        character(len=*), intent(in) :: prefix
+        character(len=*), intent(out) :: path
+
+        integer :: count
+
+        call system_clock(count)
+        write (path, '(a,a,a,i0,a)') '/tmp/', trim(prefix), '-', count, '.log'
+    end subroutine make_tmpfile
+
+    subroutine summarize_backend_failure(stage, log_file, rerun, message)
+        character(len=*), intent(in) :: stage, log_file, rerun
+        character(len=*), intent(out) :: message
+
+        character(len=512) :: summary, fallback, line
+        integer :: u, iostat, best_priority
+
+        summary = ''
+        fallback = ''
+        best_priority = 0
+
+        open (newunit=u, file=log_file, status='old', iostat=iostat)
+        if (iostat == 0) then
+            do
+                read (u, '(a)', iostat=iostat) line
+                if (iostat /= 0) exit
+                call consider_log_line(line, summary, fallback, best_priority)
+            end do
+            close (u)
+        end if
+
+        if (len_trim(summary) == 0) summary = fallback
+        if (len_trim(summary) == 0) summary = 'backend returned nonzero status'
+
+        message = trim(stage)//': '//trim(summary)//'; log: '// &
+                  trim(log_file)//'; rerun: '//trim(rerun)
+        if (trim(rerun) == 'fo test') then
+            message = trim(message)//'; slow: make timed-out tests faster'
+            message = trim(message)//' or name them *_slow'
+            message = trim(message)//'; use fo test --all for the slow suite'
+        end if
+    end subroutine summarize_backend_failure
+
+    subroutine consider_log_line(line, summary, fallback, best_priority)
+        character(len=*), intent(in) :: line
+        character(len=*), intent(inout) :: summary, fallback
+        integer, intent(inout) :: best_priority
+
+        character(len=512) :: clean
+        integer :: priority
+
+        clean = adjustl(line)
+        if (len_trim(clean) == 0) return
+        if (trim(clean) == 'STOP 1') return
+        if (index(clean, 'Backtrace') > 0) return
+
+        fallback = clean
+
+        priority = 0
+        if (index(clean, 'Fatal Error:') > 0 .or. &
+            index(clean, 'Cannot open file') > 0) then
+            priority = 5
+        else if (index(clean, 'Error:') > 0 .or. &
+                 index(clean, 'error:') > 0) then
+            priority = 4
+        else if (index(clean, 'FAIL:') > 0) then
+            priority = 3
+        else if (index(clean, 'returned exit code') > 0) then
+            priority = 2
+        else if (index(clean, '<ERROR>') > 0 .or. &
+                 index(clean, 'FAIL') > 0) then
+            priority = 1
+        end if
+
+        if (priority > 0 .and. priority >= best_priority) then
+            summary = clean
+            best_priority = priority
+        end if
+    end subroutine consider_log_line
+
+    subroutine delete_file(path)
+        character(len=*), intent(in) :: path
+
+        call execute_command_line('rm -f '//trim(path), wait=.true.)
+    end subroutine delete_file
 
     subroutine detect_compiler(compiler)
         character(len=*), intent(out) :: compiler
@@ -322,11 +424,11 @@ contains
         cmd = 'gfortran --version 2>/dev/null | head -1 > '//trim(tmpfile)
         call execute_command_line(cmd, wait=.true.)
 
-        open(newunit=u, file=tmpfile, status='old', iostat=iostat)
+        open (newunit=u, file=tmpfile, status='old', iostat=iostat)
         if (iostat == 0) then
-            read(u, '(a)', iostat=iostat) line
+            read (u, '(a)', iostat=iostat) line
             if (iostat == 0) compiler = trim(line)
-            close(u)
+            close (u)
         end if
         call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
     end subroutine detect_compiler

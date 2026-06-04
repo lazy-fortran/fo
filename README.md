@@ -69,7 +69,7 @@ Use `fo test --all` to include them. cmake backend passes `-LE slow`.
 
 ## Tests
 
-54 tests: scanner (27), DAG (15), cache (8), backend (4).
+64 tests: scanner (27), DAG (15), cache (8), backend (6), check (8).
 
 ## Benchmarks
 

@@ -1,7 +1,7 @@
 program test_backend
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
-        BACKEND_FPM, BACKEND_CMAKE, BACKEND_NONE
+                                BACKEND_FPM, BACKEND_CMAKE, BACKEND_NONE
     implicit none
 
     integer :: n_pass, n_fail
@@ -10,11 +10,12 @@ program test_backend
     n_fail = 0
 
     call test_detect_fpm()
+    call test_detect_fpm_from_child()
     call test_detect_cmake()
     call test_detect_none()
     call test_nproc()
 
-    write(output_unit, '(a,i0,a,i0,a)') 'backend: ', n_pass, ' pass, ', n_fail, ' fail'
+    write (output_unit, '(a,i0,a,i0,a)') 'backend: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
 
 contains
@@ -27,7 +28,7 @@ contains
             n_pass = n_pass + 1
         else
             n_fail = n_fail + 1
-            write(error_unit, '(a,a)') 'FAIL: ', msg
+            write (error_unit, '(a,a)') 'FAIL: ', msg
         end if
     end subroutine assert
 
@@ -36,9 +37,9 @@ contains
         integer :: u
 
         call execute_command_line('mkdir -p /tmp/fo_test_fpm')
-        open(newunit=u, file='/tmp/fo_test_fpm/fpm.toml', status='replace')
-        write(u, '(a)') 'name = "test"'
-        close(u)
+        open (newunit=u, file='/tmp/fo_test_fpm/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "test"'
+        close (u)
 
         b = detect_backend('/tmp/fo_test_fpm')
         call assert(b%kind == BACKEND_FPM, 'detect fpm')
@@ -46,14 +47,31 @@ contains
         call execute_command_line('rm -rf /tmp/fo_test_fpm')
     end subroutine test_detect_fpm
 
+    subroutine test_detect_fpm_from_child()
+        type(backend_t) :: b
+        integer :: u
+
+        call execute_command_line('mkdir -p /tmp/fo_test_fpm_parent/src/nested')
+        open (newunit=u, file='/tmp/fo_test_fpm_parent/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "test"'
+        close (u)
+
+        b = detect_backend('/tmp/fo_test_fpm_parent/src/nested')
+        call assert(b%kind == BACKEND_FPM, 'detect fpm from child')
+        call assert(trim(b%project_dir) == '/tmp/fo_test_fpm_parent', &
+                    'detected project root')
+
+        call execute_command_line('rm -rf /tmp/fo_test_fpm_parent')
+    end subroutine test_detect_fpm_from_child
+
     subroutine test_detect_cmake()
         type(backend_t) :: b
         integer :: u
 
         call execute_command_line('mkdir -p /tmp/fo_test_cmake')
-        open(newunit=u, file='/tmp/fo_test_cmake/CMakeLists.txt', status='replace')
-        write(u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
-        close(u)
+        open (newunit=u, file='/tmp/fo_test_cmake/CMakeLists.txt', status='replace')
+        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
+        close (u)
 
         b = detect_backend('/tmp/fo_test_cmake')
         call assert(b%kind == BACKEND_CMAKE, 'detect cmake')
