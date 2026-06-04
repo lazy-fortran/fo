@@ -81,9 +81,9 @@ GORILLA (57), NEO-RT (167), sampledex (17), fluff (178).
 
 The current full matrix keeps `fo` in the Rust/C compile-overhead band
 on nbody and ahead of CMake/C there. Go still wins the tiny clean
-compile/test loop in the latest run. `fo` wins the 200-module bigmod
-clean build among the Fortran drivers; remaining work is surrounding
-driver overhead, not compiler code. See
+compile steps; `fo` wins the measured nbody test overhead in this run.
+`fo` wins the 200-module bigmod clean build among the Fortran drivers;
+remaining work is surrounding driver overhead, not compiler code. See
 [fpm-dev issue #3](https://github.com/krystophny/fpm-dev/issues/3) for
 the full cross-language comparison.
 
