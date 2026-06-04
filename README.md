@@ -21,6 +21,9 @@ fo test             run tests
 fo test --only-changed  run only tests affected by changes
 fo check            build + test, one-line status
 fo check --json     build + test, JSON status for agents
+fo check --json=compact  bounded JSON status for small local agents
+fo check --json=full     legacy JSON plus diagnostic fields
+fo check --agent    compact JSON status for opencode/Qwen
 fo changed          list changed and affected modules
 fo graph            module dependency graph
 fo watch            rebuild on file change (inotify)
@@ -31,10 +34,21 @@ fo info             backend, files, modules
 Integration (AI agents, editors):
 
 ```
-fo check --json     one JSON line for opencode/Qwen/Codex loops
+fo check --agent    one bounded JSON object for opencode/Qwen loops
+fo check --json     stable legacy JSON for existing scripts
 fo mcp-server       MCP JSON-RPC on stdin/stdout
 fo lsp              LSP server (diagnostics on save)
 ```
+
+`fo check --agent` writes one JSON object and no raw backend log. The object
+is capped by the fixed output buffer and carries the fields an agent needs:
+
+```
+{"ok":false,"stage":"test","target":"test_x","summary":"...","hint":"...","rerun":"fo test test_x","log_path":"/tmp/fo-test.log","elapsed_s":0.12}
+```
+
+MCP `check` calls return the same compact shape by default. Request full output
+only when the caller needs diagnostic arrays or log paths.
 
 ## How it works
 
@@ -72,7 +86,7 @@ non-slow subset; cmake passes `-LE slow`.
 
 ## Tests
 
-72 tests: scanner (27), DAG (15), cache (8), backend (8), check (14).
+86 tests: scanner (27), DAG (15), cache (8), backend (8), check (28).
 
 ## Benchmarks
 

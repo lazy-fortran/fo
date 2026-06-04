@@ -1,5 +1,7 @@
 module fo_mcp
     use, intrinsic :: iso_fortran_env, only: input_unit, output_unit, error_unit
+    use fo_check, only: check_result_t, fo_check_run, &
+                        check_result_compact_json, check_result_full_json
     implicit none
     private
     public :: mcp_serve
@@ -14,7 +16,7 @@ contains
         integer :: iostat
 
         do
-            read(input_unit, '(a)', iostat=iostat) line
+            read (input_unit, '(a)', iostat=iostat) line
             if (iostat /= 0) exit
             if (len_trim(line) == 0) cycle
 
@@ -47,7 +49,7 @@ contains
             case default
                 if (len_trim(id_str) > 0) then
                     call make_error_response(id_str, -32601, &
-                        'method not found', response)
+                                             'method not found', response)
                     call send_response(response)
                 end if
             end select
@@ -61,46 +63,47 @@ contains
         integer :: n
 
         n = len_trim(response)
-        write(len_str, '(i0)') n
-        write(output_unit, '(a,a,a,a,a)', advance='no') &
+        write (len_str, '(i0)') n
+        write (output_unit, '(a,a,a,a,a)', advance='no') &
             'Content-Length: ', trim(len_str), char(13)//char(10), &
             char(13)//char(10), trim(response)
-        flush(output_unit)
+        flush (output_unit)
     end subroutine send_response
 
     subroutine make_initialize_response(id_str, response)
         character(len=*), intent(in) :: id_str
         character(len=*), intent(out) :: response
 
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//',' // &
-            '"result":{"protocolVersion":"2024-11-05",' // &
-            '"capabilities":{"tools":{},"resources":{}},' // &
-            '"serverInfo":{"name":"fo","version":"0.1.0"}}}'
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+                   '"result":{"protocolVersion":"2024-11-05",'// &
+                   '"capabilities":{"tools":{},"resources":{}},'// &
+                   '"serverInfo":{"name":"fo","version":"0.1.0"}}}'
     end subroutine make_initialize_response
 
     subroutine make_tools_list_response(id_str, response)
         character(len=*), intent(in) :: id_str
         character(len=*), intent(out) :: response
 
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//',' // &
-            '"result":{"tools":[{"name":"fo",' // &
-            '"description":"Fortran build driver",' // &
-            '"inputSchema":{"type":"object","properties":{' // &
-            '"action":{"type":"string",' // &
-            '"enum":["check","build","test","graph","info","changed","clean"],' // &
-            '"description":"Action to run"}},' // &
-            '"required":["action"]}}]}}'
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+                   '"result":{"tools":[{"name":"fo",'// &
+                   '"description":"Fortran build driver",'// &
+                   '"inputSchema":{"type":"object","properties":{'// &
+                   '"action":{"type":"string",'// &
+                   '"enum":["check","build","test","graph",'// &
+                   '"info","changed","clean"],'// &
+                   '"description":"Action to run"}},'// &
+                   '"required":["action"]}}]}}'
     end subroutine make_tools_list_response
 
     subroutine make_resources_list_response(id_str, response)
         character(len=*), intent(in) :: id_str
         character(len=*), intent(out) :: response
 
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//',' // &
-            '"result":{"resources":[{"uri":"fo://diagnostics",' // &
-            '"name":"diagnostics",' // &
-            '"description":"Current fo check diagnostics",' // &
-            '"mimeType":"text/plain"}]}}'
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+                   '"result":{"resources":[{"uri":"fo://diagnostics",'// &
+                   '"name":"diagnostics",'// &
+                   '"description":"Current fo check diagnostics",'// &
+                   '"mimeType":"text/plain"}]}}'
     end subroutine make_resources_list_response
 
     subroutine handle_tools_call(line, id_str, response)
@@ -112,39 +115,60 @@ contains
         integer :: exitcode, cmdstat
         character(len=512) :: tmpfile, cmd, buf
         integer :: u, iostat, n
+        type(check_result_t) :: check_res
 
         call extract_action(line, action)
         call make_tmpfile('fo_mcp_output', tmpfile)
 
         select case (trim(action))
-        case ('check', 'build', 'test', 'graph', 'info', 'changed', 'clean')
+        case ('check')
+            call fo_check_run('.', check_res)
+            if (index(line, '"full"') > 0 .or. index(line, '"json":"full"') > 0) then
+                output_text = check_result_full_json(check_res)
+            else
+                output_text = check_result_compact_json(check_res)
+            end if
+            exitcode = 0
+            if (.not. (check_res%build_ok .and. check_res%tests_ok)) exitcode = 1
+
+            call escape_json(output_text)
+            response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+                       '"result":{"content":[{"type":"text",'// &
+                       '"text":"'//trim(output_text)//'"}],'// &
+                       '"isError":'
+            if (exitcode /= 0) then
+                response = trim(response)//'true}}'
+            else
+                response = trim(response)//'false}}'
+            end if
+        case ('build', 'test', 'graph', 'info', 'changed', 'clean')
             cmd = 'fo '//trim(action)//' > '//trim(tmpfile)//' 2>&1'
             call execute_command_line(cmd, exitstat=exitcode, &
-                cmdstat=cmdstat, wait=.true.)
+                                      cmdstat=cmdstat, wait=.true.)
             if (cmdstat /= 0) exitcode = 1
 
             output_text = ''
             n = 0
-            open(newunit=u, file=tmpfile, status='old', iostat=iostat)
+            open (newunit=u, file=tmpfile, status='old', iostat=iostat)
             if (iostat == 0) then
                 do
-                    read(u, '(a)', iostat=iostat) buf
+                    read (u, '(a)', iostat=iostat) buf
                     if (iostat /= 0) exit
                     if (n + len_trim(buf) + 1 > len(output_text)) exit
-                    output_text(n+1:n+len_trim(buf)) = trim(buf)
+                    output_text(n + 1:n + len_trim(buf)) = trim(buf)
                     n = n + len_trim(buf)
                     n = n + 1
                     output_text(n:n) = char(10)
                 end do
-                close(u)
+                close (u)
             end if
             call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
 
             call escape_json(output_text)
-            response = '{"jsonrpc":"2.0","id":'//trim(id_str)//',' // &
-                '"result":{"content":[{"type":"text",' // &
-                '"text":"'//trim(output_text)//'"}],' // &
-                '"isError":'
+            response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+                       '"result":{"content":[{"type":"text",'// &
+                       '"text":"'//trim(output_text)//'"}],'// &
+                       '"isError":'
             if (exitcode /= 0) then
                 response = trim(response)//'true}}'
             else
@@ -152,7 +176,7 @@ contains
             end if
         case default
             call make_error_response(id_str, -32602, &
-                'unknown action: '//trim(action), response)
+                                     'unknown action: '//trim(action), response)
         end select
     end subroutine handle_tools_call
 
@@ -170,34 +194,34 @@ contains
         if (trim(uri) == 'fo://diagnostics' .or. &
             index(line, 'fo://diagnostics') > 0) then
             call make_tmpfile('fo_mcp_diag', tmpfile)
-            call execute_command_line('fo check > '//trim(tmpfile)//' 2>&1', &
-                exitstat=exitcode, cmdstat=cmdstat, wait=.true.)
+            call execute_command_line('fo check --agent > '//trim(tmpfile)//' 2>&1', &
+                                      exitstat=exitcode, cmdstat=cmdstat, wait=.true.)
 
             output_text = ''
             n = 0
-            open(newunit=u, file=tmpfile, status='old', iostat=iostat)
+            open (newunit=u, file=tmpfile, status='old', iostat=iostat)
             if (iostat == 0) then
                 do
-                    read(u, '(a)', iostat=iostat) buf
+                    read (u, '(a)', iostat=iostat) buf
                     if (iostat /= 0) exit
                     if (n + len_trim(buf) + 1 > len(output_text)) exit
-                    output_text(n+1:n+len_trim(buf)) = trim(buf)
+                    output_text(n + 1:n + len_trim(buf)) = trim(buf)
                     n = n + len_trim(buf)
                     n = n + 1
                     output_text(n:n) = char(10)
                 end do
-                close(u)
+                close (u)
             end if
             call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
 
             call escape_json(output_text)
-            response = '{"jsonrpc":"2.0","id":'//trim(id_str)//',' // &
-                '"result":{"contents":[{"uri":"fo://diagnostics",' // &
-                '"mimeType":"text/plain",' // &
-                '"text":"'//trim(output_text)//'"}]}}'
+            response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+                       '"result":{"contents":[{"uri":"fo://diagnostics",'// &
+                       '"mimeType":"text/plain",'// &
+                       '"text":"'//trim(output_text)//'"}]}}'
         else
             call make_error_response(id_str, -32602, &
-                'unknown resource', response)
+                                     'unknown resource', response)
         end if
     end subroutine handle_resources_read
 
@@ -215,10 +239,10 @@ contains
 
         character(len=16) :: code_str
 
-        write(code_str, '(i0)') code
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//',' // &
-            '"error":{"code":'//trim(code_str)//',' // &
-            '"message":"'//trim(msg)//'"}}'
+        write (code_str, '(i0)') code
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+                   '"error":{"code":'//trim(code_str)//','// &
+                   '"message":"'//trim(msg)//'"}}'
     end subroutine make_error_response
 
     subroutine extract_field(line, key, val)
@@ -253,10 +277,10 @@ contains
             start = pos + 1
             fin = start
             do while (fin <= len_trim(line))
-                if (line(fin:fin) == '"' .and. line(fin-1:fin-1) /= '\') exit
+                if (line(fin:fin) == '"' .and. line(fin - 1:fin - 1) /= '\') exit
                 fin = fin + 1
             end do
-            val = line(start:fin-1)
+            val = line(start:fin - 1)
         else
             ! number or other value
             start = pos
@@ -266,7 +290,7 @@ contains
                 if (ch == ',' .or. ch == '}' .or. ch == ' ') exit
                 fin = fin + 1
             end do
-            val = line(start:fin-1)
+            val = line(start:fin - 1)
         end if
     end subroutine extract_field
 

@@ -9,7 +9,8 @@ module fo_check
     use fo_artifact_cache, only: artifact_store, artifact_restore
     implicit none
     private
-    public :: check_result_t, fo_check_run, fo_changed_modules, check_result_json
+    public :: check_result_t, fo_check_run, fo_changed_modules
+    public :: check_result_json, check_result_compact_json, check_result_full_json
 
     integer, parameter :: MAX_EXT_DEPS = 256
 
@@ -23,6 +24,12 @@ module fo_check
         integer :: n_ext_deps = 0
         real :: elapsed = 0.0
         character(len=512) :: error_msg = ''
+        character(len=32) :: stage = 'done'
+        character(len=128) :: target = ''
+        character(len=512) :: summary = ''
+        character(len=256) :: hint = ''
+        character(len=256) :: rerun = ''
+        character(len=512) :: log_path = ''
     end type check_result_t
 
 contains
@@ -260,14 +267,17 @@ contains
         integer :: n_cached, ierr, exitcode
         real :: t0, t1
         character(len=512) :: build_log, test_log
+        character(len=512) :: no_project
 
         call cpu_time(t0)
 
         backend = detect_backend(dir)
         if (backend%kind == BACKEND_NONE) then
-            res%error_msg = &
-                'no fpm.toml or CMakeLists.txt found in directory or parents: '// &
-                trim(dir)
+            no_project = 'no fpm.toml or CMakeLists.txt found'
+            no_project = trim(no_project)//' in directory or parents: '//trim(dir)
+            call set_failure(res, 'backend', '', no_project, &
+                             'run fo from a project directory', &
+                             'fo check', '')
             call cpu_time(t1)
             res%elapsed = t1 - t0
             return
@@ -276,7 +286,9 @@ contains
         call fo_changed_modules(trim(backend%project_dir), dag, changed_ids, &
                                 n_changed, affected_ids, n_affected, n_cached, ierr)
         if (ierr /= 0) then
-            res%error_msg = 'scan or dag failed'
+            call set_failure(res, 'scan', '', 'scan or dag failed', &
+                             'check source parsing and module cycles', &
+                             'fo changed', '')
             call cpu_time(t1)
             res%elapsed = t1 - t0
             return
@@ -297,8 +309,7 @@ contains
         call make_tmpfile('fo-build', build_log)
         call backend%build(exitcode, log_file=build_log)
         if (exitcode /= 0) then
-            call summarize_backend_failure('build failed', build_log, &
-                                           'fo build', res%error_msg)
+            call summarize_backend_failure('build', build_log, 'fo build', res)
             call cpu_time(t1)
             res%elapsed = t1 - t0
             return
@@ -316,8 +327,7 @@ contains
         call backend%test(exitcode, log_file=test_log)
         res%tests_ok = (exitcode == 0)
         if (.not. res%tests_ok) then
-            call summarize_backend_failure('tests failed', test_log, &
-                                           'fo test', res%error_msg)
+            call summarize_backend_failure('test', test_log, 'fo test', res)
         else
             call delete_file(test_log)
         end if
@@ -349,6 +359,81 @@ contains
         line = trim(line)//',"error":"'
         line = trim(line)//trim(json_escape(res%error_msg))//'"}'
     end function check_result_json
+
+    function check_result_compact_json(res) result(line)
+        type(check_result_t), intent(in) :: res
+        character(len=2048) :: line
+
+        line = make_agent_json(res, .false.)
+    end function check_result_compact_json
+
+    function check_result_full_json(res) result(line)
+        type(check_result_t), intent(in) :: res
+        character(len=4096) :: line
+
+        character(len=2048) :: base
+
+        base = check_result_json(res)
+        line = base(1:len_trim(base) - 1)
+        line = trim(line)//',"stage":"'//trim(json_escape(res%stage))//'"'
+        line = trim(line)//',"target":"'//trim(json_escape(res%target))//'"'
+        line = trim(line)//',"summary":"'//trim(json_escape(agent_summary(res)))//'"'
+        line = trim(line)//',"hint":"'//trim(json_escape(res%hint))//'"'
+        line = trim(line)//',"rerun":"'//trim(json_escape(res%rerun))//'"'
+        line = trim(line)//',"log_path":"'//trim(json_escape(res%log_path))//'"'
+        if (res%build_ok .and. res%tests_ok) then
+            line = trim(line)//',"diagnostics":[]}'
+        else
+            line = trim(line)//',"diagnostics":[{"kind":"'// &
+                   trim(json_escape(res%stage))//'"'
+            line = trim(line)//',"target":"'//trim(json_escape(res%target))//'"'
+            line = trim(line)//',"message":"'// &
+                   trim(json_escape(agent_summary(res)))//'"'
+            line = trim(line)//',"hint":"'//trim(json_escape(res%hint))//'"'
+            line = trim(line)//',"rerun":"'//trim(json_escape(res%rerun))//'"}]}'
+        end if
+    end function check_result_full_json
+
+    function make_agent_json(res, include_legacy) result(line)
+        type(check_result_t), intent(in) :: res
+        logical, intent(in) :: include_legacy
+        character(len=2048) :: line
+
+        character(len=32) :: elapsed
+        logical :: ok
+
+        ok = res%build_ok .and. res%tests_ok
+        write (elapsed, '(f12.3)') res%elapsed
+
+        line = '{'
+        line = trim(line)//'"ok":'//trim(json_bool(ok))
+        line = trim(line)//',"stage":"'//trim(json_escape(res%stage))//'"'
+        line = trim(line)//',"target":"'//trim(json_escape(res%target))//'"'
+        line = trim(line)//',"summary":"'//trim(json_escape(agent_summary(res)))//'"'
+        line = trim(line)//',"hint":"'//trim(json_escape(res%hint))//'"'
+        line = trim(line)//',"rerun":"'//trim(json_escape(res%rerun))//'"'
+        line = trim(line)//',"log_path":"'//trim(json_escape(res%log_path))//'"'
+        line = trim(line)//',"elapsed_s":'//trim(adjustl(elapsed))
+        if (include_legacy) then
+            line = trim(line)//',"legacy":'//trim(check_result_json(res))
+        end if
+        line = trim(line)//'}'
+    end function make_agent_json
+
+    function agent_summary(res) result(summary)
+        type(check_result_t), intent(in) :: res
+        character(len=512) :: summary
+
+        if (len_trim(res%summary) > 0) then
+            summary = res%summary
+        else if (res%build_ok .and. res%tests_ok) then
+            summary = 'build and tests passed'
+        else if (len_trim(res%error_msg) > 0) then
+            summary = res%error_msg
+        else
+            summary = 'fo check did not complete'
+        end if
+    end function agent_summary
 
     function json_bool(value) result(text)
         logical, intent(in) :: value
@@ -412,11 +497,13 @@ contains
             count, '-', serial, '.log'
     end subroutine make_tmpfile
 
-    subroutine summarize_backend_failure(stage, log_file, rerun, message)
+    subroutine summarize_backend_failure(stage, log_file, rerun, res)
         character(len=*), intent(in) :: stage, log_file, rerun
-        character(len=*), intent(out) :: message
+        type(check_result_t), intent(inout) :: res
 
         character(len=512) :: summary, fallback, line
+        character(len=128) :: target
+        character(len=256) :: rerun_cmd
         integer :: u, iostat, best_priority
 
         summary = ''
@@ -436,14 +523,89 @@ contains
         if (len_trim(summary) == 0) summary = fallback
         if (len_trim(summary) == 0) summary = 'backend returned nonzero status'
 
-        message = trim(stage)//': '//trim(summary)//'; log: '// &
-                  trim(log_file)//'; rerun: '//trim(rerun)
+        target = infer_target(summary)
+        rerun_cmd = rerun
+        if (trim(stage) == 'test' .and. len_trim(target) > 0) then
+            rerun_cmd = trim(rerun)//' '//trim(target)
+        end if
+
+        call set_failure(res, stage, target, summary, &
+                         default_hint(stage), rerun_cmd, log_file)
         if (trim(rerun) == 'fo test') then
-            message = trim(message)//'; slow: make timed-out tests faster'
-            message = trim(message)//' or name them *_slow'
-            message = trim(message)//'; use fo test --all for the slow suite'
+            res%hint = 'make this test faster or mark it slow'
+            res%error_msg = trim(res%error_msg)// &
+                            '; slow: make timed-out tests faster or name them *_slow'
+            res%error_msg = trim(res%error_msg)// &
+                            '; use fo test --all for the slow suite'
         end if
     end subroutine summarize_backend_failure
+
+    subroutine set_failure(res, stage, target, summary, hint, rerun, log_path)
+        type(check_result_t), intent(inout) :: res
+        character(len=*), intent(in) :: stage, target, summary, hint
+        character(len=*), intent(in) :: rerun, log_path
+
+        res%stage = stage
+        res%target = target
+        res%summary = truncate(summary, len(res%summary))
+        res%hint = truncate(hint, len(res%hint))
+        res%rerun = truncate(rerun, len(res%rerun))
+        res%log_path = truncate(log_path, len(res%log_path))
+        res%error_msg = trim(stage)//' failed: '//trim(res%summary)
+        if (len_trim(res%log_path) > 0) then
+            res%error_msg = trim(res%error_msg)//'; log: '//trim(res%log_path)
+        end if
+        if (len_trim(res%rerun) > 0) then
+            res%error_msg = trim(res%error_msg)//'; rerun: '//trim(res%rerun)
+        end if
+    end subroutine set_failure
+
+    function default_hint(stage) result(hint)
+        character(len=*), intent(in) :: stage
+        character(len=256) :: hint
+
+        select case (trim(stage))
+        case ('build')
+            hint = 'fix the first compiler diagnostic, then rerun fo build'
+        case ('test')
+            hint = 'rerun the failing test, then fix or mark it slow'
+        case default
+            hint = 'rerun the reported fo command after fixing the input'
+        end select
+    end function default_hint
+
+    function infer_target(summary) result(target)
+        character(len=*), intent(in) :: summary
+        character(len=128) :: target
+
+        integer :: pos, start, finish
+
+        target = ''
+        pos = index(summary, 'test_')
+        if (pos == 0) return
+
+        start = pos
+        finish = start
+        do while (finish <= len_trim(summary))
+            select case (summary(finish:finish))
+            case (' ', ':', ';', ',', ')', '(')
+                exit
+            case default
+                finish = finish + 1
+            end select
+        end do
+        target = summary(start:finish - 1)
+    end function infer_target
+
+    function truncate(input, max_len) result(output)
+        character(len=*), intent(in) :: input
+        integer, intent(in) :: max_len
+        character(len=max_len) :: output
+
+        output = ''
+        if (max_len <= 0) return
+        output = input(1:min(len_trim(input), max_len))
+    end function truncate
 
     subroutine consider_log_line(line, summary, fallback, best_priority)
         character(len=*), intent(in) :: line

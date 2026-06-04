@@ -5,7 +5,8 @@ program fo_main
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, &
                                 BACKEND_FPM, BACKEND_CMAKE
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
-                        check_result_json
+                        check_result_json, check_result_compact_json, &
+                        check_result_full_json
     implicit none
 
     character(len=256) :: action
@@ -172,6 +173,9 @@ contains
         write (output_unit, '(a)') '  test       run tests (--only-changed, --all)'
         write (output_unit, '(a)') '  check      build + test, one-line status'
         write (output_unit, '(a)') '  check --json  build + test, JSON status'
+        write (output_unit, '(a)') '  check --json=compact  bounded agent JSON'
+        write (output_unit, '(a)') '  check --json=full  JSON status with diagnostics'
+        write (output_unit, '(a)') '  check --agent  compact JSON for opencode/Qwen'
         write (output_unit, '(a)') '  changed    list changed and affected modules'
         write (output_unit, '(a)') '  graph      module dependency graph'
         write (output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
@@ -187,16 +191,34 @@ contains
 
     subroutine cmd_check()
         type(check_result_t) :: res
-        logical :: json
+        integer :: output_mode, mode_ierr
 
         call fo_check_run('.', res)
-        json = has_arg('--json')
-
-        if (json) then
-            write (output_unit, '(a)') trim(check_result_json(res))
-            if (.not. (res%build_ok .and. res%tests_ok)) stop 1
-            return
+        call check_output_mode(output_mode, mode_ierr)
+        if (mode_ierr /= 0) then
+            write (error_unit, '(a)') &
+                'fo: use --json, --json=compact, --json=full, or --agent'
+            stop 1, quiet = .true.
         end if
+
+        select case (output_mode)
+        case (1)
+            write (output_unit, '(a)') trim(check_result_json(res))
+            if (.not. (res%build_ok .and. res%tests_ok)) stop 1, quiet = .true.
+            return
+        case (2)
+            write (output_unit, '(a)') trim(check_result_compact_json(res))
+            if (.not. (res%build_ok .and. res%tests_ok)) stop 1, quiet = .true.
+            return
+        case (3)
+            write (output_unit, '(a)') trim(check_result_full_json(res))
+            if (.not. (res%build_ok .and. res%tests_ok)) stop 1, quiet = .true.
+            return
+        case (4)
+            write (output_unit, '(a)') trim(check_result_compact_json(res))
+            if (.not. (res%build_ok .and. res%tests_ok)) stop 1, quiet = .true.
+            return
+        end select
 
         if (res%build_ok .and. res%tests_ok) then
             write (output_unit, '(a,i0,a,i0,a,i0,a,i0,a,f0.1,a)') &
@@ -206,15 +228,44 @@ contains
                 ' affected) Tests: pass (', res%elapsed, 's)'
         else if (.not. res%build_ok) then
             write (output_unit, '(a,a)') 'Build: FAIL ', trim(res%error_msg)
-            stop 1
+            stop 1, quiet = .true.
         else
             write (output_unit, '(a,i0,a,i0,a,i0,a,a)') &
                 'Build: OK (', res%n_cached, ' cached, ', res%n_changed, &
                 ' changed, ', res%n_affected, &
                 ' affected) Tests: FAIL ', trim(res%error_msg)
-            stop 1
+            stop 1, quiet = .true.
         end if
     end subroutine cmd_check
+
+    subroutine check_output_mode(mode, ierr)
+        integer, intent(out) :: mode, ierr
+
+        character(len=256) :: arg
+        integer :: i
+
+        mode = 0
+        ierr = 0
+        do i = 2, command_argument_count()
+            call get_command_argument(i, arg)
+            select case (trim(arg))
+            case ('--json')
+                mode = 1
+            case ('--json=compact')
+                mode = 2
+            case ('--json=full')
+                mode = 3
+            case ('--agent')
+                mode = 4
+            case default
+                if (index(trim(arg), '--json=') == 1 .or. &
+                    index(trim(arg), '--agent=') == 1) then
+                    ierr = 1
+                    return
+                end if
+            end select
+        end do
+    end subroutine check_output_mode
 
     logical function has_arg(name)
         character(len=*), intent(in) :: name

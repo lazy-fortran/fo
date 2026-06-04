@@ -1,6 +1,7 @@
 program test_check
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_check, only: check_result_t, fo_check_run, check_result_json
+    use fo_check, only: check_result_t, fo_check_run, check_result_json, &
+                        check_result_compact_json, check_result_full_json
     implicit none
 
     integer :: n_pass, n_fail
@@ -11,6 +12,9 @@ program test_check
     call test_check_from_child_reports_backend_error()
     call test_check_reports_test_failure_advice()
     call test_check_result_json()
+    call test_check_result_compact_json_success()
+    call test_check_result_compact_json_failure()
+    call test_check_result_full_json_diagnostics()
 
     write (output_unit, '(a,i0,a,i0,a)') 'check: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -100,6 +104,80 @@ contains
         call assert(index(line, achar(92)//achar(92)//'path') > 0, &
                     'json escapes backslashes')
     end subroutine test_check_result_json
+
+    subroutine test_check_result_compact_json_success()
+        type(check_result_t) :: res
+        character(len=2048) :: line
+
+        res%build_ok = .true.
+        res%tests_ok = .true.
+        res%elapsed = 0.125
+        res%stage = 'done'
+
+        line = check_result_compact_json(res)
+
+        call assert(index(line, '"ok":true') > 0, &
+                    'compact success includes ok')
+        call assert(index(line, '"stage":"done"') > 0, &
+                    'compact success includes done stage')
+        call assert(index(line, '"summary":"build and tests passed"') > 0, &
+                    'compact success includes summary')
+        call assert(len_trim(line) < 8192, 'compact success stays bounded')
+    end subroutine test_check_result_compact_json_success
+
+    subroutine test_check_result_compact_json_failure()
+        type(check_result_t) :: res
+        character(len=2048) :: line
+
+        res%build_ok = .true.
+        res%tests_ok = .false.
+        res%stage = 'test'
+        res%target = 'test_x'
+        res%summary = 'test_x returned exit code 1'
+        res%hint = 'make this test faster or mark it slow'
+        res%rerun = 'fo test test_x'
+        res%log_path = '/tmp/fo-test.log'
+        res%elapsed = 0.5
+
+        line = check_result_compact_json(res)
+
+        call assert(index(line, '"ok":false') > 0, &
+                    'compact failure includes ok false')
+        call assert(index(line, '"stage":"test"') > 0, &
+                    'compact failure includes stage')
+        call assert(index(line, '"target":"test_x"') > 0, &
+                    'compact failure includes target')
+        call assert(index(line, '"rerun":"fo test test_x"') > 0, &
+                    'compact failure includes rerun')
+        call assert(index(line, 'make this test faster or mark it slow') > 0, &
+                    'compact failure includes slow hint')
+        call assert(len_trim(line) < 8192, 'compact failure stays bounded')
+    end subroutine test_check_result_compact_json_failure
+
+    subroutine test_check_result_full_json_diagnostics()
+        type(check_result_t) :: res
+        character(len=4096) :: line
+
+        res%build_ok = .false.
+        res%tests_ok = .false.
+        res%stage = 'build'
+        res%summary = 'src/x.f90:12:5: Error: bad token'
+        res%hint = 'fix the first compiler diagnostic, then rerun fo build'
+        res%rerun = 'fo build'
+        res%log_path = '/tmp/fo-build.log'
+        res%elapsed = 0.75
+
+        line = check_result_full_json(res)
+
+        call assert(index(line, '"build_ok":false') > 0, &
+                    'full json keeps legacy fields')
+        call assert(index(line, '"diagnostics":[{') > 0, &
+                    'full json includes diagnostics array')
+        call assert(index(line, '"kind":"build"') > 0, &
+                    'full json diagnostic includes kind')
+        call assert(index(line, '"log_path":"/tmp/fo-build.log"') > 0, &
+                    'full json includes log path')
+    end subroutine test_check_result_full_json_diagnostics
 
     subroutine make_bad_project(project_dir)
         character(len=*), intent(in) :: project_dir
