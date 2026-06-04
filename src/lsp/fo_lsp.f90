@@ -1,5 +1,5 @@
 module fo_lsp
-    use, intrinsic :: iso_fortran_env, only: input_unit, output_unit, error_unit
+    use, intrinsic :: iso_fortran_env, only: input_unit
     use fo_json, only: json_escape, extract_json_field, make_tmpfile, &
                        read_text_file, delete_tmpfile, send_jsonrpc, &
                        jsonrpc_error, jsonrpc_null

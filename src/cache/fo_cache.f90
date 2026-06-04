@@ -1,6 +1,6 @@
 module fo_cache
-    use, intrinsic :: iso_fortran_env, only: int64, error_unit
-    use fo_scan, only: scan_unit_t, MAX_NAME
+    use, intrinsic :: iso_fortran_env, only: int64
+    use fo_scan, only: MAX_NAME
     use fo_dag, only: dag_t, MAX_NODES
     implicit none
     private

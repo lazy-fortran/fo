@@ -1,6 +1,6 @@
 program test_dag
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_scan, only: scan_unit_t, MAX_NAME
+    use fo_scan, only: scan_unit_t
     use fo_dag, only: dag_t, dag_build, dag_topo_order, dag_reverse_deps, MAX_NODES
     implicit none
 

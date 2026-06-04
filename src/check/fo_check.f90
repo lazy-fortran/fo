@@ -1,7 +1,6 @@
 module fo_check
-    use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
     use fo_json, only: make_tmpfile, delete_tmpfile
-    use fo_scan, only: scan_unit_t, scan_file, scan_dir, MAX_NAME, MAX_UNITS
+    use fo_scan, only: scan_unit_t, scan_dir, MAX_NAME, MAX_UNITS
     use fo_dag, only: dag_t, dag_build, dag_topo_order, dag_reverse_deps, MAX_NODES
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, &
                                 BACKEND_FPM, BACKEND_CMAKE

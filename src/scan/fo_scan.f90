@@ -1,5 +1,5 @@
 module fo_scan
-    use, intrinsic :: iso_fortran_env, only: dp => real64, error_unit
+    use, intrinsic :: iso_fortran_env, only: error_unit
     use fo_process, only: process_scan_sources
     implicit none
     private

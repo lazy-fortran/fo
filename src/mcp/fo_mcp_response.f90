@@ -34,7 +34,7 @@ contains
                    '"inputSchema":{"type":"object","properties":{'// &
                    '"action":{"type":"string",'// &
                    '"enum":["check","status","diagnostics","cancel",'// &
-                   '"build","test","graph","info","changed","clean"],'// &
+                   '"build","test","graph","info","changed","clean","lint"],'// &
                    '"description":"Action to run"}},'// &
                    '"required":["action"]}}]}}'
     end subroutine make_tools_list_response

@@ -1,5 +1,5 @@
 module fo_capabilities
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_int
     implicit none
     private
     public :: capabilities_t, detect_capabilities

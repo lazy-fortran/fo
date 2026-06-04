@@ -1,5 +1,5 @@
 module fo_check_output
-    use fo_json, only: json_bool, json_int, json_escape_str, json_append
+    use fo_json, only: json_bool, json_int, json_escape_str
     use fo_check, only: check_result_t, fo_check_run
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
                                capabilities_json

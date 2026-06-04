@@ -35,6 +35,8 @@ program fo_main
         call cmd_test()
     case ('info')
         call cmd_info()
+    case ('lint')
+        call cmd_lint()
     case ('clean')
         call cmd_clean()
     case ('watch')
@@ -181,6 +183,8 @@ contains
         write (output_unit, '(a)') '  changed    list changed and affected modules'
         write (output_unit, '(a)') '  graph      module dependency graph'
         write (output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
+        write (output_unit, '(a)') '  lint       check for unused imports'
+        write (output_unit, '(a)') '  lint --json  unused imports as JSON'
         write (output_unit, '(a)') '  clean      clear global cache (~/.cache/fo)'
         write (output_unit, '(a)') '  info       backend, file count, module count'
         write (output_unit, '(a)') '  info --capabilities  compiler and tooling limits'
@@ -475,6 +479,39 @@ contains
             end if
         end do
     end subroutine cmd_graph
+
+    subroutine cmd_lint()
+        use fo_lint, only: lint_finding_t, lint_dir, lint_findings_json, &
+                           MAX_FINDINGS
+        type(backend_t) :: b
+        type(lint_finding_t) :: findings(MAX_FINDINGS)
+        integer :: n_findings, i, output_mode, mode_ierr
+        character(len=512) :: scan_root
+
+        b = detect_backend('.')
+        scan_root = '.'
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+
+        call check_output_mode(output_mode, mode_ierr)
+
+        call lint_dir(trim(scan_root), findings, n_findings)
+
+        if (output_mode > 0) then
+            write (output_unit, '(a)') &
+                trim(lint_findings_json(findings, n_findings))
+        else if (n_findings == 0) then
+            write (output_unit, '(a)') 'no unused imports'
+        else
+            do i = 1, n_findings
+                write (output_unit, '(a,a,i0,a,a,a,a)') &
+                    trim(findings(i)%file), ':', findings(i)%line, &
+                    ': unused import ', trim(findings(i)%symbol), &
+                    ' from ', trim(findings(i)%module_name)
+            end do
+            write (output_unit, '(i0,a)') n_findings, ' unused import(s)'
+            stop 1, quiet = .true.
+        end if
+    end subroutine cmd_lint
 
     subroutine cmd_clean()
         use fo_cache, only: cache_t, cache_init

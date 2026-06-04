@@ -1,5 +1,4 @@
 module fo_artifact_cache
-    use, intrinsic :: iso_fortran_env, only: int64, error_unit
     use fo_cache, only: HASH_LEN, hash_mod_file
     implicit none
     private

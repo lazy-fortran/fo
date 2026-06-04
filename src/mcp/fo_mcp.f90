@@ -1,5 +1,4 @@
 module fo_mcp
-    use, intrinsic :: iso_fortran_env, only: input_unit, output_unit, error_unit
     use fo_json, only: json_int, json_escape, extract_json_field, &
                        make_tmpfile, delete_tmpfile, read_text_file, &
                        send_jsonrpc, jsonrpc_error, jsonrpc_null
@@ -157,6 +156,22 @@ contains
             return
         case ('cancel')
             call handle_async_cancel(line, id_str, response, async_state)
+            return
+        case ('lint')
+            block
+                use fo_lint, only: lint_finding_t, lint_dir, &
+                                   lint_findings_json, MAX_FINDINGS
+                type(lint_finding_t) :: findings(MAX_FINDINGS)
+                integer :: n_findings
+
+                call lint_dir('.', findings, n_findings)
+                output_text = lint_findings_json(findings, n_findings)
+                exitcode = 0
+                if (n_findings > 0) exitcode = 1
+                call make_tool_text_response(id_str, output_text, &
+                                             exitcode, response)
+            end block
+            call delete_tmpfile(tmpfile)
             return
         case ('build', 'test', 'graph', 'info', 'changed', 'clean')
             cmd = 'fo '//trim(action)//' > '//trim(tmpfile)//' 2>&1'
