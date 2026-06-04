@@ -50,6 +50,8 @@ contains
                     'error summary includes build log')
         call assert(index(res%error_msg, 'rerun: fo build') > 0, &
                     'error summary includes rerun command')
+        call assert(res%diag_line > 0 .and. res%diag_column > 0, &
+                    'build diagnostic includes numeric location')
 
         call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_check_from_child_reports_backend_error
@@ -165,6 +167,9 @@ contains
         res%hint = 'fix the first compiler diagnostic, then rerun fo build'
         res%rerun = 'fo build'
         res%log_path = '/tmp/fo-build.log'
+        res%diag_file = 'src/x.f90'
+        res%diag_line = 12
+        res%diag_column = 5
         res%elapsed = 0.75
 
         line = check_result_full_json(res)
@@ -175,6 +180,12 @@ contains
                     'full json includes diagnostics array')
         call assert(index(line, '"kind":"build"') > 0, &
                     'full json diagnostic includes kind')
+        call assert(index(line, '"file":"src/x.f90"') > 0, &
+                    'full json diagnostic includes file')
+        call assert(index(line, '"line":12') > 0, &
+                    'full json diagnostic includes line')
+        call assert(index(line, '"column":5') > 0, &
+                    'full json diagnostic includes column')
         call assert(index(line, '"log_path":"/tmp/fo-build.log"') > 0, &
                     'full json includes log path')
     end subroutine test_check_result_full_json_diagnostics

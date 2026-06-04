@@ -93,7 +93,7 @@ instead of one process per test.
 
 ## Tests
 
-91 tests: scanner (27), DAG (15), cache (8), backend (13), check (28).
+95 tests: scanner (27), DAG (15), cache (8), backend (13), check (32).
 
 ## Benchmarks
 

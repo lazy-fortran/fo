@@ -30,6 +30,9 @@ module fo_check
         character(len=256) :: hint = ''
         character(len=256) :: rerun = ''
         character(len=512) :: log_path = ''
+        character(len=256) :: diag_file = ''
+        integer :: diag_line = 0
+        integer :: diag_column = 0
     end type check_result_t
 
 contains
@@ -386,6 +389,13 @@ contains
         else
             line = trim(line)//',"diagnostics":[{"kind":"'// &
                    trim(json_escape(res%stage))//'"'
+            if (len_trim(res%diag_file) > 0) then
+                line = trim(line)//',"file":"'//trim(json_escape(res%diag_file))//'"'
+            else
+                line = trim(line)//',"file":""'
+            end if
+            line = trim(line)//',"line":'//trim(int_json(res%diag_line))
+            line = trim(line)//',"column":'//trim(int_json(res%diag_column))
             line = trim(line)//',"target":"'//trim(json_escape(res%target))//'"'
             line = trim(line)//',"message":"'// &
                    trim(json_escape(agent_summary(res)))//'"'
@@ -446,6 +456,13 @@ contains
         end if
     end function json_bool
 
+    function int_json(value) result(text)
+        integer, intent(in) :: value
+        character(len=32) :: text
+
+        write (text, '(i0)') value
+    end function int_json
+
     function json_escape(input) result(output)
         character(len=*), intent(in) :: input
         character(len=1024) :: output
@@ -504,18 +521,41 @@ contains
         character(len=512) :: summary, fallback, line
         character(len=128) :: target
         character(len=256) :: rerun_cmd
+        character(len=256) :: current_file, selected_file, parsed_file
+        integer :: current_line, current_column, selected_line, selected_column
+        integer :: parsed_line, parsed_column
         integer :: u, iostat, best_priority
+        logical :: has_location, selected
 
         summary = ''
         fallback = ''
         best_priority = 0
+        current_file = ''
+        selected_file = ''
+        current_line = 0
+        current_column = 0
+        selected_line = 0
+        selected_column = 0
 
         open (newunit=u, file=log_file, status='old', iostat=iostat)
         if (iostat == 0) then
             do
                 read (u, '(a)', iostat=iostat) line
                 if (iostat /= 0) exit
-                call consider_log_line(line, summary, fallback, best_priority)
+                call parse_location_line(line, parsed_file, parsed_line, &
+                                         parsed_column, has_location)
+                if (has_location) then
+                    current_file = parsed_file
+                    current_line = parsed_line
+                    current_column = parsed_column
+                end if
+                call consider_log_line(line, summary, fallback, best_priority, &
+                                       selected)
+                if (selected .and. len_trim(current_file) > 0) then
+                    selected_file = current_file
+                    selected_line = current_line
+                    selected_column = current_column
+                end if
             end do
             close (u)
         end if
@@ -531,6 +571,9 @@ contains
 
         call set_failure(res, stage, target, summary, &
                          default_hint(stage), rerun_cmd, log_file)
+        res%diag_file = ''
+        res%diag_line = selected_line
+        res%diag_column = selected_column
         if (trim(rerun) == 'fo test') then
             res%hint = 'make this test faster or mark it slow'
             res%error_msg = trim(res%error_msg)// &
@@ -547,10 +590,10 @@ contains
 
         res%stage = stage
         res%target = target
-        res%summary = truncate(summary, len(res%summary))
-        res%hint = truncate(hint, len(res%hint))
-        res%rerun = truncate(rerun, len(res%rerun))
-        res%log_path = truncate(log_path, len(res%log_path))
+        res%summary = summary
+        res%hint = hint
+        res%rerun = rerun
+        res%log_path = log_path
         res%error_msg = trim(stage)//' failed: '//trim(res%summary)
         if (len_trim(res%log_path) > 0) then
             res%error_msg = trim(res%error_msg)//'; log: '//trim(res%log_path)
@@ -597,24 +640,60 @@ contains
         target = summary(start:finish - 1)
     end function infer_target
 
-    function truncate(input, max_len) result(output)
-        character(len=*), intent(in) :: input
-        integer, intent(in) :: max_len
-        character(len=max_len) :: output
+    subroutine parse_location_line(line, file, line_no, column, found)
+        character(len=*), intent(in) :: line
+        character(len=256), intent(out) :: file
+        integer, intent(out) :: line_no, column
+        logical, intent(out) :: found
 
-        output = ''
-        if (max_len <= 0) return
-        output = input(1:min(len_trim(input), max_len))
-    end function truncate
+        character(len=512) :: clean, number
+        integer :: ext, start, colon1, colon2, iostat, file_len
 
-    subroutine consider_log_line(line, summary, fallback, best_priority)
+        found = .false.
+        file = ''
+        line_no = 0
+        column = 0
+
+        clean = adjustl(line)
+        ext = index(clean, '.f90:')
+        if (ext == 0) ext = index(clean, '.F90:')
+        if (ext == 0) return
+
+        start = 1
+        colon1 = ext + 4
+        colon2 = index(clean(colon1 + 1:), ':')
+        if (colon2 == 0) return
+        colon2 = colon1 + colon2
+
+        number = clean(colon1 + 1:colon2 - 1)
+        read (number, *, iostat=iostat) line_no
+        if (iostat /= 0) return
+
+        number = ''
+        if (colon2 + 1 <= len_trim(clean)) then
+            number = clean(colon2 + 1:)
+            if (index(number, ':') > 0) number = number(1:index(number, ':') - 1)
+            read (number, *, iostat=iostat) column
+            if (iostat /= 0) column = 0
+        end if
+
+        file_len = colon1 - start
+        if (file_len <= 0) return
+        if (file_len > len(file)) file_len = len(file)
+        file(1:file_len) = clean(start:start + file_len - 1)
+        found = .true.
+    end subroutine parse_location_line
+
+    subroutine consider_log_line(line, summary, fallback, best_priority, selected)
         character(len=*), intent(in) :: line
         character(len=*), intent(inout) :: summary, fallback
         integer, intent(inout) :: best_priority
+        logical, intent(out) :: selected
 
         character(len=512) :: clean
         integer :: priority
 
+        selected = .false.
         clean = adjustl(line)
         if (len_trim(clean) == 0) return
         if (trim(clean) == 'STOP 1') return
@@ -641,6 +720,7 @@ contains
         if (priority > 0 .and. priority >= best_priority) then
             summary = clean
             best_priority = priority
+            selected = .true.
         end if
     end subroutine consider_log_line
 
