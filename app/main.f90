@@ -4,9 +4,9 @@ program fo_main
     use fo_dag, only: dag_t, dag_build, dag_topo_order, MAX_NODES
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, &
                                 BACKEND_FPM, BACKEND_CMAKE
-    use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
-                        check_result_json, check_result_compact_json, &
-                        check_result_full_json
+    use fo_check, only: check_result_t, fo_check_run, fo_changed_modules
+    use fo_check_output, only: check_result_json, check_result_compact_json, &
+                               check_result_full_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
                                capabilities_json
     implicit none

@@ -1,10 +1,18 @@
 module fo_mcp
     use, intrinsic :: iso_fortran_env, only: input_unit, output_unit, error_unit
-    use fo_json, only: json_bool, json_int, json_escape, extract_json_field, &
+    use fo_json, only: json_int, json_escape, extract_json_field, &
                        make_tmpfile, delete_tmpfile, read_text_file, &
                        send_jsonrpc, jsonrpc_error, jsonrpc_null
-    use fo_check, only: check_result_t, fo_check_run, &
-                        check_result_compact_json, check_result_full_json
+    use fo_mcp_response, only: make_initialize_response, &
+                               make_tools_list_response, &
+                               make_resources_list_response, &
+                               make_run_start_response, &
+                               make_status_response, &
+                               make_diagnostics_response, &
+                               make_tool_text_response
+    use fo_check, only: check_result_t, fo_check_run
+    use fo_check_output, only: check_result_compact_json, &
+                               check_result_full_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
                                capabilities_json
     use fo_process, only: process_start_fo_check, process_poll_pid, &
@@ -96,47 +104,6 @@ contains
             iostat = -1
         end if
     end subroutine read_jsonrpc_message
-
-    subroutine make_initialize_response(id_str, line, response)
-        character(len=*), intent(in) :: id_str, line
-        character(len=*), intent(out) :: response
-
-        character(len=32) :: proto_ver
-
-        call extract_json_field(line, '"protocolVersion"', proto_ver)
-        if (len_trim(proto_ver) == 0) proto_ver = '2025-03-26'
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"result":{"protocolVersion":"'//trim(proto_ver)//'",'// &
-                   '"capabilities":{"tools":{"listChanged":false},'// &
-                   '"resources":{"listChanged":false}},'// &
-                   '"serverInfo":{"name":"fo","version":"0.1.0"}}}'
-    end subroutine make_initialize_response
-
-    subroutine make_tools_list_response(id_str, response)
-        character(len=*), intent(in) :: id_str
-        character(len=*), intent(out) :: response
-
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"result":{"tools":[{"name":"fo",'// &
-                   '"description":"Fortran build driver",'// &
-                   '"inputSchema":{"type":"object","properties":{'// &
-                   '"action":{"type":"string",'// &
-                   '"enum":["check","status","diagnostics","cancel",'// &
-                   '"build","test","graph","info","changed","clean"],'// &
-                   '"description":"Action to run"}},'// &
-                   '"required":["action"]}}]}}'
-    end subroutine make_tools_list_response
-
-    subroutine make_resources_list_response(id_str, response)
-        character(len=*), intent(in) :: id_str
-        character(len=*), intent(out) :: response
-
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"result":{"resources":[{"uri":"fo://diagnostics",'// &
-                   '"name":"diagnostics",'// &
-                   '"description":"Current fo check diagnostics",'// &
-                   '"mimeType":"text/plain"}]}}'
-    end subroutine make_resources_list_response
 
     subroutine handle_tools_call(line, id_str, response, async_state)
         character(len=*), intent(in) :: line, id_str
@@ -299,7 +266,11 @@ contains
             return
         end if
 
-        call make_status_response(id_str, run_id, async_state, response)
+        call make_status_response(id_str, run_id, async_state%active_run_id, &
+                                 async_state%active_pid, &
+                                 async_state%pending_run_id, &
+                                 async_state%last_run_id, &
+                                 async_state%last_exitcode, response)
     end subroutine handle_async_status
 
     subroutine handle_async_diagnostics(line, id_str, response, async_state)
@@ -475,85 +446,5 @@ contains
         if (run_id == async_state%last_run_id) return
         ierr = 1
     end subroutine requested_run_id
-
-    subroutine make_run_start_response(id_str, run_id, pending, response)
-        character(len=*), intent(in) :: id_str
-        integer, intent(in) :: run_id
-        logical, intent(in) :: pending
-        character(len=*), intent(out) :: response
-
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"result":{"run_id":'//trim(json_int(run_id))// &
-                   ',"state":"'
-        if (pending) then
-            response = trim(response)//'rerun-pending"'
-        else
-            response = trim(response)//'running"'
-        end if
-        response = trim(response)//',"pending":'//trim(json_bool(pending))//'}}'
-    end subroutine make_run_start_response
-
-    subroutine make_status_response(id_str, run_id, async_state, response)
-        character(len=*), intent(in) :: id_str
-        integer, intent(in) :: run_id
-        type(mcp_async_state_t), intent(in) :: async_state
-        character(len=*), intent(out) :: response
-
-        character(len=32) :: state
-
-        if (run_id == async_state%active_run_id .and. async_state%active_pid > 0) then
-            state = 'running'
-        else if (run_id == async_state%pending_run_id) then
-            state = 'rerun-pending'
-        else if (run_id == async_state%last_run_id) then
-            state = 'finished'
-        else
-            state = 'unknown'
-        end if
-
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"result":{"run_id":'//trim(json_int(run_id))// &
-                   ',"state":"'//trim(state)// &
-                   '","active":'// &
-                   trim(json_bool(run_id == async_state%active_run_id .and. &
-                                  async_state%active_pid > 0))// &
-                   ',"pending":'// &
-                   trim(json_bool(run_id == async_state%pending_run_id))// &
-                   ',"last_exitcode":'// &
-                   trim(json_int(async_state%last_exitcode))//'}}'
-    end subroutine make_status_response
-
-    subroutine make_diagnostics_response(id_str, run_id, output_text, stale, &
-                                         exitcode, response)
-        character(len=*), intent(in) :: id_str, output_text
-        integer, intent(in) :: run_id, exitcode
-        logical, intent(in) :: stale
-        character(len=*), intent(out) :: response
-
-        character(len=4096) :: escaped
-
-        escaped = output_text
-        call json_escape(escaped)
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"result":{"run_id":'//trim(json_int(run_id))// &
-                   ',"stale":'//trim(json_bool(stale))// &
-                   ',"exitcode":'//trim(json_int(exitcode))// &
-                   ',"diagnostics":"'//trim(escaped)//'"}}'
-    end subroutine make_diagnostics_response
-
-    subroutine make_tool_text_response(id_str, output_text, exitcode, response)
-        character(len=*), intent(in) :: id_str, output_text
-        integer, intent(in) :: exitcode
-        character(len=*), intent(out) :: response
-
-        character(len=4096) :: escaped
-
-        escaped = output_text
-        call json_escape(escaped)
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"result":{"content":[{"type":"text",'// &
-                   '"text":"'//trim(escaped)//'"}],"isError":'// &
-                   trim(json_bool(exitcode /= 0))//'}}'
-    end subroutine make_tool_text_response
 
 end module fo_mcp
