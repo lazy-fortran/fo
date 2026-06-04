@@ -2,7 +2,7 @@ module fo_build_backend
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
     private
-    public :: backend_t, detect_backend, detect_nproc
+    public :: backend_t, detect_backend, detect_nproc, detect_jobs
     public :: BACKEND_FPM, BACKEND_CMAKE, BACKEND_NONE
 
     integer, parameter :: BACKEND_NONE = 0
@@ -125,6 +125,20 @@ contains
         if (np < 1) np = 1
     end function detect_nproc
 
+    function detect_jobs() result(jobs)
+        integer :: jobs
+
+        character(len=32) :: buf
+        integer :: status, iostat
+
+        jobs = detect_nproc()
+        call get_environment_variable('FO_JOBS', buf, status=status)
+        if (status /= 0 .or. len_trim(buf) == 0) return
+
+        read (buf, *, iostat=iostat) jobs
+        if (iostat /= 0 .or. jobs < 1) jobs = detect_nproc()
+    end function detect_jobs
+
     subroutine backend_build(self, exitcode, flags, log_file)
         class(backend_t), intent(in) :: self
         integer, intent(out) :: exitcode
@@ -135,16 +149,18 @@ contains
         character(len=2048) :: cmd
         character(len=8) :: np_str
 
-        np = detect_nproc()
+        np = detect_jobs()
         write (np_str, '(i0)') np
 
         select case (self%kind)
         case (BACKEND_FPM)
             if (present(flags) .and. len_trim(flags) > 0) then
                 cmd = 'cd '//trim(self%project_dir)// &
-                      ' && fpm build --flag "'//trim(flags)//'"'
+                      ' && OMP_NUM_THREADS='//trim(np_str)// &
+                      ' fpm build --flag "'//trim(flags)//'"'
             else
-                cmd = 'cd '//trim(self%project_dir)//' && fpm build'
+                cmd = 'cd '//trim(self%project_dir)// &
+                      ' && OMP_NUM_THREADS='//trim(np_str)//' fpm build'
             end if
         case (BACKEND_CMAKE)
             if (present(flags) .and. len_trim(flags) > 0) then
@@ -174,18 +190,22 @@ contains
         logical, intent(in), optional :: include_slow
         character(len=*), intent(in), optional :: log_file
 
-        integer :: cmdstat, list_ierr, n_names
+        integer :: cmdstat, list_ierr, n_names, jobs
         character(len=2048) :: cmd
+        character(len=16) :: jobs_str
         character(len=128) :: names(MAX_TEST_TARGETS)
         logical :: has_tests, slow
 
         slow = .false.
         if (present(include_slow)) slow = include_slow
+        jobs = detect_jobs()
+        write (jobs_str, '(i0)') jobs
 
         select case (self%kind)
         case (BACKEND_FPM)
             if (slow) then
-                cmd = 'cd '//trim(self%project_dir)//' && fpm test'
+                cmd = 'cd '//trim(self%project_dir)// &
+                      ' && OMP_NUM_THREADS='//trim(jobs_str)//' fpm test'
             else
                 call fpm_list_tests(self%project_dir, names, n_names, &
                                     list_ierr, log_file)
@@ -211,10 +231,11 @@ contains
             end if
             if (slow) then
                 cmd = 'cd '//trim(self%project_dir)// &
-                      ' && cd build && ctest --output-on-failure'
+                      ' && cd build && ctest --output-on-failure -j '//trim(jobs_str)
             else
                 cmd = 'cd '//trim(self%project_dir)// &
-                      ' && cd build && ctest --output-on-failure -LE slow'
+                      ' && cd build && ctest --output-on-failure -j '// &
+                      trim(jobs_str)//' -LE slow'
             end if
         case default
             write (error_unit, '(a)') 'fo: no build backend detected'
@@ -237,53 +258,64 @@ contains
         logical, intent(in), optional :: include_slow
         character(len=*), intent(in), optional :: log_file
 
-        integer :: cmdstat, i, sub_exit
+        integer :: i
         character(len=2048) :: cmd
         character(len=128) :: fast_names(MAX_TEST_TARGETS)
         logical :: slow
-        integer :: n_fast
+        integer :: n_fast, jobs
+        character(len=16) :: jobs_str
+        character(len=1024) :: regex
 
         slow = .false.
         if (present(include_slow)) slow = include_slow
         exitcode = 0
+        jobs = detect_jobs()
+        write (jobs_str, '(i0)') jobs
+
+        n_fast = 0
+        do i = 1, n_names
+            if (.not. slow .and. is_slow_test(names(i))) cycle
+            if (n_fast < MAX_TEST_TARGETS) then
+                n_fast = n_fast + 1
+                fast_names(n_fast) = names(i)
+            end if
+        end do
+        if (n_fast == 0) return
 
         if (self%kind == BACKEND_FPM) then
-            n_fast = 0
-            do i = 1, n_names
-                if (.not. slow .and. is_slow_test(names(i))) cycle
-                if (n_fast < MAX_TEST_TARGETS) then
-                    n_fast = n_fast + 1
-                    fast_names(n_fast) = names(i)
-                end if
-            end do
-            if (n_fast == 0) return
             call fpm_run_tests(self%project_dir, fast_names, n_fast, &
                                exitcode, log_file)
             return
         end if
 
-        do i = 1, n_names
-            if (.not. slow .and. is_slow_test(names(i))) cycle
+        if (self%kind == BACKEND_CMAKE) then
+            call names_to_ctest_regex(fast_names, n_fast, regex)
+            cmd = 'cd '//trim(self%project_dir)// &
+                  ' && cd build && ctest --output-on-failure -j '// &
+                  trim(jobs_str)//' -R "'//trim(regex)//'"'
+            if (.not. slow) cmd = trim(cmd)//' -LE slow'
+            call redirect_command(cmd, log_file)
+            call execute_command_line(cmd, exitstat=exitcode, wait=.true.)
+            return
+        end if
 
-            select case (self%kind)
-            case (BACKEND_FPM)
-                cmd = 'cd '//trim(self%project_dir)// &
-                      ' && fpm test '//trim(names(i))//' 2>&1'
-            case (BACKEND_CMAKE)
-                cmd = 'cd '//trim(self%project_dir)// &
-                      ' && cd build && ctest --output-on-failure -R '// &
-                      trim(names(i))//' 2>&1'
-            case default
-                exitcode = 1
-                return
-            end select
-
-            call execute_command_line(cmd, exitstat=sub_exit, &
-                                      cmdstat=cmdstat, wait=.true.)
-            if (cmdstat /= 0) sub_exit = 1
-            if (sub_exit /= 0) exitcode = sub_exit
-        end do
+        exitcode = 1
     end subroutine backend_test_names
+
+    subroutine names_to_ctest_regex(names, n_names, regex)
+        character(len=128), intent(in) :: names(MAX_TEST_TARGETS)
+        integer, intent(in) :: n_names
+        character(len=*), intent(out) :: regex
+
+        integer :: i
+
+        regex = '^('
+        do i = 1, n_names
+            if (i > 1) regex = trim(regex)//'|'
+            regex = trim(regex)//trim(names(i))
+        end do
+        regex = trim(regex)//')$'
+    end subroutine names_to_ctest_regex
 
     subroutine redirect_command(cmd, log_file)
         character(len=*), intent(inout) :: cmd
@@ -410,15 +442,20 @@ contains
         integer, intent(out) :: exitcode
         character(len=*), intent(in), optional :: log_file
 
-        integer :: i, cmdstat
+        integer :: i, cmdstat, jobs
         character(len=2048) :: cmd
+        character(len=16) :: jobs_str
 
         if (n_names == 0) then
             exitcode = 0
             return
         end if
 
-        cmd = 'cd '//trim(project_dir)//' && fpm test'
+        jobs = detect_jobs()
+        write (jobs_str, '(i0)') jobs
+
+        cmd = 'cd '//trim(project_dir)// &
+              ' && OMP_NUM_THREADS='//trim(jobs_str)//' fpm test'
         do i = 1, n_names
             cmd = trim(cmd)//' '//trim(names(i))
         end do

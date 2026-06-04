@@ -1,6 +1,7 @@
 program test_backend
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
+                                detect_jobs, &
                                 BACKEND_FPM, BACKEND_CMAKE, BACKEND_NONE
     implicit none
 
@@ -14,7 +15,10 @@ program test_backend
     call test_detect_cmake()
     call test_detect_none()
     call test_nproc()
+    call test_detect_jobs()
     call test_fpm_skips_slow_by_default()
+    call test_cmake_skips_slow_by_default()
+    call test_cmake_named_tests_select_regex()
 
     write (output_unit, '(a,i0,a,i0,a)') 'backend: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -107,6 +111,13 @@ contains
         call assert(np >= 1, 'nproc >= 1')
     end subroutine test_nproc
 
+    subroutine test_detect_jobs()
+        integer :: jobs
+
+        jobs = detect_jobs()
+        call assert(jobs >= 1, 'jobs >= 1')
+    end subroutine test_detect_jobs
+
     subroutine test_fpm_skips_slow_by_default()
         type(backend_t) :: b
         integer :: exitcode
@@ -128,6 +139,51 @@ contains
         call execute_command_line('rm -rf '//trim(project_dir))
         call execute_command_line('rm -f '//trim(fast_log)//' '//trim(slow_log))
     end subroutine test_fpm_skips_slow_by_default
+
+    subroutine test_cmake_skips_slow_by_default()
+        type(backend_t) :: b
+        integer :: exitcode
+        character(len=512) :: project_dir, fast_log, slow_log
+
+        call make_tmp_path('fo_test_slow_cmake', project_dir)
+        call make_tmp_path('fo_backend_cmake_fast', fast_log)
+        call make_tmp_path('fo_backend_cmake_slow', slow_log)
+        call make_cmake_tests_project(project_dir, .false.)
+
+        b = detect_backend(project_dir)
+        call b%test(exitcode, log_file=fast_log)
+        call assert(exitcode == 0, 'cmake test skips slow by default')
+
+        call b%test(exitcode, include_slow=.true., log_file=slow_log)
+        call assert(exitcode /= 0, 'cmake test --all includes slow')
+
+        call execute_command_line('rm -rf '//trim(project_dir))
+        call execute_command_line('rm -f '//trim(fast_log)//' '//trim(slow_log))
+    end subroutine test_cmake_skips_slow_by_default
+
+    subroutine test_cmake_named_tests_select_regex()
+        type(backend_t) :: b
+        integer :: exitcode
+        character(len=512) :: project_dir, log_file
+        character(len=128) :: names(2)
+
+        call make_tmp_path('fo_test_named_cmake', project_dir)
+        call make_tmp_path('fo_backend_cmake_named', log_file)
+        call make_cmake_tests_project(project_dir, .true.)
+
+        b = detect_backend(project_dir)
+        names(1) = 'test_a'
+        names(2) = 'test_b'
+        call b%test_names(names, 2, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'cmake named tests select requested tests')
+        call assert(file_contains(log_file, 'Test #1: test_a') .or. &
+                    file_contains(log_file, 'Test #2: test_a') .or. &
+                    file_contains(log_file, 'test_a'), &
+                    'cmake named log includes selected test')
+
+        call execute_command_line('rm -rf '//trim(project_dir))
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_cmake_named_tests_select_regex
 
     subroutine make_slow_fpm_project(project_dir)
         character(len=*), intent(in) :: project_dir
@@ -168,6 +224,60 @@ contains
         write (u, '(a)') 'end program test_kernel_slow'
         close (u)
     end subroutine make_slow_fpm_project
+
+    subroutine make_cmake_tests_project(project_dir, unselected_fails)
+        character(len=*), intent(in) :: project_dir
+        logical, intent(in) :: unselected_fails
+        integer :: u, exitcode
+
+        call execute_command_line('rm -rf '//trim(project_dir))
+        call execute_command_line('mkdir -p '//trim(project_dir))
+
+        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
+              status='replace')
+        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
+        write (u, '(a)') 'project(fo_backend_cmake_tests NONE)'
+        write (u, '(a)') 'enable_testing()'
+        write (u, '(a)') 'add_test(NAME test_a COMMAND ${CMAKE_COMMAND} -E true)'
+        write (u, '(a)') 'add_test(NAME test_b COMMAND ${CMAKE_COMMAND} -E true)'
+        if (unselected_fails) then
+            write (u, '(a)') &
+                'add_test(NAME test_unselected COMMAND ${CMAKE_COMMAND} -E false)'
+        else
+            write (u, '(a)') &
+                'add_test(NAME test_unselected COMMAND ${CMAKE_COMMAND} -E true)'
+        end if
+        write (u, '(a)') &
+            'add_test(NAME test_kernel_slow COMMAND ${CMAKE_COMMAND} -E false)'
+        write (u, '(a)') &
+            'set_tests_properties(test_kernel_slow PROPERTIES LABELS slow)'
+        close (u)
+
+        call execute_command_line('cd '//trim(project_dir)// &
+                                  ' && cmake -S . -B build >/dev/null 2>&1', &
+                                  exitstat=exitcode, wait=.true.)
+    end subroutine make_cmake_tests_project
+
+    logical function file_contains(path, needle)
+        character(len=*), intent(in) :: path, needle
+
+        character(len=512) :: line
+        integer :: u, iostat
+
+        file_contains = .false.
+        open (newunit=u, file=path, status='old', iostat=iostat)
+        if (iostat /= 0) return
+
+        do
+            read (u, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            if (index(line, trim(needle)) > 0) then
+                file_contains = .true.
+                exit
+            end if
+        end do
+        close (u)
+    end function file_contains
 
     subroutine make_tmp_path(prefix, path)
         character(len=*), intent(in) :: prefix

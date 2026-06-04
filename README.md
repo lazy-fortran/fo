@@ -71,6 +71,13 @@ Tests named `*_slow` or `*_slow_*` are excluded by default.
 Use `fo test --all` to include them. fpm lists targets and runs the
 non-slow subset; cmake passes `-LE slow`.
 
+## Test parallelism
+
+`FO_JOBS=N` caps build and test fanout. Missing or invalid `FO_JOBS` falls
+back to `nproc`. fpm receives the limit through `OMP_NUM_THREADS`; CMake and
+CTest receive `-j N`. CMake selected tests run through one `ctest -R` expression
+instead of one process per test.
+
 ## Go parity
 
 | Go feature | fo |
@@ -78,7 +85,7 @@ non-slow subset; cmake passes `-LE slow`.
 | Global content-addressed cache | `~/.cache/fo/index`, FNV-1a |
 | Cache key = hash(source + compiler + flags + dep hashes) | yes |
 | Affected-test selection | `fo changed`, `fo test --only-changed` |
-| Parallel builds | auto nproc for cmake; fpm delegates scheduling |
+| Parallel builds | `FO_JOBS` or nproc for fpm, cmake, ctest |
 | Flag passthrough | `fo build --flag` |
 | Cache clear | `fo clean` |
 | Backend autodetection | fpm.toml or CMakeLists.txt |
@@ -86,7 +93,7 @@ non-slow subset; cmake passes `-LE slow`.
 
 ## Tests
 
-86 tests: scanner (27), DAG (15), cache (8), backend (8), check (28).
+91 tests: scanner (27), DAG (15), cache (8), backend (13), check (28).
 
 ## Benchmarks
 
