@@ -1,5 +1,8 @@
 module fo_lsp
     use, intrinsic :: iso_fortran_env, only: input_unit, output_unit, error_unit
+    use fo_json, only: json_escape, extract_json_field, make_tmpfile, &
+                       read_text_file, delete_tmpfile, send_jsonrpc, &
+                       jsonrpc_error, jsonrpc_null
     implicit none
     private
     public :: lsp_serve
@@ -31,13 +34,13 @@ contains
             read(input_unit, '(a)', iostat=iostat) body
             if (iostat /= 0) return
 
-            call extract_lsp_field(body, '"method"', method)
-            call extract_lsp_field(body, '"id"', id_str)
+            call extract_json_field(body, '"method"', method)
+            call extract_json_field(body, '"id"', id_str)
 
             select case (trim(method))
             case ('initialize')
                 call make_lsp_init_response(id_str, response)
-                call send_lsp(response)
+                call send_jsonrpc(response)
             case ('initialized')
                 cycle
             case ('textDocument/didSave')
@@ -47,15 +50,15 @@ contains
             case ('textDocument/didClose')
                 cycle
             case ('shutdown')
-                call make_lsp_null_result(id_str, response)
-                call send_lsp(response)
+                call jsonrpc_null(id_str, response)
+                call send_jsonrpc(response)
             case ('exit')
                 return
             case default
                 if (len_trim(id_str) > 0) then
-                    call make_lsp_error(id_str, -32601, &
+                    call jsonrpc_error(id_str, -32601, &
                         'method not found', response)
-                    call send_lsp(response)
+                    call send_jsonrpc(response)
                 end if
             end select
         end do
@@ -77,20 +80,6 @@ contains
         read(header(pos+15:), *, iostat=iostat) length
     end subroutine parse_content_length
 
-    subroutine send_lsp(response)
-        character(len=*), intent(in) :: response
-
-        character(len=16) :: len_str
-        integer :: n
-
-        n = len_trim(response)
-        write(len_str, '(i0)') n
-        write(output_unit, '(a,a,a,a,a)', advance='no') &
-            'Content-Length: ', trim(len_str), char(13)//char(10), &
-            char(13)//char(10), trim(response)
-        flush(output_unit)
-    end subroutine send_lsp
-
     subroutine make_lsp_init_response(id_str, response)
         character(len=*), intent(in) :: id_str
         character(len=*), intent(out) :: response
@@ -104,39 +93,23 @@ contains
     subroutine handle_did_save(body)
         character(len=*), intent(in) :: body
 
-        character(len=512) :: uri, tmpfile, buf
+        character(len=512) :: uri, tmpfile
         character(len=4096) :: diag_text
         character(len=MAX_LINE) :: notification
-        integer :: exitcode, cmdstat, u, iostat, n
+        integer :: exitcode, cmdstat
 
-        ! extract the saved file URI
-        call extract_lsp_field(body, '"uri"', uri)
+        call extract_json_field(body, '"uri"', uri)
 
-        ! run fo check and capture output
         call make_tmpfile('fo_lsp_check', tmpfile)
         call execute_command_line('fo check > '//trim(tmpfile)//' 2>&1', &
             exitstat=exitcode, cmdstat=cmdstat, wait=.true.)
         if (cmdstat /= 0) exitcode = 1
 
-        diag_text = ''
-        n = 0
-        open(newunit=u, file=tmpfile, status='old', iostat=iostat)
-        if (iostat == 0) then
-            do
-                read(u, '(a)', iostat=iostat) buf
-                if (iostat /= 0) exit
-                if (n + len_trim(buf) + 1 > len(diag_text)) exit
-                diag_text(n+1:n+len_trim(buf)) = trim(buf)
-                n = n + len_trim(buf)
-                n = n + 1
-                diag_text(n:n) = char(10)
-            end do
-            close(u)
-        end if
-        call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
+        call read_text_file(tmpfile, diag_text)
+        call delete_tmpfile(tmpfile)
 
         ! publish diagnostics notification
-        call escape_lsp_json(diag_text)
+        call json_escape(diag_text)
         if (exitcode /= 0) then
             notification = '{"jsonrpc":"2.0",' // &
                 '"method":"textDocument/publishDiagnostics",' // &
@@ -155,111 +128,8 @@ contains
                 '"diagnostics":[]}}'
         end if
 
-        call send_lsp(notification)
+        call send_jsonrpc(notification)
     end subroutine handle_did_save
-
-    subroutine make_lsp_null_result(id_str, response)
-        character(len=*), intent(in) :: id_str
-        character(len=*), intent(out) :: response
-
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//',"result":null}'
-    end subroutine make_lsp_null_result
-
-    subroutine make_lsp_error(id_str, code, msg, response)
-        character(len=*), intent(in) :: id_str, msg
-        integer, intent(in) :: code
-        character(len=*), intent(out) :: response
-
-        character(len=16) :: code_str
-
-        write(code_str, '(i0)') code
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//',' // &
-            '"error":{"code":'//trim(code_str)//',' // &
-            '"message":"'//trim(msg)//'"}}'
-    end subroutine make_lsp_error
-
-    subroutine extract_lsp_field(line, key, val)
-        character(len=*), intent(in) :: line, key
-        character(len=*), intent(out) :: val
-
-        integer :: pos, start, fin
-        character(len=1) :: ch
-
-        val = ''
-        pos = index(line, trim(key))
-        if (pos == 0) return
-
-        pos = pos + len_trim(key)
-        do while (pos <= len_trim(line))
-            if (line(pos:pos) == ':') exit
-            pos = pos + 1
-        end do
-        pos = pos + 1
-
-        do while (pos <= len_trim(line) .and. line(pos:pos) == ' ')
-            pos = pos + 1
-        end do
-
-        if (pos > len_trim(line)) return
-
-        ch = line(pos:pos)
-        if (ch == '"') then
-            start = pos + 1
-            fin = start
-            do while (fin <= len_trim(line))
-                if (line(fin:fin) == '"' .and. &
-                    (fin == start .or. line(fin-1:fin-1) /= '\')) exit
-                fin = fin + 1
-            end do
-            val = line(start:fin-1)
-        else
-            start = pos
-            fin = pos
-            do while (fin <= len_trim(line))
-                ch = line(fin:fin)
-                if (ch == ',' .or. ch == '}' .or. ch == ' ') exit
-                fin = fin + 1
-            end do
-            val = line(start:fin-1)
-        end if
-    end subroutine extract_lsp_field
-
-    subroutine escape_lsp_json(str)
-        character(len=*), intent(inout) :: str
-
-        character(len=len(str)) :: buf
-        integer :: i, j, n
-
-        n = len_trim(str)
-        j = 0
-        buf = ''
-
-        do i = 1, n
-            select case (str(i:i))
-            case ('"')
-                if (j + 2 > len(buf)) exit
-                j = j + 1; buf(j:j) = '\'
-                j = j + 1; buf(j:j) = '"'
-            case ('\')
-                if (j + 2 > len(buf)) exit
-                j = j + 1; buf(j:j) = '\'
-                j = j + 1; buf(j:j) = '\'
-            case (char(10))
-                if (j + 2 > len(buf)) exit
-                j = j + 1; buf(j:j) = '\'
-                j = j + 1; buf(j:j) = 'n'
-            case (char(13))
-                if (j + 2 > len(buf)) exit
-                j = j + 1; buf(j:j) = '\'
-                j = j + 1; buf(j:j) = 'r'
-            case default
-                if (j + 1 > len(buf)) exit
-                j = j + 1; buf(j:j) = str(i:i)
-            end select
-        end do
-
-        str = buf(1:j)
-    end subroutine escape_lsp_json
 
     subroutine to_lower_lsp(str)
         character(len=*), intent(inout) :: str
@@ -272,18 +142,5 @@ contains
             end if
         end do
     end subroutine to_lower_lsp
-
-    subroutine make_tmpfile(prefix, path)
-        character(len=*), intent(in) :: prefix
-        character(len=*), intent(out) :: path
-
-        integer :: count
-        integer, save :: serial = 0
-
-        serial = serial + 1
-        call system_clock(count)
-        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
-            count, '-', serial, '.tmp'
-    end subroutine make_tmpfile
 
 end module fo_lsp

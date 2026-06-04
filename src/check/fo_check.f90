@@ -1,5 +1,7 @@
 module fo_check
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
+    use fo_json, only: json_bool, json_int, json_escape_str, json_append, &
+                       make_tmpfile, delete_tmpfile
     use fo_scan, only: scan_unit_t, scan_file, scan_dir, MAX_NAME, MAX_UNITS
     use fo_dag, only: dag_t, dag_build, dag_topo_order, dag_reverse_deps, MAX_NODES
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, &
@@ -220,7 +222,7 @@ contains
                 end if
                 close (u)
             end if
-            call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
+            call delete_tmpfile(tmpfile)
         end block
     end subroutine find_mod_file
 
@@ -321,7 +323,7 @@ contains
             res%elapsed = t1 - t0
             return
         end if
-        call delete_file(build_log)
+        call delete_tmpfile(build_log)
         res%build_ok = .true.
 
         ! cache artifacts after successful build
@@ -336,7 +338,7 @@ contains
         if (.not. res%tests_ok) then
             call summarize_backend_failure('test', test_log, 'fo test', res)
         else
-            call delete_file(test_log)
+            call delete_tmpfile(test_log)
         end if
 
         call cpu_time(t1)
@@ -448,7 +450,7 @@ contains
         line = trim(line)//',"affected":'//trim(affected)
         line = trim(line)//',"elapsed_s":'//trim(adjustl(elapsed))
         line = trim(line)//',"error":"'
-        line = trim(line)//trim(json_escape(res%error_msg))//'"}'
+        line = trim(line)//trim(json_escape_str(res%error_msg))//'"}'
     end function check_result_json
 
     function check_result_compact_json(res) result(line)
@@ -467,29 +469,29 @@ contains
 
         base = check_result_json(res)
         line = base(1:len_trim(base) - 1)
-        line = trim(line)//',"stage":"'//trim(json_escape(res%stage))//'"'
-        line = trim(line)//',"target":"'//trim(json_escape(res%target))//'"'
-        line = trim(line)//',"summary":"'//trim(json_escape(agent_summary(res)))//'"'
-        line = trim(line)//',"hint":"'//trim(json_escape(res%hint))//'"'
-        line = trim(line)//',"rerun":"'//trim(json_escape(res%rerun))//'"'
-        line = trim(line)//',"log_path":"'//trim(json_escape(res%log_path))//'"'
+        line = trim(line)//',"stage":"'//trim(json_escape_str(res%stage))//'"'
+        line = trim(line)//',"target":"'//trim(json_escape_str(res%target))//'"'
+        line = trim(line)//',"summary":"'//trim(json_escape_str(agent_summary(res)))//'"'
+        line = trim(line)//',"hint":"'//trim(json_escape_str(res%hint))//'"'
+        line = trim(line)//',"rerun":"'//trim(json_escape_str(res%rerun))//'"'
+        line = trim(line)//',"log_path":"'//trim(json_escape_str(res%log_path))//'"'
         if (res%build_ok .and. res%tests_ok) then
             line = trim(line)//',"diagnostics":[]'
         else
             line = trim(line)//',"diagnostics":[{"kind":"'// &
-                   trim(json_escape(res%stage))//'"'
+                   trim(json_escape_str(res%stage))//'"'
             if (len_trim(res%diag_file) > 0) then
-                line = trim(line)//',"file":"'//trim(json_escape(res%diag_file))//'"'
+                line = trim(line)//',"file":"'//trim(json_escape_str(res%diag_file))//'"'
             else
                 line = trim(line)//',"file":""'
             end if
-            line = trim(line)//',"line":'//trim(int_json(res%diag_line))
-            line = trim(line)//',"column":'//trim(int_json(res%diag_column))
-            line = trim(line)//',"target":"'//trim(json_escape(res%target))//'"'
+            line = trim(line)//',"line":'//trim(json_int(res%diag_line))
+            line = trim(line)//',"column":'//trim(json_int(res%diag_column))
+            line = trim(line)//',"target":"'//trim(json_escape_str(res%target))//'"'
             line = trim(line)//',"message":"'// &
-                   trim(json_escape(agent_summary(res)))//'"'
-            line = trim(line)//',"hint":"'//trim(json_escape(res%hint))//'"'
-            line = trim(line)//',"rerun":"'//trim(json_escape(res%rerun))//'"}]'
+                   trim(json_escape_str(agent_summary(res)))//'"'
+            line = trim(line)//',"hint":"'//trim(json_escape_str(res%hint))//'"'
+            line = trim(line)//',"rerun":"'//trim(json_escape_str(res%rerun))//'"}]'
         end if
         if (len_trim(cap_json_str) > 0) then
             line = trim(line)//',"capabilities":'//trim(cap_json_str)//'}'
@@ -511,12 +513,12 @@ contains
 
         line = '{'
         line = trim(line)//'"ok":'//trim(json_bool(ok))
-        line = trim(line)//',"stage":"'//trim(json_escape(res%stage))//'"'
-        line = trim(line)//',"target":"'//trim(json_escape(res%target))//'"'
-        line = trim(line)//',"summary":"'//trim(json_escape(agent_summary(res)))//'"'
-        line = trim(line)//',"hint":"'//trim(json_escape(res%hint))//'"'
-        line = trim(line)//',"rerun":"'//trim(json_escape(res%rerun))//'"'
-        line = trim(line)//',"log_path":"'//trim(json_escape(res%log_path))//'"'
+        line = trim(line)//',"stage":"'//trim(json_escape_str(res%stage))//'"'
+        line = trim(line)//',"target":"'//trim(json_escape_str(res%target))//'"'
+        line = trim(line)//',"summary":"'//trim(json_escape_str(agent_summary(res)))//'"'
+        line = trim(line)//',"hint":"'//trim(json_escape_str(res%hint))//'"'
+        line = trim(line)//',"rerun":"'//trim(json_escape_str(res%rerun))//'"'
+        line = trim(line)//',"log_path":"'//trim(json_escape_str(res%log_path))//'"'
         line = trim(line)//',"elapsed_s":'//trim(adjustl(elapsed))
         if (include_legacy) then
             line = trim(line)//',"legacy":'//trim(check_result_json(res))
@@ -539,74 +541,6 @@ contains
         end if
     end function agent_summary
 
-    function json_bool(value) result(text)
-        logical, intent(in) :: value
-        character(len=5) :: text
-
-        if (value) then
-            text = 'true'
-        else
-            text = 'false'
-        end if
-    end function json_bool
-
-    function int_json(value) result(text)
-        integer, intent(in) :: value
-        character(len=32) :: text
-
-        write (text, '(i0)') value
-    end function int_json
-
-    function json_escape(input) result(output)
-        character(len=*), intent(in) :: input
-        character(len=1024) :: output
-
-        integer :: i, n
-        character(len=1) :: ch
-
-        output = ''
-        n = 0
-        do i = 1, len_trim(input)
-            ch = input(i:i)
-            select case (ch)
-            case ('"')
-                call append_json_chars(output, n, achar(92)//achar(34))
-            case (achar(92))
-                call append_json_chars(output, n, achar(92)//achar(92))
-            case (achar(9), achar(10), achar(13))
-                call append_json_chars(output, n, ' ')
-            case default
-                if (iachar(ch) >= 32) call append_json_chars(output, n, ch)
-            end select
-        end do
-    end function json_escape
-
-    subroutine append_json_chars(output, n, text)
-        character(len=*), intent(inout) :: output
-        integer, intent(inout) :: n
-        character(len=*), intent(in) :: text
-
-        integer :: m
-
-        m = len(text)
-        if (m <= 0) return
-        if (n + m > len(output)) return
-        output(n + 1:n + m) = text(1:m)
-        n = n + m
-    end subroutine append_json_chars
-
-    subroutine make_tmpfile(prefix, path)
-        character(len=*), intent(in) :: prefix
-        character(len=*), intent(out) :: path
-
-        integer :: count
-        integer, save :: serial = 0
-
-        serial = serial + 1
-        call system_clock(count)
-        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
-            count, '-', serial, '.log'
-    end subroutine make_tmpfile
 
     subroutine summarize_backend_failure(stage, log_file, rerun, res)
         character(len=*), intent(in) :: stage, log_file, rerun
@@ -648,11 +582,6 @@ contains
         end if
     end subroutine set_failure
 
-    subroutine delete_file(path)
-        character(len=*), intent(in) :: path
-
-        call execute_command_line('rm -f '//trim(path), wait=.true.)
-    end subroutine delete_file
 
     subroutine detect_compiler(compiler)
         character(len=*), intent(out) :: compiler
@@ -672,7 +601,7 @@ contains
             if (iostat == 0) compiler = trim(line)
             close (u)
         end if
-        call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
+        call delete_tmpfile(tmpfile)
     end subroutine detect_compiler
 
 end module fo_check

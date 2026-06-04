@@ -1,5 +1,8 @@
 module fo_mcp
     use, intrinsic :: iso_fortran_env, only: input_unit, output_unit, error_unit
+    use fo_json, only: json_bool, json_int, json_escape, extract_json_field, &
+                       make_tmpfile, delete_tmpfile, read_text_file, &
+                       send_jsonrpc, jsonrpc_error, jsonrpc_null
     use fo_check, only: check_result_t, fo_check_run, &
                         check_result_compact_json, check_result_full_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
@@ -35,62 +38,109 @@ contains
         type(mcp_async_state_t) :: async_state
 
         do
-            read (input_unit, '(a)', iostat=iostat) line
+            call read_jsonrpc_message(line, iostat)
             if (iostat /= 0) exit
             if (len_trim(line) == 0) cycle
 
-            call extract_field(line, '"method"', method)
-            call extract_field(line, '"id"', id_str)
+            call extract_json_field(line, '"method"', method)
+            call extract_json_field(line, '"id"', id_str)
             call async_poll(async_state)
 
             select case (trim(method))
             case ('initialize')
                 call make_initialize_response(id_str, response)
-                call send_response(response)
+                call send_jsonrpc(response)
             case ('initialized')
                 ! notification, no response needed
                 cycle
             case ('tools/list')
                 call make_tools_list_response(id_str, response)
-                call send_response(response)
+                call send_jsonrpc(response)
             case ('tools/call')
                 call handle_tools_call(line, id_str, response, async_state)
-                call send_response(response)
+                call send_jsonrpc(response)
             case ('resources/list')
                 call make_resources_list_response(id_str, response)
-                call send_response(response)
+                call send_jsonrpc(response)
             case ('resources/read')
                 call handle_resources_read(line, id_str, response, async_state)
-                call send_response(response)
+                call send_jsonrpc(response)
             case ('shutdown')
                 call async_cancel_all(async_state)
-                call make_result_null(id_str, response)
-                call send_response(response)
+                call jsonrpc_null(id_str, response)
+                call send_jsonrpc(response)
                 exit
             case default
                 if (len_trim(id_str) > 0) then
-                    call make_error_response(id_str, -32601, &
+                    call jsonrpc_error(id_str, -32601, &
                                              'method not found', response)
-                    call send_response(response)
+                    call send_jsonrpc(response)
                 end if
             end select
         end do
         call async_cancel_all(async_state)
     end subroutine mcp_serve
 
-    subroutine send_response(response)
-        character(len=*), intent(in) :: response
+    subroutine read_jsonrpc_message(body, iostat)
+        character(len=*), intent(out) :: body
+        integer, intent(out) :: iostat
 
-        character(len=16) :: len_str
-        integer :: n
+        character(len=512) :: header_line
+        integer :: content_length, pos, hdr_iostat
 
-        n = len_trim(response)
-        write (len_str, '(i0)') n
-        write (output_unit, '(a,a,a,a,a)', advance='no') &
-            'Content-Length: ', trim(len_str), char(13)//char(10), &
-            char(13)//char(10), trim(response)
-        flush (output_unit)
-    end subroutine send_response
+        body = ''
+        iostat = 0
+        content_length = 0
+
+        read (input_unit, '(a)', iostat=iostat) header_line
+        if (iostat /= 0) return
+
+        if (index(header_line, '{') > 0) then
+            body = header_line
+            return
+        end if
+
+        call parse_content_length_header(header_line, content_length)
+        do
+            read (input_unit, '(a)', iostat=iostat) header_line
+            if (iostat /= 0) return
+            if (len_trim(header_line) == 0 .or. &
+                trim(header_line) == char(13)) exit
+            call parse_content_length_header(header_line, content_length)
+        end do
+
+        if (content_length <= 0 .or. content_length > len(body)) then
+            iostat = -1
+            return
+        end if
+
+        read (input_unit, '(a)', iostat=iostat) body
+    end subroutine read_jsonrpc_message
+
+    subroutine parse_content_length_header(header, length)
+        character(len=*), intent(in) :: header
+        integer, intent(inout) :: length
+
+        integer :: pos, rd_iostat
+        character(len=512) :: lower_hdr
+
+        lower_hdr = header
+        call to_lower_mcp(lower_hdr)
+        pos = index(lower_hdr, 'content-length:')
+        if (pos == 0) return
+        read (header(pos + 15:), *, iostat=rd_iostat) length
+    end subroutine parse_content_length_header
+
+    subroutine to_lower_mcp(str)
+        character(len=*), intent(inout) :: str
+        integer :: i, ic
+
+        do i = 1, len_trim(str)
+            ic = iachar(str(i:i))
+            if (ic >= iachar('A') .and. ic <= iachar('Z')) &
+                str(i:i) = achar(ic + 32)
+        end do
+    end subroutine to_lower_mcp
 
     subroutine make_initialize_response(id_str, response)
         character(len=*), intent(in) :: id_str
@@ -136,16 +186,15 @@ contains
         character(len=64) :: action, mode
         character(len=4096) :: output_text
         integer :: exitcode, cmdstat
-        character(len=512) :: tmpfile, cmd, buf
-        integer :: u, iostat, n
+        character(len=512) :: tmpfile, cmd
         type(check_result_t) :: check_res
 
-        call extract_action(line, action)
+        call extract_json_field(line, '"action"', action)
         call make_tmpfile('fo_mcp_output', tmpfile)
 
         select case (trim(action))
         case ('check')
-            call extract_field(line, '"mode"', mode)
+            call extract_json_field(line, '"mode"', mode)
             if (trim(mode) == 'start') then
                 call handle_async_start(line, id_str, response, async_state)
                 return
@@ -188,26 +237,12 @@ contains
                                       cmdstat=cmdstat, wait=.true.)
             if (cmdstat /= 0) exitcode = 1
 
-            output_text = ''
-            n = 0
-            open (newunit=u, file=tmpfile, status='old', iostat=iostat)
-            if (iostat == 0) then
-                do
-                    read (u, '(a)', iostat=iostat) buf
-                    if (iostat /= 0) exit
-                    if (n + len_trim(buf) + 1 > len(output_text)) exit
-                    output_text(n + 1:n + len_trim(buf)) = trim(buf)
-                    n = n + len_trim(buf)
-                    n = n + 1
-                    output_text(n:n) = char(10)
-                end do
-                close (u)
-            end if
-            call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
+            call read_text_file(tmpfile, output_text)
+            call delete_tmpfile(tmpfile)
 
             call make_tool_text_response(id_str, output_text, exitcode, response)
         case default
-            call make_error_response(id_str, -32602, &
+            call jsonrpc_error(id_str, -32602, &
                                      'unknown action: '//trim(action), response)
         end select
     end subroutine handle_tools_call
@@ -222,7 +257,7 @@ contains
         integer :: exitcode
         type(check_result_t) :: check_res
 
-        call extract_field(line, '"uri"', uri)
+        call extract_json_field(line, '"uri"', uri)
         call async_poll(async_state)
 
         if (trim(uri) == 'fo://diagnostics' .or. &
@@ -237,13 +272,13 @@ contains
                 if (.not. (check_res%build_ok .and. check_res%tests_ok)) exitcode = 1
             end if
 
-            call escape_json(output_text)
+            call json_escape(output_text)
             response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
                        '"result":{"contents":[{"uri":"fo://diagnostics",'// &
                        '"mimeType":"text/plain",'// &
                        '"text":"'//trim(output_text)//'"}]}}'
         else
-            call make_error_response(id_str, -32602, &
+            call jsonrpc_error(id_str, -32602, &
                                      'unknown resource', response)
         end if
     end subroutine handle_resources_read
@@ -258,7 +293,7 @@ contains
         integer :: ierr, run_id, started_before
         logical :: pending
 
-        call extract_field(line, '"root"', root)
+        call extract_json_field(line, '"root"', root)
         if (len_trim(root) == 0) root = '.'
         output_mode = 'agent'
         if (index(line, '"json":"full"') > 0 .or. index(line, '"full"') > 0) then
@@ -268,7 +303,7 @@ contains
         started_before = async_state%queue%started
         call async_state%queue%request(root, output_mode, ierr)
         if (ierr /= 0) then
-            call make_error_response(id_str, -32602, 'invalid root', response)
+            call jsonrpc_error(id_str, -32602, 'invalid root', response)
             return
         end if
 
@@ -280,7 +315,7 @@ contains
         else
             call async_start_current(async_state, 0, ierr)
             if (ierr /= 0) then
-                call make_error_response(id_str, -32603, &
+                call jsonrpc_error(id_str, -32603, &
                                          'could not start check', response)
                 return
             end if
@@ -300,7 +335,7 @@ contains
         call async_poll(async_state)
         call requested_run_id(line, async_state, run_id, ierr)
         if (ierr /= 0) then
-            call make_error_response(id_str, -32602, 'unknown run_id', response)
+            call jsonrpc_error(id_str, -32602, 'unknown run_id', response)
             return
         end if
 
@@ -319,7 +354,7 @@ contains
         call async_poll(async_state)
         call requested_run_id(line, async_state, run_id, ierr)
         if (ierr /= 0) then
-            call make_error_response(id_str, -32602, 'unknown run_id', response)
+            call jsonrpc_error(id_str, -32602, 'unknown run_id', response)
             return
         end if
 
@@ -342,11 +377,11 @@ contains
 
         call requested_run_id(line, async_state, run_id, ierr)
         if (ierr /= 0) then
-            call make_error_response(id_str, -32602, 'unknown run_id', response)
+            call jsonrpc_error(id_str, -32602, 'unknown run_id', response)
             return
         end if
         if (run_id /= async_state%active_run_id .or. async_state%active_pid <= 0) then
-            call make_error_response(id_str, -32602, 'run is not active', response)
+            call jsonrpc_error(id_str, -32602, 'run is not active', response)
             return
         end if
 
@@ -361,7 +396,7 @@ contains
         call async_start_pending_if_ready(async_state)
 
         response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"result":{"cancelled":true,"run_id":'//trim(int_text(run_id))//'}}'
+                   '"result":{"cancelled":true,"run_id":'//trim(json_int(run_id))//'}}'
     end subroutine handle_async_cancel
 
     subroutine async_poll(async_state)
@@ -469,7 +504,7 @@ contains
             return
         end if
 
-        call extract_field(line, '"run_id"', run_text)
+        call extract_json_field(line, '"run_id"', run_text)
         read (run_text, *, iostat=iostat) run_id
         if (iostat /= 0) then
             ierr = 1
@@ -488,7 +523,7 @@ contains
         character(len=*), intent(out) :: response
 
         response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"result":{"run_id":'//trim(int_text(run_id))// &
+                   '"result":{"run_id":'//trim(json_int(run_id))// &
                    ',"state":"'
         if (pending) then
             response = trim(response)//'rerun-pending"'
@@ -517,7 +552,7 @@ contains
         end if
 
         response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"result":{"run_id":'//trim(int_text(run_id))// &
+                   '"result":{"run_id":'//trim(json_int(run_id))// &
                    ',"state":"'//trim(state)// &
                    '","active":'// &
                    trim(json_bool(run_id == async_state%active_run_id .and. &
@@ -525,7 +560,7 @@ contains
                    ',"pending":'// &
                    trim(json_bool(run_id == async_state%pending_run_id))// &
                    ',"last_exitcode":'// &
-                   trim(int_text(async_state%last_exitcode))//'}}'
+                   trim(json_int(async_state%last_exitcode))//'}}'
     end subroutine make_status_response
 
     subroutine make_diagnostics_response(id_str, run_id, output_text, stale, &
@@ -538,11 +573,11 @@ contains
         character(len=4096) :: escaped
 
         escaped = output_text
-        call escape_json(escaped)
+        call json_escape(escaped)
         response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"result":{"run_id":'//trim(int_text(run_id))// &
+                   '"result":{"run_id":'//trim(json_int(run_id))// &
                    ',"stale":'//trim(json_bool(stale))// &
-                   ',"exitcode":'//trim(int_text(exitcode))// &
+                   ',"exitcode":'//trim(json_int(exitcode))// &
                    ',"diagnostics":"'//trim(escaped)//'"}}'
     end subroutine make_diagnostics_response
 
@@ -554,186 +589,11 @@ contains
         character(len=4096) :: escaped
 
         escaped = output_text
-        call escape_json(escaped)
+        call json_escape(escaped)
         response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
                    '"result":{"content":[{"type":"text",'// &
                    '"text":"'//trim(escaped)//'"}],"isError":'// &
                    trim(json_bool(exitcode /= 0))//'}}'
     end subroutine make_tool_text_response
-
-    subroutine read_text_file(path, text)
-        character(len=*), intent(in) :: path
-        character(len=*), intent(out) :: text
-
-        character(len=512) :: buf
-        integer :: u, iostat, n
-
-        text = ''
-        n = 0
-        open (newunit=u, file=trim(path), status='old', iostat=iostat)
-        if (iostat /= 0) return
-        do
-            read (u, '(a)', iostat=iostat) buf
-            if (iostat /= 0) exit
-            if (n + len_trim(buf) + 1 > len(text)) exit
-            text(n + 1:n + len_trim(buf)) = trim(buf)
-            n = n + len_trim(buf)
-            n = n + 1
-            text(n:n) = char(10)
-        end do
-        close (u)
-    end subroutine read_text_file
-
-    function int_text(value) result(text)
-        integer, intent(in) :: value
-        character(len=32) :: text
-
-        write (text, '(i0)') value
-    end function int_text
-
-    function json_bool(value) result(text)
-        logical, intent(in) :: value
-        character(len=5) :: text
-
-        if (value) then
-            text = 'true'
-        else
-            text = 'false'
-        end if
-    end function json_bool
-
-    subroutine make_result_null(id_str, response)
-        character(len=*), intent(in) :: id_str
-        character(len=*), intent(out) :: response
-
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//',"result":null}'
-    end subroutine make_result_null
-
-    subroutine make_error_response(id_str, code, msg, response)
-        character(len=*), intent(in) :: id_str, msg
-        integer, intent(in) :: code
-        character(len=*), intent(out) :: response
-
-        character(len=16) :: code_str
-
-        write (code_str, '(i0)') code
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"error":{"code":'//trim(code_str)//','// &
-                   '"message":"'//trim(msg)//'"}}'
-    end subroutine make_error_response
-
-    subroutine extract_field(line, key, val)
-        character(len=*), intent(in) :: line, key
-        character(len=*), intent(out) :: val
-
-        integer :: pos, start, fin, i
-        character(len=1) :: ch
-
-        val = ''
-        pos = index(line, trim(key))
-        if (pos == 0) return
-
-        ! find the colon after the key
-        pos = pos + len_trim(key)
-        do while (pos <= len_trim(line))
-            if (line(pos:pos) == ':') exit
-            pos = pos + 1
-        end do
-        pos = pos + 1
-
-        ! skip whitespace
-        do while (pos <= len_trim(line) .and. line(pos:pos) == ' ')
-            pos = pos + 1
-        end do
-
-        if (pos > len_trim(line)) return
-
-        ch = line(pos:pos)
-        if (ch == '"') then
-            ! string value
-            start = pos + 1
-            fin = start
-            do while (fin <= len_trim(line))
-                if (line(fin:fin) == '"' .and. line(fin - 1:fin - 1) /= '\') exit
-                fin = fin + 1
-            end do
-            val = line(start:fin - 1)
-        else
-            ! number or other value
-            start = pos
-            fin = pos
-            do while (fin <= len_trim(line))
-                ch = line(fin:fin)
-                if (ch == ',' .or. ch == '}' .or. ch == ' ') exit
-                fin = fin + 1
-            end do
-            val = line(start:fin - 1)
-        end if
-    end subroutine extract_field
-
-    subroutine extract_action(line, action)
-        character(len=*), intent(in) :: line
-        character(len=*), intent(out) :: action
-
-        character(len=256) :: arguments_str
-
-        ! look for "action" inside the arguments/params
-        action = ''
-        call extract_field(line, '"action"', action)
-    end subroutine extract_action
-
-    subroutine escape_json(str)
-        character(len=*), intent(inout) :: str
-
-        character(len=len(str)) :: buf
-        integer :: i, j, n
-
-        n = len_trim(str)
-        j = 0
-        buf = ''
-
-        do i = 1, n
-            select case (str(i:i))
-            case ('"')
-                if (j + 2 > len(buf)) exit
-                j = j + 1; buf(j:j) = '\'
-                j = j + 1; buf(j:j) = '"'
-            case ('\')
-                if (j + 2 > len(buf)) exit
-                j = j + 1; buf(j:j) = '\'
-                j = j + 1; buf(j:j) = '\'
-            case (char(10))
-                if (j + 2 > len(buf)) exit
-                j = j + 1; buf(j:j) = '\'
-                j = j + 1; buf(j:j) = 'n'
-            case (char(13))
-                if (j + 2 > len(buf)) exit
-                j = j + 1; buf(j:j) = '\'
-                j = j + 1; buf(j:j) = 'r'
-            case (char(9))
-                if (j + 2 > len(buf)) exit
-                j = j + 1; buf(j:j) = '\'
-                j = j + 1; buf(j:j) = 't'
-            case default
-                if (j + 1 > len(buf)) exit
-                j = j + 1; buf(j:j) = str(i:i)
-            end select
-        end do
-
-        str = buf(1:j)
-    end subroutine escape_json
-
-    subroutine make_tmpfile(prefix, path)
-        character(len=*), intent(in) :: prefix
-        character(len=*), intent(out) :: path
-
-        integer :: count
-        integer, save :: serial = 0
-
-        serial = serial + 1
-        call system_clock(count)
-        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
-            count, '-', serial, '.tmp'
-    end subroutine make_tmpfile
 
 end module fo_mcp
