@@ -41,11 +41,11 @@ contains
             inquire (file=trim(current)//'/fpm.toml', exist=has_fpm)
             inquire (file=trim(current)//'/CMakeLists.txt', exist=has_cmake)
 
-            if (has_fpm) then
-                b%kind = BACKEND_FPM
-                return
-            else if (has_cmake) then
+            if (has_cmake) then
                 b%kind = BACKEND_CMAKE
+                return
+            else if (has_fpm) then
+                b%kind = BACKEND_FPM
                 return
             end if
 

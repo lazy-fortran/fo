@@ -272,7 +272,7 @@ void fo_c_ctest(const char *project_dir, int jobs, const char *regex,
     }
     if (!include_slow) {
         argv[n++] = "-LE";
-        argv[n++] = "slow";
+        argv[n++] = "slow|regression|performance|scalability";
     }
     argv[n] = NULL;
 

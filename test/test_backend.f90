@@ -13,6 +13,7 @@ program test_backend
     call test_detect_fpm()
     call test_detect_fpm_from_child()
     call test_detect_cmake()
+    call test_detect_cmake_over_fpm()
     call test_detect_none()
     call test_nproc()
     call test_detect_jobs()
@@ -94,6 +95,27 @@ contains
         call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_detect_cmake
 
+    subroutine test_detect_cmake_over_fpm()
+        type(backend_t) :: b
+        integer :: u
+        character(len=512) :: project_dir
+
+        call make_tmp_path('fo_test_cmake_over_fpm', project_dir)
+        call execute_command_line('mkdir -p '//trim(project_dir))
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "test"'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
+              status='replace')
+        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
+        close (u)
+
+        b = detect_backend(project_dir)
+        call assert(b%kind == BACKEND_CMAKE, 'detect cmake over fpm')
+
+        call execute_command_line('rm -rf '//trim(project_dir))
+    end subroutine test_detect_cmake_over_fpm
+
     subroutine test_detect_none()
         type(backend_t) :: b
         character(len=512) :: project_dir
@@ -155,7 +177,7 @@ contains
 
         b = detect_backend(project_dir)
         call b%test(exitcode, log_file=fast_log)
-        call assert(exitcode == 0, 'cmake test skips slow by default')
+        call assert(exitcode == 0, 'cmake test skips excluded labels by default')
 
         call b%test(exitcode, include_slow=.true., log_file=slow_log)
         call assert(exitcode /= 0, 'cmake test --all includes slow')
@@ -349,6 +371,18 @@ contains
             'add_test(NAME test_kernel_slow COMMAND ${CMAKE_COMMAND} -E false)'
         write (u, '(a)') &
             'set_tests_properties(test_kernel_slow PROPERTIES LABELS slow)'
+        write (u, '(a)') &
+            'add_test(NAME test_regression COMMAND ${CMAKE_COMMAND} -E false)'
+        write (u, '(a)') &
+            'set_tests_properties(test_regression PROPERTIES LABELS regression)'
+        write (u, '(a)') &
+            'add_test(NAME test_performance COMMAND ${CMAKE_COMMAND} -E false)'
+        write (u, '(a)') &
+            'set_tests_properties(test_performance PROPERTIES LABELS performance)'
+        write (u, '(a)') &
+            'add_test(NAME test_scalability COMMAND ${CMAKE_COMMAND} -E false)'
+        write (u, '(a)') &
+            'set_tests_properties(test_scalability PROPERTIES LABELS scalability)'
         close (u)
 
         call execute_command_line('cd '//trim(project_dir)// &
