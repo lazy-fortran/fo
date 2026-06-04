@@ -37,6 +37,19 @@ If `fo` is slower than the backend or cannot handle the project, fix
 - `doc/FO.md`: specification.
 - `test/`: fpm tests.
 
+## MCP Server
+
+`fo mcp-server` exposes a single `fo` tool over JSON-RPC/stdio. Actions: `check`, `build`, `test`, `info`, `graph`, `changed`, `clean`, `status`, `diagnostics`, `cancel`.
+
+Protocol: auto-detects input framing (Content-Length headers or bare JSON lines) from the first message and mirrors it. Protocol version is echoed from the client's `initialize` request.
+
+System test: `node test/test_mcp_system.js` (or pass a binary path as arg). Tests both framing modes, protocol negotiation, tool calls, error paths, and clean shutdown.
+
+Key source files:
+- `src/mcp/fo_mcp.f90`: server loop, dispatch, async state.
+- `src/proc/fo_process.c`: `fo_c_read_jsonrpc_message` (framing auto-detect), `fo_c_get_mcp_framing`.
+- `src/json/fo_json.f90`: `send_jsonrpc` (output framing follows input).
+
 ## Rules
 
 - Pure Fortran + C shim. No Python, no shell scripts in the build path.
