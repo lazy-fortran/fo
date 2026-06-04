@@ -3,6 +3,8 @@ program test_check
     use fo_check, only: check_result_t, fo_check_run, check_result_json, &
                         check_result_compact_json, check_result_full_json
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
+    use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
+                            RUN_RERUN_PENDING, RUN_FINISHED
     implicit none
 
     integer :: n_pass, n_fail
@@ -18,6 +20,10 @@ program test_check
     call test_check_result_full_json_diagnostics()
     call test_diagnostic_timeout_hint()
     call test_diagnostic_unknown_line()
+    call test_run_queue_coalesces_requests()
+    call test_run_queue_single_returns_idle()
+    call test_run_queue_failed_then_pending()
+    call test_run_queue_invalid_root()
 
     write (output_unit, '(a,i0,a,i0,a)') 'check: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -237,6 +243,120 @@ contains
         call execute_command_line('rm -f '//trim(log_path))
     end subroutine test_diagnostic_unknown_line
 
+    subroutine test_run_queue_coalesces_requests()
+        type(run_queue_t) :: queue
+        character(len=512) :: root_a, root_b, root_c
+        integer :: ierr
+
+        call make_tmp_path('fo_queue_a', root_a)
+        call make_tmp_path('fo_queue_b', root_b)
+        call make_tmp_path('fo_queue_c', root_c)
+        call make_dir(root_a)
+        call make_dir(root_b)
+        call make_dir(root_c)
+
+        call queue%request(root_a, 'check', ierr)
+        call assert(ierr == 0, 'first queue request succeeds')
+        call assert(queue%state == RUN_RUNNING, 'first queue request starts')
+        call queue%request(root_b, 'agent', ierr)
+        call queue%request(root_c, 'json', ierr)
+
+        call assert(queue%started == 1, &
+                    'active queue stores pending requests without extra start')
+        call assert(queue%state == RUN_RERUN_PENDING, &
+                    'active queue enters rerun-pending state')
+        call assert(queue%rerun_pending, 'active queue records pending rerun')
+        call assert(trim(queue%pending_root) == trim(root_c), &
+                    'queue keeps newest pending root')
+        call assert(trim(queue%pending_mode) == 'json', &
+                    'queue keeps newest pending mode')
+
+        call queue%finish(0)
+        call assert(queue%started == 2, &
+                    'queue starts one rerun after active finish')
+        call assert(queue%completed == 1, &
+                    'queue reports first completed run before rerun finishes')
+        call assert(queue%last_state == RUN_FINISHED, &
+                    'queue records finished active run')
+        call assert(queue%state == RUN_RUNNING, &
+                    'queue returns to running state for pending rerun')
+        call assert(trim(queue%current_root) == trim(root_c), &
+                    'queue rerun uses newest root')
+        call assert(.not. queue%rerun_pending, &
+                    'queue clears pending marker after rerun starts')
+
+        call queue%finish(0)
+        call assert(queue%state == RUN_IDLE, 'queue returns idle after rerun')
+        call assert(queue%completed == 2, &
+                    'queue reports both completed runs')
+
+        call remove_dir(root_a)
+        call remove_dir(root_b)
+        call remove_dir(root_c)
+    end subroutine test_run_queue_coalesces_requests
+
+    subroutine test_run_queue_single_returns_idle()
+        type(run_queue_t) :: queue
+        character(len=512) :: root
+        integer :: ierr
+
+        call make_tmp_path('fo_queue_single', root)
+        call make_dir(root)
+
+        call queue%request(root, 'check', ierr)
+        call queue%finish(0)
+
+        call assert(ierr == 0, 'single queue request succeeds')
+        call assert(queue%state == RUN_IDLE, &
+                    'single completed request returns queue idle')
+        call assert(queue%started == 1 .and. queue%completed == 1, &
+                    'single completed request records one run')
+
+        call remove_dir(root)
+    end subroutine test_run_queue_single_returns_idle
+
+    subroutine test_run_queue_failed_then_pending()
+        type(run_queue_t) :: queue
+        character(len=512) :: root_a, root_b
+        integer :: ierr
+
+        call make_tmp_path('fo_queue_fail_a', root_a)
+        call make_tmp_path('fo_queue_fail_b', root_b)
+        call make_dir(root_a)
+        call make_dir(root_b)
+
+        call queue%request(root_a, 'check', ierr)
+        call queue%request(root_b, 'agent', ierr)
+        call queue%finish(1)
+
+        call assert(queue%last_exitcode == 1, &
+                    'failed active queue run records exit code')
+        call assert(queue%state == RUN_RUNNING, &
+                    'failed active queue run starts pending rerun')
+        call assert(queue%started == 2, &
+                    'failed active queue run starts pending exactly once')
+        call assert(trim(queue%current_root) == trim(root_b), &
+                    'failed active queue rerun uses pending root')
+
+        call remove_dir(root_a)
+        call remove_dir(root_b)
+    end subroutine test_run_queue_failed_then_pending
+
+    subroutine test_run_queue_invalid_root()
+        type(run_queue_t) :: queue
+        character(len=512) :: root
+        integer :: ierr
+
+        call make_tmp_path('fo_queue_missing', root)
+        call queue%request(root, 'check', ierr)
+
+        call assert(ierr /= 0, 'invalid queue root returns error')
+        call assert(queue%state == RUN_IDLE, &
+                    'invalid queue root does not start run')
+        call assert(queue%started == 0, &
+                    'invalid queue root keeps start count zero')
+    end subroutine test_run_queue_invalid_root
+
     subroutine make_bad_project(project_dir)
         character(len=*), intent(in) :: project_dir
         integer :: u
@@ -303,5 +423,17 @@ contains
         write (path, '(a,a,a,i0,a,i0)') '/tmp/', trim(prefix), '-', &
             count, '-', serial
     end subroutine make_tmp_path
+
+    subroutine make_dir(path)
+        character(len=*), intent(in) :: path
+
+        call execute_command_line('mkdir -p '//trim(path))
+    end subroutine make_dir
+
+    subroutine remove_dir(path)
+        character(len=*), intent(in) :: path
+
+        call execute_command_line('rm -rf '//trim(path))
+    end subroutine remove_dir
 
 end program test_check
