@@ -12,6 +12,7 @@ module fo_check
     private
     public :: check_result_t, fo_check_run, fo_changed_modules
     public :: check_result_json, check_result_compact_json, check_result_full_json
+    public :: check_result_text, fo_check_write
 
     integer, parameter :: MAX_EXT_DEPS = 256
 
@@ -339,6 +340,80 @@ contains
         call cpu_time(t1)
         res%elapsed = t1 - t0
     end subroutine fo_check_run
+
+    subroutine fo_check_write(dir, mode, output_path, ierr)
+        character(len=*), intent(in) :: dir, mode, output_path
+        integer, intent(out) :: ierr
+
+        type(check_result_t) :: res
+        character(len=4096) :: line
+        integer :: u, io
+
+        ierr = 0
+        if (len_trim(output_path) == 0) then
+            ierr = 3
+            return
+        end if
+        select case (trim(mode))
+        case ('', 'text', 'json', 'json=compact', 'compact', &
+              'json=full', 'full', 'agent')
+        case default
+            ierr = 2
+            return
+        end select
+
+        call fo_check_run(dir, res)
+        select case (trim(mode))
+        case ('', 'text')
+            line = check_result_text(res)
+        case ('json')
+            line = check_result_json(res)
+        case ('json=compact', 'compact')
+            line = check_result_compact_json(res)
+        case ('json=full', 'full')
+            line = check_result_full_json(res)
+        case ('agent')
+            line = check_result_compact_json(res)
+        case default
+            ierr = 2
+            return
+        end select
+
+        open (newunit=u, file=trim(output_path), status='replace', &
+              action='write', iostat=io)
+        if (io /= 0) then
+            ierr = 3
+            return
+        end if
+        write (u, '(a)') trim(line)
+        close (u)
+
+        if (.not. (res%build_ok .and. res%tests_ok)) ierr = 1
+    end subroutine fo_check_write
+
+    function check_result_text(res) result(line)
+        type(check_result_t), intent(in) :: res
+        character(len=2048) :: line
+
+        character(len=32) :: modules, cached, changed, affected, elapsed
+
+        write (modules, '(i0)') res%n_modules
+        write (cached, '(i0)') res%n_cached
+        write (changed, '(i0)') res%n_changed
+        write (affected, '(i0)') res%n_affected
+        write (elapsed, '(f12.3)') res%elapsed
+
+        if (res%build_ok .and. res%tests_ok) then
+            line = 'OK modules='//trim(modules)//' cached='//trim(cached)
+            line = trim(line)//' changed='//trim(changed)
+            line = trim(line)//' affected='//trim(affected)
+            line = trim(line)//' elapsed_s='//trim(adjustl(elapsed))
+        else if (.not. res%build_ok) then
+            line = 'Build: FAIL '//trim(res%error_msg)
+        else
+            line = 'Tests: FAIL '//trim(res%error_msg)
+        end if
+    end function check_result_text
 
     function check_result_json(res) result(line)
         type(check_result_t), intent(in) :: res

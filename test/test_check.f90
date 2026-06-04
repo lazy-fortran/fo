@@ -1,7 +1,8 @@
 program test_check
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_check, only: check_result_t, fo_check_run, check_result_json, &
-                        check_result_compact_json, check_result_full_json
+                        check_result_compact_json, check_result_full_json, &
+                        fo_check_write
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
                             RUN_RERUN_PENDING, RUN_FINISHED
@@ -18,6 +19,7 @@ program test_check
     call test_check_result_compact_json_success()
     call test_check_result_compact_json_failure()
     call test_check_result_full_json_diagnostics()
+    call test_check_write_outputs()
     call test_diagnostic_timeout_hint()
     call test_diagnostic_unknown_line()
     call test_run_queue_coalesces_requests()
@@ -201,6 +203,35 @@ contains
                     'full json includes log path')
     end subroutine test_check_result_full_json_diagnostics
 
+    subroutine test_check_write_outputs()
+        character(len=512) :: project_dir, json_path, text_path
+        integer :: ierr
+
+        call make_tmp_path('fo_writer_project', project_dir)
+        call make_tmp_path('fo_writer_json', json_path)
+        call make_tmp_path('fo_writer_text', text_path)
+        call make_ok_project(project_dir)
+
+        call fo_check_write(trim(project_dir)//'/src', 'json', json_path, ierr)
+        call assert(ierr == 0, 'check writer accepts json mode')
+        call assert(file_contains(json_path, '"build_ok":true'), &
+                    'check writer writes json output')
+
+        call fo_check_write(project_dir, 'text', text_path, ierr)
+        call assert(ierr == 0, 'check writer accepts text mode')
+        call assert(file_contains(text_path, 'OK modules='), &
+                    'check writer writes text output')
+
+        call fo_check_write(project_dir, 'bad-mode', text_path, ierr)
+        call assert(ierr == 2, 'check writer rejects invalid mode')
+        call assert(file_contains(text_path, 'OK modules='), &
+                    'invalid writer mode leaves prior output untouched')
+
+        call execute_command_line('rm -f '//trim(json_path))
+        call execute_command_line('rm -f '//trim(text_path))
+        call remove_dir(project_dir)
+    end subroutine test_check_write_outputs
+
     subroutine test_diagnostic_timeout_hint()
         type(diagnostic_t) :: diag
         character(len=512) :: log_path
@@ -357,6 +388,37 @@ contains
                     'invalid queue root keeps start count zero')
     end subroutine test_run_queue_invalid_root
 
+    subroutine make_ok_project(project_dir)
+        character(len=*), intent(in) :: project_dir
+        integer :: u
+
+        call execute_command_line('rm -rf '//trim(project_dir))
+        call execute_command_line('mkdir -p '//trim(project_dir)//'/src')
+        call execute_command_line('mkdir -p '//trim(project_dir)//'/test')
+
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "fo_writer_project"'
+        close (u)
+
+        open (newunit=u, file=trim(project_dir)//'/src/ok.f90', &
+              status='replace')
+        write (u, '(a)') 'module ok'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine noop()'
+        write (u, '(a)') 'end subroutine noop'
+        write (u, '(a)') 'end module ok'
+        close (u)
+
+        open (newunit=u, file=trim(project_dir)//'/test/test_ok.f90', &
+              status='replace')
+        write (u, '(a)') 'program test_ok'
+        write (u, '(a)') 'use ok, only: noop'
+        write (u, '(a)') 'call noop()'
+        write (u, '(a)') 'end program test_ok'
+        close (u)
+    end subroutine make_ok_project
+
     subroutine make_bad_project(project_dir)
         character(len=*), intent(in) :: project_dir
         integer :: u
@@ -435,5 +497,25 @@ contains
 
         call execute_command_line('rm -rf '//trim(path))
     end subroutine remove_dir
+
+    logical function file_contains(path, needle)
+        character(len=*), intent(in) :: path, needle
+
+        character(len=1024) :: line
+        integer :: u, iostat
+
+        file_contains = .false.
+        open (newunit=u, file=trim(path), status='old', iostat=iostat)
+        if (iostat /= 0) return
+        do
+            read (u, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            if (index(line, needle) > 0) then
+                file_contains = .true.
+                exit
+            end if
+        end do
+        close (u)
+    end function file_contains
 
 end program test_check
