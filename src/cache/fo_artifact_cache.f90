@@ -30,7 +30,7 @@ contains
         call artifact_cache_dir(basedir)
         call execute_command_line('mkdir -p '//trim(basedir), wait=.true.)
 
-        tmpfile = '/tmp/fo_artifact_store.tmp'
+        call make_tmpfile('fo_artifact_store', tmpfile)
 
         ! find all .mod files in the build tree
         cmd = 'find '//trim(build_dir)// &
@@ -89,7 +89,7 @@ contains
         inquire(file=trim(basedir)//'/.', exist=exists)
         if (.not. exists) return
 
-        tmpfile = '/tmp/fo_artifact_restore.tmp'
+        call make_tmpfile('fo_artifact_restore', tmpfile)
 
         ! find all .mod files in the build tree
         cmd = 'find '//trim(build_dir)// &
@@ -140,5 +140,18 @@ contains
         close(u)
         call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
     end subroutine artifact_restore
+
+    subroutine make_tmpfile(prefix, path)
+        character(len=*), intent(in) :: prefix
+        character(len=*), intent(out) :: path
+
+        integer :: count
+        integer, save :: serial = 0
+
+        serial = serial + 1
+        call system_clock(count)
+        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
+            count, '-', serial, '.tmp'
+    end subroutine make_tmpfile
 
 end module fo_artifact_cache

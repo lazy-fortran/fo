@@ -113,7 +113,7 @@ contains
         call extract_lsp_field(body, '"uri"', uri)
 
         ! run fo check and capture output
-        tmpfile = '/tmp/fo_lsp_check.tmp'
+        call make_tmpfile('fo_lsp_check', tmpfile)
         call execute_command_line('fo check > '//trim(tmpfile)//' 2>&1', &
             exitstat=exitcode, cmdstat=cmdstat, wait=.true.)
         if (cmdstat /= 0) exitcode = 1
@@ -272,5 +272,18 @@ contains
             end if
         end do
     end subroutine to_lower_lsp
+
+    subroutine make_tmpfile(prefix, path)
+        character(len=*), intent(in) :: prefix
+        character(len=*), intent(out) :: path
+
+        integer :: count
+        integer, save :: serial = 0
+
+        serial = serial + 1
+        call system_clock(count)
+        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
+            count, '-', serial, '.tmp'
+    end subroutine make_tmpfile
 
 end module fo_lsp

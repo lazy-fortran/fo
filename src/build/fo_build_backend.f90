@@ -111,7 +111,7 @@ contains
         integer :: u, iostat
 
         np = 1
-        tmpfile = '/tmp/fo_nproc.tmp'
+        call make_tmpfile('fo_nproc', tmpfile)
         cmd = 'nproc > '//trim(tmpfile)//' 2>/dev/null'
         call execute_command_line(cmd, wait=.true.)
 
@@ -434,9 +434,12 @@ contains
         character(len=*), intent(out) :: path
 
         integer :: count
+        integer, save :: serial = 0
 
+        serial = serial + 1
         call system_clock(count)
-        write (path, '(a,a,a,i0,a)') '/tmp/', trim(prefix), '-', count, '.tmp'
+        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
+            count, '-', serial, '.tmp'
     end subroutine make_tmpfile
 
     subroutine delete_file(path)

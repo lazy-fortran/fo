@@ -31,9 +31,11 @@ contains
 
     subroutine test_check_from_child_reports_backend_error()
         type(check_result_t) :: res
+        character(len=512) :: project_dir
 
-        call make_bad_project()
-        call fo_check_run('/tmp/fo_bad_project/src/nested', res)
+        call make_tmp_path('fo_bad_project', project_dir)
+        call make_bad_project(project_dir)
+        call fo_check_run(trim(project_dir)//'/src/nested', res)
 
         call assert(.not. res%build_ok, 'bad project build fails')
         call assert( &
@@ -45,14 +47,16 @@ contains
         call assert(index(res%error_msg, 'rerun: fo build') > 0, &
                     'error summary includes rerun command')
 
-        call execute_command_line('rm -rf /tmp/fo_bad_project')
+        call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_check_from_child_reports_backend_error
 
     subroutine test_check_reports_test_failure_advice()
         type(check_result_t) :: res
+        character(len=512) :: project_dir
 
-        call make_failing_test_project()
-        call fo_check_run('/tmp/fo_failing_test_project/test', res)
+        call make_tmp_path('fo_failing_test_project', project_dir)
+        call make_failing_test_project(project_dir)
+        call fo_check_run(trim(project_dir)//'/test', res)
 
         call assert(res%build_ok, 'failing-test project builds')
         call assert(.not. res%tests_ok, 'failing-test project tests fail')
@@ -62,7 +66,7 @@ contains
                     index(res%error_msg, '*_slow') > 0, &
                     'test error summary includes slow-test advice')
 
-        call execute_command_line('rm -rf /tmp/fo_failing_test_project')
+        call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_check_reports_test_failure_advice
 
     subroutine test_check_result_json()
@@ -97,17 +101,18 @@ contains
                     'json escapes backslashes')
     end subroutine test_check_result_json
 
-    subroutine make_bad_project()
+    subroutine make_bad_project(project_dir)
+        character(len=*), intent(in) :: project_dir
         integer :: u
 
-        call execute_command_line('rm -rf /tmp/fo_bad_project')
-        call execute_command_line('mkdir -p /tmp/fo_bad_project/src/nested')
+        call execute_command_line('rm -rf '//trim(project_dir))
+        call execute_command_line('mkdir -p '//trim(project_dir)//'/src/nested')
 
-        open (newunit=u, file='/tmp/fo_bad_project/fpm.toml', status='replace')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "fo_bad_project"'
         close (u)
 
-        open (newunit=u, file='/tmp/fo_bad_project/src/broken.f90', status='replace')
+        open (newunit=u, file=trim(project_dir)//'/src/broken.f90', status='replace')
         write (u, '(a)') 'module broken'
         write (u, '(a)') 'contains'
         write (u, '(a)') 'subroutine fail()'
@@ -118,19 +123,19 @@ contains
         close (u)
     end subroutine make_bad_project
 
-    subroutine make_failing_test_project()
+    subroutine make_failing_test_project(project_dir)
+        character(len=*), intent(in) :: project_dir
         integer :: u
 
-        call execute_command_line('rm -rf /tmp/fo_failing_test_project')
-        call execute_command_line('mkdir -p /tmp/fo_failing_test_project/src')
-        call execute_command_line('mkdir -p /tmp/fo_failing_test_project/test')
+        call execute_command_line('rm -rf '//trim(project_dir))
+        call execute_command_line('mkdir -p '//trim(project_dir)//'/src')
+        call execute_command_line('mkdir -p '//trim(project_dir)//'/test')
 
-        open (newunit=u, file='/tmp/fo_failing_test_project/fpm.toml', &
-              status='replace')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "fo_failing_test_project"'
         close (u)
 
-        open (newunit=u, file='/tmp/fo_failing_test_project/src/ok.f90', &
+        open (newunit=u, file=trim(project_dir)//'/src/ok.f90', &
               status='replace')
         write (u, '(a)') 'module ok'
         write (u, '(a)') 'implicit none'
@@ -140,7 +145,7 @@ contains
         write (u, '(a)') 'end module ok'
         close (u)
 
-        open (newunit=u, file='/tmp/fo_failing_test_project/test/test_fail.f90', &
+        open (newunit=u, file=trim(project_dir)//'/test/test_fail.f90', &
               status='replace')
         write (u, '(a)') 'program test_fail'
         write (u, '(a)') 'use ok, only: noop'
@@ -149,5 +154,18 @@ contains
         write (u, '(a)') 'end program test_fail'
         close (u)
     end subroutine make_failing_test_project
+
+    subroutine make_tmp_path(prefix, path)
+        character(len=*), intent(in) :: prefix
+        character(len=*), intent(out) :: path
+
+        integer :: count
+        integer, save :: serial = 0
+
+        serial = serial + 1
+        call system_clock(count)
+        write (path, '(a,a,a,i0,a,i0)') '/tmp/', trim(prefix), '-', &
+            count, '-', serial
+    end subroutine make_tmp_path
 
 end program test_check

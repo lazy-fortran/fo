@@ -114,7 +114,7 @@ contains
         integer :: u, iostat, n
 
         call extract_action(line, action)
-        tmpfile = '/tmp/fo_mcp_output.tmp'
+        call make_tmpfile('fo_mcp_output', tmpfile)
 
         select case (trim(action))
         case ('check', 'build', 'test', 'graph', 'info', 'changed', 'clean')
@@ -169,7 +169,7 @@ contains
 
         if (trim(uri) == 'fo://diagnostics' .or. &
             index(line, 'fo://diagnostics') > 0) then
-            tmpfile = '/tmp/fo_mcp_diag.tmp'
+            call make_tmpfile('fo_mcp_diag', tmpfile)
             call execute_command_line('fo check > '//trim(tmpfile)//' 2>&1', &
                 exitstat=exitcode, cmdstat=cmdstat, wait=.true.)
 
@@ -321,5 +321,18 @@ contains
 
         str = buf(1:j)
     end subroutine escape_json
+
+    subroutine make_tmpfile(prefix, path)
+        character(len=*), intent(in) :: prefix
+        character(len=*), intent(out) :: path
+
+        integer :: count
+        integer, save :: serial = 0
+
+        serial = serial + 1
+        call system_clock(count)
+        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
+            count, '-', serial, '.tmp'
+    end subroutine make_tmpfile
 
 end module fo_mcp

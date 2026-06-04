@@ -92,19 +92,19 @@ contains
         type(dag_t) :: dag
         character(len=HASH_LEN) :: key_a, key_b
         character(len=HASH_LEN) :: dep_keys(1)
+        character(len=512) :: path_a, path_b
 
-        call write_large_source('/tmp/fo_cache_large_a.f90', '1')
-        call write_large_source('/tmp/fo_cache_large_b.f90', '2')
+        call make_tmp_path('fo_cache_large_a', path_a, '.f90')
+        call make_tmp_path('fo_cache_large_b', path_b, '.f90')
+        call write_large_source(path_a, '1')
+        call write_large_source(path_b, '2')
 
-        key_a = cache_key_for('/tmp/fo_cache_large_a.f90', 'compiler', '', &
-                              dag, dep_keys, 0)
-        key_b = cache_key_for('/tmp/fo_cache_large_b.f90', 'compiler', '', &
-                              dag, dep_keys, 0)
+        key_a = cache_key_for(path_a, 'compiler', '', dag, dep_keys, 0)
+        key_b = cache_key_for(path_b, 'compiler', '', dag, dep_keys, 0)
 
         call assert(key_a /= key_b, &
                     'cache key includes source content after fixed buffer boundary')
-        call execute_command_line('rm -f /tmp/fo_cache_large_a.f90 '// &
-                                  '/tmp/fo_cache_large_b.f90')
+        call execute_command_line('rm -f '//trim(path_a)//' '//trim(path_b))
     end subroutine test_large_file_hashes_full_source
 
     subroutine write_large_source(filename, marker)
@@ -123,5 +123,18 @@ contains
         write (u, '(a)') 'end module fo_cache_large'
         close (u)
     end subroutine write_large_source
+
+    subroutine make_tmp_path(prefix, path, suffix)
+        character(len=*), intent(in) :: prefix, suffix
+        character(len=*), intent(out) :: path
+
+        integer :: count
+        integer, save :: serial = 0
+
+        serial = serial + 1
+        call system_clock(count)
+        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
+            count, '-', serial, trim(suffix)
+    end subroutine make_tmp_path
 
 end program test_cache

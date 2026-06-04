@@ -191,7 +191,7 @@ contains
             character(len=1024) :: cmd, tmpfile, line
             integer :: u, iostat
 
-            tmpfile = '/tmp/fo_find_mod.tmp'
+            call make_tmpfile('fo_find_mod', tmpfile)
             cmd = 'find '//trim(b%project_dir)//'/build'// &
                   " -name '"//trim(lower_name)//".mod'"// &
                   ' -type f 2>/dev/null | head -1 > '//trim(tmpfile)
@@ -404,9 +404,12 @@ contains
         character(len=*), intent(out) :: path
 
         integer :: count
+        integer, save :: serial = 0
 
+        serial = serial + 1
         call system_clock(count)
-        write (path, '(a,a,a,i0,a)') '/tmp/', trim(prefix), '-', count, '.log'
+        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
+            count, '-', serial, '.log'
     end subroutine make_tmpfile
 
     subroutine summarize_backend_failure(stage, log_file, rerun, message)
@@ -493,7 +496,7 @@ contains
         integer :: u, iostat
 
         compiler = 'unknown'
-        tmpfile = '/tmp/fo_compiler_version.tmp'
+        call make_tmpfile('fo_compiler_version', tmpfile)
         cmd = 'gfortran --version 2>/dev/null | head -1 > '//trim(tmpfile)
         call execute_command_line(cmd, wait=.true.)
 

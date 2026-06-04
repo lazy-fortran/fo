@@ -48,6 +48,7 @@ contains
     subroutine test_scan_use_statements()
         type(scan_unit_t) :: info
         integer :: ierr
+        character(len=512) :: path
         character(len=80) :: lines(5)
 
         lines(1) = 'module foo'
@@ -55,55 +56,64 @@ contains
         lines(3) = '    use baz'
         lines(4) = '    implicit none'
         lines(5) = 'end module foo'
-        call write_file('/tmp/fo_test_use.f90', lines, 5)
+        call make_tmp_path('fo_test_use', path, '.f90')
+        call write_file(path, lines, 5)
 
-        call scan_file('/tmp/fo_test_use.f90', info, ierr)
+        call scan_file(path, info, ierr)
         call assert(ierr == 0, 'scan_use: no error')
         call assert(trim(info%module_name) == 'foo', 'scan_use: module name')
         call assert(info%n_deps == 2, 'scan_use: 2 deps')
         call assert(trim(info%deps(1)) == 'bar', 'scan_use: dep 1 is bar')
         call assert(trim(info%deps(2)) == 'baz', 'scan_use: dep 2 is baz')
+        call execute_command_line('rm -f '//trim(path))
     end subroutine test_scan_use_statements
 
     subroutine test_scan_module_def()
         type(scan_unit_t) :: info
         integer :: ierr
+        character(len=512) :: path
         character(len=80) :: lines(3)
 
         lines(1) = 'module my_module'
         lines(2) = '    implicit none'
         lines(3) = 'end module my_module'
-        call write_file('/tmp/fo_test_mod.f90', lines, 3)
+        call make_tmp_path('fo_test_mod', path, '.f90')
+        call write_file(path, lines, 3)
 
-        call scan_file('/tmp/fo_test_mod.f90', info, ierr)
+        call scan_file(path, info, ierr)
         call assert(ierr == 0, 'scan_mod: no error')
         call assert(trim(info%module_name) == 'my_module', 'scan_mod: name')
         call assert(info%n_deps == 0, 'scan_mod: no deps')
         call assert(.not. info%is_program, 'scan_mod: not a program')
+        call execute_command_line('rm -f '//trim(path))
     end subroutine test_scan_module_def
 
     subroutine test_scan_program_def()
         type(scan_unit_t) :: info
         integer :: ierr
+        character(len=512) :: path
         character(len=80) :: lines(4)
 
         lines(1) = 'program main'
         lines(2) = '    use utils, only: helper'
         lines(3) = '    implicit none'
         lines(4) = 'end program main'
-        call write_file('/tmp/fo_test_prog.f90', lines, 4)
+        call make_tmp_path('fo_test_prog', path, '.f90')
+        call write_file(path, lines, 4)
 
-        call scan_file('/tmp/fo_test_prog.f90', info, ierr)
+        call scan_file(path, info, ierr)
         call assert(ierr == 0, 'scan_prog: no error')
         call assert(trim(info%program_name) == 'main', 'scan_prog: name')
         call assert(info%is_program, 'scan_prog: is program')
         call assert(info%n_deps == 1, 'scan_prog: 1 dep')
         call assert(trim(info%deps(1)) == 'utils', 'scan_prog: dep is utils')
+        call execute_command_line('rm -f '//trim(path))
     end subroutine test_scan_program_def
 
     subroutine test_scan_intrinsic_skip()
         type(scan_unit_t) :: info
         integer :: ierr
+        character(len=512) :: path
         character(len=80) :: lines(5)
 
         lines(1) = 'module calc'
@@ -111,12 +121,14 @@ contains
         lines(3) = '    use my_lib'
         lines(4) = '    implicit none'
         lines(5) = 'end module calc'
-        call write_file('/tmp/fo_test_intrinsic.f90', lines, 5)
+        call make_tmp_path('fo_test_intrinsic', path, '.f90')
+        call write_file(path, lines, 5)
 
-        call scan_file('/tmp/fo_test_intrinsic.f90', info, ierr)
+        call scan_file(path, info, ierr)
         call assert(ierr == 0, 'scan_intrinsic: no error')
         call assert(info%n_deps == 1, 'scan_intrinsic: 1 dep (intrinsic skipped)')
         call assert(trim(info%deps(1)) == 'my_lib', 'scan_intrinsic: dep is my_lib')
+        call execute_command_line('rm -f '//trim(path))
     end subroutine test_scan_intrinsic_skip
 
     subroutine test_slow_test_detection()
@@ -146,16 +158,30 @@ contains
     subroutine test_scan_dir_empty()
         type(scan_unit_t) :: units(MAX_UNITS)
         integer :: n_units, ierr
+        character(len=512) :: dir
 
-        ! scan a directory with no Fortran files
-        call execute_command_line('mkdir -p /tmp/fo_test_empty_dir')
-        call execute_command_line('rm -f /tmp/fo_test_empty_dir/*.f90')
+        call make_tmp_path('fo_test_empty_dir', dir, '')
+        call execute_command_line('rm -rf '//trim(dir))
+        call execute_command_line('mkdir -p '//trim(dir))
 
-        call scan_dir('/tmp/fo_test_empty_dir', units, n_units, ierr)
+        call scan_dir(dir, units, n_units, ierr)
         call assert(ierr == 0, 'empty_dir: no error')
         call assert(n_units == 0, 'empty_dir: 0 files')
 
-        call execute_command_line('rm -rf /tmp/fo_test_empty_dir')
+        call execute_command_line('rm -rf '//trim(dir))
     end subroutine test_scan_dir_empty
+
+    subroutine make_tmp_path(prefix, path, suffix)
+        character(len=*), intent(in) :: prefix, suffix
+        character(len=*), intent(out) :: path
+
+        integer :: count
+        integer, save :: serial = 0
+
+        serial = serial + 1
+        call system_clock(count)
+        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
+            count, '-', serial, trim(suffix)
+    end subroutine make_tmp_path
 
 end program test_scan

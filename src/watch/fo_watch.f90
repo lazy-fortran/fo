@@ -14,7 +14,7 @@ contains
         integer :: u, iostat, exitcode, cmdstat
         character(len=128) :: pipe_path
 
-        pipe_path = '/tmp/fo_watch_fifo'
+        call make_pipe_path(pipe_path)
 
         ! clean up any stale fifo
         call execute_command_line('rm -f '//trim(pipe_path), wait=.true.)
@@ -65,5 +65,16 @@ contains
         call execute_command_line("pkill -f 'inotifywait.*fo_watch'", &
             wait=.true.)
     end subroutine watch_loop
+
+    subroutine make_pipe_path(path)
+        character(len=*), intent(out) :: path
+
+        integer :: count
+        integer, save :: serial = 0
+
+        serial = serial + 1
+        call system_clock(count)
+        write (path, '(a,i0,a,i0)') '/tmp/fo_watch_fifo-', count, '-', serial
+    end subroutine make_pipe_path
 
 end module fo_watch

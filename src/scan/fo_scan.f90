@@ -71,7 +71,7 @@ contains
 
         ierr = 0
         n_units = 0
-        tmpfile = '/tmp/fo_scan_files.tmp'
+        call make_tmpfile('fo_scan_files', tmpfile)
 
         ! exclude build/, .git/, and common dependency directories
         cmd = 'find '//trim(dirname)// &
@@ -119,6 +119,19 @@ contains
         close(funit)
         call execute_command_line('rm -f '//trim(tmpfile))
     end subroutine scan_dir
+
+    subroutine make_tmpfile(prefix, path)
+        character(len=*), intent(in) :: prefix
+        character(len=*), intent(out) :: path
+
+        integer :: count
+        integer, save :: serial = 0
+
+        serial = serial + 1
+        call system_clock(count)
+        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
+            count, '-', serial, '.tmp'
+    end subroutine make_tmpfile
 
     subroutine parse_line(line, unit_info)
         character(len=*), intent(in) :: line
