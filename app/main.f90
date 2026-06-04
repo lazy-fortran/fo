@@ -101,12 +101,19 @@ contains
             'Static: OK (', dag%n, ' modules, ', n_changed, &
             ' changed, ', n_affected, ' affected)'
 
-        ! 2. build
-        call b%build(exitcode)
-        if (exitcode /= 0) then
-            write(error_unit, '(a)') 'Build: FAIL'
-            stop 1
-        end if
+        ! 2. build (restore cached artifacts first, store after)
+        block
+            use fo_artifact_cache, only: artifact_restore, artifact_store
+            integer :: n_restored, art_ierr
+
+            call artifact_restore('./build', n_restored, art_ierr)
+            call b%build(exitcode)
+            if (exitcode /= 0) then
+                write(error_unit, '(a)') 'Build: FAIL'
+                stop 1
+            end if
+            call artifact_store('./build', art_ierr)
+        end block
         write(output_unit, '(a)') 'Build: OK'
 
         ! 3. test: skip if nothing changed, otherwise run affected tests only

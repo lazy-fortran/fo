@@ -6,6 +6,7 @@ module fo_check
         BACKEND_FPM, BACKEND_CMAKE
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_store, &
         cache_key_for, hash_mod_file, HASH_LEN
+    use fo_artifact_cache, only: artifact_store, artifact_restore
     implicit none
     private
     public :: check_result_t, fo_check_run, fo_changed_modules
@@ -278,6 +279,12 @@ contains
         res%n_changed = n_changed
         res%n_affected = n_affected
 
+        ! try restoring cached artifacts before build
+        block
+            integer :: n_restored, art_ierr
+            call artifact_restore(trim(dir)//'/build', n_restored, art_ierr)
+        end block
+
         call backend%build(exitcode)
         if (exitcode /= 0) then
             res%error_msg = 'build failed'
@@ -286,6 +293,12 @@ contains
             return
         end if
         res%build_ok = .true.
+
+        ! cache artifacts after successful build
+        block
+            integer :: art_ierr
+            call artifact_store(trim(dir)//'/build', art_ierr)
+        end block
 
         call backend%test(exitcode)
         res%tests_ok = (exitcode == 0)
