@@ -1,5 +1,6 @@
 module fo_build_backend
     use, intrinsic :: iso_fortran_env, only: error_unit
+    use fo_json, only: make_tmpfile, delete_tmpfile
     use fo_process, only: process_detect_nproc, process_fpm_build, &
                           process_fpm_test_list, process_fpm_test_all, &
                           process_fpm_test_names, process_cmake_build, &
@@ -322,7 +323,7 @@ contains
         call process_fpm_test_list(project_dir, list_file, exitcode)
         if (exitcode == 0) call parse_fpm_test_list(parse_file, names, n_names)
         if (.not. present(log_file) .or. len_trim(log_file) == 0) then
-            call delete_file(list_file)
+            call delete_tmpfile(list_file)
         end if
     end subroutine fpm_list_tests
 
@@ -426,24 +427,5 @@ contains
                                         exitcode)
         end if
     end subroutine fpm_run_tests
-
-    subroutine make_tmpfile(prefix, path)
-        character(len=*), intent(in) :: prefix
-        character(len=*), intent(out) :: path
-
-        integer :: count
-        integer, save :: serial = 0
-
-        serial = serial + 1
-        call system_clock(count)
-        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
-            count, '-', serial, '.tmp'
-    end subroutine make_tmpfile
-
-    subroutine delete_file(path)
-        character(len=*), intent(in) :: path
-
-        call execute_command_line('rm -f '//trim(path), wait=.true.)
-    end subroutine delete_file
 
 end module fo_build_backend

@@ -238,6 +238,11 @@ contains
                 res%n_cached, ' cached, ', res%n_changed, &
                 ' changed, ', res%n_affected, &
                 ' affected) Tests: pass (', res%elapsed, 's)'
+            if (res%n_in_cycle > 0) then
+                write (error_unit, '(a,i0,a,i0,a)') &
+                    'Warning: ', res%n_in_cycle, ' of ', res%n_modules, &
+                    ' modules in possible cycle'
+            end if
         else if (.not. res%build_ok) then
             write (output_unit, '(a,a)') 'Build: FAIL ', trim(res%error_msg)
             stop 1, quiet = .true.

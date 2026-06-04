@@ -9,7 +9,7 @@ module fo_check
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_store, &
                         cache_key_for, hash_mod_file, HASH_LEN
     use fo_artifact_cache, only: artifact_store, artifact_restore
-    use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
+    use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, is_runner_crash
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
                                capabilities_json
     implicit none
@@ -28,6 +28,7 @@ module fo_check
         integer :: n_changed = 0
         integer :: n_affected = 0
         integer :: n_ext_deps = 0
+        integer :: n_in_cycle = 0
         real :: elapsed = 0.0
         character(len=512) :: error_msg = ''
         character(len=32) :: stage = 'done'
@@ -44,12 +45,14 @@ module fo_check
 contains
 
     subroutine fo_changed_modules(dir, dag, changed_ids, n_changed, &
-                                  affected_ids, n_affected, n_cached, ierr)
+                                  affected_ids, n_affected, n_cached, ierr, &
+                                  n_in_cycle)
         character(len=*), intent(in) :: dir
         type(dag_t), intent(out) :: dag
         integer, intent(out) :: changed_ids(MAX_NODES), n_changed
         integer, intent(out) :: affected_ids(MAX_NODES), n_affected
         integer, intent(out) :: n_cached, ierr
+        integer, intent(out), optional :: n_in_cycle
 
         type(scan_unit_t) :: units(MAX_UNITS)
         type(cache_t) :: c
@@ -83,6 +86,7 @@ contains
 
         call dag_build(units, n_units, dag)
         call dag_topo_order(dag, order, n_order, ierr)
+        if (present(n_in_cycle)) n_in_cycle = dag%n - n_order
         ierr = 0
 
         call detect_compiler(compiler)
@@ -293,7 +297,8 @@ contains
         end if
 
         call fo_changed_modules(trim(backend%project_dir), dag, changed_ids, &
-                                n_changed, affected_ids, n_affected, n_cached, ierr)
+                                n_changed, affected_ids, n_affected, n_cached, &
+                                ierr, res%n_in_cycle)
         if (ierr /= 0) then
             call set_failure(res, 'scan', '', 'scan or dag failed', &
                              'check source parsing and module cycles', &
@@ -421,6 +426,13 @@ contains
             line = 'OK modules='//trim(modules)//' cached='//trim(cached)
             line = trim(line)//' changed='//trim(changed)
             line = trim(line)//' affected='//trim(affected)
+            if (res%n_in_cycle > 0) then
+                block
+                    character(len=32) :: cyc
+                    write (cyc, '(i0)') res%n_in_cycle
+                    line = trim(line)//' cycle_warning='//trim(cyc)
+                end block
+            end if
             line = trim(line)//' elapsed_s='//trim(adjustl(elapsed))
         else if (.not. res%build_ok) then
             line = 'Build: FAIL '//trim(res%error_msg)
@@ -448,6 +460,8 @@ contains
         line = trim(line)//',"cached":'//trim(cached)
         line = trim(line)//',"changed":'//trim(changed)
         line = trim(line)//',"affected":'//trim(affected)
+        if (res%n_in_cycle > 0) &
+            line = trim(line)//',"in_cycle":'//trim(json_int(res%n_in_cycle))
         line = trim(line)//',"elapsed_s":'//trim(adjustl(elapsed))
         line = trim(line)//',"error":"'
         line = trim(line)//trim(json_escape_str(res%error_msg))//'"}'
@@ -549,6 +563,9 @@ contains
         type(diagnostic_t) :: diag
 
         call diagnostic_from_log(stage, log_file, rerun, diag)
+        if (trim(stage) == 'test' .and. is_runner_crash(diag%message)) then
+            diag%hint = 'runner crash (not a test failure); check fpm/OpenMP'
+        end if
         call set_failure(res, stage, diag%target, diag%message, &
                          diag%hint, diag%rerun, log_file)
         res%diag_file = diag%file

@@ -1,7 +1,7 @@
 module fo_diagnostics
     implicit none
     private
-    public :: diagnostic_t, diagnostic_from_log
+    public :: diagnostic_t, diagnostic_from_log, is_runner_crash
 
     type :: diagnostic_t
         character(len=32) :: kind = 'backend'
@@ -68,6 +68,9 @@ contains
         end if
 
         diag%target = infer_target(diag%message)
+        if (is_linker_error(diag%message)) then
+            diag%hint = 'check LIBRARY_PATH and link = [...] in fpm.toml'
+        end if
         if (trim(kind) == 'test') then
             diag%hint = 'make this test faster or mark it slow'
             if (len_trim(diag%target) > 0) then
@@ -139,6 +142,11 @@ contains
         if (index(clean, 'Fatal Error:') > 0 .or. &
             index(clean, 'Cannot open file') > 0) then
             priority = 5
+        else if (index(clean, 'undefined reference') > 0 .or. &
+                 index(clean, 'ld: cannot find') > 0 .or. &
+                 index(clean, 'cannot find -l') > 0 .or. &
+                 index(clean, 'library not found') > 0) then
+            priority = 5
         else if (index(clean, 'Error:') > 0 .or. &
                  index(clean, 'error:') > 0) then
             priority = 4
@@ -205,5 +213,25 @@ contains
                           index(text, 'Timeout') > 0 .or. &
                           index(text, 'timed out') > 0
     end function is_timeout_text
+
+    logical function is_linker_error(text)
+        character(len=*), intent(in) :: text
+
+        is_linker_error = index(text, 'undefined reference') > 0 .or. &
+                          index(text, 'ld: cannot find') > 0 .or. &
+                          index(text, 'cannot find -l') > 0 .or. &
+                          index(text, 'library not found') > 0
+    end function is_linker_error
+
+    logical function is_runner_crash(text)
+        character(len=*), intent(in) :: text
+
+        is_runner_crash = index(text, 'malloc') > 0 .or. &
+                          index(text, 'Assertion') > 0 .or. &
+                          index(text, 'SIGABRT') > 0 .or. &
+                          index(text, 'SIGSEGV') > 0 .or. &
+                          index(text, 'double free') > 0 .or. &
+                          index(text, 'corrupted') > 0
+    end function is_runner_crash
 
 end module fo_diagnostics
