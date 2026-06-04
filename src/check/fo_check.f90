@@ -8,6 +8,8 @@ module fo_check
                         cache_key_for, hash_mod_file, HASH_LEN
     use fo_artifact_cache, only: artifact_store, artifact_restore
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
+    use fo_capabilities, only: capabilities_t, detect_capabilities, &
+                               capabilities_json
     implicit none
     private
     public :: check_result_t, fo_check_run, fo_changed_modules
@@ -346,8 +348,11 @@ contains
         integer, intent(out) :: ierr
 
         type(check_result_t) :: res
-        character(len=4096) :: line
+        type(capabilities_t) :: cap
+        character(len=2048) :: cap_json
+        character(len=8192) :: line
         integer :: u, io
+        logical :: need_caps
 
         ierr = 0
         if (len_trim(output_path) == 0) then
@@ -362,6 +367,13 @@ contains
             return
         end select
 
+        need_caps = (trim(mode) == 'json=full' .or. trim(mode) == 'full')
+        cap_json = ''
+        if (need_caps) then
+            call detect_capabilities(cap)
+            call capabilities_json(cap, cap_json)
+        end if
+
         call fo_check_run(dir, res)
         select case (trim(mode))
         case ('', 'text')
@@ -371,7 +383,7 @@ contains
         case ('json=compact', 'compact')
             line = check_result_compact_json(res)
         case ('json=full', 'full')
-            line = check_result_full_json(res)
+            line = check_result_full_json(res, cap_json)
         case ('agent')
             line = check_result_compact_json(res)
         case default
@@ -446,9 +458,10 @@ contains
         line = make_agent_json(res, .false.)
     end function check_result_compact_json
 
-    function check_result_full_json(res) result(line)
+    function check_result_full_json(res, cap_json_str) result(line)
         type(check_result_t), intent(in) :: res
-        character(len=4096) :: line
+        character(len=*), intent(in) :: cap_json_str
+        character(len=8192) :: line
 
         character(len=2048) :: base
 
@@ -461,7 +474,7 @@ contains
         line = trim(line)//',"rerun":"'//trim(json_escape(res%rerun))//'"'
         line = trim(line)//',"log_path":"'//trim(json_escape(res%log_path))//'"'
         if (res%build_ok .and. res%tests_ok) then
-            line = trim(line)//',"diagnostics":[]}'
+            line = trim(line)//',"diagnostics":[]'
         else
             line = trim(line)//',"diagnostics":[{"kind":"'// &
                    trim(json_escape(res%stage))//'"'
@@ -476,7 +489,12 @@ contains
             line = trim(line)//',"message":"'// &
                    trim(json_escape(agent_summary(res)))//'"'
             line = trim(line)//',"hint":"'//trim(json_escape(res%hint))//'"'
-            line = trim(line)//',"rerun":"'//trim(json_escape(res%rerun))//'"}]}'
+            line = trim(line)//',"rerun":"'//trim(json_escape(res%rerun))//'"}]'
+        end if
+        if (len_trim(cap_json_str) > 0) then
+            line = trim(line)//',"capabilities":'//trim(cap_json_str)//'}'
+        else
+            line = trim(line)//'}'
         end if
     end function check_result_full_json
 

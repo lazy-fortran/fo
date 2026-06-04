@@ -2,6 +2,8 @@ module fo_mcp
     use, intrinsic :: iso_fortran_env, only: input_unit, output_unit, error_unit
     use fo_check, only: check_result_t, fo_check_run, &
                         check_result_compact_json, check_result_full_json
+    use fo_capabilities, only: capabilities_t, detect_capabilities, &
+                               capabilities_json
     use fo_process, only: process_start_fo_check, process_poll_pid, &
                           process_cancel_pid
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
@@ -148,16 +150,28 @@ contains
                 call handle_async_start(line, id_str, response, async_state)
                 return
             else
+                block
+                logical :: want_full
+                type(capabilities_t) :: cap
+                character(len=2048) :: cap_json
+
+                want_full = (index(line, '"full"') > 0 .or. &
+                             index(line, '"json":"full"') > 0)
+                cap_json = ''
+                if (want_full) then
+                    call detect_capabilities(cap)
+                    call capabilities_json(cap, cap_json)
+                end if
                 call fo_check_run('.', check_res)
-                if (index(line, '"full"') > 0 .or. &
-                    index(line, '"json":"full"') > 0) then
-                    output_text = check_result_full_json(check_res)
+                if (want_full) then
+                    output_text = check_result_full_json(check_res, cap_json)
                 else
                     output_text = check_result_compact_json(check_res)
                 end if
                 exitcode = 0
                 if (.not. (check_res%build_ok .and. check_res%tests_ok)) exitcode = 1
                 call make_tool_text_response(id_str, output_text, exitcode, response)
+                end block
             end if
         case ('status')
             call handle_async_status(line, id_str, response, async_state)

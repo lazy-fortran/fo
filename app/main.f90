@@ -7,7 +7,8 @@ program fo_main
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
                         check_result_json, check_result_compact_json, &
                         check_result_full_json
-    use fo_capabilities, only: capabilities_t, detect_capabilities
+    use fo_capabilities, only: capabilities_t, detect_capabilities, &
+                               capabilities_json
     implicit none
 
     character(len=256) :: action
@@ -193,15 +194,24 @@ contains
 
     subroutine cmd_check()
         type(check_result_t) :: res
+        type(capabilities_t) :: cap
+        character(len=2048) :: cap_json
         integer :: output_mode, mode_ierr
 
-        call fo_check_run('.', res)
         call check_output_mode(output_mode, mode_ierr)
         if (mode_ierr /= 0) then
             write (error_unit, '(a)') &
                 'fo: use --json, --json=compact, --json=full, or --agent'
             stop 1, quiet = .true.
         end if
+
+        cap_json = ''
+        if (output_mode == 3) then
+            call detect_capabilities(cap)
+            call capabilities_json(cap, cap_json)
+        end if
+
+        call fo_check_run('.', res)
 
         select case (output_mode)
         case (1)
@@ -213,7 +223,7 @@ contains
             if (.not. (res%build_ok .and. res%tests_ok)) stop 1, quiet = .true.
             return
         case (3)
-            write (output_unit, '(a)') trim(check_result_full_json(res))
+            write (output_unit, '(a)') trim(check_result_full_json(res, cap_json))
             if (.not. (res%build_ok .and. res%tests_ok)) stop 1, quiet = .true.
             return
         case (4)

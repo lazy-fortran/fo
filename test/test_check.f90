@@ -178,7 +178,7 @@ contains
 
     subroutine test_check_result_full_json_diagnostics()
         type(check_result_t) :: res
-        character(len=4096) :: line
+        character(len=8192) :: line
 
         res%build_ok = .false.
         res%tests_ok = .false.
@@ -192,7 +192,7 @@ contains
         res%diag_column = 5
         res%elapsed = 0.75
 
-        line = check_result_full_json(res)
+        line = check_result_full_json(res, '')
 
         call assert(index(line, '"build_ok":false') > 0, &
                     'full json keeps legacy fields')
@@ -470,19 +470,39 @@ contains
     end subroutine test_capabilities_unknown_compiler
 
     subroutine test_full_json_includes_capabilities()
+        use fo_capabilities, only: capabilities_t, capabilities_json
         type(check_result_t) :: res
-        character(len=4096) :: line
+        type(capabilities_t) :: cap
+        character(len=2048) :: cap_json
+        character(len=8192) :: line
+
+        cap%compiler_id = 'gfortran'
+        cap%compiler_version = '14.0'
+        cap%has_openmp = .true.
+        cap%has_module_output_dir = .true.
+        cap%has_depfile = .true.
+        call capabilities_json(cap, cap_json)
 
         res%build_ok = .true.
         res%tests_ok = .true.
         res%stage = 'done'
         res%elapsed = 0.1
 
-        line = check_result_full_json(res)
+        line = check_result_full_json(res, cap_json)
         call assert(index(line, '"diagnostics":[]') > 0, &
                     'full json success includes empty diagnostics')
         call assert(index(line, '"stage":"done"') > 0, &
                     'full json success includes stage')
+        call assert(index(line, '"capabilities":{') > 0, &
+                    'full json includes capabilities object')
+        call assert(index(line, '"fo_can_optimize":[') > 0, &
+                    'full json includes fo_can_optimize array')
+        call assert(index(line, '"compiler_limited":[') > 0, &
+                    'full json includes compiler_limited array')
+
+        line = check_result_full_json(res, '')
+        call assert(index(line, '"capabilities"') == 0, &
+                    'full json without cap_json omits capabilities')
     end subroutine test_full_json_includes_capabilities
 
     subroutine make_ok_project(project_dir)
