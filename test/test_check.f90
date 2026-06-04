@@ -6,6 +6,8 @@ program test_check
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
                             RUN_RERUN_PENDING, RUN_FINISHED
+    use fo_capabilities, only: capabilities_t, detect_capabilities, &
+                               capabilities_text, capabilities_json
     implicit none
 
     integer :: n_pass, n_fail
@@ -26,6 +28,11 @@ program test_check
     call test_run_queue_single_returns_idle()
     call test_run_queue_failed_then_pending()
     call test_run_queue_invalid_root()
+    call test_capabilities_detect()
+    call test_capabilities_text_output()
+    call test_capabilities_json_output()
+    call test_capabilities_unknown_compiler()
+    call test_full_json_includes_capabilities()
 
     write (output_unit, '(a,i0,a,i0,a)') 'check: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -387,6 +394,96 @@ contains
         call assert(queue%started == 0, &
                     'invalid queue root keeps start count zero')
     end subroutine test_run_queue_invalid_root
+
+    subroutine test_capabilities_detect()
+        type(capabilities_t) :: cap
+
+        call detect_capabilities(cap)
+        call assert(len_trim(cap%compiler_id) > 0, &
+                    'capabilities detects compiler id')
+        call assert(trim(cap%compiler_id) /= '', &
+                    'capabilities compiler id is not empty')
+    end subroutine test_capabilities_detect
+
+    subroutine test_capabilities_text_output()
+        type(capabilities_t) :: cap
+        character(len=2048) :: text
+
+        cap%compiler_id = 'gfortran'
+        cap%compiler_version = '15.1'
+        cap%has_openmp = .true.
+        cap%has_module_output_dir = .true.
+        cap%has_depfile = .true.
+
+        call capabilities_text(cap, text)
+        call assert(index(text, 'compiler: gfortran 15.1') > 0, &
+                    'capabilities text includes compiler')
+        call assert(index(text, 'openmp: yes') > 0, &
+                    'capabilities text includes openmp')
+        call assert(index(text, 'module-output-dir: yes') > 0, &
+                    'capabilities text includes module-output-dir')
+        call assert(index(text, 'depfile: yes') > 0, &
+                    'capabilities text includes depfile')
+        call assert(index(text, 'fo-can-optimize:') > 0, &
+                    'capabilities text includes fo-can-optimize')
+        call assert(index(text, 'compiler-limited:') > 0, &
+                    'capabilities text includes compiler-limited')
+    end subroutine test_capabilities_text_output
+
+    subroutine test_capabilities_json_output()
+        type(capabilities_t) :: cap
+        character(len=1024) :: json
+
+        cap%compiler_id = 'gfortran'
+        cap%compiler_version = '15.1'
+        cap%has_openmp = .true.
+        cap%has_module_output_dir = .true.
+        cap%has_depfile = .false.
+
+        call capabilities_json(cap, json)
+        call assert(index(json, '"compiler":"gfortran"') > 0, &
+                    'capabilities json includes compiler')
+        call assert(index(json, '"compiler_version":"15.1"') > 0, &
+                    'capabilities json includes version')
+        call assert(index(json, '"openmp":true') > 0, &
+                    'capabilities json includes openmp')
+        call assert(index(json, '"depfile":false') > 0, &
+                    'capabilities json includes depfile')
+        call assert(index(json, '"fo_can_optimize":[') > 0, &
+                    'capabilities json includes fo_can_optimize array')
+        call assert(index(json, '"compiler_limited":[') > 0, &
+                    'capabilities json includes compiler_limited array')
+    end subroutine test_capabilities_json_output
+
+    subroutine test_capabilities_unknown_compiler()
+        type(capabilities_t) :: cap
+        character(len=2048) :: text
+
+        cap%compiler_id = 'unknown'
+        cap%has_openmp = .false.
+        cap%has_module_output_dir = .false.
+        cap%has_depfile = .false.
+
+        call capabilities_text(cap, text)
+        call assert(index(text, 'compiler: unknown') > 0, &
+                    'unknown compiler does not crash capabilities text')
+    end subroutine test_capabilities_unknown_compiler
+
+    subroutine test_full_json_includes_capabilities()
+        type(check_result_t) :: res
+        character(len=4096) :: line
+
+        res%build_ok = .true.
+        res%tests_ok = .true.
+        res%stage = 'done'
+        res%elapsed = 0.1
+
+        line = check_result_full_json(res)
+        call assert(index(line, '"diagnostics":[]') > 0, &
+                    'full json success includes empty diagnostics')
+        call assert(index(line, '"stage":"done"') > 0, &
+                    'full json success includes stage')
+    end subroutine test_full_json_includes_capabilities
 
     subroutine make_ok_project(project_dir)
         character(len=*), intent(in) :: project_dir

@@ -7,6 +7,7 @@ program fo_main
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
                         check_result_json, check_result_compact_json, &
                         check_result_full_json
+    use fo_capabilities, only: capabilities_t, detect_capabilities
     implicit none
 
     character(len=256) :: action
@@ -181,6 +182,7 @@ contains
         write (output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
         write (output_unit, '(a)') '  clean      clear global cache (~/.cache/fo)'
         write (output_unit, '(a)') '  info       backend, file count, module count'
+        write (output_unit, '(a)') '  info --capabilities  compiler and tooling limits'
         write (output_unit, '(a)') ''
         write (output_unit, '(a)') 'integration:'
         write (output_unit, '(a)') '  mcp-server  MCP JSON-RPC on stdin/stdout'
@@ -472,15 +474,31 @@ contains
     end subroutine cmd_clean
 
     subroutine cmd_info()
+        use fo_capabilities, only: capabilities_t, detect_capabilities, &
+                                   capabilities_text, capabilities_json
         type(scan_unit_t) :: units(MAX_UNITS)
         type(dag_t) :: dag
         type(backend_t) :: b
         character(len=512) :: scan_root
         integer :: n_units, ierr
+        logical :: show_caps
+        type(capabilities_t) :: cap
 
         b = detect_backend('.')
         scan_root = '.'
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+
+        show_caps = has_arg('--capabilities')
+
+        if (show_caps) then
+            call detect_capabilities(cap)
+            block
+                character(len=2048) :: text
+                call capabilities_text(cap, text)
+                write (output_unit, '(a)') trim(text)
+            end block
+            return
+        end if
 
         select case (b%kind)
         case (BACKEND_FPM)
