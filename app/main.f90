@@ -60,14 +60,17 @@ contains
         call fo_check_run('.', res)
 
         if (res%build_ok .and. res%tests_ok) then
-            write(output_unit, '(a,i0,a,f0.1,a)') &
-                'Build: OK (', res%n_modules, ' modules) Tests: pass (', &
-                res%elapsed, 's)'
+            write(output_unit, '(a,i0,a,i0,a,i0,a,f0.1,a)') &
+                'Build: OK (', res%n_modules, ' modules, ', &
+                res%n_cached, ' cached, ', res%n_changed, &
+                ' changed) Tests: pass (', res%elapsed, 's)'
         else if (.not. res%build_ok) then
             write(output_unit, '(a,a)') 'Build: FAIL ', trim(res%error_msg)
             stop 1
         else
-            write(output_unit, '(a,a)') 'Tests: FAIL ', trim(res%error_msg)
+            write(output_unit, '(a,i0,a,i0,a,a)') &
+                'Build: OK (', res%n_cached, ' cached, ', res%n_changed, &
+                ' changed) Tests: FAIL ', trim(res%error_msg)
             stop 1
         end if
     end subroutine cmd_check
