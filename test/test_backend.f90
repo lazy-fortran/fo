@@ -141,12 +141,16 @@ contains
         open (newunit=u, file='/tmp/fo_test_slow_fpm/test/test_fast.f90', &
               status='replace')
         write (u, '(a)') 'program test_fast'
+        write (u, '(a)') 'use lib, only: noop'
+        write (u, '(a)') 'call noop()'
         write (u, '(a)') 'end program test_fast'
         close (u)
 
         open (newunit=u, file='/tmp/fo_test_slow_fpm/test/test_kernel_slow.f90', &
               status='replace')
         write (u, '(a)') 'program test_kernel_slow'
+        write (u, '(a)') 'use lib, only: noop'
+        write (u, '(a)') 'call noop()'
         write (u, '(a)') 'stop 1'
         write (u, '(a)') 'end program test_kernel_slow'
         close (u)

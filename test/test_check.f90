@@ -143,6 +143,8 @@ contains
         open (newunit=u, file='/tmp/fo_failing_test_project/test/test_fail.f90', &
               status='replace')
         write (u, '(a)') 'program test_fail'
+        write (u, '(a)') 'use ok, only: noop'
+        write (u, '(a)') 'call noop()'
         write (u, '(a)') 'stop 1'
         write (u, '(a)') 'end program test_fail'
         close (u)
