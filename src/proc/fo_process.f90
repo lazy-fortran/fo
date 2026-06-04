@@ -6,6 +6,7 @@ module fo_process
     public :: process_fpm_build, process_fpm_test_list, process_fpm_test_all
     public :: process_fpm_test_names, process_cmake_build, process_ctest
     public :: process_scan_sources
+    public :: process_start_fo_check, process_poll_pid, process_cancel_pid
 
     integer, parameter :: C_PATH_LEN = 4096
     integer, parameter :: C_ARG_LEN = 4096
@@ -73,6 +74,27 @@ module fo_process
             integer(c_int), value :: jobs, include_slow
             integer(c_int), intent(out) :: exitcode
         end subroutine fo_c_ctest
+
+        subroutine fo_c_start_fo_check(project_dir, mode, output_file, pid, &
+                                       exitcode) bind(C, name='fo_c_start_fo_check')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: project_dir(*), mode(*)
+            character(kind=c_char), intent(in) :: output_file(*)
+            integer(c_int), intent(out) :: pid, exitcode
+        end subroutine fo_c_start_fo_check
+
+        subroutine fo_c_poll_pid(pid, done, exitcode) &
+            bind(C, name='fo_c_poll_pid')
+            import :: c_int
+            integer(c_int), value :: pid
+            integer(c_int), intent(out) :: done, exitcode
+        end subroutine fo_c_poll_pid
+
+        subroutine fo_c_cancel_pid(pid, exitcode) bind(C, name='fo_c_cancel_pid')
+            import :: c_int
+            integer(c_int), value :: pid
+            integer(c_int), intent(out) :: exitcode
+        end subroutine fo_c_cancel_pid
     end interface
 
 contains
@@ -199,6 +221,45 @@ contains
                         c_exit)
         exitcode = int(c_exit)
     end subroutine process_ctest
+
+    subroutine process_start_fo_check(project_dir, mode, output_file, pid, &
+                                      exitcode)
+        character(len=*), intent(in) :: project_dir, mode, output_file
+        integer, intent(out) :: pid, exitcode
+
+        character(kind=c_char) :: c_project(C_PATH_LEN), c_mode(C_ARG_LEN)
+        character(kind=c_char) :: c_output(C_PATH_LEN)
+        integer(c_int) :: c_pid, c_exit
+
+        call to_c_string(project_dir, c_project)
+        call to_c_string(mode, c_mode)
+        call to_c_string(output_file, c_output)
+        call fo_c_start_fo_check(c_project, c_mode, c_output, c_pid, c_exit)
+        pid = int(c_pid)
+        exitcode = int(c_exit)
+    end subroutine process_start_fo_check
+
+    subroutine process_poll_pid(pid, done, exitcode)
+        integer, intent(in) :: pid
+        logical, intent(out) :: done
+        integer, intent(out) :: exitcode
+
+        integer(c_int) :: c_done, c_exit
+
+        call fo_c_poll_pid(int(pid, c_int), c_done, c_exit)
+        done = c_done /= 0
+        exitcode = int(c_exit)
+    end subroutine process_poll_pid
+
+    subroutine process_cancel_pid(pid, exitcode)
+        integer, intent(in) :: pid
+        integer, intent(out) :: exitcode
+
+        integer(c_int) :: c_exit
+
+        call fo_c_cancel_pid(int(pid, c_int), c_exit)
+        exitcode = int(c_exit)
+    end subroutine process_cancel_pid
 
     subroutine to_c_string(text, c_text)
         character(len=*), intent(in) :: text

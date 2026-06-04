@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -276,4 +277,88 @@ void fo_c_ctest(const char *project_dir, int jobs, const char *regex,
     argv[n] = NULL;
 
     *exitcode = run_argv(build_dir, argv, log_file, 0, 0);
+}
+
+void fo_c_start_fo_check(const char *project_dir, const char *mode,
+                         const char *output_file, int *pid_out,
+                         int *exitcode) {
+    pid_t pid;
+
+    *pid_out = 0;
+    *exitcode = 0;
+    if (!has_text(project_dir) || !has_text(output_file)) {
+        *exitcode = 1;
+        return;
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        *exitcode = 1;
+        return;
+    }
+
+    if (pid == 0) {
+        int fd;
+        char *argv_agent[] = {"fo", "check", "--agent", NULL};
+        char *argv_full[] = {"fo", "check", "--json=full", NULL};
+        char *argv_json[] = {"fo", "check", "--json", NULL};
+        char **argv = argv_agent;
+
+        if (chdir(project_dir) != 0) _exit(127);
+        fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (fd < 0) _exit(126);
+        if (dup2(fd, STDOUT_FILENO) < 0) _exit(126);
+        if (dup2(fd, STDERR_FILENO) < 0) _exit(126);
+        close(fd);
+
+        if (strcmp(mode, "full") == 0 || strcmp(mode, "json=full") == 0) {
+            argv = argv_full;
+        } else if (strcmp(mode, "json") == 0) {
+            argv = argv_json;
+        }
+        execvp(argv[0], argv);
+        _exit(errno == ENOENT ? 127 : 126);
+    }
+
+    *pid_out = (int)pid;
+}
+
+void fo_c_poll_pid(int pid, int *done, int *exitcode) {
+    int status;
+    pid_t got;
+
+    *done = 0;
+    *exitcode = 0;
+    if (pid <= 0) {
+        *done = 1;
+        *exitcode = 1;
+        return;
+    }
+
+    got = waitpid((pid_t)pid, &status, WNOHANG);
+    if (got == 0) return;
+    *done = 1;
+    if (got < 0) {
+        *exitcode = 1;
+    } else if (WIFEXITED(status)) {
+        *exitcode = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        *exitcode = 128 + WTERMSIG(status);
+    } else {
+        *exitcode = 1;
+    }
+}
+
+void fo_c_cancel_pid(int pid, int *exitcode) {
+    int status;
+
+    *exitcode = 0;
+    if (pid <= 0) return;
+    if (kill((pid_t)pid, SIGTERM) != 0 && errno != ESRCH) {
+        *exitcode = 1;
+        return;
+    }
+    if (waitpid((pid_t)pid, &status, 0) < 0 && errno != ECHILD) {
+        *exitcode = 1;
+    }
 }
