@@ -38,13 +38,14 @@ contains
 
         c%dir = trim(home)//'/.cache/fo'
         call execute_command_line('mkdir -p '//trim(c%dir), exitstat=ierr, &
-            cmdstat=cmdstat, wait=.true.)
+                                  cmdstat=cmdstat, wait=.true.)
         if (cmdstat /= 0) ierr = 1
 
         call load_index(c)
     end subroutine cache_init
 
-    function cache_key_for(filename, compiler, flags, dag, dep_keys, n_dep_keys) result(key)
+    function cache_key_for(filename, compiler, flags, dag, dep_keys, &
+                           n_dep_keys) result(key)
         character(len=*), intent(in) :: filename, compiler, flags
         type(dag_t), intent(in) :: dag
         character(len=HASH_LEN), intent(in) :: dep_keys(:)
@@ -53,14 +54,9 @@ contains
 
         integer(int64) :: h
         integer :: i
-        character(len=4096) :: buf
-
-        ! read source file content
-        call read_file_to_buf(filename, buf)
-
         ! hash: source + compiler + flags + dependency keys
         h = fnv1a_init()
-        h = fnv1a_update(h, trim(buf))
+        call fnv1a_update_file(h, filename)
         h = fnv1a_update(h, trim(compiler))
         h = fnv1a_update(h, trim(flags))
         do i = 1, n_dep_keys
@@ -131,7 +127,7 @@ contains
         h_out = h
         do i = 1, len_trim(str)
             h_out = ieor(h_out, int(iachar(str(i:i)), int64))
-            h_out = h_out * 1099511628211_int64
+            h_out = h_out*1099511628211_int64
         end do
     end function fnv1a_update
 
@@ -139,21 +135,38 @@ contains
         integer(int64), intent(in) :: h
         character(len=HASH_LEN), intent(out) :: hex
 
-        write(hex, '(z16.16)') h
+        write (hex, '(z16.16)') h
     end subroutine hash_to_hex
 
     subroutine hash_mod_file(modpath, key)
         character(len=*), intent(in) :: modpath
         character(len=HASH_LEN), intent(out) :: key
 
-        character(len=4096) :: buf
         integer(int64) :: h
 
-        call read_file_to_buf(modpath, buf)
         h = fnv1a_init()
-        h = fnv1a_update(h, trim(buf))
+        call fnv1a_update_file(h, modpath)
         call hash_to_hex(h, key)
     end subroutine hash_mod_file
+
+    subroutine fnv1a_update_file(h, filename)
+        integer(int64), intent(inout) :: h
+        character(len=*), intent(in) :: filename
+
+        integer :: u, iostat
+        character(len=4096) :: line
+
+        open (newunit=u, file=filename, status='old', iostat=iostat)
+        if (iostat /= 0) return
+
+        do
+            read (u, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            h = fnv1a_update(h, trim(line))
+            h = fnv1a_update(h, char(10))
+        end do
+        close (u)
+    end subroutine fnv1a_update_file
 
     ! --- index persistence ---
 
@@ -165,15 +178,15 @@ contains
         logical :: exists
 
         indexfile = trim(c%dir)//'/index'
-        inquire(file=indexfile, exist=exists)
+        inquire (file=indexfile, exist=exists)
         if (.not. exists) return
 
-        open(newunit=u, file=indexfile, status='old', iostat=iostat)
+        open (newunit=u, file=indexfile, status='old', iostat=iostat)
         if (iostat /= 0) return
 
         c%n_entries = 0
         do
-            read(u, '(a)', iostat=iostat) line
+            read (u, '(a)', iostat=iostat) line
             if (iostat /= 0) exit
             if (len_trim(line) == 0) cycle
             c%n_entries = c%n_entries + 1
@@ -183,7 +196,7 @@ contains
             end if
             call parse_index_line(line, c%entries(c%n_entries))
         end do
-        close(u)
+        close (u)
     end subroutine load_index
 
     subroutine save_index(c)
@@ -193,13 +206,13 @@ contains
         integer :: u, i
 
         indexfile = trim(c%dir)//'/index'
-        open(newunit=u, file=indexfile, status='replace')
+        open (newunit=u, file=indexfile, status='replace')
         do i = 1, c%n_entries
             if (c%entries(i)%valid) then
-                write(u, '(a,1x,a)') trim(c%entries(i)%key), trim(c%entries(i)%name)
+                write (u, '(a,1x,a)') trim(c%entries(i)%key), trim(c%entries(i)%name)
             end if
         end do
-        close(u)
+        close (u)
     end subroutine save_index
 
     subroutine parse_index_line(line, entry)
@@ -210,34 +223,10 @@ contains
 
         sp = index(line, ' ')
         if (sp > 0 .and. sp <= HASH_LEN + 1) then
-            entry%key = line(1:sp-1)
-            entry%name = adjustl(line(sp+1:))
+            entry%key = line(1:sp - 1)
+            entry%name = adjustl(line(sp + 1:))
             entry%valid = .true.
         end if
     end subroutine parse_index_line
-
-    subroutine read_file_to_buf(filename, buf)
-        character(len=*), intent(in) :: filename
-        character(len=*), intent(out) :: buf
-
-        integer :: u, iostat, n
-        character(len=256) :: line
-
-        buf = ''
-        n = 0
-        open(newunit=u, file=filename, status='old', iostat=iostat)
-        if (iostat /= 0) return
-
-        do
-            read(u, '(a)', iostat=iostat) line
-            if (iostat /= 0) exit
-            if (n + len_trim(line) + 1 > len(buf)) exit
-            buf(n+1:n+len_trim(line)) = trim(line)
-            n = n + len_trim(line)
-            buf(n+1:n+1) = char(10)
-            n = n + 1
-        end do
-        close(u)
-    end subroutine read_file_to_buf
 
 end module fo_cache
