@@ -19,6 +19,9 @@ program test_backend
     call test_fpm_skips_slow_by_default()
     call test_cmake_skips_slow_by_default()
     call test_cmake_named_tests_select_regex()
+    call test_fpm_path_with_spaces()
+    call test_cmake_path_with_spaces()
+    call test_cmake_regex_metachar_name()
 
     write (output_unit, '(a,i0,a,i0,a)') 'backend: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -185,6 +188,70 @@ contains
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_cmake_named_tests_select_regex
 
+    subroutine test_fpm_path_with_spaces()
+        type(backend_t) :: b
+        integer :: exitcode
+        character(len=512) :: base_dir, project_dir, log_file
+
+        call make_tmp_path('fo_test_fpm_spaces', base_dir)
+        project_dir = trim(base_dir)//' path with spaces'
+        call make_tmp_path('fo_backend_fpm_spaces', log_file)
+        call make_simple_fpm_project(project_dir)
+
+        b = detect_backend(project_dir)
+        call b%build(exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'fpm build handles project path with spaces')
+        call b%test(exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'fpm test handles project path with spaces')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_fpm_path_with_spaces
+
+    subroutine test_cmake_path_with_spaces()
+        type(backend_t) :: b
+        integer :: exitcode
+        character(len=512) :: base_dir, project_dir, log_file
+
+        call make_tmp_path('fo_test_cmake_spaces', base_dir)
+        project_dir = trim(base_dir)//' path with spaces'
+        call make_tmp_path('fo_backend_cmake_spaces', log_file)
+        call make_cmake_space_project(project_dir)
+
+        b = detect_backend(project_dir)
+        call b%build(exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'cmake build handles project path with spaces')
+        call b%test(exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'ctest handles project path with spaces')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_cmake_path_with_spaces
+
+    subroutine test_cmake_regex_metachar_name()
+        type(backend_t) :: b
+        integer :: exitcode
+        character(len=512) :: project_dir, log_file
+        character(len=128) :: names(1)
+
+        call make_tmp_path('fo_test_cmake_regex', project_dir)
+        call make_tmp_path('fo_backend_cmake_regex', log_file)
+        call make_cmake_regex_project(project_dir)
+
+        b = detect_backend(project_dir)
+        call b%build(exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'cmake regex fixture configures')
+
+        names(1) = 'test.dot'
+        call b%test_names(names, 1, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'ctest selected names escape regex metacharacters')
+        call assert(file_contains(log_file, 'test.dot'), &
+                    'ctest regex fixture runs selected dotted name')
+
+        call execute_command_line('rm -rf '//trim(project_dir))
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_cmake_regex_metachar_name
+
     subroutine make_slow_fpm_project(project_dir)
         character(len=*), intent(in) :: project_dir
         integer :: u
@@ -225,6 +292,37 @@ contains
         close (u)
     end subroutine make_slow_fpm_project
 
+    subroutine make_simple_fpm_project(project_dir)
+        character(len=*), intent(in) :: project_dir
+        integer :: u
+
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        call make_dir(trim(project_dir)//'/test')
+
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "fo_test_spaces"'
+        close (u)
+
+        open (newunit=u, file=trim(project_dir)//'/src/lib.f90', &
+              status='replace')
+        write (u, '(a)') 'module lib'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine noop()'
+        write (u, '(a)') 'end subroutine noop'
+        write (u, '(a)') 'end module lib'
+        close (u)
+
+        open (newunit=u, file=trim(project_dir)//'/test/test_fast.f90', &
+              status='replace')
+        write (u, '(a)') 'program test_fast'
+        write (u, '(a)') 'use lib, only: noop'
+        write (u, '(a)') 'call noop()'
+        write (u, '(a)') 'end program test_fast'
+        close (u)
+    end subroutine make_simple_fpm_project
+
     subroutine make_cmake_tests_project(project_dir, unselected_fails)
         character(len=*), intent(in) :: project_dir
         logical, intent(in) :: unselected_fails
@@ -257,6 +355,39 @@ contains
                                   ' && cmake -S . -B build >/dev/null 2>&1', &
                                   exitstat=exitcode, wait=.true.)
     end subroutine make_cmake_tests_project
+
+    subroutine make_cmake_space_project(project_dir)
+        character(len=*), intent(in) :: project_dir
+        integer :: u
+
+        call remove_tree(project_dir)
+        call make_dir(project_dir)
+
+        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
+              status='replace')
+        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
+        write (u, '(a)') 'project(fo_backend_cmake_spaces NONE)'
+        write (u, '(a)') 'enable_testing()'
+        write (u, '(a)') 'add_test(NAME test_space COMMAND ${CMAKE_COMMAND} -E true)'
+        close (u)
+    end subroutine make_cmake_space_project
+
+    subroutine make_cmake_regex_project(project_dir)
+        character(len=*), intent(in) :: project_dir
+        integer :: u
+
+        call execute_command_line('rm -rf '//trim(project_dir))
+        call execute_command_line('mkdir -p '//trim(project_dir))
+
+        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
+              status='replace')
+        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
+        write (u, '(a)') 'project(fo_backend_cmake_regex NONE)'
+        write (u, '(a)') 'enable_testing()'
+        write (u, '(a)') 'add_test(NAME test.dot COMMAND ${CMAKE_COMMAND} -E true)'
+        write (u, '(a)') 'add_test(NAME testXdot COMMAND ${CMAKE_COMMAND} -E false)'
+        close (u)
+    end subroutine make_cmake_regex_project
 
     logical function file_contains(path, needle)
         character(len=*), intent(in) :: path, needle
@@ -291,5 +422,17 @@ contains
         write (path, '(a,a,a,i0,a,i0)') '/tmp/', trim(prefix), '-', &
             count, '-', serial
     end subroutine make_tmp_path
+
+    subroutine make_dir(path)
+        character(len=*), intent(in) :: path
+
+        call execute_command_line('mkdir -p "'//trim(path)//'"')
+    end subroutine make_dir
+
+    subroutine remove_tree(path)
+        character(len=*), intent(in) :: path
+
+        call execute_command_line('rm -rf "'//trim(path)//'"')
+    end subroutine remove_tree
 
 end program test_backend
