@@ -7,7 +7,7 @@ module fo_check
         cache_key_for
     implicit none
     private
-    public :: check_result_t, fo_check_run
+    public :: check_result_t, fo_check_run, fo_changed_modules
 
     integer, parameter :: HASH_LEN = 16
 
@@ -17,28 +17,93 @@ module fo_check
         integer :: n_modules = 0
         integer :: n_cached = 0
         integer :: n_changed = 0
+        integer :: n_affected = 0
         real :: elapsed = 0.0
         character(len=512) :: error_msg = ''
     end type check_result_t
 
 contains
 
+    subroutine fo_changed_modules(dir, dag, changed_ids, n_changed, &
+            affected_ids, n_affected, n_cached, ierr)
+        character(len=*), intent(in) :: dir
+        type(dag_t), intent(out) :: dag
+        integer, intent(out) :: changed_ids(MAX_NODES), n_changed
+        integer, intent(out) :: affected_ids(MAX_NODES), n_affected
+        integer, intent(out) :: n_cached, ierr
+
+        type(scan_unit_t) :: units(MAX_UNITS)
+        type(cache_t) :: c
+        integer :: n_units
+        integer :: order(MAX_NODES), n_order
+        integer :: i, node_id, j, dep_id, n_dep_keys
+        character(len=HASH_LEN) :: keys(MAX_NODES)
+        character(len=HASH_LEN) :: dep_keys(64)
+        character(len=256) :: compiler
+
+        ierr = 0
+        n_changed = 0
+        n_affected = 0
+        n_cached = 0
+
+        call scan_dir(dir, units, n_units, ierr)
+        if (ierr /= 0) return
+
+        call dag_build(units, n_units, dag)
+        call dag_topo_order(dag, order, n_order, ierr)
+        if (ierr /= 0) return
+
+        call detect_compiler(compiler)
+        call cache_init(c, ierr)
+        if (ierr /= 0) return
+
+        keys = ''
+        do i = 1, n_order
+            node_id = order(i)
+
+            n_dep_keys = 0
+            do j = 1, dag%nodes(node_id)%n_deps
+                dep_id = dag%nodes(node_id)%dep_ids(j)
+                if (dep_id > 0 .and. len_trim(keys(dep_id)) > 0) then
+                    n_dep_keys = n_dep_keys + 1
+                    dep_keys(n_dep_keys) = keys(dep_id)
+                end if
+            end do
+
+            keys(node_id) = cache_key_for( &
+                dag%nodes(node_id)%filename, compiler, '', &
+                dag, dep_keys, n_dep_keys)
+
+            if (cache_lookup(c, dag%nodes(node_id)%name, keys(node_id))) then
+                n_cached = n_cached + 1
+            else
+                n_changed = n_changed + 1
+                changed_ids(n_changed) = node_id
+            end if
+        end do
+
+        ! compute reverse-dependency closure of changed modules
+        if (n_changed > 0) then
+            call dag_reverse_deps(dag, changed_ids, n_changed, &
+                affected_ids, n_affected)
+        end if
+
+        ! update cache after analysis (caller decides whether to build)
+        do i = 1, n_order
+            node_id = order(i)
+            call cache_store(c, dag%nodes(node_id)%name, keys(node_id))
+        end do
+    end subroutine fo_changed_modules
+
     subroutine fo_check_run(dir, res)
         character(len=*), intent(in) :: dir
         type(check_result_t), intent(out) :: res
 
-        type(scan_unit_t) :: units(MAX_UNITS)
         type(dag_t) :: dag
         type(backend_t) :: backend
-        type(cache_t) :: c
-        integer :: n_units, ierr, exitcode
-        integer :: order(MAX_NODES), n_order
-        integer :: i, node_id
-        character(len=HASH_LEN) :: keys(MAX_NODES)
-        character(len=HASH_LEN) :: dep_keys(64)
-        integer :: n_dep_keys, j, dep_id
-        character(len=256) :: compiler, flags
-        logical :: any_changed
+        integer :: changed_ids(MAX_NODES), n_changed
+        integer :: affected_ids(MAX_NODES), n_affected
+        integer :: n_cached, ierr, exitcode
         real :: t0, t1
 
         call cpu_time(t0)
@@ -51,61 +116,21 @@ contains
             return
         end if
 
-        call scan_dir(dir, units, n_units, ierr)
+        call fo_changed_modules(dir, dag, changed_ids, n_changed, &
+            affected_ids, n_affected, n_cached, ierr)
         if (ierr /= 0) then
-            res%error_msg = 'scan failed: '//trim(dir)
+            res%error_msg = 'scan or dag failed'
             call cpu_time(t1)
             res%elapsed = t1 - t0
             return
         end if
 
-        call dag_build(units, n_units, dag)
         res%n_modules = dag%n
+        res%n_cached = n_cached
+        res%n_changed = n_changed
+        res%n_affected = n_affected
 
-        call dag_topo_order(dag, order, n_order, ierr)
-        if (ierr /= 0) then
-            res%error_msg = 'cycle in module dependency graph'
-            call cpu_time(t1)
-            res%elapsed = t1 - t0
-            return
-        end if
-
-        ! detect compiler
-        call detect_compiler(compiler)
-        flags = ''
-
-        ! init global cache
-        call cache_init(c, ierr)
-
-        ! compute cache keys in topo order (deps before dependents)
-        keys = ''
-        any_changed = .false.
-        do i = 1, n_order
-            node_id = order(i)
-
-            ! collect dep keys
-            n_dep_keys = 0
-            do j = 1, dag%nodes(node_id)%n_deps
-                dep_id = dag%nodes(node_id)%dep_ids(j)
-                if (dep_id > 0 .and. len_trim(keys(dep_id)) > 0) then
-                    n_dep_keys = n_dep_keys + 1
-                    dep_keys(n_dep_keys) = keys(dep_id)
-                end if
-            end do
-
-            keys(node_id) = cache_key_for( &
-                dag%nodes(node_id)%filename, compiler, flags, &
-                dag, dep_keys, n_dep_keys)
-
-            if (cache_lookup(c, dag%nodes(node_id)%name, keys(node_id))) then
-                res%n_cached = res%n_cached + 1
-            else
-                res%n_changed = res%n_changed + 1
-                any_changed = .true.
-            end if
-        end do
-
-        ! build (always, since fpm/cmake have their own incremental logic)
+        ! build
         call backend%build(exitcode)
         if (exitcode /= 0) then
             res%error_msg = 'build failed'
@@ -114,12 +139,6 @@ contains
             return
         end if
         res%build_ok = .true.
-
-        ! update cache for all modules after successful build
-        do i = 1, n_order
-            node_id = order(i)
-            call cache_store(c, dag%nodes(node_id)%name, keys(node_id))
-        end do
 
         ! test
         call backend%test(exitcode)
