@@ -5,6 +5,7 @@ module fo_cache
     implicit none
     private
     public :: cache_t, cache_init, cache_lookup, cache_store, cache_key_for
+    public :: hash_mod_file, HASH_LEN
 
     integer, parameter :: HASH_LEN = 16
 
@@ -140,6 +141,19 @@ contains
 
         write(hex, '(z16.16)') h
     end subroutine hash_to_hex
+
+    subroutine hash_mod_file(modpath, key)
+        character(len=*), intent(in) :: modpath
+        character(len=HASH_LEN), intent(out) :: key
+
+        character(len=4096) :: buf
+        integer(int64) :: h
+
+        call read_file_to_buf(modpath, buf)
+        h = fnv1a_init()
+        h = fnv1a_update(h, trim(buf))
+        call hash_to_hex(h, key)
+    end subroutine hash_mod_file
 
     ! --- index persistence ---
 

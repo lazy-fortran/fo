@@ -2,14 +2,15 @@ module fo_check
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
     use fo_scan, only: scan_unit_t, scan_file, scan_dir, MAX_NAME, MAX_UNITS
     use fo_dag, only: dag_t, dag_build, dag_topo_order, dag_reverse_deps, MAX_NODES
-    use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
+    use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, &
+        BACKEND_FPM, BACKEND_CMAKE
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_store, &
-        cache_key_for
+        cache_key_for, hash_mod_file, HASH_LEN
     implicit none
     private
     public :: check_result_t, fo_check_run, fo_changed_modules
 
-    integer, parameter :: HASH_LEN = 16
+    integer, parameter :: MAX_EXT_DEPS = 256
 
     type :: check_result_t
         logical :: build_ok = .false.
@@ -18,6 +19,7 @@ module fo_check
         integer :: n_cached = 0
         integer :: n_changed = 0
         integer :: n_affected = 0
+        integer :: n_ext_deps = 0
         real :: elapsed = 0.0
         character(len=512) :: error_msg = ''
     end type check_result_t
@@ -34,42 +36,58 @@ contains
 
         type(scan_unit_t) :: units(MAX_UNITS)
         type(cache_t) :: c
+        type(backend_t) :: b
         integer :: n_units
         integer :: order(MAX_NODES), n_order
         integer :: i, node_id, j, dep_id, n_dep_keys
         character(len=HASH_LEN) :: keys(MAX_NODES)
         character(len=HASH_LEN) :: dep_keys(64)
         character(len=256) :: compiler
+        ! external dep hashes (global across all modules)
+        character(len=HASH_LEN) :: ext_hash
+        character(len=MAX_NAME) :: ext_names(MAX_EXT_DEPS)
+        character(len=HASH_LEN) :: ext_keys(MAX_EXT_DEPS)
+        integer :: n_ext
 
         ierr = 0
         n_changed = 0
         n_affected = 0
         n_cached = 0
+        n_ext = 0
 
         call scan_dir(dir, units, n_units, ierr)
         if (ierr /= 0) return
 
         call dag_build(units, n_units, dag)
         call dag_topo_order(dag, order, n_order, ierr)
-        ! continue even if some modules are in cycles (process what we can)
         ierr = 0
 
         call detect_compiler(compiler)
         call cache_init(c, ierr)
         if (ierr /= 0) return
 
+        ! collect and hash external deps (modules used but not in DAG)
+        b = detect_backend(dir)
+        call collect_external_dep_hashes(units, n_units, dag, b, &
+            ext_names, ext_keys, n_ext)
+
         keys = ''
         do i = 1, n_order
             node_id = order(i)
 
+            ! collect in-DAG dep keys
             n_dep_keys = 0
             do j = 1, dag%nodes(node_id)%n_deps
                 dep_id = dag%nodes(node_id)%dep_ids(j)
                 if (dep_id > 0 .and. len_trim(keys(dep_id)) > 0) then
                     n_dep_keys = n_dep_keys + 1
-                    dep_keys(n_dep_keys) = keys(dep_id)
+                    if (n_dep_keys <= 64) dep_keys(n_dep_keys) = keys(dep_id)
                 end if
             end do
+
+            ! add external dep hashes for any unresolved uses in this unit
+            call add_ext_dep_keys(units, n_units, dag, node_id, &
+                ext_names, ext_keys, n_ext, dep_keys, n_dep_keys)
 
             keys(node_id) = cache_key_for( &
                 dag%nodes(node_id)%filename, compiler, '', &
@@ -83,18 +101,147 @@ contains
             end if
         end do
 
-        ! compute reverse-dependency closure of changed modules
         if (n_changed > 0) then
             call dag_reverse_deps(dag, changed_ids, n_changed, &
                 affected_ids, n_affected)
         end if
 
-        ! update cache after analysis (caller decides whether to build)
         do i = 1, n_order
             node_id = order(i)
             call cache_store(c, dag%nodes(node_id)%name, keys(node_id))
         end do
     end subroutine fo_changed_modules
+
+    subroutine collect_external_dep_hashes(units, n_units, dag, b, &
+            ext_names, ext_keys, n_ext)
+        type(scan_unit_t), intent(in) :: units(:)
+        integer, intent(in) :: n_units
+        type(dag_t), intent(in) :: dag
+        type(backend_t), intent(in) :: b
+        character(len=MAX_NAME), intent(out) :: ext_names(MAX_EXT_DEPS)
+        character(len=HASH_LEN), intent(out) :: ext_keys(MAX_EXT_DEPS)
+        integer, intent(out) :: n_ext
+
+        integer :: i, j, k
+        character(len=MAX_NAME) :: dep_name
+        character(len=512) :: modpath
+        logical :: found, already
+
+        n_ext = 0
+
+        do i = 1, n_units
+            do j = 1, units(i)%n_deps
+                dep_name = units(i)%deps(j)
+                if (dag%find(dep_name) > 0) cycle
+
+                ! skip if already collected
+                already = .false.
+                do k = 1, n_ext
+                    if (trim(ext_names(k)) == trim(dep_name)) then
+                        already = .true.
+                        exit
+                    end if
+                end do
+                if (already) cycle
+
+                ! search for .mod file in build directories
+                call find_mod_file(dep_name, b, modpath, found)
+                if (found) then
+                    if (n_ext < MAX_EXT_DEPS) then
+                        n_ext = n_ext + 1
+                        ext_names(n_ext) = dep_name
+                        call hash_mod_file(modpath, ext_keys(n_ext))
+                    end if
+                end if
+            end do
+        end do
+    end subroutine collect_external_dep_hashes
+
+    subroutine find_mod_file(modname, b, modpath, found)
+        character(len=*), intent(in) :: modname
+        type(backend_t), intent(in) :: b
+        character(len=*), intent(out) :: modpath
+        logical, intent(out) :: found
+
+        character(len=512) :: candidate
+        character(len=MAX_NAME) :: lower_name
+        integer :: i
+
+        found = .false.
+        modpath = ''
+
+        lower_name = modname
+        do i = 1, len_trim(lower_name)
+            if (iachar(lower_name(i:i)) >= iachar('A') .and. &
+                iachar(lower_name(i:i)) <= iachar('Z')) then
+                lower_name(i:i) = achar(iachar(lower_name(i:i)) + 32)
+            end if
+        end do
+
+        ! fpm build tree: build/dependencies/*/*.mod and build/gfortran_*/*.mod
+        ! cmake build tree: build/**/*.mod
+        ! search with find for the .mod file
+        block
+            character(len=1024) :: cmd, tmpfile, line
+            integer :: u, iostat
+
+            tmpfile = '/tmp/fo_find_mod.tmp'
+            cmd = 'find '//trim(b%project_dir)//'/build'// &
+                " -name '"//trim(lower_name)//".mod'"// &
+                ' -type f 2>/dev/null | head -1 > '//trim(tmpfile)
+            call execute_command_line(cmd, wait=.true.)
+
+            open(newunit=u, file=tmpfile, status='old', iostat=iostat)
+            if (iostat == 0) then
+                read(u, '(a)', iostat=iostat) line
+                if (iostat == 0 .and. len_trim(line) > 0) then
+                    modpath = trim(line)
+                    found = .true.
+                end if
+                close(u)
+            end if
+            call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
+        end block
+    end subroutine find_mod_file
+
+    subroutine add_ext_dep_keys(units, n_units, dag, node_id, &
+            ext_names, ext_keys, n_ext, dep_keys, n_dep_keys)
+        type(scan_unit_t), intent(in) :: units(:)
+        integer, intent(in) :: n_units
+        type(dag_t), intent(in) :: dag
+        integer, intent(in) :: node_id
+        character(len=MAX_NAME), intent(in) :: ext_names(MAX_EXT_DEPS)
+        character(len=HASH_LEN), intent(in) :: ext_keys(MAX_EXT_DEPS)
+        integer, intent(in) :: n_ext
+        character(len=HASH_LEN), intent(inout) :: dep_keys(64)
+        integer, intent(inout) :: n_dep_keys
+
+        integer :: i, j, k
+        character(len=MAX_NAME) :: node_name
+
+        ! find the scan unit for this node
+        node_name = dag%nodes(node_id)%name
+        do i = 1, n_units
+            if (trim(units(i)%module_name) == trim(node_name) .or. &
+                trim(units(i)%program_name) == trim(node_name)) then
+                ! check each of this unit's deps
+                do j = 1, units(i)%n_deps
+                    if (dag%find(units(i)%deps(j)) > 0) cycle
+                    ! external dep: find its hash
+                    do k = 1, n_ext
+                        if (trim(ext_names(k)) == trim(units(i)%deps(j))) then
+                            if (n_dep_keys < 64) then
+                                n_dep_keys = n_dep_keys + 1
+                                dep_keys(n_dep_keys) = ext_keys(k)
+                            end if
+                            exit
+                        end if
+                    end do
+                end do
+                return
+            end if
+        end do
+    end subroutine add_ext_dep_keys
 
     subroutine fo_check_run(dir, res)
         character(len=*), intent(in) :: dir
@@ -131,7 +278,6 @@ contains
         res%n_changed = n_changed
         res%n_affected = n_affected
 
-        ! build
         call backend%build(exitcode)
         if (exitcode /= 0) then
             res%error_msg = 'build failed'
@@ -141,7 +287,6 @@ contains
         end if
         res%build_ok = .true.
 
-        ! test
         call backend%test(exitcode)
         res%tests_ok = (exitcode == 0)
         if (.not. res%tests_ok) then
