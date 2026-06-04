@@ -9,7 +9,7 @@ module fo_check
     use fo_artifact_cache, only: artifact_store, artifact_restore
     implicit none
     private
-    public :: check_result_t, fo_check_run, fo_changed_modules
+    public :: check_result_t, fo_check_run, fo_changed_modules, check_result_json
 
     integer, parameter :: MAX_EXT_DEPS = 256
 
@@ -325,6 +325,79 @@ contains
         call cpu_time(t1)
         res%elapsed = t1 - t0
     end subroutine fo_check_run
+
+    function check_result_json(res) result(line)
+        type(check_result_t), intent(in) :: res
+        character(len=2048) :: line
+
+        character(len=32) :: modules, cached, changed, affected, elapsed
+
+        write (modules, '(i0)') res%n_modules
+        write (cached, '(i0)') res%n_cached
+        write (changed, '(i0)') res%n_changed
+        write (affected, '(i0)') res%n_affected
+        write (elapsed, '(f12.3)') res%elapsed
+
+        line = '{'
+        line = trim(line)//'"build_ok":'//trim(json_bool(res%build_ok))
+        line = trim(line)//',"tests_ok":'//trim(json_bool(res%tests_ok))
+        line = trim(line)//',"modules":'//trim(modules)
+        line = trim(line)//',"cached":'//trim(cached)
+        line = trim(line)//',"changed":'//trim(changed)
+        line = trim(line)//',"affected":'//trim(affected)
+        line = trim(line)//',"elapsed_s":'//trim(adjustl(elapsed))
+        line = trim(line)//',"error":"'
+        line = trim(line)//trim(json_escape(res%error_msg))//'"}'
+    end function check_result_json
+
+    function json_bool(value) result(text)
+        logical, intent(in) :: value
+        character(len=5) :: text
+
+        if (value) then
+            text = 'true'
+        else
+            text = 'false'
+        end if
+    end function json_bool
+
+    function json_escape(input) result(output)
+        character(len=*), intent(in) :: input
+        character(len=1024) :: output
+
+        integer :: i, n
+        character(len=1) :: ch
+
+        output = ''
+        n = 0
+        do i = 1, len_trim(input)
+            ch = input(i:i)
+            select case (ch)
+            case ('"')
+                call append_json_chars(output, n, achar(92)//achar(34))
+            case (achar(92))
+                call append_json_chars(output, n, achar(92)//achar(92))
+            case (achar(9), achar(10), achar(13))
+                call append_json_chars(output, n, ' ')
+            case default
+                if (iachar(ch) >= 32) call append_json_chars(output, n, ch)
+            end select
+        end do
+    end function json_escape
+
+    subroutine append_json_chars(output, n, text)
+        character(len=*), intent(inout) :: output
+        integer, intent(inout) :: n
+        character(len=*), intent(in) :: text
+
+        integer :: m
+
+        m = len(text)
+        if (m <= 0) return
+        if (n + m > len(output)) return
+        output(n + 1:n + m) = text(1:m)
+        n = n + m
+    end subroutine append_json_chars
 
     subroutine make_tmpfile(prefix, path)
         character(len=*), intent(in) :: prefix

@@ -1,6 +1,6 @@
 program test_check
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_check, only: check_result_t, fo_check_run
+    use fo_check, only: check_result_t, fo_check_run, check_result_json
     implicit none
 
     integer :: n_pass, n_fail
@@ -10,6 +10,7 @@ program test_check
 
     call test_check_from_child_reports_backend_error()
     call test_check_reports_test_failure_advice()
+    call test_check_result_json()
 
     write (output_unit, '(a,i0,a,i0,a)') 'check: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -63,6 +64,38 @@ contains
 
         call execute_command_line('rm -rf /tmp/fo_failing_test_project')
     end subroutine test_check_reports_test_failure_advice
+
+    subroutine test_check_result_json()
+        type(check_result_t) :: res
+        character(len=2048) :: line
+
+        res%build_ok = .true.
+        res%tests_ok = .false.
+        res%n_modules = 7
+        res%n_cached = 3
+        res%n_changed = 2
+        res%n_affected = 5
+        res%elapsed = 0.25
+        res%error_msg = 'bad "quote" '//achar(92)//'path'
+
+        line = check_result_json(res)
+
+        call assert(index(line, '"build_ok":true') > 0, &
+                    'json includes build_ok boolean')
+        call assert(index(line, '"tests_ok":false') > 0, &
+                    'json includes tests_ok boolean')
+        call assert(index(line, '"modules":7') > 0, &
+                    'json includes module count')
+        call assert(index(line, '"elapsed_s":0.250') > 0, &
+                    'json includes valid elapsed number')
+        if (index(line, 'bad '//achar(92)//'"quote') <= 0) then
+            write (error_unit, '(a,a)') 'json line: ', trim(line)
+        end if
+        call assert(index(line, 'bad '//achar(92)//'"quote') > 0, &
+                    'json escapes quotes')
+        call assert(index(line, achar(92)//achar(92)//'path') > 0, &
+                    'json escapes backslashes')
+    end subroutine test_check_result_json
 
     subroutine make_bad_project()
         integer :: u

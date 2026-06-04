@@ -8,6 +8,7 @@ module fo_build_backend
     integer, parameter :: BACKEND_NONE = 0
     integer, parameter :: BACKEND_FPM = 1
     integer, parameter :: BACKEND_CMAKE = 2
+    integer, parameter :: MAX_TEST_TARGETS = 512
 
     type :: backend_t
         integer :: kind = BACKEND_NONE
@@ -173,8 +174,9 @@ contains
         logical, intent(in), optional :: include_slow
         character(len=*), intent(in), optional :: log_file
 
-        integer :: cmdstat
+        integer :: cmdstat, list_ierr, n_names
         character(len=2048) :: cmd
+        character(len=128) :: names(MAX_TEST_TARGETS)
         logical :: has_tests, slow
 
         slow = .false.
@@ -182,12 +184,24 @@ contains
 
         select case (self%kind)
         case (BACKEND_FPM)
-            inquire (file=trim(self%project_dir)//'/test/.', exist=has_tests)
-            if (.not. has_tests) then
-                exitcode = 0
+            if (slow) then
+                cmd = 'cd '//trim(self%project_dir)//' && fpm test'
+            else
+                call fpm_list_tests(self%project_dir, names, n_names, &
+                                    list_ierr, log_file)
+                if (list_ierr /= 0) then
+                    exitcode = 1
+                    return
+                end if
+                call filter_slow_tests(names, n_names)
+                if (n_names == 0) then
+                    exitcode = 0
+                    return
+                end if
+                call fpm_run_tests(self%project_dir, names, n_names, &
+                                   exitcode, log_file)
                 return
             end if
-            cmd = 'cd '//trim(self%project_dir)//' && fpm test'
         case (BACKEND_CMAKE)
             inquire (file=trim(self%project_dir)//'/build/CTestTestfile.cmake', &
                      exist=has_tests)
@@ -213,21 +227,40 @@ contains
         if (cmdstat /= 0) exitcode = 1
     end subroutine backend_test
 
-    subroutine backend_test_names(self, names, n_names, exitcode, include_slow)
+    subroutine backend_test_names(self, names, n_names, exitcode, include_slow, &
+                                  log_file)
         use fo_scan, only: is_slow_test
         class(backend_t), intent(in) :: self
         character(len=128), intent(in) :: names(:)
         integer, intent(in) :: n_names
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
+        character(len=*), intent(in), optional :: log_file
 
         integer :: cmdstat, i, sub_exit
         character(len=2048) :: cmd
+        character(len=128) :: fast_names(MAX_TEST_TARGETS)
         logical :: slow
+        integer :: n_fast
 
         slow = .false.
         if (present(include_slow)) slow = include_slow
         exitcode = 0
+
+        if (self%kind == BACKEND_FPM) then
+            n_fast = 0
+            do i = 1, n_names
+                if (.not. slow .and. is_slow_test(names(i))) cycle
+                if (n_fast < MAX_TEST_TARGETS) then
+                    n_fast = n_fast + 1
+                    fast_names(n_fast) = names(i)
+                end if
+            end do
+            if (n_fast == 0) return
+            call fpm_run_tests(self%project_dir, fast_names, n_fast, &
+                               exitcode, log_file)
+            return
+        end if
 
         do i = 1, n_names
             if (.not. slow .and. is_slow_test(names(i))) cycle
@@ -262,5 +295,154 @@ contains
             cmd = trim(cmd)//' 2>&1'
         end if
     end subroutine redirect_command
+
+    subroutine fpm_list_tests(project_dir, names, n_names, exitcode, log_file)
+        character(len=*), intent(in) :: project_dir
+        character(len=128), intent(out) :: names(MAX_TEST_TARGETS)
+        integer, intent(out) :: n_names, exitcode
+        character(len=*), intent(in), optional :: log_file
+
+        character(len=2048) :: cmd
+        character(len=512) :: list_file, parse_file
+        integer :: cmdstat
+
+        names = ''
+        n_names = 0
+        exitcode = 0
+
+        if (present(log_file) .and. len_trim(log_file) > 0) then
+            list_file = log_file
+            parse_file = log_file
+        else
+            call make_tmpfile('fo-fpm-tests', list_file)
+            parse_file = list_file
+        end if
+
+        cmd = 'cd '//trim(project_dir)//' && fpm test --list'
+        call redirect_command(cmd, list_file)
+        call execute_command_line(cmd, exitstat=exitcode, cmdstat=cmdstat, &
+                                  wait=.true.)
+        if (cmdstat /= 0) exitcode = 1
+        if (exitcode == 0) call parse_fpm_test_list(parse_file, names, n_names)
+        if (.not. present(log_file)) call delete_file(list_file)
+    end subroutine fpm_list_tests
+
+    subroutine parse_fpm_test_list(path, names, n_names)
+        character(len=*), intent(in) :: path
+        character(len=128), intent(inout) :: names(MAX_TEST_TARGETS)
+        integer, intent(inout) :: n_names
+
+        character(len=512) :: line
+        integer :: u, iostat, colon
+        logical :: in_names
+
+        in_names = .false.
+        open (newunit=u, file=path, status='old', iostat=iostat)
+        if (iostat /= 0) return
+
+        do
+            read (u, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            colon = index(line, 'Matched names:')
+            if (colon > 0) then
+                in_names = .true.
+                line = line(colon + len('Matched names:'):)
+            else if (.not. in_names) then
+                cycle
+            end if
+            call parse_words(line, names, n_names)
+        end do
+        close (u)
+    end subroutine parse_fpm_test_list
+
+    subroutine parse_words(line, names, n_names)
+        character(len=*), intent(in) :: line
+        character(len=128), intent(inout) :: names(MAX_TEST_TARGETS)
+        integer, intent(inout) :: n_names
+
+        integer :: pos, start, finish, n
+
+        n = len_trim(line)
+        pos = 1
+        do while (pos <= n)
+            do while (pos <= n .and. line(pos:pos) == ' ')
+                pos = pos + 1
+            end do
+            if (pos > n) exit
+
+            start = pos
+            do while (pos <= n .and. line(pos:pos) /= ' ')
+                pos = pos + 1
+            end do
+            finish = pos - 1
+
+            if (n_names < MAX_TEST_TARGETS) then
+                n_names = n_names + 1
+                names(n_names) = line(start:finish)
+            end if
+        end do
+    end subroutine parse_words
+
+    subroutine filter_slow_tests(names, n_names)
+        use fo_scan, only: is_slow_test
+        character(len=128), intent(inout) :: names(MAX_TEST_TARGETS)
+        integer, intent(inout) :: n_names
+
+        character(len=128) :: fast_names(MAX_TEST_TARGETS)
+        integer :: i, n_fast
+
+        fast_names = ''
+        n_fast = 0
+        do i = 1, n_names
+            if (is_slow_test(names(i))) cycle
+            n_fast = n_fast + 1
+            fast_names(n_fast) = names(i)
+        end do
+
+        names = fast_names
+        n_names = n_fast
+    end subroutine filter_slow_tests
+
+    subroutine fpm_run_tests(project_dir, names, n_names, exitcode, log_file)
+        character(len=*), intent(in) :: project_dir
+        character(len=128), intent(in) :: names(MAX_TEST_TARGETS)
+        integer, intent(in) :: n_names
+        integer, intent(out) :: exitcode
+        character(len=*), intent(in), optional :: log_file
+
+        integer :: i, cmdstat
+        character(len=2048) :: cmd
+
+        if (n_names == 0) then
+            exitcode = 0
+            return
+        end if
+
+        cmd = 'cd '//trim(project_dir)//' && fpm test'
+        do i = 1, n_names
+            cmd = trim(cmd)//' '//trim(names(i))
+        end do
+
+        call redirect_command(cmd, log_file)
+        call execute_command_line(cmd, exitstat=exitcode, cmdstat=cmdstat, &
+                                  wait=.true.)
+        if (cmdstat /= 0) exitcode = 1
+    end subroutine fpm_run_tests
+
+    subroutine make_tmpfile(prefix, path)
+        character(len=*), intent(in) :: prefix
+        character(len=*), intent(out) :: path
+
+        integer :: count
+
+        call system_clock(count)
+        write (path, '(a,a,a,i0,a)') '/tmp/', trim(prefix), '-', count, '.tmp'
+    end subroutine make_tmpfile
+
+    subroutine delete_file(path)
+        character(len=*), intent(in) :: path
+
+        call execute_command_line('rm -f '//trim(path), wait=.true.)
+    end subroutine delete_file
 
 end module fo_build_backend
