@@ -1,13 +1,128 @@
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 static int has_text(const char *text) { return text != NULL && text[0] != '\0'; }
+
+struct path_list {
+    char **items;
+    size_t n;
+    size_t cap;
+};
+
+static int path_list_add(struct path_list *list, const char *path) {
+    char **next;
+
+    if (list->n == list->cap) {
+        size_t next_cap = list->cap == 0 ? 64 : list->cap * 2;
+        next = realloc(list->items, next_cap * sizeof(char *));
+        if (next == NULL) return 1;
+        list->items = next;
+        list->cap = next_cap;
+    }
+    list->items[list->n] = strdup(path);
+    if (list->items[list->n] == NULL) return 1;
+    list->n++;
+    return 0;
+}
+
+static int path_cmp(const void *lhs, const void *rhs) {
+    const char *const *a = lhs;
+    const char *const *b = rhs;
+    return strcmp(*a, *b);
+}
+
+static void path_list_free(struct path_list *list) {
+    size_t i;
+
+    for (i = 0; i < list->n; i++) free(list->items[i]);
+    free(list->items);
+    list->items = NULL;
+    list->n = 0;
+    list->cap = 0;
+}
+
+static int skip_dir_name(const char *name) {
+    return strcmp(name, ".") == 0 || strcmp(name, "..") == 0 ||
+           strcmp(name, "build") == 0 || strcmp(name, ".git") == 0 ||
+           strcmp(name, "node_modules") == 0;
+}
+
+static int has_fortran_ext(const char *path) {
+    size_t n = strlen(path);
+    if (n >= 4 && strcmp(path + n - 4, ".f90") == 0) return 1;
+    if (n >= 4 && strcmp(path + n - 4, ".F90") == 0) return 1;
+    if (n >= 2 && strcmp(path + n - 2, ".f") == 0) return 1;
+    if (n >= 2 && strcmp(path + n - 2, ".F") == 0) return 1;
+    return 0;
+}
+
+static int scan_sources_recursive(const char *dir, struct path_list *list,
+                                  int required) {
+    DIR *handle;
+    struct dirent *entry;
+
+    handle = opendir(dir);
+    if (handle == NULL) return required ? 1 : 0;
+
+    while ((entry = readdir(handle)) != NULL) {
+        char path[4096];
+        struct stat st;
+
+        if (skip_dir_name(entry->d_name)) continue;
+        snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
+        if (stat(path, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (scan_sources_recursive(path, list, 0) != 0) {
+                closedir(handle);
+                return 1;
+            }
+        } else if (S_ISREG(st.st_mode) && has_fortran_ext(path)) {
+            if (path_list_add(list, path) != 0) {
+                closedir(handle);
+                return 1;
+            }
+        }
+    }
+
+    closedir(handle);
+    return 0;
+}
+
+void fo_c_scan_sources(const char *root, const char *output_file, int *exitcode) {
+    struct path_list list = {0};
+    FILE *out;
+    size_t i;
+
+    *exitcode = 0;
+    if (!has_text(root) || !has_text(output_file)) {
+        *exitcode = 1;
+        return;
+    }
+    if (scan_sources_recursive(root, &list, 1) != 0) {
+        path_list_free(&list);
+        *exitcode = 1;
+        return;
+    }
+
+    qsort(list.items, list.n, sizeof(char *), path_cmp);
+    out = fopen(output_file, "w");
+    if (out == NULL) {
+        *exitcode = 1;
+    } else {
+        for (i = 0; i < list.n; i++) fprintf(out, "%s\n", list.items[i]);
+        fclose(out);
+    }
+
+    path_list_free(&list);
+}
 
 static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                     int append, int jobs) {

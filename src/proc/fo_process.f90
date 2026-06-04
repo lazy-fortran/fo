@@ -5,6 +5,7 @@ module fo_process
     public :: process_detect_nproc
     public :: process_fpm_build, process_fpm_test_list, process_fpm_test_all
     public :: process_fpm_test_names, process_cmake_build, process_ctest
+    public :: process_scan_sources
 
     integer, parameter :: C_PATH_LEN = 4096
     integer, parameter :: C_ARG_LEN = 4096
@@ -14,6 +15,13 @@ module fo_process
             import :: c_int
             integer(c_int), intent(out) :: nproc
         end subroutine fo_c_detect_nproc
+
+        subroutine fo_c_scan_sources(root, output_file, exitcode) &
+            bind(C, name='fo_c_scan_sources')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: root(*), output_file(*)
+            integer(c_int), intent(out) :: exitcode
+        end subroutine fo_c_scan_sources
 
         subroutine fo_c_fpm_build(project_dir, flags, jobs, log_file, &
                                   exitcode) bind(C, name='fo_c_fpm_build')
@@ -78,6 +86,19 @@ contains
         nproc = int(c_nproc)
         if (nproc < 1) nproc = 1
     end function process_detect_nproc
+
+    subroutine process_scan_sources(root, output_file, exitcode)
+        character(len=*), intent(in) :: root, output_file
+        integer, intent(out) :: exitcode
+
+        character(kind=c_char) :: c_root(C_PATH_LEN), c_output(C_PATH_LEN)
+        integer(c_int) :: c_exit
+
+        call to_c_string(root, c_root)
+        call to_c_string(output_file, c_output)
+        call fo_c_scan_sources(c_root, c_output, c_exit)
+        exitcode = int(c_exit)
+    end subroutine process_scan_sources
 
     subroutine process_fpm_build(project_dir, flags, jobs, log_file, exitcode)
         character(len=*), intent(in) :: project_dir, flags, log_file

@@ -14,8 +14,9 @@ program test_scan
     call test_scan_intrinsic_skip()
     call test_slow_test_detection()
     call test_scan_dir_empty()
+    call test_scan_dir_path_with_spaces()
 
-    write(output_unit, '(a,i0,a,i0,a)') 'scan: ', n_pass, ' pass, ', n_fail, ' fail'
+    write (output_unit, '(a,i0,a,i0,a)') 'scan: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
 
 contains
@@ -28,7 +29,7 @@ contains
             n_pass = n_pass + 1
         else
             n_fail = n_fail + 1
-            write(error_unit, '(a,a)') 'FAIL: ', msg
+            write (error_unit, '(a,a)') 'FAIL: ', msg
         end if
     end subroutine assert
 
@@ -38,11 +39,11 @@ contains
         integer, intent(in) :: n_lines
         integer :: u, i
 
-        open(newunit=u, file=filename, status='replace')
+        open (newunit=u, file=filename, status='replace')
         do i = 1, n_lines
-            write(u, '(a)') trim(lines(i))
+            write (u, '(a)') trim(lines(i))
         end do
-        close(u)
+        close (u)
     end subroutine write_file
 
     subroutine test_scan_use_statements()
@@ -134,25 +135,25 @@ contains
     subroutine test_slow_test_detection()
         ! *_slow suffix
         call assert(is_slow_test('test_integration_slow'), &
-            'slow: test_integration_slow is slow')
+                    'slow: test_integration_slow is slow')
         call assert(is_slow_test('perf_slow'), &
-            'slow: perf_slow is slow')
+                    'slow: perf_slow is slow')
 
         ! *_slow_* infix
         call assert(is_slow_test('test_slow_network'), &
-            'slow: test_slow_network is slow')
+                    'slow: test_slow_network is slow')
         call assert(is_slow_test('my_slow_test'), &
-            'slow: my_slow_test is slow')
+                    'slow: my_slow_test is slow')
 
         ! not slow
         call assert(.not. is_slow_test('test_fast'), &
-            'slow: test_fast is not slow')
+                    'slow: test_fast is not slow')
         call assert(.not. is_slow_test('test_slowly'), &
-            'slow: test_slowly is not slow')
+                    'slow: test_slowly is not slow')
         call assert(.not. is_slow_test('slowtest'), &
-            'slow: slowtest is not slow')
+                    'slow: slowtest is not slow')
         call assert(.not. is_slow_test('test_cache'), &
-            'slow: test_cache is not slow')
+                    'slow: test_cache is not slow')
     end subroutine test_slow_test_detection
 
     subroutine test_scan_dir_empty()
@@ -171,6 +172,37 @@ contains
         call execute_command_line('rm -rf '//trim(dir))
     end subroutine test_scan_dir_empty
 
+    subroutine test_scan_dir_path_with_spaces()
+        type(scan_unit_t) :: units(MAX_UNITS)
+        integer :: n_units, ierr, n_tests
+        character(len=512) :: base_dir, dir
+        character(len=80) :: lib_lines(3), test_lines(3)
+
+        call make_tmp_path('fo_test_scan_spaces', base_dir, '')
+        dir = trim(base_dir)//' path with spaces'
+        call remove_tree(dir)
+        call make_dir(trim(dir)//'/src')
+        call make_dir(trim(dir)//'/test')
+
+        lib_lines(1) = 'module lib'
+        lib_lines(2) = 'implicit none'
+        lib_lines(3) = 'end module lib'
+        call write_file(trim(dir)//'/src/lib.f90', lib_lines, 3)
+
+        test_lines(1) = 'program test_fast'
+        test_lines(2) = 'use lib'
+        test_lines(3) = 'end program test_fast'
+        call write_file(trim(dir)//'/test/test_fast.f90', test_lines, 3)
+
+        call scan_dir(dir, units, n_units, ierr)
+        n_tests = count(units(1:n_units)%is_test)
+        call assert(ierr == 0, 'scan spaces: no error')
+        call assert(n_units == 2, 'scan spaces: finds source files')
+        call assert(n_tests == 1, 'scan spaces: marks test file')
+
+        call remove_tree(dir)
+    end subroutine test_scan_dir_path_with_spaces
+
     subroutine make_tmp_path(prefix, path, suffix)
         character(len=*), intent(in) :: prefix, suffix
         character(len=*), intent(out) :: path
@@ -183,5 +215,17 @@ contains
         write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
             count, '-', serial, trim(suffix)
     end subroutine make_tmp_path
+
+    subroutine make_dir(path)
+        character(len=*), intent(in) :: path
+
+        call execute_command_line('mkdir -p "'//trim(path)//'"')
+    end subroutine make_dir
+
+    subroutine remove_tree(path)
+        character(len=*), intent(in) :: path
+
+        call execute_command_line('rm -rf "'//trim(path)//'"')
+    end subroutine remove_tree
 
 end program test_scan

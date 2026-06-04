@@ -1,5 +1,6 @@
 module fo_scan
     use, intrinsic :: iso_fortran_env, only: dp => real64, error_unit
+    use fo_process, only: process_scan_sources
     implicit none
     private
     integer, parameter, public :: MAX_NAME = 128
@@ -42,23 +43,30 @@ contains
         character(len=512) :: line
 
         ierr = 0
-        unit_info%filename = filename
+        unit_info%filename = ''
+        unit_info%module_name = ''
+        unit_info%program_name = ''
+        unit_info%is_program = .false.
+        unit_info%is_test = .false.
         unit_info%n_deps = 0
+        unit_info%deps = ''
+        unit_info%filename = filename
+        unit_info%is_test = is_test_path(filename)
 
-        open(newunit=funit, file=filename, status='old', iostat=iostat)
+        open (newunit=funit, file=filename, status='old', iostat=iostat)
         if (iostat /= 0) then
-            write(error_unit, '(a)') 'fo: cannot open '//trim(filename)
+            write (error_unit, '(a)') 'fo: cannot open '//trim(filename)
             ierr = 1
             return
         end if
 
         do
-            read(funit, '(a)', iostat=iostat) line
+            read (funit, '(a)', iostat=iostat) line
             if (iostat /= 0) exit
             call parse_line(line, unit_info)
         end do
 
-        close(funit)
+        close (funit)
     end subroutine scan_file
 
     subroutine scan_dir(dirname, units, n_units, ierr)
@@ -66,59 +74,64 @@ contains
         type(scan_unit_t), intent(out) :: units(MAX_UNITS)
         integer, intent(out) :: n_units, ierr
 
-        character(len=512) :: cmd, tmpfile, line
+        character(len=512) :: tmpfile, line
         integer :: funit, iostat, sub_ierr
 
         ierr = 0
         n_units = 0
         call make_tmpfile('fo_scan_files', tmpfile)
 
-        ! exclude build/, .git/, and common dependency directories
-        cmd = 'find '//trim(dirname)// &
-              " -path '*/build' -prune -o"// &
-              " -path '*/.git' -prune -o"// &
-              " -path '*/node_modules' -prune -o"// &
-              " \( -name '*.f90' -o -name '*.F90'"// &
-              " -o -name '*.f' -o -name '*.F' \)"// &
-              " -print 2>/dev/null | sort > "//trim(tmpfile)
-        call execute_command_line(cmd, exitstat=sub_ierr)
+        call process_scan_sources(dirname, tmpfile, sub_ierr)
         if (sub_ierr /= 0) then
             ierr = 1
             return
         end if
 
-        open(newunit=funit, file=tmpfile, status='old', iostat=iostat)
+        open (newunit=funit, file=tmpfile, status='old', iostat=iostat)
         if (iostat /= 0) then
             ierr = 1
             return
         end if
 
         do
-            read(funit, '(a)', iostat=iostat) line
+            read (funit, '(a)', iostat=iostat) line
             if (iostat /= 0) exit
             if (len_trim(line) == 0) cycle
             n_units = n_units + 1
             if (n_units > MAX_UNITS) then
-                write(error_unit, '(a,i0)') 'fo: too many source files, max ', MAX_UNITS
+                write (error_unit, '(a,i0)') &
+                    'fo: too many source files, max ', MAX_UNITS
                 n_units = MAX_UNITS
                 exit
             end if
             call scan_file(trim(line), units(n_units), sub_ierr)
             if (sub_ierr /= 0) then
                 n_units = n_units - 1
-            else
-                ! mark test files by path convention (test/ or tests/)
-                if (index(trim(line), '/test/') > 0 .or. &
-                    index(trim(line), '/tests/') > 0 .or. &
-                    index(trim(line), 'test_') > 0) then
-                    units(n_units)%is_test = .true.
-                end if
             end if
         end do
 
-        close(funit)
+        close (funit)
         call execute_command_line('rm -f '//trim(tmpfile))
     end subroutine scan_dir
+
+    logical function is_test_path(path)
+        character(len=*), intent(in) :: path
+
+        character(len=512) :: clean, base
+        integer :: slash
+
+        clean = trim(path)
+        slash = index(clean, '/', back=.true.)
+        if (slash > 0) then
+            base = clean(slash + 1:)
+        else
+            base = clean
+        end if
+
+        is_test_path = index(clean, '/test/') > 0 .or. &
+                       index(clean, '/tests/') > 0 .or. &
+                       index(base, 'test_') == 1
+    end function is_test_path
 
     subroutine make_tmpfile(prefix, path)
         character(len=*), intent(in) :: prefix
