@@ -11,6 +11,7 @@ module fo_dag
         character(len=MAX_NAME) :: name = ''
         character(len=MAX_NAME) :: filename = ''
         logical :: is_program = .false.
+        logical :: is_test = .false.
         integer :: n_deps = 0
         integer :: dep_ids(MAX_EDGES)
         integer :: n_rdeps = 0
@@ -38,10 +39,12 @@ contains
         ! register all modules and programs as nodes
         do i = 1, n_units
             if (len_trim(units(i)%module_name) > 0) then
-                call add_node(dag, units(i)%module_name, units(i)%filename, .false.)
+                call add_node(dag, units(i)%module_name, units(i)%filename, &
+                    .false., units(i)%is_test)
             end if
             if (units(i)%is_program) then
-                call add_node(dag, units(i)%program_name, units(i)%filename, .true.)
+                call add_node(dag, units(i)%program_name, units(i)%filename, &
+                    .true., units(i)%is_test)
             end if
         end do
 
@@ -141,10 +144,10 @@ contains
 
     ! --- private helpers ---
 
-    subroutine add_node(dag, name, filename, is_prog)
+    subroutine add_node(dag, name, filename, is_prog, is_test)
         type(dag_t), intent(inout) :: dag
         character(len=*), intent(in) :: name, filename
-        logical, intent(in) :: is_prog
+        logical, intent(in) :: is_prog, is_test
 
         integer :: idx
 
@@ -155,6 +158,7 @@ contains
         dag%nodes(dag%n)%name = name
         dag%nodes(dag%n)%filename = filename
         dag%nodes(dag%n)%is_program = is_prog
+        dag%nodes(dag%n)%is_test = is_test
     end subroutine add_node
 
     subroutine add_edge(dag, from_id, dep_name)

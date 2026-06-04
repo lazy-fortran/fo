@@ -88,7 +88,7 @@ contains
         type(dag_t) :: dag
         integer :: changed_ids(MAX_NODES), n_changed
         integer :: affected_ids(MAX_NODES), n_affected
-        integer :: n_cached, ierr, i
+        integer :: n_cached, ierr, i, n_tests
 
         call fo_changed_modules('.', dag, changed_ids, n_changed, &
             affected_ids, n_affected, n_cached, ierr)
@@ -115,6 +115,21 @@ contains
                 trim(dag%nodes(affected_ids(i))%name), &
                 '  ', trim(dag%nodes(affected_ids(i))%filename)
         end do
+
+        n_tests = 0
+        do i = 1, n_affected
+            if (dag%nodes(affected_ids(i))%is_test) n_tests = n_tests + 1
+        end do
+        if (n_tests > 0) then
+            write(output_unit, '(a,i0,a)') 'affected tests (', n_tests, '):'
+            do i = 1, n_affected
+                if (dag%nodes(affected_ids(i))%is_test) then
+                    write(output_unit, '(a,a,a,a)') '  ', &
+                        trim(dag%nodes(affected_ids(i))%name), &
+                        '  ', trim(dag%nodes(affected_ids(i))%filename)
+                end if
+            end do
+        end if
     end subroutine cmd_changed
 
     subroutine cmd_build()

@@ -13,6 +13,7 @@ module fo_scan
         character(len=MAX_NAME) :: module_name = ''
         character(len=MAX_NAME) :: program_name = ''
         logical :: is_program = .false.
+        logical :: is_test = .false.
         integer :: n_deps = 0
         character(len=MAX_NAME) :: deps(MAX_DEPS)
     end type scan_unit_t
@@ -103,7 +104,16 @@ contains
                 exit
             end if
             call scan_file(trim(line), units(n_units), sub_ierr)
-            if (sub_ierr /= 0) n_units = n_units - 1
+            if (sub_ierr /= 0) then
+                n_units = n_units - 1
+            else
+                ! mark test files by path convention (test/ or tests/)
+                if (index(trim(line), '/test/') > 0 .or. &
+                    index(trim(line), '/tests/') > 0 .or. &
+                    index(trim(line), 'test_') > 0) then
+                    units(n_units)%is_test = .true.
+                end if
+            end if
         end do
 
         close(funit)
