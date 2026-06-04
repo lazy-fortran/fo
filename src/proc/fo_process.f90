@@ -8,6 +8,7 @@ module fo_process
     public :: process_scan_sources
     public :: process_start_fo_check, process_poll_pid, process_cancel_pid
     public :: process_read_jsonrpc_message
+    public :: process_get_mcp_framing
 
     integer, parameter :: C_PATH_LEN = 4096
     integer, parameter :: C_ARG_LEN = 4096
@@ -104,6 +105,11 @@ module fo_process
             integer(c_int), value :: bufsize
             integer(c_int), intent(out) :: nread
         end subroutine fo_c_read_jsonrpc_message
+
+        integer(c_int) function fo_c_get_mcp_framing() &
+            bind(C, name='fo_c_get_mcp_framing')
+            import :: c_int
+        end function fo_c_get_mcp_framing
     end interface
 
 contains
@@ -289,6 +295,12 @@ contains
             buf(i:i) = char(iachar(c_buf(i)))
         end do
     end subroutine process_read_jsonrpc_message
+
+    function process_get_mcp_framing() result(framing)
+        integer :: framing
+
+        framing = int(fo_c_get_mcp_framing())
+    end function process_get_mcp_framing
 
     subroutine to_c_string(text, c_text)
         character(len=*), intent(in) :: text

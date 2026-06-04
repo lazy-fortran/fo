@@ -48,7 +48,7 @@ contains
 
             select case (trim(method))
             case ('initialize')
-                call make_initialize_response(id_str, response)
+                call make_initialize_response(id_str, line, response)
                 call send_jsonrpc(response)
             case ('initialized')
                 ! notification, no response needed
@@ -97,13 +97,18 @@ contains
         end if
     end subroutine read_jsonrpc_message
 
-    subroutine make_initialize_response(id_str, response)
-        character(len=*), intent(in) :: id_str
+    subroutine make_initialize_response(id_str, line, response)
+        character(len=*), intent(in) :: id_str, line
         character(len=*), intent(out) :: response
 
+        character(len=32) :: proto_ver
+
+        call extract_json_field(line, '"protocolVersion"', proto_ver)
+        if (len_trim(proto_ver) == 0) proto_ver = '2025-03-26'
         response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"result":{"protocolVersion":"2024-11-05",'// &
-                   '"capabilities":{"tools":{},"resources":{}},'// &
+                   '"result":{"protocolVersion":"'//trim(proto_ver)//'",'// &
+                   '"capabilities":{"tools":{"listChanged":false},'// &
+                   '"resources":{"listChanged":false}},'// &
                    '"serverInfo":{"name":"fo","version":"0.1.0"}}}'
     end subroutine make_initialize_response
 

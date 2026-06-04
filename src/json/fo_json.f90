@@ -200,16 +200,22 @@ contains
     end subroutine read_text_file
 
     subroutine send_jsonrpc(response)
+        use fo_process, only: process_get_mcp_framing
         character(len=*), intent(in) :: response
 
         character(len=16) :: len_str
-        integer :: n
+        integer :: n, framing
 
         n = len_trim(response)
-        write (len_str, '(i0)') n
-        write (output_unit, '(a,a,a,a,a)', advance='no') &
-            'Content-Length: ', trim(len_str), char(13)//char(10), &
-            char(13)//char(10), trim(response)
+        framing = process_get_mcp_framing()
+        if (framing == 0) then
+            write (output_unit, '(a)') trim(response)
+        else
+            write (len_str, '(i0)') n
+            write (output_unit, '(a,a,a,a,a)', advance='no') &
+                'Content-Length: ', trim(len_str), char(13)//char(10), &
+                char(13)//char(10), trim(response)
+        end if
         flush (output_unit)
     end subroutine send_jsonrpc
 

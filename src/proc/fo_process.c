@@ -349,40 +349,47 @@ void fo_c_poll_pid(int pid, int *done, int *exitcode) {
     }
 }
 
+static int fo_mcp_framing = -1; /* -1 = unknown, 0 = bare JSON, 1 = Content-Length */
+
 void fo_c_read_jsonrpc_message(char *buf, int bufsize, int *nread) {
     int content_length = -1;
-    char line[512];
     int pos = 0;
     int ch;
+    int is_json = 0;
 
     *nread = 0;
     if (bufsize <= 0) return;
 
     for (;;) {
         pos = 0;
+        is_json = 0;
         for (;;) {
             ch = fgetc(stdin);
             if (ch == EOF) { *nread = -1; return; }
             if (ch == '\r') continue;
             if (ch == '\n') break;
-            if (pos < (int)sizeof(line) - 1) line[pos++] = (char)ch;
+            if (pos == 0 && ch == '{') is_json = 1;
+            if (is_json) {
+                if (pos < bufsize) buf[pos++] = (char)ch;
+            } else {
+                if (pos < bufsize - 1) buf[pos++] = (char)ch;
+            }
         }
-        line[pos] = '\0';
 
         if (pos == 0) {
             if (content_length > 0) break;
             continue;
         }
 
-        if (pos > 0 && line[0] == '{') {
-            int n = pos < bufsize ? pos : bufsize;
-            memcpy(buf, line, (size_t)n);
-            *nread = n;
+        if (is_json) {
+            *nread = pos < bufsize ? pos : bufsize;
+            if (fo_mcp_framing < 0) fo_mcp_framing = 0;
             return;
         }
 
-        if (strncasecmp(line, "content-length:", 15) == 0) {
-            content_length = atoi(line + 15);
+        buf[pos] = '\0';
+        if (strncasecmp(buf, "content-length:", 15) == 0) {
+            content_length = atoi(buf + 15);
         }
     }
 
@@ -390,6 +397,8 @@ void fo_c_read_jsonrpc_message(char *buf, int bufsize, int *nread) {
         *nread = -1;
         return;
     }
+
+    if (fo_mcp_framing < 0) fo_mcp_framing = 1;
 
     {
         size_t total = 0;
@@ -401,6 +410,10 @@ void fo_c_read_jsonrpc_message(char *buf, int bufsize, int *nread) {
         }
         *nread = (int)total;
     }
+}
+
+int fo_c_get_mcp_framing(void) {
+    return fo_mcp_framing;
 }
 
 void fo_c_cancel_pid(int pid, int *exitcode) {
