@@ -6,8 +6,20 @@
 const { spawn } = require('child_process');
 const path = require('path');
 
-const FO = process.argv[2] || path.join(__dirname, '..', 'build',
-  'gfortran_4308FCC5A9F59874', 'app', 'fo');
+const FO = process.argv[2] || findLocalBuild();
+
+function findLocalBuild() {
+  const fs = require('fs');
+  const buildDir = path.join(__dirname, '..', 'build');
+  try {
+    const entries = fs.readdirSync(buildDir);
+    for (const entry of entries) {
+      const candidate = path.join(buildDir, entry, 'app', 'fo');
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  } catch (_) { /* no build dir */ }
+  return path.join(process.env.HOME || '', '.local', 'bin', 'fo');
+}
 
 let passed = 0;
 let failed = 0;
@@ -141,6 +153,16 @@ async function runSuite(label, send, readResponse) {
     const info = await readResponse(srv.proc);
     assert(info.result.isError === false, 'info not error');
     assert(info.result.content[0].text.includes('backend:'), 'info has backend');
+
+    process.stdout.write('tools/call lint:\n');
+    send(srv.proc, {
+      jsonrpc: '2.0', id: 8, method: 'tools/call',
+      params: { name: 'fo', arguments: { action: 'lint' } }
+    });
+    const lint = await readResponse(srv.proc);
+    assert(lint.result !== undefined && lint.result.content !== undefined, 'lint returns content');
+    assert(lint.result.content[0].text.includes('unused_imports'), 'lint has json output');
+    assert(fo.inputSchema.properties.action.enum.includes('lint'), 'has lint action');
 
     process.stdout.write('unknown method:\n');
     send(srv.proc, { jsonrpc: '2.0', id: 5, method: 'bogus/method', params: {} });
