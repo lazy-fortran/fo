@@ -6,7 +6,7 @@ module fo_scan
     integer, parameter, public :: MAX_UNITS = 2048
     integer, parameter :: MAX_DEPS = 64
 
-    public :: scan_unit_t, scan_file, scan_dir
+    public :: scan_unit_t, scan_file, scan_dir, is_slow_test
 
     type :: scan_unit_t
         character(len=MAX_NAME) :: filename = ''
@@ -293,5 +293,29 @@ contains
             end if
         end do
     end subroutine to_lower
+
+    logical function is_slow_test(name)
+        character(len=*), intent(in) :: name
+
+        character(len=MAX_NAME) :: lower_name
+        integer :: n
+
+        is_slow_test = .false.
+        lower_name = name
+        call to_lower(lower_name)
+        n = len_trim(lower_name)
+        if (n == 0) return
+
+        ! matches *_slow or *_slow_*
+        if (n >= 5) then
+            if (lower_name(n-4:n) == '_slow') then
+                is_slow_test = .true.
+                return
+            end if
+        end if
+        if (index(trim(lower_name), '_slow_') > 0) then
+            is_slow_test = .true.
+        end if
+    end function is_slow_test
 
 end module fo_scan

@@ -12,6 +12,7 @@ program test_dag
     call test_linear_chain()
     call test_diamond()
     call test_reverse_deps()
+    call test_affected_tests()
 
     write(output_unit, '(a,i0,a,i0,a)') 'dag: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -126,6 +127,61 @@ contains
         call dag_reverse_deps(dag, changed, 1, affected, n_affected)
         call assert(n_affected == 3, 'rdeps: changing c affects all 3')
     end subroutine test_reverse_deps
+
+    subroutine test_affected_tests()
+        ! lib_a (module), test_a (test program, depends on lib_a),
+        ! test_b (test program, no deps), lib_b (module, no rdeps)
+        ! changing lib_a should affect lib_a + test_a but not test_b or lib_b
+        type(scan_unit_t) :: units(4)
+        type(dag_t) :: dag
+        integer :: changed(1), affected(MAX_NODES), n_affected
+        integer :: i, n_test_affected
+
+        units(1)%filename = 'src/lib_a.f90'
+        units(1)%module_name = 'lib_a'
+        units(1)%n_deps = 0
+        units(1)%is_test = .false.
+
+        units(2)%filename = 'test/test_a.f90'
+        units(2)%program_name = 'test_a'
+        units(2)%is_program = .true.
+        units(2)%is_test = .true.
+        units(2)%n_deps = 1
+        units(2)%deps(1) = 'lib_a'
+
+        units(3)%filename = 'test/test_b.f90'
+        units(3)%program_name = 'test_b'
+        units(3)%is_program = .true.
+        units(3)%is_test = .true.
+        units(3)%n_deps = 0
+
+        units(4)%filename = 'src/lib_b.f90'
+        units(4)%module_name = 'lib_b'
+        units(4)%n_deps = 0
+        units(4)%is_test = .false.
+
+        call dag_build(units, 4, dag)
+        call assert(dag%n == 4, 'affected_tests: 4 nodes')
+
+        ! change lib_a
+        changed(1) = dag%find('lib_a')
+        call dag_reverse_deps(dag, changed, 1, affected, n_affected)
+
+        call assert(n_affected == 2, 'affected_tests: 2 affected (lib_a + test_a)')
+
+        ! count how many affected are tests
+        n_test_affected = 0
+        do i = 1, n_affected
+            if (dag%nodes(affected(i))%is_test) n_test_affected = n_test_affected + 1
+        end do
+        call assert(n_test_affected == 1, 'affected_tests: 1 affected test')
+
+        ! verify test_b is not affected
+        do i = 1, n_affected
+            call assert(trim(dag%nodes(affected(i))%name) /= 'test_b', &
+                'affected_tests: test_b not affected')
+        end do
+    end subroutine test_affected_tests
 
     function position(order, n, idx) result(pos)
         integer, intent(in) :: order(:), n, idx

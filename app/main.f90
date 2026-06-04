@@ -1,6 +1,6 @@
 program fo_main
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS
+    use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, is_slow_test
     use fo_dag, only: dag_t, dag_build, dag_topo_order, MAX_NODES
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, &
         BACKEND_FPM, BACKEND_CMAKE
@@ -33,6 +33,12 @@ program fo_main
         call cmd_info()
     case ('clean')
         call cmd_clean()
+    case ('watch')
+        call cmd_watch()
+    case ('mcp-server')
+        call cmd_mcp_server()
+    case ('lsp')
+        call cmd_lsp()
     case ('version', '--version')
         write(output_unit, '(a)') 'fo 0.1.0'
     case ('help', '--help', '-h')
@@ -56,8 +62,9 @@ contains
         integer :: order(MAX_NODES), n_order
         integer :: changed_ids(MAX_NODES), n_changed
         integer :: affected_ids(MAX_NODES), n_affected
-        integer :: n_cached
+        integer :: n_cached, i, n_test_names
         real :: t0, t1
+        character(len=128) :: test_names(MAX_NODES)
 
         call cpu_time(t0)
 
@@ -74,6 +81,9 @@ contains
             write(error_unit, '(a)') 'Static: FAIL scan error'
             stop 1
         end if
+
+        ! graceful skip for non-Fortran directories
+        if (n_units == 0) return
 
         call dag_build(units, n_units, dag)
         call dag_topo_order(dag, order, n_order, ierr)
@@ -98,11 +108,38 @@ contains
         end if
         write(output_unit, '(a)') 'Build: OK'
 
-        ! 3. test (skip slow by naming convention)
-        call b%test(exitcode)
-        if (exitcode /= 0) then
-            write(error_unit, '(a)') 'Tests: FAIL'
-            stop 1
+        ! 3. test: skip if nothing changed, otherwise run affected tests only
+        if (n_changed == 0) then
+            call cpu_time(t1)
+            write(output_unit, '(a,f0.1,a)') &
+                'Tests: skipped, all cached (', t1 - t0, 's)'
+            return
+        end if
+
+        ! collect affected test names (excluding slow)
+        n_test_names = 0
+        do i = 1, n_affected
+            if (dag%nodes(affected_ids(i))%is_test) then
+                if (.not. is_slow_test(dag%nodes(affected_ids(i))%name)) then
+                    n_test_names = n_test_names + 1
+                    test_names(n_test_names) = dag%nodes(affected_ids(i))%name
+                end if
+            end if
+        end do
+
+        if (n_test_names > 0) then
+            call b%test_names(test_names, n_test_names, exitcode)
+            if (exitcode /= 0) then
+                write(error_unit, '(a)') 'Tests: FAIL'
+                stop 1
+            end if
+        else
+            ! no specific affected tests found; run all non-slow
+            call b%test(exitcode)
+            if (exitcode /= 0) then
+                write(error_unit, '(a)') 'Tests: FAIL'
+                stop 1
+            end if
         end if
 
         call cpu_time(t1)
@@ -119,10 +156,13 @@ contains
         write(output_unit, '(a)') '  check    build + test, compact delta'
         write(output_unit, '(a)') '  changed  list changed and affected modules'
         write(output_unit, '(a)') '  build    build only'
-        write(output_unit, '(a)') '  test     run tests only'
+        write(output_unit, '(a)') '  test     run tests (--only-changed, --all)'
         write(output_unit, '(a)') '  graph    module dependency graph'
         write(output_unit, '(a)') '  info     detected backend and module count'
         write(output_unit, '(a)') '  clean    clear global build cache'
+        write(output_unit, '(a)') '  watch    inotify watch + rebuild loop'
+        write(output_unit, '(a)') '  mcp-server  MCP JSON-RPC server on stdin/stdout'
+        write(output_unit, '(a)') '  lsp      LSP server (didSave diagnostics)'
         write(output_unit, '(a)') '  version  print version'
     end subroutine print_usage
 
@@ -234,16 +274,64 @@ contains
     end subroutine get_flags_arg
 
     subroutine cmd_test()
+        use fo_dag, only: MAX_NODES
         type(backend_t) :: b
+        type(dag_t) :: dag
         integer :: exitcode
+        integer :: changed_ids(MAX_NODES), n_changed
+        integer :: affected_ids(MAX_NODES), n_affected
+        integer :: n_cached, ierr, i, n_test_names
+        logical :: only_changed, include_all
+        character(len=256) :: arg
+        character(len=128) :: test_names(MAX_NODES)
 
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
             write(error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             stop 1
         end if
-        call b%test(exitcode)
-        if (exitcode /= 0) stop 1
+
+        only_changed = .false.
+        include_all = .false.
+        do i = 2, command_argument_count()
+            call get_command_argument(i, arg)
+            if (trim(arg) == '--only-changed') only_changed = .true.
+            if (trim(arg) == '--all') include_all = .true.
+        end do
+
+        if (only_changed) then
+            call fo_changed_modules('.', dag, changed_ids, n_changed, &
+                affected_ids, n_affected, n_cached, ierr)
+            if (ierr /= 0) then
+                write(error_unit, '(a)') 'fo: scan or dag failed'
+                stop 1
+            end if
+
+            if (n_changed == 0) then
+                write(output_unit, '(a)') 'all cached, skipping tests'
+                return
+            end if
+
+            ! collect affected test names
+            n_test_names = 0
+            do i = 1, n_affected
+                if (dag%nodes(affected_ids(i))%is_test) then
+                    n_test_names = n_test_names + 1
+                    test_names(n_test_names) = dag%nodes(affected_ids(i))%name
+                end if
+            end do
+
+            if (n_test_names == 0) then
+                write(output_unit, '(a)') 'no affected tests'
+                return
+            end if
+
+            call b%test_names(test_names, n_test_names, exitcode, include_all)
+            if (exitcode /= 0) stop 1
+        else
+            call b%test(exitcode, include_all)
+            if (exitcode /= 0) stop 1
+        end if
     end subroutine cmd_test
 
     subroutine cmd_graph()
@@ -307,5 +395,20 @@ contains
             write(output_unit, '(a,i0)') 'modules: ', dag%n
         end if
     end subroutine cmd_info
+
+    subroutine cmd_watch()
+        use fo_watch, only: watch_loop
+        call watch_loop('.')
+    end subroutine cmd_watch
+
+    subroutine cmd_mcp_server()
+        use fo_mcp, only: mcp_serve
+        call mcp_serve()
+    end subroutine cmd_mcp_server
+
+    subroutine cmd_lsp()
+        use fo_lsp, only: lsp_serve
+        call lsp_serve()
+    end subroutine cmd_lsp
 
 end program fo_main

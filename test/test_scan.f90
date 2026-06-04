@@ -1,6 +1,6 @@
 program test_scan
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_scan, only: scan_unit_t, scan_file
+    use fo_scan, only: scan_unit_t, scan_file, scan_dir, MAX_UNITS, is_slow_test
     implicit none
 
     integer :: n_pass, n_fail
@@ -12,6 +12,8 @@ program test_scan
     call test_scan_module_def()
     call test_scan_program_def()
     call test_scan_intrinsic_skip()
+    call test_slow_test_detection()
+    call test_scan_dir_empty()
 
     write(output_unit, '(a,i0,a,i0,a)') 'scan: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -116,5 +118,44 @@ contains
         call assert(info%n_deps == 1, 'scan_intrinsic: 1 dep (intrinsic skipped)')
         call assert(trim(info%deps(1)) == 'my_lib', 'scan_intrinsic: dep is my_lib')
     end subroutine test_scan_intrinsic_skip
+
+    subroutine test_slow_test_detection()
+        ! *_slow suffix
+        call assert(is_slow_test('test_integration_slow'), &
+            'slow: test_integration_slow is slow')
+        call assert(is_slow_test('perf_slow'), &
+            'slow: perf_slow is slow')
+
+        ! *_slow_* infix
+        call assert(is_slow_test('test_slow_network'), &
+            'slow: test_slow_network is slow')
+        call assert(is_slow_test('my_slow_test'), &
+            'slow: my_slow_test is slow')
+
+        ! not slow
+        call assert(.not. is_slow_test('test_fast'), &
+            'slow: test_fast is not slow')
+        call assert(.not. is_slow_test('test_slowly'), &
+            'slow: test_slowly is not slow')
+        call assert(.not. is_slow_test('slowtest'), &
+            'slow: slowtest is not slow')
+        call assert(.not. is_slow_test('test_cache'), &
+            'slow: test_cache is not slow')
+    end subroutine test_slow_test_detection
+
+    subroutine test_scan_dir_empty()
+        type(scan_unit_t) :: units(MAX_UNITS)
+        integer :: n_units, ierr
+
+        ! scan a directory with no Fortran files
+        call execute_command_line('mkdir -p /tmp/fo_test_empty_dir')
+        call execute_command_line('rm -f /tmp/fo_test_empty_dir/*.f90')
+
+        call scan_dir('/tmp/fo_test_empty_dir', units, n_units, ierr)
+        call assert(ierr == 0, 'empty_dir: no error')
+        call assert(n_units == 0, 'empty_dir: 0 files')
+
+        call execute_command_line('rm -rf /tmp/fo_test_empty_dir')
+    end subroutine test_scan_dir_empty
 
 end program test_scan

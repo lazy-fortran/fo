@@ -1,6 +1,6 @@
 program test_backend
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_build_backend, only: backend_t, detect_backend, &
+    use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
         BACKEND_FPM, BACKEND_CMAKE, BACKEND_NONE
     implicit none
 
@@ -12,6 +12,7 @@ program test_backend
     call test_detect_fpm()
     call test_detect_cmake()
     call test_detect_none()
+    call test_nproc()
 
     write(output_unit, '(a,i0,a,i0,a)') 'backend: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -70,5 +71,12 @@ contains
 
         call execute_command_line('rm -rf /tmp/fo_test_none')
     end subroutine test_detect_none
+
+    subroutine test_nproc()
+        integer :: np
+
+        np = detect_nproc()
+        call assert(np >= 1, 'nproc >= 1')
+    end subroutine test_nproc
 
 end program test_backend

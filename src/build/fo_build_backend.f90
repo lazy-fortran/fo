@@ -2,7 +2,8 @@ module fo_build_backend
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
     private
-    public :: backend_t, detect_backend, BACKEND_FPM, BACKEND_CMAKE, BACKEND_NONE
+    public :: backend_t, detect_backend, detect_nproc
+    public :: BACKEND_FPM, BACKEND_CMAKE, BACKEND_NONE
 
     integer, parameter :: BACKEND_NONE = 0
     integer, parameter :: BACKEND_FPM = 1
@@ -14,6 +15,7 @@ module fo_build_backend
     contains
         procedure :: build => backend_build
         procedure :: test => backend_test
+        procedure :: test_names => backend_test_names
     end type backend_t
 
 contains
@@ -37,13 +39,39 @@ contains
         end if
     end function detect_backend
 
+    function detect_nproc() result(np)
+        integer :: np
+
+        character(len=32) :: buf
+        character(len=128) :: tmpfile, cmd
+        integer :: u, iostat
+
+        np = 1
+        tmpfile = '/tmp/fo_nproc.tmp'
+        cmd = 'nproc > '//trim(tmpfile)//' 2>/dev/null'
+        call execute_command_line(cmd, wait=.true.)
+
+        open(newunit=u, file=tmpfile, status='old', iostat=iostat)
+        if (iostat == 0) then
+            read(u, '(a)', iostat=iostat) buf
+            if (iostat == 0) read(buf, *, iostat=iostat) np
+            close(u)
+        end if
+        call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
+        if (np < 1) np = 1
+    end function detect_nproc
+
     subroutine backend_build(self, exitcode, flags)
         class(backend_t), intent(in) :: self
         integer, intent(out) :: exitcode
         character(len=*), intent(in), optional :: flags
 
-        integer :: cmdstat
+        integer :: cmdstat, np
         character(len=2048) :: cmd
+        character(len=8) :: np_str
+
+        np = detect_nproc()
+        write(np_str, '(i0)') np
 
         select case (self%kind)
         case (BACKEND_FPM)
@@ -58,11 +86,13 @@ contains
                 cmd = 'cd '//trim(self%project_dir)// &
                     ' && cmake -S . -B build -G Ninja'// &
                     ' -DCMAKE_Fortran_FLAGS="'//trim(flags)//'"'// &
-                    ' 2>&1 && cmake --build build 2>&1'
+                    ' 2>&1 && cmake --build build -j '// &
+                    trim(np_str)//' 2>&1'
             else
                 cmd = 'cd '//trim(self%project_dir)// &
                     ' && cmake -S . -B build -G Ninja 2>&1'// &
-                    ' && cmake --build build 2>&1'
+                    ' && cmake --build build -j '// &
+                    trim(np_str)//' 2>&1'
             end if
         case default
             write(error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
@@ -74,17 +104,20 @@ contains
         if (cmdstat /= 0) exitcode = 1
     end subroutine backend_build
 
-    subroutine backend_test(self, exitcode)
+    subroutine backend_test(self, exitcode, include_slow)
         class(backend_t), intent(in) :: self
         integer, intent(out) :: exitcode
+        logical, intent(in), optional :: include_slow
 
         integer :: cmdstat
         character(len=2048) :: cmd
-        logical :: has_tests
+        logical :: has_tests, slow
+
+        slow = .false.
+        if (present(include_slow)) slow = include_slow
 
         select case (self%kind)
         case (BACKEND_FPM)
-            ! check if test/ directory exists
             inquire(file=trim(self%project_dir)//'/test/.', exist=has_tests)
             if (.not. has_tests) then
                 exitcode = 0
@@ -98,8 +131,13 @@ contains
                 exitcode = 0
                 return
             end if
-            cmd = 'cd '//trim(self%project_dir)// &
-                ' && cd build && ctest --output-on-failure 2>&1'
+            if (slow) then
+                cmd = 'cd '//trim(self%project_dir)// &
+                    ' && cd build && ctest --output-on-failure 2>&1'
+            else
+                cmd = 'cd '//trim(self%project_dir)// &
+                    ' && cd build && ctest --output-on-failure -LE slow 2>&1'
+            end if
         case default
             write(error_unit, '(a)') 'fo: no build backend detected'
             exitcode = 1
@@ -109,5 +147,44 @@ contains
         call execute_command_line(cmd, exitstat=exitcode, cmdstat=cmdstat, wait=.true.)
         if (cmdstat /= 0) exitcode = 1
     end subroutine backend_test
+
+    subroutine backend_test_names(self, names, n_names, exitcode, include_slow)
+        use fo_scan, only: is_slow_test
+        class(backend_t), intent(in) :: self
+        character(len=128), intent(in) :: names(:)
+        integer, intent(in) :: n_names
+        integer, intent(out) :: exitcode
+        logical, intent(in), optional :: include_slow
+
+        integer :: cmdstat, i, sub_exit
+        character(len=2048) :: cmd
+        logical :: slow
+
+        slow = .false.
+        if (present(include_slow)) slow = include_slow
+        exitcode = 0
+
+        do i = 1, n_names
+            if (.not. slow .and. is_slow_test(names(i))) cycle
+
+            select case (self%kind)
+            case (BACKEND_FPM)
+                cmd = 'cd '//trim(self%project_dir)// &
+                    ' && fpm test '//trim(names(i))//' 2>&1'
+            case (BACKEND_CMAKE)
+                cmd = 'cd '//trim(self%project_dir)// &
+                    ' && cd build && ctest --output-on-failure -R '// &
+                    trim(names(i))//' 2>&1'
+            case default
+                exitcode = 1
+                return
+            end select
+
+            call execute_command_line(cmd, exitstat=sub_exit, &
+                cmdstat=cmdstat, wait=.true.)
+            if (cmdstat /= 0) sub_exit = 1
+            if (sub_exit /= 0) exitcode = sub_exit
+        end do
+    end subroutine backend_test_names
 
 end module fo_build_backend
