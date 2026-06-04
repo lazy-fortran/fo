@@ -12,8 +12,8 @@ program fo_main
 
     nargs = command_argument_count()
     if (nargs == 0) then
-        call print_usage()
-        stop 1
+        call cmd_run()
+        stop
     end if
 
     call get_command_argument(1, action)
@@ -45,10 +45,76 @@ program fo_main
 
 contains
 
+    subroutine cmd_run()
+        ! staged pipeline: static -> build -> test
+        ! stops at first failure, reports the failing stage
+        use fo_dag, only: MAX_NODES
+        type(backend_t) :: b
+        type(dag_t) :: dag
+        type(scan_unit_t) :: units(MAX_UNITS)
+        integer :: n_units, ierr, exitcode
+        integer :: order(MAX_NODES), n_order
+        integer :: changed_ids(MAX_NODES), n_changed
+        integer :: affected_ids(MAX_NODES), n_affected
+        integer :: n_cached
+        real :: t0, t1
+
+        call cpu_time(t0)
+
+        ! 0. detect backend
+        b = detect_backend('.')
+        if (b%kind == BACKEND_NONE) then
+            write(output_unit, '(a)') 'fo: no Fortran project detected'
+            return
+        end if
+
+        ! 1. static: scan + DAG cycle check
+        call scan_dir('.', units, n_units, ierr)
+        if (ierr /= 0) then
+            write(error_unit, '(a)') 'Static: FAIL scan error'
+            stop 1
+        end if
+
+        call dag_build(units, n_units, dag)
+        call dag_topo_order(dag, order, n_order, ierr)
+        if (ierr /= 0) then
+            write(error_unit, '(a)') 'Static: FAIL cycle in module graph'
+            stop 1
+        end if
+
+        ! compute changed modules
+        call fo_changed_modules('.', dag, changed_ids, n_changed, &
+            affected_ids, n_affected, n_cached, ierr)
+
+        write(output_unit, '(a,i0,a,i0,a,i0,a)') &
+            'Static: OK (', dag%n, ' modules, ', n_changed, &
+            ' changed, ', n_affected, ' affected)'
+
+        ! 2. build
+        call b%build(exitcode)
+        if (exitcode /= 0) then
+            write(error_unit, '(a)') 'Build: FAIL'
+            stop 1
+        end if
+        write(output_unit, '(a)') 'Build: OK'
+
+        ! 3. test (skip slow by naming convention)
+        call b%test(exitcode)
+        if (exitcode /= 0) then
+            write(error_unit, '(a)') 'Tests: FAIL'
+            stop 1
+        end if
+
+        call cpu_time(t1)
+        write(output_unit, '(a,f0.1,a)') 'Tests: OK (', t1 - t0, 's)'
+    end subroutine cmd_run
+
     subroutine print_usage()
         write(output_unit, '(a)') 'fo - Fortran build driver'
         write(output_unit, '(a)') ''
-        write(output_unit, '(a)') 'usage: fo <command>'
+        write(output_unit, '(a)') 'usage: fo [command]'
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a)') 'no command: staged pipeline (static -> build -> test)'
         write(output_unit, '(a)') ''
         write(output_unit, '(a)') '  check    build + test, compact delta'
         write(output_unit, '(a)') '  changed  list changed and affected modules'
