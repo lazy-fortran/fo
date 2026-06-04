@@ -14,7 +14,7 @@ program test_dag
     call test_reverse_deps()
     call test_affected_tests()
 
-    write(output_unit, '(a,i0,a,i0,a)') 'dag: ', n_pass, ' pass, ', n_fail, ' fail'
+    write (output_unit, '(a,i0,a,i0,a)') 'dag: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
 
 contains
@@ -27,7 +27,7 @@ contains
             n_pass = n_pass + 1
         else
             n_fail = n_fail + 1
-            write(error_unit, '(a,a)') 'FAIL: ', msg
+            write (error_unit, '(a,a)') 'FAIL: ', msg
         end if
     end subroutine assert
 
@@ -179,7 +179,7 @@ contains
         ! verify test_b is not affected
         do i = 1, n_affected
             call assert(trim(dag%nodes(affected(i))%name) /= 'test_b', &
-                'affected_tests: test_b not affected')
+                        'affected_tests: test_b not affected')
         end do
     end subroutine test_affected_tests
 

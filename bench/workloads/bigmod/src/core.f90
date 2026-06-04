@@ -5,6 +5,6 @@ contains
     function core_compute(x) result(y)
         integer, intent(in) :: x
         integer :: y
-        y = x * 2 + CORE_VERSION
+        y = x*2 + CORE_VERSION
     end function core_compute
 end module bigmod_core

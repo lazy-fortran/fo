@@ -21,7 +21,7 @@ contains
             ! read headers until blank line
             content_length = 0
             do
-                read(input_unit, '(a)', iostat=iostat) header_line
+                read (input_unit, '(a)', iostat=iostat) header_line
                 if (iostat /= 0) return
                 if (len_trim(header_line) == 0 .or. &
                     trim(header_line) == char(13)) exit
@@ -31,7 +31,7 @@ contains
             if (content_length <= 0 .or. content_length > MAX_LINE) cycle
 
             ! read body
-            read(input_unit, '(a)', iostat=iostat) body
+            read (input_unit, '(a)', iostat=iostat) body
             if (iostat /= 0) return
 
             call extract_json_field(body, '"method"', method)
@@ -57,7 +57,7 @@ contains
             case default
                 if (len_trim(id_str) > 0) then
                     call jsonrpc_error(id_str, -32601, &
-                        'method not found', response)
+                                       'method not found', response)
                     call send_jsonrpc(response)
                 end if
             end select
@@ -77,17 +77,17 @@ contains
         pos = index(lower_hdr, 'content-length:')
         if (pos == 0) return
 
-        read(header(pos+15:), *, iostat=iostat) length
+        read (header(pos + 15:), *, iostat=iostat) length
     end subroutine parse_content_length
 
     subroutine make_lsp_init_response(id_str, response)
         character(len=*), intent(in) :: id_str
         character(len=*), intent(out) :: response
 
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//',' // &
-            '"result":{"capabilities":{' // &
-            '"textDocumentSync":{"openClose":true,"save":true}' // &
-            '},"serverInfo":{"name":"fo","version":"0.1.0"}}}'
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+                   '"result":{"capabilities":{'// &
+                   '"textDocumentSync":{"openClose":true,"save":true}'// &
+                   '},"serverInfo":{"name":"fo","version":"0.1.0"}}}'
     end subroutine make_lsp_init_response
 
     subroutine handle_did_save(body)
@@ -102,7 +102,7 @@ contains
 
         call make_tmpfile('fo_lsp_check', tmpfile)
         call execute_command_line('fo check > '//trim(tmpfile)//' 2>&1', &
-            exitstat=exitcode, cmdstat=cmdstat, wait=.true.)
+                                  exitstat=exitcode, cmdstat=cmdstat, wait=.true.)
         if (cmdstat /= 0) exitcode = 1
 
         call read_text_file(tmpfile, diag_text)
@@ -111,21 +111,21 @@ contains
         ! publish diagnostics notification
         call json_escape(diag_text)
         if (exitcode /= 0) then
-            notification = '{"jsonrpc":"2.0",' // &
-                '"method":"textDocument/publishDiagnostics",' // &
-                '"params":{"uri":"'//trim(uri)//'",' // &
-                '"diagnostics":[{"range":{' // &
-                '"start":{"line":0,"character":0},' // &
-                '"end":{"line":0,"character":0}},' // &
-                '"severity":1,' // &
-                '"source":"fo",' // &
-                '"message":"'//trim(diag_text)//'"}]}}'
+            notification = '{"jsonrpc":"2.0",'// &
+                           '"method":"textDocument/publishDiagnostics",'// &
+                           '"params":{"uri":"'//trim(uri)//'",'// &
+                           '"diagnostics":[{"range":{'// &
+                           '"start":{"line":0,"character":0},'// &
+                           '"end":{"line":0,"character":0}},'// &
+                           '"severity":1,'// &
+                           '"source":"fo",'// &
+                           '"message":"'//trim(diag_text)//'"}]}}'
         else
             ! clear diagnostics on success
-            notification = '{"jsonrpc":"2.0",' // &
-                '"method":"textDocument/publishDiagnostics",' // &
-                '"params":{"uri":"'//trim(uri)//'",' // &
-                '"diagnostics":[]}}'
+            notification = '{"jsonrpc":"2.0",'// &
+                           '"method":"textDocument/publishDiagnostics",'// &
+                           '"params":{"uri":"'//trim(uri)//'",'// &
+                           '"diagnostics":[]}}'
         end if
 
         call send_jsonrpc(notification)

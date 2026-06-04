@@ -13,9 +13,11 @@ fo check          # build + test, one-line status
 fo check --json   # JSON status
 fo build          # build only
 fo test           # run tests
-fo lint           # check for unused imports
-fo lint --json    # unused imports as JSON
-fo                # staged pipeline: static -> build -> test
+fo lint           # unused imports + gfortran warnings
+fo lint --json    # lint results as JSON
+fo fmt            # format sources (fprettify, 88 col, 4 sp)
+fo graph --dot    # module DAG in Graphviz DOT format
+fo                # staged pipeline: static -> build -> test -> lint
 ```
 
 If `fo` is slower than the backend or cannot handle the project, fix
@@ -23,13 +25,13 @@ If `fo` is slower than the backend or cannot handle the project, fix
 
 ## Structure
 
-- `app/main.f90`: CLI entry point. Dispatches to check, build, test, lint, graph, info, watch, mcp-server, lsp.
+- `app/main.f90`: CLI entry point. Dispatches to check, build, test, lint, fmt, graph, info, watch, mcp-server, lsp.
 - `src/scan/`: module dependency scanner. Parses `use` and `module` statements.
 - `src/dag/`: directed acyclic graph. Topological sort, reverse-dependency closure.
 - `src/check/`: build + test runner (`fo_check`) and output formatters (`fo_check_output`).
 - `src/build/`: backend detection and dispatch (fpm, CMake). Argv execution via C shim.
 - `src/cache/`: content-addressed module cache. FNV-1a hashing of source + compiler + flags + deps.
-- `src/lint/`: unused-import linter. Parses `use ..., only:` and checks symbol references.
+- `src/lint/`: linter. Unused-import detection + gfortran compiler warnings (stack-size filtered, deduplicated).
 - `src/diag/`: log parser. Extracts file, line, column, target, hint from compiler and test output.
 - `src/compiler/`: compiler capability detection (identity, OpenMP, module-output-dir, depfile).
 - `src/mcp/`: MCP JSON-RPC server (`fo_mcp`) and response builders (`fo_mcp_response`).
@@ -42,7 +44,7 @@ If `fo` is slower than the backend or cannot handle the project, fix
 
 ## MCP Server
 
-`fo mcp-server` exposes a single `fo` tool over JSON-RPC/stdio. Actions: `check`, `build`, `test`, `lint`, `info`, `graph`, `changed`, `clean`, `status`, `diagnostics`, `cancel`.
+`fo mcp-server` exposes a single `fo` tool over JSON-RPC/stdio. Actions: `check`, `build`, `test`, `lint`, `fmt`, `info`, `graph`, `changed`, `clean`, `status`, `diagnostics`, `cancel`. Optional `dir` parameter targets a specific project directory.
 
 Protocol: auto-detects input framing (Content-Length headers or bare JSON lines) from the first message and mirrors it. Protocol version is echoed from the client's `initialize` request.
 

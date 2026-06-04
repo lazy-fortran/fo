@@ -33,8 +33,11 @@ contains
                    '"inputSchema":{"type":"object","properties":{'// &
                    '"action":{"type":"string",'// &
                    '"enum":["check","status","diagnostics","cancel",'// &
-                   '"build","test","graph","info","changed","clean","lint"],'// &
-                   '"description":"Action to run"}},'// &
+                   '"build","test","graph","info","changed","clean",'// &
+                   '"lint","fmt"],'// &
+                   '"description":"Action to run"},'// &
+                   '"dir":{"type":"string",'// &
+                   '"description":"Project directory (default: cwd)"}},'// &
                    '"required":["action"]}}]}}'
     end subroutine make_tools_list_response
 

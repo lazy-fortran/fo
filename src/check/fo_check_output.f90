@@ -101,7 +101,7 @@ contains
         line = base(1:len_trim(base) - 1)
         line = trim(line)//',"stage":"'//trim(json_escape_str(res%stage))//'"'
         line = trim(line)//',"target":"'//trim(json_escape_str(res%target))//'"'
-        line = trim(line)//',"summary":"'//trim(json_escape_str(agent_summary(res)))//'"'
+       line = trim(line)//',"summary":"'//trim(json_escape_str(agent_summary(res)))//'"'
         line = trim(line)//',"hint":"'//trim(json_escape_str(res%hint))//'"'
         line = trim(line)//',"rerun":"'//trim(json_escape_str(res%rerun))//'"'
         line = trim(line)//',"log_path":"'//trim(json_escape_str(res%log_path))//'"'
@@ -111,7 +111,7 @@ contains
             line = trim(line)//',"diagnostics":[{"kind":"'// &
                    trim(json_escape_str(res%stage))//'"'
             if (len_trim(res%diag_file) > 0) then
-                line = trim(line)//',"file":"'//trim(json_escape_str(res%diag_file))//'"'
+               line = trim(line)//',"file":"'//trim(json_escape_str(res%diag_file))//'"'
             else
                 line = trim(line)//',"file":""'
             end if
@@ -145,7 +145,7 @@ contains
         line = trim(line)//'"ok":'//trim(json_bool(ok))
         line = trim(line)//',"stage":"'//trim(json_escape_str(res%stage))//'"'
         line = trim(line)//',"target":"'//trim(json_escape_str(res%target))//'"'
-        line = trim(line)//',"summary":"'//trim(json_escape_str(agent_summary(res)))//'"'
+       line = trim(line)//',"summary":"'//trim(json_escape_str(agent_summary(res)))//'"'
         line = trim(line)//',"hint":"'//trim(json_escape_str(res%hint))//'"'
         line = trim(line)//',"rerun":"'//trim(json_escape_str(res%rerun))//'"'
         line = trim(line)//',"log_path":"'//trim(json_escape_str(res%log_path))//'"'

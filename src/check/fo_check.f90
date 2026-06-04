@@ -384,7 +384,6 @@ contains
         end if
     end subroutine set_failure
 
-
     subroutine detect_compiler(compiler)
         character(len=*), intent(out) :: compiler
 

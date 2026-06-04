@@ -40,11 +40,11 @@ contains
         do i = 1, n_units
             if (len_trim(units(i)%module_name) > 0) then
                 call add_node(dag, units(i)%module_name, units(i)%filename, &
-                    .false., units(i)%is_test)
+                              .false., units(i)%is_test)
             end if
             if (units(i)%is_program) then
                 call add_node(dag, units(i)%program_name, units(i)%filename, &
-                    .true., units(i)%is_test)
+                              .true., units(i)%is_test)
             end if
         end do
 

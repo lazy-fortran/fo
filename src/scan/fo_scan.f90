@@ -21,17 +21,17 @@ module fo_scan
     end type scan_unit_t
 
     character(len=32), dimension(10), parameter :: INTRINSIC_MODULES = [ &
-        'iso_fortran_env  ', &
-        'iso_c_binding    ', &
-        'ieee_arithmetic  ', &
-        'ieee_exceptions  ', &
-        'ieee_features    ', &
-        'omp_lib          ', &
-        'openacc          ', &
-        'mpi              ', &
-        'mpi_f08          ', &
-        'coarray_intrinsic' &
-        ]
+                                                   'iso_fortran_env  ', &
+                                                   'iso_c_binding    ', &
+                                                   'ieee_arithmetic  ', &
+                                                   'ieee_exceptions  ', &
+                                                   'ieee_features    ', &
+                                                   'omp_lib          ', &
+                                                   'openacc          ', &
+                                                   'mpi              ', &
+                                                   'mpi_f08          ', &
+                                                   'coarray_intrinsic' &
+                                                   ]
 
 contains
 
@@ -321,7 +321,7 @@ contains
 
         ! matches *_slow or *_slow_*
         if (n >= 5) then
-            if (lower_name(n-4:n) == '_slow') then
+            if (lower_name(n - 4:n) == '_slow') then
                 is_slow_test = .true.
                 return
             end if

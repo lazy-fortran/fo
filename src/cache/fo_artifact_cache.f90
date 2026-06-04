@@ -33,14 +33,14 @@ contains
 
         ! find all .mod files in the build tree
         cmd = 'find '//trim(build_dir)// &
-            " -name '*.mod' -type f 2>/dev/null > "//trim(tmpfile)
+              " -name '*.mod' -type f 2>/dev/null > "//trim(tmpfile)
         call execute_command_line(cmd, wait=.true.)
 
-        open(newunit=u, file=tmpfile, status='old', iostat=iostat)
+        open (newunit=u, file=tmpfile, status='old', iostat=iostat)
         if (iostat /= 0) return
 
         do
-            read(u, '(a)', iostat=iostat) line
+            read (u, '(a)', iostat=iostat) line
             if (iostat /= 0) exit
             if (len_trim(line) == 0) cycle
 
@@ -59,7 +59,7 @@ contains
                 logical :: exists
 
                 ofile = line(1:len_trim(line) - 4)//'.o'
-                inquire(file=ofile, exist=exists)
+                inquire (file=ofile, exist=exists)
                 if (exists) then
                     cmd = 'cp -n '//trim(ofile)//' '//trim(objdir)//'/ 2>/dev/null'
                     call execute_command_line(cmd, wait=.true.)
@@ -67,7 +67,7 @@ contains
             end block
         end do
 
-        close(u)
+        close (u)
         call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
     end subroutine artifact_store
 
@@ -85,28 +85,28 @@ contains
         n_restored = 0
         call artifact_cache_dir(basedir)
 
-        inquire(file=trim(basedir)//'/.', exist=exists)
+        inquire (file=trim(basedir)//'/.', exist=exists)
         if (.not. exists) return
 
         call make_tmpfile('fo_artifact_restore', tmpfile)
 
         ! find all .mod files in the build tree
         cmd = 'find '//trim(build_dir)// &
-            " -name '*.mod' -type f 2>/dev/null > "//trim(tmpfile)
+              " -name '*.mod' -type f 2>/dev/null > "//trim(tmpfile)
         call execute_command_line(cmd, wait=.true.)
 
-        open(newunit=u, file=tmpfile, status='old', iostat=iostat)
+        open (newunit=u, file=tmpfile, status='old', iostat=iostat)
         if (iostat /= 0) return
 
         do
-            read(u, '(a)', iostat=iostat) line
+            read (u, '(a)', iostat=iostat) line
             if (iostat /= 0) exit
             if (len_trim(line) == 0) cycle
 
             call hash_mod_file(trim(line), key)
             objdir = trim(basedir)//'/'//key
 
-            inquire(file=trim(objdir)//'/.', exist=exists)
+            inquire (file=trim(objdir)//'/.', exist=exists)
             if (exists) then
                 ! cached artifacts exist; .mod is already current (same hash)
                 ! but check for .o
@@ -117,15 +117,15 @@ contains
 
                     ! extract mod filename
                     last_slash = index(line, '/', back=.true.)
-                    mod_basename = line(last_slash+1:)
+                    mod_basename = line(last_slash + 1:)
                     last_dot = index(mod_basename, '.', back=.true.)
 
                     ofile = line(1:len_trim(line) - 4)//'.o'
                     cached_o = trim(objdir)//'/'// &
-                        mod_basename(1:last_dot-1)//'.o'
+                               mod_basename(1:last_dot - 1)//'.o'
 
-                    inquire(file=ofile, exist=o_exists)
-                    inquire(file=cached_o, exist=cached_o_exists)
+                    inquire (file=ofile, exist=o_exists)
+                    inquire (file=cached_o, exist=cached_o_exists)
 
                     if (.not. o_exists .and. cached_o_exists) then
                         cmd = 'cp '//trim(cached_o)//' '//trim(ofile)
@@ -136,7 +136,7 @@ contains
             end if
         end do
 
-        close(u)
+        close (u)
         call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
     end subroutine artifact_restore
 

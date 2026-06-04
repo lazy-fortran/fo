@@ -37,6 +37,8 @@ program fo_main
         call cmd_info()
     case ('lint')
         call cmd_lint()
+    case ('fmt', 'format')
+        call cmd_fmt()
     case ('clean')
         call cmd_clean()
     case ('watch')
@@ -58,8 +60,7 @@ program fo_main
 contains
 
     subroutine cmd_run()
-        ! staged pipeline: static -> build -> test
-        ! stops at first failure, reports the failing stage
+        ! staged pipeline: static -> build -> test -> lint
         use fo_dag, only: MAX_NODES
         type(backend_t) :: b
         type(dag_t) :: dag
@@ -160,8 +161,31 @@ contains
             end if
         end if
 
+        write (output_unit, '(a)') 'Tests: OK'
+
+        ! 4. lint: unused imports (skip compiler warnings in pipeline)
+        block
+            use fo_lint, only: lint_finding_t, lint_dir, MAX_FINDINGS
+            type(lint_finding_t) :: findings(MAX_FINDINGS)
+            integer :: n_findings, li
+
+            call lint_dir(trim(b%project_dir), findings, n_findings)
+            if (n_findings > 0) then
+                do li = 1, n_findings
+                    write (error_unit, '(a,a,i0,a,a,a,a)') &
+                        trim(findings(li)%file), ':', findings(li)%line, &
+                        ': unused import ', trim(findings(li)%symbol), &
+                        ' from ', trim(findings(li)%module_name)
+                end do
+                write (error_unit, '(a,i0,a)') &
+                    'Lint: FAIL (', n_findings, ' unused imports)'
+                stop 1
+            end if
+        end block
+        write (output_unit, '(a)') 'Lint: OK'
+
         call cpu_time(t1)
-        write (output_unit, '(a,f0.1,a)') 'Tests: OK (', t1 - t0, 's)'
+        write (output_unit, '(a,f0.1,a)') 'All stages passed (', t1 - t0, 's)'
     end subroutine cmd_run
 
     subroutine print_usage()
@@ -172,7 +196,7 @@ contains
         write (output_unit, '(a)') ''
         write (output_unit, '(a)') 'usage: fo [command]'
         write (output_unit, '(a)') ''
-        write (output_unit, '(a)') '  (none)     static -> build -> test (the default)'
+        write (output_unit, '(a)') '  (none)     static -> build -> test -> lint'
         write (output_unit, '(a)') '  build      build only (--flag "-O0")'
         write (output_unit, '(a)') '  test       run tests (--only-changed, --all)'
         write (output_unit, '(a)') '  check      build + test, one-line status'
@@ -182,6 +206,8 @@ contains
         write (output_unit, '(a)') '  check --agent  compact JSON for opencode/Qwen'
         write (output_unit, '(a)') '  changed    list changed and affected modules'
         write (output_unit, '(a)') '  graph      module dependency graph'
+        write (output_unit, '(a)') '  graph --dot  graph in Graphviz DOT format'
+      write (output_unit, '(a)') '  fmt        format sources (fprettify, 88 col, 4 sp)'
         write (output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
         write (output_unit, '(a)') '  lint       unused imports + gfortran warnings'
         write (output_unit, '(a)') '  lint --json  lint results as JSON'
@@ -455,10 +481,12 @@ contains
         type(backend_t) :: b
         character(len=512) :: scan_root
         integer :: n_units, ierr, i, j
+        logical :: dot_mode
 
         b = detect_backend('.')
         scan_root = '.'
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+        dot_mode = has_arg('--dot')
 
         call scan_dir(trim(scan_root), units, n_units, ierr)
         if (ierr /= 0) then
@@ -468,21 +496,42 @@ contains
 
         call dag_build(units, n_units, dag)
 
-        do i = 1, dag%n
-            if (dag%nodes(i)%n_deps == 0) then
-                write (output_unit, '(a)') trim(dag%nodes(i)%name)
-            else
-                do j = 1, dag%nodes(i)%n_deps
-                    write (output_unit, '(a,a,a)') trim(dag%nodes(i)%name), &
-                        ' -> ', trim(dag%nodes(dag%nodes(i)%dep_ids(j))%name)
-                end do
-            end if
-        end do
+        if (dot_mode) then
+            write (output_unit, '(a)') 'digraph modules {'
+            write (output_unit, '(a)') '  rankdir=BT;'
+            write (output_unit, '(a)') '  node [shape=box, fontsize=10];'
+            do i = 1, dag%n
+                if (dag%nodes(i)%n_deps == 0) then
+                    write (output_unit, '(a,a,a)') &
+                        '  "', trim(dag%nodes(i)%name), '";'
+                else
+                    do j = 1, dag%nodes(i)%n_deps
+                        write (output_unit, '(a,a,a,a,a)') &
+                            '  "', trim(dag%nodes(i)%name), '" -> "', &
+                            trim(dag%nodes(dag%nodes(i)%dep_ids(j))%name), '";'
+                    end do
+                end if
+            end do
+            write (output_unit, '(a)') '}'
+        else
+            do i = 1, dag%n
+                if (dag%nodes(i)%n_deps == 0) then
+                    write (output_unit, '(a)') trim(dag%nodes(i)%name)
+                else
+                    do j = 1, dag%nodes(i)%n_deps
+                        write (output_unit, '(a,a,a)') &
+                            trim(dag%nodes(i)%name), &
+                            ' -> ', &
+                            trim(dag%nodes(dag%nodes(i)%dep_ids(j))%name)
+                    end do
+                end if
+            end do
+        end if
     end subroutine cmd_graph
 
     subroutine cmd_lint()
         use fo_lint, only: lint_finding_t, lint_warning_t, &
-                           lint_dir, lint_compiler, &
+                           lint_dir, lint_compiler, lint_dedup_warnings, &
                            lint_all_json, MAX_FINDINGS, MAX_WARNINGS
         type(backend_t) :: b
         type(lint_finding_t) :: findings(MAX_FINDINGS)
@@ -498,6 +547,7 @@ contains
 
         call lint_dir(trim(scan_root), findings, n_findings)
         call lint_compiler(trim(scan_root), warnings, n_warnings)
+        call lint_dedup_warnings(warnings, n_warnings)
 
         if (output_mode > 0) then
             write (output_unit, '(a)') &
@@ -524,6 +574,29 @@ contains
             stop 1, quiet = .true.
         end if
     end subroutine cmd_lint
+
+    subroutine cmd_fmt()
+        type(backend_t) :: b
+        character(len=512) :: scan_root
+        character(len=4096) :: cmd
+        integer :: exitcode
+
+        b = detect_backend('.')
+        scan_root = '.'
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+
+        cmd = 'find '//trim(scan_root)// &
+              " -path '*/build' -prune -o"// &
+              " -path '*/.git' -prune -o"// &
+              " \( -name '*.f90' -o -name '*.F90' \) -print"// &
+              " | xargs -r fprettify -i 4 -l 88 --strict-indent"
+        call execute_command_line(cmd, exitstat=exitcode, wait=.true.)
+        if (exitcode /= 0) then
+            write (error_unit, '(a)') 'fo fmt: fprettify failed'
+            stop 1, quiet = .true.
+        end if
+        write (output_unit, '(a)') 'formatted'
+    end subroutine cmd_fmt
 
     subroutine cmd_clean()
         use fo_cache, only: cache_t, cache_init

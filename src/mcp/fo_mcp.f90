@@ -78,7 +78,7 @@ contains
             case default
                 if (len_trim(id_str) > 0) then
                     call jsonrpc_error(id_str, -32601, &
-                                             'method not found', response)
+                                       'method not found', response)
                     call send_jsonrpc(response)
                 end if
             end select
@@ -106,10 +106,12 @@ contains
         character(len=64) :: action, mode
         character(len=8192) :: output_text
         integer :: exitcode, cmdstat
-        character(len=512) :: tmpfile, cmd
+        character(len=512) :: tmpfile, cmd, dir
         type(check_result_t) :: check_res
 
         call extract_json_field(line, '"action"', action)
+        call extract_json_field(line, '"dir"', dir)
+        if (len_trim(dir) == 0) dir = '.'
         call make_tmpfile('fo_mcp_output', tmpfile)
 
         select case (trim(action))
@@ -120,26 +122,26 @@ contains
                 return
             else
                 block
-                logical :: want_full
-                type(capabilities_t) :: cap
-                character(len=2048) :: cap_json
+                    logical :: want_full
+                    type(capabilities_t) :: cap
+                    character(len=2048) :: cap_json
 
-                want_full = (index(line, '"full"') > 0 .or. &
-                             index(line, '"json":"full"') > 0)
-                cap_json = ''
-                if (want_full) then
-                    call detect_capabilities(cap)
-                    call capabilities_json(cap, cap_json)
-                end if
-                call fo_check_run('.', check_res)
-                if (want_full) then
-                    output_text = check_result_full_json(check_res, cap_json)
-                else
-                    output_text = check_result_compact_json(check_res)
-                end if
-                exitcode = 0
-                if (.not. (check_res%build_ok .and. check_res%tests_ok)) exitcode = 1
-                call make_tool_text_response(id_str, output_text, exitcode, response)
+                    want_full = (index(line, '"full"') > 0 .or. &
+                                 index(line, '"json":"full"') > 0)
+                    cap_json = ''
+                    if (want_full) then
+                        call detect_capabilities(cap)
+                        call capabilities_json(cap, cap_json)
+                    end if
+                    call fo_check_run(trim(dir), check_res)
+                    if (want_full) then
+                        output_text = check_result_full_json(check_res, cap_json)
+                    else
+                        output_text = check_result_compact_json(check_res)
+                    end if
+                    exitcode = 0
+                   if (.not. (check_res%build_ok .and. check_res%tests_ok)) exitcode = 1
+                   call make_tool_text_response(id_str, output_text, exitcode, response)
                 end block
             end if
         case ('status')
@@ -155,6 +157,7 @@ contains
             block
                 use fo_lint, only: lint_finding_t, lint_warning_t, &
                                    lint_dir, lint_compiler, &
+                                   lint_dedup_warnings, &
                                    lint_all_json, &
                                    MAX_FINDINGS, MAX_WARNINGS
                 type(lint_finding_t) :: findings(MAX_FINDINGS)
@@ -162,8 +165,9 @@ contains
                 integer :: n_findings, n_warnings
                 character(len=16384) :: lint_output
 
-                call lint_dir('.', findings, n_findings)
-                call lint_compiler('.', warnings, n_warnings)
+                call lint_dir(trim(dir), findings, n_findings)
+                call lint_compiler(trim(dir), warnings, n_warnings)
+                call lint_dedup_warnings(warnings, n_warnings)
                 lint_output = lint_all_json(findings, n_findings, &
                                             warnings, n_warnings)
                 exitcode = 0
@@ -173,8 +177,18 @@ contains
             end block
             call delete_tmpfile(tmpfile)
             return
+        case ('fmt')
+            cmd = 'cd '//trim(dir)//' && fo fmt > '// &
+                  trim(tmpfile)//' 2>&1'
+            call execute_command_line(cmd, exitstat=exitcode, &
+                                      cmdstat=cmdstat, wait=.true.)
+            if (cmdstat /= 0) exitcode = 1
+            call read_text_file(tmpfile, output_text)
+            call delete_tmpfile(tmpfile)
+            call make_tool_text_response(id_str, output_text, exitcode, response)
         case ('build', 'test', 'graph', 'info', 'changed', 'clean')
-            cmd = 'fo '//trim(action)//' > '//trim(tmpfile)//' 2>&1'
+            cmd = 'cd '//trim(dir)//' && fo '//trim(action)// &
+                  ' > '//trim(tmpfile)//' 2>&1'
             call execute_command_line(cmd, exitstat=exitcode, &
                                       cmdstat=cmdstat, wait=.true.)
             if (cmdstat /= 0) exitcode = 1
@@ -185,7 +199,7 @@ contains
             call make_tool_text_response(id_str, output_text, exitcode, response)
         case default
             call jsonrpc_error(id_str, -32602, &
-                                     'unknown action: '//trim(action), response)
+                               'unknown action: '//trim(action), response)
         end select
     end subroutine handle_tools_call
 
@@ -221,7 +235,7 @@ contains
                        '"text":"'//trim(output_text)//'"}]}}'
         else
             call jsonrpc_error(id_str, -32602, &
-                                     'unknown resource', response)
+                               'unknown resource', response)
         end if
     end subroutine handle_resources_read
 
@@ -258,7 +272,7 @@ contains
             call async_start_current(async_state, 0, ierr)
             if (ierr /= 0) then
                 call jsonrpc_error(id_str, -32603, &
-                                         'could not start check', response)
+                                   'could not start check', response)
                 return
             end if
             run_id = async_state%active_run_id

@@ -4,6 +4,7 @@ module fo_lint
     private
     public :: lint_finding_t, lint_file, lint_dir, lint_findings_json
     public :: lint_warning_t, lint_compiler, lint_warnings_json, lint_all_json
+    public :: lint_dedup_warnings
     public :: MAX_FINDINGS, MAX_WARNINGS
 
     integer, parameter :: MAX_FINDINGS = 512
@@ -174,12 +175,12 @@ contains
 
             arrow_pos = index(token, '=>')
             if (arrow_pos > 0) then
-                local_names(n_syms) = token(1:arrow_pos - 1)
-                syms(n_syms) = token
+                local_names(n_syms) = trim(token(1:arrow_pos - 1))
+                syms(n_syms) = trim(token)
                 call strip_trailing(local_names(n_syms))
             else
-                syms(n_syms) = token
-                local_names(n_syms) = token
+                syms(n_syms) = trim(token)
+                local_names(n_syms) = trim(token)
             end if
 
             if (start > len_trim(after_only)) exit
@@ -219,20 +220,20 @@ contains
 
             pos = 1
             do
-                pos = index(lowered(i)(pos:), trim(search_sym))
+                pos = index(lowered(i) (pos:), trim(search_sym))
                 if (pos == 0) exit
                 pos = pos + (1 - 1)
                 ! recompute absolute position
                 block
                     integer :: abs_pos
-                    abs_pos = index(lowered(i)(1:), trim(search_sym))
+                    abs_pos = index(lowered(i) (1:), trim(search_sym))
                     if (abs_pos == 0) exit
                     ! check word boundary
                     before_ch = ' '
-                    if (abs_pos > 1) before_ch = lowered(i)(abs_pos - 1:abs_pos - 1)
+                    if (abs_pos > 1) before_ch = lowered(i) (abs_pos - 1:abs_pos - 1)
                     after_ch = ' '
                     if (abs_pos + sym_len <= len_trim(lowered(i))) &
-                        after_ch = lowered(i)(abs_pos + sym_len:abs_pos + sym_len)
+                        after_ch = lowered(i) (abs_pos + sym_len:abs_pos + sym_len)
                     if (.not. is_ident_char(before_ch) .and. &
                         .not. is_ident_char(after_ch)) then
                         used = .true.
@@ -448,14 +449,15 @@ contains
         if (index(clean, 'Warning:') /= 1) return
         if (index(clean, "Can't open module file") > 0) return
         if (index(clean, 'Fatal Error') > 0) return
+        if (index(clean, 'stack-var-size') > 0) return
         if (len_trim(cur_file) == 0) return
         if (n_warnings >= MAX_WARNINGS) return
 
         n_warnings = n_warnings + 1
-        warnings(n_warnings)%file = cur_file
+        warnings(n_warnings)%file = trim(cur_file)
         warnings(n_warnings)%line = cur_line
         warnings(n_warnings)%column = cur_col
-        warnings(n_warnings)%message = clean
+        warnings(n_warnings)%message = trim(clean)
     end subroutine parse_gfortran_warning
 
     function lint_warnings_json(warnings, n_warnings) result(json)
@@ -484,7 +486,7 @@ contains
     end function lint_warnings_json
 
     function lint_all_json(findings, n_findings, warnings, n_warnings) &
-            result(json)
+        result(json)
         type(lint_finding_t), intent(in) :: findings(*)
         integer, intent(in) :: n_findings
         type(lint_warning_t), intent(in) :: warnings(*)
@@ -583,5 +585,31 @@ contains
                         (ic >= iachar('0') .and. ic <= iachar('9')) .or. &
                         c == '_'
     end function is_ident_char
+
+    subroutine lint_dedup_warnings(warnings, n_warnings)
+        type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
+        integer, intent(inout) :: n_warnings
+
+        integer :: i, j, out
+        logical :: dup
+
+        out = 0
+        do i = 1, n_warnings
+            dup = .false.
+            do j = 1, out
+                if (trim(warnings(j)%file) == trim(warnings(i)%file) .and. &
+                    warnings(j)%line == warnings(i)%line .and. &
+                    trim(warnings(j)%message) == trim(warnings(i)%message)) then
+                    dup = .true.
+                    exit
+                end if
+            end do
+            if (.not. dup) then
+                out = out + 1
+                if (out /= i) warnings(out) = warnings(i)
+            end if
+        end do
+        n_warnings = out
+    end subroutine lint_dedup_warnings
 
 end module fo_lint
