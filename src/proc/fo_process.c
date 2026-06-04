@@ -349,6 +349,60 @@ void fo_c_poll_pid(int pid, int *done, int *exitcode) {
     }
 }
 
+void fo_c_read_jsonrpc_message(char *buf, int bufsize, int *nread) {
+    int content_length = -1;
+    char line[512];
+    int pos = 0;
+    int ch;
+
+    *nread = 0;
+    if (bufsize <= 0) return;
+
+    for (;;) {
+        pos = 0;
+        for (;;) {
+            ch = fgetc(stdin);
+            if (ch == EOF) { *nread = -1; return; }
+            if (ch == '\r') continue;
+            if (ch == '\n') break;
+            if (pos < (int)sizeof(line) - 1) line[pos++] = (char)ch;
+        }
+        line[pos] = '\0';
+
+        if (pos == 0) {
+            if (content_length > 0) break;
+            continue;
+        }
+
+        if (pos > 0 && line[0] == '{') {
+            int n = pos < bufsize ? pos : bufsize;
+            memcpy(buf, line, (size_t)n);
+            *nread = n;
+            return;
+        }
+
+        if (strncasecmp(line, "content-length:", 15) == 0) {
+            content_length = atoi(line + 15);
+        }
+    }
+
+    if (content_length <= 0 || content_length > bufsize) {
+        *nread = -1;
+        return;
+    }
+
+    {
+        size_t total = 0;
+        while ((int)total < content_length) {
+            size_t got = fread(buf + total, 1,
+                               (size_t)(content_length - (int)total), stdin);
+            if (got == 0) break;
+            total += got;
+        }
+        *nread = (int)total;
+    }
+}
+
 void fo_c_cancel_pid(int pid, int *exitcode) {
     int status;
 

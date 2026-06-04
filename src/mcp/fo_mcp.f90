@@ -8,7 +8,7 @@ module fo_mcp
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
                                capabilities_json
     use fo_process, only: process_start_fo_check, process_poll_pid, &
-                          process_cancel_pid
+                          process_cancel_pid, process_read_jsonrpc_message
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
                             RUN_RERUN_PENDING
     implicit none
@@ -85,62 +85,17 @@ contains
         character(len=*), intent(out) :: body
         integer, intent(out) :: iostat
 
-        character(len=512) :: header_line
-        integer :: content_length, pos, hdr_iostat
+        integer :: nread
 
         body = ''
         iostat = 0
-        content_length = 0
-
-        read (input_unit, '(a)', iostat=iostat) header_line
-        if (iostat /= 0) return
-
-        if (index(header_line, '{') > 0) then
-            body = header_line
-            return
-        end if
-
-        call parse_content_length_header(header_line, content_length)
-        do
-            read (input_unit, '(a)', iostat=iostat) header_line
-            if (iostat /= 0) return
-            if (len_trim(header_line) == 0 .or. &
-                trim(header_line) == char(13)) exit
-            call parse_content_length_header(header_line, content_length)
-        end do
-
-        if (content_length <= 0 .or. content_length > len(body)) then
+        call process_read_jsonrpc_message(body, nread)
+        if (nread < 0) then
             iostat = -1
-            return
+        else if (nread == 0) then
+            iostat = -1
         end if
-
-        read (input_unit, '(a)', iostat=iostat) body
     end subroutine read_jsonrpc_message
-
-    subroutine parse_content_length_header(header, length)
-        character(len=*), intent(in) :: header
-        integer, intent(inout) :: length
-
-        integer :: pos, rd_iostat
-        character(len=512) :: lower_hdr
-
-        lower_hdr = header
-        call to_lower_mcp(lower_hdr)
-        pos = index(lower_hdr, 'content-length:')
-        if (pos == 0) return
-        read (header(pos + 15:), *, iostat=rd_iostat) length
-    end subroutine parse_content_length_header
-
-    subroutine to_lower_mcp(str)
-        character(len=*), intent(inout) :: str
-        integer :: i, ic
-
-        do i = 1, len_trim(str)
-            ic = iachar(str(i:i))
-            if (ic >= iachar('A') .and. ic <= iachar('Z')) &
-                str(i:i) = achar(ic + 32)
-        end do
-    end subroutine to_lower_mcp
 
     subroutine make_initialize_response(id_str, response)
         character(len=*), intent(in) :: id_str

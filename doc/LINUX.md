@@ -230,20 +230,9 @@ for the AI agent loop.
 
 Content-addressed caching: fo hashes `source + flags + compiler_version +
 dependency_mod_hashes` to a store key. Cache hit skips compilation entirely.
-<<<<<<< HEAD
-<<<<<<< HEAD
 ccache and sccache use the same content-addressed model for C/C++/Rust but do
 not support Fortran: they cannot track `.mod` file dependencies. fo builds
 this cache from scratch, unified with the Nix-compatible object store.
-=======
-This is the same model as ccache/sccache but unified with the object store
-rather than a side cache.
->>>>>>> cc74e02 (docs(fo): fo on Linux via kernel primitives, no custom OS needed)
-=======
-ccache and sccache use the same content-addressed model for C/C++/Rust but do
-not support Fortran: they cannot track `.mod` file dependencies. fo builds
-this cache from scratch, unified with the Nix-compatible object store.
->>>>>>> 590011e (docs(fo): reuse Nix/CRIU/git, build Fortran .mod cache and checkpoint integration)
 
 Module DAG parallelism: independent modules compile in parallel. fo resolves
 the module dependency graph from `use` statements (a DAG walk, not a full
@@ -389,8 +378,6 @@ Three things, none of which blocks fo:
    with own firmware. fo validates the same property via capsule hashes on
    Linux.
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 ## Implementation order
 
 fo stays in this repository. The compiler chain, the store, and the build
@@ -417,55 +404,6 @@ Each step is independently useful:
    bridge.
 6. **Economy.** Cost model over the capsule lineage graph, tiering policy, gc
    over the Nix-compatible store.
-=======
-## Migration path
-=======
-## Implementation order
->>>>>>> 590011e (docs(fo): reuse Nix/CRIU/git, build Fortran .mod cache and checkpoint integration)
-
-fo stays in this repository. The compiler chain, the store, and the build
-driver share the Fortran `.mod` format and the content-addressed object
-layout; separating them creates cross-repo friction for no gain.
-
-The logos OS work (`bootstrap/os/`) stays as an optional long-horizon target.
-`PLAN.md` and `HAL.md` continue to specify the bare-metal path.
-
-Each step is independently useful:
-
-<<<<<<< HEAD
-Implementation order:
-
-1. Store library: BLAKE3 + FastCDC chunker + warm index + mmap backing.
-2. Build core: module DAG, content-addressed cache, incremental rebuild,
-   inotify watch, affected-test selection.
-3. Capsules: mount-namespace isolation, Landlock + seccomp sandbox, lineage
-   recording, reproducibility verification.
-4. Checkpoint: userfaultfd dirty tracking, incremental CRIU integration,
-   store-backed page images.
-5. Surfaces: CLI (`fo build/run/test`), MCP server, web canvas, voice bridge.
-6. Economy: cost model over the capsule graph, tiering policy, gc.
-
-Each step is independently useful. Step 1-2 replace the interim `fo.py`.
-Step 3 is the Nix-like reproducibility layer. Step 4 is the checkpoint
-innovation. Step 5-6 are the agent integration.
->>>>>>> cc74e02 (docs(fo): fo on Linux via kernel primitives, no custom OS needed)
-=======
-1. **Nix-compatible store library.** Integrate with the Nix store layout for
-   closures and gc. Add BLAKE3 hashing and FastCDC chunking for large objects.
-   mmap-backed warm index.
-2. **Fortran build core.** `.mod` DAG resolution, content-addressed cache,
-   incremental rebuild, inotify watch, affected-test selection. Replaces the
-   interim `tools/fo.py` (#904).
-3. **Capsules.** Mount-namespace isolation, Landlock + seccomp sandbox,
-   lineage recording, reproducibility verification. Wraps fpm for the package
-   manifest.
-4. **Checkpoint.** CRIU wrapper with userfaultfd dirty tracking, FastCDC +
-   BLAKE3 chunking of page images, incremental store-backed chain.
-5. **Surfaces.** CLI (`fo build/run/test`), MCP server, web canvas, voice
-   bridge.
-6. **Economy.** Cost model over the capsule lineage graph, tiering policy, gc
-   over the Nix-compatible store.
->>>>>>> 590011e (docs(fo): reuse Nix/CRIU/git, build Fortran .mod cache and checkpoint integration)
 
 ## References
 

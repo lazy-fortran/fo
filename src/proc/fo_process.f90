@@ -7,6 +7,7 @@ module fo_process
     public :: process_fpm_test_names, process_cmake_build, process_ctest
     public :: process_scan_sources
     public :: process_start_fo_check, process_poll_pid, process_cancel_pid
+    public :: process_read_jsonrpc_message
 
     integer, parameter :: C_PATH_LEN = 4096
     integer, parameter :: C_ARG_LEN = 4096
@@ -95,6 +96,14 @@ module fo_process
             integer(c_int), value :: pid
             integer(c_int), intent(out) :: exitcode
         end subroutine fo_c_cancel_pid
+
+        subroutine fo_c_read_jsonrpc_message(buf, bufsize, nread) &
+            bind(C, name='fo_c_read_jsonrpc_message')
+            import :: c_int, c_char
+            character(kind=c_char), intent(out) :: buf(*)
+            integer(c_int), value :: bufsize
+            integer(c_int), intent(out) :: nread
+        end subroutine fo_c_read_jsonrpc_message
     end interface
 
 contains
@@ -260,6 +269,26 @@ contains
         call fo_c_cancel_pid(int(pid, c_int), c_exit)
         exitcode = int(c_exit)
     end subroutine process_cancel_pid
+
+    subroutine process_read_jsonrpc_message(buf, nread)
+        character(len=*), intent(out) :: buf
+        integer, intent(out) :: nread
+
+        integer, parameter :: C_BUF_LEN = 8192
+        character(kind=c_char) :: c_buf(C_BUF_LEN)
+        integer(c_int) :: c_nread
+        integer :: i, n
+
+        buf = ''
+        nread = 0
+        n = min(len(buf), C_BUF_LEN)
+        call fo_c_read_jsonrpc_message(c_buf, int(n, c_int), c_nread)
+        nread = int(c_nread)
+        if (nread <= 0) return
+        do i = 1, nread
+            buf(i:i) = char(iachar(c_buf(i)))
+        end do
+    end subroutine process_read_jsonrpc_message
 
     subroutine to_c_string(text, c_text)
         character(len=*), intent(in) :: text
