@@ -4,7 +4,6 @@ module fo_mcp_response
     private
     public :: make_initialize_response, make_tools_list_response
     public :: make_resources_list_response, make_run_start_response
-    public :: make_status_response, make_diagnostics_response
     public :: make_tool_text_response
 
 contains
@@ -67,62 +66,12 @@ contains
         response = trim(response)//',"pending":'//trim(json_bool(pending))//'}}'
     end subroutine make_run_start_response
 
-    subroutine make_status_response(id_str, run_id, active_run_id, &
-                                    active_pid, pending_run_id, &
-                                    last_run_id, last_exitcode, response)
-        character(len=*), intent(in) :: id_str
-        integer, intent(in) :: run_id, active_run_id, active_pid
-        integer, intent(in) :: pending_run_id, last_run_id, last_exitcode
-        character(len=*), intent(out) :: response
-
-        character(len=32) :: state
-
-        if (run_id == active_run_id .and. active_pid > 0) then
-            state = 'running'
-        else if (run_id == pending_run_id) then
-            state = 'rerun-pending'
-        else if (run_id == last_run_id) then
-            state = 'finished'
-        else
-            state = 'unknown'
-        end if
-
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"result":{"run_id":'//trim(json_int(run_id))// &
-                   ',"state":"'//trim(state)// &
-                   '","active":'// &
-                   trim(json_bool(run_id == active_run_id .and. &
-                                  active_pid > 0))// &
-                   ',"pending":'// &
-                   trim(json_bool(run_id == pending_run_id))// &
-                   ',"last_exitcode":'// &
-                   trim(json_int(last_exitcode))//'}}'
-    end subroutine make_status_response
-
-    subroutine make_diagnostics_response(id_str, run_id, output_text, stale, &
-                                         exitcode, response)
-        character(len=*), intent(in) :: id_str, output_text
-        integer, intent(in) :: run_id, exitcode
-        logical, intent(in) :: stale
-        character(len=*), intent(out) :: response
-
-        character(len=4096) :: escaped
-
-        escaped = output_text
-        call json_escape(escaped)
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"result":{"run_id":'//trim(json_int(run_id))// &
-                   ',"stale":'//trim(json_bool(stale))// &
-                   ',"exitcode":'//trim(json_int(exitcode))// &
-                   ',"diagnostics":"'//trim(escaped)//'"}}'
-    end subroutine make_diagnostics_response
-
     subroutine make_tool_text_response(id_str, output_text, exitcode, response)
         character(len=*), intent(in) :: id_str, output_text
         integer, intent(in) :: exitcode
         character(len=*), intent(out) :: response
 
-        character(len=4096) :: escaped
+        character(len=16384) :: escaped
 
         escaped = output_text
         call json_escape(escaped)

@@ -1,5 +1,6 @@
 module fo_capabilities
     use, intrinsic :: iso_c_binding, only: c_int
+    use fo_json, only: make_tmpfile, delete_tmpfile, json_bool
     implicit none
     private
     public :: capabilities_t, detect_capabilities
@@ -279,35 +280,5 @@ contains
         json = trim(json)//',"compiler_limited":'// &
                '["front_end_parse","module_generation","codegen"]}'
     end subroutine capabilities_json
-
-    function json_bool(val) result(text)
-        logical, intent(in) :: val
-        character(len=5) :: text
-
-        if (val) then
-            text = 'true'
-        else
-            text = 'false'
-        end if
-    end function json_bool
-
-    subroutine make_tmpfile(prefix, path)
-        character(len=*), intent(in) :: prefix
-        character(len=*), intent(out) :: path
-
-        integer :: count
-        integer, save :: serial = 0
-
-        serial = serial + 1
-        call system_clock(count)
-        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
-            count, '-', serial, '.tmp'
-    end subroutine make_tmpfile
-
-    subroutine delete_tmpfile(path)
-        character(len=*), intent(in) :: path
-
-        call execute_command_line('rm -f '//trim(path), wait=.true.)
-    end subroutine delete_tmpfile
 
 end module fo_capabilities

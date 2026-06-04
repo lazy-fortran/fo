@@ -1,5 +1,6 @@
 module fo_scan
     use, intrinsic :: iso_fortran_env, only: error_unit
+    use fo_json, only: make_tmpfile, delete_tmpfile
     use fo_process, only: process_scan_sources
     implicit none
     private
@@ -111,7 +112,7 @@ contains
         end do
 
         close (funit)
-        call execute_command_line('rm -f '//trim(tmpfile))
+        call delete_tmpfile(tmpfile)
     end subroutine scan_dir
 
     logical function is_test_path(path)
@@ -133,26 +134,12 @@ contains
                        index(base, 'test_') == 1
     end function is_test_path
 
-    subroutine make_tmpfile(prefix, path)
-        character(len=*), intent(in) :: prefix
-        character(len=*), intent(out) :: path
-
-        integer :: count
-        integer, save :: serial = 0
-
-        serial = serial + 1
-        call system_clock(count)
-        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
-            count, '-', serial, '.tmp'
-    end subroutine make_tmpfile
-
     subroutine parse_line(line, unit_info)
         character(len=*), intent(in) :: line
         type(scan_unit_t), intent(inout) :: unit_info
 
         character(len=512) :: trimmed
         character(len=MAX_NAME) :: name
-        integer :: pos
 
         trimmed = adjustl(line)
         if (len_trim(trimmed) == 0) return

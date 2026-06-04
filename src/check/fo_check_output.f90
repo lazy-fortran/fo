@@ -150,6 +150,9 @@ contains
         line = trim(line)//',"rerun":"'//trim(json_escape_str(res%rerun))//'"'
         line = trim(line)//',"log_path":"'//trim(json_escape_str(res%log_path))//'"'
         line = trim(line)//',"elapsed_s":'//trim(adjustl(elapsed))
+        line = trim(line)//',"modules":'//trim(json_int(res%n_modules))
+        line = trim(line)//',"cached":'//trim(json_int(res%n_cached))
+        line = trim(line)//',"changed":'//trim(json_int(res%n_changed))
         if (include_legacy) then
             line = trim(line)//',"legacy":'//trim(check_result_json(res))
         end if

@@ -1,7 +1,7 @@
 module fo_cache
     use, intrinsic :: iso_fortran_env, only: int64
     use fo_scan, only: MAX_NAME
-    use fo_dag, only: dag_t, MAX_NODES
+    use fo_dag, only: MAX_NODES
     implicit none
     private
     public :: cache_t, cache_init, cache_lookup, cache_store, cache_key_for
@@ -44,10 +44,9 @@ contains
         call load_index(c)
     end subroutine cache_init
 
-    function cache_key_for(filename, compiler, flags, dag, dep_keys, &
+    function cache_key_for(filename, compiler, flags, dep_keys, &
                            n_dep_keys) result(key)
         character(len=*), intent(in) :: filename, compiler, flags
-        type(dag_t), intent(in) :: dag
         character(len=HASH_LEN), intent(in) :: dep_keys(:)
         integer, intent(in) :: n_dep_keys
         character(len=HASH_LEN) :: key

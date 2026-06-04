@@ -2,7 +2,6 @@ program test_cache
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_cache, only: cache_t, cache_init, cache_key_for, cache_lookup, &
                         cache_store, HASH_LEN
-    use fo_dag, only: dag_t
     implicit none
 
     integer :: n_pass, n_fail
@@ -89,7 +88,6 @@ contains
     end subroutine test_persistence
 
     subroutine test_large_file_hashes_full_source()
-        type(dag_t) :: dag
         character(len=HASH_LEN) :: key_a, key_b
         character(len=HASH_LEN) :: dep_keys(1)
         character(len=512) :: path_a, path_b
@@ -99,8 +97,8 @@ contains
         call write_large_source(path_a, '1')
         call write_large_source(path_b, '2')
 
-        key_a = cache_key_for(path_a, 'compiler', '', dag, dep_keys, 0)
-        key_b = cache_key_for(path_b, 'compiler', '', dag, dep_keys, 0)
+        key_a = cache_key_for(path_a, 'compiler', '', dep_keys, 0)
+        key_b = cache_key_for(path_b, 'compiler', '', dep_keys, 0)
 
         call assert(key_a /= key_b, &
                     'cache key includes source content after fixed buffer boundary')

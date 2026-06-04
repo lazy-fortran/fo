@@ -1,4 +1,5 @@
 module fo_run_queue
+    use fo_json, only: json_bool
     implicit none
     private
     public :: run_queue_t
@@ -124,16 +125,5 @@ contains
         inquire (file=trim(root), exist=exists)
         valid_root = exists
     end function valid_root
-
-    function json_bool(value) result(text)
-        logical, intent(in) :: value
-        character(len=5) :: text
-
-        if (value) then
-            text = 'true'
-        else
-            text = 'false'
-        end if
-    end function json_bool
 
 end module fo_run_queue

@@ -57,8 +57,6 @@ contains
         character(len=HASH_LEN) :: keys(MAX_NODES)
         character(len=HASH_LEN) :: dep_keys(64)
         character(len=256) :: compiler
-        ! external dep hashes (global across all modules)
-        character(len=HASH_LEN) :: ext_hash
         character(len=MAX_NAME) :: ext_names(MAX_EXT_DEPS)
         character(len=HASH_LEN) :: ext_keys(MAX_EXT_DEPS)
         integer :: n_ext
@@ -111,7 +109,7 @@ contains
 
             keys(node_id) = cache_key_for( &
                             dag%nodes(node_id)%filename, compiler, '', &
-                            dag, dep_keys, n_dep_keys)
+                            dep_keys, n_dep_keys)
 
             if (cache_lookup(c, dag%nodes(node_id)%name, keys(node_id))) then
                 n_cached = n_cached + 1
@@ -183,7 +181,6 @@ contains
         character(len=*), intent(out) :: modpath
         logical, intent(out) :: found
 
-        character(len=512) :: candidate
         character(len=MAX_NAME) :: lower_name
         integer :: i
 

@@ -1,7 +1,7 @@
 program fo_main
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, is_slow_test
-    use fo_dag, only: dag_t, dag_build, dag_topo_order, MAX_NODES
+    use fo_dag, only: dag_t, dag_build, dag_topo_order
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, &
                                 BACKEND_FPM, BACKEND_CMAKE
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules
@@ -183,8 +183,8 @@ contains
         write (output_unit, '(a)') '  changed    list changed and affected modules'
         write (output_unit, '(a)') '  graph      module dependency graph'
         write (output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
-        write (output_unit, '(a)') '  lint       check for unused imports'
-        write (output_unit, '(a)') '  lint --json  unused imports as JSON'
+        write (output_unit, '(a)') '  lint       unused imports + gfortran warnings'
+        write (output_unit, '(a)') '  lint --json  lint results as JSON'
         write (output_unit, '(a)') '  clean      clear global cache (~/.cache/fo)'
         write (output_unit, '(a)') '  info       backend, file count, module count'
         write (output_unit, '(a)') '  info --capabilities  compiler and tooling limits'
@@ -481,11 +481,13 @@ contains
     end subroutine cmd_graph
 
     subroutine cmd_lint()
-        use fo_lint, only: lint_finding_t, lint_dir, lint_findings_json, &
-                           MAX_FINDINGS
+        use fo_lint, only: lint_finding_t, lint_warning_t, &
+                           lint_dir, lint_compiler, &
+                           lint_all_json, MAX_FINDINGS, MAX_WARNINGS
         type(backend_t) :: b
         type(lint_finding_t) :: findings(MAX_FINDINGS)
-        integer :: n_findings, i, output_mode, mode_ierr
+        type(lint_warning_t) :: warnings(MAX_WARNINGS)
+        integer :: n_findings, n_warnings, i, output_mode, mode_ierr
         character(len=512) :: scan_root
 
         b = detect_backend('.')
@@ -495,12 +497,14 @@ contains
         call check_output_mode(output_mode, mode_ierr)
 
         call lint_dir(trim(scan_root), findings, n_findings)
+        call lint_compiler(trim(scan_root), warnings, n_warnings)
 
         if (output_mode > 0) then
             write (output_unit, '(a)') &
-                trim(lint_findings_json(findings, n_findings))
-        else if (n_findings == 0) then
-            write (output_unit, '(a)') 'no unused imports'
+                trim(lint_all_json(findings, n_findings, &
+                                   warnings, n_warnings))
+        else if (n_findings == 0 .and. n_warnings == 0) then
+            write (output_unit, '(a)') 'no issues found'
         else
             do i = 1, n_findings
                 write (output_unit, '(a,a,i0,a,a,a,a)') &
@@ -508,7 +512,15 @@ contains
                     ': unused import ', trim(findings(i)%symbol), &
                     ' from ', trim(findings(i)%module_name)
             end do
-            write (output_unit, '(i0,a)') n_findings, ' unused import(s)'
+            do i = 1, n_warnings
+                write (output_unit, '(a,a,i0,a,i0,a,a)') &
+                    trim(warnings(i)%file), ':', warnings(i)%line, &
+                    ':', warnings(i)%column, ': ', &
+                    trim(warnings(i)%message)
+            end do
+            write (output_unit, '(i0,a,i0,a)') &
+                n_findings, ' unused import(s), ', &
+                n_warnings, ' compiler warning(s)'
             stop 1, quiet = .true.
         end if
     end subroutine cmd_lint

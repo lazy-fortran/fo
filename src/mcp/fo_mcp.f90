@@ -6,8 +6,6 @@ module fo_mcp
                                make_tools_list_response, &
                                make_resources_list_response, &
                                make_run_start_response, &
-                               make_status_response, &
-                               make_diagnostics_response, &
                                make_tool_text_response
     use fo_check, only: check_result_t, fo_check_run
     use fo_check_output, only: check_result_compact_json, &
@@ -22,7 +20,7 @@ module fo_mcp
     private
     public :: mcp_serve
 
-    integer, parameter :: MAX_LINE = 8192
+    integer, parameter :: MAX_LINE = 32768
 
     type :: mcp_async_state_t
         type(run_queue_t) :: queue
@@ -97,11 +95,7 @@ contains
         body = ''
         iostat = 0
         call process_read_jsonrpc_message(body, nread)
-        if (nread < 0) then
-            iostat = -1
-        else if (nread == 0) then
-            iostat = -1
-        end if
+        if (nread <= 0) iostat = -1
     end subroutine read_jsonrpc_message
 
     subroutine handle_tools_call(line, id_str, response, async_state)
@@ -110,7 +104,7 @@ contains
         type(mcp_async_state_t), intent(inout) :: async_state
 
         character(len=64) :: action, mode
-        character(len=4096) :: output_text
+        character(len=8192) :: output_text
         integer :: exitcode, cmdstat
         character(len=512) :: tmpfile, cmd
         type(check_result_t) :: check_res
@@ -149,7 +143,7 @@ contains
                 end block
             end if
         case ('status')
-            call handle_async_status(line, id_str, response, async_state)
+            call handle_async_status(id_str, response, async_state)
             return
         case ('diagnostics')
             call handle_async_diagnostics(line, id_str, response, async_state)
@@ -159,16 +153,22 @@ contains
             return
         case ('lint')
             block
-                use fo_lint, only: lint_finding_t, lint_dir, &
-                                   lint_findings_json, MAX_FINDINGS
+                use fo_lint, only: lint_finding_t, lint_warning_t, &
+                                   lint_dir, lint_compiler, &
+                                   lint_all_json, &
+                                   MAX_FINDINGS, MAX_WARNINGS
                 type(lint_finding_t) :: findings(MAX_FINDINGS)
-                integer :: n_findings
+                type(lint_warning_t) :: warnings(MAX_WARNINGS)
+                integer :: n_findings, n_warnings
+                character(len=16384) :: lint_output
 
                 call lint_dir('.', findings, n_findings)
-                output_text = lint_findings_json(findings, n_findings)
+                call lint_compiler('.', warnings, n_warnings)
+                lint_output = lint_all_json(findings, n_findings, &
+                                            warnings, n_warnings)
                 exitcode = 0
-                if (n_findings > 0) exitcode = 1
-                call make_tool_text_response(id_str, output_text, &
+                if (n_findings > 0 .or. n_warnings > 0) exitcode = 1
+                call make_tool_text_response(id_str, lint_output, &
                                              exitcode, response)
             end block
             call delete_tmpfile(tmpfile)
@@ -195,7 +195,7 @@ contains
         type(mcp_async_state_t), intent(inout) :: async_state
 
         character(len=256) :: uri
-        character(len=4096) :: output_text
+        character(len=8192) :: output_text
         integer :: exitcode
         type(check_result_t) :: check_res
 
@@ -267,25 +267,31 @@ contains
         call make_run_start_response(id_str, run_id, pending, response)
     end subroutine handle_async_start
 
-    subroutine handle_async_status(line, id_str, response, async_state)
-        character(len=*), intent(in) :: line, id_str
+    subroutine handle_async_status(id_str, response, async_state)
+        character(len=*), intent(in) :: id_str
         character(len=*), intent(out) :: response
         type(mcp_async_state_t), intent(inout) :: async_state
 
-        integer :: run_id, ierr
+        character(len=1024) :: status_text
 
         call async_poll(async_state)
-        call requested_run_id(line, async_state, run_id, ierr)
-        if (ierr /= 0) then
-            call jsonrpc_error(id_str, -32602, 'unknown run_id', response)
-            return
+
+        if (async_state%active_pid > 0) then
+            status_text = '{"state":"running"'// &
+                          ',"run_id":'//trim(json_int(async_state%active_run_id))//'}'
+        else if (async_state%pending_run_id > 0) then
+            status_text = '{"state":"rerun-pending"'// &
+                          ',"run_id":'//trim(json_int(async_state%pending_run_id))//'}'
+        else if (async_state%last_run_id > 0) then
+            status_text = '{"state":"finished"'// &
+                          ',"run_id":'//trim(json_int(async_state%last_run_id))// &
+                          ',"exitcode":'// &
+                          trim(json_int(async_state%last_exitcode))//'}'
+        else
+            status_text = '{"state":"idle"}'
         end if
 
-        call make_status_response(id_str, run_id, async_state%active_run_id, &
-                                 async_state%active_pid, &
-                                 async_state%pending_run_id, &
-                                 async_state%last_run_id, &
-                                 async_state%last_exitcode, response)
+        call make_tool_text_response(id_str, status_text, 0, response)
     end subroutine handle_async_status
 
     subroutine handle_async_diagnostics(line, id_str, response, async_state)
@@ -293,9 +299,8 @@ contains
         character(len=*), intent(out) :: response
         type(mcp_async_state_t), intent(inout) :: async_state
 
-        character(len=4096) :: output_text
+        character(len=8192) :: output_text
         integer :: run_id, ierr
-        logical :: stale
 
         call async_poll(async_state)
         call requested_run_id(line, async_state, run_id, ierr)
@@ -305,13 +310,16 @@ contains
         end if
 
         output_text = ''
-        if (run_id == async_state%last_run_id .and. &
+        if (run_id > 0 .and. run_id == async_state%last_run_id .and. &
             len_trim(async_state%last_output) > 0) then
             call read_text_file(async_state%last_output, output_text)
         end if
-        stale = async_state%active_pid > 0 .or. async_state%pending_run_id > 0
-        call make_diagnostics_response(id_str, run_id, output_text, stale, &
-                                       async_state%last_exitcode, response)
+
+        if (len_trim(output_text) == 0) then
+            output_text = '{"state":"idle","diagnostics":""}'
+        end if
+
+        call make_tool_text_response(id_str, output_text, 0, response)
     end subroutine handle_async_diagnostics
 
     subroutine handle_async_cancel(line, id_str, response, async_state)
@@ -341,8 +349,12 @@ contains
         async_state%active_run_id = 0
         call async_start_pending_if_ready(async_state)
 
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                   '"result":{"cancelled":true,"run_id":'//trim(json_int(run_id))//'}}'
+        block
+            character(len=256) :: cancel_text
+            cancel_text = '{"cancelled":true,"run_id":'// &
+                          trim(json_int(run_id))//'}'
+            call make_tool_text_response(id_str, cancel_text, 0, response)
+        end block
     end subroutine handle_async_cancel
 
     subroutine async_poll(async_state)

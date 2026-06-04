@@ -111,7 +111,6 @@ contains
     function detect_nproc() result(np)
         integer :: np
 
-        np = 1
         np = process_detect_nproc()
         if (np < 1) np = 1
     end function detect_nproc
