@@ -93,19 +93,25 @@ instead of one process per test.
 
 ## Tests
 
-142 tests: scanner (30), DAG (15), cache (8), backend (20), check (69).
+163 tests: scanner (30), DAG (15), cache (8), backend (20), check (90).
 
 ## Benchmarks
 
-Tested on 7 codebases: SIMPLE (1231 files), fortui (20), libneo (223),
-GORILLA (57), NEO-RT (167), sampledex (17), fluff (178).
+Local regression suite against three synthetic workloads:
 
-The current full matrix keeps `fo` in the Rust/C compile-overhead band
-on nbody and ahead of CMake/C there. Go still wins the tiny clean
-compile steps; `fo` wins the measured nbody test overhead in this run.
-`fo` wins the 200-module bigmod clean build among the Fortran drivers;
-remaining work is surrounding driver overhead, not compiler code. See
-[fpm-dev issue #3](https://github.com/krystophny/fpm-dev/issues/3) for
-the full cross-language comparison.
+```bash
+bench/run.sh                          # 7 reps, JSON lines to stdout
+BENCH_REPS=3 bench/run.sh             # quick smoke run
+BENCH_OUTPUT=out.jsonl bench/run.sh   # write to file
+python3 bench/report.py out.jsonl     # medians, targets, pass/fail
+```
+
+Acceptance targets: no-op check under 100 ms on warm cache,
+incremental leaf rebuild under 200 ms, diagnostic latency under 200 ms.
+
+Cross-language comparison on 7 real codebases (SIMPLE 1231 files,
+fortui 20, libneo 223, GORILLA 57, NEO-RT 167, sampledex 17,
+fluff 178) at
+[fpm-dev issue #3](https://github.com/krystophny/fpm-dev/issues/3).
 
 Architecture: `doc/FO.md`. Linux primitives: `doc/LINUX.md`.
