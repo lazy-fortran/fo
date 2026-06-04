@@ -80,11 +80,24 @@ contains
 
         integer :: cmdstat
         character(len=2048) :: cmd
+        logical :: has_tests
 
         select case (self%kind)
         case (BACKEND_FPM)
+            ! check if test/ directory exists
+            inquire(file=trim(self%project_dir)//'/test/.', exist=has_tests)
+            if (.not. has_tests) then
+                exitcode = 0
+                return
+            end if
             cmd = 'cd '//trim(self%project_dir)//' && fpm test 2>&1'
         case (BACKEND_CMAKE)
+            inquire(file=trim(self%project_dir)//'/build/CTestTestfile.cmake', &
+                exist=has_tests)
+            if (.not. has_tests) then
+                exitcode = 0
+                return
+            end if
             cmd = 'cd '//trim(self%project_dir)// &
                 ' && cd build && ctest --output-on-failure 2>&1'
         case default
