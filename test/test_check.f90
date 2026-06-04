@@ -2,6 +2,7 @@ program test_check
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_check, only: check_result_t, fo_check_run, check_result_json, &
                         check_result_compact_json, check_result_full_json
+    use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
     implicit none
 
     integer :: n_pass, n_fail
@@ -15,6 +16,8 @@ program test_check
     call test_check_result_compact_json_success()
     call test_check_result_compact_json_failure()
     call test_check_result_full_json_diagnostics()
+    call test_diagnostic_timeout_hint()
+    call test_diagnostic_unknown_line()
 
     write (output_unit, '(a,i0,a,i0,a)') 'check: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -52,6 +55,8 @@ contains
                     'error summary includes rerun command')
         call assert(res%diag_line > 0 .and. res%diag_column > 0, &
                     'build diagnostic includes numeric location')
+        call assert(index(res%diag_file, 'src/broken.f90') > 0, &
+                    'build diagnostic includes source file')
 
         call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_check_from_child_reports_backend_error
@@ -189,6 +194,48 @@ contains
         call assert(index(line, '"log_path":"/tmp/fo-build.log"') > 0, &
                     'full json includes log path')
     end subroutine test_check_result_full_json_diagnostics
+
+    subroutine test_diagnostic_timeout_hint()
+        type(diagnostic_t) :: diag
+        character(len=512) :: log_path
+        integer :: u
+
+        call make_tmp_path('fo_timeout_log', log_path)
+        open (newunit=u, file=log_path, status='replace')
+        write (u, '(a)') 'Timeout: test_timeout exceeded 1.0 sec'
+        close (u)
+
+        call diagnostic_from_log('test', log_path, 'fo test', diag)
+
+        call assert(index(diag%hint, '*_slow') > 0, &
+                    'timeout diagnostic suggests slow test')
+        call assert(trim(diag%rerun) == 'fo test test_timeout', &
+                    'timeout diagnostic includes target rerun')
+
+        call execute_command_line('rm -f '//trim(log_path))
+    end subroutine test_diagnostic_timeout_hint
+
+    subroutine test_diagnostic_unknown_line()
+        type(diagnostic_t) :: diag
+        character(len=512) :: log_path
+        integer :: u
+
+        call make_tmp_path('fo_unknown_log', log_path)
+        open (newunit=u, file=log_path, status='replace')
+        write (u, '(a)') repeat('x', 900)
+        close (u)
+
+        call diagnostic_from_log('backend', log_path, 'fo check', diag)
+
+        call assert(trim(diag%kind) == 'backend', &
+                    'unknown diagnostic keeps backend kind')
+        call assert(len_trim(diag%message) <= len(diag%message), &
+                    'unknown diagnostic stays bounded')
+        call assert(len_trim(diag%message) > 0, &
+                    'unknown diagnostic keeps fallback line')
+
+        call execute_command_line('rm -f '//trim(log_path))
+    end subroutine test_diagnostic_unknown_line
 
     subroutine make_bad_project(project_dir)
         character(len=*), intent(in) :: project_dir

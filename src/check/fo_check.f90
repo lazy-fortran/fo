@@ -7,6 +7,7 @@ module fo_check
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_store, &
                         cache_key_for, hash_mod_file, HASH_LEN
     use fo_artifact_cache, only: artifact_store, artifact_restore
+    use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
     implicit none
     private
     public :: check_result_t, fo_check_run, fo_changed_modules
@@ -518,64 +519,15 @@ contains
         character(len=*), intent(in) :: stage, log_file, rerun
         type(check_result_t), intent(inout) :: res
 
-        character(len=512) :: summary, fallback, line
-        character(len=128) :: target
-        character(len=256) :: rerun_cmd
-        character(len=256) :: current_file, selected_file, parsed_file
-        integer :: current_line, current_column, selected_line, selected_column
-        integer :: parsed_line, parsed_column
-        integer :: u, iostat, best_priority
-        logical :: has_location, selected
+        type(diagnostic_t) :: diag
 
-        summary = ''
-        fallback = ''
-        best_priority = 0
-        current_file = ''
-        selected_file = ''
-        current_line = 0
-        current_column = 0
-        selected_line = 0
-        selected_column = 0
-
-        open (newunit=u, file=log_file, status='old', iostat=iostat)
-        if (iostat == 0) then
-            do
-                read (u, '(a)', iostat=iostat) line
-                if (iostat /= 0) exit
-                call parse_location_line(line, parsed_file, parsed_line, &
-                                         parsed_column, has_location)
-                if (has_location) then
-                    current_file = parsed_file
-                    current_line = parsed_line
-                    current_column = parsed_column
-                end if
-                call consider_log_line(line, summary, fallback, best_priority, &
-                                       selected)
-                if (selected .and. len_trim(current_file) > 0) then
-                    selected_file = current_file
-                    selected_line = current_line
-                    selected_column = current_column
-                end if
-            end do
-            close (u)
-        end if
-
-        if (len_trim(summary) == 0) summary = fallback
-        if (len_trim(summary) == 0) summary = 'backend returned nonzero status'
-
-        target = infer_target(summary)
-        rerun_cmd = rerun
-        if (trim(stage) == 'test' .and. len_trim(target) > 0) then
-            rerun_cmd = trim(rerun)//' '//trim(target)
-        end if
-
-        call set_failure(res, stage, target, summary, &
-                         default_hint(stage), rerun_cmd, log_file)
-        res%diag_file = ''
-        res%diag_line = selected_line
-        res%diag_column = selected_column
+        call diagnostic_from_log(stage, log_file, rerun, diag)
+        call set_failure(res, stage, diag%target, diag%message, &
+                         diag%hint, diag%rerun, log_file)
+        res%diag_file = diag%file
+        res%diag_line = diag%line
+        res%diag_column = diag%column
         if (trim(rerun) == 'fo test') then
-            res%hint = 'make this test faster or mark it slow'
             res%error_msg = trim(res%error_msg)// &
                             '; slow: make timed-out tests faster or name them *_slow'
             res%error_msg = trim(res%error_msg)// &
@@ -602,127 +554,6 @@ contains
             res%error_msg = trim(res%error_msg)//'; rerun: '//trim(res%rerun)
         end if
     end subroutine set_failure
-
-    function default_hint(stage) result(hint)
-        character(len=*), intent(in) :: stage
-        character(len=256) :: hint
-
-        select case (trim(stage))
-        case ('build')
-            hint = 'fix the first compiler diagnostic, then rerun fo build'
-        case ('test')
-            hint = 'rerun the failing test, then fix or mark it slow'
-        case default
-            hint = 'rerun the reported fo command after fixing the input'
-        end select
-    end function default_hint
-
-    function infer_target(summary) result(target)
-        character(len=*), intent(in) :: summary
-        character(len=128) :: target
-
-        integer :: pos, start, finish
-
-        target = ''
-        pos = index(summary, 'test_')
-        if (pos == 0) return
-
-        start = pos
-        finish = start
-        do while (finish <= len_trim(summary))
-            select case (summary(finish:finish))
-            case (' ', ':', ';', ',', ')', '(')
-                exit
-            case default
-                finish = finish + 1
-            end select
-        end do
-        target = summary(start:finish - 1)
-    end function infer_target
-
-    subroutine parse_location_line(line, file, line_no, column, found)
-        character(len=*), intent(in) :: line
-        character(len=256), intent(out) :: file
-        integer, intent(out) :: line_no, column
-        logical, intent(out) :: found
-
-        character(len=512) :: clean, number
-        integer :: ext, start, colon1, colon2, iostat, file_len
-
-        found = .false.
-        file = ''
-        line_no = 0
-        column = 0
-
-        clean = adjustl(line)
-        ext = index(clean, '.f90:')
-        if (ext == 0) ext = index(clean, '.F90:')
-        if (ext == 0) return
-
-        start = 1
-        colon1 = ext + 4
-        colon2 = index(clean(colon1 + 1:), ':')
-        if (colon2 == 0) return
-        colon2 = colon1 + colon2
-
-        number = clean(colon1 + 1:colon2 - 1)
-        read (number, *, iostat=iostat) line_no
-        if (iostat /= 0) return
-
-        number = ''
-        if (colon2 + 1 <= len_trim(clean)) then
-            number = clean(colon2 + 1:)
-            if (index(number, ':') > 0) number = number(1:index(number, ':') - 1)
-            read (number, *, iostat=iostat) column
-            if (iostat /= 0) column = 0
-        end if
-
-        file_len = colon1 - start
-        if (file_len <= 0) return
-        if (file_len > len(file)) file_len = len(file)
-        file(1:file_len) = clean(start:start + file_len - 1)
-        found = .true.
-    end subroutine parse_location_line
-
-    subroutine consider_log_line(line, summary, fallback, best_priority, selected)
-        character(len=*), intent(in) :: line
-        character(len=*), intent(inout) :: summary, fallback
-        integer, intent(inout) :: best_priority
-        logical, intent(out) :: selected
-
-        character(len=512) :: clean
-        integer :: priority
-
-        selected = .false.
-        clean = adjustl(line)
-        if (len_trim(clean) == 0) return
-        if (trim(clean) == 'STOP 1') return
-        if (index(clean, 'Backtrace') > 0) return
-
-        fallback = clean
-
-        priority = 0
-        if (index(clean, 'Fatal Error:') > 0 .or. &
-            index(clean, 'Cannot open file') > 0) then
-            priority = 5
-        else if (index(clean, 'Error:') > 0 .or. &
-                 index(clean, 'error:') > 0) then
-            priority = 4
-        else if (index(clean, 'FAIL:') > 0) then
-            priority = 3
-        else if (index(clean, 'returned exit code') > 0) then
-            priority = 2
-        else if (index(clean, '<ERROR>') > 0 .or. &
-                 index(clean, 'FAIL') > 0) then
-            priority = 1
-        end if
-
-        if (priority > 0 .and. priority >= best_priority) then
-            summary = clean
-            best_priority = priority
-            selected = .true.
-        end if
-    end subroutine consider_log_line
 
     subroutine delete_file(path)
         character(len=*), intent(in) :: path
