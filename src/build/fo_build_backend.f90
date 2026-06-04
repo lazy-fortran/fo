@@ -37,19 +37,33 @@ contains
         end if
     end function detect_backend
 
-    subroutine backend_build(self, exitcode)
+    subroutine backend_build(self, exitcode, flags)
         class(backend_t), intent(in) :: self
         integer, intent(out) :: exitcode
+        character(len=*), intent(in), optional :: flags
 
         integer :: cmdstat
-        character(len=1024) :: cmd
+        character(len=2048) :: cmd
 
         select case (self%kind)
         case (BACKEND_FPM)
-            cmd = 'cd '//trim(self%project_dir)//' && fpm build 2>&1'
+            if (present(flags) .and. len_trim(flags) > 0) then
+                cmd = 'cd '//trim(self%project_dir)// &
+                    ' && fpm build --flag "'//trim(flags)//'" 2>&1'
+            else
+                cmd = 'cd '//trim(self%project_dir)//' && fpm build 2>&1'
+            end if
         case (BACKEND_CMAKE)
-            cmd = 'cd '//trim(self%project_dir)// &
-                ' && cmake -S . -B build -G Ninja 2>&1 && cmake --build build 2>&1'
+            if (present(flags) .and. len_trim(flags) > 0) then
+                cmd = 'cd '//trim(self%project_dir)// &
+                    ' && cmake -S . -B build -G Ninja'// &
+                    ' -DCMAKE_Fortran_FLAGS="'//trim(flags)//'"'// &
+                    ' 2>&1 && cmake --build build 2>&1'
+            else
+                cmd = 'cd '//trim(self%project_dir)// &
+                    ' && cmake -S . -B build -G Ninja 2>&1'// &
+                    ' && cmake --build build 2>&1'
+            end if
         case default
             write(error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             exitcode = 1
@@ -65,7 +79,7 @@ contains
         integer, intent(out) :: exitcode
 
         integer :: cmdstat
-        character(len=1024) :: cmd
+        character(len=2048) :: cmd
 
         select case (self%kind)
         case (BACKEND_FPM)

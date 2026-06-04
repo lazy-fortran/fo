@@ -29,6 +29,8 @@ program fo_main
         call cmd_test()
     case ('info')
         call cmd_info()
+    case ('clean')
+        call cmd_clean()
     case ('version', '--version')
         write(output_unit, '(a)') 'fo 0.1.0'
     case ('help', '--help', '-h')
@@ -51,6 +53,7 @@ contains
         write(output_unit, '(a)') '  test     run tests only'
         write(output_unit, '(a)') '  graph    module dependency graph'
         write(output_unit, '(a)') '  info     detected backend and module count'
+        write(output_unit, '(a)') '  clean    clear global build cache'
         write(output_unit, '(a)') '  version  print version'
     end subroutine print_usage
 
@@ -78,15 +81,37 @@ contains
     subroutine cmd_build()
         type(backend_t) :: b
         integer :: exitcode
+        character(len=512) :: flags
 
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
             write(error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             stop 1
         end if
-        call b%build(exitcode)
+
+        call get_flags_arg(flags)
+        if (len_trim(flags) > 0) then
+            call b%build(exitcode, flags)
+        else
+            call b%build(exitcode)
+        end if
         if (exitcode /= 0) stop 1
     end subroutine cmd_build
+
+    subroutine get_flags_arg(flags)
+        character(len=*), intent(out) :: flags
+        character(len=256) :: arg
+        integer :: i
+
+        flags = ''
+        do i = 2, command_argument_count()
+            call get_command_argument(i, arg)
+            if (trim(arg) == '--flag' .and. i < command_argument_count()) then
+                call get_command_argument(i + 1, flags)
+                return
+            end if
+        end do
+    end subroutine get_flags_arg
 
     subroutine cmd_test()
         type(backend_t) :: b
@@ -125,6 +150,18 @@ contains
             end if
         end do
     end subroutine cmd_graph
+
+    subroutine cmd_clean()
+        use fo_cache, only: cache_t, cache_init
+        type(cache_t) :: c
+        integer :: ierr
+
+        call cache_init(c, ierr)
+        if (ierr == 0) then
+            call execute_command_line('rm -f '//trim(c%dir)//'/index', wait=.true.)
+            write(output_unit, '(a,a)') 'cache cleared: ', trim(c%dir)
+        end if
+    end subroutine cmd_clean
 
     subroutine cmd_info()
         type(scan_unit_t) :: units(MAX_UNITS)
