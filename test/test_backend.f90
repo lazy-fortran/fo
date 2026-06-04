@@ -132,6 +132,9 @@ contains
               status='replace')
         write (u, '(a)') 'module lib'
         write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine noop()'
+        write (u, '(a)') 'end subroutine noop'
         write (u, '(a)') 'end module lib'
         close (u)
 
