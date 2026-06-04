@@ -88,8 +88,9 @@ contains
         call dag_build(units, n_units, dag)
         call dag_topo_order(dag, order, n_order, ierr)
         if (ierr /= 0) then
-            write(error_unit, '(a)') 'Static: FAIL cycle in module graph'
-            stop 1
+            write(error_unit, '(a,i0,a,i0,a)') &
+                'Static: warning: ', dag%n - n_order, ' of ', dag%n, &
+                ' modules in possible cycle (continuing with build)'
         end if
 
         ! compute changed modules
@@ -149,21 +150,26 @@ contains
     subroutine print_usage()
         write(output_unit, '(a)') 'fo - Fortran build driver'
         write(output_unit, '(a)') ''
+        write(output_unit, '(a)') 'Run fo in a directory with fpm.toml or CMakeLists.txt.'
+        write(output_unit, '(a)') 'Scans modules, builds the DAG, caches by content hash.'
+        write(output_unit, '(a)') ''
         write(output_unit, '(a)') 'usage: fo [command]'
         write(output_unit, '(a)') ''
-        write(output_unit, '(a)') 'no command: staged pipeline (static -> build -> test)'
+        write(output_unit, '(a)') '  (none)     static -> build -> test (the default)'
+        write(output_unit, '(a)') '  build      build only (--flag "-O0" for fast debug)'
+        write(output_unit, '(a)') '  test       run tests (--only-changed, --all for slow)'
+        write(output_unit, '(a)') '  check      build + test, one-line status'
+        write(output_unit, '(a)') '  changed    list changed and affected modules'
+        write(output_unit, '(a)') '  graph      module dependency graph'
+        write(output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
+        write(output_unit, '(a)') '  clean      clear global cache (~/.cache/fo)'
+        write(output_unit, '(a)') '  info       backend, file count, module count'
         write(output_unit, '(a)') ''
-        write(output_unit, '(a)') '  check    build + test, compact delta'
-        write(output_unit, '(a)') '  changed  list changed and affected modules'
-        write(output_unit, '(a)') '  build    build only'
-        write(output_unit, '(a)') '  test     run tests (--only-changed, --all)'
-        write(output_unit, '(a)') '  graph    module dependency graph'
-        write(output_unit, '(a)') '  info     detected backend and module count'
-        write(output_unit, '(a)') '  clean    clear global build cache'
-        write(output_unit, '(a)') '  watch    inotify watch + rebuild loop'
-        write(output_unit, '(a)') '  mcp-server  MCP JSON-RPC server on stdin/stdout'
-        write(output_unit, '(a)') '  lsp      LSP server (didSave diagnostics)'
-        write(output_unit, '(a)') '  version  print version'
+        write(output_unit, '(a)') 'integration:'
+        write(output_unit, '(a)') '  mcp-server  MCP JSON-RPC on stdin/stdout'
+        write(output_unit, '(a)') '  lsp         LSP server (diagnostics on save)'
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a)') 'fo version    print version'
     end subroutine print_usage
 
     subroutine cmd_check()

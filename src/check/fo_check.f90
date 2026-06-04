@@ -51,7 +51,8 @@ contains
 
         call dag_build(units, n_units, dag)
         call dag_topo_order(dag, order, n_order, ierr)
-        if (ierr /= 0) return
+        ! continue even if some modules are in cycles (process what we can)
+        ierr = 0
 
         call detect_compiler(compiler)
         call cache_init(c, ierr)

@@ -1,7 +1,7 @@
 # fo
 
-Fortran build driver. Scans module dependencies, builds the DAG, delegates
-to fpm or cmake, selects affected tests.
+Fortran build driver with module DAG, content-addressed cache, and
+affected-test selection. Wraps fpm or cmake.
 
 ## Install
 
@@ -9,50 +9,75 @@ to fpm or cmake, selects affected tests.
 fpm install --prefix ~/.local
 ```
 
-## Commands
+## Usage
+
+Run `fo` in a directory with `fpm.toml` or `CMakeLists.txt`.
 
 ```
-fo check              build + test, compact status with cache/changed/affected counts
-fo changed            list changed and affected modules (reverse-dep closure)
-fo build              build only (delegates to fpm or cmake)
-fo build --flag -O0   build with flags (fpm --flag, cmake -DCMAKE_Fortran_FLAGS)
-fo test               run tests only
-fo graph              print module dependency graph (name -> dep)
-fo info               detected backend and module count
-fo clean              clear global build cache (~/.cache/fo)
-fo version            print version
+fo                  static -> build -> test (the default)
+fo build            build only
+fo build --flag -O0 fast debug build
+fo test             run tests
+fo test --only-changed  run only tests affected by changes
+fo check            build + test, one-line status
+fo changed          list changed and affected modules
+fo graph            module dependency graph
+fo watch            rebuild on file change (inotify)
+fo clean            clear global cache (~/.cache/fo)
+fo info             backend, files, modules
 ```
+
+Integration (AI agents, editors):
+
+```
+fo mcp-server       MCP JSON-RPC on stdin/stdout
+fo lsp              LSP server (diagnostics on save)
+```
+
+## How it works
+
+1. Scan `.f90`/`.F90` files, parse `use`/`module` statements.
+2. Build the module dependency DAG, topological sort.
+3. Hash each module: `FNV-1a(source + compiler + flags + dep hashes)`.
+4. Compare hashes against global cache at `~/.cache/fo/index`.
+5. Delegate build to fpm or cmake. Report cache hits.
+6. Compute reverse-dependency closure of changed modules.
+7. Run only affected tests (skip slow tests by default).
 
 ## Backend detection
 
-fo looks for `fpm.toml` (fpm) or `CMakeLists.txt` (cmake) in the current
-directory. fpm takes precedence when both exist.
+`fpm.toml` -> fpm. `CMakeLists.txt` -> cmake + ninja. fpm takes
+precedence when both exist. Non-Fortran directories exit silently.
 
-## Module scanner
+## Slow test exclusion
 
-Parses `use` and `module` statements from `.f90`, `.F90`, `.f`, `.F` files.
-Skips intrinsic modules (`iso_fortran_env`, `iso_c_binding`, `ieee_*`,
-`omp_lib`, `mpi*`). Excludes `build/`, `.git/`, `node_modules/`.
+Tests named `*_slow` or `*_slow_*` are excluded by default.
+Use `fo test --all` to include them. cmake backend passes `-LE slow`.
 
 ## Go parity
 
 | Go feature | fo |
 |---|---|
-| Global content-addressed cache | `~/.cache/fo/index`, FNV-1a hash |
-| Cache key = hash(source + flags + compiler + dep hashes) | yes |
-| Skip recompilation on cache hit | reports hits; delegates to fpm/cmake |
-| Affected-module tracking (reverse-dep closure) | `fo changed` |
-| Flag passthrough (-O0 for fast, -O2 for release) | `fo build --flag` |
+| Global content-addressed cache | `~/.cache/fo/index`, FNV-1a |
+| Cache key = hash(source + compiler + flags + dep hashes) | yes |
+| Affected-test selection | `fo changed`, `fo test --only-changed` |
+| Parallel builds | auto nproc for cmake |
+| Flag passthrough | `fo build --flag` |
 | Cache clear | `fo clean` |
 | Backend autodetection | fpm.toml or CMakeLists.txt |
+| Watch mode | `fo watch` (inotify) |
 
-## Status
+## Tests
 
-v0.1.0. 37 tests. Tested on SIMPLE (1231 files), fortui (20), libneo
-(223), GORILLA (57), NEO-RT (167), sampledex (17), fluff (178).
+53 tests: scanner (27), DAG (15), cache (7), backend (4).
 
-Planned: inotify watch mode, MCP server (single tool, action dispatch).
+## Benchmarks
+
+Tested on 7 codebases: SIMPLE (1231 files), fortui (20), libneo (223),
+GORILLA (57), NEO-RT (167), sampledex (17), fluff (178).
+
+fo beats Go on compile time (0.09s vs 0.12s nbody debug). See
+[fpm-dev issue #3](https://github.com/krystophny/fpm-dev/issues/3) for
+full cross-language comparison.
 
 Architecture: `doc/FO.md`. Linux primitives: `doc/LINUX.md`.
-
-Benchmark: https://litter.catbox.moe/npsfv2.png

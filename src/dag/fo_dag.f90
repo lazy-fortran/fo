@@ -85,9 +85,15 @@ contains
         ierr = 0
         n_order = 0
 
-        ! n_unsatisfied(i) = number of i's dependencies not yet processed
+        ! n_unsatisfied(i) = number of i's in-DAG dependencies not yet processed
+        ! (external deps that didn't resolve to a node are not counted)
         do i = 1, dag%n
-            n_unsatisfied(i) = dag%nodes(i)%n_deps
+            n_unsatisfied(i) = 0
+            do j = 1, dag%nodes(i)%n_deps
+                if (dag%nodes(i)%dep_ids(j) > 0) then
+                    n_unsatisfied(i) = n_unsatisfied(i) + 1
+                end if
+            end do
         end do
 
         ! seed with nodes that have no dependencies (leaves)
