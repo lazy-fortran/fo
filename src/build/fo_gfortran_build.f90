@@ -114,7 +114,7 @@ contains
         character(len=512), intent(out) :: dep_objs(MAX_DEP_OBJS)
         integer, intent(out) :: n_dep_objs
 
-        character(len=512) :: tmpfile, line
+        character(len=512) :: tmpfile, dirfile, line, dep_dir
         character(len=4096) :: cmd
         integer :: u, ios, i
 
@@ -122,33 +122,34 @@ contains
         n_dep_objs = 0
         if (config%n_deps == 0) return
 
-        call make_tmpfile('fo_dep_dirs', tmpfile)
+        ! Pick the most recently modified fpm build dir to avoid duplicate symbols
+        ! when the project has been built multiple times with different flags.
+        call make_tmpfile('fo_dep_dir', dirfile)
         cmd = 'find '//sq(trim(project_dir)//'/build')//' -maxdepth 1 '// &
-              '-name "gfortran_*" -type d 2>/dev/null | sort > '//trim(tmpfile)
+              '-name "gfortran_*" -type d 2>/dev/null'// &
+              ' | xargs -r ls -dt 2>/dev/null | head -1 > '//trim(dirfile)
         call execute_command_line(trim(cmd), wait=.true.)
 
-        open (newunit=u, file=tmpfile, status='old', iostat=ios)
+        dep_dir = ''
+        open (newunit=u, file=dirfile, status='old', iostat=ios)
         if (ios == 0) then
-            do
-                read (u, '(a)', iostat=ios) line
-                if (ios /= 0) exit
-                if (len_trim(line) == 0) cycle
-                if (n_dep_includes < MAX_DEP_DIRS) then
-                    n_dep_includes = n_dep_includes + 1
-                    dep_includes(n_dep_includes) = trim(line)
-                end if
-            end do
+            read (u, '(a)', iostat=ios) dep_dir
             close (u)
         end if
-        call delete_tmpfile(tmpfile)
+        call delete_tmpfile(dirfile)
+
+        if (len_trim(dep_dir) == 0) return
+
+        n_dep_includes = 1
+        dep_includes(1) = trim(dep_dir)
 
         call make_tmpfile('fo_dep_objs', tmpfile)
         do i = 1, config%n_deps
-            cmd = 'find '//sq(trim(project_dir)//'/build')//' -name '// &
+            cmd = 'find '//sq(trim(dep_dir))//' -name '// &
                   '"build_dependencies_'//trim(config%deps(i)%name)//'_src_*.f90.o" '// &
                   '2>/dev/null >> '//trim(tmpfile)
             call execute_command_line(trim(cmd), wait=.true.)
-            cmd = 'find '//sq(trim(project_dir)//'/build')//' -name '// &
+            cmd = 'find '//sq(trim(dep_dir))//' -name '// &
                   '"build_dependencies_'//trim(config%deps(i)%name)//'_*.c.o" '// &
                   '2>/dev/null >> '//trim(tmpfile)
             call execute_command_line(trim(cmd), wait=.true.)
