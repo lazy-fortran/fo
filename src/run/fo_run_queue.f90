@@ -1,5 +1,5 @@
 module fo_run_queue
-    use fo_json, only: json_bool
+    use fo_util, only: json_bool
     implicit none
     private
     public :: run_queue_t

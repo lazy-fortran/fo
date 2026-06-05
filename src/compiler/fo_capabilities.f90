@@ -1,6 +1,6 @@
 module fo_capabilities
     use, intrinsic :: iso_c_binding, only: c_int
-    use fo_json, only: make_tmpfile, delete_tmpfile, json_bool
+    use fo_util, only: make_tmpfile, delete_tmpfile, json_bool
     implicit none
     private
     public :: capabilities_t, detect_capabilities

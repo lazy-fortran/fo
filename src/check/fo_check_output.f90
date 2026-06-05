@@ -1,5 +1,6 @@
 module fo_check_output
-    use fo_json, only: json_bool, json_int, json_escape_str
+    use fo_util, only: json_bool, json_int
+    use fx_json_build, only: json_escape_string
     use fo_check, only: check_result_t, fo_check_run
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
                                capabilities_json
@@ -80,7 +81,7 @@ contains
             line = trim(line)//',"in_cycle":'//trim(json_int(res%n_in_cycle))
         line = trim(line)//',"elapsed_s":'//trim(adjustl(elapsed))
         line = trim(line)//',"error":"'
-        line = trim(line)//trim(json_escape_str(res%error_msg))//'"}'
+        line = trim(line)//trim(json_escape_string(res%error_msg))//'"}'
     end function check_result_json
 
     function check_result_compact_json(res) result(line)
@@ -99,29 +100,29 @@ contains
 
         base = check_result_json(res)
         line = base(1:len_trim(base) - 1)
-        line = trim(line)//',"stage":"'//trim(json_escape_str(res%stage))//'"'
-        line = trim(line)//',"target":"'//trim(json_escape_str(res%target))//'"'
-       line = trim(line)//',"summary":"'//trim(json_escape_str(agent_summary(res)))//'"'
-        line = trim(line)//',"hint":"'//trim(json_escape_str(res%hint))//'"'
-        line = trim(line)//',"rerun":"'//trim(json_escape_str(res%rerun))//'"'
-        line = trim(line)//',"log_path":"'//trim(json_escape_str(res%log_path))//'"'
+        line = trim(line)//',"stage":"'//trim(json_escape_string(res%stage))//'"'
+        line = trim(line)//',"target":"'//trim(json_escape_string(res%target))//'"'
+       line = trim(line)//',"summary":"'//trim(json_escape_string(agent_summary(res)))//'"'
+        line = trim(line)//',"hint":"'//trim(json_escape_string(res%hint))//'"'
+        line = trim(line)//',"rerun":"'//trim(json_escape_string(res%rerun))//'"'
+        line = trim(line)//',"log_path":"'//trim(json_escape_string(res%log_path))//'"'
         if (res%build_ok .and. res%tests_ok) then
             line = trim(line)//',"diagnostics":[]'
         else
             line = trim(line)//',"diagnostics":[{"kind":"'// &
-                   trim(json_escape_str(res%stage))//'"'
+                   trim(json_escape_string(res%stage))//'"'
             if (len_trim(res%diag_file) > 0) then
-               line = trim(line)//',"file":"'//trim(json_escape_str(res%diag_file))//'"'
+               line = trim(line)//',"file":"'//trim(json_escape_string(res%diag_file))//'"'
             else
                 line = trim(line)//',"file":""'
             end if
             line = trim(line)//',"line":'//trim(json_int(res%diag_line))
             line = trim(line)//',"column":'//trim(json_int(res%diag_column))
-            line = trim(line)//',"target":"'//trim(json_escape_str(res%target))//'"'
+            line = trim(line)//',"target":"'//trim(json_escape_string(res%target))//'"'
             line = trim(line)//',"message":"'// &
-                   trim(json_escape_str(agent_summary(res)))//'"'
-            line = trim(line)//',"hint":"'//trim(json_escape_str(res%hint))//'"'
-            line = trim(line)//',"rerun":"'//trim(json_escape_str(res%rerun))//'"}]'
+                   trim(json_escape_string(agent_summary(res)))//'"'
+            line = trim(line)//',"hint":"'//trim(json_escape_string(res%hint))//'"'
+            line = trim(line)//',"rerun":"'//trim(json_escape_string(res%rerun))//'"}]'
         end if
         if (len_trim(cap_json_str) > 0) then
             line = trim(line)//',"capabilities":'//trim(cap_json_str)//'}'
@@ -143,12 +144,12 @@ contains
 
         line = '{'
         line = trim(line)//'"ok":'//trim(json_bool(ok))
-        line = trim(line)//',"stage":"'//trim(json_escape_str(res%stage))//'"'
-        line = trim(line)//',"target":"'//trim(json_escape_str(res%target))//'"'
-       line = trim(line)//',"summary":"'//trim(json_escape_str(agent_summary(res)))//'"'
-        line = trim(line)//',"hint":"'//trim(json_escape_str(res%hint))//'"'
-        line = trim(line)//',"rerun":"'//trim(json_escape_str(res%rerun))//'"'
-        line = trim(line)//',"log_path":"'//trim(json_escape_str(res%log_path))//'"'
+        line = trim(line)//',"stage":"'//trim(json_escape_string(res%stage))//'"'
+        line = trim(line)//',"target":"'//trim(json_escape_string(res%target))//'"'
+       line = trim(line)//',"summary":"'//trim(json_escape_string(agent_summary(res)))//'"'
+        line = trim(line)//',"hint":"'//trim(json_escape_string(res%hint))//'"'
+        line = trim(line)//',"rerun":"'//trim(json_escape_string(res%rerun))//'"'
+        line = trim(line)//',"log_path":"'//trim(json_escape_string(res%log_path))//'"'
         line = trim(line)//',"elapsed_s":'//trim(adjustl(elapsed))
         line = trim(line)//',"modules":'//trim(json_int(res%n_modules))
         line = trim(line)//',"cached":'//trim(json_int(res%n_cached))

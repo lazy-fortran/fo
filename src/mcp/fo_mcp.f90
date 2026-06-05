@@ -1,8 +1,8 @@
 module fo_mcp
-    use fo_json, only: json_int, json_escape, extract_json_field, &
-                       make_tmpfile, delete_tmpfile, read_text_file, &
-                       send_jsonrpc, jsonrpc_error, jsonrpc_null, &
-                       strip_path_prefix_in_str
+    use fo_util, only: json_int, extract_json_field, make_tmpfile, &
+                       delete_tmpfile, read_text_file, send_jsonrpc, &
+                       jsonrpc_error, jsonrpc_null, strip_path_prefix_in_str
+    use fx_json_build, only: json_escape_string
     use fo_mcp_response, only: make_initialize_response, &
                                make_tools_list_response, &
                                make_resources_list_response, &
@@ -255,7 +255,7 @@ contains
                 if (.not. (check_res%build_ok .and. check_res%tests_ok)) exitcode = 1
             end if
 
-            call json_escape(output_text)
+            output_text = json_escape_string(output_text)
             response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
                        '"result":{"contents":[{"uri":"fo://diagnostics",'// &
                        '"mimeType":"text/plain",'// &

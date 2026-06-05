@@ -1,6 +1,6 @@
 module fo_scan
     use, intrinsic :: iso_fortran_env, only: error_unit
-    use fo_json, only: make_tmpfile, delete_tmpfile
+    use fo_util, only: make_tmpfile, delete_tmpfile
     use fo_process, only: process_scan_sources
     implicit none
     private

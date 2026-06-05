@@ -577,7 +577,7 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
     end subroutine cmd_lint
 
     subroutine cmd_fmt()
-        use fo_json, only: make_tmpfile, delete_tmpfile
+        use fo_util, only: make_tmpfile, delete_tmpfile
         type(backend_t) :: b
         character(len=512) :: scan_root
         character(len=4096) :: cmd
@@ -609,7 +609,7 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
     end subroutine cmd_fmt
 
     subroutine fmt_check(scan_root, exitcode)
-        use fo_json, only: make_tmpfile, delete_tmpfile
+        use fo_util, only: make_tmpfile, delete_tmpfile
         character(len=*), intent(in) :: scan_root
         integer, intent(out) :: exitcode
 

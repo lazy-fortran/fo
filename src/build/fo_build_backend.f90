@@ -1,6 +1,6 @@
 module fo_build_backend
     use, intrinsic :: iso_fortran_env, only: error_unit
-    use fo_json, only: make_tmpfile, delete_tmpfile
+    use fo_util, only: make_tmpfile, delete_tmpfile
     use fo_process, only: process_detect_nproc, process_fpm_build, &
                           process_fpm_test_list, process_fpm_test_all, &
                           process_fpm_test_names, process_cmake_build, &

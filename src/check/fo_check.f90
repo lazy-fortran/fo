@@ -1,5 +1,5 @@
 module fo_check
-    use fo_json, only: make_tmpfile, delete_tmpfile
+    use fo_util, only: make_tmpfile, delete_tmpfile
     use fo_scan, only: scan_unit_t, scan_dir, MAX_NAME, MAX_UNITS
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_affected_set, MAX_NODES
     use fo_dag_bridge, only: build_dag_from_units

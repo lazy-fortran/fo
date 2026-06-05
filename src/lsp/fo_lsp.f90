@@ -1,8 +1,8 @@
 module fo_lsp
     use, intrinsic :: iso_fortran_env, only: input_unit
-    use fo_json, only: json_escape, extract_json_field, make_tmpfile, &
-                       read_text_file, delete_tmpfile, send_jsonrpc, &
-                       jsonrpc_error, jsonrpc_null
+    use fo_util, only: extract_json_field, make_tmpfile, read_text_file, &
+                       delete_tmpfile, send_jsonrpc, jsonrpc_error, jsonrpc_null
+    use fx_json_build, only: json_escape_string
     implicit none
     private
     public :: lsp_serve
@@ -109,7 +109,7 @@ contains
         call delete_tmpfile(tmpfile)
 
         ! publish diagnostics notification
-        call json_escape(diag_text)
+        diag_text = json_escape_string(diag_text)
         if (exitcode /= 0) then
             notification = '{"jsonrpc":"2.0",'// &
                            '"method":"textDocument/publishDiagnostics",'// &

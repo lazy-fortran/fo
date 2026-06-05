@@ -1,5 +1,6 @@
 module fo_lint
-    use fo_json, only: json_escape_str, json_int, make_tmpfile, delete_tmpfile
+    use fo_util, only: json_int, make_tmpfile, delete_tmpfile
+    use fx_json_build, only: json_escape_string
     implicit none
     private
     public :: lint_finding_t, lint_file, lint_dir, lint_findings_json
@@ -292,12 +293,12 @@ contains
         do i = 1, n_findings
             if (i > 1) json = trim(json)//','
             json = trim(json)//'{"file":"'// &
-                   trim(json_escape_str(findings(i)%file))//'"'// &
+                   trim(json_escape_string(findings(i)%file))//'"'// &
                    ',"line":'//trim(json_int(findings(i)%line))// &
                    ',"module":"'// &
-                   trim(json_escape_str(findings(i)%module_name))//'"'// &
+                   trim(json_escape_string(findings(i)%module_name))//'"'// &
                    ',"symbol":"'// &
-                   trim(json_escape_str(findings(i)%symbol))//'"}'
+                   trim(json_escape_string(findings(i)%symbol))//'"}'
         end do
         json = trim(json)//'],"count":'//trim(json_int(n_findings))//'}'
     end function lint_findings_json
@@ -513,11 +514,11 @@ contains
         do i = 1, n_warnings
             if (i > 1) json = trim(json)//','
             json = trim(json)//'{"file":"'// &
-                   trim(json_escape_str(warnings(i)%file))//'"'// &
+                   trim(json_escape_string(warnings(i)%file))//'"'// &
                    ',"line":'//trim(json_int(warnings(i)%line))// &
                    ',"column":'//trim(json_int(warnings(i)%column))// &
                    ',"message":"'// &
-                   trim(json_escape_str(warnings(i)%message))//'"}'
+                   trim(json_escape_string(warnings(i)%message))//'"}'
         end do
         json = trim(json)//'],"count":'//trim(json_int(n_warnings))//'}'
     end function lint_warnings_json
@@ -540,12 +541,12 @@ contains
             if (len_trim(json) > LIMIT) exit
             if (i > 1) json = trim(json)//','
             json = trim(json)//'{"file":"'// &
-                   trim(json_escape_str(findings(i)%file))//'"'// &
+                   trim(json_escape_string(findings(i)%file))//'"'// &
                    ',"line":'//trim(json_int(findings(i)%line))// &
                    ',"module":"'// &
-                   trim(json_escape_str(findings(i)%module_name))//'"'// &
+                   trim(json_escape_string(findings(i)%module_name))//'"'// &
                    ',"symbol":"'// &
-                   trim(json_escape_str(findings(i)%symbol))//'"}'
+                   trim(json_escape_string(findings(i)%symbol))//'"}'
         end do
 
         json = trim(json)//'],"warnings":['
@@ -556,11 +557,11 @@ contains
             if (n_emitted > 0) json = trim(json)//','
             n_emitted = n_emitted + 1
             json = trim(json)//'{"file":"'// &
-                   trim(json_escape_str(warnings(i)%file))//'"'// &
+                   trim(json_escape_string(warnings(i)%file))//'"'// &
                    ',"line":'//trim(json_int(warnings(i)%line))// &
                    ',"column":'//trim(json_int(warnings(i)%column))// &
                    ',"message":"'// &
-                   trim(json_escape_str(warnings(i)%message))//'"}'
+                   trim(json_escape_string(warnings(i)%message))//'"}'
         end do
 
         json = trim(json)//'],"count":'//trim(json_int(total))//'}'

@@ -1,5 +1,6 @@
 module fo_mcp_response
-    use fo_json, only: json_bool, json_int, json_escape, extract_json_field
+    use fo_util, only: json_bool, json_int, extract_json_field
+    use fx_json_build, only: json_escape_string
     implicit none
     private
     public :: make_initialize_response, make_tools_list_response
@@ -76,8 +77,7 @@ contains
 
         character(len=16384) :: escaped
 
-        escaped = output_text
-        call json_escape(escaped)
+        escaped = json_escape_string(output_text)
         response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
                    '"result":{"content":[{"type":"text",'// &
                    '"text":"'//trim(escaped)//'"}],"isError":'// &
