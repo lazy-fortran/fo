@@ -1,7 +1,7 @@
 program fo_main
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME, is_slow_test
-    use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_to_dot, MAX_NODES
+    use fx_dag, only: dag_t, dag_topo_sort, dag_to_dot, MAX_NODES
     use fo_dag_bridge, only: build_dag_from_units
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, &
                                 BACKEND_FPM, BACKEND_CMAKE
@@ -66,7 +66,7 @@ contains
         ! staged pipeline: static -> build -> test -> lint
         type(backend_t) :: b
         type(dag_t) :: dag
-        type(scan_unit_t) :: units(MAX_UNITS)
+        type(scan_unit_t), allocatable :: units(:)
         integer :: n_units, ierr, exitcode
         integer :: order(MAX_NODES), n_order
         integer :: changed_ids(MAX_NODES), n_changed
@@ -75,6 +75,8 @@ contains
         real :: t0, t1
         character(len=128) :: test_names(MAX_NODES)
         logical :: is_test_arr(MAX_NODES), has_cycle
+
+        allocate (units(MAX_UNITS))
 
         call cpu_time(t0)
 
@@ -170,8 +172,10 @@ contains
         ! 4. lint: unused imports (skip compiler warnings in pipeline)
         block
             use fo_lint, only: lint_finding_t, lint_dir, MAX_FINDINGS
-            type(lint_finding_t) :: findings(MAX_FINDINGS)
+            type(lint_finding_t), allocatable :: findings(:)
             integer :: n_findings, li
+
+            allocate (findings(MAX_FINDINGS))
 
             call lint_dir(trim(b%project_dir), findings, n_findings)
             if (n_findings > 0) then
@@ -221,11 +225,11 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
       write (output_unit, '(a)') '  fmt        format sources (fprettify, 88 col, 4 sp)'
     write (output_unit, '(a)') '  fmt --check  check formatting without modifying files'
         write (output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
-        write (output_unit, '(a)') '  watch --fmt  auto-format changed files before rebuild'
+    write (output_unit, '(a)') '  watch --fmt  auto-format changed files before rebuild'
         write (output_unit, '(a)') '  lint       unused imports + gfortran warnings'
         write (output_unit, '(a)') '  lint --json  lint results as JSON'
         write (output_unit, '(a)') '  clean      clear global cache (~/.cache/fo)'
-        write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/.local)'
+write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/.local)'
         write (output_unit, '(a)') '  info       backend, file count, module count'
         write (output_unit, '(a)') '  info --capabilities  compiler and tooling limits'
         write (output_unit, '(a)') ''
@@ -538,11 +542,12 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
                            lint_dir, lint_compiler, lint_dedup_warnings, &
                            lint_all_json, MAX_FINDINGS, MAX_WARNINGS
         type(backend_t) :: b
-        type(lint_finding_t) :: findings(MAX_FINDINGS)
-        type(lint_warning_t) :: warnings(MAX_WARNINGS)
+        type(lint_finding_t), allocatable :: findings(:)
+        type(lint_warning_t), allocatable :: warnings(:)
         integer :: n_findings, n_warnings, i, output_mode, mode_ierr
         character(len=512) :: scan_root
 
+        allocate (findings(MAX_FINDINGS), warnings(MAX_WARNINGS))
         b = detect_backend('.')
         scan_root = '.'
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir

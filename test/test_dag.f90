@@ -63,9 +63,9 @@ contains
 
         ! c must come before b, b before a
         call assert(position(order, n_order, dag_find_node(dag, 'c')) < &
-                    position(order, n_order, dag_find_node(dag, 'b')), 'linear: c before b')
+                position(order, n_order, dag_find_node(dag, 'b')), 'linear: c before b')
         call assert(position(order, n_order, dag_find_node(dag, 'b')) < &
-                    position(order, n_order, dag_find_node(dag, 'a')), 'linear: b before a')
+                position(order, n_order, dag_find_node(dag, 'a')), 'linear: b before a')
     end subroutine test_linear_chain
 
     subroutine test_diamond()
@@ -102,7 +102,7 @@ contains
         call assert(.not. has_cycle, 'diamond: no cycle')
         call assert(n_order == 4, 'diamond: all 4 ordered')
         call assert(position(order, n_order, dag_find_node(dag, 'a')) < &
-                    position(order, n_order, dag_find_node(dag, 'd')), 'diamond: a before d')
+               position(order, n_order, dag_find_node(dag, 'd')), 'diamond: a before d')
     end subroutine test_diamond
 
     subroutine test_reverse_deps()

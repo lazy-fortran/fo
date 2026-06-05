@@ -1,7 +1,6 @@
 program test_fpm_config
     use, intrinsic :: iso_fortran_env, only: output_unit
-    use fo_fpm_config, only: fpm_dep_t, fpm_config_t, fpm_config_parse, &
-                             fpm_config_init
+    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_config_init
     implicit none
 
     integer :: n_pass, n_fail
@@ -13,7 +12,7 @@ program test_fpm_config
     call test_init_defaults()
     call test_parse_missing_file()
 
-    write (output_unit, '(a,i0,a,i0,a)') 'fpm_config: ', n_pass, ' pass, ', n_fail, ' fail'
+ write (output_unit, '(a,i0,a,i0,a)') 'fpm_config: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
 
 contains

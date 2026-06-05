@@ -110,7 +110,7 @@ contains
                 return
             end if
             call handle_check(line, id_str, dir, check_res, output_text, &
-                               exitcode, response)
+                              exitcode, response)
         case ('status')
             call handle_async_status(id_str, response, async_state)
             return
@@ -156,7 +156,7 @@ contains
     end subroutine handle_tools_call
 
     subroutine handle_check(line, id_str, dir, check_res, output_text, &
-                             exitcode, response)
+                            exitcode, response)
         character(len=*), intent(in) :: line, id_str, dir
         type(check_result_t), intent(out) :: check_res
         character(len=*), intent(out) :: output_text
@@ -268,12 +268,13 @@ contains
         character(len=*), intent(out) :: response
 
         type(backend_t) :: b
-        type(scan_unit_t) :: units(MAX_UNITS)
+        type(scan_unit_t), allocatable :: units(:)
         type(dag_t) :: dag
         character(len=512) :: scan_root
         integer :: n_units, ierr, i, j
         character(len=:), allocatable :: dot_out
 
+        allocate (units(MAX_UNITS))
         b = detect_backend(trim(dir))
         scan_root = trim(dir)
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
@@ -292,12 +293,12 @@ contains
                 do i = 1, dag%n_nodes
                     if (dag%nodes(i)%n_edges == 0) then
                         output_text = trim(output_text)// &
-                            trim(dag%nodes(i)%label)//achar(10)
+                                      trim(dag%nodes(i)%label)//achar(10)
                     else
                         do j = 1, dag%nodes(i)%n_edges
                             output_text = trim(output_text)// &
-                                trim(dag%nodes(i)%label)//' -> '// &
-                                trim(dag%nodes(dag%nodes(i)%edges(j))%label)//achar(10)
+                                          trim(dag%nodes(i)%label)//' -> '// &
+                                 trim(dag%nodes(dag%nodes(i)%edges(j))%label)//achar(10)
                         end do
                     end if
                 end do
@@ -318,11 +319,12 @@ contains
         character(len=*), intent(out) :: response
 
         type(backend_t) :: b
-        type(scan_unit_t) :: units(MAX_UNITS)
+        type(scan_unit_t), allocatable :: units(:)
         type(dag_t) :: dag
         character(len=512) :: scan_root
         integer :: n_units, ierr
 
+        allocate (units(MAX_UNITS))
         b = detect_backend(trim(dir))
         scan_root = trim(dir)
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
@@ -381,16 +383,16 @@ contains
         write (output_text, '(a,i0,a)') 'changed (', n_changed, '):'
         do i = 1, n_changed
             output_text = trim(output_text)//achar(10)//'  '// &
-                trim(dag%nodes(changed_ids(i))%label)//'  '// &
-                trim(filenames(changed_ids(i)))
+                          trim(dag%nodes(changed_ids(i))%label)//'  '// &
+                          trim(filenames(changed_ids(i)))
         end do
         output_text = trim(output_text)//achar(10)
         write (output_text(len_trim(output_text) + 1:), '(a,i0,a)') &
             'affected (', n_affected, '):'
         do i = 1, n_affected
             output_text = trim(output_text)//achar(10)//'  '// &
-                trim(dag%nodes(affected_ids(i))%label)//'  '// &
-                trim(filenames(affected_ids(i)))
+                          trim(dag%nodes(affected_ids(i))%label)//'  '// &
+                          trim(filenames(affected_ids(i)))
         end do
         n_tests = 0
         do i = 1, n_affected
@@ -403,8 +405,8 @@ contains
             do i = 1, n_affected
                 if (is_test_arr(affected_ids(i))) then
                     output_text = trim(output_text)//achar(10)//'  '// &
-                        trim(dag%nodes(affected_ids(i))%label)//'  '// &
-                        trim(filenames(affected_ids(i)))
+                                  trim(dag%nodes(affected_ids(i))%label)//'  '// &
+                                  trim(filenames(affected_ids(i)))
                 end if
             end do
         end if

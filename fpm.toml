@@ -17,6 +17,7 @@ library = false
 
 [dependencies]
 fx = { git = "git@github.com:lazy-fortran/fx.git", branch = "main" }
+openmp = "*"
 
 [fortran]
 implicit-typing = false

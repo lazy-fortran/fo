@@ -61,20 +61,24 @@ contains
         character(len=MAX_NAME), optional, intent(out) :: filenames(MAX_NODES)
         logical, optional, intent(out) :: is_test_arr(MAX_NODES)
 
-        type(scan_unit_t) :: units(MAX_UNITS)
+        type(scan_unit_t), allocatable :: units(:)
         type(cache_t) :: c
         type(backend_t) :: b
         integer :: n_units
-        integer :: order(MAX_NODES), n_order
+        integer, allocatable :: order(:)
+        integer :: n_order
         integer :: i, node_id, j, dep_id, n_dep_keys
-        character(len=HASH_LEN) :: keys(MAX_NODES)
+        character(len=HASH_LEN), allocatable :: keys(:)
         character(len=HASH_LEN) :: dep_keys(64)
         character(len=256) :: compiler
         character(len=MAX_NAME) :: ext_names(MAX_EXT_DEPS)
         character(len=HASH_LEN) :: ext_keys(MAX_EXT_DEPS)
         integer :: n_ext
-        character(len=MAX_NAME) :: local_filenames(MAX_NODES)
+        character(len=MAX_NAME), allocatable :: local_filenames(:)
         logical :: has_cycle
+
+        allocate (units(MAX_UNITS), order(MAX_NODES))
+        allocate (keys(MAX_NODES), local_filenames(MAX_NODES))
 
         ierr = 0
         n_changed = 0

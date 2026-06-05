@@ -1,6 +1,6 @@
 program test_check
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_check, only: check_result_t, test_result_t, fo_check_run
+    use fo_check, only: check_result_t, fo_check_run
     use fo_check_output, only: check_result_json, check_result_compact_json, &
                                check_result_full_json, fo_check_write
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log

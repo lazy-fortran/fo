@@ -34,9 +34,10 @@ contains
         type(lint_finding_t), intent(inout) :: findings(MAX_FINDINGS)
         integer, intent(inout) :: n_findings
 
-        character(len=1024) :: lines(10000)
+        character(len=1024), allocatable :: lines(:), lowered(:)
         integer :: n_lines, u, iostat, i
-        character(len=1024) :: lowered(10000)
+
+        allocate (lines(10000), lowered(10000))
 
         n_lines = 0
         open (newunit=u, file=filename, status='old', iostat=iostat)

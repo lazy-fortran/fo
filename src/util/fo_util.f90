@@ -1,6 +1,5 @@
 module fo_util
     use fx_mcp, only: mcp_send_response, MCP_FRAME_UNKNOWN
-    use, intrinsic :: iso_fortran_env, only: output_unit
     implicit none
     private
     public :: make_tmpfile, delete_tmpfile, read_text_file

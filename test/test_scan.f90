@@ -157,10 +157,11 @@ contains
     end subroutine test_slow_test_detection
 
     subroutine test_scan_dir_empty()
-        type(scan_unit_t) :: units(MAX_UNITS)
+        type(scan_unit_t), allocatable :: units(:)
         integer :: n_units, ierr
         character(len=512) :: dir
 
+        allocate (units(MAX_UNITS))
         call make_tmp_path('fo_test_empty_dir', dir, '')
         call execute_command_line('rm -rf '//trim(dir))
         call execute_command_line('mkdir -p '//trim(dir))
@@ -173,11 +174,12 @@ contains
     end subroutine test_scan_dir_empty
 
     subroutine test_scan_dir_path_with_spaces()
-        type(scan_unit_t) :: units(MAX_UNITS)
+        type(scan_unit_t), allocatable :: units(:)
         integer :: n_units, ierr, n_tests
         character(len=512) :: base_dir, dir
         character(len=80) :: lib_lines(3), test_lines(3)
 
+        allocate (units(MAX_UNITS))
         call make_tmp_path('fo_test_scan_spaces', base_dir, '')
         dir = trim(base_dir)//' path with spaces'
         call remove_tree(dir)

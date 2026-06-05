@@ -1,11 +1,10 @@
 module fo_gfortran_build
-    ! Direct gfortran build pipeline for fpm.toml projects.
-    ! Phase 1: deps must be pre-built (fpm must have run at least once).
-    ! Discovers dep .mod and .o files from build/gfortran_*/ directories.
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME
     use fo_dag_bridge, only: build_dag_from_units
-    use fx_dag, only: dag_t, dag_topo_sort, MAX_NODES
+    use fx_dag, only: dag_t, dag_topo_sort, dag_levels, MAX_NODES
+    use fo_cache, only: cache_t, cache_init, cache_lookup, cache_store, &
+                        cache_key_for, HASH_LEN
     use fo_util, only: make_tmpfile, delete_tmpfile
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
@@ -19,12 +18,13 @@ module fo_gfortran_build
 
 contains
 
-    subroutine gfortran_build(project_dir, log_file, exitcode)
+    subroutine gfortran_build(project_dir, log_file, exitcode, n_compiled)
         character(len=*), intent(in) :: project_dir, log_file
         integer, intent(out) :: exitcode
+        integer, intent(out), optional :: n_compiled
 
         type(fpm_config_t) :: config
-        integer :: ierr, n_dep_includes, n_dep_objs, n_src_objs
+        integer :: ierr, n_dep_includes, n_dep_objs, n_src_objs, nc
         character(len=512) :: mod_dir, obj_dir, bin_dir
         character(len=512) :: dep_includes(MAX_DEP_DIRS)
         character(len=512) :: dep_objs(MAX_DEP_OBJS)
@@ -50,16 +50,18 @@ contains
                                   wait=.true., exitstat=exitcode)
         if (exitcode /= 0) return
 
-        ! Truncate log
         call truncate_file(trim(lf))
 
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
                                 dep_objs, n_dep_objs)
 
+        nc = 0
         call compile_sources(project_dir, config%source_dir, config%app_dir, &
                              mod_dir, obj_dir, dep_includes, n_dep_includes, lf, &
-                             src_objs, n_src_objs, is_prog_arr, exitcode)
+                             src_objs, n_src_objs, is_prog_arr, exitcode, nc)
         if (exitcode /= 0) return
+
+        if (present(n_compiled)) n_compiled = nc
 
         call link_app_binaries(project_dir, config, bin_dir, src_objs, n_src_objs, &
                                is_prog_arr, dep_objs, n_dep_objs, lf, exitcode)
@@ -80,7 +82,6 @@ contains
         lf = log_file
         if (len_trim(lf) == 0) lf = '/dev/null'
 
-        ! Build library and app first
         call gfortran_build(project_dir, lf, exitcode)
         if (exitcode /= 0) return
 
@@ -96,8 +97,6 @@ contains
 
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
                                 dep_objs, n_dep_objs)
-
-        ! Collect library objects (exclude app objects)
         call collect_lib_objs(obj_dir, lib_objs, n_lib_objs)
 
         call compile_and_run_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
@@ -161,7 +160,6 @@ contains
                 read (u, '(a)', iostat=ios) line
                 if (ios /= 0) exit
                 if (len_trim(line) == 0) cycle
-                ! skip dep app and test objects
                 if (index(line, '_app_') > 0) cycle
                 if (index(line, '_test_') > 0) cycle
                 if (n_dep_objs < MAX_DEP_OBJS) then
@@ -176,7 +174,7 @@ contains
 
     subroutine compile_sources(project_dir, src_dir, app_dir, mod_dir, obj_dir, &
                                dep_includes, n_dep_includes, log_file, &
-                               src_objs, n_src_objs, is_prog_arr, exitcode)
+                               src_objs, n_src_objs, is_prog_arr, exitcode, n_compiled)
         character(len=*), intent(in) :: project_dir, src_dir, app_dir
         character(len=*), intent(in) :: mod_dir, obj_dir, log_file
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
@@ -184,23 +182,44 @@ contains
         character(len=512), intent(out) :: src_objs(MAX_SRC_OBJS)
         integer, intent(out) :: n_src_objs
         logical, intent(out) :: is_prog_arr(MAX_SRC_OBJS)
-        integer, intent(out) :: exitcode
+        integer, intent(out) :: exitcode, n_compiled
 
-        type(scan_unit_t) :: units_a(MAX_UNITS), units_b(MAX_UNITS)
-        integer :: na, nb, n_all, i, ierr, node_id
-        type(scan_unit_t) :: all_units(MAX_UNITS)
+        type(scan_unit_t), allocatable :: units_a(:), units_b(:), all_units(:)
+        integer :: na, nb, n_all, i, ii, ierr, node_id
         type(dag_t) :: dag
-        character(len=MAX_NAME) :: filenames(MAX_NODES)
-        logical :: is_prog(MAX_NODES), is_test_arr(MAX_NODES)
-        integer :: topo_order(MAX_NODES), n_order
-        logical :: has_cycle
+        character(len=MAX_NAME), allocatable :: filenames(:)
+        logical, allocatable :: is_prog(:), is_test_arr(:)
+        integer, allocatable :: topo_order(:), node_levels(:)
+        integer :: n_order, n_levels, lvl
+        logical :: has_cycle, obj_exists
         character(len=512) :: obj_path, includes_flag
         character(len=512) :: c_list, c_line
         integer :: uc, cios
 
+        type(cache_t) :: c
+        integer :: cache_ierr
+        character(len=HASH_LEN), allocatable :: old_mod_keys(:), new_mod_keys(:)
+        character(len=HASH_LEN) :: dep_keys(64), source_key
+        integer :: dep_id, j, n_dep
+        integer, allocatable :: compile_nodes(:)
+        character(len=HASH_LEN), allocatable :: compile_keys(:)
+        integer, allocatable :: compile_exits(:)
+        character(len=512), allocatable :: per_logs(:)
+        integer :: n_compile
+        character(len=MAX_NAME) :: fname_local
+        character(len=512) :: per_log_local
+
         n_src_objs = 0
         is_prog_arr = .false.
         exitcode = 0
+        n_compiled = 0
+
+        allocate (units_a(MAX_UNITS), units_b(MAX_UNITS), all_units(MAX_UNITS))
+        allocate (filenames(MAX_NODES), is_prog(MAX_NODES), is_test_arr(MAX_NODES))
+        allocate (topo_order(MAX_NODES), node_levels(MAX_NODES))
+        allocate (old_mod_keys(MAX_NODES), new_mod_keys(MAX_NODES))
+        allocate (compile_nodes(MAX_NODES), compile_keys(MAX_NODES))
+        allocate (compile_exits(MAX_NODES), per_logs(MAX_NODES))
 
         call scan_dir(trim(project_dir)//'/'//trim(src_dir), units_a, na, ierr)
         call scan_dir(trim(project_dir)//'/'//trim(app_dir), units_b, nb, ierr)
@@ -218,16 +237,99 @@ contains
 
         call build_dag_from_units(all_units, n_all, dag, filenames, is_test_arr, is_prog)
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
+        call dag_levels(dag, topo_order, n_order, node_levels, n_levels)
         call make_includes_flag(mod_dir, dep_includes, n_dep_includes, includes_flag)
+
+        old_mod_keys = ''
+        new_mod_keys = ''
+        call load_mod_keys(mod_dir, dag, n_order, topo_order, old_mod_keys)
+        call cache_init(c, cache_ierr)
+
+        if (cache_ierr == 0) then
+            do lvl = 0, n_levels - 1
+                n_compile = 0
+                compile_exits = 0
+
+                do i = 1, n_order
+                    if (node_levels(i) /= lvl) cycle
+                    node_id = topo_order(i)
+                    if (is_test_arr(node_id)) cycle
+                    if (len_trim(filenames(node_id)) == 0) cycle
+
+                    n_dep = 0
+                    do j = 1, dag%nodes(node_id)%n_edges
+                        dep_id = dag%nodes(node_id)%edges(j)
+                        if (dep_id > 0 .and. len_trim(new_mod_keys(dep_id)) > 0) then
+                            n_dep = n_dep + 1
+                            if (n_dep <= 64) dep_keys(n_dep) = new_mod_keys(dep_id)
+                        end if
+                    end do
+                    source_key = cache_key_for(filenames(node_id), 'gfortran', '', &
+                                               dep_keys, n_dep)
+
+                    call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
+                    if (cache_lookup(c, dag%nodes(node_id)%label, source_key)) then
+                        inquire (file=trim(obj_path), exist=obj_exists)
+                        if (obj_exists) then
+                            new_mod_keys(node_id) = old_mod_keys(node_id)
+                            cycle
+                        end if
+                    end if
+                    n_compile = n_compile + 1
+                    compile_nodes(n_compile) = node_id
+                    compile_keys(n_compile) = source_key
+                end do
+
+                do ii = 1, n_compile
+                    call make_tmpfile('fo_compile', per_logs(ii))
+                end do
+
+                !$omp parallel do schedule(dynamic) &
+                !$omp private(node_id, obj_path, fname_local, per_log_local)
+                do ii = 1, n_compile
+                    node_id = compile_nodes(ii)
+                    fname_local = filenames(node_id)
+                    per_log_local = per_logs(ii)
+                    call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
+                    call compile_f90(fname_local, obj_path, includes_flag, &
+                                     per_log_local, compile_exits(ii))
+                end do
+                !$omp end parallel do
+
+                do ii = 1, n_compile
+                    call append_log_file(trim(per_logs(ii)), log_file)
+                end do
+                do ii = 1, n_compile
+                    if (compile_exits(ii) /= 0) then
+                        exitcode = compile_exits(ii)
+                        return
+                    end if
+                    node_id = compile_nodes(ii)
+                    call get_mod_key(dag%nodes(node_id)%label, mod_dir, &
+                                     new_mod_keys(node_id))
+                    call cache_store(c, dag%nodes(node_id)%label, compile_keys(ii))
+                end do
+                n_compiled = n_compiled + n_compile
+            end do
+            call save_mod_keys(mod_dir, dag, n_order, topo_order, new_mod_keys)
+        else
+            do i = 1, n_order
+                node_id = topo_order(i)
+                if (len_trim(filenames(node_id)) == 0) cycle
+                if (is_test_arr(node_id)) cycle
+                call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
+                call compile_f90(filenames(node_id), obj_path, includes_flag, &
+                                 log_file, exitcode)
+                if (exitcode /= 0) return
+                n_compiled = n_compiled + 1
+            end do
+        end if
 
         do i = 1, n_order
             node_id = topo_order(i)
             if (len_trim(filenames(node_id)) == 0) cycle
             if (is_test_arr(node_id)) cycle
             call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
-            call compile_f90(filenames(node_id), obj_path, includes_flag, &
-                             log_file, exitcode)
-            if (exitcode /= 0) return
             if (n_src_objs < MAX_SRC_OBJS) then
                 n_src_objs = n_src_objs + 1
                 src_objs(n_src_objs) = obj_path
@@ -235,7 +337,6 @@ contains
             end if
         end do
 
-        ! Compile C sources in src_dir
         call make_tmpfile('fo_c_files', c_list)
         call execute_command_line('find '//sq(trim(project_dir)//'/'//trim(src_dir))// &
             ' -name "*.c" 2>/dev/null | sort > '//trim(c_list), wait=.true.)
@@ -262,6 +363,89 @@ contains
         end if
         call delete_tmpfile(c_list)
     end subroutine compile_sources
+
+    subroutine load_mod_keys(mod_dir, dag, n_order, order, keys)
+        character(len=*), intent(in) :: mod_dir
+        type(dag_t), intent(in) :: dag
+        integer, intent(in) :: n_order, order(n_order)
+        character(len=HASH_LEN), intent(out) :: keys(MAX_NODES)
+
+        character(len=512) :: hashfile
+        character(len=MAX_NAME) :: label
+        character(len=HASH_LEN) :: key
+        integer :: u, ios, i, node_id
+
+        keys = ''
+        hashfile = trim(mod_dir)//'/mod_hashes.dat'
+        open (newunit=u, file=hashfile, status='old', iostat=ios)
+        if (ios /= 0) return
+        do
+            read (u, *, iostat=ios) label, key
+            if (ios /= 0) exit
+            if (len_trim(label) == 0) cycle
+            do i = 1, n_order
+                node_id = order(i)
+                if (trim(dag%nodes(node_id)%label) == trim(label)) then
+                    keys(node_id) = trim(key)
+                    exit
+                end if
+            end do
+        end do
+        close (u)
+    end subroutine load_mod_keys
+
+    subroutine save_mod_keys(mod_dir, dag, n_order, order, keys)
+        character(len=*), intent(in) :: mod_dir
+        type(dag_t), intent(in) :: dag
+        integer, intent(in) :: n_order, order(n_order)
+        character(len=HASH_LEN), intent(in) :: keys(MAX_NODES)
+
+        character(len=512) :: hashfile
+        integer :: u, ios, i, node_id
+
+        hashfile = trim(mod_dir)//'/mod_hashes.dat'
+        open (newunit=u, file=hashfile, status='replace', iostat=ios)
+        if (ios /= 0) return
+        do i = 1, n_order
+            node_id = order(i)
+            if (len_trim(keys(node_id)) == 0) cycle
+            write (u, '(a,1x,a)') trim(dag%nodes(node_id)%label), trim(keys(node_id))
+        end do
+        close (u)
+    end subroutine save_mod_keys
+
+    subroutine get_mod_key(label, mod_dir, key)
+        character(len=*), intent(in) :: label, mod_dir
+        character(len=HASH_LEN), intent(out) :: key
+
+        character(len=MAX_NAME) :: lower_label
+        character(len=512) :: modpath, tmpfile, cmd
+        character(len=HASH_LEN) :: empty_keys(0)
+        integer :: exitcode, i
+
+        lower_label = label
+        do i = 1, len_trim(lower_label)
+            if (lower_label(i:i) >= 'A' .and. lower_label(i:i) <= 'Z') &
+                lower_label(i:i) = achar(iachar(lower_label(i:i)) + 32)
+        end do
+
+        modpath = trim(mod_dir)//'/'//trim(lower_label)//'.mod'
+        call make_tmpfile('fo_mod_text', tmpfile)
+        cmd = 'gzip -d -c '//sq(modpath)//' > '//trim(tmpfile)//' 2>/dev/null'
+        call execute_command_line(trim(cmd), wait=.true., exitstat=exitcode)
+        if (exitcode == 0) then
+            key = cache_key_for(trim(tmpfile), '', '', empty_keys, 0)
+        else
+            key = cache_key_for(trim(modpath), '', '', empty_keys, 0)
+        end if
+        call delete_tmpfile(tmpfile)
+    end subroutine get_mod_key
+
+    subroutine append_log_file(src, dst)
+        character(len=*), intent(in) :: src, dst
+        call execute_command_line('cat '//sq(trim(src))//' >> '//sq(trim(dst))// &
+                                  ' 2>/dev/null; rm -f '//sq(trim(src)), wait=.true.)
+    end subroutine append_log_file
 
     subroutine link_app_binaries(project_dir, config, bin_dir, src_objs, n_src_objs, &
                                  is_prog_arr, dep_objs, n_dep_objs, log_file, exitcode)
@@ -322,18 +506,22 @@ contains
         integer, intent(in) :: n_link_libs
         integer, intent(out) :: exitcode
 
-        type(scan_unit_t) :: tunits(MAX_UNITS)
+        type(scan_unit_t), allocatable :: tunits(:)
         integer :: n_tests, i, ierr, node_id
         type(dag_t) :: dag
-        character(len=MAX_NAME) :: filenames(MAX_NODES)
-        logical :: is_prog(MAX_NODES), is_test_arr(MAX_NODES)
-        integer :: topo_order(MAX_NODES), n_order
+        character(len=MAX_NAME), allocatable :: filenames(:)
+        logical, allocatable :: is_prog(:), is_test_arr(:)
+        integer, allocatable :: topo_order(:)
+        integer :: n_order
         logical :: has_cycle
         character(len=512) :: obj_path, bin_path, incl_flag
         character(len=128) :: tname
         integer :: run_exit
 
         exitcode = 0
+        allocate (tunits(MAX_UNITS))
+        allocate (filenames(MAX_NODES), is_prog(MAX_NODES), is_test_arr(MAX_NODES))
+        allocate (topo_order(MAX_NODES))
         call scan_dir(trim(project_dir)//'/'//trim(test_dir), tunits, n_tests, ierr)
         if (n_tests == 0) return
 
@@ -386,7 +574,6 @@ contains
                 else
                     bname = trim(line)
                 end if
-                ! skip app/test entry point objects; they conflict when linked as libs
                 if (bname(1:4) == 'app_') cycle
                 if (bname(1:5) == 'test_') cycle
                 if (n_lib_objs < MAX_SRC_OBJS) then
