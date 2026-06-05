@@ -153,7 +153,7 @@ contains
                             local_filenames(node_id), compiler, '', &
                             dep_keys, n_dep_keys)
 
-            if (cache_lookup(c, dag%nodes(node_id)%label, keys(node_id))) then
+            if (cache_lookup(c, keys(node_id))) then
                 n_cached = n_cached + 1
                 call cache_action_mod_key(c, keys(node_id), mod_keys(node_id), &
                                           found_mod_key)

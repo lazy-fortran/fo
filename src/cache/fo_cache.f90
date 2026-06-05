@@ -9,8 +9,10 @@ module fo_cache
     private
     public :: cache_t, cache_init, cache_lookup, cache_key_for, &
               cache_restore_action, cache_store_action, cache_root, &
-              cache_store_root, cache_schema, cache_action_mod_key, &
-              hash_mod_file, HASH_LEN
+              cache_store_root, cache_schema, cache_action_mod_key
+    public :: cache_debug_write_action_record
+    public :: cache_debug_corrupt_object_payload
+    public :: hash_mod_file, HASH_LEN
 
     integer, parameter :: HASH_LEN = 64
     integer, parameter :: MAX_PARTS = 132
@@ -81,9 +83,9 @@ contains
         key = digest_parts(parts, n_parts)
     end function cache_key_for
 
-    function cache_lookup(c, name, key) result(hit)
+    function cache_lookup(c, key) result(hit)
         type(cache_t), intent(in) :: c
-        character(len=*), intent(in) :: name, key
+        character(len=*), intent(in) :: key
         logical :: hit
 
         character(len=512) :: record_path
@@ -93,7 +95,6 @@ contains
         logical :: has_mod
 
         hit = .false.
-        if (len_trim(name) < 0) return
         if (.not. fx_cache_has(c, trim(key)//'-a')) return
 
         call make_tmpfile('fo_action_lookup', record_path)
@@ -172,7 +173,7 @@ contains
 
         character(len=HASH_LEN) :: object_key, mod_key
         character(len=512) :: parts(4)
-        character(len=512) :: record_path, payload_path, mod_path, lower_name
+        character(len=512) :: record_path, mod_path, lower_name
         character(len=1) :: marker(1)
         integer :: obj_size, mod_size, u, ios, store_ierr
         logical :: has_mod
@@ -279,6 +280,54 @@ contains
         found = fx_cache_has(c, trim(mod_key)//'-d')
         if (.not. found) mod_key = ''
     end subroutine cache_action_mod_key
+
+    subroutine cache_debug_write_action_record(c, action_id, record_text, ierr)
+        type(cache_t), intent(inout) :: c
+        character(len=*), intent(in) :: action_id, record_text
+        integer, intent(out) :: ierr
+
+        character(len=1), allocatable :: bytes(:)
+        integer :: i, n
+
+        ierr = 0
+        n = len_trim(record_text)
+        allocate (bytes(max(n, 0)))
+        do i = 1, n
+            bytes(i) = record_text(i:i)
+        end do
+        call fx_cache_store_bytes(c, trim(action_id)//'-a', bytes, n, ierr)
+    end subroutine cache_debug_write_action_record
+
+    subroutine cache_debug_corrupt_object_payload(c, action_id, ierr)
+        type(cache_t), intent(inout) :: c
+        character(len=*), intent(in) :: action_id
+        integer, intent(out) :: ierr
+
+        character(len=512) :: record_path
+        character(len=HASH_LEN) :: out_id, object_key, mod_key
+        character(len=MAX_PARTS) :: mod_label
+        character(len=1) :: bad(7)
+        integer :: obj_size, mod_size, i
+        logical :: has_mod
+
+        ierr = 1
+        if (.not. c%initialized) return
+        call make_tmpfile('fo_action_corrupt', record_path)
+        call fx_cache_restore(c, trim(action_id)//'-a', record_path, ierr)
+        if (ierr /= 0) then
+            call delete_tmpfile(record_path)
+            return
+        end if
+        call read_action_record(record_path, out_id, object_key, obj_size, &
+                                mod_label, mod_key, mod_size, has_mod, ierr)
+        call delete_tmpfile(record_path)
+        if (ierr /= 0) return
+        bad = ''
+        do i = 1, size(bad)
+            bad(i) = achar(iachar('0') + modulo(i, 10))
+        end do
+        call fx_cache_store_bytes(c, trim(object_key)//'-d', bad, size(bad), ierr)
+    end subroutine cache_debug_corrupt_object_payload
 
     subroutine file_content_key(path, kind, key, size_bytes, ierr)
         character(len=*), intent(in) :: path, kind

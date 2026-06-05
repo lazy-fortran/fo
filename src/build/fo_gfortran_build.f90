@@ -20,10 +20,11 @@ module fo_gfortran_build
 
 contains
 
-    subroutine gfortran_build(project_dir, log_file, exitcode, n_compiled)
+    subroutine gfortran_build(project_dir, log_file, exitcode, n_compiled, flags)
         character(len=*), intent(in) :: project_dir, log_file
         integer, intent(out) :: exitcode
         integer, intent(out), optional :: n_compiled
+        character(len=*), intent(in), optional :: flags
 
         type(fpm_config_t) :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_src_objs, nc
@@ -33,9 +34,12 @@ contains
         character(len=512) :: src_objs(MAX_SRC_OBJS)
         logical :: is_prog_arr(MAX_SRC_OBJS)
         character(len=512) :: lf
+        character(len=512) :: flag_text
 
         lf = log_file
         if (len_trim(lf) == 0) lf = '/dev/null'
+        flag_text = ''
+        if (present(flags)) flag_text = flags
 
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) then
@@ -60,7 +64,8 @@ contains
         nc = 0
         call compile_sources(project_dir, config%source_dir, config%app_dir, &
                              mod_dir, obj_dir, dep_includes, n_dep_includes, lf, &
-                             src_objs, n_src_objs, is_prog_arr, exitcode, nc)
+                             src_objs, n_src_objs, is_prog_arr, exitcode, nc, &
+                             flag_text)
         if (exitcode /= 0) return
 
         if (present(n_compiled)) n_compiled = nc
@@ -244,9 +249,11 @@ contains
 
     subroutine compile_sources(project_dir, src_dir, app_dir, mod_dir, obj_dir, &
                                dep_includes, n_dep_includes, log_file, &
-                               src_objs, n_src_objs, is_prog_arr, exitcode, n_compiled)
+                               src_objs, n_src_objs, is_prog_arr, exitcode, &
+                               n_compiled, flags)
         character(len=*), intent(in) :: project_dir, src_dir, app_dir
         character(len=*), intent(in) :: mod_dir, obj_dir, log_file
+        character(len=*), intent(in) :: flags
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
         integer, intent(in) :: n_dep_includes
         character(len=512), intent(out) :: src_objs(MAX_SRC_OBJS)
@@ -332,12 +339,19 @@ contains
 
                     call collect_dep_keys_source_order(all_units, n_all, dag, node_id, &
                                                        new_mod_keys, dep_includes, &
-                                                       n_dep_includes, dep_keys, n_dep)
-                    source_key = cache_key_for(filenames(node_id), compiler, '', &
+                                                       n_dep_includes, dep_keys, n_dep, &
+                                                       restored)
+                    if (.not. restored) then
+                        n_compile = n_compile + 1
+                        compile_nodes(n_compile) = node_id
+                        compile_keys(n_compile) = ''
+                        cycle
+                    end if
+                    source_key = cache_key_for(filenames(node_id), compiler, flags, &
                                                dep_keys, n_dep)
 
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
-                    if (cache_lookup(c, dag%nodes(node_id)%label, source_key)) then
+                    if (cache_lookup(c, source_key)) then
                         call cache_restore_action(c, source_key, obj_path, mod_dir, &
                                                   dag%nodes(node_id)%label, restored)
                         if (restored) then
@@ -362,7 +376,8 @@ contains
                     fname_local = filenames(node_id)
                     per_log_local = per_logs(ii)
                     call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
-                    call compile_f90(project_dir, fname_local, obj_path, includes_flag, &
+                    call compile_f90(project_dir, fname_local, obj_path, &
+                                     trim(includes_flag)//' '//trim(flags), &
                                      per_log_local, compile_exits(ii))
                 end do
                 !$omp end parallel do
@@ -394,7 +409,8 @@ contains
                 if (is_test_arr(node_id)) cycle
                 call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
                 call compile_f90(project_dir, filenames(node_id), obj_path, &
-                                 includes_flag, log_file, exitcode)
+                                 trim(includes_flag)//' '//trim(flags), log_file, &
+                                 exitcode)
                 if (exitcode /= 0) return
                 n_compiled = n_compiled + 1
             end do
@@ -473,7 +489,7 @@ contains
 
     subroutine collect_dep_keys_source_order(units, n_units, dag, node_id, &
                                              mod_keys, dep_includes, &
-                                             n_dep_includes, dep_keys, n_dep)
+                                             n_dep_includes, dep_keys, n_dep, complete)
         type(scan_unit_t), intent(in) :: units(:)
         integer, intent(in) :: n_units, node_id, n_dep_includes
         type(dag_t), intent(in) :: dag
@@ -481,6 +497,7 @@ contains
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
         character(len=HASH_LEN), intent(out) :: dep_keys(64)
         integer, intent(out) :: n_dep
+        logical, intent(out) :: complete
 
         integer :: i, j, dep_id
         character(len=MAX_NAME) :: node_name
@@ -489,6 +506,7 @@ contains
 
         n_dep = 0
         dep_keys = ''
+        complete = .true.
         node_name = dag%nodes(node_id)%label(1:MAX_NAME)
         do i = 1, n_units
             if (trim(units(i)%module_name) /= trim(node_name) .and. &
@@ -498,7 +516,10 @@ contains
                 if (n_dep >= 64) return
                 dep_id = dag_find_node(dag, units(i)%deps(j))
                 if (dep_id > 0) then
-                    if (len_trim(mod_keys(dep_id)) == 0) cycle
+                    if (len_trim(mod_keys(dep_id)) == 0) then
+                        complete = .false.
+                        return
+                    end if
                     n_dep = n_dep + 1
                     dep_keys(n_dep) = mod_keys(dep_id)
                 else

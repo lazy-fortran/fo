@@ -4,6 +4,7 @@ program test_backend
                                 detect_jobs, backend_build, backend_test, &
                                 backend_test_names, &
                                 BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
+    use fo_gfortran_build, only: gfortran_build
     implicit none
 
     integer :: n_pass, n_fail
@@ -21,6 +22,10 @@ program test_backend
     call test_fpm_skips_slow_by_default()
     call test_gfortran_named_tests_select_requested()
     call test_gfortran_recovers_from_root_mod_shadow()
+    call test_gfortran_restores_deleted_outputs()
+    call test_gfortran_flags_change_action_id()
+    call test_gfortran_private_change_keeps_dependent_cached()
+    call test_gfortran_interface_change_rebuilds_dependent()
     call test_cmake_skips_slow_by_default()
     call test_cmake_named_tests_select_regex()
     call test_fpm_path_with_spaces()
@@ -211,6 +216,7 @@ contains
 
         open (newunit=u, file=trim(project_dir)//'/src/consumer.f90', &
               status='replace')
+        write (u, '(a)') '! fixture '//trim(project_dir)
         write (u, '(a)') 'module consumer'
         write (u, '(a)') 'use lib, only: noop'
         write (u, '(a)') 'implicit none'
@@ -236,6 +242,174 @@ contains
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_recovers_from_root_mod_shadow
+
+    subroutine test_gfortran_restores_deleted_outputs()
+        integer :: exitcode, n_first, n_restore
+        character(len=512) :: project_dir, log_file
+        logical :: obj_exists, mod_exists
+
+        call make_tmp_path('fo_test_gfortran_restore', project_dir)
+        call make_tmp_path('fo_backend_gfortran_restore', log_file)
+        call make_simple_fpm_project(project_dir)
+        call rewrite_lib_unique(project_dir)
+
+        call gfortran_build(project_dir, log_file, exitcode, n_first)
+        call assert(exitcode == 0 .and. n_first > 0, &
+                    'gfortran restore fixture first build compiles')
+        call execute_command_line('rm -rf '//trim(project_dir)// &
+                                  '/build/fo/obj '//trim(project_dir)// &
+                                  '/build/fo/mod', wait=.true.)
+        call gfortran_build(project_dir, log_file, exitcode, n_restore)
+        call assert(exitcode == 0 .and. n_restore == 0, &
+                    'deleted outputs restore without recompiling')
+        inquire (file=trim(project_dir)//'/build/fo/obj/src_lib.f90.o', &
+                 exist=obj_exists)
+        inquire (file=trim(project_dir)//'/build/fo/mod/lib.mod', exist=mod_exists)
+        call assert(obj_exists .and. mod_exists, &
+                    'deleted object and module outputs are restored')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_restores_deleted_outputs
+
+    subroutine test_gfortran_flags_change_action_id()
+        integer :: exitcode, n_first, n_same, n_changed
+        character(len=512) :: project_dir, log_file
+
+        call make_tmp_path('fo_test_gfortran_flags', project_dir)
+        call make_tmp_path('fo_backend_gfortran_flags', log_file)
+        call make_simple_fpm_project(project_dir)
+        call rewrite_lib_unique(project_dir)
+
+        call gfortran_build(project_dir, log_file, exitcode, n_first, '-O0')
+        call assert(exitcode == 0 .and. n_first > 0, &
+                    'gfortran flags fixture first build compiles')
+        call gfortran_build(project_dir, log_file, exitcode, n_same, '-O0')
+        call assert(exitcode == 0 .and. n_same == 0, &
+                    'same flags restore from action cache')
+        call gfortran_build(project_dir, log_file, exitcode, n_changed, '-O3')
+        call assert(exitcode == 0 .and. n_changed > 0, &
+                    'changed flags miss action cache')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_flags_change_action_id
+
+    subroutine rewrite_lib_unique(project_dir)
+        character(len=*), intent(in) :: project_dir
+        integer :: u
+
+        open (newunit=u, file=trim(project_dir)//'/src/lib.f90', status='replace')
+        write (u, '(a)') '! fixture '//trim(project_dir)
+        write (u, '(a)') 'module lib'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'character(len=*), parameter :: fixture = "'// &
+            trim(project_dir)//'"'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine noop()'
+        write (u, '(a)') 'end subroutine noop'
+        write (u, '(a)') 'end module lib'
+        close (u)
+    end subroutine rewrite_lib_unique
+
+    subroutine test_gfortran_private_change_keeps_dependent_cached()
+        integer :: exitcode, n_first, n_update
+        character(len=512) :: project_dir, log_file
+
+        call make_tmp_path('fo_test_private_change', project_dir)
+        call make_tmp_path('fo_backend_private_change', log_file)
+        call make_two_module_project(project_dir)
+
+        call gfortran_build(project_dir, log_file, exitcode, n_first)
+        call assert(exitcode == 0 .and. n_first == 2, &
+                    'private change fixture first build compiles two modules')
+        call write_lib_private_body(project_dir, 2)
+        call gfortran_build(project_dir, log_file, exitcode, n_update)
+        call assert(exitcode == 0 .and. n_update == 1, &
+                    'private implementation change does not rebuild dependent')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_private_change_keeps_dependent_cached
+
+    subroutine test_gfortran_interface_change_rebuilds_dependent()
+        integer :: exitcode, n_first, n_update
+        character(len=512) :: project_dir, log_file
+
+        call make_tmp_path('fo_test_interface_change', project_dir)
+        call make_tmp_path('fo_backend_interface_change', log_file)
+        call make_two_module_project(project_dir)
+
+        call gfortran_build(project_dir, log_file, exitcode, n_first)
+        call assert(exitcode == 0 .and. n_first == 2, &
+                    'interface change fixture first build compiles two modules')
+        call write_lib_interface(project_dir)
+        call gfortran_build(project_dir, log_file, exitcode, n_update)
+        call assert(exitcode == 0 .and. n_update == 2, &
+                    'interface change rebuilds dependent module')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_interface_change_rebuilds_dependent
+
+    subroutine make_two_module_project(project_dir)
+        character(len=*), intent(in) :: project_dir
+        integer :: u
+
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "fo_two_module"'
+        close (u)
+        call write_lib_private_body(project_dir, 1)
+        open (newunit=u, file=trim(project_dir)//'/src/consumer.f90', &
+              status='replace')
+        write (u, '(a)') '! fixture '//trim(project_dir)
+        write (u, '(a)') 'module consumer'
+        write (u, '(a)') 'use lib, only: value'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine call_value(x)'
+        write (u, '(a)') 'integer, intent(out) :: x'
+        write (u, '(a)') 'x = 1'
+        write (u, '(a)') 'end subroutine call_value'
+        write (u, '(a)') 'end module consumer'
+        close (u)
+    end subroutine make_two_module_project
+
+    subroutine write_lib_private_body(project_dir, value)
+        character(len=*), intent(in) :: project_dir
+        integer, intent(in) :: value
+        integer :: u
+
+        open (newunit=u, file=trim(project_dir)//'/src/lib.f90', status='replace')
+        write (u, '(a)') '! fixture '//trim(project_dir)
+        write (u, '(a)') 'module lib'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'integer function value()'
+        write (u, '(a,i0)') 'value = ', value
+        write (u, '(a)') 'end function value'
+        write (u, '(a)') 'end module lib'
+        close (u)
+    end subroutine write_lib_private_body
+
+    subroutine write_lib_interface(project_dir)
+        character(len=*), intent(in) :: project_dir
+        integer :: u
+
+        open (newunit=u, file=trim(project_dir)//'/src/lib.f90', status='replace')
+        write (u, '(a)') '! fixture '//trim(project_dir)
+        write (u, '(a)') 'module lib'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'integer function value(scale)'
+        write (u, '(a)') 'integer, intent(in) :: scale'
+        write (u, '(a)') 'value = scale'
+        write (u, '(a)') 'end function value'
+        write (u, '(a)') 'end module lib'
+        close (u)
+    end subroutine write_lib_interface
 
     subroutine test_cmake_skips_slow_by_default()
         type(backend_t) :: b

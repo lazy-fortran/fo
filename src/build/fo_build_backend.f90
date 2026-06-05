@@ -146,7 +146,8 @@ contains
 
         select case (self%kind)
         case (BACKEND_GFORTRAN)
-            call gfortran_build(self%project_dir, log_path, exitcode)
+            call gfortran_build(self%project_dir, log_path, exitcode, &
+                                flags=flag_text)
         case (BACKEND_FPM)
             call process_fpm_build(self%project_dir, flag_text, np, log_path, &
                                    exitcode)
