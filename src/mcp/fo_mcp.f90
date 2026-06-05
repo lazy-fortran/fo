@@ -108,33 +108,9 @@ contains
             if (trim(mode) == 'start') then
                 call handle_async_start(line, id_str, response, async_state)
                 return
-            else
-                block
-                    logical :: want_full
-                    type(capabilities_t) :: cap
-                    character(len=2048) :: cap_json
-                    character(len=514) :: dir_prefix
-
-                    want_full = (index(line, '"full"') > 0 .or. &
-                                 index(line, '"json":"full"') > 0)
-                    cap_json = ''
-                    if (want_full) then
-                        call detect_capabilities(cap)
-                        call capabilities_json(cap, cap_json)
-                    end if
-                    call fo_check_run(trim(dir), check_res)
-                    if (want_full) then
-                        output_text = check_result_full_json(check_res, cap_json)
-                    else
-                        output_text = check_result_compact_json(check_res)
-                    end if
-                    dir_prefix = trim(dir)//'/'
-                    call strip_path_prefix_in_str(output_text, trim(dir_prefix))
-                    exitcode = 0
-                   if (.not. (check_res%build_ok .and. check_res%tests_ok)) exitcode = 1
-                   call make_tool_text_response(id_str, output_text, exitcode, response)
-                end block
             end if
+            call handle_check(line, id_str, dir, check_res, output_text, &
+                               exitcode, response)
         case ('status')
             call handle_async_status(id_str, response, async_state)
             return
@@ -145,32 +121,7 @@ contains
             call handle_async_cancel(line, id_str, response, async_state)
             return
         case ('lint')
-            block
-                use fo_lint, only: lint_finding_t, lint_warning_t, &
-                                   lint_dir, lint_compiler, &
-                                   lint_dedup_warnings, &
-                                   lint_all_json, &
-                                   MAX_FINDINGS, MAX_WARNINGS
-                type(lint_finding_t) :: findings(MAX_FINDINGS)
-                type(lint_warning_t) :: warnings(MAX_WARNINGS)
-                integer :: n_findings, n_warnings
-                character(len=16384) :: lint_output
-                character(len=514) :: dir_prefix
-
-                call lint_dir(trim(dir), findings, n_findings)
-                call lint_compiler(trim(dir), warnings, n_warnings)
-                call lint_dedup_warnings(warnings, n_warnings)
-                lint_output = lint_all_json(findings, n_findings, &
-                                            warnings, n_warnings)
-                dir_prefix = trim(dir)//'/'
-                call strip_path_prefix_in_str(lint_output, trim(dir_prefix))
-                exitcode = 0
-                if (n_findings > 0 .or. n_warnings > 0) exitcode = 1
-                call make_tool_text_response(id_str, lint_output, &
-                                             exitcode, response)
-            end block
-            call delete_tmpfile(tmpfile)
-            return
+            call handle_lint(id_str, dir, output_text, exitcode, response)
         case ('fmt')
             cmd = 'cd '//trim(dir)//' && timeout 120 fo fmt > '// &
                   trim(tmpfile)//' 2>&1'
@@ -182,40 +133,305 @@ contains
             else
                 call read_text_file(tmpfile, output_text)
             end if
-            call delete_tmpfile(tmpfile)
             call make_tool_text_response(id_str, output_text, exitcode, response)
-        case ('build', 'test', 'graph', 'info', 'changed', 'clean')
-            block
-                character(len=16) :: t_str
-                integer :: t_val
-                if (trim(action) == 'build') then
-                    t_val = 300
-                else if (trim(action) == 'test') then
-                    t_val = 120
-                else
-                    t_val = 60
-                end if
-                write (t_str, '(i0)') t_val
-                cmd = 'cd '//trim(dir)//' && timeout '//trim(t_str)// &
-                      ' fo '//trim(action)//' > '//trim(tmpfile)//' 2>&1'
-            end block
-            call execute_command_line(cmd, exitstat=exitcode, &
-                                      cmdstat=cmdstat, wait=.true.)
-            if (cmdstat /= 0) exitcode = 1
-
-            if (exitcode == 124) then
-                output_text = 'fo '//trim(action)//' timed out'
-            else
-                call read_text_file(tmpfile, output_text)
-            end if
-            call delete_tmpfile(tmpfile)
-
-            call make_tool_text_response(id_str, output_text, exitcode, response)
+        case ('build')
+            call handle_backend_build(id_str, dir, tmpfile, response)
+            return
+        case ('test')
+            call handle_backend_test(id_str, dir, tmpfile, response)
+            return
+        case ('graph')
+            call handle_graph(line, id_str, dir, output_text, exitcode, response)
+        case ('info')
+            call handle_info(id_str, dir, output_text, exitcode, response)
+        case ('changed')
+            call handle_changed(id_str, dir, output_text, exitcode, response)
+        case ('clean')
+            call handle_clean(id_str, output_text, exitcode, response)
         case default
             call jsonrpc_error(id_str, -32602, &
                                'unknown action: '//trim(action), response)
         end select
+        call delete_tmpfile(tmpfile)
     end subroutine handle_tools_call
+
+    subroutine handle_check(line, id_str, dir, check_res, output_text, &
+                             exitcode, response)
+        character(len=*), intent(in) :: line, id_str, dir
+        type(check_result_t), intent(out) :: check_res
+        character(len=*), intent(out) :: output_text
+        integer, intent(out) :: exitcode
+        character(len=*), intent(out) :: response
+
+        logical :: want_full
+        type(capabilities_t) :: cap
+        character(len=2048) :: cap_json
+        character(len=514) :: dir_prefix
+
+        want_full = (index(line, '"full"') > 0 .or. &
+                     index(line, '"json":"full"') > 0)
+        cap_json = ''
+        if (want_full) then
+            call detect_capabilities(cap)
+            call capabilities_json(cap, cap_json)
+        end if
+        call fo_check_run(trim(dir), check_res)
+        if (want_full) then
+            output_text = check_result_full_json(check_res, cap_json)
+        else
+            output_text = check_result_compact_json(check_res)
+        end if
+        dir_prefix = trim(dir)//'/'
+        call strip_path_prefix_in_str(output_text, trim(dir_prefix))
+        exitcode = 0
+        if (.not. (check_res%build_ok .and. check_res%tests_ok)) exitcode = 1
+        call make_tool_text_response(id_str, output_text, exitcode, response)
+    end subroutine handle_check
+
+    subroutine handle_lint(id_str, dir, output_text, exitcode, response)
+        use fo_lint, only: lint_finding_t, lint_warning_t, lint_dir, &
+                           lint_compiler, lint_dedup_warnings, lint_all_json, &
+                           MAX_FINDINGS, MAX_WARNINGS
+        character(len=*), intent(in) :: id_str, dir
+        character(len=*), intent(out) :: output_text
+        integer, intent(out) :: exitcode
+        character(len=*), intent(out) :: response
+
+        type(lint_finding_t) :: findings(MAX_FINDINGS)
+        type(lint_warning_t) :: warnings(MAX_WARNINGS)
+        integer :: n_findings, n_warnings
+        character(len=16384) :: lint_output
+        character(len=514) :: dir_prefix
+
+        call lint_dir(trim(dir), findings, n_findings)
+        call lint_compiler(trim(dir), warnings, n_warnings)
+        call lint_dedup_warnings(warnings, n_warnings)
+        lint_output = lint_all_json(findings, n_findings, warnings, n_warnings)
+        dir_prefix = trim(dir)//'/'
+        call strip_path_prefix_in_str(lint_output, trim(dir_prefix))
+        output_text = trim(lint_output)
+        exitcode = 0
+        if (n_findings > 0 .or. n_warnings > 0) exitcode = 1
+        call make_tool_text_response(id_str, lint_output, exitcode, response)
+    end subroutine handle_lint
+
+    subroutine handle_backend_build(id_str, dir, tmpfile, response)
+        use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
+        character(len=*), intent(in) :: id_str, dir, tmpfile
+        character(len=*), intent(out) :: response
+
+        type(backend_t) :: b
+        character(len=8192) :: output_text
+        integer :: exitcode
+
+        b = detect_backend(trim(dir))
+        if (b%kind == BACKEND_NONE) then
+            output_text = 'fo: no fpm.toml or CMakeLists.txt found'
+            exitcode = 1
+        else
+            call b%build(exitcode, log_file=tmpfile)
+            call read_text_file(tmpfile, output_text)
+        end if
+        call delete_tmpfile(tmpfile)
+        call make_tool_text_response(id_str, output_text, exitcode, response)
+    end subroutine handle_backend_build
+
+    subroutine handle_backend_test(id_str, dir, tmpfile, response)
+        use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
+        character(len=*), intent(in) :: id_str, dir, tmpfile
+        character(len=*), intent(out) :: response
+
+        type(backend_t) :: b
+        character(len=8192) :: output_text
+        integer :: exitcode
+
+        b = detect_backend(trim(dir))
+        if (b%kind == BACKEND_NONE) then
+            output_text = 'fo: no fpm.toml or CMakeLists.txt found'
+            exitcode = 1
+        else
+            call b%test(exitcode, log_file=tmpfile)
+            call read_text_file(tmpfile, output_text)
+        end if
+        call delete_tmpfile(tmpfile)
+        call make_tool_text_response(id_str, output_text, exitcode, response)
+    end subroutine handle_backend_test
+
+    subroutine handle_graph(line, id_str, dir, output_text, exitcode, response)
+        use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS
+        use fx_dag, only: dag_t, dag_to_dot, MAX_NODES
+        use fo_dag_bridge, only: build_dag_from_units
+        use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
+        character(len=*), intent(in) :: line, id_str, dir
+        character(len=*), intent(out) :: output_text
+        integer, intent(out) :: exitcode
+        character(len=*), intent(out) :: response
+
+        type(backend_t) :: b
+        type(scan_unit_t) :: units(MAX_UNITS)
+        type(dag_t) :: dag
+        character(len=512) :: scan_root
+        integer :: n_units, ierr, i, j
+        character(len=:), allocatable :: dot_out
+
+        b = detect_backend(trim(dir))
+        scan_root = trim(dir)
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+        call scan_dir(trim(scan_root), units, n_units, ierr)
+        if (ierr /= 0) then
+            output_text = 'fo: scan failed'
+            exitcode = 1
+        else
+            call build_dag_from_units(units, n_units, dag)
+            exitcode = 0
+            if (index(line, '"dot"') > 0) then
+                call dag_to_dot(dag, dot_out)
+                output_text = trim(dot_out)
+            else
+                output_text = ''
+                do i = 1, dag%n_nodes
+                    if (dag%nodes(i)%n_edges == 0) then
+                        output_text = trim(output_text)// &
+                            trim(dag%nodes(i)%label)//achar(10)
+                    else
+                        do j = 1, dag%nodes(i)%n_edges
+                            output_text = trim(output_text)// &
+                                trim(dag%nodes(i)%label)//' -> '// &
+                                trim(dag%nodes(dag%nodes(i)%edges(j))%label)//achar(10)
+                        end do
+                    end if
+                end do
+            end if
+        end if
+        call make_tool_text_response(id_str, output_text, exitcode, response)
+    end subroutine handle_graph
+
+    subroutine handle_info(id_str, dir, output_text, exitcode, response)
+        use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS
+        use fx_dag, only: dag_t, MAX_NODES
+        use fo_dag_bridge, only: build_dag_from_units
+        use fo_build_backend, only: backend_t, detect_backend, &
+                                    BACKEND_NONE, BACKEND_FPM, BACKEND_CMAKE
+        character(len=*), intent(in) :: id_str, dir
+        character(len=*), intent(out) :: output_text
+        integer, intent(out) :: exitcode
+        character(len=*), intent(out) :: response
+
+        type(backend_t) :: b
+        type(scan_unit_t) :: units(MAX_UNITS)
+        type(dag_t) :: dag
+        character(len=512) :: scan_root
+        integer :: n_units, ierr
+
+        b = detect_backend(trim(dir))
+        scan_root = trim(dir)
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+        select case (b%kind)
+        case (BACKEND_FPM)
+            output_text = 'backend: fpm'//achar(10)
+        case (BACKEND_CMAKE)
+            output_text = 'backend: cmake'//achar(10)
+        case default
+            output_text = 'backend: none'//achar(10)
+        end select
+        call scan_dir(trim(scan_root), units, n_units, ierr)
+        if (ierr == 0) then
+            call build_dag_from_units(units, n_units, dag)
+            write (output_text(len_trim(output_text) + 1:), '(a,i0)') &
+                'files: ', n_units
+            output_text = trim(output_text)//achar(10)
+            write (output_text(len_trim(output_text) + 1:), '(a,i0)') &
+                'modules: ', dag%n_nodes
+        end if
+        exitcode = 0
+        call make_tool_text_response(id_str, output_text, exitcode, response)
+    end subroutine handle_info
+
+    subroutine handle_changed(id_str, dir, output_text, exitcode, response)
+        use fo_check, only: fo_changed_modules
+        use fx_dag, only: dag_t, MAX_NODES
+        use fo_scan, only: MAX_NAME
+        character(len=*), intent(in) :: id_str, dir
+        character(len=*), intent(out) :: output_text
+        integer, intent(out) :: exitcode
+        character(len=*), intent(out) :: response
+
+        type(dag_t) :: dag
+        integer :: changed_ids(MAX_NODES), n_changed
+        integer :: affected_ids(MAX_NODES), n_affected
+        integer :: n_cached, ierr, i, n_tests
+        character(len=MAX_NAME) :: filenames(MAX_NODES)
+        logical :: is_test_arr(MAX_NODES)
+
+        call fo_changed_modules(trim(dir), dag, changed_ids, n_changed, &
+                                affected_ids, n_affected, n_cached, ierr, &
+                                filenames=filenames, is_test_arr=is_test_arr)
+        if (ierr /= 0) then
+            output_text = 'fo: scan or dag failed'
+            exitcode = 1
+            call make_tool_text_response(id_str, output_text, exitcode, response)
+            return
+        end if
+        exitcode = 0
+        if (n_changed == 0) then
+            write (output_text, '(a,i0,a)') 'all ', n_cached, ' modules cached'
+            call make_tool_text_response(id_str, output_text, exitcode, response)
+            return
+        end if
+        write (output_text, '(a,i0,a)') 'changed (', n_changed, '):'
+        do i = 1, n_changed
+            output_text = trim(output_text)//achar(10)//'  '// &
+                trim(dag%nodes(changed_ids(i))%label)//'  '// &
+                trim(filenames(changed_ids(i)))
+        end do
+        output_text = trim(output_text)//achar(10)
+        write (output_text(len_trim(output_text) + 1:), '(a,i0,a)') &
+            'affected (', n_affected, '):'
+        do i = 1, n_affected
+            output_text = trim(output_text)//achar(10)//'  '// &
+                trim(dag%nodes(affected_ids(i))%label)//'  '// &
+                trim(filenames(affected_ids(i)))
+        end do
+        n_tests = 0
+        do i = 1, n_affected
+            if (is_test_arr(affected_ids(i))) n_tests = n_tests + 1
+        end do
+        if (n_tests > 0) then
+            output_text = trim(output_text)//achar(10)
+            write (output_text(len_trim(output_text) + 1:), '(a,i0,a)') &
+                'affected tests (', n_tests, '):'
+            do i = 1, n_affected
+                if (is_test_arr(affected_ids(i))) then
+                    output_text = trim(output_text)//achar(10)//'  '// &
+                        trim(dag%nodes(affected_ids(i))%label)//'  '// &
+                        trim(filenames(affected_ids(i)))
+                end if
+            end do
+        end if
+        call make_tool_text_response(id_str, output_text, exitcode, response)
+    end subroutine handle_changed
+
+    subroutine handle_clean(id_str, output_text, exitcode, response)
+        use fo_cache, only: cache_t, cache_init
+        character(len=*), intent(in) :: id_str
+        character(len=*), intent(out) :: output_text
+        integer, intent(out) :: exitcode
+        character(len=*), intent(out) :: response
+
+        type(cache_t) :: c
+        integer :: ierr
+
+        call cache_init(c, ierr)
+        if (ierr == 0) then
+            call execute_command_line('rm -rf '//trim(c%root_dir), wait=.true.)
+            output_text = 'cache cleared: '//trim(c%root_dir)
+            exitcode = 0
+        else
+            output_text = 'cache init failed'
+            exitcode = 1
+        end if
+        call make_tool_text_response(id_str, output_text, exitcode, response)
+    end subroutine handle_clean
 
     subroutine handle_resources_read(line, id_str, response, async_state)
         character(len=*), intent(in) :: line, id_str

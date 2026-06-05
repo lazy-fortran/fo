@@ -42,6 +42,8 @@ program fo_main
         call cmd_fmt()
     case ('clean')
         call cmd_clean()
+    case ('install')
+        call cmd_install()
     case ('watch')
         call cmd_watch()
     case ('mcp-server')
@@ -223,6 +225,7 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
         write (output_unit, '(a)') '  lint       unused imports + gfortran warnings'
         write (output_unit, '(a)') '  lint --json  lint results as JSON'
         write (output_unit, '(a)') '  clean      clear global cache (~/.cache/fo)'
+        write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/.local)'
         write (output_unit, '(a)') '  info       backend, file count, module count'
         write (output_unit, '(a)') '  info --capabilities  compiler and tooling limits'
         write (output_unit, '(a)') ''
@@ -665,6 +668,29 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
             write (output_unit, '(a)') 'Format: OK'
         end if
     end subroutine fmt_check
+
+    subroutine cmd_install()
+        character(len=256) :: prefix, arg
+        character(len=512) :: home
+        character(len=4096) :: cmd
+        integer :: i, exitcode, status
+
+        call get_environment_variable('HOME', home, status=status)
+        if (status /= 0 .or. len_trim(home) == 0) home = '/usr/local'
+        prefix = trim(home)//'/.local'
+
+        do i = 2, command_argument_count()
+            call get_command_argument(i, arg)
+            if (trim(arg) == '--prefix' .and. i < command_argument_count()) then
+                call get_command_argument(i + 1, prefix)
+            end if
+        end do
+
+        cmd = 'fpm install --prefix '//trim(prefix)
+        call execute_command_line(cmd, exitstat=exitcode, wait=.true.)
+        if (exitcode /= 0) stop 1
+        write (output_unit, '(a,a)') 'installed: ', trim(prefix)//'/bin/fo'
+    end subroutine cmd_install
 
     subroutine cmd_clean()
         use fo_cache, only: cache_t, cache_init

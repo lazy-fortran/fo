@@ -9,6 +9,7 @@ or compiler commands directly except to diagnose a `fo` failure or confirm
 backend parity after a `fo` fix.
 
 ```bash
+fo                # staged pipeline: static -> build -> test -> lint -> fmt --check
 fo check          # build + test, one-line status
 fo check --json   # JSON status
 fo build          # build only
@@ -17,7 +18,8 @@ fo lint           # unused imports + gfortran warnings
 fo lint --json    # lint results as JSON
 fo fmt            # format sources (fprettify, 88 col, 4 sp)
 fo graph --dot    # module DAG in Graphviz DOT format
-fo                # staged pipeline: static -> build -> test -> lint
+fo install        # fpm install --prefix ~/.local
+fo install --prefix /path  # install to custom prefix
 ```
 
 If `fo` is slower than the backend or cannot handle the project, fix
@@ -25,7 +27,7 @@ If `fo` is slower than the backend or cannot handle the project, fix
 
 ## Structure
 
-- `app/main.f90`: CLI entry point. Dispatches to check, build, test, lint, fmt, graph, info, watch, mcp-server, lsp.
+- `app/main.f90`: CLI entry point. Dispatches to check, build, test, lint, fmt, graph, info, install, watch, mcp-server, lsp.
 - `src/scan/`: module dependency scanner. Parses `use` and `module` statements.
 - `src/dag/`: directed acyclic graph. Topological sort, reverse-dependency closure.
 - `src/check/`: build + test runner (`fo_check`) and output formatters (`fo_check_output`).
