@@ -84,17 +84,43 @@ contains
         line = trim(line)//trim(json_escape_string(res%error_msg))//'"}'
     end function check_result_json
 
+    function test_results_json(res) result(s)
+        type(check_result_t), intent(in) :: res
+        character(len=4096) :: s
+
+        integer :: i
+
+        if (res%n_test_results == 0) then
+            s = ''
+            return
+        end if
+        s = ',"tests":['
+        do i = 1, res%n_test_results
+            if (i > 1) s = trim(s)//','
+            s = trim(s)//'{"name":"'// &
+                trim(json_escape_string(res%test_results(i)%name))//'"'
+            s = trim(s)//',"pass":'//trim(json_int(res%test_results(i)%n_pass))
+            s = trim(s)//',"fail":'//trim(json_int(res%test_results(i)%n_fail))
+            s = trim(s)//'}'
+        end do
+        s = trim(s)//']'
+    end function test_results_json
+
     function check_result_compact_json(res) result(line)
         type(check_result_t), intent(in) :: res
-        character(len=2048) :: line
+        character(len=8192) :: line
 
-        line = make_agent_json(res, .false.)
+        character(len=2048) :: base
+
+        base = make_agent_json(res, .false.)
+        line = base(1:len_trim(base) - 1)
+        line = trim(line)//trim(test_results_json(res))//'}'
     end function check_result_compact_json
 
     function check_result_full_json(res, cap_json_str) result(line)
         type(check_result_t), intent(in) :: res
         character(len=*), intent(in) :: cap_json_str
-        character(len=8192) :: line
+        character(len=16384) :: line
 
         character(len=2048) :: base
 
@@ -102,17 +128,19 @@ contains
         line = base(1:len_trim(base) - 1)
         line = trim(line)//',"stage":"'//trim(json_escape_string(res%stage))//'"'
         line = trim(line)//',"target":"'//trim(json_escape_string(res%target))//'"'
-       line = trim(line)//',"summary":"'//trim(json_escape_string(agent_summary(res)))//'"'
+        line = trim(line)//',"summary":"'//trim(json_escape_string(agent_summary(res)))//'"'
         line = trim(line)//',"hint":"'//trim(json_escape_string(res%hint))//'"'
         line = trim(line)//',"rerun":"'//trim(json_escape_string(res%rerun))//'"'
         line = trim(line)//',"log_path":"'//trim(json_escape_string(res%log_path))//'"'
+        line = trim(line)//trim(test_results_json(res))
         if (res%build_ok .and. res%tests_ok) then
             line = trim(line)//',"diagnostics":[]'
         else
             line = trim(line)//',"diagnostics":[{"kind":"'// &
                    trim(json_escape_string(res%stage))//'"'
             if (len_trim(res%diag_file) > 0) then
-               line = trim(line)//',"file":"'//trim(json_escape_string(res%diag_file))//'"'
+                line = trim(line)//',"file":"'// &
+                       trim(json_escape_string(res%diag_file))//'"'
             else
                 line = trim(line)//',"file":""'
             end if

@@ -1,6 +1,6 @@
 program test_check
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_check, only: check_result_t, fo_check_run
+    use fo_check, only: check_result_t, test_result_t, fo_check_run
     use fo_check_output, only: check_result_json, check_result_compact_json, &
                                check_result_full_json, fo_check_write
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
@@ -33,6 +33,9 @@ program test_check
     call test_capabilities_json_output()
     call test_capabilities_unknown_compiler()
     call test_full_json_includes_capabilities()
+    call test_compact_json_includes_test_results()
+    call test_full_json_includes_test_results()
+    call test_test_results_parse()
 
     write (output_unit, '(a,i0,a,i0,a)') 'check: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -634,5 +637,74 @@ contains
         end do
         close (u)
     end function file_contains
+
+    subroutine test_compact_json_includes_test_results()
+        type(check_result_t) :: res
+        character(len=8192) :: json
+
+        res%build_ok = .true.
+        res%tests_ok = .true.
+        res%stage = 'done'
+        res%n_test_results = 2
+        res%test_results(1)%name = 'test_cache'
+        res%test_results(1)%n_pass = 8
+        res%test_results(1)%n_fail = 0
+        res%test_results(2)%name = 'test_dag'
+        res%test_results(2)%n_pass = 15
+        res%test_results(2)%n_fail = 0
+
+        json = check_result_compact_json(res)
+        call assert(index(json, '"tests"') > 0, 'compact json has tests key')
+        call assert(index(json, '"test_cache"') > 0, 'compact json has test name')
+        call assert(index(json, '"pass":8') > 0, 'compact json has pass count')
+        call assert(index(json, '"fail":0') > 0, 'compact json has fail count')
+    end subroutine test_compact_json_includes_test_results
+
+    subroutine test_full_json_includes_test_results()
+        type(check_result_t) :: res
+        character(len=16384) :: json
+
+        res%build_ok = .true.
+        res%tests_ok = .true.
+        res%stage = 'done'
+        res%n_test_results = 1
+        res%test_results(1)%name = 'test_scan'
+        res%test_results(1)%n_pass = 30
+        res%test_results(1)%n_fail = 0
+
+        json = check_result_full_json(res, '')
+        call assert(index(json, '"tests"') > 0, 'full json has tests key')
+        call assert(index(json, '"test_scan"') > 0, 'full json has test name')
+        call assert(index(json, '"pass":30') > 0, 'full json has pass count')
+    end subroutine test_full_json_includes_test_results
+
+    subroutine test_test_results_parse()
+        type(check_result_t) :: res
+        character(len=512) :: project_dir, src_dir, toml, src
+        integer :: u
+
+        call make_tmp_path('fo_test_results_project', project_dir)
+        src_dir = trim(project_dir)//'/src'
+        call execute_command_line('mkdir -p '//trim(src_dir), wait=.true.)
+
+        toml = trim(project_dir)//'/fpm.toml'
+        open (newunit=u, file=toml, status='replace')
+        write (u, '(a)') 'name = "testpkg"'
+        write (u, '(a)') 'version = "0.1.0"'
+        close (u)
+
+        src = trim(src_dir)//'/testmod.f90'
+        open (newunit=u, file=src, status='replace')
+        write (u, '(a)') 'module testmod'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine hello()'
+        write (u, '(a)') 'end subroutine'
+        write (u, '(a)') 'end module testmod'
+        close (u)
+
+        call fo_check_run(trim(project_dir), res)
+        call assert(res%build_ok, 'parse test project builds')
+        call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
+    end subroutine test_test_results_parse
 
 end program test_check

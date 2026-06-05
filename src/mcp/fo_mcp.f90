@@ -92,7 +92,7 @@ contains
         type(mcp_async_state_t), intent(inout) :: async_state
 
         character(len=64) :: action, mode
-        character(len=8192) :: output_text
+        character(len=16384) :: output_text
         integer :: exitcode, cmdstat
         character(len=512) :: tmpfile, cmd, dir
         type(check_result_t) :: check_res

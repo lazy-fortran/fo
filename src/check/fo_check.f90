@@ -11,9 +11,17 @@ module fo_check
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, is_runner_crash
     implicit none
     private
-    public :: check_result_t, fo_check_run, fo_changed_modules
+    public :: check_result_t, test_result_t, fo_check_run, fo_changed_modules
+    public :: MAX_TEST_RESULTS
 
     integer, parameter :: MAX_EXT_DEPS = 256
+    integer, parameter :: MAX_TEST_RESULTS = 64
+
+    type :: test_result_t
+        character(len=128) :: name = ''
+        integer :: n_pass = 0
+        integer :: n_fail = 0
+    end type test_result_t
 
     type :: check_result_t
         logical :: build_ok = .false.
@@ -35,6 +43,8 @@ module fo_check
         character(len=256) :: diag_file = ''
         integer :: diag_line = 0
         integer :: diag_column = 0
+        type(test_result_t) :: test_results(MAX_TEST_RESULTS)
+        integer :: n_test_results = 0
     end type check_result_t
 
 contains
@@ -337,6 +347,7 @@ contains
         call make_tmpfile('fo-test', test_log)
         call backend%test(exitcode, log_file=test_log)
         res%tests_ok = (exitcode == 0)
+        call parse_test_log(test_log, res%test_results, res%n_test_results)
         if (.not. res%tests_ok) then
             call summarize_backend_failure('test', test_log, 'fo test', res)
         else
@@ -389,6 +400,47 @@ contains
             res%error_msg = trim(res%error_msg)//'; rerun: '//trim(res%rerun)
         end if
     end subroutine set_failure
+
+    subroutine parse_test_log(log_file, results, n_results)
+        character(len=*), intent(in) :: log_file
+        type(test_result_t), intent(out) :: results(MAX_TEST_RESULTS)
+        integer, intent(out) :: n_results
+
+        character(len=512) :: line
+        character(len=128) :: name
+        integer :: u, iostat, io, colon_pos, pass_pos, fail_pos, comma_pos
+        integer :: n_pass, n_fail
+
+        n_results = 0
+        open (newunit=u, file=log_file, status='old', iostat=iostat)
+        if (iostat /= 0) return
+
+        do
+            read (u, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            colon_pos = index(line, ': ')
+            if (colon_pos < 2) cycle
+            name = line(1:colon_pos - 1)
+            if (len_trim(name) == 0) cycle
+            line = adjustl(line(colon_pos + 2:))
+            pass_pos = index(line, ' pass')
+            fail_pos = index(line, ' fail')
+            comma_pos = index(line, ',')
+            if (pass_pos < 2 .or. fail_pos < 2 .or. &
+                comma_pos < 2 .or. comma_pos >= fail_pos) cycle
+            read (line(1:pass_pos - 1), *, iostat=io) n_pass
+            if (io /= 0) cycle
+            read (line(comma_pos + 1:fail_pos - 1), *, iostat=io) n_fail
+            if (io /= 0) cycle
+            if (n_results < MAX_TEST_RESULTS) then
+                n_results = n_results + 1
+                results(n_results)%name = trim(name)
+                results(n_results)%n_pass = n_pass
+                results(n_results)%n_fail = n_fail
+            end if
+        end do
+        close (u)
+    end subroutine parse_test_log
 
     subroutine detect_compiler(compiler)
         character(len=*), intent(out) :: compiler
