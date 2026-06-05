@@ -20,11 +20,13 @@ module fo_gfortran_build
 
 contains
 
-    subroutine gfortran_build(project_dir, log_file, exitcode, n_compiled, flags)
+    subroutine gfortran_build(project_dir, log_file, exitcode, n_compiled, flags, &
+                              compiler_id)
         character(len=*), intent(in) :: project_dir, log_file
         integer, intent(out) :: exitcode
         integer, intent(out), optional :: n_compiled
         character(len=*), intent(in), optional :: flags
+        character(len=*), intent(in), optional :: compiler_id
 
         type(fpm_config_t) :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_src_objs, nc
@@ -34,12 +36,17 @@ contains
         character(len=512) :: src_objs(MAX_SRC_OBJS)
         logical :: is_prog_arr(MAX_SRC_OBJS)
         character(len=512) :: lf
-        character(len=512) :: flag_text
+        character(len=512) :: flag_text, compiler
 
         lf = log_file
         if (len_trim(lf) == 0) lf = '/dev/null'
         flag_text = ''
         if (present(flags)) flag_text = flags
+        if (present(compiler_id)) then
+            compiler = compiler_id
+        else
+            call detect_compiler(compiler)
+        end if
 
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) then
@@ -65,7 +72,7 @@ contains
         call compile_sources(project_dir, config%source_dir, config%app_dir, &
                              mod_dir, obj_dir, dep_includes, n_dep_includes, lf, &
                              src_objs, n_src_objs, is_prog_arr, exitcode, nc, &
-                             flag_text)
+                             flag_text, compiler)
         if (exitcode /= 0) return
 
         if (present(n_compiled)) n_compiled = nc
@@ -250,10 +257,10 @@ contains
     subroutine compile_sources(project_dir, src_dir, app_dir, mod_dir, obj_dir, &
                                dep_includes, n_dep_includes, log_file, &
                                src_objs, n_src_objs, is_prog_arr, exitcode, &
-                               n_compiled, flags)
+                               n_compiled, flags, compiler)
         character(len=*), intent(in) :: project_dir, src_dir, app_dir
         character(len=*), intent(in) :: mod_dir, obj_dir, log_file
-        character(len=*), intent(in) :: flags
+        character(len=*), intent(in) :: flags, compiler
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
         integer, intent(in) :: n_dep_includes
         character(len=512), intent(out) :: src_objs(MAX_SRC_OBJS)
@@ -272,7 +279,6 @@ contains
         character(len=512) :: obj_path
         character(len=4096) :: includes_flag
         character(len=512) :: c_list, c_line
-        character(len=256) :: compiler
         integer :: uc, cios
 
         type(cache_t) :: c
@@ -324,7 +330,6 @@ contains
         new_mod_keys = ''
         call load_mod_keys(mod_dir, dag, n_order, topo_order, old_mod_keys)
         call cache_init(c, cache_ierr)
-        call detect_compiler(compiler)
 
         if (cache_ierr == 0) then
             do lvl = 0, n_levels - 1

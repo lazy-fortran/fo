@@ -24,6 +24,7 @@ program test_backend
     call test_gfortran_recovers_from_root_mod_shadow()
     call test_gfortran_restores_deleted_outputs()
     call test_gfortran_flags_change_action_id()
+    call test_gfortran_compiler_identity_changes_action_id()
     call test_gfortran_private_change_keeps_dependent_cached()
     call test_gfortran_interface_change_rebuilds_dependent()
     call test_cmake_skips_slow_by_default()
@@ -294,6 +295,32 @@ contains
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_flags_change_action_id
+
+    subroutine test_gfortran_compiler_identity_changes_action_id()
+        integer :: exitcode, n_first, n_same, n_changed
+        character(len=512) :: project_dir, log_file
+
+        call make_tmp_path('fo_test_gfortran_compiler_id', project_dir)
+        call make_tmp_path('fo_backend_gfortran_compiler_id', log_file)
+        call make_simple_fpm_project(project_dir)
+        call rewrite_lib_unique(project_dir)
+
+        call gfortran_build(project_dir, log_file, exitcode, n_first, &
+                            compiler_id='compiler-a')
+        call assert(exitcode == 0 .and. n_first > 0, &
+                    'compiler identity fixture first build compiles')
+        call gfortran_build(project_dir, log_file, exitcode, n_same, &
+                            compiler_id='compiler-a')
+        call assert(exitcode == 0 .and. n_same == 0, &
+                    'same compiler identity restores from action cache')
+        call gfortran_build(project_dir, log_file, exitcode, n_changed, &
+                            compiler_id='compiler-b')
+        call assert(exitcode == 0 .and. n_changed > 0, &
+                    'changed compiler identity misses action cache')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_compiler_identity_changes_action_id
 
     subroutine rewrite_lib_unique(project_dir)
         character(len=*), intent(in) :: project_dir
