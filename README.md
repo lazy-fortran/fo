@@ -54,11 +54,12 @@ only when the caller needs diagnostic arrays or log paths.
 
 1. Scan `.f90`/`.F90` files, parse `use`/`module` statements.
 2. Build the module dependency DAG, topological sort.
-3. Hash each module: `FNV-1a(source + compiler + flags + dep hashes)`.
-4. Compare hashes against global cache at `~/.cache/fo/index`.
-5. Delegate build to fpm or cmake. Report cache hits.
+3. Compute SHA-256 action IDs from source content, compiler identity, flags,
+   and dependency `.mod` payload hashes.
+4. Restore objects and module files from `~/.cache/fo/store/v1` on action hits.
+5. Compile misses, then store action records and output payloads atomically.
 6. Compute reverse-dependency closure of changed modules.
-7. Run only affected tests (skip slow tests by default).
+7. Run only affected tests; unchanged tests are cached.
 
 ## Backend detection
 
@@ -82,8 +83,8 @@ instead of one process per test.
 
 | Go feature | fo |
 |---|---|
-| Global content-addressed cache | `~/.cache/fo/index`, FNV-1a |
-| Cache key = hash(source + compiler + flags + dep hashes) | yes |
+| Global content-addressed cache | `~/.cache/fo/store/v1`, SHA-256 |
+| Cache key = hash(source + compiler + flags + `.mod` payload hashes) | yes |
 | Affected-test selection | `fo changed`, `fo test --only-changed` |
 | Parallel builds | `FO_JOBS` or nproc for fpm, cmake, ctest |
 | Flag passthrough | `fo build --flag` |
@@ -93,7 +94,7 @@ instead of one process per test.
 
 ## Tests
 
-163 tests: scanner (30), DAG (15), cache (8), backend (20), check (90).
+181 tests: scanner (33), DAG (15), cache (12), backend (27), check (98).
 
 ## Benchmarks
 

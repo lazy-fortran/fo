@@ -122,19 +122,12 @@ contains
             'Static: OK (', dag%n_nodes, ' modules, ', n_changed, &
             ' changed, ', n_affected, ' affected)'
 
-        ! 2. build (restore cached artifacts first, store after)
-        block
-            use fo_artifact_cache, only: artifact_restore, artifact_store
-            integer :: n_restored, art_ierr
-
-            call artifact_restore(trim(b%project_dir)//'/build', n_restored, art_ierr)
-            call backend_build(b, exitcode)
-            if (exitcode /= 0) then
-                write (error_unit, '(a)') 'Build: FAIL'
-                stop 1
-            end if
-            call artifact_store(trim(b%project_dir)//'/build', art_ierr)
-        end block
+        ! 2. build through the action/output store
+        call backend_build(b, exitcode)
+        if (exitcode /= 0) then
+            write (error_unit, '(a)') 'Build: FAIL'
+            stop 1
+        end if
         write (output_unit, '(a)') 'Build: OK'
 
         ! 3. test: skip if nothing changed, otherwise run affected tests only
@@ -155,22 +148,16 @@ contains
                 end if
             end do
 
-            if (n_test_names > 0) then
+            if (n_test_names == 0) then
+                write (output_unit, '(a)') 'Tests: skipped, no affected tests'
+            else
                 call backend_test_names(b, test_names, n_test_names, exitcode)
                 if (exitcode /= 0) then
                     write (error_unit, '(a)') 'Tests: FAIL'
                     stop 1
                 end if
-            else
-                ! no specific affected tests found; run all non-slow
-                call backend_test(b, exitcode)
-                if (exitcode /= 0) then
-                    write (error_unit, '(a)') 'Tests: FAIL'
-                    stop 1
-                end if
+                write (output_unit, '(a)') 'Tests: OK'
             end if
-
-            write (output_unit, '(a)') 'Tests: OK'
         end if
 
         ! 4. lint: unused imports (skip compiler warnings in pipeline)
@@ -674,21 +661,19 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
     end subroutine cmd_install
 
     subroutine cmd_clean()
-        use fo_cache, only: cache_t, cache_init
-        type(cache_t) :: c
-        integer :: ierr
+        use fo_cache, only: cache_root, cache_store_root
+        character(len=512) :: root, store_root
 
-        call cache_init(c, ierr)
-        if (ierr == 0) then
-            call execute_command_line( &
-                'rm -rf '//trim(c%root_dir), wait=.true.)
-            write (output_unit, '(a,a)') 'cache cleared: ', trim(c%root_dir)
-        end if
+        call cache_root(root)
+        call cache_store_root(store_root)
+        call execute_command_line('rm -rf '//trim(root), wait=.true.)
+        write (output_unit, '(a,a)') 'cache cleared: ', trim(store_root)
     end subroutine cmd_clean
 
     subroutine cmd_info()
         use fo_capabilities, only: capabilities_t, detect_capabilities, &
                                    capabilities_text, capabilities_json
+        use fo_cache, only: cache_schema, cache_store_root
         type(scan_unit_t), allocatable :: units(:)
         type(dag_t) :: dag
         type(backend_t) :: b
@@ -696,6 +681,7 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
         integer :: n_units, ierr
         logical :: show_caps
         type(capabilities_t) :: cap
+        character(len=512) :: cache_text
 
         allocate (units(MAX_UNITS))
         b = detect_backend('.')
@@ -722,6 +708,11 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
         case default
             write (output_unit, '(a)') 'backend: none'
         end select
+        call cache_schema(cache_text)
+        write (output_unit, '(a,a)') 'cache-schema: ', trim(cache_text)
+        call cache_store_root(cache_text)
+        write (output_unit, '(a,a)') 'cache-root: ', trim(cache_text)
+        write (output_unit, '(a)') 'cache-shards: 256'
 
         call scan_dir(trim(scan_root), units, n_units, ierr)
         if (ierr == 0) then

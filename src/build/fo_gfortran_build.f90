@@ -3,9 +3,11 @@ module fo_gfortran_build
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME
     use fo_dag_bridge, only: build_dag_from_units
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
-    use fo_cache, only: cache_t, cache_init, cache_lookup, cache_store, &
-                        cache_key_for, hash_mod_file, HASH_LEN
-    use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
+                        cache_restore_action, cache_store_action, hash_mod_file, &
+                        HASH_LEN
+    use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
+                       clean_root_build_artifacts
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
     private
@@ -259,7 +261,7 @@ contains
         logical, allocatable :: is_prog(:), is_test_arr(:)
         integer, allocatable :: topo_order(:), node_levels(:)
         integer :: n_order, n_levels, lvl
-        logical :: has_cycle, obj_exists
+        logical :: has_cycle, restored
         character(len=512) :: obj_path
         character(len=4096) :: includes_flag
         character(len=512) :: c_list, c_line
@@ -270,7 +272,7 @@ contains
         integer :: cache_ierr
         character(len=HASH_LEN), allocatable :: old_mod_keys(:), new_mod_keys(:)
         character(len=HASH_LEN) :: dep_keys(64), source_key
-        integer :: dep_id, j, n_dep
+        integer :: n_dep
         integer, allocatable :: compile_nodes(:)
         character(len=HASH_LEN), allocatable :: compile_keys(:)
         integer, allocatable :: compile_exits(:)
@@ -328,25 +330,19 @@ contains
                     if (is_test_arr(node_id)) cycle
                     if (len_trim(filenames(node_id)) == 0) cycle
 
-                    n_dep = 0
-                    do j = 1, dag%nodes(node_id)%n_edges
-                        dep_id = dag%nodes(node_id)%edges(j)
-                        if (dep_id > 0 .and. len_trim(new_mod_keys(dep_id)) > 0) then
-                            n_dep = n_dep + 1
-                            if (n_dep <= 64) dep_keys(n_dep) = new_mod_keys(dep_id)
-                        end if
-                    end do
-                    call add_external_dep_keys(all_units, n_all, dag, node_id, &
-                                               dep_includes, n_dep_includes, &
-                                               dep_keys, n_dep)
+                    call collect_dep_keys_source_order(all_units, n_all, dag, node_id, &
+                                                       new_mod_keys, dep_includes, &
+                                                       n_dep_includes, dep_keys, n_dep)
                     source_key = cache_key_for(filenames(node_id), compiler, '', &
                                                dep_keys, n_dep)
 
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
                     if (cache_lookup(c, dag%nodes(node_id)%label, source_key)) then
-                        inquire (file=trim(obj_path), exist=obj_exists)
-                        if (obj_exists) then
-                            new_mod_keys(node_id) = old_mod_keys(node_id)
+                        call cache_restore_action(c, source_key, obj_path, mod_dir, &
+                                                  dag%nodes(node_id)%label, restored)
+                        if (restored) then
+                            call get_mod_key(dag%nodes(node_id)%label, mod_dir, &
+                                             new_mod_keys(node_id))
                             cycle
                         end if
                     end if
@@ -366,7 +362,7 @@ contains
                     fname_local = filenames(node_id)
                     per_log_local = per_logs(ii)
                     call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
-                    call compile_f90(fname_local, obj_path, includes_flag, &
+                    call compile_f90(project_dir, fname_local, obj_path, includes_flag, &
                                      per_log_local, compile_exits(ii))
                 end do
                 !$omp end parallel do
@@ -380,9 +376,13 @@ contains
                         return
                     end if
                     node_id = compile_nodes(ii)
+                    call make_obj_path(filenames(node_id), project_dir, obj_dir, &
+                                       obj_path)
                     call get_mod_key(dag%nodes(node_id)%label, mod_dir, &
                                      new_mod_keys(node_id))
-                    call cache_store(c, dag%nodes(node_id)%label, compile_keys(ii))
+                    call cache_store_action(c, compile_keys(ii), obj_path, mod_dir, &
+                                            dag%nodes(node_id)%label, source_key, &
+                                            cache_ierr)
                 end do
                 n_compiled = n_compiled + n_compile
             end do
@@ -393,8 +393,8 @@ contains
                 if (len_trim(filenames(node_id)) == 0) cycle
                 if (is_test_arr(node_id)) cycle
                 call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
-                call compile_f90(filenames(node_id), obj_path, includes_flag, &
-                                 log_file, exitcode)
+                call compile_f90(project_dir, filenames(node_id), obj_path, &
+                                 includes_flag, log_file, exitcode)
                 if (exitcode /= 0) return
                 n_compiled = n_compiled + 1
             end do
@@ -470,6 +470,48 @@ contains
             return
         end do
     end subroutine add_external_dep_keys
+
+    subroutine collect_dep_keys_source_order(units, n_units, dag, node_id, &
+                                             mod_keys, dep_includes, &
+                                             n_dep_includes, dep_keys, n_dep)
+        type(scan_unit_t), intent(in) :: units(:)
+        integer, intent(in) :: n_units, node_id, n_dep_includes
+        type(dag_t), intent(in) :: dag
+        character(len=HASH_LEN), intent(in) :: mod_keys(MAX_NODES)
+        character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
+        character(len=HASH_LEN), intent(out) :: dep_keys(64)
+        integer, intent(out) :: n_dep
+
+        integer :: i, j, dep_id
+        character(len=MAX_NAME) :: node_name
+        character(len=512) :: modpath
+        logical :: found
+
+        n_dep = 0
+        dep_keys = ''
+        node_name = dag%nodes(node_id)%label(1:MAX_NAME)
+        do i = 1, n_units
+            if (trim(units(i)%module_name) /= trim(node_name) .and. &
+                trim(units(i)%program_name) /= trim(node_name)) cycle
+
+            do j = 1, units(i)%n_deps
+                if (n_dep >= 64) return
+                dep_id = dag_find_node(dag, units(i)%deps(j))
+                if (dep_id > 0) then
+                    if (len_trim(mod_keys(dep_id)) == 0) cycle
+                    n_dep = n_dep + 1
+                    dep_keys(n_dep) = mod_keys(dep_id)
+                else
+                    call find_dep_mod_file(units(i)%deps(j), dep_includes, &
+                                           n_dep_includes, modpath, found)
+                    if (.not. found) cycle
+                    n_dep = n_dep + 1
+                    call hash_mod_file(modpath, dep_keys(n_dep))
+                end if
+            end do
+            return
+        end do
+    end subroutine collect_dep_keys_source_order
 
     subroutine find_dep_mod_file(modname, dep_includes, n_dep_includes, modpath, &
                                  found)
@@ -553,9 +595,8 @@ contains
         character(len=HASH_LEN), intent(out) :: key
 
         character(len=MAX_NAME) :: lower_label
-        character(len=512) :: modpath, tmpfile, cmd
-        character(len=HASH_LEN) :: empty_keys(0)
-        integer :: exitcode, i
+        character(len=512) :: modpath
+        integer :: i
 
         lower_label = label
         do i = 1, len_trim(lower_label)
@@ -564,15 +605,7 @@ contains
         end do
 
         modpath = trim(mod_dir)//'/'//trim(lower_label)//'.mod'
-        call make_tmpfile('fo_mod_text', tmpfile)
-        cmd = 'gzip -d -c '//sq(modpath)//' > '//trim(tmpfile)//' 2>/dev/null'
-        call execute_command_line(trim(cmd), wait=.true., exitstat=exitcode)
-        if (exitcode == 0) then
-            key = cache_key_for(trim(tmpfile), '', '', empty_keys, 0)
-        else
-            key = cache_key_for(trim(modpath), '', '', empty_keys, 0)
-        end if
-        call delete_tmpfile(tmpfile)
+        call hash_mod_file(modpath, key)
     end subroutine get_mod_key
 
     subroutine remove_shadow_mods(project_dir, dag)
@@ -672,6 +705,7 @@ contains
         integer, allocatable :: topo_order(:)
         integer, allocatable :: run_nodes(:), run_exits(:)
         character(len=512), allocatable :: run_logs(:)
+        character(len=HASH_LEN), allocatable :: run_keys(:)
         integer :: n_order
         logical :: has_cycle
         character(len=512) :: obj_path, bin_path
@@ -679,18 +713,34 @@ contains
         character(len=128) :: tname
         character(len=MAX_NAME) :: fname_local
         character(len=512) :: log_local
+        type(cache_t) :: c
+        integer :: cache_ierr
+        character(len=256) :: compiler
+        character(len=HASH_LEN) :: dep_keys(64), output_key
+        integer :: n_dep, n_test_includes
+        character(len=512) :: test_includes(MAX_DEP_DIRS)
 
         exitcode = 0
         allocate (tunits(MAX_UNITS))
         allocate (filenames(MAX_NODES), is_prog(MAX_NODES), is_test_arr(MAX_NODES))
         allocate (topo_order(MAX_NODES))
         allocate (run_nodes(MAX_NODES), run_exits(MAX_NODES), run_logs(MAX_NODES))
+        allocate (run_keys(MAX_NODES))
         call scan_dir(trim(project_dir)//'/'//trim(test_dir), tunits, n_tests, ierr)
         if (n_tests == 0) return
 
         call build_dag_from_units(tunits, n_tests, dag, filenames, is_test_arr, is_prog)
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
         call make_includes_flag(mod_dir, dep_includes, n_dep_includes, incl_flag)
+        call cache_init(c, cache_ierr)
+        call detect_compiler(compiler)
+        test_includes = ''
+        test_includes(1) = trim(mod_dir)
+        n_test_includes = 1
+        do i = 1, min(n_dep_includes, MAX_DEP_DIRS - 1)
+            n_test_includes = n_test_includes + 1
+            test_includes(i + 1) = dep_includes(i)
+        end do
 
         n_run = 0
         do i = 1, n_order
@@ -704,6 +754,12 @@ contains
             n_run = n_run + 1
             run_nodes(n_run) = node_id
             call make_tmpfile('fo_test_case', run_logs(n_run))
+            n_dep = 0
+            call add_external_dep_keys(tunits, n_tests, dag, node_id, &
+                                       test_includes, n_test_includes, &
+                                       dep_keys, n_dep)
+            run_keys(n_run) = cache_key_for(filenames(node_id), compiler, '', &
+                                            dep_keys, n_dep)
         end do
 
         run_exits = 0
@@ -714,7 +770,8 @@ contains
             fname_local = filenames(node_id)
             log_local = run_logs(i)
             call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
-            call compile_f90(fname_local, obj_path, incl_flag, log_local, run_exits(i))
+            call compile_f90(project_dir, fname_local, obj_path, incl_flag, &
+                             log_local, run_exits(i))
             if (run_exits(i) == 0) then
                 call file_basename(fname_local, tname)
                 bin_path = trim(bin_dir)//'/'//trim(tname)
@@ -735,6 +792,11 @@ contains
                 call file_basename(filenames(run_nodes(i)), tname)
                 call append_test_status(log_file, tname, run_exits(i))
                 if (exitcode == 0) exitcode = run_exits(i)
+            else if (cache_ierr == 0) then
+                call make_obj_path(filenames(run_nodes(i)), project_dir, obj_dir, &
+                                   obj_path)
+                call cache_store_action(c, run_keys(i), obj_path, mod_dir, '', &
+                                        output_key, cache_ierr)
             end if
             call delete_tmpfile(run_logs(i))
         end do
@@ -882,16 +944,66 @@ contains
         r = "'"//trim(s)//"'"
     end function sq
 
-    subroutine compile_f90(source, objfile, includes_flag, log_file, exitcode)
-        character(len=*), intent(in) :: source, objfile, includes_flag, log_file
+    subroutine compile_f90(project_dir, source, objfile, includes_flag, log_file, &
+                           exitcode)
+        character(len=*), intent(in) :: project_dir, source, objfile, includes_flag
+        character(len=*), intent(in) :: log_file
         integer, intent(out) :: exitcode
         character(len=8192) :: cmd
-        cmd = 'gfortran -c '//trim(includes_flag)// &
+        integer :: n_removed
+
+        cmd = 'cd '//sq(trim(project_dir))//' && gfortran -c '//trim(includes_flag)// &
               ' -ffree-line-length-none -fimplicit-none'// &
               ' -o '//sq(objfile)//' '//sq(source)// &
               " >> '"//trim(log_file)//"' 2>&1"
         call execute_command_line(trim(cmd), wait=.true., exitstat=exitcode)
+        if (exitcode == 0) return
+        if (.not. looks_like_stale_mod_failure(log_file)) return
+
+        call clean_root_build_artifacts(project_dir, n_removed)
+        call append_stale_mod_hint(log_file, n_removed)
+
+        call execute_command_line(trim(cmd), wait=.true., exitstat=exitcode)
     end subroutine compile_f90
+
+    logical function looks_like_stale_mod_failure(log_file) result(matches)
+        character(len=*), intent(in) :: log_file
+
+        character(len=8192) :: text
+
+        call read_text_file(log_file, text)
+        matches = index(text, 'is not a GNU Fortran module file') > 0 .or. &
+                  index(text, 'created by a different version of GNU Fortran') > 0 .or. &
+                  index(text, 'Cannot open module file') > 0 .or. &
+                  index(text, 'Fatal Error: Cannot read module file') > 0
+    end function looks_like_stale_mod_failure
+
+    subroutine append_stale_mod_hint(log_file, n_removed)
+        character(len=*), intent(in) :: log_file
+        integer, intent(in) :: n_removed
+
+        integer :: u, ios
+
+        open (newunit=u, file=trim(log_file), status='old', position='append', &
+              iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a)') 'fo: possible stale root build artifacts detected.'
+        write (u, '(a)') 'fo: .mod/.smod/.o files in the project root can shadow build/fo/mod.'
+        write (u, '(a)') 'fo: VS Code Modern Fortran linting can create these files; set fortran.linter.modOutput outside the project root.'
+        if (n_removed > 0) then
+            write (u, '(a,i0,a)') 'fo: removed ', n_removed, &
+                ' root build artifacts and retried once.'
+            write (error_unit, '(a,i0,a)') 'fo: removed ', n_removed, &
+                ' stale root build artifacts (*.mod/*.smod/*.o); retried once'
+        else
+            write (u, '(a)') 'fo: no root build artifacts were found to clean.'
+            write (error_unit, '(a)') &
+                'fo: stale-module-like failure; root artifacts may already be clean'
+        end if
+        write (error_unit, '(a)') &
+            'fo: VS Code Modern Fortran users: set fortran.linter.modOutput outside the project root'
+        close (u)
+    end subroutine append_stale_mod_hint
 
     subroutine compile_c(source, objfile, log_file, exitcode)
         character(len=*), intent(in) :: source, objfile, log_file

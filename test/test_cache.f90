@@ -1,7 +1,8 @@
 program test_cache
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_cache, only: cache_t, cache_init, cache_key_for, cache_lookup, &
-                        cache_store, HASH_LEN
+                        cache_store_action, cache_restore_action, cache_schema, &
+                        cache_store_root, HASH_LEN
     implicit none
 
     integer :: n_pass, n_fail
@@ -10,11 +11,11 @@ program test_cache
     n_fail = 0
 
     call test_init()
-    call test_store_and_lookup()
+    call test_action_store_restore()
     call test_miss()
-    call test_update()
-    call test_persistence()
+    call test_action_persistence()
     call test_large_file_hashes_full_source()
+    call test_schema_and_root()
 
     write (output_unit, '(a,i0,a,i0,a)') 'cache: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -42,15 +43,39 @@ contains
         call assert(c%initialized, 'cache dir set')
     end subroutine test_init
 
-    subroutine test_store_and_lookup()
+    subroutine test_action_store_restore()
         type(cache_t) :: c
         integer :: ierr
+        character(len=512) :: obj_path, mod_dir, mod_path
+        character(len=HASH_LEN) :: action_id, output_id
+        logical :: restored
 
         call cache_init(c, ierr)
-        call cache_store(c, 'test_module', 'ABCDEF1234567890')
-        call assert(cache_lookup(c, 'test_module', 'ABCDEF1234567890'), &
-                    'lookup after store hits')
-    end subroutine test_store_and_lookup
+        call make_tmp_path('fo_cache_obj', obj_path, '.o')
+        call make_tmp_path('fo_cache_moddir', mod_dir, '')
+        call execute_command_line('mkdir -p '//trim(mod_dir), wait=.true.)
+        mod_path = trim(mod_dir)//'/m.mod'
+        call write_text(obj_path, 'object payload')
+        call write_text(mod_path, 'module payload')
+
+        action_id = repeat('a', HASH_LEN)
+        call cache_store_action(c, action_id, obj_path, mod_dir, 'm', output_id, ierr)
+        call assert(ierr == 0, 'store action succeeds')
+        call assert(cache_lookup(c, 'm', action_id), 'action lookup hits')
+
+        call execute_command_line('rm -f '//trim(obj_path)//' '//trim(mod_path), &
+                                  wait=.true.)
+        call cache_restore_action(c, action_id, obj_path, mod_dir, 'm', restored)
+        call assert(restored, 'action restore reports success')
+        call assert(file_contains(obj_path, 'object payload'), &
+                    'object restored from action cache')
+        call assert(file_contains(mod_path, 'module payload'), &
+                    'module restored from action cache')
+
+        call execute_command_line('rm -f '//trim(obj_path)//' '//trim(mod_path), &
+                                  wait=.true.)
+        call execute_command_line('rm -rf '//trim(mod_dir), wait=.true.)
+    end subroutine test_action_store_restore
 
     subroutine test_miss()
         type(cache_t) :: c
@@ -61,33 +86,28 @@ contains
                     'lookup nonexistent misses')
     end subroutine test_miss
 
-    subroutine test_update()
+    subroutine test_action_persistence()
         type(cache_t) :: c
         integer :: ierr
+        character(len=512) :: obj_path, mod_dir
+        character(len=HASH_LEN) :: action_id, output_id
 
-        ! Content-addressed cache: each key is independent.
-        ! Storing a second key for the same name does not evict the first.
         call cache_init(c, ierr)
-        call cache_store(c, 'mod_a', '1111111111111111')
-        call cache_store(c, 'mod_a', '2222222222222222')
-        call assert(cache_lookup(c, 'mod_a', '1111111111111111'), &
-                    'old key still hits (content-addressed)')
-        call assert(cache_lookup(c, 'mod_a', '2222222222222222'), &
-                    'new key hits after store')
-    end subroutine test_update
+        call make_tmp_path('fo_cache_persist_obj', obj_path, '.o')
+        call make_tmp_path('fo_cache_persist_moddir', mod_dir, '')
+        call execute_command_line('mkdir -p '//trim(mod_dir), wait=.true.)
+        call write_text(obj_path, 'persist object')
+        call write_text(trim(mod_dir)//'/persist_mod.mod', 'persist mod')
+        action_id = repeat('b', HASH_LEN)
+        call cache_store_action(c, action_id, obj_path, mod_dir, 'persist_mod', &
+                                output_id, ierr)
 
-    subroutine test_persistence()
-        type(cache_t) :: c1, c2
-        integer :: ierr
-
-        call cache_init(c1, ierr)
-        call cache_store(c1, 'persist_mod', 'AAAA111122223333')
-
-        ! reinit loads from disk
-        call cache_init(c2, ierr)
-        call assert(cache_lookup(c2, 'persist_mod', 'AAAA111122223333'), &
-                    'cache persists across init')
-    end subroutine test_persistence
+        call cache_init(c, ierr)
+        call assert(cache_lookup(c, 'persist_mod', action_id), &
+                    'action cache persists across init')
+        call execute_command_line('rm -f '//trim(obj_path), wait=.true.)
+        call execute_command_line('rm -rf '//trim(mod_dir), wait=.true.)
+    end subroutine test_action_persistence
 
     subroutine test_large_file_hashes_full_source()
         character(len=HASH_LEN) :: key_a, key_b
@@ -106,6 +126,44 @@ contains
                     'cache key includes source content after fixed buffer boundary')
         call execute_command_line('rm -f '//trim(path_a)//' '//trim(path_b))
     end subroutine test_large_file_hashes_full_source
+
+    subroutine test_schema_and_root()
+        character(len=512) :: text
+
+        call cache_schema(text)
+        call assert(trim(text) == 'action-output-v1', 'cache schema is reported')
+        call cache_store_root(text)
+        call assert(index(text, '/.cache/fo/store/v1') > 0, &
+                    'cache root points at store v1')
+    end subroutine test_schema_and_root
+
+    subroutine write_text(path, text)
+        character(len=*), intent(in) :: path, text
+        integer :: u
+
+        open (newunit=u, file=trim(path), status='replace')
+        write (u, '(a)') trim(text)
+        close (u)
+    end subroutine write_text
+
+    logical function file_contains(path, needle)
+        character(len=*), intent(in) :: path, needle
+        character(len=512) :: line
+        integer :: u, iostat
+
+        file_contains = .false.
+        open (newunit=u, file=trim(path), status='old', iostat=iostat)
+        if (iostat /= 0) return
+        do
+            read (u, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            if (index(line, trim(needle)) > 0) then
+                file_contains = .true.
+                exit
+            end if
+        end do
+        close (u)
+    end function file_contains
 
     subroutine write_large_source(filename, marker)
         character(len=*), intent(in) :: filename, marker

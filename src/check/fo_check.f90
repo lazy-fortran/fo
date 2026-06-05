@@ -9,13 +9,12 @@ module fo_check
                           process_ctest
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
                                  gfortran_test_names
-    use fo_cache, only: cache_t, cache_init, cache_lookup, cache_store, &
-                        cache_key_for, hash_mod_file, HASH_LEN
+    use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
+                        cache_action_mod_key, hash_mod_file, HASH_LEN
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, is_runner_crash
     implicit none
     private
     public :: check_result_t, test_result_t, fo_check_run, fo_changed_modules
-    public :: fo_mark_current
     public :: MAX_TEST_RESULTS
 
     integer, parameter :: MAX_EXT_DEPS = 256
@@ -73,32 +72,17 @@ contains
 
         call fo_changed_modules_impl(dir, dag, changed_ids, n_changed, &
                                      affected_ids, n_affected, n_cached, ierr, &
-                                     .false., n_in_cycle, filenames, is_test_arr)
+                                     n_in_cycle, filenames, is_test_arr)
     end subroutine fo_changed_modules
-
-    subroutine fo_mark_current(dir, ierr)
-        character(len=*), intent(in) :: dir
-        integer, intent(out) :: ierr
-
-        type(dag_t) :: dag
-        integer :: changed_ids(MAX_NODES), affected_ids(MAX_NODES)
-        integer :: n_changed, n_affected, n_cached
-
-        call fo_changed_modules_impl(dir, dag, changed_ids, n_changed, &
-                                     affected_ids, n_affected, n_cached, ierr, &
-                                     .true.)
-    end subroutine fo_mark_current
 
     subroutine fo_changed_modules_impl(dir, dag, changed_ids, n_changed, &
                                        affected_ids, n_affected, n_cached, ierr, &
-                                       store_current, n_in_cycle, filenames, &
-                                       is_test_arr)
+                                       n_in_cycle, filenames, is_test_arr)
         character(len=*), intent(in) :: dir
         type(dag_t), intent(out) :: dag
         integer, intent(out) :: changed_ids(MAX_NODES), n_changed
         integer, intent(out) :: affected_ids(MAX_NODES), n_affected
         integer, intent(out) :: n_cached, ierr
-        logical, intent(in) :: store_current
         integer, intent(out), optional :: n_in_cycle
         character(len=MAX_NAME), optional, intent(out) :: filenames(MAX_NODES)
         logical, optional, intent(out) :: is_test_arr(MAX_NODES)
@@ -110,8 +94,9 @@ contains
         character(len=512) :: project_dir
         integer, allocatable :: order(:)
         integer :: n_order
-        integer :: i, node_id, j, dep_id, n_dep_keys
+        integer :: i, node_id, n_dep_keys
         character(len=HASH_LEN), allocatable :: keys(:)
+        character(len=HASH_LEN), allocatable :: mod_keys(:)
         character(len=HASH_LEN) :: dep_keys(64)
         character(len=256) :: compiler
         character(len=MAX_NAME) :: ext_names(MAX_EXT_DEPS)
@@ -119,10 +104,10 @@ contains
         integer :: n_ext
         character(len=MAX_NAME), allocatable :: local_filenames(:)
         logical, allocatable :: local_is_test_arr(:)
-        logical :: has_cycle
+        logical :: has_cycle, found_mod_key
 
         allocate (units(MAX_UNITS), order(MAX_NODES))
-        allocate (keys(MAX_NODES), local_filenames(MAX_NODES))
+        allocate (keys(MAX_NODES), mod_keys(MAX_NODES), local_filenames(MAX_NODES))
         allocate (local_is_test_arr(MAX_NODES))
 
         ierr = 0
@@ -156,22 +141,13 @@ contains
                                          ext_names, ext_keys, n_ext)
 
         keys = ''
+        mod_keys = ''
         do i = 1, n_order
             node_id = order(i)
 
-            ! collect in-DAG dep keys
-            n_dep_keys = 0
-            do j = 1, dag%nodes(node_id)%n_edges
-                dep_id = dag%nodes(node_id)%edges(j)
-                if (dep_id > 0 .and. len_trim(keys(dep_id)) > 0) then
-                    n_dep_keys = n_dep_keys + 1
-                    if (n_dep_keys <= 64) dep_keys(n_dep_keys) = keys(dep_id)
-                end if
-            end do
-
-            ! add external dep hashes for any unresolved uses in this unit
-            call add_ext_dep_keys(units, n_units, dag, node_id, &
-                                  ext_names, ext_keys, n_ext, dep_keys, n_dep_keys)
+            call collect_dep_keys_source_order(units, n_units, dag, node_id, &
+                                               mod_keys, ext_names, ext_keys, n_ext, &
+                                               dep_keys, n_dep_keys)
 
             keys(node_id) = cache_key_for( &
                             local_filenames(node_id), compiler, '', &
@@ -179,11 +155,12 @@ contains
 
             if (cache_lookup(c, dag%nodes(node_id)%label, keys(node_id))) then
                 n_cached = n_cached + 1
+                call cache_action_mod_key(c, keys(node_id), mod_keys(node_id), &
+                                          found_mod_key)
             else
                 n_changed = n_changed + 1
                 changed_ids(n_changed) = node_id
             end if
-         if (store_current) call cache_store(c, dag%nodes(node_id)%label, keys(node_id))
         end do
 
         if (n_changed > 0) then
@@ -267,7 +244,9 @@ contains
             cc_file = trim(project_dir)//'/build/compile_commands.json'
             dep_dir = trim(project_dir)//'/build/dependencies'
             mod_file = trim(lower_name)//'.mod'
-            cmd = '( if [ -f '//sq(trim(cc_file))// &
+            cmd = '( test -d '//sq(trim(project_dir)//'/build/fo/mod')// &
+                  ' && printf "%s\n" '//sq(trim(project_dir)//'/build/fo/mod')// &
+                  '; if [ -f '//sq(trim(cc_file))// &
                   ' ]; then grep -o ''build/gfortran_[A-Za-z0-9_]*'' '// &
                   sq(trim(cc_file))//' | awk -v p='//sq(trim(project_dir))// &
                   ' ''{print p "/" $0}''; fi; '// &
@@ -291,44 +270,48 @@ contains
         end block
     end subroutine find_mod_file
 
-    subroutine add_ext_dep_keys(units, n_units, dag, node_id, &
-                                ext_names, ext_keys, n_ext, dep_keys, n_dep_keys)
+    subroutine collect_dep_keys_source_order(units, n_units, dag, node_id, &
+                                             mod_keys, ext_names, ext_keys, n_ext, &
+                                             dep_keys, n_dep_keys)
         type(scan_unit_t), intent(in) :: units(:)
-        integer, intent(in) :: n_units
+        integer, intent(in) :: n_units, node_id, n_ext
         type(dag_t), intent(in) :: dag
-        integer, intent(in) :: node_id
+        character(len=HASH_LEN), intent(in) :: mod_keys(MAX_NODES)
         character(len=MAX_NAME), intent(in) :: ext_names(MAX_EXT_DEPS)
         character(len=HASH_LEN), intent(in) :: ext_keys(MAX_EXT_DEPS)
-        integer, intent(in) :: n_ext
-        character(len=HASH_LEN), intent(inout) :: dep_keys(64)
-        integer, intent(inout) :: n_dep_keys
+        character(len=HASH_LEN), intent(out) :: dep_keys(64)
+        integer, intent(out) :: n_dep_keys
 
-        integer :: i, j, k
+        integer :: i, j, k, dep_id
         character(len=MAX_NAME) :: node_name
 
-        ! find the scan unit for this node
+        dep_keys = ''
+        n_dep_keys = 0
         node_name = dag%nodes(node_id)%label(1:MAX_NAME)
         do i = 1, n_units
-            if (trim(units(i)%module_name) == trim(node_name) .or. &
-                trim(units(i)%program_name) == trim(node_name)) then
-                ! check each of this unit's deps
-                do j = 1, units(i)%n_deps
-                    if (dag_find_node(dag, units(i)%deps(j)) > 0) cycle
-                    ! external dep: find its hash
+            if (trim(units(i)%module_name) /= trim(node_name) .and. &
+                trim(units(i)%program_name) /= trim(node_name)) cycle
+
+            do j = 1, units(i)%n_deps
+                if (n_dep_keys >= 64) return
+                dep_id = dag_find_node(dag, units(i)%deps(j))
+                if (dep_id > 0) then
+                    if (len_trim(mod_keys(dep_id)) == 0) cycle
+                    n_dep_keys = n_dep_keys + 1
+                    dep_keys(n_dep_keys) = mod_keys(dep_id)
+                else
                     do k = 1, n_ext
                         if (trim(ext_names(k)) == trim(units(i)%deps(j))) then
-                            if (n_dep_keys < 64) then
-                                n_dep_keys = n_dep_keys + 1
-                                dep_keys(n_dep_keys) = ext_keys(k)
-                            end if
+                            n_dep_keys = n_dep_keys + 1
+                            dep_keys(n_dep_keys) = ext_keys(k)
                             exit
                         end if
                     end do
-                end do
-                return
-            end if
+                end if
+            end do
+            return
         end do
-    end subroutine add_ext_dep_keys
+    end subroutine collect_dep_keys_source_order
 
     subroutine fo_check_run(dir, res)
         character(len=*), intent(in) :: dir
@@ -380,6 +363,15 @@ contains
         res%n_affected = n_affected
 
         if (n_changed == 0) then
+            call make_tmpfile('fo-build', build_log)
+            call run_backend_build(backend_kind, project_dir, build_log, exitcode)
+            if (exitcode /= 0) then
+                call summarize_backend_failure('build', build_log, 'fo build', res)
+                call cpu_time(t1)
+                res%elapsed = t1 - t0
+                return
+            end if
+            call delete_tmpfile(build_log)
             res%build_ok = .true.
             res%tests_ok = .true.
             call cpu_time(t1)
@@ -408,6 +400,13 @@ contains
             end if
         end do
 
+        if (n_test_names == 0) then
+            res%tests_ok = .true.
+            call cpu_time(t1)
+            res%elapsed = t1 - t0
+            return
+        end if
+
         call make_tmpfile('fo-test', test_log)
         call run_backend_tests(backend_kind, project_dir, test_names, n_test_names, &
                                test_log, exitcode)
@@ -417,7 +416,6 @@ contains
             call summarize_backend_failure('test', test_log, 'fo test', res)
         else
             call delete_tmpfile(test_log)
-            call fo_mark_current(trim(project_dir), ierr)
         end if
 
         call cpu_time(t1)

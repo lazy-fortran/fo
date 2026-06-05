@@ -20,6 +20,7 @@ program test_backend
     call test_detect_jobs()
     call test_fpm_skips_slow_by_default()
     call test_gfortran_named_tests_select_requested()
+    call test_gfortran_recovers_from_root_mod_shadow()
     call test_cmake_skips_slow_by_default()
     call test_cmake_named_tests_select_regex()
     call test_fpm_path_with_spaces()
@@ -186,6 +187,55 @@ contains
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_named_tests_select_requested
+
+    subroutine test_gfortran_recovers_from_root_mod_shadow()
+        type(backend_t) :: b
+        integer :: exitcode, u
+        character(len=512) :: project_dir, log_file
+
+        call make_tmp_path('fo_test_gfortran_stale_mod', project_dir)
+        call make_tmp_path('fo_backend_gfortran_stale_mod', log_file)
+        call make_simple_fpm_project(project_dir)
+
+        open (newunit=u, file=trim(project_dir)//'/src/lib.f90', &
+              status='replace')
+        write (u, '(a)') 'module lib'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'character(len=*), parameter :: stale_mod_fixture = "'// &
+            trim(project_dir)//'"'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine noop()'
+        write (u, '(a)') 'end subroutine noop'
+        write (u, '(a)') 'end module lib'
+        close (u)
+
+        open (newunit=u, file=trim(project_dir)//'/src/consumer.f90', &
+              status='replace')
+        write (u, '(a)') 'module consumer'
+        write (u, '(a)') 'use lib, only: noop'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine call_noop()'
+        write (u, '(a)') 'call noop()'
+        write (u, '(a)') 'end subroutine call_noop'
+        write (u, '(a)') 'end module consumer'
+        close (u)
+
+        open (newunit=u, file=trim(project_dir)//'/lib.mod', status='replace')
+        write (u, '(a)') 'not a gfortran module'
+        close (u)
+
+        b = detect_backend(project_dir)
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'gfortran build recovers from root .mod shadow')
+        call assert(file_contains(log_file, 'fortran.linter.modOutput'), &
+                    'stale root module hint reaches build log')
+        call assert(.not. file_exists(trim(project_dir)//'/lib.mod'), &
+                    'stale root module is removed after matched failure')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_recovers_from_root_mod_shadow
 
     subroutine test_cmake_skips_slow_by_default()
         type(backend_t) :: b
@@ -506,6 +556,12 @@ contains
         end do
         close (u)
     end function file_contains
+
+    logical function file_exists(path)
+        character(len=*), intent(in) :: path
+
+        inquire (file=trim(path), exist=file_exists)
+    end function file_exists
 
     subroutine make_tmp_path(prefix, path)
         character(len=*), intent(in) :: prefix

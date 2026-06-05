@@ -4,6 +4,7 @@ module fo_util
     implicit none
     private
     public :: make_tmpfile, delete_tmpfile, read_text_file
+    public :: clean_root_build_artifacts
     public :: strip_path_prefix_in_str
     public :: send_jsonrpc, jsonrpc_error, jsonrpc_null
     public :: json_bool, json_int
@@ -62,6 +63,38 @@ contains
         close (u)
     end subroutine read_text_file
 
+    subroutine clean_root_build_artifacts(dir, n_removed)
+        character(len=*), intent(in) :: dir
+        integer, intent(out) :: n_removed
+
+        character(len=512) :: tmpfile, line
+        character(len=2048) :: cmd
+        integer :: u, ios, status
+
+        n_removed = 0
+        call make_tmpfile('fo-root-artifacts', tmpfile)
+        cmd = 'find '//sq(trim(dir))//' -maxdepth 1 -type f \( '// &
+              '-name "*.mod" -o -name "*.smod" -o -name "*.o" \) '// &
+              '2>/dev/null > '//sq(trim(tmpfile))
+        call execute_command_line(trim(cmd), wait=.true.)
+
+        open (newunit=u, file=trim(tmpfile), status='old', iostat=ios)
+        if (ios /= 0) then
+            call delete_tmpfile(tmpfile)
+            return
+        end if
+        do
+            read (u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (len_trim(line) == 0) cycle
+            call execute_command_line('rm -f '//sq(trim(line)), wait=.true., &
+                                      exitstat=status)
+            if (status == 0) n_removed = n_removed + 1
+        end do
+        close (u)
+        call delete_tmpfile(tmpfile)
+    end subroutine clean_root_build_artifacts
+
     subroutine strip_path_prefix_in_str(text, prefix)
         character(len=*), intent(inout) :: text
         character(len=*), intent(in) :: prefix
@@ -111,6 +144,12 @@ contains
                    '"error":{"code":'//trim(code_str)//','// &
                    '"message":"'//trim(msg)//'"}}'
     end subroutine jsonrpc_error
+
+    pure function sq(s) result(r)
+        character(len=*), intent(in) :: s
+        character(len=len_trim(s) + 2) :: r
+        r = "'"//trim(s)//"'"
+    end function sq
 
     subroutine jsonrpc_null(id_str, response)
         character(len=*), intent(in) :: id_str

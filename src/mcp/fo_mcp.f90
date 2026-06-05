@@ -164,7 +164,6 @@ contains
         type(capabilities_t) :: cap
         character(len=2048) :: cap_json
         character(len=514) :: dir_prefix
-
         want_full = (index(line, '"full"') > 0 .or. &
                      index(line, '"json":"full"') > 0)
         cap_json = ''
@@ -199,7 +198,6 @@ contains
         integer :: n_findings, n_warnings
         character(len=16384) :: lint_output
         character(len=514) :: dir_prefix
-
         call lint_dir(trim(dir), findings, n_findings)
         call lint_compiler(trim(dir), warnings, n_warnings)
         call lint_dedup_warnings(warnings, n_warnings)
@@ -312,6 +310,7 @@ contains
         use fo_dag_bridge, only: build_dag_from_units
         use fo_build_backend, only: backend_t, detect_backend, &
                                     BACKEND_NONE, BACKEND_GFORTRAN, BACKEND_CMAKE
+        use fo_cache, only: cache_schema, cache_store_root
         character(len=*), intent(in) :: id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
@@ -320,7 +319,7 @@ contains
         type(backend_t) :: b
         type(scan_unit_t), allocatable :: units(:)
         type(dag_t) :: dag
-        character(len=512) :: scan_root
+        character(len=512) :: scan_root, cache_text
         integer :: n_units, ierr
 
         allocate (units(MAX_UNITS))
@@ -335,6 +334,12 @@ contains
         case default
             output_text = 'backend: none'//achar(10)
         end select
+        call cache_schema(cache_text)
+        output_text = trim(output_text)//'cache-schema: '// &
+                      trim(cache_text)//achar(10)
+        call cache_store_root(cache_text)
+        output_text = trim(output_text)//'cache-root: '// &
+                      trim(cache_text)//achar(10)//'cache-shards: 256'//achar(10)
         call scan_dir(trim(scan_root), units, n_units, ierr)
         if (ierr == 0) then
             call build_dag_from_units(units, n_units, dag)
@@ -363,7 +368,6 @@ contains
         integer :: n_cached, ierr, i, n_tests
         character(len=MAX_NAME) :: filenames(MAX_NODES)
         logical :: is_test_arr(MAX_NODES)
-
         call fo_changed_modules(trim(dir), dag, changed_ids, n_changed, &
                                 affected_ids, n_affected, n_cached, ierr, &
                                 filenames=filenames, is_test_arr=is_test_arr)
@@ -413,24 +417,19 @@ contains
     end subroutine handle_changed
 
     subroutine handle_clean(id_str, output_text, exitcode, response)
-        use fo_cache, only: cache_t, cache_init
+        use fo_cache, only: cache_root, cache_store_root
         character(len=*), intent(in) :: id_str
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
         character(len=*), intent(out) :: response
 
-        type(cache_t) :: c
-        integer :: ierr
+        character(len=512) :: root, store_root
 
-        call cache_init(c, ierr)
-        if (ierr == 0) then
-            call execute_command_line('rm -rf '//trim(c%root_dir), wait=.true.)
-            output_text = 'cache cleared: '//trim(c%root_dir)
-            exitcode = 0
-        else
-            output_text = 'cache init failed'
-            exitcode = 1
-        end if
+        call cache_root(root)
+        call cache_store_root(store_root)
+        call execute_command_line('rm -rf '//trim(root), wait=.true.)
+        output_text = 'cache cleared: '//trim(store_root)
+        exitcode = 0
         call make_tool_text_response(id_str, output_text, exitcode, response)
     end subroutine handle_clean
 
