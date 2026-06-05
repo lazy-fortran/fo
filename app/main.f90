@@ -673,8 +673,9 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
 
         call cache_init(c, ierr)
         if (ierr == 0) then
-            call execute_command_line('rm -f '//trim(c%dir)//'/index', wait=.true.)
-            write (output_unit, '(a,a)') 'cache cleared: ', trim(c%dir)
+            call execute_command_line( &
+                'rm -rf '//trim(c%root_dir), wait=.true.)
+            write (output_unit, '(a,a)') 'cache cleared: ', trim(c%root_dir)
         end if
     end subroutine cmd_clean
 
