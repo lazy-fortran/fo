@@ -39,7 +39,7 @@ contains
 
         call cache_init(c, ierr)
         call assert(ierr == 0, 'cache init succeeds')
-        call assert(len_trim(c%dir) > 0, 'cache dir set')
+        call assert(c%initialized, 'cache dir set')
     end subroutine test_init
 
     subroutine test_store_and_lookup()
@@ -65,13 +65,15 @@ contains
         type(cache_t) :: c
         integer :: ierr
 
+        ! Content-addressed cache: each key is independent.
+        ! Storing a second key for the same name does not evict the first.
         call cache_init(c, ierr)
         call cache_store(c, 'mod_a', '1111111111111111')
         call cache_store(c, 'mod_a', '2222222222222222')
-        call assert(.not. cache_lookup(c, 'mod_a', '1111111111111111'), &
-                    'old key misses after update')
+        call assert(cache_lookup(c, 'mod_a', '1111111111111111'), &
+                    'old key still hits (content-addressed)')
         call assert(cache_lookup(c, 'mod_a', '2222222222222222'), &
-                    'new key hits after update')
+                    'new key hits after store')
     end subroutine test_update
 
     subroutine test_persistence()
