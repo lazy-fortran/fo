@@ -1,7 +1,8 @@
 program test_backend
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
-                                detect_jobs, &
+                                detect_jobs, backend_build, backend_test, &
+                                backend_test_names, &
                                 BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
     implicit none
 
@@ -18,6 +19,7 @@ program test_backend
     call test_nproc()
     call test_detect_jobs()
     call test_fpm_skips_slow_by_default()
+    call test_gfortran_named_tests_select_requested()
     call test_cmake_skips_slow_by_default()
     call test_cmake_named_tests_select_regex()
     call test_fpm_path_with_spaces()
@@ -150,17 +152,40 @@ contains
 
         call make_tmp_path('fo_test_gfortran_run', project_dir)
         call make_tmp_path('fo_backend_gfortran', log_file)
-        call make_simple_fpm_project(project_dir)
+        call make_slow_fpm_project(project_dir)
 
         b = detect_backend(project_dir)
-        call b%build(exitcode, log_file=log_file)
+        call backend_build(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'gfortran build succeeds on simple project')
-        call b%test(exitcode, log_file=log_file)
-        call assert(exitcode == 0, 'gfortran test runs passing tests')
+        call backend_test(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'gfortran test skips slow tests')
+        call backend_test(b, exitcode, include_slow=.true., log_file=log_file)
+        call assert(exitcode /= 0, 'gfortran test --all includes slow tests')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_fpm_skips_slow_by_default
+
+    subroutine test_gfortran_named_tests_select_requested()
+        type(backend_t) :: b
+        integer :: exitcode
+        character(len=512) :: project_dir, log_file
+        character(len=128) :: names(1)
+
+        call make_tmp_path('fo_test_gfortran_named', project_dir)
+        call make_tmp_path('fo_backend_gfortran_named', log_file)
+        call make_named_fpm_project(project_dir)
+
+        b = detect_backend(project_dir)
+        names(1) = 'test_a'
+        call backend_test_names(b, names, 1, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'gfortran named tests run selected test only')
+        call assert(file_contains(log_file, 'selected test ran'), &
+                    'gfortran named log includes selected test output')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_named_tests_select_requested
 
     subroutine test_cmake_skips_slow_by_default()
         type(backend_t) :: b
@@ -173,10 +198,10 @@ contains
         call make_cmake_tests_project(project_dir, .false.)
 
         b = detect_backend(project_dir)
-        call b%test(exitcode, log_file=fast_log)
+        call backend_test(b, exitcode, log_file=fast_log)
         call assert(exitcode == 0, 'cmake test skips excluded labels by default')
 
-        call b%test(exitcode, include_slow=.true., log_file=slow_log)
+        call backend_test(b, exitcode, include_slow=.true., log_file=slow_log)
         call assert(exitcode /= 0, 'cmake test --all includes slow')
 
         call execute_command_line('rm -rf '//trim(project_dir))
@@ -196,7 +221,7 @@ contains
         b = detect_backend(project_dir)
         names(1) = 'test_a'
         names(2) = 'test_b'
-        call b%test_names(names, 2, exitcode, log_file=log_file)
+        call backend_test_names(b, names, 2, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'cmake named tests select requested tests')
         call assert(file_contains(log_file, 'Test #1: test_a') .or. &
                     file_contains(log_file, 'Test #2: test_a') .or. &
@@ -218,9 +243,9 @@ contains
         call make_simple_fpm_project(project_dir)
 
         b = detect_backend(project_dir)
-        call b%build(exitcode, log_file=log_file)
+        call backend_build(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'fpm build handles project path with spaces')
-        call b%test(exitcode, log_file=log_file)
+        call backend_test(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'fpm test handles project path with spaces')
 
         call remove_tree(project_dir)
@@ -238,9 +263,9 @@ contains
         call make_cmake_space_project(project_dir)
 
         b = detect_backend(project_dir)
-        call b%build(exitcode, log_file=log_file)
+        call backend_build(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'cmake build handles project path with spaces')
-        call b%test(exitcode, log_file=log_file)
+        call backend_test(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'ctest handles project path with spaces')
 
         call remove_tree(project_dir)
@@ -258,11 +283,11 @@ contains
         call make_cmake_regex_project(project_dir)
 
         b = detect_backend(project_dir)
-        call b%build(exitcode, log_file=log_file)
+        call backend_build(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'cmake regex fixture configures')
 
         names(1) = 'test.dot'
-        call b%test_names(names, 1, exitcode, log_file=log_file)
+        call backend_test_names(b, names, 1, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'ctest selected names escape regex metacharacters')
         call assert(file_contains(log_file, 'test.dot'), &
                     'ctest regex fixture runs selected dotted name')
@@ -310,6 +335,47 @@ contains
         write (u, '(a)') 'end program test_kernel_slow'
         close (u)
     end subroutine make_slow_fpm_project
+
+    subroutine make_named_fpm_project(project_dir)
+        character(len=*), intent(in) :: project_dir
+        integer :: u
+
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        call make_dir(trim(project_dir)//'/test')
+
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "fo_test_named_fpm"'
+        close (u)
+
+        open (newunit=u, file=trim(project_dir)//'/src/lib.f90', &
+              status='replace')
+        write (u, '(a)') 'module lib'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine noop()'
+        write (u, '(a)') 'end subroutine noop'
+        write (u, '(a)') 'end module lib'
+        close (u)
+
+        open (newunit=u, file=trim(project_dir)//'/test/test_a.f90', &
+              status='replace')
+        write (u, '(a)') 'program test_a'
+        write (u, '(a)') 'use lib, only: noop'
+        write (u, '(a)') 'call noop()'
+        write (u, '(a)') 'print *, "selected test ran"'
+        write (u, '(a)') 'end program test_a'
+        close (u)
+
+        open (newunit=u, file=trim(project_dir)//'/test/test_unselected.f90', &
+              status='replace')
+        write (u, '(a)') 'program test_unselected'
+        write (u, '(a)') 'use lib, only: noop'
+        write (u, '(a)') 'call noop()'
+        write (u, '(a)') 'stop 1'
+        write (u, '(a)') 'end program test_unselected'
+        close (u)
+    end subroutine make_named_fpm_project
 
     subroutine make_simple_fpm_project(project_dir)
         character(len=*), intent(in) :: project_dir

@@ -5,10 +5,12 @@ module fo_build_backend
                           process_fpm_test_list, process_fpm_test_all, &
                           process_fpm_test_names, process_cmake_build, &
                           process_ctest
-    use fo_gfortran_build, only: gfortran_build, gfortran_test
+    use fo_gfortran_build, only: gfortran_build, gfortran_test, &
+                                 gfortran_test_names
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
+    public :: backend_build, backend_test, backend_test_names
     public :: BACKEND_FPM, BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
 
     integer, parameter :: BACKEND_NONE = 0
@@ -20,10 +22,6 @@ module fo_build_backend
     type :: backend_t
         integer :: kind = BACKEND_NONE
         character(len=512) :: project_dir = '.'
-    contains
-        procedure :: build => backend_build
-        procedure :: test => backend_test
-        procedure :: test_names => backend_test_names
     end type backend_t
 
 contains
@@ -132,7 +130,7 @@ contains
     end function detect_jobs
 
     subroutine backend_build(self, exitcode, flags, log_file)
-        class(backend_t), intent(in) :: self
+        type(backend_t), intent(in) :: self
         integer, intent(out) :: exitcode
         character(len=*), intent(in), optional :: flags
         character(len=*), intent(in), optional :: log_file
@@ -178,7 +176,7 @@ contains
     end subroutine backend_build
 
     subroutine backend_test(self, exitcode, include_slow, log_file)
-        class(backend_t), intent(in) :: self
+        type(backend_t), intent(in) :: self
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
         character(len=*), intent(in), optional :: log_file
@@ -196,7 +194,8 @@ contains
 
         select case (self%kind)
         case (BACKEND_GFORTRAN)
-            call gfortran_test(self%project_dir, log_path, exitcode)
+            call gfortran_test(self%project_dir, log_path, exitcode, &
+                               include_slow=slow)
         case (BACKEND_FPM)
             if (slow) then
                 call process_fpm_test_all(self%project_dir, jobs, log_path, exitcode)
@@ -238,7 +237,7 @@ contains
     subroutine backend_test_names(self, names, n_names, exitcode, include_slow, &
                                   log_file)
         use fo_scan, only: is_slow_test
-        class(backend_t), intent(in) :: self
+        type(backend_t), intent(in) :: self
         character(len=128), intent(in) :: names(:)
         integer, intent(in) :: n_names
         integer, intent(out) :: exitcode
@@ -270,7 +269,8 @@ contains
         if (n_fast == 0) return
 
         if (self%kind == BACKEND_GFORTRAN) then
-            call gfortran_test(self%project_dir, log_path, exitcode)
+            call gfortran_test_names(self%project_dir, fast_names, n_fast, &
+                                     log_path, exitcode, include_slow=slow)
             return
         end if
 

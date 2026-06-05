@@ -3,9 +3,12 @@ program fo_main
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME, is_slow_test
     use fx_dag, only: dag_t, dag_topo_sort, dag_to_dot, MAX_NODES
     use fo_dag_bridge, only: build_dag_from_units
-    use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, &
-                                BACKEND_FPM, BACKEND_CMAKE
+    use fo_build_backend, only: backend_t, detect_backend, backend_build, &
+                                backend_test, backend_test_names, BACKEND_NONE, &
+                                BACKEND_GFORTRAN, BACKEND_CMAKE
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules
+    use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
+    use fo_util, only: make_tmpfile, delete_tmpfile
     use fo_check_output, only: check_result_json, check_result_compact_json, &
                                check_result_full_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
@@ -125,7 +128,7 @@ contains
             integer :: n_restored, art_ierr
 
             call artifact_restore(trim(b%project_dir)//'/build', n_restored, art_ierr)
-            call b%build(exitcode)
+            call backend_build(b, exitcode)
             if (exitcode /= 0) then
                 write (error_unit, '(a)') 'Build: FAIL'
                 stop 1
@@ -139,36 +142,36 @@ contains
             call cpu_time(t1)
             write (output_unit, '(a,f0.1,a)') &
                 'Tests: skipped, all cached (', t1 - t0, 's)'
-            return
-        end if
+        else
+            ! collect affected test names (excluding slow)
+            n_test_names = 0
+            do i = 1, n_affected
+                if (is_test_arr(affected_ids(i))) then
+                    if (.not. is_slow_test(dag%nodes(affected_ids(i))%label)) then
+                        n_test_names = n_test_names + 1
+                        test_names(n_test_names) = &
+                            dag%nodes(affected_ids(i))%label(1:128)
+                    end if
+                end if
+            end do
 
-        ! collect affected test names (excluding slow)
-        n_test_names = 0
-        do i = 1, n_affected
-            if (is_test_arr(affected_ids(i))) then
-                if (.not. is_slow_test(dag%nodes(affected_ids(i))%label)) then
-                    n_test_names = n_test_names + 1
-                    test_names(n_test_names) = dag%nodes(affected_ids(i))%label(1:128)
+            if (n_test_names > 0) then
+                call backend_test_names(b, test_names, n_test_names, exitcode)
+                if (exitcode /= 0) then
+                    write (error_unit, '(a)') 'Tests: FAIL'
+                    stop 1
+                end if
+            else
+                ! no specific affected tests found; run all non-slow
+                call backend_test(b, exitcode)
+                if (exitcode /= 0) then
+                    write (error_unit, '(a)') 'Tests: FAIL'
+                    stop 1
                 end if
             end if
-        end do
 
-        if (n_test_names > 0) then
-            call b%test_names(test_names, n_test_names, exitcode)
-            if (exitcode /= 0) then
-                write (error_unit, '(a)') 'Tests: FAIL'
-                stop 1
-            end if
-        else
-            ! no specific affected tests found; run all non-slow
-            call b%test(exitcode)
-            if (exitcode /= 0) then
-                write (error_unit, '(a)') 'Tests: FAIL'
-                stop 1
-            end if
+            write (output_unit, '(a)') 'Tests: OK'
         end if
-
-        write (output_unit, '(a)') 'Tests: OK'
 
         ! 4. lint: unused imports (skip compiler warnings in pipeline)
         block
@@ -415,9 +418,9 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
 
         call get_flags_arg(flags)
         if (len_trim(flags) > 0) then
-            call b%build(exitcode, flags)
+            call backend_build(b, exitcode, flags)
         else
-            call b%build(exitcode)
+            call backend_build(b, exitcode)
         end if
         if (exitcode /= 0) stop 1
     end subroutine cmd_build
@@ -443,10 +446,11 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
         integer :: exitcode
         integer :: changed_ids(MAX_NODES), n_changed
         integer :: affected_ids(MAX_NODES), n_affected
-        integer :: n_cached, ierr, i, n_test_names
+        integer :: n_cached, ierr, i, n_test_names, n_arg_names
         logical :: only_changed, include_all
         character(len=256) :: arg
         character(len=128) :: test_names(MAX_NODES)
+        character(len=512) :: test_log
         logical :: is_test_arr(MAX_NODES)
 
         b = detect_backend('.')
@@ -457,13 +461,24 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
 
         only_changed = .false.
         include_all = .false.
+        n_arg_names = 0
         do i = 2, command_argument_count()
             call get_command_argument(i, arg)
             if (trim(arg) == '--only-changed') only_changed = .true.
             if (trim(arg) == '--all') include_all = .true.
+            if (arg(1:1) /= '-') then
+                n_arg_names = n_arg_names + 1
+                test_names(n_arg_names) = arg(1:128)
+            end if
         end do
 
-        if (only_changed) then
+        if (n_arg_names > 0) then
+            call make_tmpfile('fo-test', test_log)
+            call backend_test_names(b, test_names, n_arg_names, exitcode, &
+                                    include_all, test_log)
+            call report_test_result(exitcode, test_log)
+            call delete_tmpfile(test_log)
+        else if (only_changed) then
             call fo_changed_modules('.', dag, changed_ids, n_changed, &
                                     affected_ids, n_affected, n_cached, ierr, &
                                     is_test_arr=is_test_arr)
@@ -491,16 +506,43 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
                 return
             end if
 
-            call b%test_names(test_names, n_test_names, exitcode, include_all)
-            if (exitcode /= 0) stop 1
+            call make_tmpfile('fo-test', test_log)
+            call backend_test_names(b, test_names, n_test_names, exitcode, &
+                                    include_all, test_log)
+            call report_test_result(exitcode, test_log)
+            call delete_tmpfile(test_log)
         else
-            call b%test(exitcode, include_all)
-            if (exitcode /= 0) stop 1
+            call make_tmpfile('fo-test', test_log)
+            call backend_test(b, exitcode, include_all, test_log)
+            call report_test_result(exitcode, test_log)
+            call delete_tmpfile(test_log)
         end if
     end subroutine cmd_test
 
+    subroutine report_test_result(exitcode, test_log)
+        integer, intent(in) :: exitcode
+        character(len=*), intent(in) :: test_log
+
+        type(diagnostic_t) :: diag
+
+        if (exitcode == 0) return
+        call diagnostic_from_log('test', test_log, 'fo test', diag)
+        write (error_unit, '(a,a)') 'fo: test failed: ', trim(diag%message)
+        if (len_trim(diag%target) > 0) then
+            write (error_unit, '(a,a)') 'fo: target: ', trim(diag%target)
+        end if
+        if (len_trim(diag%hint) > 0) then
+            write (error_unit, '(a,a)') 'fo: hint: ', trim(diag%hint)
+        end if
+        if (len_trim(diag%rerun) > 0) then
+            write (error_unit, '(a,a)') 'fo: rerun: ', trim(diag%rerun)
+        end if
+        write (error_unit, '(a,a)') 'fo: log: ', trim(test_log)
+        stop 1, quiet = .true.
+    end subroutine report_test_result
+
     subroutine cmd_graph()
-        type(scan_unit_t) :: units(MAX_UNITS)
+        type(scan_unit_t), allocatable :: units(:)
         type(dag_t) :: dag
         type(backend_t) :: b
         character(len=512) :: scan_root
@@ -508,6 +550,7 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
         logical :: dot_mode
         character(len=:), allocatable :: dot_output
 
+        allocate (units(MAX_UNITS))
         b = detect_backend('.')
         scan_root = '.'
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
@@ -646,7 +689,7 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
     subroutine cmd_info()
         use fo_capabilities, only: capabilities_t, detect_capabilities, &
                                    capabilities_text, capabilities_json
-        type(scan_unit_t) :: units(MAX_UNITS)
+        type(scan_unit_t), allocatable :: units(:)
         type(dag_t) :: dag
         type(backend_t) :: b
         character(len=512) :: scan_root
@@ -654,6 +697,7 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
         logical :: show_caps
         type(capabilities_t) :: cap
 
+        allocate (units(MAX_UNITS))
         b = detect_backend('.')
         scan_root = '.'
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
@@ -671,8 +715,8 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
         end if
 
         select case (b%kind)
-        case (BACKEND_FPM)
-            write (output_unit, '(a)') 'backend: fpm'
+        case (BACKEND_GFORTRAN)
+            write (output_unit, '(a)') 'backend: gfortran'
         case (BACKEND_CMAKE)
             write (output_unit, '(a)') 'backend: cmake'
         case default

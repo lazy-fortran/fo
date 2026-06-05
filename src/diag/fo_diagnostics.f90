@@ -139,8 +139,13 @@ contains
 
         fallback = clean
         priority = 0
-        if (index(clean, 'Fatal Error:') > 0 .or. &
-            index(clean, 'Cannot open file') > 0) then
+        if (index(clean, 'fo: test target ') > 0 .and. &
+            index(clean, ' returned exit code') > 0) then
+            priority = 7
+        else if (index(clean, 'ERROR STOP') > 0) then
+            priority = 6
+        else if (index(clean, 'Fatal Error:') > 0 .or. &
+                 index(clean, 'Cannot open file') > 0) then
             priority = 5
         else if (index(clean, 'undefined reference') > 0 .or. &
                  index(clean, 'ld: cannot find') > 0 .or. &

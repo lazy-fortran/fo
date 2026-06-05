@@ -2,9 +2,9 @@ module fo_gfortran_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME
     use fo_dag_bridge, only: build_dag_from_units
-    use fx_dag, only: dag_t, dag_topo_sort, dag_levels, MAX_NODES
+    use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_store, &
-                        cache_key_for, HASH_LEN
+                        cache_key_for, hash_mod_file, HASH_LEN
     use fo_util, only: make_tmpfile, delete_tmpfile
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
@@ -14,7 +14,7 @@ module fo_gfortran_build
     integer, parameter :: MAX_DEP_OBJS = 1024
     integer, parameter :: MAX_SRC_OBJS = 2048
 
-    public :: gfortran_build, gfortran_test
+    public :: gfortran_build, gfortran_test, gfortran_test_names
 
 contains
 
@@ -67,9 +67,10 @@ contains
                                is_prog_arr, dep_objs, n_dep_objs, lf, exitcode)
     end subroutine gfortran_build
 
-    subroutine gfortran_test(project_dir, log_file, exitcode)
+    subroutine gfortran_test(project_dir, log_file, exitcode, include_slow)
         character(len=*), intent(in) :: project_dir, log_file
         integer, intent(out) :: exitcode
+        logical, intent(in), optional :: include_slow
 
         type(fpm_config_t) :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_lib_objs
@@ -78,9 +79,13 @@ contains
         character(len=512) :: dep_objs(MAX_DEP_OBJS)
         character(len=512) :: lib_objs(MAX_SRC_OBJS)
         character(len=512) :: lf
+        character(len=128) :: no_names(1)
+        logical :: slow
 
         lf = log_file
         if (len_trim(lf) == 0) lf = '/dev/null'
+        slow = .false.
+        if (present(include_slow)) slow = include_slow
 
         call gfortran_build(project_dir, lf, exitcode)
         if (exitcode /= 0) return
@@ -102,8 +107,55 @@ contains
         call compile_and_run_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
                                    bin_dir, dep_includes, n_dep_includes, &
                                    dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
-                                   config%link_libs, config%n_link_libs, lf, exitcode)
+                                   config%link_libs, config%n_link_libs, lf, &
+                                   no_names, 0, slow, exitcode)
     end subroutine gfortran_test
+
+    subroutine gfortran_test_names(project_dir, names, n_names, log_file, &
+                                   exitcode, include_slow)
+        character(len=*), intent(in) :: project_dir, log_file
+        character(len=128), intent(in) :: names(:)
+        integer, intent(in) :: n_names
+        integer, intent(out) :: exitcode
+        logical, intent(in), optional :: include_slow
+
+        type(fpm_config_t) :: config
+        integer :: ierr, n_dep_includes, n_dep_objs, n_lib_objs
+        character(len=512) :: mod_dir, obj_dir, bin_dir
+        character(len=512) :: dep_includes(MAX_DEP_DIRS)
+        character(len=512) :: dep_objs(MAX_DEP_OBJS)
+        character(len=512) :: lib_objs(MAX_SRC_OBJS)
+        character(len=512) :: lf
+        logical :: slow
+
+        lf = log_file
+        if (len_trim(lf) == 0) lf = '/dev/null'
+        slow = .false.
+        if (present(include_slow)) slow = include_slow
+
+        call gfortran_build(project_dir, lf, exitcode)
+        if (exitcode /= 0) return
+
+        call fpm_config_parse(project_dir, config, ierr)
+        if (ierr /= 0) then
+            exitcode = 1
+            return
+        end if
+
+        mod_dir = trim(project_dir)//'/build/fo/mod'
+        obj_dir = trim(project_dir)//'/build/fo/obj'
+        bin_dir = trim(project_dir)//'/build/fo/bin'
+
+        call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
+                                dep_objs, n_dep_objs)
+        call collect_lib_objs(obj_dir, lib_objs, n_lib_objs)
+
+        call compile_and_run_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
+                                   bin_dir, dep_includes, n_dep_includes, &
+                                   dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
+                                   config%link_libs, config%n_link_libs, lf, &
+                                   names, n_names, slow, exitcode)
+    end subroutine gfortran_test_names
 
     subroutine find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
                                   dep_objs, n_dep_objs)
@@ -114,7 +166,7 @@ contains
         character(len=512), intent(out) :: dep_objs(MAX_DEP_OBJS)
         integer, intent(out) :: n_dep_objs
 
-        character(len=512) :: tmpfile, line
+        character(len=512) :: dirfile, objfile, line
         character(len=4096) :: cmd
         integer :: u, ios, i
         integer :: n_obj_seen
@@ -126,12 +178,17 @@ contains
         n_obj_seen = 0
         if (config%n_deps == 0) return
 
-        call make_tmpfile('fo_dep_dirs', tmpfile)
-        cmd = 'find '//sq(trim(project_dir)//'/build')//' -maxdepth 1 '// &
-              '-name "gfortran_*" -type d 2>/dev/null | sort > '//trim(tmpfile)
+        call make_tmpfile('fo_dep_dirs', dirfile)
+        cmd = '( if [ -f '//sq(trim(project_dir)//'/build/compile_commands.json')// &
+              ' ]; then grep -o ''build/gfortran_[A-Za-z0-9_]*'' '// &
+              sq(trim(project_dir)//'/build/compile_commands.json')// &
+              ' | awk -v p='//sq(trim(project_dir))//' ''{print p "/" $0}''; fi; '// &
+              'find '//sq(trim(project_dir)//'/build/dependencies')//' -type f '// &
+              '-name "*.mod" -printf "%h\n" 2>/dev/null ) | sort -u > '// &
+              trim(dirfile)
         call execute_command_line(trim(cmd), wait=.true.)
 
-        open (newunit=u, file=tmpfile, status='old', iostat=ios)
+        open (newunit=u, file=dirfile, status='old', iostat=ios)
         if (ios == 0) then
             do
                 read (u, '(a)', iostat=ios) line
@@ -144,21 +201,22 @@ contains
             end do
             close (u)
         end if
-        call delete_tmpfile(tmpfile)
 
-        call make_tmpfile('fo_dep_objs', tmpfile)
+        call make_tmpfile('fo_dep_objs', objfile)
         do i = 1, config%n_deps
-            cmd = 'find '//sq(trim(project_dir)//'/build')//' -name '// &
-                  '"build_dependencies_'//trim(config%deps(i)%name)//'_src_*.f90.o" '// &
-                  '2>/dev/null >> '//trim(tmpfile)
+            cmd = 'while IFS= read -r d; do find "$d" -maxdepth 2 -name '// &
+                  '"build_dependencies_'//trim(config%deps(i)%name)// &
+                  '_src_*.f90.o" 2>/dev/null; done < '//trim(dirfile)// &
+                  ' >> '//trim(objfile)
             call execute_command_line(trim(cmd), wait=.true.)
-            cmd = 'find '//sq(trim(project_dir)//'/build')//' -name '// &
-                  '"build_dependencies_'//trim(config%deps(i)%name)//'_*.c.o" '// &
-                  '2>/dev/null >> '//trim(tmpfile)
+            cmd = 'find '//sq(trim(project_dir)//'/build')//' -path '// &
+                  '"*/gfortran_*/fo/build_dependencies_'// &
+                  trim(config%deps(i)%name)//'_*.c.o" 2>/dev/null >> '// &
+                  trim(objfile)
             call execute_command_line(trim(cmd), wait=.true.)
         end do
 
-        open (newunit=u, file=tmpfile, status='old', iostat=ios)
+        open (newunit=u, file=objfile, status='old', iostat=ios)
         if (ios == 0) then
             do
                 read (u, '(a)', iostat=ios) line
@@ -178,7 +236,8 @@ contains
             end do
             close (u)
         end if
-        call delete_tmpfile(tmpfile)
+        call delete_tmpfile(objfile)
+        call delete_tmpfile(dirfile)
     end subroutine find_dep_artifacts
 
     subroutine compile_sources(project_dir, src_dir, app_dir, mod_dir, obj_dir, &
@@ -204,6 +263,7 @@ contains
         character(len=512) :: obj_path
         character(len=4096) :: includes_flag
         character(len=512) :: c_list, c_line
+        character(len=256) :: compiler
         integer :: uc, cios
 
         type(cache_t) :: c
@@ -248,12 +308,14 @@ contains
         call build_dag_from_units(all_units, n_all, dag, filenames, is_test_arr, is_prog)
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
         call dag_levels(dag, topo_order, n_order, node_levels, n_levels)
+        call remove_shadow_mods(project_dir, dag)
         call make_includes_flag(mod_dir, dep_includes, n_dep_includes, includes_flag)
 
         old_mod_keys = ''
         new_mod_keys = ''
         call load_mod_keys(mod_dir, dag, n_order, topo_order, old_mod_keys)
         call cache_init(c, cache_ierr)
+        call detect_compiler(compiler)
 
         if (cache_ierr == 0) then
             do lvl = 0, n_levels - 1
@@ -274,7 +336,10 @@ contains
                             if (n_dep <= 64) dep_keys(n_dep) = new_mod_keys(dep_id)
                         end if
                     end do
-                    source_key = cache_key_for(filenames(node_id), 'gfortran', '', &
+                    call add_external_dep_keys(all_units, n_all, dag, node_id, &
+                                               dep_includes, n_dep_includes, &
+                                               dep_keys, n_dep)
+                    source_key = cache_key_for(filenames(node_id), compiler, '', &
                                                dep_keys, n_dep)
 
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
@@ -374,6 +439,65 @@ contains
         call delete_tmpfile(c_list)
     end subroutine compile_sources
 
+    subroutine add_external_dep_keys(units, n_units, dag, node_id, &
+                                     dep_includes, n_dep_includes, dep_keys, n_dep)
+        type(scan_unit_t), intent(in) :: units(:)
+        integer, intent(in) :: n_units, node_id, n_dep_includes
+        type(dag_t), intent(in) :: dag
+        character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
+        character(len=HASH_LEN), intent(inout) :: dep_keys(64)
+        integer, intent(inout) :: n_dep
+
+        integer :: i, j
+        character(len=MAX_NAME) :: node_name
+        character(len=512) :: modpath
+        logical :: found
+
+        node_name = dag%nodes(node_id)%label(1:MAX_NAME)
+        do i = 1, n_units
+            if (trim(units(i)%module_name) /= trim(node_name) .and. &
+                trim(units(i)%program_name) /= trim(node_name)) cycle
+
+            do j = 1, units(i)%n_deps
+                if (dag_find_node(dag, units(i)%deps(j)) > 0) cycle
+                if (n_dep >= 64) return
+                call find_dep_mod_file(units(i)%deps(j), dep_includes, &
+                                       n_dep_includes, modpath, found)
+                if (.not. found) cycle
+                n_dep = n_dep + 1
+                call hash_mod_file(modpath, dep_keys(n_dep))
+            end do
+            return
+        end do
+    end subroutine add_external_dep_keys
+
+    subroutine find_dep_mod_file(modname, dep_includes, n_dep_includes, modpath, &
+                                 found)
+        character(len=*), intent(in) :: modname
+        character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
+        integer, intent(in) :: n_dep_includes
+        character(len=*), intent(out) :: modpath
+        logical, intent(out) :: found
+
+        character(len=MAX_NAME) :: lower_name
+        integer :: i
+
+        found = .false.
+        modpath = ''
+        lower_name = modname
+        do i = 1, len_trim(lower_name)
+            if (lower_name(i:i) >= 'A' .and. lower_name(i:i) <= 'Z') then
+                lower_name(i:i) = achar(iachar(lower_name(i:i)) + 32)
+            end if
+        end do
+
+        do i = 1, n_dep_includes
+            modpath = trim(dep_includes(i))//'/'//trim(lower_name)//'.mod'
+            inquire (file=trim(modpath), exist=found)
+            if (found) return
+        end do
+    end subroutine find_dep_mod_file
+
     subroutine load_mod_keys(mod_dir, dag, n_order, order, keys)
         character(len=*), intent(in) :: mod_dir
         type(dag_t), intent(in) :: dag
@@ -451,6 +575,25 @@ contains
         call delete_tmpfile(tmpfile)
     end subroutine get_mod_key
 
+    subroutine remove_shadow_mods(project_dir, dag)
+        character(len=*), intent(in) :: project_dir
+        type(dag_t), intent(in) :: dag
+        character(len=MAX_NAME) :: lower_label
+        character(len=1024) :: cmd
+        integer :: i, j, exitcode
+
+        do i = 1, dag%n_nodes
+            lower_label = dag%nodes(i)%label
+            do j = 1, len_trim(lower_label)
+                if (lower_label(j:j) >= 'A' .and. lower_label(j:j) <= 'Z') &
+                    lower_label(j:j) = achar(iachar(lower_label(j:j)) + 32)
+            end do
+            cmd = 'find '//sq(trim(project_dir)//'/build/dependencies')// &
+                  ' -type f -name "'//trim(lower_label)//'.mod" -delete 2>/dev/null'
+            call execute_command_line(trim(cmd), wait=.true., exitstat=exitcode)
+        end do
+    end subroutine remove_shadow_mods
+
     subroutine append_log_file(src, dst)
         character(len=*), intent(in) :: src, dst
         call execute_command_line('cat '//sq(trim(src))//' >> '//sq(trim(dst))// &
@@ -503,7 +646,9 @@ contains
     subroutine compile_and_run_tests(project_dir, test_dir, mod_dir, obj_dir, &
                                      bin_dir, dep_includes, n_dep_includes, &
                                      dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
-                                     link_libs, n_link_libs, log_file, exitcode)
+                                     link_libs, n_link_libs, log_file, &
+                                     selected_names, n_selected, include_slow, &
+                                     exitcode)
         character(len=*), intent(in) :: project_dir, test_dir, mod_dir
         character(len=*), intent(in) :: obj_dir, bin_dir, log_file
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
@@ -514,25 +659,32 @@ contains
         integer, intent(in) :: n_lib_objs
         character(len=128), intent(in) :: link_libs(*)
         integer, intent(in) :: n_link_libs
+        character(len=128), intent(in) :: selected_names(:)
+        integer, intent(in) :: n_selected
+        logical, intent(in) :: include_slow
         integer, intent(out) :: exitcode
 
         type(scan_unit_t), allocatable :: tunits(:)
-        integer :: n_tests, i, ierr, node_id
+        integer :: n_tests, i, ierr, node_id, n_run
         type(dag_t) :: dag
         character(len=MAX_NAME), allocatable :: filenames(:)
         logical, allocatable :: is_prog(:), is_test_arr(:)
         integer, allocatable :: topo_order(:)
+        integer, allocatable :: run_nodes(:), run_exits(:)
+        character(len=512), allocatable :: run_logs(:)
         integer :: n_order
         logical :: has_cycle
         character(len=512) :: obj_path, bin_path
         character(len=4096) :: incl_flag
         character(len=128) :: tname
-        integer :: run_exit
+        character(len=MAX_NAME) :: fname_local
+        character(len=512) :: log_local
 
         exitcode = 0
         allocate (tunits(MAX_UNITS))
         allocate (filenames(MAX_NODES), is_prog(MAX_NODES), is_test_arr(MAX_NODES))
         allocate (topo_order(MAX_NODES))
+        allocate (run_nodes(MAX_NODES), run_exits(MAX_NODES), run_logs(MAX_NODES))
         call scan_dir(trim(project_dir)//'/'//trim(test_dir), tunits, n_tests, ierr)
         if (n_tests == 0) return
 
@@ -540,25 +692,97 @@ contains
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
         call make_includes_flag(mod_dir, dep_includes, n_dep_includes, incl_flag)
 
+        n_run = 0
         do i = 1, n_order
             node_id = topo_order(i)
             if (len_trim(filenames(node_id)) == 0) cycle
             if (.not. is_prog(node_id)) cycle
-            call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
-            call compile_f90(filenames(node_id), obj_path, incl_flag, log_file, exitcode)
-            if (exitcode /= 0) return
-
             call file_basename(filenames(node_id), tname)
-            bin_path = trim(bin_dir)//'/'//trim(tname)
-            call link_binary(obj_path, lib_objs, n_lib_objs, dep_objs, n_dep_objs, &
-                             link_libs, n_link_libs, bin_path, log_file, exitcode)
-            if (exitcode /= 0) return
+            if (.not. include_slow .and. is_slow_name(tname)) cycle
+            if (n_selected > 0 .and. .not. selected_test(tname, selected_names, &
+                                                         n_selected)) cycle
+            n_run = n_run + 1
+            run_nodes(n_run) = node_id
+            call make_tmpfile('fo_test_case', run_logs(n_run))
+        end do
 
-            call execute_command_line(sq(bin_path)//" >> '"//trim(log_file)// &
-                                      "' 2>&1", wait=.true., exitstat=run_exit)
-            if (run_exit /= 0) exitcode = run_exit
+        run_exits = 0
+        !$omp parallel do schedule(dynamic) private(node_id, fname_local, obj_path, &
+        !$omp& bin_path, tname, log_local)
+        do i = 1, n_run
+            node_id = run_nodes(i)
+            fname_local = filenames(node_id)
+            log_local = run_logs(i)
+            call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
+            call compile_f90(fname_local, obj_path, incl_flag, log_local, run_exits(i))
+            if (run_exits(i) == 0) then
+                call file_basename(fname_local, tname)
+                bin_path = trim(bin_dir)//'/'//trim(tname)
+                call link_binary(obj_path, lib_objs, n_lib_objs, dep_objs, n_dep_objs, &
+                                 link_libs, n_link_libs, bin_path, log_local, &
+                                 run_exits(i))
+            end if
+            if (run_exits(i) == 0) then
+                call execute_command_line(sq(bin_path)//' >> '//sq(log_local)// &
+                                          ' 2>&1', wait=.true., exitstat=run_exits(i))
+            end if
+        end do
+        !$omp end parallel do
+
+        do i = 1, n_run
+            call append_log_file(trim(run_logs(i)), log_file)
+            if (run_exits(i) /= 0) then
+                call file_basename(filenames(run_nodes(i)), tname)
+                call append_test_status(log_file, tname, run_exits(i))
+                if (exitcode == 0) exitcode = run_exits(i)
+            end if
+            call delete_tmpfile(run_logs(i))
         end do
     end subroutine compile_and_run_tests
+
+    subroutine append_test_status(log_file, test_name, status)
+        character(len=*), intent(in) :: log_file, test_name
+        integer, intent(in) :: status
+
+        integer :: u, ios
+
+        open (newunit=u, file=trim(log_file), position='append', &
+              status='old', iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a,a,a,i0)') 'fo: test target ', trim(test_name), &
+            ' returned exit code ', status
+        close (u)
+    end subroutine append_test_status
+
+    logical function selected_test(name, selected_names, n_selected) result(found)
+        character(len=*), intent(in) :: name
+        character(len=128), intent(in) :: selected_names(:)
+        integer, intent(in) :: n_selected
+        integer :: i
+
+        found = .false.
+        do i = 1, n_selected
+            if (trim(name) == trim(selected_names(i))) then
+                found = .true.
+                return
+            end if
+        end do
+    end function selected_test
+
+    logical function is_slow_name(name) result(slow)
+        character(len=*), intent(in) :: name
+        character(len=MAX_NAME) :: lower_name
+        integer :: i, n
+
+        lower_name = name
+        do i = 1, len_trim(lower_name)
+            if (lower_name(i:i) >= 'A' .and. lower_name(i:i) <= 'Z') &
+                lower_name(i:i) = achar(iachar(lower_name(i:i)) + 32)
+        end do
+        n = len_trim(lower_name)
+        slow = n >= 5 .and. lower_name(n - 4:n) == '_slow'
+        if (.not. slow) slow = index(trim(lower_name), '_slow_') > 0
+    end function is_slow_name
 
     subroutine collect_lib_objs(obj_dir, lib_objs, n_lib_objs)
         character(len=*), intent(in) :: obj_dir
@@ -630,6 +854,27 @@ contains
             flag = trim(flag)//' -I '//sq(dep_includes(i))
         end do
     end subroutine make_includes_flag
+
+    subroutine detect_compiler(compiler)
+        character(len=*), intent(out) :: compiler
+
+        character(len=256) :: line
+        character(len=512) :: tmpfile
+        integer :: u, iostat
+
+        compiler = 'gfortran'
+        call make_tmpfile('fo_compiler_version', tmpfile)
+        call execute_command_line('gfortran --version 2>/dev/null | head -1 > '// &
+                                  trim(tmpfile), wait=.true.)
+
+        open (newunit=u, file=tmpfile, status='old', iostat=iostat)
+        if (iostat == 0) then
+            read (u, '(a)', iostat=iostat) line
+            if (iostat == 0 .and. len_trim(line) > 0) compiler = trim(line)
+            close (u)
+        end if
+        call delete_tmpfile(tmpfile)
+    end subroutine detect_compiler
 
     pure function sq(s) result(r)
         character(len=*), intent(in) :: s

@@ -1,4 +1,5 @@
 module fo_util
+    use, intrinsic :: iso_c_binding, only: c_int
     use fx_mcp, only: mcp_send_response, MCP_FRAME_UNKNOWN
     implicit none
     private
@@ -8,6 +9,13 @@ module fo_util
     public :: json_bool, json_int
     public :: extract_json_field
 
+    interface
+        subroutine fo_c_getpid(pid_out) bind(C, name='fo_c_getpid')
+            import :: c_int
+            integer(c_int), intent(out) :: pid_out
+        end subroutine fo_c_getpid
+    end interface
+
 contains
 
     subroutine make_tmpfile(prefix, path)
@@ -15,12 +23,14 @@ contains
         character(len=*), intent(out) :: path
 
         integer :: count
+        integer(c_int) :: pid
         integer, save :: serial = 0
 
         serial = serial + 1
+        call fo_c_getpid(pid)
         call system_clock(count)
-        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
-            count, '-', serial, '.tmp'
+        write (path, '(a,a,a,i0,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
+            int(pid), '-', count, '-', serial, '.tmp'
     end subroutine make_tmpfile
 
     subroutine delete_tmpfile(path)

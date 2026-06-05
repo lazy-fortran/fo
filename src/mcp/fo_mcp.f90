@@ -213,7 +213,8 @@ contains
     end subroutine handle_lint
 
     subroutine handle_backend_build(id_str, dir, tmpfile, response)
-        use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
+        use fo_build_backend, only: backend_t, detect_backend, backend_build, &
+                                    BACKEND_NONE
         character(len=*), intent(in) :: id_str, dir, tmpfile
         character(len=*), intent(out) :: response
 
@@ -226,7 +227,7 @@ contains
             output_text = 'fo: no fpm.toml or CMakeLists.txt found'
             exitcode = 1
         else
-            call b%build(exitcode, log_file=tmpfile)
+            call backend_build(b, exitcode, log_file=tmpfile)
             call read_text_file(tmpfile, output_text)
         end if
         call delete_tmpfile(tmpfile)
@@ -234,7 +235,8 @@ contains
     end subroutine handle_backend_build
 
     subroutine handle_backend_test(id_str, dir, tmpfile, response)
-        use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
+        use fo_build_backend, only: backend_t, detect_backend, backend_test, &
+                                    BACKEND_NONE
         character(len=*), intent(in) :: id_str, dir, tmpfile
         character(len=*), intent(out) :: response
 
@@ -247,7 +249,7 @@ contains
             output_text = 'fo: no fpm.toml or CMakeLists.txt found'
             exitcode = 1
         else
-            call b%test(exitcode, log_file=tmpfile)
+            call backend_test(b, exitcode, log_file=tmpfile)
             call read_text_file(tmpfile, output_text)
         end if
         call delete_tmpfile(tmpfile)
@@ -309,7 +311,7 @@ contains
         use fx_dag, only: dag_t
         use fo_dag_bridge, only: build_dag_from_units
         use fo_build_backend, only: backend_t, detect_backend, &
-                                    BACKEND_NONE, BACKEND_FPM, BACKEND_CMAKE
+                                    BACKEND_NONE, BACKEND_GFORTRAN, BACKEND_CMAKE
         character(len=*), intent(in) :: id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
@@ -326,8 +328,8 @@ contains
         scan_root = trim(dir)
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
         select case (b%kind)
-        case (BACKEND_FPM)
-            output_text = 'backend: fpm'//achar(10)
+        case (BACKEND_GFORTRAN)
+            output_text = 'backend: gfortran'//achar(10)
         case (BACKEND_CMAKE)
             output_text = 'backend: cmake'//achar(10)
         case default

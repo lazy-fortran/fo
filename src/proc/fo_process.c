@@ -95,6 +95,7 @@ static int scan_sources_recursive(const char *dir, struct path_list *list,
         snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
         if (stat(path, &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) {
+            if (depth >= 0 && is_project_root(path)) continue;
             if (scan_sources_recursive(path, list, 0, is_proj_root, depth + 1) != 0) {
                 closedir(handle);
                 return 1;
@@ -203,6 +204,10 @@ void fo_c_detect_nproc(int *nproc) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     if (n < 1) n = 1;
     *nproc = (int)n;
+}
+
+void fo_c_getpid(int *pid_out) {
+    *pid_out = (int)getpid();
 }
 
 void fo_c_fpm_build(const char *project_dir, const char *flags, int jobs,
