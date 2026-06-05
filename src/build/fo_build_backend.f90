@@ -148,16 +148,19 @@ contains
         case (BACKEND_FPM)
             call process_fpm_build(self%project_dir, flag_text, np, log_path, &
                                    exitcode)
-            return
         case (BACKEND_CMAKE)
             call process_cmake_build(self%project_dir, flag_text, np, log_path, &
                                      exitcode)
-            return
         case default
             write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             exitcode = 1
             return
         end select
+        if (exitcode == 124) then
+            write (error_unit, '(a)') &
+                'fo: WARNING: build timed out (FO_BUILD_TIMEOUT exceeded);' // &
+                ' set FO_BUILD_TIMEOUT env var or investigate slow build'
+        end if
     end subroutine backend_build
 
     subroutine backend_test(self, exitcode, include_slow, log_file)
@@ -181,7 +184,6 @@ contains
         case (BACKEND_FPM)
             if (slow) then
                 call process_fpm_test_all(self%project_dir, jobs, log_path, exitcode)
-                return
             else
                 call fpm_list_tests(self%project_dir, names, n_names, &
                                     list_ierr, log_path)
@@ -196,7 +198,6 @@ contains
                 end if
                 call fpm_run_tests(self%project_dir, names, n_names, &
                                    exitcode, log_path)
-                return
             end if
         case (BACKEND_CMAKE)
             inquire (file=trim(self%project_dir)//'/build/CTestTestfile.cmake', &
@@ -206,12 +207,16 @@ contains
                 return
             end if
             call process_ctest(self%project_dir, jobs, '', slow, log_path, exitcode)
-            return
         case default
             write (error_unit, '(a)') 'fo: no build backend detected'
             exitcode = 1
             return
         end select
+        if (exitcode == 124) then
+            write (error_unit, '(a)') &
+                'fo: WARNING: tests timed out (FO_TEST_TIMEOUT exceeded);' // &
+                ' set FO_TEST_TIMEOUT env var or mark slow tests with _slow suffix'
+        end if
     end subroutine backend_test
 
     subroutine backend_test_names(self, names, n_names, exitcode, include_slow, &

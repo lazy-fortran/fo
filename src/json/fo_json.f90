@@ -7,6 +7,7 @@ module fo_json
     public :: extract_json_field
     public :: make_tmpfile, delete_tmpfile, read_text_file
     public :: send_jsonrpc, jsonrpc_error, jsonrpc_null
+    public :: strip_path_prefix_in_str
 
 contains
 
@@ -238,5 +239,36 @@ contains
 
         response = '{"jsonrpc":"2.0","id":'//trim(id_str)//',"result":null}'
     end subroutine jsonrpc_null
+
+    subroutine strip_path_prefix_in_str(text, prefix)
+        character(len=*), intent(inout) :: text
+        character(len=*), intent(in) :: prefix
+
+        character(len=len(text)) :: buf
+        integer :: pos, plen, tlen, n
+
+        plen = len_trim(prefix)
+        if (plen == 0) return
+
+        buf = ''
+        n = 0
+        pos = 1
+        tlen = len_trim(text)
+
+        do while (pos <= tlen)
+            if (pos + plen - 1 <= tlen .and. &
+                text(pos:pos + plen - 1) == prefix(1:plen)) then
+                pos = pos + plen
+            else
+                if (n + 1 <= len(buf)) then
+                    n = n + 1
+                    buf(n:n) = text(pos:pos)
+                end if
+                pos = pos + 1
+            end if
+        end do
+
+        text = buf(1:n)
+    end subroutine strip_path_prefix_in_str
 
 end module fo_json

@@ -336,6 +336,7 @@ contains
             if (len_trim(fpath) == 0) cycle
             call lint_file_compiler(trim(fpath), mod_flags, &
                                     warnings, n_warnings)
+            call lint_file_lengths(trim(fpath), warnings, n_warnings)
         end do
         close (u)
         call delete_tmpfile(tmpfile)
@@ -370,6 +371,42 @@ contains
         end if
         call delete_tmpfile(tmpfile)
     end subroutine find_mod_include_flags
+
+    subroutine lint_file_lengths(filepath, warnings, n_warnings)
+        character(len=*), intent(in) :: filepath
+        type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
+        integer, intent(inout) :: n_warnings
+
+        character(len=2048) :: line
+        integer :: u, iostat, lineno, linelen
+
+        open (newunit=u, file=trim(filepath), status='old', iostat=iostat)
+        if (iostat /= 0) return
+
+        lineno = 0
+        do
+            read (u, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            lineno = lineno + 1
+            linelen = len_trim(line)
+            if (linelen > 132) then
+                block
+                    character(len=len(line)) :: stripped
+                    stripped = adjustl(line)
+                    if (stripped(1:1) == '#') cycle
+                end block
+                if (n_warnings < MAX_WARNINGS) then
+                    n_warnings = n_warnings + 1
+                    warnings(n_warnings)%file = trim(filepath)
+                    warnings(n_warnings)%line = lineno
+                    warnings(n_warnings)%column = 133
+                    write (warnings(n_warnings)%message, '(a,i0,a)') &
+                        'line exceeds 132 characters (', linelen, ' chars)'
+                end if
+            end if
+        end do
+        close (u)
+    end subroutine lint_file_lengths
 
     subroutine lint_file_compiler(filepath, mod_flags, warnings, n_warnings)
         character(len=*), intent(in) :: filepath, mod_flags

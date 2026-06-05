@@ -1,7 +1,8 @@
 module fo_mcp
     use fo_json, only: json_int, json_escape, extract_json_field, &
                        make_tmpfile, delete_tmpfile, read_text_file, &
-                       send_jsonrpc, jsonrpc_error, jsonrpc_null
+                       send_jsonrpc, jsonrpc_error, jsonrpc_null, &
+                       strip_path_prefix_in_str
     use fo_mcp_response, only: make_initialize_response, &
                                make_tools_list_response, &
                                make_resources_list_response, &
@@ -125,6 +126,7 @@ contains
                     logical :: want_full
                     type(capabilities_t) :: cap
                     character(len=2048) :: cap_json
+                    character(len=514) :: dir_prefix
 
                     want_full = (index(line, '"full"') > 0 .or. &
                                  index(line, '"json":"full"') > 0)
@@ -139,6 +141,8 @@ contains
                     else
                         output_text = check_result_compact_json(check_res)
                     end if
+                    dir_prefix = trim(dir)//'/'
+                    call strip_path_prefix_in_str(output_text, trim(dir_prefix))
                     exitcode = 0
                    if (.not. (check_res%build_ok .and. check_res%tests_ok)) exitcode = 1
                    call make_tool_text_response(id_str, output_text, exitcode, response)
@@ -164,12 +168,15 @@ contains
                 type(lint_warning_t) :: warnings(MAX_WARNINGS)
                 integer :: n_findings, n_warnings
                 character(len=16384) :: lint_output
+                character(len=514) :: dir_prefix
 
                 call lint_dir(trim(dir), findings, n_findings)
                 call lint_compiler(trim(dir), warnings, n_warnings)
                 call lint_dedup_warnings(warnings, n_warnings)
                 lint_output = lint_all_json(findings, n_findings, &
                                             warnings, n_warnings)
+                dir_prefix = trim(dir)//'/'
+                call strip_path_prefix_in_str(lint_output, trim(dir_prefix))
                 exitcode = 0
                 if (n_findings > 0 .or. n_warnings > 0) exitcode = 1
                 call make_tool_text_response(id_str, lint_output, &
@@ -178,22 +185,42 @@ contains
             call delete_tmpfile(tmpfile)
             return
         case ('fmt')
-            cmd = 'cd '//trim(dir)//' && fo fmt > '// &
+            cmd = 'cd '//trim(dir)//' && timeout 120 fo fmt > '// &
                   trim(tmpfile)//' 2>&1'
             call execute_command_line(cmd, exitstat=exitcode, &
                                       cmdstat=cmdstat, wait=.true.)
             if (cmdstat /= 0) exitcode = 1
-            call read_text_file(tmpfile, output_text)
+            if (exitcode == 124) then
+                output_text = 'fo fmt timed out (120s); check for large files'
+            else
+                call read_text_file(tmpfile, output_text)
+            end if
             call delete_tmpfile(tmpfile)
             call make_tool_text_response(id_str, output_text, exitcode, response)
         case ('build', 'test', 'graph', 'info', 'changed', 'clean')
-            cmd = 'cd '//trim(dir)//' && fo '//trim(action)// &
-                  ' > '//trim(tmpfile)//' 2>&1'
+            block
+                character(len=16) :: t_str
+                integer :: t_val
+                if (trim(action) == 'build') then
+                    t_val = 300
+                else if (trim(action) == 'test') then
+                    t_val = 120
+                else
+                    t_val = 60
+                end if
+                write (t_str, '(i0)') t_val
+                cmd = 'cd '//trim(dir)//' && timeout '//trim(t_str)// &
+                      ' fo '//trim(action)//' > '//trim(tmpfile)//' 2>&1'
+            end block
             call execute_command_line(cmd, exitstat=exitcode, &
                                       cmdstat=cmdstat, wait=.true.)
             if (cmdstat /= 0) exitcode = 1
 
-            call read_text_file(tmpfile, output_text)
+            if (exitcode == 124) then
+                output_text = 'fo '//trim(action)//' timed out'
+            else
+                call read_text_file(tmpfile, output_text)
+            end if
             call delete_tmpfile(tmpfile)
 
             call make_tool_text_response(id_str, output_text, exitcode, response)

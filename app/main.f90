@@ -184,6 +184,13 @@ contains
         end block
         write (output_unit, '(a)') 'Lint: OK'
 
+        ! 5. fmt --check
+        block
+            integer :: fmt_exit
+            call fmt_check(trim(b%project_dir), fmt_exit)
+            if (fmt_exit /= 0) stop 1
+        end block
+
         call cpu_time(t1)
         write (output_unit, '(a,f0.1,a)') 'All stages passed (', t1 - t0, 's)'
     end subroutine cmd_run
@@ -196,7 +203,7 @@ contains
         write (output_unit, '(a)') ''
         write (output_unit, '(a)') 'usage: fo [command]'
         write (output_unit, '(a)') ''
-        write (output_unit, '(a)') '  (none)     static -> build -> test -> lint'
+write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt --check'
         write (output_unit, '(a)') '  build      build only (--flag "-O0")'
         write (output_unit, '(a)') '  test       run tests (--only-changed, --all)'
         write (output_unit, '(a)') '  check      build + test, one-line status'
@@ -208,6 +215,7 @@ contains
         write (output_unit, '(a)') '  graph      module dependency graph'
         write (output_unit, '(a)') '  graph --dot  graph in Graphviz DOT format'
       write (output_unit, '(a)') '  fmt        format sources (fprettify, 88 col, 4 sp)'
+    write (output_unit, '(a)') '  fmt --check  check formatting without modifying files'
         write (output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
         write (output_unit, '(a)') '  lint       unused imports + gfortran warnings'
         write (output_unit, '(a)') '  lint --json  lint results as JSON'
@@ -576,14 +584,23 @@ contains
     end subroutine cmd_lint
 
     subroutine cmd_fmt()
+        use fo_json, only: make_tmpfile, delete_tmpfile
         type(backend_t) :: b
         character(len=512) :: scan_root
         character(len=4096) :: cmd
         integer :: exitcode
+        logical :: check_mode
 
         b = detect_backend('.')
         scan_root = '.'
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+
+        check_mode = has_arg('--check')
+        if (check_mode) then
+            call fmt_check(trim(scan_root), exitcode)
+            if (exitcode /= 0) stop 1, quiet = .true.
+            return
+        end if
 
         cmd = 'find '//trim(scan_root)// &
               " -path '*/build' -prune -o"// &
@@ -597,6 +614,64 @@ contains
         end if
         write (output_unit, '(a)') 'formatted'
     end subroutine cmd_fmt
+
+    subroutine fmt_check(scan_root, exitcode)
+        use fo_json, only: make_tmpfile, delete_tmpfile
+        character(len=*), intent(in) :: scan_root
+        integer, intent(out) :: exitcode
+
+        character(len=512) :: list_file, fpath, tmpf
+        character(len=4096) :: cmd
+        integer :: u, iostat, diff_exit, n_bad
+
+        exitcode = 0
+        n_bad = 0
+
+        call make_tmpfile('fo_fmt_files', list_file)
+        cmd = 'find '//trim(scan_root)// &
+              " -path '*/build' -prune -o"// &
+              " -path '*/.git' -prune -o"// &
+              " \( -name '*.f90' -o -name '*.F90' \) -print 2>/dev/null"// &
+              ' | sort > '//trim(list_file)
+        call execute_command_line(cmd, wait=.true.)
+
+        open (newunit=u, file=list_file, status='old', iostat=iostat)
+        if (iostat /= 0) then
+            call delete_tmpfile(list_file)
+            return
+        end if
+
+        do
+            read (u, '(a)', iostat=iostat) fpath
+            if (iostat /= 0) exit
+            if (len_trim(fpath) == 0) cycle
+
+            call make_tmpfile('fo_fmt_check', tmpf)
+            cmd = 'cp '//trim(fpath)//' '//trim(tmpf)
+            call execute_command_line(cmd, wait=.true.)
+            cmd = 'fprettify -i 4 -l 88 --strict-indent '//trim(tmpf)// &
+                  ' >/dev/null 2>&1'
+            call execute_command_line(cmd, wait=.true.)
+            cmd = 'diff -q '//trim(fpath)//' '//trim(tmpf)//' >/dev/null 2>&1'
+            call execute_command_line(cmd, exitstat=diff_exit, wait=.true.)
+            call delete_tmpfile(tmpf)
+
+            if (diff_exit /= 0) then
+                write (error_unit, '(a)') trim(fpath)//': needs formatting'
+                n_bad = n_bad + 1
+            end if
+        end do
+        close (u)
+        call delete_tmpfile(list_file)
+
+        if (n_bad > 0) then
+            write (error_unit, '(a,i0,a)') &
+                'Format: FAIL (', n_bad, ' files need formatting)'
+            exitcode = 1
+        else
+            write (output_unit, '(a)') 'Format: OK'
+        end if
+    end subroutine fmt_check
 
     subroutine cmd_clean()
         use fo_cache, only: cache_t, cache_init

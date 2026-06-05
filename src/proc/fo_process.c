@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static int has_text(const char *text) { return text != NULL && text[0] != '\0'; }
@@ -126,7 +127,7 @@ void fo_c_scan_sources(const char *root, const char *output_file, int *exitcode)
 }
 
 static int run_argv(const char *cwd, char *const argv[], const char *log_file,
-                    int append, int jobs) {
+                    int append, int jobs, int timeout_s) {
     pid_t pid;
     int status;
 
@@ -152,10 +153,35 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
         _exit(errno == ENOENT ? 127 : 126);
     }
 
-    if (waitpid(pid, &status, 0) < 0) return 1;
+    if (timeout_s <= 0) {
+        if (waitpid(pid, &status, 0) < 0) return 1;
+    } else {
+        int elapsed = 0;
+        struct timespec ts = {1, 0};
+        for (;;) {
+            pid_t got = waitpid(pid, &status, WNOHANG);
+            if (got > 0) break;
+            if (got < 0) { kill(pid, SIGKILL); waitpid(pid, NULL, 0); return 1; }
+            if (elapsed >= timeout_s) {
+                kill(pid, SIGKILL);
+                waitpid(pid, &status, 0);
+                return 124;  /* timeout — same as GNU timeout exit code */
+            }
+            nanosleep(&ts, NULL);
+            elapsed++;
+        }
+    }
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
     return 1;
+}
+
+static int env_timeout(const char *var, int default_s) {
+    const char *s = getenv(var);
+    int v;
+    if (!s || !s[0]) return default_s;
+    v = atoi(s);
+    return v > 0 ? v : default_s;
 }
 
 void fo_c_detect_nproc(int *nproc) {
@@ -168,11 +194,14 @@ void fo_c_fpm_build(const char *project_dir, const char *flags, int jobs,
                     const char *log_file, int *exitcode) {
     char *argv_with_flags[] = {"fpm", "build", "--flag", (char *)flags, NULL};
     char *argv_plain[] = {"fpm", "build", NULL};
+    int timeout = env_timeout("FO_BUILD_TIMEOUT", 300);
 
     if (has_text(flags)) {
-        *exitcode = run_argv(project_dir, argv_with_flags, log_file, 0, jobs);
+        *exitcode = run_argv(project_dir, argv_with_flags, log_file, 0, jobs,
+                             timeout);
     } else {
-        *exitcode = run_argv(project_dir, argv_plain, log_file, 0, jobs);
+        *exitcode = run_argv(project_dir, argv_plain, log_file, 0, jobs,
+                             timeout);
     }
 }
 
@@ -180,14 +209,16 @@ void fo_c_fpm_test_list(const char *project_dir, const char *log_file,
                         int *exitcode) {
     char *argv[] = {"fpm", "test", "--list", NULL};
 
-    *exitcode = run_argv(project_dir, argv, log_file, 0, 0);
+    *exitcode = run_argv(project_dir, argv, log_file, 0, 0,
+                         env_timeout("FO_TEST_TIMEOUT", 30));
 }
 
 void fo_c_fpm_test_all(const char *project_dir, int jobs, const char *log_file,
                        int *exitcode) {
     char *argv[] = {"fpm", "test", NULL};
 
-    *exitcode = run_argv(project_dir, argv, log_file, 0, jobs);
+    *exitcode = run_argv(project_dir, argv, log_file, 0, jobs,
+                         env_timeout("FO_TEST_TIMEOUT", 120));
 }
 
 void fo_c_fpm_test_names(const char *project_dir, const char *names, int jobs,
@@ -226,7 +257,8 @@ void fo_c_fpm_test_names(const char *project_dir, const char *names, int jobs,
     for (i = 0; i < n; i++) argv[i + 2] = items[i];
     argv[n + 2] = NULL;
 
-    *exitcode = run_argv(project_dir, argv, log_file, 0, jobs);
+    *exitcode = run_argv(project_dir, argv, log_file, 0, jobs,
+                         env_timeout("FO_TEST_TIMEOUT", 120));
     free(argv);
     free(copy);
 }
@@ -242,14 +274,17 @@ void fo_c_cmake_build(const char *project_dir, const char *flags, int jobs,
     char *build_argv[] = {"cmake", "--build", "build", "-j", jobs_text, NULL};
 
     snprintf(jobs_text, sizeof(jobs_text), "%d", jobs > 0 ? jobs : 1);
+    int build_timeout = env_timeout("FO_BUILD_TIMEOUT", 300);
     if (has_text(flags)) {
         snprintf(flag_arg, sizeof(flag_arg), "-DCMAKE_Fortran_FLAGS=%s", flags);
-        *exitcode = run_argv(project_dir, configure_flags, log_file, 0, 0);
+        *exitcode = run_argv(project_dir, configure_flags, log_file, 0, 0,
+                             build_timeout);
     } else {
-        *exitcode = run_argv(project_dir, configure_plain, log_file, 0, 0);
+        *exitcode = run_argv(project_dir, configure_plain, log_file, 0, 0,
+                             build_timeout);
     }
     if (*exitcode != 0) return;
-    *exitcode = run_argv(project_dir, build_argv, log_file, 1, 0);
+    *exitcode = run_argv(project_dir, build_argv, log_file, 1, 0, build_timeout);
 }
 
 void fo_c_ctest(const char *project_dir, int jobs, const char *regex,
@@ -276,7 +311,8 @@ void fo_c_ctest(const char *project_dir, int jobs, const char *regex,
     }
     argv[n] = NULL;
 
-    *exitcode = run_argv(build_dir, argv, log_file, 0, 0);
+    *exitcode = run_argv(build_dir, argv, log_file, 0, 0,
+                         env_timeout("FO_TEST_TIMEOUT", 120));
 }
 
 void fo_c_start_fo_check(const char *project_dir, const char *mode,
