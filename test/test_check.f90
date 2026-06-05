@@ -8,6 +8,8 @@ program test_check
                             RUN_RERUN_PENDING, RUN_FINISHED
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
                                capabilities_text, capabilities_json
+    use fo_fmt, only: fo_fmt_check_run
+    use fo_cache, only: cache_store_root
     implicit none
 
     integer :: n_pass, n_fail
@@ -33,6 +35,7 @@ program test_check
     call test_capabilities_json_output()
     call test_capabilities_unknown_compiler()
     call test_full_json_includes_capabilities()
+    call test_fmt_check_caches_success()
     call test_compact_json_includes_test_results()
     call test_full_json_includes_test_results()
     call test_test_results_parse()
@@ -472,6 +475,42 @@ contains
                     'unknown compiler does not crash capabilities text')
     end subroutine test_capabilities_unknown_compiler
 
+    subroutine test_fmt_check_caches_success()
+        character(len=512) :: project_dir, src_dir, output
+        integer :: u, exitcode, before_count, after_first, after_second
+
+        call make_tmp_path('fo_fmt_cache_project', project_dir)
+        src_dir = trim(project_dir)//'/src'
+        call execute_command_line('mkdir -p '//trim(src_dir), wait=.true.)
+
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "fmt_cache_project"'
+        close (u)
+
+        open (newunit=u, file=trim(src_dir)//'/lib.f90', status='replace')
+        write (u, '(a)') 'module lib'
+        write (u, '(a)') '    implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '    subroutine noop()'
+        write (u, '(a)') '    end subroutine noop'
+        write (u, '(a)') 'end module lib'
+        close (u)
+
+        before_count = count_fmt_markers()
+        call fo_fmt_check_run(project_dir, output, exitcode)
+        after_first = count_fmt_markers()
+        call fo_fmt_check_run(project_dir, output, exitcode)
+        after_second = count_fmt_markers()
+
+        call assert(exitcode == 0, 'format cache fixture is formatted')
+        call assert(after_first > before_count, &
+                    'format check stores success marker')
+        call assert(after_second == after_first, &
+                    'format check reuses success marker')
+
+        call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
+    end subroutine test_fmt_check_caches_success
+
     subroutine test_full_json_includes_capabilities()
         use fo_capabilities, only: capabilities_t, capabilities_json
         type(check_result_t) :: res
@@ -706,5 +745,27 @@ contains
         call assert(res%build_ok, 'parse test project builds')
         call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
     end subroutine test_test_results_parse
+
+    integer function count_fmt_markers() result(n)
+        character(len=512) :: root, tmpfile, line
+        integer :: u, ios
+
+        n = 0
+        call cache_store_root(root)
+        call make_tmp_path('fo_fmt_marker_count', tmpfile)
+        call execute_command_line('find '//trim(root)// &
+                                  ' -name "*-fmt" -type f 2>/dev/null > '// &
+                                  trim(tmpfile), wait=.true.)
+        open (newunit=u, file=trim(tmpfile), status='old', iostat=ios)
+        if (ios == 0) then
+            do
+                read (u, '(a)', iostat=ios) line
+                if (ios /= 0) exit
+                if (len_trim(line) > 0) n = n + 1
+            end do
+            close (u)
+        end if
+        call execute_command_line('rm -f '//trim(tmpfile), wait=.true.)
+    end function count_fmt_markers
 
 end program test_check
