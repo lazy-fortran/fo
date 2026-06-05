@@ -6,13 +6,19 @@ module fo_watch
 
 contains
 
-    subroutine watch_loop(dir)
+    subroutine watch_loop(dir, fmt_mode)
         character(len=*), intent(in) :: dir
+        logical, intent(in), optional :: fmt_mode
 
         character(len=2048) :: cmd
-        character(len=512) :: line
+        character(len=512) :: line, event_file, skip_path
         integer :: u, iostat, exitcode, cmdstat
         character(len=128) :: pipe_path
+        logical :: do_fmt
+
+        do_fmt = .false.
+        if (present(fmt_mode)) do_fmt = fmt_mode
+        skip_path = ''
 
         call make_pipe_path(pipe_path)
 
@@ -31,7 +37,12 @@ contains
               trim(dir)//' > '//trim(pipe_path)//' 2>/dev/null &'
         call execute_command_line(cmd, wait=.false.)
 
-        write (output_unit, '(a)') 'fo: watching for Fortran file changes...'
+        if (do_fmt) then
+            write (output_unit, '(a)') &
+                'fo: watching for Fortran file changes (--fmt enabled)...'
+        else
+            write (output_unit, '(a)') 'fo: watching for Fortran file changes...'
+        end if
 
         open (newunit=u, file=pipe_path, status='old', iostat=iostat)
         if (iostat /= 0) then
@@ -46,7 +57,28 @@ contains
             if (iostat /= 0) exit
             if (len_trim(line) == 0) cycle
 
+            call parse_inotify_path(line, event_file)
+
+            ! skip events caused by our own fmt write
+            if (len_trim(skip_path) > 0 .and. &
+                trim(event_file) == trim(skip_path)) then
+                skip_path = ''
+                cycle
+            end if
+            skip_path = ''
+
             write (output_unit, '(a,a)') 'change: ', trim(line)
+
+            ! format before build if requested and file path is known
+            if (do_fmt .and. len_trim(event_file) > 0) then
+                cmd = 'fprettify -i 4 -l 88 --strict-indent '// &
+                      trim(event_file)//' 2>/dev/null'
+                call execute_command_line(cmd, exitstat=exitcode, &
+                                          cmdstat=cmdstat, wait=.true.)
+                if (exitcode == 0) then
+                    skip_path = trim(event_file)
+                end if
+            end if
 
             ! run fo check as a subprocess
             cmd = 'fo check 2>&1'
@@ -65,6 +97,51 @@ contains
         call execute_command_line("pkill -f 'inotifywait.*fo_watch'", &
                                   wait=.true.)
     end subroutine watch_loop
+
+    subroutine parse_inotify_path(line, filepath)
+        character(len=*), intent(in) :: line
+        character(len=*), intent(out) :: filepath
+
+        ! inotifywait format: "/path/to/dir/ EVENT filename.f90"
+        integer :: last_space, n
+
+        filepath = ''
+        n = len_trim(line)
+        if (n == 0) return
+
+        ! find last space to separate dir+event from filename
+        last_space = 0
+        block
+            integer :: i
+            do i = n, 1, -1
+                if (line(i:i) == ' ') then
+                    last_space = i
+                    exit
+                end if
+            end do
+        end block
+        if (last_space == 0) return
+
+        ! find first space to get the directory part
+        block
+            integer :: i, first_space, second_space
+            first_space = 0
+            second_space = 0
+            do i = 1, n
+                if (line(i:i) == ' ') then
+                    if (first_space == 0) then
+                        first_space = i
+                    else
+                        second_space = i
+                        exit
+                    end if
+                end if
+            end do
+            if (first_space == 0) return
+            ! dir is from 1 to first_space-1, filename is after last_space
+            filepath = line(1:first_space - 1)//line(last_space + 1:n)
+        end block
+    end subroutine parse_inotify_path
 
     subroutine make_pipe_path(path)
         character(len=*), intent(out) :: path

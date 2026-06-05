@@ -217,6 +217,7 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
       write (output_unit, '(a)') '  fmt        format sources (fprettify, 88 col, 4 sp)'
     write (output_unit, '(a)') '  fmt --check  check formatting without modifying files'
         write (output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
+        write (output_unit, '(a)') '  watch --fmt  auto-format changed files before rebuild'
         write (output_unit, '(a)') '  lint       unused imports + gfortran warnings'
         write (output_unit, '(a)') '  lint --json  lint results as JSON'
         write (output_unit, '(a)') '  clean      clear global cache (~/.cache/fo)'
@@ -731,7 +732,16 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
 
     subroutine cmd_watch()
         use fo_watch, only: watch_loop
-        call watch_loop('.')
+        character(len=256) :: arg
+        logical :: fmt_mode
+        integer :: i
+
+        fmt_mode = .false.
+        do i = 2, command_argument_count()
+            call get_command_argument(i, arg)
+            if (trim(arg) == '--fmt') fmt_mode = .true.
+        end do
+        call watch_loop('.', fmt_mode=fmt_mode)
     end subroutine cmd_watch
 
     subroutine cmd_mcp_server()
