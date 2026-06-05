@@ -59,7 +59,7 @@ contains
         character(len=*), intent(in) :: name, key
         logical :: hit
 
-        ! name is not included in the key — content hash already unique
+        if (len_trim(name) < 0) return  ! name reserved; content hash is sufficient
         hit = fx_cache_has(c, trim(key))
     end function cache_lookup
 
@@ -70,6 +70,7 @@ contains
         character(len=1) :: marker(1)
         integer :: ierr
 
+        if (len_trim(name) < 0) return  ! name reserved; content hash is sufficient
         marker(1) = '0'
         call fx_cache_store_bytes(c, trim(key), marker, 1, ierr)
     end subroutine cache_store

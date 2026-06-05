@@ -10,6 +10,7 @@ program fo_main
                                check_result_full_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
                                capabilities_json
+    use fo_fmt, only: fo_fmt_run, fo_fmt_check_run
     implicit none
 
     character(len=256) :: action
@@ -147,7 +148,7 @@ contains
             if (is_test_arr(affected_ids(i))) then
                 if (.not. is_slow_test(dag%nodes(affected_ids(i))%label)) then
                     n_test_names = n_test_names + 1
-                    test_names(n_test_names) = dag%nodes(affected_ids(i))%label
+                    test_names(n_test_names) = dag%nodes(affected_ids(i))%label(1:128)
                 end if
             end if
         end do
@@ -195,7 +196,9 @@ contains
         ! 5. fmt --check
         block
             integer :: fmt_exit
-            call fmt_check(trim(b%project_dir), fmt_exit)
+            character(len=8192) :: fmt_out
+            call fo_fmt_check_run(trim(b%project_dir), fmt_out, fmt_exit)
+            if (len_trim(fmt_out) > 0) write (error_unit, '(a)') trim(fmt_out)
             if (fmt_exit /= 0) stop 1
         end block
 
@@ -479,7 +482,7 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
             do i = 1, n_affected
                 if (is_test_arr(affected_ids(i))) then
                     n_test_names = n_test_names + 1
-                    test_names(n_test_names) = dag%nodes(affected_ids(i))%label
+                    test_names(n_test_names) = dag%nodes(affected_ids(i))%label(1:128)
                 end if
             end do
 
@@ -585,94 +588,24 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
     end subroutine cmd_lint
 
     subroutine cmd_fmt()
-        use fo_util, only: make_tmpfile, delete_tmpfile
-        type(backend_t) :: b
-        character(len=512) :: scan_root
-        character(len=4096) :: cmd
         integer :: exitcode
-        logical :: check_mode
+        character(len=8192) :: fmt_output
 
-        b = detect_backend('.')
-        scan_root = '.'
-        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-
-        check_mode = has_arg('--check')
-        if (check_mode) then
-            call fmt_check(trim(scan_root), exitcode)
+        if (has_arg('--check')) then
+            call fo_fmt_check_run('.', fmt_output, exitcode)
+            if (len_trim(fmt_output) > 0) &
+                write (error_unit, '(a)') trim(fmt_output)
             if (exitcode /= 0) stop 1, quiet = .true.
             return
         end if
 
-        cmd = 'find '//trim(scan_root)// &
-              " -path '*/build' -prune -o"// &
-              " -path '*/.git' -prune -o"// &
-              " \( -name '*.f90' -o -name '*.F90' \) -print"// &
-              " | xargs -r fprettify -i 4 -l 88 --strict-indent"
-        call execute_command_line(cmd, exitstat=exitcode, wait=.true.)
+        call fo_fmt_run('.', exitcode)
         if (exitcode /= 0) then
             write (error_unit, '(a)') 'fo fmt: fprettify failed'
             stop 1, quiet = .true.
         end if
         write (output_unit, '(a)') 'formatted'
     end subroutine cmd_fmt
-
-    subroutine fmt_check(scan_root, exitcode)
-        use fo_util, only: make_tmpfile, delete_tmpfile
-        character(len=*), intent(in) :: scan_root
-        integer, intent(out) :: exitcode
-
-        character(len=512) :: list_file, fpath, tmpf
-        character(len=4096) :: cmd
-        integer :: u, iostat, diff_exit, n_bad
-
-        exitcode = 0
-        n_bad = 0
-
-        call make_tmpfile('fo_fmt_files', list_file)
-        cmd = 'find '//trim(scan_root)// &
-              " -path '*/build' -prune -o"// &
-              " -path '*/.git' -prune -o"// &
-              " \( -name '*.f90' -o -name '*.F90' \) -print 2>/dev/null"// &
-              ' | sort > '//trim(list_file)
-        call execute_command_line(cmd, wait=.true.)
-
-        open (newunit=u, file=list_file, status='old', iostat=iostat)
-        if (iostat /= 0) then
-            call delete_tmpfile(list_file)
-            return
-        end if
-
-        do
-            read (u, '(a)', iostat=iostat) fpath
-            if (iostat /= 0) exit
-            if (len_trim(fpath) == 0) cycle
-
-            call make_tmpfile('fo_fmt_check', tmpf)
-            cmd = 'cp '//trim(fpath)//' '//trim(tmpf)
-            call execute_command_line(cmd, wait=.true.)
-            cmd = 'fprettify -i 4 -l 88 --strict-indent '//trim(tmpf)// &
-                  ' >/dev/null 2>&1'
-            call execute_command_line(cmd, wait=.true.)
-            cmd = 'diff -q '//trim(fpath)//' '//trim(tmpf)//' >/dev/null 2>&1'
-            call execute_command_line(cmd, exitstat=diff_exit, wait=.true.)
-            call delete_tmpfile(tmpf)
-
-            if (diff_exit /= 0) then
-                write (error_unit, '(a)') trim(fpath)//': needs formatting'
-                n_bad = n_bad + 1
-            end if
-        end do
-        close (u)
-        call delete_tmpfile(list_file)
-
-        if (n_bad > 0) then
-            write (error_unit, '(a,i0,a)') &
-                'Format: FAIL (', n_bad, ' files need formatting)'
-            exitcode = 1
-        else
-            write (output_unit, '(a)') 'Format: OK'
-        end if
-    end subroutine fmt_check
 
     subroutine cmd_install()
         character(len=256) :: prefix, arg

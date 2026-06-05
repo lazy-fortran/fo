@@ -21,6 +21,7 @@ module fo_check
         character(len=128) :: name = ''
         integer :: n_pass = 0
         integer :: n_fail = 0
+        character(len=8) :: status = ''
     end type test_result_t
 
     type :: check_result_t
@@ -95,7 +96,7 @@ contains
         call scan_dir(trim(b%project_dir), units, n_units, ierr)
         if (ierr /= 0) return
 
-        call build_dag_from_units(units, n_units, dag, local_filenames)
+        call build_dag_from_units(units, n_units, dag, local_filenames, is_test_arr)
         if (present(filenames)) filenames = local_filenames
         call dag_topo_sort(dag, order, n_order, has_cycle)
         if (present(n_in_cycle)) n_in_cycle = dag%n_nodes - n_order
@@ -257,7 +258,7 @@ contains
         character(len=MAX_NAME) :: node_name
 
         ! find the scan unit for this node
-        node_name = dag%nodes(node_id)%label
+        node_name = dag%nodes(node_id)%label(1:MAX_NAME)
         do i = 1, n_units
             if (trim(units(i)%module_name) == trim(node_name) .or. &
                 trim(units(i)%program_name) == trim(node_name)) then
@@ -441,6 +442,11 @@ contains
                 results(n_results)%name = trim(name)
                 results(n_results)%n_pass = n_pass
                 results(n_results)%n_fail = n_fail
+                if (n_fail == 0) then
+                    results(n_results)%status = 'pass'
+                else
+                    results(n_results)%status = 'fail'
+                end if
             end if
         end do
         close (u)

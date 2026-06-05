@@ -7,6 +7,7 @@ module fo_mcp
     use fo_check, only: check_result_t, fo_check_run
     use fo_check_output, only: check_result_compact_json, &
                                check_result_full_json
+    use fo_fmt, only: fo_fmt_run
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
                                capabilities_json
     use fo_process, only: process_start_fo_check, process_poll_pid, &
@@ -93,8 +94,8 @@ contains
 
         character(len=64) :: action, mode
         character(len=16384) :: output_text
-        integer :: exitcode, cmdstat
-        character(len=512) :: tmpfile, cmd, dir
+        integer :: exitcode
+        character(len=512) :: tmpfile, dir
         type(check_result_t) :: check_res
 
         call extract_json_field(line, '"action"', action)
@@ -123,15 +124,11 @@ contains
         case ('lint')
             call handle_lint(id_str, dir, output_text, exitcode, response)
         case ('fmt')
-            cmd = 'cd '//trim(dir)//' && timeout 120 fo fmt > '// &
-                  trim(tmpfile)//' 2>&1'
-            call execute_command_line(cmd, exitstat=exitcode, &
-                                      cmdstat=cmdstat, wait=.true.)
-            if (cmdstat /= 0) exitcode = 1
-            if (exitcode == 124) then
-                output_text = 'fo fmt timed out (120s); check for large files'
+            call fo_fmt_run(trim(dir), exitcode)
+            if (exitcode == 0) then
+                output_text = 'formatted'
             else
-                call read_text_file(tmpfile, output_text)
+                output_text = 'fo fmt: fprettify failed'
             end if
             call make_tool_text_response(id_str, output_text, exitcode, response)
         case ('build')
@@ -259,7 +256,7 @@ contains
 
     subroutine handle_graph(line, id_str, dir, output_text, exitcode, response)
         use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS
-        use fx_dag, only: dag_t, dag_to_dot, MAX_NODES
+        use fx_dag, only: dag_t, dag_to_dot
         use fo_dag_bridge, only: build_dag_from_units
         use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
         character(len=*), intent(in) :: line, id_str, dir
@@ -309,7 +306,7 @@ contains
 
     subroutine handle_info(id_str, dir, output_text, exitcode, response)
         use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS
-        use fx_dag, only: dag_t, MAX_NODES
+        use fx_dag, only: dag_t
         use fo_dag_bridge, only: build_dag_from_units
         use fo_build_backend, only: backend_t, detect_backend, &
                                     BACKEND_NONE, BACKEND_FPM, BACKEND_CMAKE

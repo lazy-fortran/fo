@@ -2,7 +2,7 @@ program test_backend
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
                                 detect_jobs, &
-                              BACKEND_FPM, BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
+                                BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
     implicit none
 
     integer :: n_pass, n_fail

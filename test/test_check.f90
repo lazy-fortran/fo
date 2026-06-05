@@ -100,7 +100,7 @@ contains
 
     subroutine test_check_result_json()
         type(check_result_t) :: res
-        character(len=2048) :: line
+        character(len=8192) :: line
 
         res%build_ok = .true.
         res%tests_ok = .false.
@@ -132,7 +132,7 @@ contains
 
     subroutine test_check_result_compact_json_success()
         type(check_result_t) :: res
-        character(len=2048) :: line
+        character(len=8192) :: line
 
         res%build_ok = .true.
         res%tests_ok = .true.
@@ -152,7 +152,7 @@ contains
 
     subroutine test_check_result_compact_json_failure()
         type(check_result_t) :: res
-        character(len=2048) :: line
+        character(len=8192) :: line
 
         res%build_ok = .true.
         res%tests_ok = .false.
@@ -181,7 +181,7 @@ contains
 
     subroutine test_check_result_full_json_diagnostics()
         type(check_result_t) :: res
-        character(len=8192) :: line
+        character(len=16384) :: line
 
         res%build_ok = .false.
         res%tests_ok = .false.
@@ -477,7 +477,7 @@ contains
         type(check_result_t) :: res
         type(capabilities_t) :: cap
         character(len=2048) :: cap_json
-        character(len=8192) :: line
+        character(len=16384) :: line
 
         cap%compiler_id = 'gfortran'
         cap%compiler_version = '14.0'

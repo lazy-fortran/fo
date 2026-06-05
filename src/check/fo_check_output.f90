@@ -60,7 +60,7 @@ contains
 
     function check_result_json(res) result(line)
         type(check_result_t), intent(in) :: res
-        character(len=2048) :: line
+        character(len=8192) :: line
 
         character(len=32) :: modules, cached, changed, affected, elapsed
 
@@ -81,8 +81,29 @@ contains
             line = trim(line)//',"in_cycle":'//trim(json_int(res%n_in_cycle))
         line = trim(line)//',"elapsed_s":'//trim(adjustl(elapsed))
         line = trim(line)//',"error":"'
-        line = trim(line)//trim(json_escape_string(res%error_msg))//'"}'
+        line = trim(line)//trim(json_escape_string(res%error_msg))//'"'
+        if (res%n_test_results > 0) then
+            line = trim(line)//',"test_summary":"'// &
+                   trim(test_summary_str(res))//'"'
+            line = trim(line)//trim(test_results_json(res))
+        end if
+        line = trim(line)//'}'
     end function check_result_json
+
+    function test_summary_str(res) result(s)
+        type(check_result_t), intent(in) :: res
+        character(len=64) :: s
+
+        integer :: total_pass, total_fail, i
+
+        total_pass = 0
+        total_fail = 0
+        do i = 1, res%n_test_results
+            total_pass = total_pass + res%test_results(i)%n_pass
+            total_fail = total_fail + res%test_results(i)%n_fail
+        end do
+        write (s, '(i0,a,i0,a)') total_pass, ' pass, ', total_fail, ' fail'
+    end function test_summary_str
 
     function test_results_json(res) result(s)
         type(check_result_t), intent(in) :: res
@@ -99,6 +120,8 @@ contains
             if (i > 1) s = trim(s)//','
             s = trim(s)//'{"name":"'// &
                 trim(json_escape_string(res%test_results(i)%name))//'"'
+            s = trim(s)//',"status":"'// &
+                trim(res%test_results(i)%status)//'"'
             s = trim(s)//',"pass":'//trim(json_int(res%test_results(i)%n_pass))
             s = trim(s)//',"fail":'//trim(json_int(res%test_results(i)%n_fail))
             s = trim(s)//'}'
@@ -122,7 +145,7 @@ contains
         character(len=*), intent(in) :: cap_json_str
         character(len=16384) :: line
 
-        character(len=2048) :: base
+        character(len=8192) :: base
 
         base = check_result_json(res)
         line = base(1:len_trim(base) - 1)
@@ -132,7 +155,6 @@ contains
         line = trim(line)//',"hint":"'//trim(json_escape_string(res%hint))//'"'
         line = trim(line)//',"rerun":"'//trim(json_escape_string(res%rerun))//'"'
         line = trim(line)//',"log_path":"'//trim(json_escape_string(res%log_path))//'"'
-        line = trim(line)//trim(test_results_json(res))
         if (res%build_ok .and. res%tests_ok) then
             line = trim(line)//',"diagnostics":[]'
         else
@@ -195,7 +217,7 @@ contains
         type(check_result_t) :: res
         type(capabilities_t) :: cap
         character(len=2048) :: cap_json
-        character(len=8192) :: line
+        character(len=16384) :: line
         integer :: u, io
         logical :: need_caps
 
