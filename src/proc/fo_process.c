@@ -51,10 +51,23 @@ static void path_list_free(struct path_list *list) {
     list->cap = 0;
 }
 
-static int skip_dir_name(const char *name) {
-    return strcmp(name, ".") == 0 || strcmp(name, "..") == 0 ||
-           strcmp(name, "build") == 0 || strcmp(name, ".git") == 0 ||
-           strcmp(name, "node_modules") == 0;
+static int is_project_root(const char *dir) {
+    char path[4096];
+    struct stat st;
+    snprintf(path, sizeof(path), "%s/fpm.toml", dir);
+    if (stat(path, &st) == 0) return 1;
+    snprintf(path, sizeof(path), "%s/CMakeLists.txt", dir);
+    if (stat(path, &st) == 0) return 1;
+    return 0;
+}
+
+static int skip_dir_name(const char *name, int is_proj_root, int depth) {
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return 1;
+    if (strcmp(name, ".git") == 0) return 1;
+    if (strcmp(name, "node_modules") == 0) return 1;
+    /* skip 'build' only at depth 0 of a project root scan */
+    if (is_proj_root && depth == 0 && strcmp(name, "build") == 0) return 1;
+    return 0;
 }
 
 static int has_fortran_ext(const char *path) {
@@ -67,7 +80,7 @@ static int has_fortran_ext(const char *path) {
 }
 
 static int scan_sources_recursive(const char *dir, struct path_list *list,
-                                  int required) {
+                                  int required, int is_proj_root, int depth) {
     DIR *handle;
     struct dirent *entry;
 
@@ -78,11 +91,11 @@ static int scan_sources_recursive(const char *dir, struct path_list *list,
         char path[4096];
         struct stat st;
 
-        if (skip_dir_name(entry->d_name)) continue;
+        if (skip_dir_name(entry->d_name, is_proj_root, depth)) continue;
         snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
         if (stat(path, &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) {
-            if (scan_sources_recursive(path, list, 0) != 0) {
+            if (scan_sources_recursive(path, list, 0, is_proj_root, depth + 1) != 0) {
                 closedir(handle);
                 return 1;
             }
@@ -102,13 +115,15 @@ void fo_c_scan_sources(const char *root, const char *output_file, int *exitcode)
     struct path_list list = {0};
     FILE *out;
     size_t i;
+    int proj_root;
 
     *exitcode = 0;
     if (!has_text(root) || !has_text(output_file)) {
         *exitcode = 1;
         return;
     }
-    if (scan_sources_recursive(root, &list, 1) != 0) {
+    proj_root = is_project_root(root);
+    if (scan_sources_recursive(root, &list, 1, proj_root, 0) != 0) {
         path_list_free(&list);
         *exitcode = 1;
         return;

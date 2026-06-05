@@ -16,7 +16,6 @@ module-naming = false
 library = false
 
 [dependencies]
-fpm = { git = "https://github.com/krystophny/fpm.git", branch = "main" }
 fx = { git = "git@github.com:lazy-fortran/fx.git", branch = "main" }
 
 [fortran]

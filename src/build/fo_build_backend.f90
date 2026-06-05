@@ -5,14 +5,16 @@ module fo_build_backend
                           process_fpm_test_list, process_fpm_test_all, &
                           process_fpm_test_names, process_cmake_build, &
                           process_ctest
+    use fo_gfortran_build, only: gfortran_build, gfortran_test
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
-    public :: BACKEND_FPM, BACKEND_CMAKE, BACKEND_NONE
+    public :: BACKEND_FPM, BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
 
     integer, parameter :: BACKEND_NONE = 0
     integer, parameter :: BACKEND_FPM = 1
     integer, parameter :: BACKEND_CMAKE = 2
+    integer, parameter :: BACKEND_GFORTRAN = 3
     integer, parameter :: MAX_TEST_TARGETS = 512
 
     type :: backend_t
@@ -45,7 +47,7 @@ contains
                 b%kind = BACKEND_CMAKE
                 return
             else if (has_fpm) then
-                b%kind = BACKEND_FPM
+                b%kind = BACKEND_GFORTRAN
                 return
             end if
 
@@ -145,10 +147,11 @@ contains
         if (present(flags)) flag_text = flags
 
         select case (self%kind)
+        case (BACKEND_GFORTRAN)
+            call gfortran_build(self%project_dir, log_path, exitcode)
         case (BACKEND_FPM)
             call process_fpm_build(self%project_dir, flag_text, np, log_path, &
                                    exitcode)
-            ! vtable mismatch = stale .mod files from a prior dependency change
             if (exitcode /= 0 .and. exitcode /= 124 .and. len_trim(log_path) > 0) then
                 if (log_has_vtable_mismatch(log_path)) then
                     write (error_unit, '(a)') &
@@ -192,6 +195,8 @@ contains
         if (present(log_file)) log_path = log_file
 
         select case (self%kind)
+        case (BACKEND_GFORTRAN)
+            call gfortran_test(self%project_dir, log_path, exitcode)
         case (BACKEND_FPM)
             if (slow) then
                 call process_fpm_test_all(self%project_dir, jobs, log_path, exitcode)
@@ -263,6 +268,11 @@ contains
             end if
         end do
         if (n_fast == 0) return
+
+        if (self%kind == BACKEND_GFORTRAN) then
+            call gfortran_test(self%project_dir, log_path, exitcode)
+            return
+        end if
 
         if (self%kind == BACKEND_FPM) then
             call fpm_run_tests(self%project_dir, fast_names, n_fast, &

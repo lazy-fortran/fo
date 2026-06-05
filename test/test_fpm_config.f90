@@ -68,20 +68,17 @@ contains
         call assert(trim(c%source_dir) == 'src', 'source_dir = src')
         call assert(trim(c%app_dir) == 'app', 'app_dir = app')
         call assert(trim(c%test_dir) == 'test', 'test_dir = test')
-        call assert(c%n_deps >= 2, 'at least 2 deps (fpm, fx)')
+        call assert(c%n_deps >= 1, 'at least 1 dep (fx)')
 
         block
             integer :: i
-            logical :: found_fx, found_fpm
+            logical :: found_fx
 
             found_fx = .false.
-            found_fpm = .false.
             do i = 1, c%n_deps
                 if (trim(c%deps(i)%name) == 'fx') found_fx = .true.
-                if (trim(c%deps(i)%name) == 'fpm') found_fpm = .true.
             end do
             call assert(found_fx, 'dep fx present')
-            call assert(found_fpm, 'dep fpm present')
         end block
     end subroutine test_parse_fo_own_toml
 

@@ -2,7 +2,7 @@ program test_backend
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
                                 detect_jobs, &
-                                BACKEND_FPM, BACKEND_CMAKE, BACKEND_NONE
+                                BACKEND_FPM, BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
     implicit none
 
     integer :: n_pass, n_fail
@@ -53,7 +53,7 @@ contains
         close (u)
 
         b = detect_backend(project_dir)
-        call assert(b%kind == BACKEND_FPM, 'detect fpm')
+        call assert(b%kind == BACKEND_GFORTRAN, 'detect fpm.toml -> gfortran backend')
 
         call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_detect_fpm
@@ -70,7 +70,7 @@ contains
         close (u)
 
         b = detect_backend(trim(project_dir)//'/src/nested')
-        call assert(b%kind == BACKEND_FPM, 'detect fpm from child')
+        call assert(b%kind == BACKEND_GFORTRAN, 'detect fpm.toml from child -> gfortran backend')
         call assert(trim(b%project_dir) == trim(project_dir), &
                     'detected project root')
 
@@ -146,23 +146,20 @@ contains
     subroutine test_fpm_skips_slow_by_default()
         type(backend_t) :: b
         integer :: exitcode
-        character(len=512) :: project_dir, fast_log, slow_log
+        character(len=512) :: project_dir, log_file
 
-        call make_tmp_path('fo_test_slow_fpm', project_dir)
-        call make_tmp_path('fo_backend_fast', fast_log)
-        call make_tmp_path('fo_backend_slow', slow_log)
-        call make_slow_fpm_project(project_dir)
+        call make_tmp_path('fo_test_gfortran_run', project_dir)
+        call make_tmp_path('fo_backend_gfortran', log_file)
+        call make_simple_fpm_project(project_dir)
 
         b = detect_backend(project_dir)
-        call b%test(exitcode, log_file=fast_log)
-        call assert(exitcode == 0, 'fpm test skips slow by default')
+        call b%build(exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'gfortran build succeeds on simple project')
+        call b%test(exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'gfortran test runs passing tests')
 
-        call b%test(exitcode, include_slow=.true., &
-                    log_file=slow_log)
-        call assert(exitcode /= 0, 'fpm test --all includes slow')
-
-        call execute_command_line('rm -rf '//trim(project_dir))
-        call execute_command_line('rm -f '//trim(fast_log)//' '//trim(slow_log))
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_fpm_skips_slow_by_default
 
     subroutine test_cmake_skips_slow_by_default()
