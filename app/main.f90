@@ -1,7 +1,8 @@
 program fo_main
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, is_slow_test
-    use fo_dag, only: dag_t, dag_build, dag_topo_order
+    use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME, is_slow_test
+    use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_to_dot, MAX_NODES
+    use fo_dag_bridge, only: build_dag_from_units
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, &
                                 BACKEND_FPM, BACKEND_CMAKE
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules
@@ -61,7 +62,6 @@ contains
 
     subroutine cmd_run()
         ! staged pipeline: static -> build -> test -> lint
-        use fo_dag, only: MAX_NODES
         type(backend_t) :: b
         type(dag_t) :: dag
         type(scan_unit_t) :: units(MAX_UNITS)
@@ -72,6 +72,7 @@ contains
         integer :: n_cached, i, n_test_names
         real :: t0, t1
         character(len=128) :: test_names(MAX_NODES)
+        logical :: is_test_arr(MAX_NODES), has_cycle
 
         call cpu_time(t0)
 
@@ -92,24 +93,25 @@ contains
         ! graceful skip for non-Fortran directories
         if (n_units == 0) return
 
-        call dag_build(units, n_units, dag)
-        call dag_topo_order(dag, order, n_order, ierr)
-        if (ierr /= 0) then
+        call build_dag_from_units(units, n_units, dag)
+        call dag_topo_sort(dag, order, n_order, has_cycle)
+        if (has_cycle) then
             write (error_unit, '(a,i0,a,i0,a)') &
-                'Static: warning: ', dag%n - n_order, ' of ', dag%n, &
+                'Static: warning: ', dag%n_nodes - n_order, ' of ', dag%n_nodes, &
                 ' modules in possible cycle (continuing with build)'
         end if
 
-        ! compute changed modules
+        ! compute changed modules (rebuilds dag internally)
         call fo_changed_modules(trim(b%project_dir), dag, changed_ids, n_changed, &
-                                affected_ids, n_affected, n_cached, ierr)
+                                affected_ids, n_affected, n_cached, ierr, &
+                                is_test_arr=is_test_arr)
         if (ierr /= 0) then
             write (error_unit, '(a)') 'Static: FAIL scan or dag error'
             stop 1
         end if
 
         write (output_unit, '(a,i0,a,i0,a,i0,a)') &
-            'Static: OK (', dag%n, ' modules, ', n_changed, &
+            'Static: OK (', dag%n_nodes, ' modules, ', n_changed, &
             ' changed, ', n_affected, ' affected)'
 
         ! 2. build (restore cached artifacts first, store after)
@@ -138,10 +140,10 @@ contains
         ! collect affected test names (excluding slow)
         n_test_names = 0
         do i = 1, n_affected
-            if (dag%nodes(affected_ids(i))%is_test) then
-                if (.not. is_slow_test(dag%nodes(affected_ids(i))%name)) then
+            if (is_test_arr(affected_ids(i))) then
+                if (.not. is_slow_test(dag%nodes(affected_ids(i))%label)) then
                     n_test_names = n_test_names + 1
-                    test_names(n_test_names) = dag%nodes(affected_ids(i))%name
+                    test_names(n_test_names) = dag%nodes(affected_ids(i))%label
                 end if
             end if
         end do
@@ -340,14 +342,16 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
     end function has_arg
 
     subroutine cmd_changed()
-        use fo_dag, only: MAX_NODES
         type(dag_t) :: dag
         integer :: changed_ids(MAX_NODES), n_changed
         integer :: affected_ids(MAX_NODES), n_affected
         integer :: n_cached, ierr, i, n_tests
+        character(len=MAX_NAME) :: filenames(MAX_NODES)
+        logical :: is_test_arr(MAX_NODES)
 
         call fo_changed_modules('.', dag, changed_ids, n_changed, &
-                                affected_ids, n_affected, n_cached, ierr)
+                                affected_ids, n_affected, n_cached, ierr, &
+                                filenames=filenames, is_test_arr=is_test_arr)
         if (ierr /= 0) then
             write (error_unit, '(a)') 'fo: scan or dag failed'
             stop 1
@@ -361,28 +365,28 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
         write (output_unit, '(a,i0,a)') 'changed (', n_changed, '):'
         do i = 1, n_changed
             write (output_unit, '(a,a,a,a)') '  ', &
-                trim(dag%nodes(changed_ids(i))%name), &
-                '  ', trim(dag%nodes(changed_ids(i))%filename)
+                trim(dag%nodes(changed_ids(i))%label), &
+                '  ', trim(filenames(changed_ids(i)))
         end do
 
         write (output_unit, '(a,i0,a)') 'affected (', n_affected, '):'
         do i = 1, n_affected
             write (output_unit, '(a,a,a,a)') '  ', &
-                trim(dag%nodes(affected_ids(i))%name), &
-                '  ', trim(dag%nodes(affected_ids(i))%filename)
+                trim(dag%nodes(affected_ids(i))%label), &
+                '  ', trim(filenames(affected_ids(i)))
         end do
 
         n_tests = 0
         do i = 1, n_affected
-            if (dag%nodes(affected_ids(i))%is_test) n_tests = n_tests + 1
+            if (is_test_arr(affected_ids(i))) n_tests = n_tests + 1
         end do
         if (n_tests > 0) then
             write (output_unit, '(a,i0,a)') 'affected tests (', n_tests, '):'
             do i = 1, n_affected
-                if (dag%nodes(affected_ids(i))%is_test) then
+                if (is_test_arr(affected_ids(i))) then
                     write (output_unit, '(a,a,a,a)') '  ', &
-                        trim(dag%nodes(affected_ids(i))%name), &
-                        '  ', trim(dag%nodes(affected_ids(i))%filename)
+                        trim(dag%nodes(affected_ids(i))%label), &
+                        '  ', trim(filenames(affected_ids(i)))
                 end if
             end do
         end if
@@ -424,7 +428,6 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
     end subroutine get_flags_arg
 
     subroutine cmd_test()
-        use fo_dag, only: MAX_NODES
         type(backend_t) :: b
         type(dag_t) :: dag
         integer :: exitcode
@@ -434,6 +437,7 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
         logical :: only_changed, include_all
         character(len=256) :: arg
         character(len=128) :: test_names(MAX_NODES)
+        logical :: is_test_arr(MAX_NODES)
 
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
@@ -451,7 +455,8 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
 
         if (only_changed) then
             call fo_changed_modules('.', dag, changed_ids, n_changed, &
-                                    affected_ids, n_affected, n_cached, ierr)
+                                    affected_ids, n_affected, n_cached, ierr, &
+                                    is_test_arr=is_test_arr)
             if (ierr /= 0) then
                 write (error_unit, '(a)') 'fo: scan or dag failed'
                 stop 1
@@ -465,9 +470,9 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
             ! collect affected test names
             n_test_names = 0
             do i = 1, n_affected
-                if (dag%nodes(affected_ids(i))%is_test) then
+                if (is_test_arr(affected_ids(i))) then
                     n_test_names = n_test_names + 1
-                    test_names(n_test_names) = dag%nodes(affected_ids(i))%name
+                    test_names(n_test_names) = dag%nodes(affected_ids(i))%label
                 end if
             end do
 
@@ -491,6 +496,7 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
         character(len=512) :: scan_root
         integer :: n_units, ierr, i, j
         logical :: dot_mode
+        character(len=:), allocatable :: dot_output
 
         b = detect_backend('.')
         scan_root = '.'
@@ -503,35 +509,21 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
             stop 1
         end if
 
-        call dag_build(units, n_units, dag)
+        call build_dag_from_units(units, n_units, dag)
 
         if (dot_mode) then
-            write (output_unit, '(a)') 'digraph modules {'
-            write (output_unit, '(a)') '  rankdir=BT;'
-            write (output_unit, '(a)') '  node [shape=box, fontsize=10];'
-            do i = 1, dag%n
-                if (dag%nodes(i)%n_deps == 0) then
-                    write (output_unit, '(a,a,a)') &
-                        '  "', trim(dag%nodes(i)%name), '";'
-                else
-                    do j = 1, dag%nodes(i)%n_deps
-                        write (output_unit, '(a,a,a,a,a)') &
-                            '  "', trim(dag%nodes(i)%name), '" -> "', &
-                            trim(dag%nodes(dag%nodes(i)%dep_ids(j))%name), '";'
-                    end do
-                end if
-            end do
-            write (output_unit, '(a)') '}'
+            call dag_to_dot(dag, dot_output)
+            write (output_unit, '(a)') trim(dot_output)
         else
-            do i = 1, dag%n
-                if (dag%nodes(i)%n_deps == 0) then
-                    write (output_unit, '(a)') trim(dag%nodes(i)%name)
+            do i = 1, dag%n_nodes
+                if (dag%nodes(i)%n_edges == 0) then
+                    write (output_unit, '(a)') trim(dag%nodes(i)%label)
                 else
-                    do j = 1, dag%nodes(i)%n_deps
+                    do j = 1, dag%nodes(i)%n_edges
                         write (output_unit, '(a,a,a)') &
-                            trim(dag%nodes(i)%name), &
+                            trim(dag%nodes(i)%label), &
                             ' -> ', &
-                            trim(dag%nodes(dag%nodes(i)%dep_ids(j))%name)
+                            trim(dag%nodes(dag%nodes(i)%edges(j))%label)
                     end do
                 end if
             end do
@@ -724,9 +716,9 @@ write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt 
 
         call scan_dir(trim(scan_root), units, n_units, ierr)
         if (ierr == 0) then
-            call dag_build(units, n_units, dag)
+            call build_dag_from_units(units, n_units, dag)
             write (output_unit, '(a,i0)') 'files: ', n_units
-            write (output_unit, '(a,i0)') 'modules: ', dag%n
+            write (output_unit, '(a,i0)') 'modules: ', dag%n_nodes
         end if
     end subroutine cmd_info
 

@@ -1,7 +1,7 @@
 module fo_cache
     use, intrinsic :: iso_fortran_env, only: int64
     use fo_scan, only: MAX_NAME
-    use fo_dag, only: MAX_NODES
+    use fx_dag, only: MAX_NODES
     implicit none
     private
     public :: cache_t, cache_init, cache_lookup, cache_store, cache_key_for

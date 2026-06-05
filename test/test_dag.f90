@@ -1,7 +1,9 @@
 program test_dag
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_scan, only: scan_unit_t
-    use fo_dag, only: dag_t, dag_build, dag_topo_order, dag_reverse_deps, MAX_NODES
+    use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_affected_set, &
+                      MAX_NODES
+    use fo_dag_bridge, only: build_dag_from_units
     implicit none
 
     integer :: n_pass, n_fail
@@ -35,7 +37,8 @@ contains
         ! a -> b -> c (a depends on b, b depends on c)
         type(scan_unit_t) :: units(3)
         type(dag_t) :: dag
-        integer :: order(MAX_NODES), n_order, ierr
+        integer :: order(MAX_NODES), n_order
+        logical :: has_cycle
 
         units(1)%filename = 'a.f90'
         units(1)%module_name = 'a'
@@ -51,25 +54,26 @@ contains
         units(3)%module_name = 'c'
         units(3)%n_deps = 0
 
-        call dag_build(units, 3, dag)
-        call assert(dag%n == 3, 'linear: 3 nodes')
+        call build_dag_from_units(units, 3, dag)
+        call assert(dag%n_nodes == 3, 'linear: 3 nodes')
 
-        call dag_topo_order(dag, order, n_order, ierr)
-        call assert(ierr == 0, 'linear: no cycle')
+        call dag_topo_sort(dag, order, n_order, has_cycle)
+        call assert(.not. has_cycle, 'linear: no cycle')
         call assert(n_order == 3, 'linear: 3 in order')
 
         ! c must come before b, b before a
-        call assert(position(order, n_order, dag%find('c')) < &
-                    position(order, n_order, dag%find('b')), 'linear: c before b')
-        call assert(position(order, n_order, dag%find('b')) < &
-                    position(order, n_order, dag%find('a')), 'linear: b before a')
+        call assert(position(order, n_order, dag_find_node(dag, 'c')) < &
+                    position(order, n_order, dag_find_node(dag, 'b')), 'linear: c before b')
+        call assert(position(order, n_order, dag_find_node(dag, 'b')) < &
+                    position(order, n_order, dag_find_node(dag, 'a')), 'linear: b before a')
     end subroutine test_linear_chain
 
     subroutine test_diamond()
         ! d -> b, d -> c, b -> a, c -> a
         type(scan_unit_t) :: units(4)
         type(dag_t) :: dag
-        integer :: order(MAX_NODES), n_order, ierr
+        integer :: order(MAX_NODES), n_order
+        logical :: has_cycle
 
         units(1)%filename = 'a.f90'
         units(1)%module_name = 'a'
@@ -91,14 +95,14 @@ contains
         units(4)%deps(1) = 'b'
         units(4)%deps(2) = 'c'
 
-        call dag_build(units, 4, dag)
-        call assert(dag%n == 4, 'diamond: 4 nodes')
+        call build_dag_from_units(units, 4, dag)
+        call assert(dag%n_nodes == 4, 'diamond: 4 nodes')
 
-        call dag_topo_order(dag, order, n_order, ierr)
-        call assert(ierr == 0, 'diamond: no cycle')
+        call dag_topo_sort(dag, order, n_order, has_cycle)
+        call assert(.not. has_cycle, 'diamond: no cycle')
         call assert(n_order == 4, 'diamond: all 4 ordered')
-        call assert(position(order, n_order, dag%find('a')) < &
-                    position(order, n_order, dag%find('d')), 'diamond: a before d')
+        call assert(position(order, n_order, dag_find_node(dag, 'a')) < &
+                    position(order, n_order, dag_find_node(dag, 'd')), 'diamond: a before d')
     end subroutine test_diamond
 
     subroutine test_reverse_deps()
@@ -121,10 +125,10 @@ contains
         units(3)%module_name = 'c'
         units(3)%n_deps = 0
 
-        call dag_build(units, 3, dag)
+        call build_dag_from_units(units, 3, dag)
 
-        changed(1) = dag%find('c')
-        call dag_reverse_deps(dag, changed, 1, affected, n_affected)
+        changed(1) = dag_find_node(dag, 'c')
+        call dag_affected_set(dag, changed, 1, affected, n_affected)
         call assert(n_affected == 3, 'rdeps: changing c affects all 3')
     end subroutine test_reverse_deps
 
@@ -136,6 +140,7 @@ contains
         type(dag_t) :: dag
         integer :: changed(1), affected(MAX_NODES), n_affected
         integer :: i, n_test_affected
+        logical :: is_test_arr(MAX_NODES)
 
         units(1)%filename = 'src/lib_a.f90'
         units(1)%module_name = 'lib_a'
@@ -160,25 +165,25 @@ contains
         units(4)%n_deps = 0
         units(4)%is_test = .false.
 
-        call dag_build(units, 4, dag)
-        call assert(dag%n == 4, 'affected_tests: 4 nodes')
+        call build_dag_from_units(units, 4, dag, is_test_arr=is_test_arr)
+        call assert(dag%n_nodes == 4, 'affected_tests: 4 nodes')
 
         ! change lib_a
-        changed(1) = dag%find('lib_a')
-        call dag_reverse_deps(dag, changed, 1, affected, n_affected)
+        changed(1) = dag_find_node(dag, 'lib_a')
+        call dag_affected_set(dag, changed, 1, affected, n_affected)
 
         call assert(n_affected == 2, 'affected_tests: 2 affected (lib_a + test_a)')
 
         ! count how many affected are tests
         n_test_affected = 0
         do i = 1, n_affected
-            if (dag%nodes(affected(i))%is_test) n_test_affected = n_test_affected + 1
+            if (is_test_arr(affected(i))) n_test_affected = n_test_affected + 1
         end do
         call assert(n_test_affected == 1, 'affected_tests: 1 affected test')
 
         ! verify test_b is not affected
         do i = 1, n_affected
-            call assert(trim(dag%nodes(affected(i))%name) /= 'test_b', &
+            call assert(trim(dag%nodes(affected(i))%label) /= 'test_b', &
                         'affected_tests: test_b not affected')
         end do
     end subroutine test_affected_tests

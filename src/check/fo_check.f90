@@ -1,7 +1,8 @@
 module fo_check
     use fo_json, only: make_tmpfile, delete_tmpfile
     use fo_scan, only: scan_unit_t, scan_dir, MAX_NAME, MAX_UNITS
-    use fo_dag, only: dag_t, dag_build, dag_topo_order, dag_reverse_deps, MAX_NODES
+    use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_affected_set, MAX_NODES
+    use fo_dag_bridge, only: build_dag_from_units
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE, &
                                 BACKEND_FPM, BACKEND_CMAKE
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_store, &
@@ -40,13 +41,15 @@ contains
 
     subroutine fo_changed_modules(dir, dag, changed_ids, n_changed, &
                                   affected_ids, n_affected, n_cached, ierr, &
-                                  n_in_cycle)
+                                  n_in_cycle, filenames, is_test_arr)
         character(len=*), intent(in) :: dir
         type(dag_t), intent(out) :: dag
         integer, intent(out) :: changed_ids(MAX_NODES), n_changed
         integer, intent(out) :: affected_ids(MAX_NODES), n_affected
         integer, intent(out) :: n_cached, ierr
         integer, intent(out), optional :: n_in_cycle
+        character(len=MAX_NAME), optional, intent(out) :: filenames(MAX_NODES)
+        logical, optional, intent(out) :: is_test_arr(MAX_NODES)
 
         type(scan_unit_t) :: units(MAX_UNITS)
         type(cache_t) :: c
@@ -60,6 +63,8 @@ contains
         character(len=MAX_NAME) :: ext_names(MAX_EXT_DEPS)
         character(len=HASH_LEN) :: ext_keys(MAX_EXT_DEPS)
         integer :: n_ext
+        character(len=MAX_NAME) :: local_filenames(MAX_NODES)
+        logical :: has_cycle
 
         ierr = 0
         n_changed = 0
@@ -76,9 +81,10 @@ contains
         call scan_dir(trim(b%project_dir), units, n_units, ierr)
         if (ierr /= 0) return
 
-        call dag_build(units, n_units, dag)
-        call dag_topo_order(dag, order, n_order, ierr)
-        if (present(n_in_cycle)) n_in_cycle = dag%n - n_order
+        call build_dag_from_units(units, n_units, dag, local_filenames)
+        if (present(filenames)) filenames = local_filenames
+        call dag_topo_sort(dag, order, n_order, has_cycle)
+        if (present(n_in_cycle)) n_in_cycle = dag%n_nodes - n_order
         ierr = 0
 
         call detect_compiler(compiler)
@@ -95,8 +101,8 @@ contains
 
             ! collect in-DAG dep keys
             n_dep_keys = 0
-            do j = 1, dag%nodes(node_id)%n_deps
-                dep_id = dag%nodes(node_id)%dep_ids(j)
+            do j = 1, dag%nodes(node_id)%n_edges
+                dep_id = dag%nodes(node_id)%edges(j)
                 if (dep_id > 0 .and. len_trim(keys(dep_id)) > 0) then
                     n_dep_keys = n_dep_keys + 1
                     if (n_dep_keys <= 64) dep_keys(n_dep_keys) = keys(dep_id)
@@ -108,10 +114,10 @@ contains
                                   ext_names, ext_keys, n_ext, dep_keys, n_dep_keys)
 
             keys(node_id) = cache_key_for( &
-                            dag%nodes(node_id)%filename, compiler, '', &
+                            local_filenames(node_id), compiler, '', &
                             dep_keys, n_dep_keys)
 
-            if (cache_lookup(c, dag%nodes(node_id)%name, keys(node_id))) then
+            if (cache_lookup(c, dag%nodes(node_id)%label, keys(node_id))) then
                 n_cached = n_cached + 1
             else
                 n_changed = n_changed + 1
@@ -120,13 +126,13 @@ contains
         end do
 
         if (n_changed > 0) then
-            call dag_reverse_deps(dag, changed_ids, n_changed, &
+            call dag_affected_set(dag, changed_ids, n_changed, &
                                   affected_ids, n_affected)
         end if
 
         do i = 1, n_order
             node_id = order(i)
-            call cache_store(c, dag%nodes(node_id)%name, keys(node_id))
+            call cache_store(c, dag%nodes(node_id)%label, keys(node_id))
         end do
     end subroutine fo_changed_modules
 
@@ -150,7 +156,7 @@ contains
         do i = 1, n_units
             do j = 1, units(i)%n_deps
                 dep_name = units(i)%deps(j)
-                if (dag%find(dep_name) > 0) cycle
+                if (dag_find_node(dag, dep_name) > 0) cycle
 
                 ! skip if already collected
                 already = .false.
@@ -237,13 +243,13 @@ contains
         character(len=MAX_NAME) :: node_name
 
         ! find the scan unit for this node
-        node_name = dag%nodes(node_id)%name
+        node_name = dag%nodes(node_id)%label
         do i = 1, n_units
             if (trim(units(i)%module_name) == trim(node_name) .or. &
                 trim(units(i)%program_name) == trim(node_name)) then
                 ! check each of this unit's deps
                 do j = 1, units(i)%n_deps
-                    if (dag%find(units(i)%deps(j)) > 0) cycle
+                    if (dag_find_node(dag, units(i)%deps(j)) > 0) cycle
                     ! external dep: find its hash
                     do k = 1, n_ext
                         if (trim(ext_names(k)) == trim(units(i)%deps(j))) then
@@ -299,7 +305,7 @@ contains
             return
         end if
 
-        res%n_modules = dag%n
+        res%n_modules = dag%n_nodes
         res%n_cached = n_cached
         res%n_changed = n_changed
         res%n_affected = n_affected

@@ -148,6 +148,17 @@ contains
         case (BACKEND_FPM)
             call process_fpm_build(self%project_dir, flag_text, np, log_path, &
                                    exitcode)
+            ! vtable mismatch = stale .mod files from a prior dependency change
+            if (exitcode /= 0 .and. exitcode /= 124 .and. len_trim(log_path) > 0) then
+                if (log_has_vtable_mismatch(log_path)) then
+                    write (error_unit, '(a)') &
+                        'fo: WARNING: stale .mod files detected (vtable mismatch);' // &
+                        ' clearing module interface cache and retrying'
+                    call clear_fpm_mod_cache(self%project_dir)
+                    call process_fpm_build(self%project_dir, flag_text, np, log_path, &
+                                           exitcode)
+                end if
+            end if
         case (BACKEND_CMAKE)
             call process_cmake_build(self%project_dir, flag_text, np, log_path, &
                                      exitcode)
@@ -431,5 +442,52 @@ contains
                                         exitcode)
         end if
     end subroutine fpm_run_tests
+
+    ! Returns true if the build log contains a gfortran vtable mismatch error.
+    ! These occur when .mod files compiled under different dependency sets are mixed.
+    logical function log_has_vtable_mismatch(log_file)
+        character(len=*), intent(in) :: log_file
+
+        integer :: u, iostat
+        character(len=512) :: line
+
+        log_has_vtable_mismatch = .false.
+        open (newunit=u, file=trim(log_file), status='old', iostat=iostat)
+        if (iostat /= 0) return
+
+        do
+            read (u, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            if (index(line, 'Mismatch in components of derived type') > 0 .or. &
+                index(line, '__vtype_') > 0) then
+                log_has_vtable_mismatch = .true.
+                exit
+            end if
+        end do
+        close (u)
+    end function log_has_vtable_mismatch
+
+    ! Delete all .mod files from fpm build directories to clear stale module interfaces.
+    ! Keeps dependency build artifacts (.o files) intact to avoid full dependency rebuild.
+    subroutine clear_fpm_mod_cache(project_dir)
+        character(len=*), intent(in) :: project_dir
+
+        character(len=1024) :: cmd
+        integer :: ierr
+
+        cmd = 'find '//trim(project_dir)//'/build' &
+              //' -maxdepth 2 -name "*.mod"' &
+              //' -not -path "*/dependencies/*"' &
+              //' -delete 2>/dev/null'
+        call execute_command_line(cmd, exitstat=ierr, wait=.true.)
+
+        ! Also remove .o files for the main project (not dependencies)
+        ! to force recompilation with fresh module interfaces.
+        cmd = 'find '//trim(project_dir)//'/build' &
+              //' -mindepth 3 -maxdepth 3 -name "src_*.o"' &
+              //' -not -path "*/dependencies/*"' &
+              //' -delete 2>/dev/null'
+        call execute_command_line(cmd, exitstat=ierr, wait=.true.)
+    end subroutine clear_fpm_mod_cache
 
 end module fo_build_backend
