@@ -135,14 +135,19 @@ contains
         character(len=*), intent(in), optional :: flags
         character(len=*), intent(in), optional :: log_file
 
-        integer :: np
-        character(len=512) :: log_path, flag_text
+        integer :: np, lock_ierr
+        character(len=512) :: log_path, flag_text, lock_dir
 
         np = detect_jobs()
         log_path = ''
         if (present(log_file)) log_path = log_file
         flag_text = ''
         if (present(flags)) flag_text = flags
+        call acquire_project_lock(self%project_dir, lock_dir, lock_ierr)
+        if (lock_ierr /= 0) then
+            exitcode = 1
+            return
+        end if
 
         select case (self%kind)
         case (BACKEND_GFORTRAN)
@@ -167,8 +172,10 @@ contains
         case default
             write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             exitcode = 1
+            call release_project_lock(lock_dir)
             return
         end select
+        call release_project_lock(lock_dir)
         if (exitcode == 124) then
             write (error_unit, '(a)') &
                 'fo: WARNING: build timed out (FO_BUILD_TIMEOUT exceeded);' // &
@@ -182,9 +189,9 @@ contains
         logical, intent(in), optional :: include_slow
         character(len=*), intent(in), optional :: log_file
 
-        integer :: list_ierr, n_names, jobs
+        integer :: list_ierr, n_names, jobs, lock_ierr
         character(len=128) :: names(MAX_TEST_TARGETS)
-        character(len=512) :: log_path
+        character(len=512) :: log_path, lock_dir
         logical :: has_tests, slow
 
         slow = .false.
@@ -192,6 +199,11 @@ contains
         jobs = detect_jobs()
         log_path = ''
         if (present(log_file)) log_path = log_file
+        call acquire_project_lock(self%project_dir, lock_dir, lock_ierr)
+        if (lock_ierr /= 0) then
+            exitcode = 1
+            return
+        end if
 
         select case (self%kind)
         case (BACKEND_GFORTRAN)
@@ -205,11 +217,13 @@ contains
                                     list_ierr, log_path)
                 if (list_ierr /= 0) then
                     exitcode = 1
+                    call release_project_lock(lock_dir)
                     return
                 end if
                 call filter_slow_tests(names, n_names)
                 if (n_names == 0) then
                     exitcode = 0
+                    call release_project_lock(lock_dir)
                     return
                 end if
                 call fpm_run_tests(self%project_dir, names, n_names, &
@@ -220,14 +234,17 @@ contains
                      exist=has_tests)
             if (.not. has_tests) then
                 exitcode = 0
+                call release_project_lock(lock_dir)
                 return
             end if
             call process_ctest(self%project_dir, jobs, '', slow, log_path, exitcode)
         case default
             write (error_unit, '(a)') 'fo: no build backend detected'
             exitcode = 1
+            call release_project_lock(lock_dir)
             return
         end select
+        call release_project_lock(lock_dir)
         if (exitcode == 124) then
             write (error_unit, '(a)') &
                 'fo: WARNING: tests timed out (FO_TEST_TIMEOUT exceeded);' // &
@@ -245,12 +262,12 @@ contains
         logical, intent(in), optional :: include_slow
         character(len=*), intent(in), optional :: log_file
 
-        integer :: i
+        integer :: i, lock_ierr
         character(len=128) :: fast_names(MAX_TEST_TARGETS)
         logical :: slow
         integer :: n_fast, jobs
         character(len=1024) :: regex
-        character(len=512) :: log_path
+        character(len=512) :: log_path, lock_dir
 
         slow = .false.
         if (present(include_slow)) slow = include_slow
@@ -268,16 +285,23 @@ contains
             end if
         end do
         if (n_fast == 0) return
+        call acquire_project_lock(self%project_dir, lock_dir, lock_ierr)
+        if (lock_ierr /= 0) then
+            exitcode = 1
+            return
+        end if
 
         if (self%kind == BACKEND_GFORTRAN) then
             call gfortran_test_names(self%project_dir, fast_names, n_fast, &
                                      log_path, exitcode, include_slow=slow)
+            call release_project_lock(lock_dir)
             return
         end if
 
         if (self%kind == BACKEND_FPM) then
             call fpm_run_tests(self%project_dir, fast_names, n_fast, &
                                exitcode, log_path)
+            call release_project_lock(lock_dir)
             return
         end if
 
@@ -285,11 +309,47 @@ contains
             call names_to_ctest_regex(fast_names, n_fast, regex)
             call process_ctest(self%project_dir, jobs, regex, slow, log_path, &
                                exitcode)
+            call release_project_lock(lock_dir)
             return
         end if
 
         exitcode = 1
+        call release_project_lock(lock_dir)
     end subroutine backend_test_names
+
+    subroutine acquire_project_lock(project_dir, lock_dir, ierr)
+        character(len=*), intent(in) :: project_dir
+        character(len=*), intent(out) :: lock_dir
+        integer, intent(out) :: ierr
+
+        character(len=4096) :: cmd
+
+        lock_dir = trim(project_dir)//'/build/fo/.lock'
+        cmd = 'base='//sq(trim(project_dir)//'/build/fo')//'; '// &
+              'lock="$base/.lock"; mkdir -p "$base" || exit 1; '// &
+              'while ! mkdir "$lock" 2>/dev/null; do '// &
+              'if [ -r "$lock/pid" ]; then pid=$(cat "$lock/pid" 2>/dev/null || true); '// &
+              'if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then '// &
+              'rm -rf "$lock"; continue; fi; fi; '// &
+              'sleep 0.05; done; printf "%s\n" "$PPID" > "$lock/pid"'
+        call execute_command_line(trim(cmd), wait=.true., exitstat=ierr)
+    end subroutine acquire_project_lock
+
+    subroutine release_project_lock(lock_dir)
+        character(len=*), intent(in) :: lock_dir
+
+        integer :: exitcode
+
+        if (len_trim(lock_dir) == 0) return
+        call execute_command_line('rm -rf '//sq(trim(lock_dir)), wait=.true., &
+                                  exitstat=exitcode)
+    end subroutine release_project_lock
+
+    pure function sq(s) result(r)
+        character(len=*), intent(in) :: s
+        character(len=len_trim(s) + 2) :: r
+        r = "'"//trim(s)//"'"
+    end function sq
 
     subroutine names_to_ctest_regex(names, n_names, regex)
         character(len=128), intent(in) :: names(MAX_TEST_TARGETS)
