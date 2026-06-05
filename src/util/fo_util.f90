@@ -1,5 +1,5 @@
 module fo_util
-    use fo_process, only: process_get_mcp_framing
+    use fx_mcp, only: mcp_send_response, MCP_FRAME_UNKNOWN
     use, intrinsic :: iso_fortran_env, only: output_unit
     implicit none
     private
@@ -87,20 +87,7 @@ contains
     subroutine send_jsonrpc(response)
         character(len=*), intent(in) :: response
 
-        character(len=16) :: len_str
-        integer :: n, framing
-
-        n = len_trim(response)
-        framing = process_get_mcp_framing()
-        if (framing == 0) then
-            write (output_unit, '(a)') trim(response)
-        else
-            write (len_str, '(i0)') n
-            write (output_unit, '(a,a,a,a,a)', advance='no') &
-                'Content-Length: ', trim(len_str), char(13)//char(10), &
-                char(13)//char(10), trim(response)
-        end if
-        flush (output_unit)
+        call mcp_send_response(trim(response), MCP_FRAME_UNKNOWN)
     end subroutine send_jsonrpc
 
     subroutine jsonrpc_error(id_str, code, msg, response)

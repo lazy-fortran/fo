@@ -1,20 +1,16 @@
 module fo_mcp
-    use fo_util, only: json_int, extract_json_field, make_tmpfile, &
-                       delete_tmpfile, read_text_file, send_jsonrpc, &
+    use fo_util, only: json_bool, json_int, extract_json_field, make_tmpfile, &
+                       delete_tmpfile, read_text_file, &
                        jsonrpc_error, jsonrpc_null, strip_path_prefix_in_str
     use fx_json_build, only: json_escape_string
-    use fo_mcp_response, only: make_initialize_response, &
-                               make_tools_list_response, &
-                               make_resources_list_response, &
-                               make_run_start_response, &
-                               make_tool_text_response
+    use fx_mcp, only: mcp_read_message, mcp_send_response, MCP_FRAME_UNKNOWN
     use fo_check, only: check_result_t, fo_check_run
     use fo_check_output, only: check_result_compact_json, &
                                check_result_full_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
                                capabilities_json
     use fo_process, only: process_start_fo_check, process_poll_pid, &
-                          process_cancel_pid, process_read_jsonrpc_message
+                          process_cancel_pid
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
                             RUN_RERUN_PENDING
     implicit none
@@ -40,12 +36,15 @@ contains
     subroutine mcp_serve()
         character(len=MAX_LINE) :: line, response
         character(len=256) :: method, id_str
-        integer :: iostat
+        integer :: framing, read_status
+        logical :: eof_flag
         type(mcp_async_state_t) :: async_state
 
+        framing = MCP_FRAME_UNKNOWN
         do
-            call read_jsonrpc_message(line, iostat)
-            if (iostat /= 0) exit
+            call mcp_read_message(line, MAX_LINE, framing, eof_flag, read_status)
+            if (eof_flag) exit
+            if (read_status /= 0) cycle
             if (len_trim(line) == 0) cycle
 
             call extract_json_field(line, '"method"', method)
@@ -55,49 +54,37 @@ contains
             select case (trim(method))
             case ('initialize')
                 call make_initialize_response(id_str, line, response)
-                call send_jsonrpc(response)
+                call mcp_send_response(trim(response), framing)
             case ('initialized')
                 ! notification, no response needed
                 cycle
             case ('tools/list')
                 call make_tools_list_response(id_str, response)
-                call send_jsonrpc(response)
+                call mcp_send_response(trim(response), framing)
             case ('tools/call')
                 call handle_tools_call(line, id_str, response, async_state)
-                call send_jsonrpc(response)
+                call mcp_send_response(trim(response), framing)
             case ('resources/list')
                 call make_resources_list_response(id_str, response)
-                call send_jsonrpc(response)
+                call mcp_send_response(trim(response), framing)
             case ('resources/read')
                 call handle_resources_read(line, id_str, response, async_state)
-                call send_jsonrpc(response)
+                call mcp_send_response(trim(response), framing)
             case ('shutdown')
                 call async_cancel_all(async_state)
                 call jsonrpc_null(id_str, response)
-                call send_jsonrpc(response)
+                call mcp_send_response(trim(response), framing)
                 exit
             case default
                 if (len_trim(id_str) > 0) then
                     call jsonrpc_error(id_str, -32601, &
                                        'method not found', response)
-                    call send_jsonrpc(response)
+                    call mcp_send_response(trim(response), framing)
                 end if
             end select
         end do
         call async_cancel_all(async_state)
     end subroutine mcp_serve
-
-    subroutine read_jsonrpc_message(body, iostat)
-        character(len=*), intent(out) :: body
-        integer, intent(out) :: iostat
-
-        integer :: nread
-
-        body = ''
-        iostat = 0
-        call process_read_jsonrpc_message(body, nread)
-        if (nread <= 0) iostat = -1
-    end subroutine read_jsonrpc_message
 
     subroutine handle_tools_call(line, id_str, response, async_state)
         character(len=*), intent(in) :: line, id_str
@@ -514,5 +501,80 @@ contains
         if (run_id == async_state%last_run_id) return
         ierr = 1
     end subroutine requested_run_id
+
+    subroutine make_initialize_response(id_str, line, response)
+        character(len=*), intent(in) :: id_str, line
+        character(len=*), intent(out) :: response
+
+        character(len=32) :: proto_ver
+
+        call extract_json_field(line, '"protocolVersion"', proto_ver)
+        if (len_trim(proto_ver) == 0) proto_ver = '2025-03-26'
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+                   '"result":{"protocolVersion":"'//trim(proto_ver)//'",'// &
+                   '"capabilities":{"tools":{"listChanged":false},'// &
+                   '"resources":{"listChanged":false}},'// &
+                   '"serverInfo":{"name":"fo","version":"0.1.0"}}}'
+    end subroutine make_initialize_response
+
+    subroutine make_tools_list_response(id_str, response)
+        character(len=*), intent(in) :: id_str
+        character(len=*), intent(out) :: response
+
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+                   '"result":{"tools":[{"name":"fo",'// &
+                   '"description":"Fortran build driver",'// &
+                   '"inputSchema":{"type":"object","properties":{'// &
+                   '"action":{"type":"string",'// &
+                   '"enum":["check","status","diagnostics","cancel",'// &
+                   '"build","test","graph","info","changed","clean",'// &
+                   '"lint","fmt"],'// &
+                   '"description":"Action to run"},'// &
+                   '"dir":{"type":"string",'// &
+                   '"description":"Project directory (default: cwd)"}},'// &
+                   '"required":["action"]}}]}}'
+    end subroutine make_tools_list_response
+
+    subroutine make_resources_list_response(id_str, response)
+        character(len=*), intent(in) :: id_str
+        character(len=*), intent(out) :: response
+
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+                   '"result":{"resources":[{"uri":"fo://diagnostics",'// &
+                   '"name":"diagnostics",'// &
+                   '"description":"Current fo check diagnostics",'// &
+                   '"mimeType":"text/plain"}]}}'
+    end subroutine make_resources_list_response
+
+    subroutine make_run_start_response(id_str, run_id, pending, response)
+        character(len=*), intent(in) :: id_str
+        integer, intent(in) :: run_id
+        logical, intent(in) :: pending
+        character(len=*), intent(out) :: response
+
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+                   '"result":{"run_id":'//trim(json_int(run_id))// &
+                   ',"state":"'
+        if (pending) then
+            response = trim(response)//'rerun-pending"'
+        else
+            response = trim(response)//'running"'
+        end if
+        response = trim(response)//',"pending":'//trim(json_bool(pending))//'}}'
+    end subroutine make_run_start_response
+
+    subroutine make_tool_text_response(id_str, output_text, exitcode, response)
+        character(len=*), intent(in) :: id_str, output_text
+        integer, intent(in) :: exitcode
+        character(len=*), intent(out) :: response
+
+        character(len=16384) :: escaped
+
+        escaped = json_escape_string(output_text)
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+                   '"result":{"content":[{"type":"text",'// &
+                   '"text":"'//trim(escaped)//'"}],"isError":'// &
+                   trim(json_bool(exitcode /= 0))//'}}'
+    end subroutine make_tool_text_response
 
 end module fo_mcp
