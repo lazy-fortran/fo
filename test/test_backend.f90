@@ -4,7 +4,7 @@ program test_backend
                                 detect_jobs, backend_build, backend_test, &
                                 backend_test_names, &
                                 BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
-    use fo_gfortran_build, only: gfortran_build
+    use fo_gfortran_build, only: gfortran_build, gfortran_test_names
     implicit none
 
     integer :: n_pass, n_fail
@@ -21,6 +21,7 @@ program test_backend
     call test_detect_jobs()
     call test_fpm_skips_slow_by_default()
     call test_gfortran_named_tests_select_requested()
+    call test_gfortran_named_test_restores_cached_object()
     call test_gfortran_recovers_from_root_mod_shadow()
     call test_gfortran_restores_deleted_outputs()
     call test_gfortran_flags_change_action_id()
@@ -194,6 +195,30 @@ contains
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_named_tests_select_requested
 
+    subroutine test_gfortran_named_test_restores_cached_object()
+        integer :: exitcode, n_first, n_second
+        character(len=512) :: project_dir, log_file
+        character(len=128) :: names(1)
+
+        call make_tmp_path('fo_test_gfortran_named_cache', project_dir)
+        call make_tmp_path('fo_backend_gfortran_named_cache', log_file)
+        call make_named_fpm_project(project_dir)
+
+        names(1) = 'test_a'
+        call gfortran_test_names(project_dir, names, 1, log_file, exitcode, &
+                                 n_compiled=n_first)
+        call gfortran_test_names(project_dir, names, 1, log_file, exitcode, &
+                                 n_compiled=n_second)
+
+        call assert(exitcode == 0, 'gfortran named cached test succeeds')
+        call assert(n_first > 0, 'gfortran named test first run compiles')
+        call assert(n_second == 0, &
+                    'gfortran named test second run restores test object')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_named_test_restores_cached_object
+
     subroutine test_gfortran_recovers_from_root_mod_shadow()
         type(backend_t) :: b
         integer :: exitcode, u
@@ -205,6 +230,7 @@ contains
 
         open (newunit=u, file=trim(project_dir)//'/src/lib.f90', &
               status='replace')
+        write (u, '(a)') '! fixture '//trim(project_dir)
         write (u, '(a)') 'module lib'
         write (u, '(a)') 'implicit none'
         write (u, '(a)') 'character(len=*), parameter :: stale_mod_fixture = "'// &
@@ -611,6 +637,7 @@ contains
 
         open (newunit=u, file=trim(project_dir)//'/test/test_a.f90', &
               status='replace')
+        write (u, '(a)') '! fixture '//trim(project_dir)
         write (u, '(a)') 'program test_a'
         write (u, '(a)') 'use lib, only: noop'
         write (u, '(a)') 'call noop()'
@@ -620,6 +647,7 @@ contains
 
         open (newunit=u, file=trim(project_dir)//'/test/test_unselected.f90', &
               status='replace')
+        write (u, '(a)') '! fixture '//trim(project_dir)
         write (u, '(a)') 'program test_unselected'
         write (u, '(a)') 'use lib, only: noop'
         write (u, '(a)') 'call noop()'

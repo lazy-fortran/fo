@@ -81,10 +81,12 @@ contains
                                is_prog_arr, dep_objs, n_dep_objs, lf, exitcode)
     end subroutine gfortran_build
 
-    subroutine gfortran_test(project_dir, log_file, exitcode, include_slow)
+    subroutine gfortran_test(project_dir, log_file, exitcode, include_slow, &
+                             n_compiled)
         character(len=*), intent(in) :: project_dir, log_file
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
+        integer, intent(out), optional :: n_compiled
 
         type(fpm_config_t) :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_lib_objs
@@ -100,6 +102,7 @@ contains
         if (len_trim(lf) == 0) lf = '/dev/null'
         slow = .false.
         if (present(include_slow)) slow = include_slow
+        if (present(n_compiled)) n_compiled = 0
 
         call gfortran_build(project_dir, lf, exitcode)
         if (exitcode /= 0) return
@@ -122,16 +125,17 @@ contains
                                    bin_dir, dep_includes, n_dep_includes, &
                                    dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
                                    config%link_libs, config%n_link_libs, lf, &
-                                   no_names, 0, slow, exitcode)
+                                   no_names, 0, slow, exitcode, n_compiled)
     end subroutine gfortran_test
 
     subroutine gfortran_test_names(project_dir, names, n_names, log_file, &
-                                   exitcode, include_slow)
+                                   exitcode, include_slow, n_compiled)
         character(len=*), intent(in) :: project_dir, log_file
         character(len=128), intent(in) :: names(:)
         integer, intent(in) :: n_names
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
+        integer, intent(out), optional :: n_compiled
 
         type(fpm_config_t) :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_lib_objs
@@ -146,6 +150,7 @@ contains
         if (len_trim(lf) == 0) lf = '/dev/null'
         slow = .false.
         if (present(include_slow)) slow = include_slow
+        if (present(n_compiled)) n_compiled = 0
 
         call gfortran_build(project_dir, lf, exitcode)
         if (exitcode /= 0) return
@@ -168,7 +173,7 @@ contains
                                    bin_dir, dep_includes, n_dep_includes, &
                                    dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
                                    config%link_libs, config%n_link_libs, lf, &
-                                   names, n_names, slow, exitcode)
+                                   names, n_names, slow, exitcode, n_compiled)
     end subroutine gfortran_test_names
 
     subroutine find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
@@ -707,7 +712,7 @@ contains
                                      dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
                                      link_libs, n_link_libs, log_file, &
                                      selected_names, n_selected, include_slow, &
-                                     exitcode)
+                                     exitcode, n_compiled)
         character(len=*), intent(in) :: project_dir, test_dir, mod_dir
         character(len=*), intent(in) :: obj_dir, bin_dir, log_file
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
@@ -722,6 +727,7 @@ contains
         integer, intent(in) :: n_selected
         logical, intent(in) :: include_slow
         integer, intent(out) :: exitcode
+        integer, intent(out), optional :: n_compiled
 
         type(scan_unit_t), allocatable :: tunits(:)
         integer :: n_tests, i, ierr, node_id, n_run
@@ -732,8 +738,9 @@ contains
         integer, allocatable :: run_nodes(:), run_exits(:)
         character(len=512), allocatable :: run_logs(:)
         character(len=HASH_LEN), allocatable :: run_keys(:)
+        logical, allocatable :: run_compiled(:)
         integer :: n_order
-        logical :: has_cycle
+        logical :: has_cycle, restored
         character(len=512) :: obj_path, bin_path
         character(len=4096) :: incl_flag
         character(len=128) :: tname
@@ -747,11 +754,13 @@ contains
         character(len=512) :: test_includes(MAX_DEP_DIRS)
 
         exitcode = 0
+        if (present(n_compiled)) n_compiled = 0
         allocate (tunits(MAX_UNITS))
         allocate (filenames(MAX_NODES), is_prog(MAX_NODES), is_test_arr(MAX_NODES))
         allocate (topo_order(MAX_NODES))
         allocate (run_nodes(MAX_NODES), run_exits(MAX_NODES), run_logs(MAX_NODES))
         allocate (run_keys(MAX_NODES))
+        allocate (run_compiled(MAX_NODES))
         call scan_dir(trim(project_dir)//'/'//trim(test_dir), tunits, n_tests, ierr)
         if (n_tests == 0) return
 
@@ -789,15 +798,24 @@ contains
         end do
 
         run_exits = 0
+        run_compiled = .false.
         !$omp parallel do schedule(dynamic) private(node_id, fname_local, obj_path, &
-        !$omp& bin_path, tname, log_local)
+        !$omp& bin_path, tname, log_local, restored)
         do i = 1, n_run
             node_id = run_nodes(i)
             fname_local = filenames(node_id)
             log_local = run_logs(i)
             call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
-            call compile_f90(project_dir, fname_local, obj_path, incl_flag, &
-                             log_local, run_exits(i))
+            restored = .false.
+            if (cache_ierr == 0 .and. cache_lookup(c, run_keys(i))) then
+                call cache_restore_action(c, run_keys(i), obj_path, mod_dir, &
+                                          restored)
+            end if
+            if (.not. restored) then
+                call compile_f90(project_dir, fname_local, obj_path, incl_flag, &
+                                 log_local, run_exits(i))
+                run_compiled(i) = run_exits(i) == 0
+            end if
             if (run_exits(i) == 0) then
                 call file_basename(fname_local, tname)
                 bin_path = trim(bin_dir)//'/'//trim(tname)
@@ -818,11 +836,12 @@ contains
                 call file_basename(filenames(run_nodes(i)), tname)
                 call append_test_status(log_file, tname, run_exits(i))
                 if (exitcode == 0) exitcode = run_exits(i)
-            else if (cache_ierr == 0) then
+            else if (cache_ierr == 0 .and. run_compiled(i)) then
                 call make_obj_path(filenames(run_nodes(i)), project_dir, obj_dir, &
                                    obj_path)
                 call cache_store_action(c, run_keys(i), obj_path, mod_dir, '', &
                                         output_key, cache_ierr)
+                if (present(n_compiled)) n_compiled = n_compiled + 1
             end if
             call delete_tmpfile(run_logs(i))
         end do
