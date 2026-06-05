@@ -114,42 +114,45 @@ contains
         character(len=512), intent(out) :: dep_objs(MAX_DEP_OBJS)
         integer, intent(out) :: n_dep_objs
 
-        character(len=512) :: tmpfile, dirfile, line, dep_dir
+        character(len=512) :: tmpfile, line
         character(len=4096) :: cmd
         integer :: u, ios, i
+        integer :: n_obj_seen
+        character(len=512) :: obj_basenames(MAX_DEP_OBJS)
+        integer :: slash
 
         n_dep_includes = 0
         n_dep_objs = 0
+        n_obj_seen = 0
         if (config%n_deps == 0) return
 
-        ! Pick the most recently modified fpm build dir to avoid duplicate symbols
-        ! when the project has been built multiple times with different flags.
-        call make_tmpfile('fo_dep_dir', dirfile)
+        call make_tmpfile('fo_dep_dirs', tmpfile)
         cmd = 'find '//sq(trim(project_dir)//'/build')//' -maxdepth 1 '// &
-              '-name "gfortran_*" -type d 2>/dev/null'// &
-              ' | xargs -r ls -dt 2>/dev/null | head -1 > '//trim(dirfile)
+              '-name "gfortran_*" -type d 2>/dev/null | sort > '//trim(tmpfile)
         call execute_command_line(trim(cmd), wait=.true.)
 
-        dep_dir = ''
-        open (newunit=u, file=dirfile, status='old', iostat=ios)
+        open (newunit=u, file=tmpfile, status='old', iostat=ios)
         if (ios == 0) then
-            read (u, '(a)', iostat=ios) dep_dir
+            do
+                read (u, '(a)', iostat=ios) line
+                if (ios /= 0) exit
+                if (len_trim(line) == 0) cycle
+                if (n_dep_includes < MAX_DEP_DIRS) then
+                    n_dep_includes = n_dep_includes + 1
+                    dep_includes(n_dep_includes) = trim(line)
+                end if
+            end do
             close (u)
         end if
-        call delete_tmpfile(dirfile)
-
-        if (len_trim(dep_dir) == 0) return
-
-        n_dep_includes = 1
-        dep_includes(1) = trim(dep_dir)
+        call delete_tmpfile(tmpfile)
 
         call make_tmpfile('fo_dep_objs', tmpfile)
         do i = 1, config%n_deps
-            cmd = 'find '//sq(trim(dep_dir))//' -name '// &
+            cmd = 'find '//sq(trim(project_dir)//'/build')//' -name '// &
                   '"build_dependencies_'//trim(config%deps(i)%name)//'_src_*.f90.o" '// &
                   '2>/dev/null >> '//trim(tmpfile)
             call execute_command_line(trim(cmd), wait=.true.)
-            cmd = 'find '//sq(trim(dep_dir))//' -name '// &
+            cmd = 'find '//sq(trim(project_dir)//'/build')//' -name '// &
                   '"build_dependencies_'//trim(config%deps(i)%name)//'_*.c.o" '// &
                   '2>/dev/null >> '//trim(tmpfile)
             call execute_command_line(trim(cmd), wait=.true.)
@@ -163,9 +166,14 @@ contains
                 if (len_trim(line) == 0) cycle
                 if (index(line, '_app_') > 0) cycle
                 if (index(line, '_test_') > 0) cycle
+                ! deduplicate: skip if basename already seen (multiple gfortran_* dirs)
+                slash = index(trim(line), '/', back=.true.)
+                if (any(obj_basenames(1:n_obj_seen) == line(slash + 1:))) cycle
                 if (n_dep_objs < MAX_DEP_OBJS) then
                     n_dep_objs = n_dep_objs + 1
                     dep_objs(n_dep_objs) = trim(line)
+                    n_obj_seen = n_obj_seen + 1
+                    obj_basenames(n_obj_seen) = line(slash + 1:)
                 end if
             end do
             close (u)
