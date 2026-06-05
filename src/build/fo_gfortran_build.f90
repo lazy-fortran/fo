@@ -192,7 +192,8 @@ contains
         integer, allocatable :: topo_order(:), node_levels(:)
         integer :: n_order, n_levels, lvl
         logical :: has_cycle, obj_exists
-        character(len=512) :: obj_path, includes_flag
+        character(len=512) :: obj_path
+        character(len=4096) :: includes_flag
         character(len=512) :: c_list, c_line
         integer :: uc, cios
 
@@ -514,7 +515,8 @@ contains
         integer, allocatable :: topo_order(:)
         integer :: n_order
         logical :: has_cycle
-        character(len=512) :: obj_path, bin_path, incl_flag
+        character(len=512) :: obj_path, bin_path
+        character(len=4096) :: incl_flag
         character(len=128) :: tname
         integer :: run_exit
 
