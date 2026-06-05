@@ -112,10 +112,10 @@ contains
         if (hit .and. has_mod) hit = fx_cache_has(c, trim(mod_key)//'-d')
     end function cache_lookup
 
-    subroutine cache_restore_action(c, action_id, obj_path, mod_dir, mod_name, &
-                                    restored, output_id)
+    subroutine cache_restore_action(c, action_id, obj_path, mod_dir, restored, &
+                                    output_id)
         type(cache_t), intent(in) :: c
-        character(len=*), intent(in) :: action_id, obj_path, mod_dir, mod_name
+        character(len=*), intent(in) :: action_id, obj_path, mod_dir
         logical, intent(out) :: restored
         character(len=HASH_LEN), intent(out), optional :: output_id
 

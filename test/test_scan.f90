@@ -159,7 +159,7 @@ contains
 
     subroutine test_scan_dir_empty()
         type(scan_unit_t), allocatable :: units(:)
-        integer :: n_units, ierr, u
+        integer :: n_units, ierr
         character(len=512) :: dir
 
         allocate (units(MAX_UNITS))

@@ -358,7 +358,7 @@ contains
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
                     if (cache_lookup(c, source_key)) then
                         call cache_restore_action(c, source_key, obj_path, mod_dir, &
-                                                  dag%nodes(node_id)%label, restored)
+                                                  restored)
                         if (restored) then
                             call get_mod_key(dag%nodes(node_id)%label, mod_dir, &
                                              new_mod_keys(node_id))

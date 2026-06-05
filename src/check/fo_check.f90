@@ -321,7 +321,7 @@ contains
         integer :: changed_ids(MAX_NODES), n_changed
         integer :: affected_ids(MAX_NODES), n_affected
         integer :: n_cached, ierr, exitcode
-        integer :: backend_kind, jobs
+        integer :: backend_kind
         real :: t0, t1
         character(len=512) :: build_log, test_log
         character(len=512) :: no_project

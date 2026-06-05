@@ -70,7 +70,7 @@ contains
 
         call execute_command_line('rm -f '//trim(obj_path)//' '//trim(mod_path), &
                                   wait=.true.)
-        call cache_restore_action(c, action_id, obj_path, mod_dir, 'm', restored)
+        call cache_restore_action(c, action_id, obj_path, mod_dir, restored)
         call assert(restored, 'action restore reports success')
         call assert(file_contains(obj_path, 'object payload'), &
                     'object restored from action cache')
@@ -134,8 +134,7 @@ contains
         call assert(ierr == 0, 'debug corrupt object payload succeeds')
         call execute_command_line('rm -f '//trim(obj_path)//' '// &
                                   trim(mod_dir)//'/badmod.mod', wait=.true.)
-        call cache_restore_action(c, action_id, obj_path, mod_dir, 'badmod', &
-                                  restored)
+        call cache_restore_action(c, action_id, obj_path, mod_dir, restored)
         call assert(.not. restored, 'corrupt payload does not restore as hit')
 
         call execute_command_line('rm -f '//trim(obj_path), wait=.true.)
