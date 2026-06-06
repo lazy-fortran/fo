@@ -223,10 +223,10 @@ contains
 
         if (len_trim(lower_line) < 8) return
         if (lower_line(1:7) /= 'module ') return
-        ! exclude 'module procedure' and 'module subroutine' and 'module function'
-        if (index(lower_line, 'procedure') > 0) return
-        if (index(lower_line, 'subroutine') > 0) return
-        if (index(lower_line, 'function') > 0) return
+        ! Exclude subprogram statements, but allow names like ast_nodes_procedure.
+        if (index(lower_line, 'module procedure') == 1) return
+        if (index(lower_line, 'module subroutine') == 1) return
+        if (index(lower_line, 'module function') == 1) return
 
         start = 8
         do while (start <= len_trim(line) .and. line(start:start) == ' ')

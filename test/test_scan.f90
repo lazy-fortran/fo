@@ -10,6 +10,7 @@ program test_scan
 
     call test_scan_use_statements()
     call test_scan_module_def()
+    call test_scan_module_name_containing_procedure()
     call test_scan_program_def()
     call test_scan_intrinsic_skip()
     call test_slow_test_detection()
@@ -89,6 +90,25 @@ contains
         call assert(.not. info%is_program, 'scan_mod: not a program')
         call execute_command_line('rm -f '//trim(path))
     end subroutine test_scan_module_def
+
+    subroutine test_scan_module_name_containing_procedure()
+        type(scan_unit_t) :: info
+        integer :: ierr
+        character(len=512) :: path
+        character(len=80) :: lines(3)
+
+        lines(1) = 'module ast_nodes_procedure'
+        lines(2) = '    implicit none'
+        lines(3) = 'end module ast_nodes_procedure'
+        call make_tmp_path('fo_test_proc_name', path, '.f90')
+        call write_file(path, lines, 3)
+
+        call scan_file(path, info, ierr)
+        call assert(ierr == 0, 'scan_proc_name: no error')
+        call assert(trim(info%module_name) == 'ast_nodes_procedure', &
+                    'scan_proc_name: module name')
+        call execute_command_line('rm -f '//trim(path))
+    end subroutine test_scan_module_name_containing_procedure
 
     subroutine test_scan_program_def()
         type(scan_unit_t) :: info
