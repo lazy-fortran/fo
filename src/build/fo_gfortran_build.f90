@@ -1192,7 +1192,7 @@ contains
         integer, intent(in) :: n_link_libs
         integer, intent(out) :: exitcode
 
-        character(len=131072) :: cmd
+        character(len=:), allocatable :: cmd
         integer :: i
 
         cmd = 'gfortran '//sq(prog_obj)
