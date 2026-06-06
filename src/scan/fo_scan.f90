@@ -166,6 +166,15 @@ contains
             return
         end if
 
+        if (len_trim(unit_info%module_name) == 0 .and. &
+            .not. unit_info%is_program) then
+            call extract_external_procedure_def(trimmed, name)
+            if (len_trim(name) > 0) then
+                unit_info%module_name = name
+                return
+            end if
+        end if
+
         call extract_program_def(trimmed, name)
         if (len_trim(name) > 0) then
             unit_info%program_name = name
@@ -293,6 +302,36 @@ contains
             call to_lower(name)
         end if
     end subroutine extract_submodule_def
+
+    subroutine extract_external_procedure_def(line, name)
+        character(len=*), intent(in) :: line
+        character(len=*), intent(out) :: name
+
+        character(len=512) :: lower_line
+        integer :: start
+
+        name = ''
+        lower_line = line
+        call to_lower(lower_line)
+
+        if (index(lower_line, 'subroutine ') == 1) then
+            start = 12
+        else if (index(lower_line, 'function ') == 1) then
+            start = 10
+        else
+            return
+        end if
+
+        do while (start <= len_trim(line) .and. line(start:start) == ' ')
+            start = start + 1
+        end do
+
+        name = adjustl(line(start:))
+        if (index(name, '(') > 0) name = name(1:index(name, '(') - 1)
+        if (index(name, ' ') > 0) name = name(1:index(name, ' ') - 1)
+        if (index(name, '!') > 0) name = name(1:index(name, '!') - 1)
+        call to_lower(name)
+    end subroutine extract_external_procedure_def
 
     subroutine extract_program_def(line, name)
         character(len=*), intent(in) :: line

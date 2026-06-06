@@ -12,12 +12,15 @@ program test_scan
     call test_scan_module_def()
     call test_scan_module_name_containing_procedure()
     call test_scan_submodule_def()
+    call test_scan_external_subroutine_def()
+    call test_scan_contained_subroutine_keeps_program()
     call test_scan_program_def()
     call test_scan_intrinsic_skip()
     call test_slow_test_detection()
     call test_scan_dir_empty()
     call test_scan_dir_path_with_spaces()
     call test_scan_dir_skips_nested_projects()
+    call test_scan_dir_skips_agent_worktrees()
 
     write (output_unit, '(a,i0,a,i0,a)') 'scan: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -144,6 +147,49 @@ contains
                     'scan_submodule: parent dependency')
         call execute_command_line('rm -f '//trim(path))
     end subroutine test_scan_submodule_def
+
+    subroutine test_scan_external_subroutine_def()
+        type(scan_unit_t) :: info
+        integer :: ierr
+        character(len=512) :: path
+        character(len=80) :: lines(3)
+
+        lines(1) = 'subroutine ensure_if_do_registration_bridge()'
+        lines(2) = '    implicit none'
+        lines(3) = 'end subroutine ensure_if_do_registration_bridge'
+        call make_tmp_path('fo_test_external_subroutine', path, '.f90')
+        call write_file(path, lines, 3)
+
+        call scan_file(path, info, ierr)
+        call assert(ierr == 0, 'scan_external_subroutine: no error')
+        call assert(trim(info%module_name) == 'ensure_if_do_registration_bridge', &
+                    'scan_external_subroutine: procedure name')
+        call execute_command_line('rm -f '//trim(path))
+    end subroutine test_scan_external_subroutine_def
+
+    subroutine test_scan_contained_subroutine_keeps_program()
+        type(scan_unit_t) :: info
+        integer :: ierr
+        character(len=512) :: path
+        character(len=80) :: lines(6)
+
+        lines(1) = 'program test_named'
+        lines(2) = 'contains'
+        lines(3) = 'subroutine helper()'
+        lines(4) = 'end subroutine helper'
+        lines(5) = 'end program test_named'
+        lines(6) = ''
+        call make_tmp_path('fo_test_contained_subroutine', path, '.f90')
+        call write_file(path, lines, 5)
+
+        call scan_file(path, info, ierr)
+        call assert(ierr == 0, 'scan_contained_subroutine: no error')
+        call assert(trim(info%program_name) == 'test_named', &
+                    'scan_contained_subroutine: program name')
+        call assert(len_trim(info%module_name) == 0, &
+                    'scan_contained_subroutine: no external unit')
+        call execute_command_line('rm -f '//trim(path))
+    end subroutine test_scan_contained_subroutine_keeps_program
 
     subroutine test_scan_program_def()
         type(scan_unit_t) :: info
@@ -300,6 +346,38 @@ contains
 
         call remove_tree(dir)
     end subroutine test_scan_dir_skips_nested_projects
+
+    subroutine test_scan_dir_skips_agent_worktrees()
+        type(scan_unit_t), allocatable :: units(:)
+        integer :: n_units, ierr
+        character(len=512) :: dir
+        character(len=80) :: root_lines(3), nested_lines(3)
+
+        allocate (units(MAX_UNITS))
+        call make_tmp_path('fo_test_agent_worktree', dir, '')
+        call remove_tree(dir)
+        call make_dir(trim(dir)//'/src')
+        call make_dir(trim(dir)//'/.claude/worktrees/wf/src')
+
+        root_lines(1) = 'module root_mod'
+        root_lines(2) = 'implicit none'
+        root_lines(3) = 'end module root_mod'
+        call write_file(trim(dir)//'/src/root_mod.f90', root_lines, 3)
+
+        nested_lines(1) = 'module ghost_mod'
+        nested_lines(2) = 'implicit none'
+        nested_lines(3) = 'end module ghost_mod'
+        call write_file(trim(dir)//'/.claude/worktrees/wf/src/ghost_mod.f90', &
+                        nested_lines, 3)
+
+        call scan_dir(dir, units, n_units, ierr)
+        call assert(ierr == 0, 'agent worktree: no scan error')
+        call assert(n_units == 1, 'agent worktree: hidden worktree skipped')
+        call assert(trim(units(1)%module_name) == 'root_mod', &
+                    'agent worktree: root module remains')
+
+        call remove_tree(dir)
+    end subroutine test_scan_dir_skips_agent_worktrees
 
     subroutine make_tmp_path(prefix, path, suffix)
         character(len=*), intent(in) :: prefix, suffix
