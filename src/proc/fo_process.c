@@ -64,6 +64,9 @@ static int is_project_root(const char *dir) {
 static int skip_dir_name(const char *name, int is_proj_root, int depth) {
     if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return 1;
     if (strcmp(name, ".git") == 0) return 1;
+    if (strcmp(name, ".claude") == 0) return 1;
+    if (strcmp(name, ".codex") == 0) return 1;
+    if (strcmp(name, ".cache") == 0) return 1;
     if (strcmp(name, "node_modules") == 0) return 1;
     /* skip 'build' only at depth 0 of a project root scan */
     if (is_proj_root && depth == 0 && strcmp(name, "build") == 0) return 1;
