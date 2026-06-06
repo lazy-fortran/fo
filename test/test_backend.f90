@@ -4,7 +4,8 @@ program test_backend
                                 detect_jobs, backend_build, backend_test, &
                                 backend_test_names, &
                                 BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
-    use fo_gfortran_build, only: gfortran_build, gfortran_test_names
+    use fo_gfortran_build, only: gfortran_build, gfortran_test, &
+                                 gfortran_test_names
     implicit none
 
     integer :: n_pass, n_fail
@@ -28,6 +29,7 @@ program test_backend
     call test_gfortran_compiler_identity_changes_action_id()
     call test_gfortran_private_change_keeps_dependent_cached()
     call test_gfortran_interface_change_rebuilds_dependent()
+    call test_gfortran_parallel_test_loop_restores_cached_objects()
     call test_cmake_skips_slow_by_default()
     call test_cmake_named_tests_select_regex()
     call test_fpm_path_with_spaces()
@@ -405,6 +407,27 @@ contains
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_interface_change_rebuilds_dependent
 
+    subroutine test_gfortran_parallel_test_loop_restores_cached_objects()
+        integer :: exitcode, n_first, n_second
+        character(len=512) :: project_dir, log_file
+
+        call make_tmp_path('fo_test_parallel_tests', project_dir)
+        call make_tmp_path('fo_backend_parallel_tests', log_file)
+        call make_many_test_fpm_project(project_dir, 8)
+
+        call gfortran_test(project_dir, log_file, exitcode, n_compiled=n_first)
+        call assert(exitcode == 0, 'parallel gfortran test suite succeeds')
+        call assert(n_first == 8, 'parallel gfortran test first run compiles')
+
+        call gfortran_test(project_dir, log_file, exitcode, n_compiled=n_second)
+        call assert(exitcode == 0, 'parallel gfortran test suite rerun succeeds')
+        call assert(n_second == 0, &
+                    'parallel gfortran test second run restores tests')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_parallel_test_loop_restores_cached_objects
+
     subroutine make_two_module_project(project_dir)
         character(len=*), intent(in) :: project_dir
         integer :: u
@@ -686,6 +709,43 @@ contains
         write (u, '(a)') 'end program test_fast'
         close (u)
     end subroutine make_simple_fpm_project
+
+    subroutine make_many_test_fpm_project(project_dir, n_tests)
+        character(len=*), intent(in) :: project_dir
+        integer, intent(in) :: n_tests
+        integer :: u, i
+        character(len=32) :: name
+
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        call make_dir(trim(project_dir)//'/test')
+
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "fo_test_parallel_fpm"'
+        close (u)
+
+        open (newunit=u, file=trim(project_dir)//'/src/lib.f90', &
+              status='replace')
+        write (u, '(a)') 'module lib'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine noop()'
+        write (u, '(a)') 'end subroutine noop'
+        write (u, '(a)') 'end module lib'
+        close (u)
+
+        do i = 1, n_tests
+            write (name, '(a,i0)') 'test_', i
+            open (newunit=u, file=trim(project_dir)//'/test/'//trim(name)//'.f90', &
+                  status='replace')
+            write (u, '(a)') '! fixture '//trim(project_dir)
+            write (u, '(a)') 'program '//trim(name)
+            write (u, '(a)') 'use lib, only: noop'
+            write (u, '(a)') 'call noop()'
+            write (u, '(a)') 'end program '//trim(name)
+            close (u)
+        end do
+    end subroutine make_many_test_fpm_project
 
     subroutine make_cmake_tests_project(project_dir, unselected_fails)
         character(len=*), intent(in) :: project_dir

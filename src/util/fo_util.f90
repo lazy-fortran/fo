@@ -26,12 +26,16 @@ contains
         integer :: count
         integer(c_int) :: pid
         integer, save :: serial = 0
+        integer :: serial_local
 
+        !$omp critical (fo_tmpfile_serial)
         serial = serial + 1
+        serial_local = serial
+        !$omp end critical (fo_tmpfile_serial)
         call fo_c_getpid(pid)
         call system_clock(count)
         write (path, '(a,a,a,i0,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
-            int(pid), '-', count, '-', serial, '.tmp'
+            int(pid), '-', count, '-', serial_local, '.tmp'
     end subroutine make_tmpfile
 
     subroutine delete_tmpfile(path)

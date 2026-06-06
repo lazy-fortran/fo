@@ -13,6 +13,7 @@ program test_cache
 
     call test_init()
     call test_action_store_restore()
+    call test_parallel_cache_lookup()
     call test_miss()
     call test_action_persistence()
     call test_corrupt_payload_misses()
@@ -81,6 +82,43 @@ contains
                                   wait=.true.)
         call execute_command_line('rm -rf '//trim(mod_dir), wait=.true.)
     end subroutine test_action_store_restore
+
+    subroutine test_parallel_cache_lookup()
+        type(cache_t) :: c
+        integer :: ierr, i
+        character(len=512) :: root, obj_path, mod_dir, mod_path
+        character(len=HASH_LEN) :: action_id, output_id
+        logical, allocatable :: hits(:)
+
+        call make_tmp_path('fo_cache_parallel', root, '')
+        call execute_command_line('rm -rf '//trim(root), wait=.true.)
+        call execute_command_line('mkdir -p '//trim(root), wait=.true.)
+        call cache_init(c, ierr)
+        call assert(ierr == 0, 'parallel cache init')
+
+        obj_path = trim(root)//'/payload.o'
+        mod_dir = trim(root)//'/mods'
+        mod_path = trim(mod_dir)//'/m.mod'
+        call execute_command_line('mkdir -p '//trim(mod_dir), wait=.true.)
+        call write_text(obj_path, 'object payload')
+        call write_text(mod_path, 'module payload')
+
+        action_id = repeat('f', HASH_LEN)
+        call cache_store_action(c, action_id, obj_path, mod_dir, 'm', output_id, &
+                                ierr)
+        call assert(ierr == 0, 'parallel cache store')
+
+        allocate (hits(64))
+        hits = .false.
+        !$omp parallel do schedule(dynamic) num_threads(8) private(i)
+        do i = 1, size(hits)
+            hits(i) = cache_lookup(c, action_id)
+        end do
+        !$omp end parallel do
+
+        call assert(all(hits), 'parallel cache lookup hits')
+        call execute_command_line('rm -rf '//trim(root), wait=.true.)
+    end subroutine test_parallel_cache_lookup
 
     subroutine test_miss()
         type(cache_t) :: c

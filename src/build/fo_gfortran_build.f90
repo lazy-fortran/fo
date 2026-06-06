@@ -818,6 +818,9 @@ contains
 
         run_exits = 0
         run_compiled = .false.
+        !$omp parallel do schedule(dynamic) private(node_id, fname_local, &
+        !$omp& obj_path, bin_path, tname, log_local, restored, clk0, clk1, &
+        !$omp& clk_rate)
         do i = 1, n_run
             node_id = run_nodes(i)
             fname_local = filenames(node_id)
@@ -848,6 +851,7 @@ contains
                 if (clk_rate > 0) run_secs(i) = real(clk1 - clk0) / real(clk_rate)
             end if
         end do
+        !$omp end parallel do
 
         do i = 1, n_run
             call append_log_file(trim(run_logs(i)), log_file)
@@ -1190,8 +1194,11 @@ contains
         integer, intent(out) :: exitcode
 
         character(len=:), allocatable :: cmd
+        character(len=8) :: debug_links
+        integer :: debug_status
         integer :: i
 
+        allocate (character(len=131072) :: cmd)
         cmd = 'gfortran '//sq(prog_obj)
         do i = 1, n_lib_objs
             cmd = trim(cmd)//' '//sq(lib_objs(i))
@@ -1203,6 +1210,11 @@ contains
             cmd = trim(cmd)//' -l'//trim(link_libs(i))
         end do
         cmd = trim(cmd)//' -o '//sq(output)//" >> '"//trim(log_file)//"' 2>&1"
+        call get_environment_variable('FO_DEBUG_LINKS', debug_links, &
+                                      status=debug_status)
+        if (debug_status == 0 .and. len_trim(debug_links) > 0) then
+            write (error_unit, '(a)') 'fo link: '//trim(cmd)
+        end if
         call execute_command_line(trim(cmd), wait=.true., exitstat=exitcode)
     end subroutine link_binary
 
