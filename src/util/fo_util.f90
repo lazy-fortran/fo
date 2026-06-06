@@ -41,7 +41,15 @@ contains
     subroutine delete_tmpfile(path)
         character(len=*), intent(in) :: path
 
-        call execute_command_line('rm -f '//trim(path), wait=.true.)
+        integer :: u, ios
+
+        ! Delete via Fortran close(status='delete'), never execute_command_line:
+        ! cache_lookup deletes its scratch record from inside an OpenMP parallel
+        ! region, and forking (fork+exec for rm) from a multithreaded region
+        ! corrupts the libgomp runtime, surfacing as nondeterministic crashes
+        ! and spurious cache misses.
+        open (newunit=u, file=trim(path), status='old', iostat=ios)
+        if (ios == 0) close (u, status='delete')
     end subroutine delete_tmpfile
 
     subroutine read_text_file(path, text)

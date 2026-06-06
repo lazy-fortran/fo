@@ -257,15 +257,17 @@ contains
 
         call make_tmpfile('fo_dep_objs', objfile)
         do i = 1, config%n_deps
-            cmd = 'while IFS= read -r d; do find "$d" -maxdepth 2 -name '// &
-                  '"build_dependencies_'//trim(config%deps(i)%name)// &
-                  '_src_*.f90.o" 2>/dev/null; done < '//trim(dirfile)// &
-                  ' >> '//trim(objfile)
-            call execute_command_line(trim(cmd), wait=.true.)
-            cmd = 'find '//sq(trim(project_dir)//'/build')//' -path '// &
-                  '"*/gfortran_*/fo/build_dependencies_'// &
-                  trim(config%deps(i)%name)//'_*.c.o" 2>/dev/null >> '// &
-                  trim(objfile)
+            ! fpm names a dependency's compiled objects from the relative path to
+            ! its source: git deps under build/dependencies become
+            ! build_dependencies_<dep>_src_*, path deps (path = "../dep") become
+            ! .._<dep>_src_*. Both share the _<dep>_src_ infix. Scan every
+            ! gfortran_* profile dir directly (compile_commands.json lists only
+            ! the project's own profile, not the deps') and dedup by basename.
+            cmd = 'find '//sq(trim(project_dir)//'/build')// &
+                  ' -path "*/gfortran_*/*" \( '// &
+                  '-name "*_'//trim(config%deps(i)%name)//'_src_*.f90.o" -o '// &
+                  '-name "*_'//trim(config%deps(i)%name)//'_src_*.c.o" '// &
+                  '\) 2>/dev/null >> '//trim(objfile)
             call execute_command_line(trim(cmd), wait=.true.)
         end do
 
@@ -1239,7 +1241,7 @@ contains
         do i = 1, n_dep_objs
             cmd = trim(cmd)//' '//sq(dep_objs(i))
         end do
-        call append_link_libs(cmd, link_libs, n_link_libs)
+        cmd = trim(cmd)//link_lib_flags(link_libs, n_link_libs)
         cmd = trim(cmd)//' -o '//sq(output)//" >> '"//trim(log_file)//"' 2>&1"
         call get_environment_variable('FO_DEBUG_LINKS', debug_links, &
                                       status=debug_status)
@@ -1249,25 +1251,29 @@ contains
         call execute_command_line(trim(cmd), wait=.true., exitstat=exitcode)
     end subroutine link_binary
 
-    subroutine append_link_libs(cmd, link_libs, n_link_libs)
+    function link_lib_flags(link_libs, n_link_libs) result(flags)
         !! Resolve each `link` lib to a concrete archive on a search path and
         !! link it by absolute path, preferring a static .a so the binary does
         !! not depend on LIBRARY_PATH at link or run time. Libs found only via
-        !! the system default search (libm, libstdc++, ...) keep -lname.
-        character(len=*), intent(inout) :: cmd
+        !! the system default search (libm, libstdc++, ...) keep -lname. Returns
+        !! the space-prefixed flag string so the caller mutates its own cmd
+        !! buffer (passing the deferred-length cmd through an assumed-length
+        !! intent(inout) dummy dropped the appended tokens via copy-out).
         character(len=128), intent(in) :: link_libs(*)
         integer, intent(in) :: n_link_libs
+        character(len=:), allocatable :: flags
 
         character(len=512) :: dirs(2*MAX_DEP_DIRS)
         character(len=1024) :: token
         integer :: n_dirs, i
 
+        flags = ''
         call build_lib_search_dirs(dirs, n_dirs)
         do i = 1, n_link_libs
             call resolve_link_token(trim(link_libs(i)), dirs, n_dirs, token)
-            cmd = trim(cmd)//' '//trim(token)
+            flags = flags//' '//trim(token)
         end do
-    end subroutine append_link_libs
+    end function link_lib_flags
 
     subroutine resolve_link_token(name, dirs, n_dirs, token)
         character(len=*), intent(in) :: name
