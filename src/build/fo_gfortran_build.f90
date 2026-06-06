@@ -753,7 +753,7 @@ contains
         type(cache_t) :: c
         integer :: cache_ierr
         character(len=256) :: compiler
-        character(len=HASH_LEN) :: dep_keys(64), output_key
+        character(len=HASH_LEN) :: dep_keys(64), output_key, lib_hash
         integer :: n_dep, n_test_includes
         character(len=512) :: test_includes(MAX_DEP_DIRS)
 
@@ -784,6 +784,14 @@ contains
             test_includes(i + 1) = dep_includes(i)
         end do
 
+        ! A test's pass/fail depends on the IMPLEMENTATION of the whole library
+        ! it links, not just the interfaces it uses. The .mod (interface) hashes
+        ! from add_external_dep_keys miss private-body changes, so a cached pass
+        ! could survive a behaviour change in a dependency. Fold a hash of the
+        ! linked library objects into every test key so any implementation
+        ! change invalidates the cached result.
+        call hash_lib_objs(lib_objs, n_lib_objs, lib_hash)
+
         n_run = 0
         do i = 1, n_order
             node_id = topo_order(i)
@@ -800,6 +808,10 @@ contains
             call add_external_dep_keys(tunits, n_tests, dag, node_id, &
                                        test_includes, n_test_includes, &
                                        dep_keys, n_dep)
+            if (len_trim(lib_hash) > 0 .and. n_dep < size(dep_keys)) then
+                n_dep = n_dep + 1
+                dep_keys(n_dep) = lib_hash
+            end if
             run_keys(n_run) = cache_key_for(filenames(node_id), compiler, '', &
                                             dep_keys, n_dep)
         end do
@@ -1012,6 +1024,31 @@ contains
         end if
         call delete_tmpfile(tmpfile)
     end subroutine collect_lib_objs
+
+    subroutine hash_lib_objs(lib_objs, n_lib_objs, combined)
+        !! Combine per-object content hashes into one key that represents the
+        !! linked library implementation a test binary depends on, so a cached
+        !! test result is invalidated when any library object changes.
+        character(len=512), intent(in) :: lib_objs(MAX_SRC_OBJS)
+        integer, intent(in) :: n_lib_objs
+        character(len=HASH_LEN), intent(out) :: combined
+        character(len=512) :: tmpfile
+        character(len=HASH_LEN) :: h
+        integer :: i, u, ios
+
+        combined = ''
+        if (n_lib_objs <= 0) return
+        call make_tmpfile('fo_lib_hash', tmpfile)
+        open (newunit=u, file=trim(tmpfile), status='replace', iostat=ios)
+        if (ios /= 0) return
+        do i = 1, n_lib_objs
+            call hash_mod_file(lib_objs(i), h)
+            write (u, '(a)') trim(h)//' '//trim(lib_objs(i))
+        end do
+        close (u)
+        call hash_mod_file(tmpfile, combined)
+        call delete_tmpfile(tmpfile)
+    end subroutine hash_lib_objs
 
     subroutine make_obj_path(source_path, project_dir, obj_dir, obj_path)
         character(len=*), intent(in) :: source_path, project_dir, obj_dir
