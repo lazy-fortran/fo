@@ -818,8 +818,6 @@ contains
 
         run_exits = 0
         run_compiled = .false.
-        !$omp parallel do schedule(dynamic) private(node_id, fname_local, obj_path, &
-        !$omp& bin_path, tname, log_local, restored, clk0, clk1, clk_rate)
         do i = 1, n_run
             node_id = run_nodes(i)
             fname_local = filenames(node_id)
@@ -850,7 +848,6 @@ contains
                 if (clk_rate > 0) run_secs(i) = real(clk1 - clk0) / real(clk_rate)
             end if
         end do
-        !$omp end parallel do
 
         do i = 1, n_run
             call append_log_file(trim(run_logs(i)), log_file)
