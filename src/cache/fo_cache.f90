@@ -67,11 +67,10 @@ contains
         character(len=HASH_LEN) :: key
 
         character(len=HASH_LEN) :: file_hash
-        integer :: i, n_parts, ierr
+        integer :: i, n_parts
         character(len=512) :: parts(MAX_PARTS)
 
-        call sha256_file(filename, file_hash, ierr)
-        if (ierr /= 0) file_hash = ''
+        call source_tree_hash(filename, file_hash)
 
         parts(1) = 'fo-cache-schema-1'
         parts(2) = file_hash
@@ -84,6 +83,98 @@ contains
         end do
         key = digest_parts(parts, n_parts)
     end function cache_key_for
+
+    subroutine source_tree_hash(filename, hash)
+        !! Hash a source file together with every file it (recursively) pulls in
+        !! via Fortran `include` statements. Without this, editing an .inc file
+        !! leaves the including .f90's content hash unchanged, so the compile
+        !! cache serves a stale object and the edit silently never takes effect.
+        character(len=*), intent(in) :: filename
+        character(len=HASH_LEN), intent(out) :: hash
+
+        character(len=512) :: parts(MAX_PARTS)
+        integer :: n_parts
+
+        n_parts = 0
+        call accumulate_source_hashes(filename, parts, n_parts, 0)
+        if (n_parts == 0) then
+            hash = ''
+        else
+            hash = digest_parts(parts, n_parts)
+        end if
+    end subroutine source_tree_hash
+
+    recursive subroutine accumulate_source_hashes(filename, parts, n_parts, depth)
+        character(len=*), intent(in) :: filename
+        character(len=512), intent(inout) :: parts(:)
+        integer, intent(inout) :: n_parts
+        integer, intent(in) :: depth
+
+        character(len=HASH_LEN) :: fh
+        character(len=512) :: line, incfile, dir
+        integer :: u, ios, ierr
+
+        if (depth > 16 .or. n_parts >= size(parts)) return
+
+        call sha256_file(filename, fh, ierr)
+        if (ierr == 0) then
+            n_parts = n_parts + 1
+            parts(n_parts) = fh
+        end if
+
+        dir = dirname_of(filename)
+        open (newunit=u, file=trim(filename), status='old', iostat=ios)
+        if (ios /= 0) return
+        do
+            read (u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            call parse_include_path(line, incfile)
+            if (len_trim(incfile) == 0) cycle
+            if (incfile(1:1) /= '/') incfile = trim(dir)//trim(incfile)
+            call accumulate_source_hashes(trim(incfile), parts, n_parts, depth + 1)
+        end do
+        close (u)
+    end subroutine accumulate_source_hashes
+
+    subroutine parse_include_path(line, incfile)
+        character(len=*), intent(in) :: line
+        character(len=*), intent(out) :: incfile
+
+        character(len=512) :: t
+        character(len=7) :: head
+        character(len=1) :: qc
+        integer :: i, q1, q2
+
+        incfile = ''
+        t = adjustl(line)
+        if (len_trim(t) < 9) return
+        head = t(1:7)
+        do i = 1, 7
+            if (head(i:i) >= 'A' .and. head(i:i) <= 'Z') &
+                head(i:i) = achar(iachar(head(i:i)) + 32)
+        end do
+        if (head /= 'include') return
+        if (t(8:8) /= ' ' .and. t(8:8) /= '''' .and. t(8:8) /= '"') return
+        q1 = scan(t, '''"')
+        if (q1 == 0) return
+        qc = t(q1:q1)
+        q2 = index(t(q1 + 1:), qc)
+        if (q2 == 0) return
+        incfile = t(q1 + 1:q1 + q2 - 1)
+    end subroutine parse_include_path
+
+    function dirname_of(path) result(d)
+        character(len=*), intent(in) :: path
+        character(len=512) :: d
+        integer :: s
+
+        s = index(path, '/', back=.true.)
+        if (s == 0) then
+            d = './'
+        else
+            d = path(1:s)
+        end if
+    end function dirname_of
 
     function cache_lookup(c, key) result(hit)
         type(cache_t), intent(in) :: c

@@ -224,6 +224,7 @@ contains
         integer :: u, ios, i
         integer :: n_obj_seen
         character(len=512) :: obj_basenames(MAX_DEP_OBJS)
+        character(len=512) :: obj_key
         integer :: slash
 
         n_dep_includes = 0
@@ -279,14 +280,21 @@ contains
                 if (len_trim(line) == 0) cycle
                 if (index(line, '_app_') > 0) cycle
                 if (index(line, '_test_') > 0) cycle
-                ! deduplicate: skip if basename already seen (multiple gfortran_* dirs)
+                ! Deduplicate by module identity, not full basename. The same
+                ! dependency module can appear under different prefixes -
+                ! build_dependencies_<dep>_src_<mod> (git dep) and
+                ! .._<dep>_src_<mod> (path dep) - and across gfortran_* profile
+                ! dirs. Keying on the part after _src_ collapses all of them, so
+                ! a project that has built the dependency both ways does not link
+                ! the module twice (which fails with multiple-definition errors).
                 slash = index(trim(line), '/', back=.true.)
-                if (any(obj_basenames(1:n_obj_seen) == line(slash + 1:))) cycle
+                obj_key = dep_object_module_key(line(slash + 1:))
+                if (any(obj_basenames(1:n_obj_seen) == obj_key)) cycle
                 if (n_dep_objs < MAX_DEP_OBJS) then
                     n_dep_objs = n_dep_objs + 1
                     dep_objs(n_dep_objs) = trim(line)
                     n_obj_seen = n_obj_seen + 1
-                    obj_basenames(n_obj_seen) = line(slash + 1:)
+                    obj_basenames(n_obj_seen) = obj_key
                 end if
             end do
             close (u)
@@ -294,6 +302,22 @@ contains
         call delete_tmpfile(objfile)
         call delete_tmpfile(dirfile)
     end subroutine find_dep_artifacts
+
+    function dep_object_module_key(basename) result(key)
+        !! Reduce an fpm dependency object basename to its module identity by
+        !! dropping everything up to and including the first '_src_' marker, so
+        !! git-dep and path-dep spellings of the same module compare equal.
+        character(len=*), intent(in) :: basename
+        character(len=512) :: key
+        integer :: p
+
+        p = index(basename, '_src_')
+        if (p == 0) then
+            key = basename
+        else
+            key = basename(p + 5:)
+        end if
+    end function dep_object_module_key
 
     subroutine compile_sources(project_dir, src_dir, app_dir, mod_dir, obj_dir, &
                                dep_includes, n_dep_includes, log_file, &
