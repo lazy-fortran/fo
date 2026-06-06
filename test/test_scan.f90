@@ -11,6 +11,7 @@ program test_scan
     call test_scan_use_statements()
     call test_scan_module_def()
     call test_scan_module_name_containing_procedure()
+    call test_scan_submodule_def()
     call test_scan_program_def()
     call test_scan_intrinsic_skip()
     call test_slow_test_detection()
@@ -121,6 +122,28 @@ contains
                     'scan_proc_prefix: module name')
         call execute_command_line('rm -f '//trim(path))
     end subroutine test_scan_module_name_containing_procedure
+
+    subroutine test_scan_submodule_def()
+        type(scan_unit_t) :: info
+        integer :: ierr
+        character(len=512) :: path
+        character(len=80) :: lines(3)
+
+        lines(1) = 'submodule(semantic_analyzer) semantic_analyzer_context_impl'
+        lines(2) = '    implicit none'
+        lines(3) = 'end submodule semantic_analyzer_context_impl'
+        call make_tmp_path('fo_test_submodule', path, '.f90')
+        call write_file(path, lines, 3)
+
+        call scan_file(path, info, ierr)
+        call assert(ierr == 0, 'scan_submodule: no error')
+        call assert(trim(info%module_name) == 'semantic_analyzer_context_impl', &
+                    'scan_submodule: submodule name')
+        call assert(info%n_deps == 1, 'scan_submodule: one parent dependency')
+        call assert(trim(info%deps(1)) == 'semantic_analyzer', &
+                    'scan_submodule: parent dependency')
+        call execute_command_line('rm -f '//trim(path))
+    end subroutine test_scan_submodule_def
 
     subroutine test_scan_program_def()
         type(scan_unit_t) :: info

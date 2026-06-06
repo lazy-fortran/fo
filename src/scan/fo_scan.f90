@@ -139,7 +139,7 @@ contains
         type(scan_unit_t), intent(inout) :: unit_info
 
         character(len=512) :: trimmed
-        character(len=MAX_NAME) :: name
+        character(len=MAX_NAME) :: name, parent_name
 
         trimmed = adjustl(line)
         if (len_trim(trimmed) == 0) return
@@ -156,6 +156,13 @@ contains
         call extract_module_def(trimmed, name)
         if (len_trim(name) > 0) then
             unit_info%module_name = name
+            return
+        end if
+
+        call extract_submodule_def(trimmed, name, parent_name)
+        if (len_trim(name) > 0) then
+            unit_info%module_name = name
+            if (len_trim(parent_name) > 0) call add_dep(unit_info, parent_name)
             return
         end if
 
@@ -244,6 +251,48 @@ contains
         name = first_name
         call to_lower(name)
     end subroutine extract_module_def
+
+    subroutine extract_submodule_def(line, name, parent)
+        character(len=*), intent(in) :: line
+        character(len=*), intent(out) :: name
+        character(len=*), intent(out), optional :: parent
+
+        character(len=512) :: lower_line, parent_text
+        integer :: open_pos, close_pos, start, fin
+
+        name = ''
+        if (present(parent)) parent = ''
+        lower_line = line
+        call to_lower(lower_line)
+
+        if (len_trim(lower_line) < 11) return
+        if (lower_line(1:10) /= 'submodule(') return
+
+        open_pos = index(lower_line, '(')
+        close_pos = index(lower_line, ')')
+        if (open_pos == 0 .or. close_pos <= open_pos + 1) return
+
+        parent_text = adjustl(lower_line(open_pos + 1:close_pos - 1))
+        if (index(parent_text, ':') > 0) then
+            parent_text = parent_text(1:index(parent_text, ':') - 1)
+        end if
+        if (present(parent)) parent = trim(parent_text)
+
+        start = close_pos + 1
+        do while (start <= len_trim(line) .and. line(start:start) == ' ')
+            start = start + 1
+        end do
+        fin = start
+        do while (fin <= len_trim(line) .and. line(fin:fin) /= ' ' .and. &
+                  line(fin:fin) /= '!')
+            fin = fin + 1
+        end do
+
+        if (fin > start) then
+            name = adjustl(line(start:fin - 1))
+            call to_lower(name)
+        end if
+    end subroutine extract_submodule_def
 
     subroutine extract_program_def(line, name)
         character(len=*), intent(in) :: line
