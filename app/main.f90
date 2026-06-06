@@ -638,6 +638,7 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
     end subroutine cmd_fmt
 
     subroutine cmd_install()
+        type(backend_t) :: b
         character(len=256) :: prefix, arg
         character(len=512) :: home
         character(len=4096) :: cmd
@@ -654,10 +655,31 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
             end if
         end do
 
-        cmd = 'fpm install --prefix '//trim(prefix)
-        call execute_command_line(cmd, exitstat=exitcode, wait=.true.)
+        ! Native build, then copy the produced app binaries into prefix/bin.
+        ! No fpm: the binaries come from the gfortran backend's build/fo/bin.
+        b = detect_backend('.')
+        if (b%kind == BACKEND_NONE) then
+            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            stop 1
+        end if
+        call backend_build(b, exitcode)
         if (exitcode /= 0) stop 1
-        write (output_unit, '(a,a)') 'installed: ', trim(prefix)//'/bin/fo'
+
+        call execute_command_line('mkdir -p "'//trim(prefix)//'/bin"', &
+                                  wait=.true., exitstat=status)
+        if (status /= 0) stop 1
+        ! Atomic per-binary replace: copy to a temp name then rename over the
+        ! target. rename swaps the directory entry even when the existing binary
+        ! is held open (e.g. a running fo MCP server), avoiding "text file busy".
+        cmd = 'set -e; for f in "'//trim(b%project_dir)//'/build/fo/bin/"*; do '// &
+              '[ -e "$f" ] || continue; d="'//trim(prefix)//'/bin/$(basename "$f")"; '// &
+              'cp -f "$f" "$d.fo-new" && mv -f "$d.fo-new" "$d"; done'
+        call execute_command_line(trim(cmd), exitstat=exitcode, wait=.true.)
+        if (exitcode /= 0) then
+            write (error_unit, '(a)') 'fo: install: no binaries found in build/fo/bin'
+            stop 1
+        end if
+        write (output_unit, '(a,a)') 'installed: ', trim(prefix)//'/bin/'
     end subroutine cmd_install
 
     subroutine cmd_clean()
@@ -667,6 +689,12 @@ write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/
         call cache_root(root)
         call cache_store_root(store_root)
         call execute_command_line('rm -rf '//trim(root), wait=.true.)
+        ! Also drop this project's own build tree and any stale module artifacts
+        ! left in the project root, which otherwise shadow build/fo/mod.
+        call execute_command_line('rm -rf build/fo', wait=.true.)
+        call execute_command_line('find . -maxdepth 1 -type f \( -name "*.mod" '// &
+                                  '-o -name "*.smod" -o -name "*.o" \) -delete '// &
+                                  '2>/dev/null', wait=.true.)
         write (output_unit, '(a,a)') 'cache cleared: ', trim(store_root)
     end subroutine cmd_clean
 

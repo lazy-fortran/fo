@@ -66,6 +66,8 @@ contains
 
         call truncate_file(trim(lf))
 
+        call guard_root_mod_shadow(project_dir, lf)
+
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
                                 dep_objs, n_dep_objs)
 
@@ -81,6 +83,37 @@ contains
         call link_app_binaries(project_dir, config, bin_dir, src_objs, n_src_objs, &
                                is_prog_arr, dep_objs, n_dep_objs, lf, exitcode)
     end subroutine gfortran_build
+
+    subroutine guard_root_mod_shadow(project_dir, log_file)
+        !! Stale *.mod/*.smod/*.o in the project root silently shadow
+        !! build/fo/mod: gfortran searches the compile working directory before
+        !! the -I include dirs, so a leftover root module pins an old interface
+        !! and a fresh source change appears as "symbol not found". Editors such
+        !! as VS Code Modern Fortran write modules to the project root by
+        !! default. Remove them up front and tell the user why, on stderr and in
+        !! the build log.
+        character(len=*), intent(in) :: project_dir, log_file
+        character(len=200) :: line1, line2
+        integer :: n_removed, u, ios
+
+        call clean_root_build_artifacts(project_dir, n_removed)
+        if (n_removed == 0) return
+
+        write (line1, '(a,i0,a)') 'fo: removed ', n_removed, &
+            ' stale build artifact(s) (*.mod/*.smod/*.o) from the project root'
+        line2 = 'fo: they shadow build/fo/mod and pin stale module interfaces; '// &
+                'point your editor''s module output outside the project root '// &
+                '(VS Code Modern Fortran: fortran.linter.modOutput)'
+        write (error_unit, '(a)') trim(line1)
+        write (error_unit, '(a)') trim(line2)
+        if (len_trim(log_file) == 0) return
+        open (newunit=u, file=trim(log_file), status='unknown', position='append', &
+              iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a)') trim(line1)
+        write (u, '(a)') trim(line2)
+        close (u)
+    end subroutine guard_root_mod_shadow
 
     subroutine gfortran_test(project_dir, log_file, exitcode, include_slow, &
                              n_compiled)
@@ -1206,9 +1239,7 @@ contains
         do i = 1, n_dep_objs
             cmd = trim(cmd)//' '//sq(dep_objs(i))
         end do
-        do i = 1, n_link_libs
-            cmd = trim(cmd)//' -l'//trim(link_libs(i))
-        end do
+        call append_link_libs(cmd, link_libs, n_link_libs)
         cmd = trim(cmd)//' -o '//sq(output)//" >> '"//trim(log_file)//"' 2>&1"
         call get_environment_variable('FO_DEBUG_LINKS', debug_links, &
                                       status=debug_status)
@@ -1217,6 +1248,109 @@ contains
         end if
         call execute_command_line(trim(cmd), wait=.true., exitstat=exitcode)
     end subroutine link_binary
+
+    subroutine append_link_libs(cmd, link_libs, n_link_libs)
+        !! Resolve each `link` lib to a concrete archive on a search path and
+        !! link it by absolute path, preferring a static .a so the binary does
+        !! not depend on LIBRARY_PATH at link or run time. Libs found only via
+        !! the system default search (libm, libstdc++, ...) keep -lname.
+        character(len=*), intent(inout) :: cmd
+        character(len=128), intent(in) :: link_libs(*)
+        integer, intent(in) :: n_link_libs
+
+        character(len=512) :: dirs(2*MAX_DEP_DIRS)
+        character(len=1024) :: token
+        integer :: n_dirs, i
+
+        call build_lib_search_dirs(dirs, n_dirs)
+        do i = 1, n_link_libs
+            call resolve_link_token(trim(link_libs(i)), dirs, n_dirs, token)
+            cmd = trim(cmd)//' '//trim(token)
+        end do
+    end subroutine append_link_libs
+
+    subroutine resolve_link_token(name, dirs, n_dirs, token)
+        character(len=*), intent(in) :: name
+        character(len=512), intent(in) :: dirs(:)
+        integer, intent(in) :: n_dirs
+        character(len=*), intent(out) :: token
+
+        character(len=1024) :: cand
+        integer :: i
+        logical :: ex
+
+        ! Prefer a static archive linked by absolute path (no LIBRARY_PATH need).
+        do i = 1, n_dirs
+            cand = trim(dirs(i))//'/lib'//trim(name)//'.a'
+            inquire (file=trim(cand), exist=ex)
+            if (ex) then
+                token = sq(trim(cand))
+                return
+            end if
+        end do
+        ! Then a shared object by absolute path.
+        do i = 1, n_dirs
+            cand = trim(dirs(i))//'/lib'//trim(name)//'.so'
+            inquire (file=trim(cand), exist=ex)
+            if (ex) then
+                token = sq(trim(cand))
+                return
+            end if
+        end do
+        token = '-l'//trim(name)
+    end subroutine resolve_link_token
+
+    subroutine build_lib_search_dirs(dirs, n)
+        !! Search dirs for static external libs: LIBRARY_PATH and FO_LIBRARY_PATH
+        !! (colon-separated, as understood by the toolchain) plus common system
+        !! library locations. FO_LIBRARY_PATH lets a daemonized fo (MCP/LSP) that
+        !! did not inherit LIBRARY_PATH still locate project-external archives.
+        character(len=512), intent(out) :: dirs(:)
+        integer, intent(out) :: n
+
+        n = 0
+        call add_env_path_list('LIBRARY_PATH', dirs, n)
+        call add_env_path_list('FO_LIBRARY_PATH', dirs, n)
+        call add_search_dir('/usr/local/lib', dirs, n)
+        call add_search_dir('/usr/lib', dirs, n)
+        call add_search_dir('/usr/lib64', dirs, n)
+        call add_search_dir('/lib', dirs, n)
+    end subroutine build_lib_search_dirs
+
+    subroutine add_env_path_list(var, dirs, n)
+        character(len=*), intent(in) :: var
+        character(len=512), intent(inout) :: dirs(:)
+        integer, intent(inout) :: n
+
+        character(len=4096) :: val
+        integer :: status, i, start
+
+        call get_environment_variable(var, val, status=status)
+        if (status /= 0 .or. len_trim(val) == 0) return
+        start = 1
+        do i = 1, len_trim(val) + 1
+            if (i > len_trim(val) .or. val(i:i) == ':') then
+                if (i > start) call add_search_dir(val(start:i - 1), dirs, n)
+                start = i + 1
+            end if
+        end do
+    end subroutine add_env_path_list
+
+    subroutine add_search_dir(dir, dirs, n)
+        character(len=*), intent(in) :: dir
+        character(len=512), intent(inout) :: dirs(:)
+        integer, intent(inout) :: n
+
+        integer :: i
+
+        if (len_trim(dir) == 0) return
+        do i = 1, n
+            if (trim(dirs(i)) == trim(dir)) return
+        end do
+        if (n >= size(dirs)) return
+        n = n + 1
+        dirs(n) = trim(dir)
+    end subroutine add_search_dir
 
     subroutine file_basename(path, name)
         character(len=*), intent(in) :: path
