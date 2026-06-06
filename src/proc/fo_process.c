@@ -151,6 +151,8 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
     if (pid < 0) return 1;
 
     if (pid == 0) {
+        /* own process group so a timeout can kill the whole subtree */
+        setpgid(0, 0);
         if (has_text(cwd) && chdir(cwd) != 0) _exit(127);
         if (jobs > 0) {
             char jobs_text[32];
@@ -169,6 +171,9 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
         _exit(errno == ENOENT ? 127 : 126);
     }
 
+    /* race-free: also set the group from the parent side */
+    setpgid(pid, pid);
+
     if (timeout_s <= 0) {
         if (waitpid(pid, &status, 0) < 0) return 1;
     } else {
@@ -177,10 +182,25 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
         for (;;) {
             pid_t got = waitpid(pid, &status, WNOHANG);
             if (got > 0) break;
-            if (got < 0) { kill(pid, SIGKILL); waitpid(pid, NULL, 0); return 1; }
+            if (got < 0) {
+                kill(-pid, SIGKILL);
+                waitpid(pid, NULL, 0);
+                return 1;
+            }
             if (elapsed >= timeout_s) {
-                kill(pid, SIGKILL);
-                waitpid(pid, &status, 0);
+                /* hard timeout: TERM the whole group, then KILL on grace expiry */
+                int reaped = 0, k;
+                struct timespec g = {0, 200000000L};  /* 200 ms */
+                kill(-pid, SIGTERM);
+                for (k = 0; k < 15 && !reaped; k++) {
+                    if (waitpid(pid, &status, WNOHANG) > 0) reaped = 1;
+                    else nanosleep(&g, NULL);
+                }
+                if (!reaped) {
+                    kill(-pid, SIGKILL);
+                    waitpid(pid, &status, 0);
+                }
+                kill(-pid, SIGKILL);  /* sweep any straggler grandchildren */
                 return 124;  /* timeout — same as GNU timeout exit code */
             }
             nanosleep(&ts, NULL);
@@ -208,6 +228,24 @@ void fo_c_detect_nproc(int *nproc) {
 
 void fo_c_getpid(int *pid_out) {
     *pid_out = (int)getpid();
+}
+
+/* Run a single executable with stdout/stderr redirected to log_file, enforcing
+   a hard timeout. On timeout the whole process group is killed and 124 is
+   returned (mirrors GNU timeout). Used for untrusted test binaries that may
+   hang. */
+void fo_c_run_logged(const char *cwd, const char *exe_path, const char *log_file,
+                     int append, int timeout_s, int *exitcode) {
+    char *argv[2];
+
+    if (!has_text(exe_path)) {
+        *exitcode = 127;
+        return;
+    }
+    argv[0] = (char *)exe_path;
+    argv[1] = NULL;
+    *exitcode = run_argv(has_text(cwd) ? cwd : NULL, argv, log_file, append, 0,
+                         timeout_s);
 }
 
 void fo_c_fpm_build(const char *project_dir, const char *flags, int jobs,

@@ -8,6 +8,7 @@ module fo_gfortran_build
                         HASH_LEN
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
                        clean_root_build_artifacts
+    use fo_process, only: process_run_logged
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
     private
@@ -739,6 +740,9 @@ contains
         character(len=512), allocatable :: run_logs(:)
         character(len=HASH_LEN), allocatable :: run_keys(:)
         logical, allocatable :: run_compiled(:)
+        real, allocatable :: run_secs(:)
+        integer :: test_timeout, test_warn
+        integer(8) :: clk0, clk1, clk_rate
         integer :: n_order
         logical :: has_cycle, restored
         character(len=512) :: obj_path, bin_path
@@ -760,7 +764,10 @@ contains
         allocate (topo_order(MAX_NODES))
         allocate (run_nodes(MAX_NODES), run_exits(MAX_NODES), run_logs(MAX_NODES))
         allocate (run_keys(MAX_NODES))
-        allocate (run_compiled(MAX_NODES))
+        allocate (run_compiled(MAX_NODES), run_secs(MAX_NODES))
+        run_secs = 0.0
+        test_timeout = test_timeout_seconds()
+        test_warn = test_warn_seconds(test_timeout)
         call scan_dir(trim(project_dir)//'/'//trim(test_dir), tunits, n_tests, ierr)
         if (n_tests == 0) return
 
@@ -800,7 +807,7 @@ contains
         run_exits = 0
         run_compiled = .false.
         !$omp parallel do schedule(dynamic) private(node_id, fname_local, obj_path, &
-        !$omp& bin_path, tname, log_local, restored)
+        !$omp& bin_path, tname, log_local, restored, clk0, clk1, clk_rate)
         do i = 1, n_run
             node_id = run_nodes(i)
             fname_local = filenames(node_id)
@@ -824,8 +831,11 @@ contains
                                  run_exits(i))
             end if
             if (run_exits(i) == 0) then
-                call execute_command_line(sq(bin_path)//' >> '//sq(log_local)// &
-                                          ' 2>&1', wait=.true., exitstat=run_exits(i))
+                call system_clock(clk0, clk_rate)
+                call process_run_logged('', bin_path, log_local, .true., &
+                                        test_timeout, run_exits(i))
+                call system_clock(clk1)
+                if (clk_rate > 0) run_secs(i) = real(clk1 - clk0) / real(clk_rate)
             end if
         end do
         !$omp end parallel do
@@ -834,7 +844,11 @@ contains
             call append_log_file(trim(run_logs(i)), log_file)
             if (run_exits(i) /= 0) then
                 call file_basename(filenames(run_nodes(i)), tname)
-                call append_test_status(log_file, tname, run_exits(i))
+                if (run_exits(i) == 124) then
+                    call append_timeout_status(log_file, tname, test_timeout)
+                else
+                    call append_test_status(log_file, tname, run_exits(i))
+                end if
                 if (exitcode == 0) exitcode = run_exits(i)
             else if (cache_ierr == 0 .and. run_compiled(i)) then
                 call make_obj_path(filenames(run_nodes(i)), project_dir, obj_dir, &
@@ -845,7 +859,78 @@ contains
             end if
             call delete_tmpfile(run_logs(i))
         end do
+
+        call warn_slow_tests(filenames, run_nodes, run_exits, run_secs, n_run, &
+                             test_warn, log_file)
     end subroutine compile_and_run_tests
+
+    integer function test_timeout_seconds() result(t)
+        character(len=32) :: buf
+        integer :: status, iostat
+
+        t = 120
+        call get_environment_variable('FO_TEST_TIMEOUT', buf, status=status)
+        if (status /= 0 .or. len_trim(buf) == 0) return
+        read (buf, *, iostat=iostat) t
+        if (iostat /= 0 .or. t < 1) t = 120
+    end function test_timeout_seconds
+
+    integer function test_warn_seconds(timeout_s) result(w)
+        integer, intent(in) :: timeout_s
+        character(len=32) :: buf
+        integer :: status, iostat
+
+        w = 30
+        call get_environment_variable('FO_TEST_WARN', buf, status=status)
+        if (status == 0 .and. len_trim(buf) > 0) then
+            read (buf, *, iostat=iostat) w
+            if (iostat /= 0 .or. w < 1) w = 30
+        end if
+        if (w > timeout_s) w = timeout_s
+    end function test_warn_seconds
+
+    subroutine warn_slow_tests(filenames, run_nodes, run_exits, run_secs, n_run, &
+                               test_warn, log_file)
+        character(len=MAX_NAME), intent(in) :: filenames(:)
+        integer, intent(in) :: run_nodes(:), run_exits(:), n_run, test_warn
+        real, intent(in) :: run_secs(:)
+        character(len=*), intent(in) :: log_file
+
+        integer :: i, u, ios
+        character(len=128) :: tname
+
+        do i = 1, n_run
+            if (run_exits(i) /= 0) cycle
+            if (run_secs(i) < real(test_warn)) cycle
+            call file_basename(filenames(run_nodes(i)), tname)
+            ! tests already named *_slow are an intentional opt-in (fo test --all);
+            ! only nag fast-suite tests that are creeping toward the hard limit
+            if (is_slow_name(tname)) cycle
+            write (error_unit, '(a,f0.1,a)') 'fo: slow test '//trim(tname)// &
+                ' took ', run_secs(i), 's; name it *_slow or speed it up'
+            open (newunit=u, file=trim(log_file), position='append', &
+                  status='old', iostat=ios)
+            if (ios /= 0) cycle
+            write (u, '(a,f0.1,a)') 'fo: warning: slow test '//trim(tname)// &
+                ' took ', run_secs(i), 's (threshold above is advisory)'
+            close (u)
+        end do
+    end subroutine warn_slow_tests
+
+    subroutine append_timeout_status(log_file, test_name, timeout_s)
+        character(len=*), intent(in) :: log_file, test_name
+        integer, intent(in) :: timeout_s
+
+        integer :: u, ios
+
+        open (newunit=u, file=trim(log_file), position='append', &
+              status='old', iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a,i0,a)') 'fo: test target '//trim(test_name)// &
+            ' exceeded the ', timeout_s, &
+            's hard timeout and was killed; fix the hang or name it *_slow'
+        close (u)
+    end subroutine append_timeout_status
 
     subroutine append_test_status(log_file, test_name, status)
         character(len=*), intent(in) :: log_file, test_name

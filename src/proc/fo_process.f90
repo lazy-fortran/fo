@@ -7,6 +7,7 @@ module fo_process
     public :: process_fpm_test_names, process_cmake_build, process_ctest
     public :: process_scan_sources
     public :: process_start_fo_check, process_poll_pid, process_cancel_pid
+    public :: process_run_logged
     integer, parameter :: C_PATH_LEN = 4096
     integer, parameter :: C_ARG_LEN = 4096
 
@@ -81,6 +82,14 @@ module fo_process
             character(kind=c_char), intent(in) :: output_file(*)
             integer(c_int), intent(out) :: pid, exitcode
         end subroutine fo_c_start_fo_check
+
+        subroutine fo_c_run_logged(cwd, exe_path, log_file, append, timeout_s, &
+                                   exitcode) bind(C, name='fo_c_run_logged')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: cwd(*), exe_path(*), log_file(*)
+            integer(c_int), value :: append, timeout_s
+            integer(c_int), intent(out) :: exitcode
+        end subroutine fo_c_run_logged
 
         subroutine fo_c_poll_pid(pid, done, exitcode) &
             bind(C, name='fo_c_poll_pid')
@@ -238,6 +247,27 @@ contains
         pid = int(c_pid)
         exitcode = int(c_exit)
     end subroutine process_start_fo_check
+
+    subroutine process_run_logged(cwd, exe_path, log_file, append, timeout_s, &
+                                  exitcode)
+        character(len=*), intent(in) :: cwd, exe_path, log_file
+        logical, intent(in) :: append
+        integer, intent(in) :: timeout_s
+        integer, intent(out) :: exitcode
+
+        character(kind=c_char) :: c_cwd(C_PATH_LEN), c_exe(C_PATH_LEN)
+        character(kind=c_char) :: c_log(C_PATH_LEN)
+        integer(c_int) :: c_exit, c_append
+
+        call to_c_string(cwd, c_cwd)
+        call to_c_string(exe_path, c_exe)
+        call to_c_string(log_file, c_log)
+        c_append = 0
+        if (append) c_append = 1
+        call fo_c_run_logged(c_cwd, c_exe, c_log, c_append, &
+                             int(timeout_s, c_int), c_exit)
+        exitcode = int(c_exit)
+    end subroutine process_run_logged
 
     subroutine process_poll_pid(pid, done, exitcode)
         integer, intent(in) :: pid
