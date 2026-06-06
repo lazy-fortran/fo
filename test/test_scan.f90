@@ -108,6 +108,18 @@ contains
         call assert(trim(info%module_name) == 'ast_nodes_procedure', &
                     'scan_proc_name: module name')
         call execute_command_line('rm -f '//trim(path))
+
+        lines(1) = 'module procedure_classification'
+        lines(2) = '    implicit none'
+        lines(3) = 'end module procedure_classification'
+        call make_tmp_path('fo_test_proc_prefix', path, '.f90')
+        call write_file(path, lines, 3)
+
+        call scan_file(path, info, ierr)
+        call assert(ierr == 0, 'scan_proc_prefix: no error')
+        call assert(trim(info%module_name) == 'procedure_classification', &
+                    'scan_proc_prefix: module name')
+        call execute_command_line('rm -f '//trim(path))
     end subroutine test_scan_module_name_containing_procedure
 
     subroutine test_scan_program_def()

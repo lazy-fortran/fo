@@ -215,7 +215,8 @@ contains
         character(len=*), intent(out) :: name
 
         character(len=512) :: lower_line
-        integer :: start
+        character(len=MAX_NAME) :: first_name
+        integer :: start, fin
 
         name = ''
         lower_line = line
@@ -223,20 +224,24 @@ contains
 
         if (len_trim(lower_line) < 8) return
         if (lower_line(1:7) /= 'module ') return
-        ! Exclude subprogram statements, but allow names like ast_nodes_procedure.
-        if (index(lower_line, 'module procedure') == 1) return
-        if (index(lower_line, 'module subroutine') == 1) return
-        if (index(lower_line, 'module function') == 1) return
-
         start = 8
         do while (start <= len_trim(line) .and. line(start:start) == ' ')
             start = start + 1
         end do
 
-        name = adjustl(line(start:))
-        ! trim at first space or comment
-        if (index(name, ' ') > 0) name = name(1:index(name, ' ') - 1)
-        if (index(name, '!') > 0) name = name(1:index(name, '!') - 1)
+        fin = start
+        do while (fin <= len_trim(line) .and. line(fin:fin) /= ' ' .and. &
+                  line(fin:fin) /= '!')
+            fin = fin + 1
+        end do
+        first_name = adjustl(line(start:fin - 1))
+        call to_lower(first_name)
+
+        if (trim(first_name) == 'procedure') return
+        if (trim(first_name) == 'subroutine') return
+        if (trim(first_name) == 'function') return
+
+        name = first_name
         call to_lower(name)
     end subroutine extract_module_def
 
