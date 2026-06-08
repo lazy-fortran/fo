@@ -735,7 +735,7 @@ contains
         integer, intent(in) :: n_dep_objs
         integer, intent(out) :: exitcode
 
-        integer :: i, j, n_lib
+        integer :: i, n_lib
         character(len=512) :: lib_objs(MAX_SRC_OBJS)
         character(len=512) :: prog_obj, bin_path
         character(len=128) :: prog_name
@@ -749,16 +749,16 @@ contains
             end if
         end do
 
-        j = 0
         do i = 1, n_src_objs
             if (.not. is_prog_arr(i)) cycle
             prog_obj = src_objs(i)
-            j = j + 1
-            if (j == 1 .and. len_trim(config%name) > 0) then
+            ! fpm naming: app/main.f90 takes the package name; every other app
+            ! program takes its own source stem. Selecting by stem (not source
+            ! order) keeps `main` mapped to the package binary even when another
+            ! app source sorts ahead of it.
+            call app_prog_stem(prog_obj, config%app_dir, prog_name)
+            if (prog_name == 'main' .and. len_trim(config%name) > 0) &
                 prog_name = trim(config%name)
-            else
-                call file_basename(prog_obj, prog_name)
-            end if
             bin_path = trim(bin_dir)//'/'//trim(prog_name)
             call link_binary(prog_obj, lib_objs, n_lib, dep_objs, n_dep_objs, &
                              config%link_libs, config%n_link_libs, bin_path, &
@@ -766,6 +766,29 @@ contains
             if (exitcode /= 0) return
         end do
     end subroutine link_app_binaries
+
+    subroutine app_prog_stem(obj_path, app_dir, stem)
+        !! Source stem of an app program from its object path. Object names
+        !! encode the project-relative source path with '/'->'_' and a trailing
+        !! '.o' (e.g. app/main.f90 -> app_main.f90.o). Strip the object suffix,
+        !! the .f90/.F90 extension, and the leading "<app_dir>_" prefix so that
+        !! app_main.f90.o -> main and app_span_mismatch_sub.f90.o ->
+        !! span_mismatch_sub.
+        character(len=*), intent(in) :: obj_path, app_dir
+        character(len=*), intent(out) :: stem
+        character(len=512) :: base
+        character(len=128) :: prefix
+        integer :: dot, plen
+
+        call file_basename(obj_path, base)   ! drops dir and trailing '.o'
+        dot = index(trim(base), '.', back=.true.)
+        if (dot > 1) base = base(1:dot - 1)  ! drop .f90 / .F90
+        prefix = trim(app_dir)//'_'
+        plen = len_trim(prefix)
+        if (len_trim(base) > plen .and. base(1:plen) == trim(prefix)) &
+            base = base(plen + 1:)
+        stem = trim(base)
+    end subroutine app_prog_stem
 
     subroutine compile_and_run_tests(project_dir, test_dir, mod_dir, obj_dir, &
                                      bin_dir, dep_includes, n_dep_includes, &

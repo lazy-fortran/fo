@@ -25,6 +25,7 @@ program test_backend
     call test_gfortran_named_test_restores_cached_object()
     call test_gfortran_recovers_from_root_mod_shadow()
     call test_gfortran_restores_deleted_outputs()
+    call test_gfortran_app_main_keeps_package_name()
     call test_gfortran_flags_change_action_id()
     call test_gfortran_compiler_identity_changes_action_id()
     call test_gfortran_private_change_keeps_dependent_cached()
@@ -300,6 +301,73 @@ contains
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_restores_deleted_outputs
+
+    subroutine test_gfortran_app_main_keeps_package_name()
+        !! Regression: with several app programs, app/main.f90 must take the
+        !! package name and every other app program its own stem -- regardless
+        !! of source order. A program sorting before main.f90 used to steal the
+        !! package binary (e.g. span_mismatch_sub linked as `tx`).
+        integer :: exitcode, n_first, u
+        character(len=512) :: project_dir, log_file, out_file, line
+
+        call make_tmp_path('fo_test_appname', project_dir)
+        call make_tmp_path('fo_backend_appname', log_file)
+        call make_tmp_path('fo_appname_out', out_file)
+
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/app')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "appnamepkg"'
+        close (u)
+        ! Sorts before main.f90; this is the program that used to steal the name.
+        open (newunit=u, file=trim(project_dir)//'/app/aaa_extra.f90', &
+              status='replace')
+        write (u, '(a)') 'program aaa_extra'
+        write (u, '(a)') "print '(a)', 'FO_APPNAME_EXTRA'"
+        write (u, '(a)') 'end program aaa_extra'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/app/main.f90', status='replace')
+        write (u, '(a)') 'program main'
+        write (u, '(a)') "print '(a)', 'FO_APPNAME_MAIN'"
+        write (u, '(a)') 'end program main'
+        close (u)
+
+        call gfortran_build(project_dir, log_file, exitcode, n_first)
+        call assert(exitcode == 0 .and. n_first > 0, &
+                    'appname fixture builds')
+
+        ! The package binary must be main, not the alphabetically-first program.
+        call run_capture(trim(project_dir)//'/build/fo/bin/appnamepkg', &
+                         trim(out_file), line)
+        call assert(trim(line) == 'FO_APPNAME_MAIN', &
+                    'package binary is app/main.f90, not the first app source')
+        ! The other program is named by its own stem, cleanly (no app_ prefix).
+        call run_capture(trim(project_dir)//'/build/fo/bin/aaa_extra', &
+                         trim(out_file), line)
+        call assert(trim(line) == 'FO_APPNAME_EXTRA', &
+                    'non-main app program is named by its source stem')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file)//' '//trim(out_file))
+    end subroutine test_gfortran_app_main_keeps_package_name
+
+    subroutine run_capture(exe, out_file, first_line)
+        !! Run exe, capturing its first stdout line. Empty if exe is missing.
+        character(len=*), intent(in) :: exe, out_file
+        character(len=*), intent(out) :: first_line
+        integer :: u, ios
+        logical :: exists
+
+        first_line = ''
+        inquire (file=trim(exe), exist=exists)
+        if (.not. exists) return
+        call execute_command_line('"'//trim(exe)//'" > "'//trim(out_file)// &
+                                  '" 2>/dev/null', wait=.true.)
+        open (newunit=u, file=trim(out_file), status='old', iostat=ios)
+        if (ios /= 0) return
+        read (u, '(a)', iostat=ios) first_line
+        close (u)
+    end subroutine run_capture
 
     subroutine test_gfortran_flags_change_action_id()
         integer :: exitcode, n_first, n_same, n_changed
