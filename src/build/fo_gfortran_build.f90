@@ -56,6 +56,9 @@ contains
             return
         end if
 
+        ! Combine config flags with CLI flags
+        call merge_flags(config, flag_text)
+
         mod_dir = trim(project_dir)//'/build/fo/mod'
         obj_dir = trim(project_dir)//'/build/fo/obj'
         bin_dir = trim(project_dir)//'/build/fo/bin'
@@ -155,11 +158,12 @@ contains
                                 dep_objs, n_dep_objs)
         call collect_lib_objs(obj_dir, lib_objs, n_lib_objs)
 
-        call compile_and_run_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
-                                   bin_dir, dep_includes, n_dep_includes, &
-                                   dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
-                                   config%link_libs, config%n_link_libs, lf, &
-                                   no_names, 0, slow, exitcode, n_compiled)
+    call compile_and_run_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
+                                    bin_dir, dep_includes, n_dep_includes, &
+                                    dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
+                                    config%link_libs, config%n_link_libs, lf, &
+                                    no_names, 0, slow, exitcode, n_compiled, &
+                                    flags=config_flags_str(config))
     end subroutine gfortran_test
 
     subroutine gfortran_test_names(project_dir, names, n_names, log_file, &
@@ -203,11 +207,12 @@ contains
                                 dep_objs, n_dep_objs)
         call collect_lib_objs(obj_dir, lib_objs, n_lib_objs)
 
-        call compile_and_run_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
-                                   bin_dir, dep_includes, n_dep_includes, &
-                                   dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
-                                   config%link_libs, config%n_link_libs, lf, &
-                                   names, n_names, slow, exitcode, n_compiled)
+   call compile_and_run_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
+                                    bin_dir, dep_includes, n_dep_includes, &
+                                    dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
+                                    config%link_libs, config%n_link_libs, lf, &
+                                    names, n_names, slow, exitcode, n_compiled, &
+                                    flags=config_flags_str(config))
     end subroutine gfortran_test_names
 
     subroutine find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
@@ -795,7 +800,7 @@ contains
                                      dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
                                      link_libs, n_link_libs, log_file, &
                                      selected_names, n_selected, include_slow, &
-                                     exitcode, n_compiled)
+                                     exitcode, n_compiled, flags)
         character(len=*), intent(in) :: project_dir, test_dir, mod_dir
         character(len=*), intent(in) :: obj_dir, bin_dir, log_file
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
@@ -811,6 +816,7 @@ contains
         logical, intent(in) :: include_slow
         integer, intent(out) :: exitcode
         integer, intent(out), optional :: n_compiled
+        character(len=*), intent(in), optional :: flags
 
         type(scan_unit_t), allocatable :: tunits(:)
         integer :: n_tests, i, ierr, node_id, n_run
@@ -838,7 +844,10 @@ contains
         character(len=HASH_LEN) :: dep_keys(64), output_key, lib_hash
         integer :: n_dep, n_test_includes
         character(len=512) :: test_includes(MAX_DEP_DIRS)
+        character(len=1024) :: test_flags
 
+        test_flags = ''
+        if (present(flags)) test_flags = flags
         exitcode = 0
         if (present(n_compiled)) n_compiled = 0
         allocate (tunits(MAX_UNITS))
@@ -856,6 +865,9 @@ contains
         call build_dag_from_units(tunits, n_tests, dag, filenames, is_test_arr, is_prog)
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
         call make_includes_flag(mod_dir, dep_includes, n_dep_includes, incl_flag)
+        if (present(flags) .and. len_trim(flags) > 0) then
+            incl_flag = trim(incl_flag)//' '//trim(flags)
+        end if
         call cache_init(c, cache_ierr)
         call detect_compiler(compiler)
         test_includes = ''
@@ -894,8 +906,8 @@ contains
                 n_dep = n_dep + 1
                 dep_keys(n_dep) = lib_hash
             end if
-            run_keys(n_run) = cache_key_for(filenames(node_id), compiler, '', &
-                                            dep_keys, n_dep)
+        run_keys(n_run) = cache_key_for(filenames(node_id), compiler, &
+                                             test_flags, dep_keys, n_dep)
         end do
 
         run_exits = 0
@@ -1433,5 +1445,35 @@ contains
         open (newunit=u, file=trim(path), status='replace', iostat=ios)
         if (ios == 0) close (u)
     end subroutine truncate_file
+
+    subroutine merge_flags(config, flag_text)
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(inout) :: flag_text
+        integer :: i
+        character(len=1024) :: combined
+
+        combined = ''
+        do i = 1, config%n_flags
+            if (len_trim(combined) > 0) combined = trim(combined)//' '
+            combined = trim(combined)//trim(config%flags(i))
+        end do
+        if (len_trim(flag_text) > 0) then
+            if (len_trim(combined) > 0) combined = trim(combined)//' '
+            combined = trim(combined)//trim(flag_text)
+        end if
+        flag_text = combined
+    end subroutine merge_flags
+
+    function config_flags_str(config) result(s)
+        type(fpm_config_t), intent(in) :: config
+        character(len=1024) :: s
+        integer :: i
+
+        s = ''
+        do i = 1, config%n_flags
+            if (len_trim(s) > 0) s = trim(s)//' '
+            s = trim(s)//trim(config%flags(i))
+        end do
+    end function config_flags_str
 
 end module fo_gfortran_build

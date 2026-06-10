@@ -7,6 +7,7 @@ module fo_fpm_config
     integer, parameter :: MAX_DEPS = 64
     integer, parameter :: MAX_DEV_DEPS = 32
     integer, parameter :: MAX_LINK_LIBS = 32
+    integer, parameter :: MAX_FLAGS = 16
 
     type :: fpm_dep_t
         character(len=256) :: name = ''
@@ -32,6 +33,8 @@ module fo_fpm_config
         type(fpm_dep_t) :: dev_deps(MAX_DEV_DEPS)
         integer :: n_link_libs = 0
         character(len=128) :: link_libs(MAX_LINK_LIBS)
+        integer :: n_flags = 0
+        character(len=128) :: flags(MAX_FLAGS)
     end type fpm_config_t
 
 contains
@@ -50,6 +53,7 @@ contains
         c%n_deps = 0
         c%n_dev_deps = 0
         c%n_link_libs = 0
+        c%n_flags = 0
     end subroutine fpm_config_init
 
     subroutine fpm_config_parse(project_dir, config, ierr)
@@ -146,6 +150,8 @@ contains
             config%auto_tests = (index(val, 'true') > 0)
         case ('link')
             call parse_link_libs(val, config)
+        case ('flags')
+            call parse_flags(val, config)
         end select
     end subroutine parse_build
 
@@ -218,6 +224,37 @@ contains
             pos = pos + 1
         end do
     end subroutine parse_link_libs
+
+    subroutine parse_flags(val, config)
+        character(len=*), intent(in) :: val
+        type(fpm_config_t), intent(inout) :: config
+
+        integer :: pos, start, n
+        character(len=128) :: flag
+        logical :: in_str
+
+        pos = 1
+        n = len_trim(val)
+        in_str = .false.
+
+        do while (pos <= n)
+            if (val(pos:pos) == '"') then
+                if (.not. in_str) then
+                    in_str = .true.
+                    start = pos + 1
+                else
+                    in_str = .false.
+                    flag = val(start:pos - 1)
+                    if (len_trim(flag) > 0 .and. &
+                        config%n_flags < MAX_FLAGS) then
+                        config%n_flags = config%n_flags + 1
+                        config%flags(config%n_flags) = trim(flag)
+                    end if
+                end if
+            end if
+            pos = pos + 1
+        end do
+    end subroutine parse_flags
 
     subroutine strip_comment(line)
         character(len=*), intent(inout) :: line
