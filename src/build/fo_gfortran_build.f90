@@ -88,7 +88,7 @@ contains
     end subroutine gfortran_build
 
     subroutine guard_root_mod_shadow(project_dir, log_file)
-        !! Stale *.mod/*.smod/*.o in the project root silently shadow
+        !! Stale root module and object files silently shadow
         !! build/fo/mod: gfortran searches the compile working directory before
         !! the -I include dirs, so a leftover root module pins an old interface
         !! and a fresh source change appears as "symbol not found". Editors such
@@ -103,7 +103,7 @@ contains
         if (n_removed == 0) return
 
         write (line1, '(a,i0,a)') 'fo: removed ', n_removed, &
-            ' stale build artifact(s) (*.mod/*.smod/*.o) from the project root'
+            ' stale root .mod, .smod, and .o build artifact(s)'
         line2 = 'fo: they shadow build/fo/mod and pin stale module interfaces; '// &
                 'point your editor''s module output outside the project root '// &
                 '(VS Code Modern Fortran: fortran.linter.modOutput)'
@@ -270,7 +270,7 @@ contains
             ! gfortran_* profile dir directly (compile_commands.json lists only
             ! the project's own profile, not the deps') and dedup by basename.
             cmd = 'find '//sq(trim(project_dir)//'/build')// &
-                  ' -path "*/gfortran_*/*" \( '// &
+                  ' -path "'//'*'//'/gfortran_'//'*'//'/'//'*'//'" \( '// &
                   '-name "*_'//trim(config%deps(i)%name)//'_src_*.f90.o" -o '// &
                   '-name "*_'//trim(config%deps(i)%name)//'_src_*.c.o" '// &
                   '\) 2>/dev/null >> '//trim(objfile)
@@ -1256,7 +1256,7 @@ contains
             write (u, '(a,i0,a)') 'fo: removed ', n_removed, &
                 ' root build artifacts and retried once.'
             write (error_unit, '(a,i0,a)') 'fo: removed ', n_removed, &
-                ' stale root build artifacts (*.mod/*.smod/*.o); retried once'
+                ' stale root .mod, .smod, and .o build artifacts; retried once'
         else
             write (u, '(a)') 'fo: no root build artifacts were found to clean.'
             write (error_unit, '(a)') &
