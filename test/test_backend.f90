@@ -322,11 +322,13 @@ contains
         ! Sorts before main.f90; this is the program that used to steal the name.
         open (newunit=u, file=trim(project_dir)//'/app/aaa_extra.f90', &
               status='replace')
+        write (u, '(a)') '! fixture '//trim(project_dir)
         write (u, '(a)') 'program aaa_extra'
         write (u, '(a)') "print '(a)', 'FO_APPNAME_EXTRA'"
         write (u, '(a)') 'end program aaa_extra'
         close (u)
         open (newunit=u, file=trim(project_dir)//'/app/main.f90', status='replace')
+        write (u, '(a)') '! fixture '//trim(project_dir)
         write (u, '(a)') 'program main'
         write (u, '(a)') "print '(a)', 'FO_APPNAME_MAIN'"
         write (u, '(a)') 'end program main'

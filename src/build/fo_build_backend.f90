@@ -169,6 +169,16 @@ contains
         case (BACKEND_CMAKE)
             call process_cmake_build(self%project_dir, flag_text, np, log_path, &
                                      exitcode)
+            if (exitcode /= 0 .and. exitcode /= 124 .and. len_trim(log_path) > 0) then
+                if (log_has_vtable_mismatch(log_path)) then
+                    write (error_unit, '(a)') &
+                        'fo: WARNING: stale CMake module interfaces detected;' // &
+                        ' clearing build tree and retrying'
+                    call clear_cmake_build_tree(self%project_dir)
+                    call process_cmake_build(self%project_dir, flag_text, np, log_path, &
+                                             exitcode)
+                end if
+            end if
         case default
             write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             exitcode = 1
@@ -560,5 +570,14 @@ contains
               //' -delete 2>/dev/null'
         call execute_command_line(cmd, exitstat=ierr, wait=.true.)
     end subroutine clear_fpm_mod_cache
+
+    subroutine clear_cmake_build_tree(project_dir)
+        character(len=*), intent(in) :: project_dir
+
+        integer :: ierr
+
+        call execute_command_line('rm -rf '//sq(trim(project_dir)//'/build'), &
+                                  exitstat=ierr, wait=.true.)
+    end subroutine clear_cmake_build_tree
 
 end module fo_build_backend

@@ -195,7 +195,7 @@ contains
         character(len=1024), intent(in) :: lowered(n_lines)
         logical, intent(out) :: used
 
-        integer :: i, pos, sym_len
+        integer :: i, pos, rel_pos, abs_pos, sym_len
         character(len=1) :: before_ch, after_ch
         character(len=MAX_SYM_LEN) :: search_sym
 
@@ -221,28 +221,21 @@ contains
             end block
 
             pos = 1
-            do
-                pos = index(lowered(i) (pos:), trim(search_sym))
-                if (pos == 0) exit
-                pos = pos + (1 - 1)
-                ! recompute absolute position
-                block
-                    integer :: abs_pos
-                    abs_pos = index(lowered(i) (1:), trim(search_sym))
-                    if (abs_pos == 0) exit
-                    ! check word boundary
-                    before_ch = ' '
-                    if (abs_pos > 1) before_ch = lowered(i) (abs_pos - 1:abs_pos - 1)
-                    after_ch = ' '
-                    if (abs_pos + sym_len <= len_trim(lowered(i))) &
-                        after_ch = lowered(i) (abs_pos + sym_len:abs_pos + sym_len)
-                    if (.not. is_ident_char(before_ch) .and. &
-                        .not. is_ident_char(after_ch)) then
-                        used = .true.
-                        return
-                    end if
-                end block
-                exit
+            do while (pos <= len_trim(lowered(i)))
+                rel_pos = index(lowered(i) (pos:), trim(search_sym))
+                if (rel_pos == 0) exit
+                abs_pos = pos + rel_pos - 1
+                before_ch = ' '
+                if (abs_pos > 1) before_ch = lowered(i) (abs_pos - 1:abs_pos - 1)
+                after_ch = ' '
+                if (abs_pos + sym_len <= len_trim(lowered(i))) &
+                    after_ch = lowered(i) (abs_pos + sym_len:abs_pos + sym_len)
+                if (is_symbol_boundary_before(lowered(i), abs_pos) .and. &
+                    .not. is_ident_char(after_ch)) then
+                    used = .true.
+                    return
+                end if
+                pos = abs_pos + 1
             end do
         end do
     end subroutine is_symbol_used
@@ -610,8 +603,8 @@ contains
     pure logical function starts_with(str, prefix)
         character(len=*), intent(in) :: str, prefix
 
-        starts_with = (len_trim(str) >= len_trim(prefix) .and. &
-                       str(1:len_trim(prefix)) == prefix)
+        starts_with = (len_trim(str) >= len(prefix) .and. &
+                       str(1:len(prefix)) == prefix)
     end function starts_with
 
     pure logical function is_ident_char(c)
@@ -624,6 +617,26 @@ contains
                         (ic >= iachar('0') .and. ic <= iachar('9')) .or. &
                         c == '_'
     end function is_ident_char
+
+    pure logical function is_symbol_boundary_before(line, pos)
+        character(len=*), intent(in) :: line
+        integer, intent(in) :: pos
+
+        character(len=1) :: before_ch, kind_prefix
+
+        is_symbol_boundary_before = .true.
+        if (pos <= 1) return
+
+        before_ch = line(pos - 1:pos - 1)
+        if (.not. is_ident_char(before_ch)) return
+
+        is_symbol_boundary_before = .false.
+        if (before_ch /= '_' .or. pos <= 2) return
+
+        kind_prefix = line(pos - 2:pos - 2)
+        is_symbol_boundary_before = (kind_prefix >= '0' .and. kind_prefix <= '9') .or. &
+                                    kind_prefix == '"' .or. kind_prefix == "'"
+    end function is_symbol_boundary_before
 
     subroutine lint_dedup_warnings(warnings, n_warnings)
         type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)

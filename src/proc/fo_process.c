@@ -328,13 +328,18 @@ void fo_c_cmake_build(const char *project_dir, const char *flags, int jobs,
                       const char *log_file, int *exitcode) {
     char jobs_text[32];
     char flag_arg[2048];
+    char compiler_arg[2048];
+    const char *fc;
     char *configure_plain[] = {"cmake", "-S", ".", "-B", "build", "-G",
-                               "Ninja", NULL};
+                               "Ninja", compiler_arg, NULL};
     char *configure_flags[] = {"cmake", "-S", ".", "-B", "build", "-G",
-                               "Ninja", flag_arg, NULL};
+                               "Ninja", compiler_arg, flag_arg, NULL};
     char *build_argv[] = {"cmake", "--build", "build", "-j", jobs_text, NULL};
 
     snprintf(jobs_text, sizeof(jobs_text), "%d", jobs > 0 ? jobs : 1);
+    fc = getenv("FC");
+    if (!has_text(fc)) fc = "gfortran";
+    snprintf(compiler_arg, sizeof(compiler_arg), "-DCMAKE_Fortran_COMPILER=%s", fc);
     int build_timeout = env_timeout("FO_BUILD_TIMEOUT", 300);
     if (has_text(flags)) {
         snprintf(flag_arg, sizeof(flag_arg), "-DCMAKE_Fortran_FLAGS=%s", flags);
