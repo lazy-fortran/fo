@@ -5,7 +5,8 @@ program test_backend
         backend_test_names, &
         BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
-        gfortran_test_names
+        gfortran_test_names, config_flags_str
+    use fo_fpm_config, only: fpm_config_t
     implicit none
 
     integer :: n_pass, n_fail
@@ -26,6 +27,7 @@ program test_backend
     call test_gfortran_recovers_from_root_mod_shadow()
     call test_gfortran_restores_deleted_outputs()
     call test_gfortran_app_main_keeps_package_name()
+    call test_config_flags_str_joins_with_spaces()
     call test_gfortran_flags_change_action_id()
     call test_gfortran_compiler_identity_changes_action_id()
     call test_gfortran_private_change_keeps_dependent_cached()
@@ -370,6 +372,31 @@ contains
         read (u, '(a)', iostat=ios) first_line
         close (u)
     end subroutine run_capture
+
+    subroutine test_config_flags_str_joins_with_spaces()
+        !! Regression: multiple [build] flags must be space-separated.
+        !! The old code added a space then trimmed it back off, producing
+        !! e.g. "-O2-fopenmp" which gfortran rejects.
+        type(fpm_config_t) :: config
+
+        config%n_flags = 2
+        config%flags(1) = '-O2'
+        config%flags(2) = '-fopenmp'
+        call assert(trim(config_flags_str(config)) == '-O2 -fopenmp', &
+                    'config_flags_str joins two flags with a space')
+
+        config%n_flags = 3
+        config%flags(1) = '-O2'
+        config%flags(2) = '-fopenmp'
+        config%flags(3) = '-funroll-loops'
+        call assert(trim(config_flags_str(config)) == '-O2 -fopenmp -funroll-loops', &
+                    'config_flags_str joins three flags with spaces')
+
+        config%n_flags = 1
+        config%flags(1) = '-fopenmp'
+        call assert(trim(config_flags_str(config)) == '-fopenmp', &
+                    'config_flags_str passes a single flag through')
+    end subroutine test_config_flags_str_joins_with_spaces
 
     subroutine test_gfortran_flags_change_action_id()
         integer :: exitcode, n_first, n_same, n_changed

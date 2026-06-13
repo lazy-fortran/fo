@@ -18,6 +18,7 @@ module fo_gfortran_build
     integer, parameter :: MAX_SRC_OBJS = 2048
 
     public :: gfortran_build, gfortran_test, gfortran_test_names
+    public :: config_flags_str
 
 contains
 
@@ -1454,12 +1455,18 @@ contains
 
         combined = ''
         do i = 1, config%n_flags
-            if (len_trim(combined) > 0) combined = trim(combined)//' '
-            combined = trim(combined)//trim(config%flags(i))
+            if (len_trim(combined) > 0) then
+                combined = trim(combined)//' '//trim(config%flags(i))
+            else
+                combined = trim(config%flags(i))
+            end if
         end do
         if (len_trim(flag_text) > 0) then
-            if (len_trim(combined) > 0) combined = trim(combined)//' '
-            combined = trim(combined)//trim(flag_text)
+            if (len_trim(combined) > 0) then
+                combined = trim(combined)//' '//trim(flag_text)
+            else
+                combined = trim(flag_text)
+            end if
         end if
         flag_text = combined
     end subroutine merge_flags
@@ -1471,8 +1478,11 @@ contains
 
         s = ''
         do i = 1, config%n_flags
-            if (len_trim(s) > 0) s = trim(s)//' '
-            s = trim(s)//trim(config%flags(i))
+            if (len_trim(s) > 0) then
+                s = trim(s)//' '//trim(config%flags(i))
+            else
+                s = trim(config%flags(i))
+            end if
         end do
     end function config_flags_str
 
