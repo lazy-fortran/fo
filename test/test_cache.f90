@@ -1,9 +1,9 @@
 program test_cache
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_cache, only: cache_t, cache_init, cache_key_for, cache_lookup, &
-                        cache_store_action, cache_restore_action, cache_schema, &
-                        cache_store_root, cache_debug_write_action_record, &
-                        cache_debug_corrupt_object_payload, HASH_LEN
+        cache_store_action, cache_restore_action, cache_schema, &
+        cache_store_root, cache_debug_write_action_record, &
+        cache_debug_corrupt_object_payload, HASH_LEN
     implicit none
 
     integer :: n_pass, n_fail
@@ -70,16 +70,16 @@ contains
         call assert(cache_lookup(c, action_id), 'action lookup hits')
 
         call execute_command_line('rm -f '//trim(obj_path)//' '//trim(mod_path), &
-                                  wait=.true.)
+            wait=.true.)
         call cache_restore_action(c, action_id, obj_path, mod_dir, restored)
         call assert(restored, 'action restore reports success')
         call assert(file_contains(obj_path, 'object payload'), &
-                    'object restored from action cache')
+            'object restored from action cache')
         call assert(file_contains(mod_path, 'module payload'), &
-                    'module restored from action cache')
+            'module restored from action cache')
 
         call execute_command_line('rm -f '//trim(obj_path)//' '//trim(mod_path), &
-                                  wait=.true.)
+            wait=.true.)
         call execute_command_line('rm -rf '//trim(mod_dir), wait=.true.)
     end subroutine test_action_store_restore
 
@@ -105,7 +105,7 @@ contains
 
         action_id = repeat('f', HASH_LEN)
         call cache_store_action(c, action_id, obj_path, mod_dir, 'm', output_id, &
-                                ierr)
+            ierr)
         call assert(ierr == 0, 'parallel cache store')
 
         allocate (hits(64))
@@ -126,7 +126,7 @@ contains
 
         call cache_init(c, ierr)
         call assert(.not. cache_lookup(c, '0000000000000000'), &
-                    'lookup nonexistent misses')
+            'lookup nonexistent misses')
     end subroutine test_miss
 
     subroutine test_action_persistence()
@@ -143,11 +143,11 @@ contains
         call write_text(trim(mod_dir)//'/persist_mod.mod', 'persist mod')
         action_id = repeat('b', HASH_LEN)
         call cache_store_action(c, action_id, obj_path, mod_dir, 'persist_mod', &
-                                output_id, ierr)
+            output_id, ierr)
 
         call cache_init(c, ierr)
         call assert(cache_lookup(c, action_id), &
-                    'action cache persists across init')
+            'action cache persists across init')
         call execute_command_line('rm -f '//trim(obj_path), wait=.true.)
         call execute_command_line('rm -rf '//trim(mod_dir), wait=.true.)
     end subroutine test_action_persistence
@@ -167,11 +167,11 @@ contains
         call write_text(trim(mod_dir)//'/badmod.mod', 'valid mod')
         action_id = repeat('c', HASH_LEN)
         call cache_store_action(c, action_id, obj_path, mod_dir, 'badmod', &
-                                output_id, ierr)
+            output_id, ierr)
         call cache_debug_corrupt_object_payload(c, action_id, ierr)
         call assert(ierr == 0, 'debug corrupt object payload succeeds')
         call execute_command_line('rm -f '//trim(obj_path)//' '// &
-                                  trim(mod_dir)//'/badmod.mod', wait=.true.)
+            trim(mod_dir)//'/badmod.mod', wait=.true.)
         call cache_restore_action(c, action_id, obj_path, mod_dir, restored)
         call assert(.not. restored, 'corrupt payload does not restore as hit')
 
@@ -188,12 +188,12 @@ contains
         call cache_init(c, ierr)
         action_id = repeat('d', HASH_LEN)
         record = 'schema 1'//achar(10)//'kind compile'//achar(10)// &
-                 'output '//repeat('1', HASH_LEN)//achar(10)// &
-                 'object '//repeat('2', HASH_LEN)//' 1'//achar(10)
+            'output '//repeat('1', HASH_LEN)//achar(10)// &
+            'object '//repeat('2', HASH_LEN)//' 1'//achar(10)
         call cache_debug_write_action_record(c, action_id, record, ierr)
         call assert(ierr == 0, 'debug stale action write succeeds')
         call assert(.not. cache_lookup(c, action_id), &
-                    'stale action record with missing payload misses')
+            'stale action record with missing payload misses')
     end subroutine test_stale_action_record_misses
 
     subroutine test_wrong_schema_misses()
@@ -205,12 +205,12 @@ contains
         call cache_init(c, ierr)
         action_id = repeat('e', HASH_LEN)
         record = 'schema 999'//achar(10)//'kind compile'//achar(10)// &
-                 'output '//repeat('3', HASH_LEN)//achar(10)// &
-                 'object '//repeat('4', HASH_LEN)//' 1'//achar(10)
+            'output '//repeat('3', HASH_LEN)//achar(10)// &
+            'object '//repeat('4', HASH_LEN)//' 1'//achar(10)
         call cache_debug_write_action_record(c, action_id, record, ierr)
         call assert(ierr == 0, 'debug wrong schema write succeeds')
         call assert(.not. cache_lookup(c, action_id), &
-                    'wrong schema action record misses')
+            'wrong schema action record misses')
     end subroutine test_wrong_schema_misses
 
     subroutine test_partial_temp_ignored()
@@ -227,7 +227,7 @@ contains
         temp_path = trim(shard)//'/.tmp.'//trim(action_id)//'-a'
         call write_text(temp_path, 'partial action')
         call assert(.not. cache_lookup(c, action_id), &
-                    'partial temp file is ignored by lookup')
+            'partial temp file is ignored by lookup')
         call execute_command_line('rm -f '//trim(temp_path), wait=.true.)
     end subroutine test_partial_temp_ignored
 
@@ -245,7 +245,7 @@ contains
         key_b = cache_key_for(path_b, 'compiler', '', dep_keys, 0)
 
         call assert(key_a /= key_b, &
-                    'cache key includes source content after fixed buffer boundary')
+            'cache key includes source content after fixed buffer boundary')
         call execute_command_line('rm -f '//trim(path_a)//' '//trim(path_b))
     end subroutine test_large_file_hashes_full_source
 
@@ -256,7 +256,7 @@ contains
         call assert(trim(text) == 'action-output-v1', 'cache schema is reported')
         call cache_store_root(text)
         call assert(index(text, '/.cache/fo/store/v1') > 0, &
-                    'cache root points at store v1')
+            'cache root points at store v1')
     end subroutine test_schema_and_root
 
     subroutine write_text(path, text)

@@ -47,7 +47,7 @@ contains
         call lint_lines('fo_lint_prefixed_use', lines, 7, findings, n_findings)
 
         call assert(n_findings == 0, &
-                    'lint accepts symbol used after prefixed occurrence on same line')
+            'lint accepts symbol used after prefixed occurrence on same line')
     end subroutine test_symbol_used_after_prefixed_occurrence
 
     subroutine test_kind_suffix_counts_as_use()
@@ -82,7 +82,7 @@ contains
         call lint_lines('fo_lint_use_prefix_assignment', lines, 7, findings, n_findings)
 
         call assert(n_findings == 0, &
-                    'lint accepts imported names that start with use')
+            'lint accepts imported names that start with use')
     end subroutine test_use_prefixed_symbol_assignment_counts_as_use
 
     subroutine test_unused_import_still_reported()
@@ -101,7 +101,7 @@ contains
         call assert(n_findings == 1, 'lint still reports a genuinely unused import')
         if (n_findings == 1) then
             call assert(trim(findings(1)%symbol) == 'dp', &
-                        'unused import finding names the imported symbol')
+                'unused import finding names the imported symbol')
         end if
     end subroutine test_unused_import_still_reported
 

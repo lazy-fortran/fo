@@ -21,17 +21,17 @@ module fo_scan
     end type scan_unit_t
 
     character(len=32), dimension(10), parameter :: INTRINSIC_MODULES = [ &
-                                                   'iso_fortran_env  ', &
-                                                   'iso_c_binding    ', &
-                                                   'ieee_arithmetic  ', &
-                                                   'ieee_exceptions  ', &
-                                                   'ieee_features    ', &
-                                                   'omp_lib          ', &
-                                                   'openacc          ', &
-                                                   'mpi              ', &
-                                                   'mpi_f08          ', &
-                                                   'coarray_intrinsic' &
-                                                   ]
+        'iso_fortran_env  ', &
+        'iso_c_binding    ', &
+        'ieee_arithmetic  ', &
+        'ieee_exceptions  ', &
+        'ieee_features    ', &
+        'omp_lib          ', &
+        'openacc          ', &
+        'mpi              ', &
+        'mpi_f08          ', &
+        'coarray_intrinsic' &
+        ]
 
 contains
 
@@ -130,8 +130,8 @@ contains
         end if
 
         is_test_path = index(clean, '/test/') > 0 .or. &
-                       index(clean, '/tests/') > 0 .or. &
-                       index(base, 'test_') == 1
+            index(clean, '/tests/') > 0 .or. &
+            index(base, 'test_') == 1
     end function is_test_path
 
     subroutine parse_line(line, unit_info)
@@ -168,260 +168,260 @@ contains
 
         if (len_trim(unit_info%module_name) == 0 .and. &
             .not. unit_info%is_program) then
-            call extract_external_procedure_def(trimmed, name)
-            if (len_trim(name) > 0) then
-                unit_info%module_name = name
-                return
-            end if
-        end if
-
-        call extract_program_def(trimmed, name)
+        call extract_external_procedure_def(trimmed, name)
         if (len_trim(name) > 0) then
-            unit_info%program_name = name
-            unit_info%is_program = .true.
-        end if
-    end subroutine parse_line
-
-    subroutine extract_use(line, name)
-        character(len=*), intent(in) :: line
-        character(len=*), intent(out) :: name
-
-        integer :: start, fin, comma_pos, only_pos
-
-        name = ''
-        if (len_trim(line) < 5) return
-
-        if (line(1:4) /= 'use ' .and. line(1:4) /= 'USE ') return
-
-        start = 5
-
-        ! skip 'intrinsic ::' or ', intrinsic ::'
-        if (index(line, '::') > 0) then
-            start = index(line, '::') + 2
-        end if
-
-        ! skip whitespace
-        do while (start <= len_trim(line) .and. line(start:start) == ' ')
-            start = start + 1
-        end do
-
-        comma_pos = index(line(start:), ',')
-        only_pos = index(line(start:), ' ')
-
-        if (comma_pos > 0 .and. (only_pos == 0 .or. comma_pos < only_pos)) then
-            fin = start + comma_pos - 2
-        else if (only_pos > 0) then
-            fin = start + only_pos - 2
-        else
-            fin = len_trim(line)
-        end if
-
-        do while (fin >= start .and. line(fin:fin) == ' ')
-            fin = fin - 1
-        end do
-
-        if (fin >= start) then
-            name = line(start:fin)
-            call to_lower(name)
-        end if
-    end subroutine extract_use
-
-    subroutine extract_module_def(line, name)
-        character(len=*), intent(in) :: line
-        character(len=*), intent(out) :: name
-
-        character(len=512) :: lower_line
-        character(len=MAX_NAME) :: first_name
-        integer :: start, fin
-
-        name = ''
-        lower_line = line
-        call to_lower(lower_line)
-
-        if (len_trim(lower_line) < 8) return
-        if (lower_line(1:7) /= 'module ') return
-        start = 8
-        do while (start <= len_trim(line) .and. line(start:start) == ' ')
-            start = start + 1
-        end do
-
-        fin = start
-        do while (fin <= len_trim(line) .and. line(fin:fin) /= ' ' .and. &
-                  line(fin:fin) /= '!')
-            fin = fin + 1
-        end do
-        first_name = adjustl(line(start:fin - 1))
-        call to_lower(first_name)
-
-        if (trim(first_name) == 'procedure') return
-        if (trim(first_name) == 'subroutine') return
-        if (trim(first_name) == 'function') return
-
-        name = first_name
-        call to_lower(name)
-    end subroutine extract_module_def
-
-    subroutine extract_submodule_def(line, name, parent)
-        character(len=*), intent(in) :: line
-        character(len=*), intent(out) :: name
-        character(len=*), intent(out), optional :: parent
-
-        character(len=512) :: lower_line, parent_text
-        integer :: open_pos, close_pos, start, fin
-
-        name = ''
-        if (present(parent)) parent = ''
-        lower_line = line
-        call to_lower(lower_line)
-
-        if (len_trim(lower_line) < 11) return
-        if (lower_line(1:10) /= 'submodule(') return
-
-        open_pos = index(lower_line, '(')
-        close_pos = index(lower_line, ')')
-        if (open_pos == 0 .or. close_pos <= open_pos + 1) return
-
-        parent_text = adjustl(lower_line(open_pos + 1:close_pos - 1))
-        if (index(parent_text, ':') > 0) then
-            parent_text = parent_text(1:index(parent_text, ':') - 1)
-        end if
-        if (present(parent)) parent = trim(parent_text)
-
-        start = close_pos + 1
-        do while (start <= len_trim(line) .and. line(start:start) == ' ')
-            start = start + 1
-        end do
-        fin = start
-        do while (fin <= len_trim(line) .and. line(fin:fin) /= ' ' .and. &
-                  line(fin:fin) /= '!')
-            fin = fin + 1
-        end do
-
-        if (fin > start) then
-            name = adjustl(line(start:fin - 1))
-            call to_lower(name)
-        end if
-    end subroutine extract_submodule_def
-
-    subroutine extract_external_procedure_def(line, name)
-        character(len=*), intent(in) :: line
-        character(len=*), intent(out) :: name
-
-        character(len=512) :: lower_line
-        integer :: start
-
-        name = ''
-        lower_line = line
-        call to_lower(lower_line)
-
-        if (index(lower_line, 'subroutine ') == 1) then
-            start = 12
-        else if (index(lower_line, 'function ') == 1) then
-            start = 10
-        else
+            unit_info%module_name = name
             return
         end if
+    end if
 
-        do while (start <= len_trim(line) .and. line(start:start) == ' ')
-            start = start + 1
-        end do
+    call extract_program_def(trimmed, name)
+    if (len_trim(name) > 0) then
+        unit_info%program_name = name
+        unit_info%is_program = .true.
+    end if
+end subroutine parse_line
 
-        name = adjustl(line(start:))
-        if (index(name, '(') > 0) name = name(1:index(name, '(') - 1)
-        if (index(name, ' ') > 0) name = name(1:index(name, ' ') - 1)
-        if (index(name, '!') > 0) name = name(1:index(name, '!') - 1)
+subroutine extract_use(line, name)
+    character(len=*), intent(in) :: line
+    character(len=*), intent(out) :: name
+
+    integer :: start, fin, comma_pos, only_pos
+
+    name = ''
+    if (len_trim(line) < 5) return
+
+    if (line(1:4) /= 'use ' .and. line(1:4) /= 'USE ') return
+
+    start = 5
+
+    ! skip 'intrinsic ::' or ', intrinsic ::'
+    if (index(line, '::') > 0) then
+        start = index(line, '::') + 2
+    end if
+
+    ! skip whitespace
+    do while (start <= len_trim(line) .and. line(start:start) == ' ')
+        start = start + 1
+    end do
+
+    comma_pos = index(line(start:), ',')
+    only_pos = index(line(start:), ' ')
+
+    if (comma_pos > 0 .and. (only_pos == 0 .or. comma_pos < only_pos)) then
+        fin = start + comma_pos - 2
+    else if (only_pos > 0) then
+        fin = start + only_pos - 2
+    else
+        fin = len_trim(line)
+    end if
+
+    do while (fin >= start .and. line(fin:fin) == ' ')
+        fin = fin - 1
+    end do
+
+    if (fin >= start) then
+        name = line(start:fin)
         call to_lower(name)
-    end subroutine extract_external_procedure_def
+    end if
+end subroutine extract_use
 
-    subroutine extract_program_def(line, name)
-        character(len=*), intent(in) :: line
-        character(len=*), intent(out) :: name
+subroutine extract_module_def(line, name)
+    character(len=*), intent(in) :: line
+    character(len=*), intent(out) :: name
 
-        character(len=512) :: lower_line
-        integer :: start
+    character(len=512) :: lower_line
+    character(len=MAX_NAME) :: first_name
+    integer :: start, fin
 
-        name = ''
-        lower_line = line
-        call to_lower(lower_line)
+    name = ''
+    lower_line = line
+    call to_lower(lower_line)
 
-        if (len_trim(lower_line) < 9) return
-        if (lower_line(1:8) /= 'program ') return
+    if (len_trim(lower_line) < 8) return
+    if (lower_line(1:7) /= 'module ') return
+    start = 8
+    do while (start <= len_trim(line) .and. line(start:start) == ' ')
+        start = start + 1
+    end do
 
-        start = 9
-        do while (start <= len_trim(line) .and. line(start:start) == ' ')
-            start = start + 1
-        end do
+    fin = start
+    do while (fin <= len_trim(line) .and. line(fin:fin) /= ' ' .and. &
+            line(fin:fin) /= '!')
+        fin = fin + 1
+    end do
+    first_name = adjustl(line(start:fin - 1))
+    call to_lower(first_name)
 
-        name = adjustl(line(start:))
-        if (index(name, ' ') > 0) name = name(1:index(name, ' ') - 1)
-        if (index(name, '!') > 0) name = name(1:index(name, '!') - 1)
+    if (trim(first_name) == 'procedure') return
+    if (trim(first_name) == 'subroutine') return
+    if (trim(first_name) == 'function') return
+
+    name = first_name
+    call to_lower(name)
+end subroutine extract_module_def
+
+subroutine extract_submodule_def(line, name, parent)
+    character(len=*), intent(in) :: line
+    character(len=*), intent(out) :: name
+    character(len=*), intent(out), optional :: parent
+
+    character(len=512) :: lower_line, parent_text
+    integer :: open_pos, close_pos, start, fin
+
+    name = ''
+    if (present(parent)) parent = ''
+    lower_line = line
+    call to_lower(lower_line)
+
+    if (len_trim(lower_line) < 11) return
+    if (lower_line(1:10) /= 'submodule(') return
+
+    open_pos = index(lower_line, '(')
+    close_pos = index(lower_line, ')')
+    if (open_pos == 0 .or. close_pos <= open_pos + 1) return
+
+    parent_text = adjustl(lower_line(open_pos + 1:close_pos - 1))
+    if (index(parent_text, ':') > 0) then
+        parent_text = parent_text(1:index(parent_text, ':') - 1)
+    end if
+    if (present(parent)) parent = trim(parent_text)
+
+    start = close_pos + 1
+    do while (start <= len_trim(line) .and. line(start:start) == ' ')
+        start = start + 1
+    end do
+    fin = start
+    do while (fin <= len_trim(line) .and. line(fin:fin) /= ' ' .and. &
+            line(fin:fin) /= '!')
+        fin = fin + 1
+    end do
+
+    if (fin > start) then
+        name = adjustl(line(start:fin - 1))
         call to_lower(name)
-    end subroutine extract_program_def
+    end if
+end subroutine extract_submodule_def
 
-    logical function is_intrinsic(name)
-        character(len=*), intent(in) :: name
-        integer :: i
+subroutine extract_external_procedure_def(line, name)
+    character(len=*), intent(in) :: line
+    character(len=*), intent(out) :: name
 
-        is_intrinsic = .false.
-        do i = 1, size(INTRINSIC_MODULES)
-            if (trim(name) == trim(INTRINSIC_MODULES(i))) then
-                is_intrinsic = .true.
-                return
-            end if
-        end do
-    end function is_intrinsic
+    character(len=512) :: lower_line
+    integer :: start
 
-    subroutine add_dep(unit_info, name)
-        type(scan_unit_t), intent(inout) :: unit_info
-        character(len=*), intent(in) :: name
+    name = ''
+    lower_line = line
+    call to_lower(lower_line)
 
-        integer :: i
+    if (index(lower_line, 'subroutine ') == 1) then
+        start = 12
+    else if (index(lower_line, 'function ') == 1) then
+        start = 10
+    else
+        return
+    end if
 
-        ! skip duplicates
-        do i = 1, unit_info%n_deps
-            if (trim(unit_info%deps(i)) == trim(name)) return
-        end do
+    do while (start <= len_trim(line) .and. line(start:start) == ' ')
+        start = start + 1
+    end do
 
-        if (unit_info%n_deps < MAX_DEPS) then
-            unit_info%n_deps = unit_info%n_deps + 1
-            unit_info%deps(unit_info%n_deps) = name
+    name = adjustl(line(start:))
+    if (index(name, '(') > 0) name = name(1:index(name, '(') - 1)
+    if (index(name, ' ') > 0) name = name(1:index(name, ' ') - 1)
+    if (index(name, '!') > 0) name = name(1:index(name, '!') - 1)
+    call to_lower(name)
+end subroutine extract_external_procedure_def
+
+subroutine extract_program_def(line, name)
+    character(len=*), intent(in) :: line
+    character(len=*), intent(out) :: name
+
+    character(len=512) :: lower_line
+    integer :: start
+
+    name = ''
+    lower_line = line
+    call to_lower(lower_line)
+
+    if (len_trim(lower_line) < 9) return
+    if (lower_line(1:8) /= 'program ') return
+
+    start = 9
+    do while (start <= len_trim(line) .and. line(start:start) == ' ')
+        start = start + 1
+    end do
+
+    name = adjustl(line(start:))
+    if (index(name, ' ') > 0) name = name(1:index(name, ' ') - 1)
+    if (index(name, '!') > 0) name = name(1:index(name, '!') - 1)
+    call to_lower(name)
+end subroutine extract_program_def
+
+logical function is_intrinsic(name)
+    character(len=*), intent(in) :: name
+    integer :: i
+
+    is_intrinsic = .false.
+    do i = 1, size(INTRINSIC_MODULES)
+        if (trim(name) == trim(INTRINSIC_MODULES(i))) then
+            is_intrinsic = .true.
+            return
         end if
-    end subroutine add_dep
+    end do
+end function is_intrinsic
 
-    subroutine to_lower(str)
-        character(len=*), intent(inout) :: str
-        integer :: i, ic
+subroutine add_dep(unit_info, name)
+    type(scan_unit_t), intent(inout) :: unit_info
+    character(len=*), intent(in) :: name
 
-        do i = 1, len_trim(str)
-            ic = iachar(str(i:i))
-            if (ic >= iachar('A') .and. ic <= iachar('Z')) then
-                str(i:i) = achar(ic + 32)
-            end if
-        end do
-    end subroutine to_lower
+    integer :: i
 
-    logical function is_slow_test(name)
-        character(len=*), intent(in) :: name
+    ! skip duplicates
+    do i = 1, unit_info%n_deps
+        if (trim(unit_info%deps(i)) == trim(name)) return
+    end do
 
-        character(len=MAX_NAME) :: lower_name
-        integer :: n
+    if (unit_info%n_deps < MAX_DEPS) then
+        unit_info%n_deps = unit_info%n_deps + 1
+        unit_info%deps(unit_info%n_deps) = name
+    end if
+end subroutine add_dep
 
-        is_slow_test = .false.
-        lower_name = name
-        call to_lower(lower_name)
-        n = len_trim(lower_name)
-        if (n == 0) return
+subroutine to_lower(str)
+    character(len=*), intent(inout) :: str
+    integer :: i, ic
 
-        ! matches *_slow or *_slow_*
-        if (n >= 5) then
-            if (lower_name(n - 4:n) == '_slow') then
-                is_slow_test = .true.
-                return
-            end if
+    do i = 1, len_trim(str)
+        ic = iachar(str(i:i))
+        if (ic >= iachar('A') .and. ic <= iachar('Z')) then
+            str(i:i) = achar(ic + 32)
         end if
-        if (index(trim(lower_name), '_slow_') > 0) then
+    end do
+end subroutine to_lower
+
+logical function is_slow_test(name)
+    character(len=*), intent(in) :: name
+
+    character(len=MAX_NAME) :: lower_name
+    integer :: n
+
+    is_slow_test = .false.
+    lower_name = name
+    call to_lower(lower_name)
+    n = len_trim(lower_name)
+    if (n == 0) return
+
+    ! matches *_slow or *_slow_*
+    if (n >= 5) then
+        if (lower_name(n - 4:n) == '_slow') then
             is_slow_test = .true.
+            return
         end if
-    end function is_slow_test
+    end if
+    if (index(trim(lower_name), '_slow_') > 0) then
+        is_slow_test = .true.
+    end if
+end function is_slow_test
 
 end module fo_scan

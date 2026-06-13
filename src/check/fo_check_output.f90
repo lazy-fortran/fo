@@ -3,7 +3,7 @@ module fo_check_output
     use fx_json_build, only: json_escape_string
     use fo_check, only: check_result_t, fo_check_run
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
-                               capabilities_json
+        capabilities_json
     implicit none
     private
     public :: check_result_text, check_result_json
@@ -84,7 +84,7 @@ contains
         line = trim(line)//trim(json_escape_string(res%error_msg))//'"'
         if (res%n_test_results > 0) then
             line = trim(line)//',"test_summary":"'// &
-                   trim(test_summary_str(res))//'"'
+                trim(test_summary_str(res))//'"'
             line = trim(line)//trim(test_results_json(res))
         end if
         line = trim(line)//'}'
@@ -151,7 +151,7 @@ contains
         line = base(1:len_trim(base) - 1)
         line = trim(line)//',"stage":"'//trim(json_escape_string(res%stage))//'"'
         line = trim(line)//',"target":"'//trim(json_escape_string(res%target))//'"'
-    line = trim(line)//',"summary":"'//trim(json_escape_string(agent_summary(res)))//'"'
+        line = trim(line)//',"summary":"'//trim(json_escape_string(agent_summary(res)))//'"'
         line = trim(line)//',"hint":"'//trim(json_escape_string(res%hint))//'"'
         line = trim(line)//',"rerun":"'//trim(json_escape_string(res%rerun))//'"'
         line = trim(line)//',"log_path":"'//trim(json_escape_string(res%log_path))//'"'
@@ -159,10 +159,10 @@ contains
             line = trim(line)//',"diagnostics":[]'
         else
             line = trim(line)//',"diagnostics":[{"kind":"'// &
-                   trim(json_escape_string(res%stage))//'"'
+                trim(json_escape_string(res%stage))//'"'
             if (len_trim(res%diag_file) > 0) then
                 line = trim(line)//',"file":"'// &
-                       trim(json_escape_string(res%diag_file))//'"'
+                    trim(json_escape_string(res%diag_file))//'"'
             else
                 line = trim(line)//',"file":""'
             end if
@@ -170,7 +170,7 @@ contains
             line = trim(line)//',"column":'//trim(json_int(res%diag_column))
             line = trim(line)//',"target":"'//trim(json_escape_string(res%target))//'"'
             line = trim(line)//',"message":"'// &
-                   trim(json_escape_string(agent_summary(res)))//'"'
+                trim(json_escape_string(agent_summary(res)))//'"'
             line = trim(line)//',"hint":"'//trim(json_escape_string(res%hint))//'"'
             line = trim(line)//',"rerun":"'//trim(json_escape_string(res%rerun))//'"}]'
         end if
@@ -196,7 +196,7 @@ contains
         line = trim(line)//'"ok":'//trim(json_bool(ok))
         line = trim(line)//',"stage":"'//trim(json_escape_string(res%stage))//'"'
         line = trim(line)//',"target":"'//trim(json_escape_string(res%target))//'"'
-    line = trim(line)//',"summary":"'//trim(json_escape_string(agent_summary(res)))//'"'
+        line = trim(line)//',"summary":"'//trim(json_escape_string(agent_summary(res)))//'"'
         line = trim(line)//',"hint":"'//trim(json_escape_string(res%hint))//'"'
         line = trim(line)//',"rerun":"'//trim(json_escape_string(res%rerun))//'"'
         line = trim(line)//',"log_path":"'//trim(json_escape_string(res%log_path))//'"'
@@ -228,7 +228,7 @@ contains
         end if
         select case (trim(mode))
         case ('', 'text', 'json', 'json=compact', 'compact', &
-              'json=full', 'full', 'agent')
+                'json=full', 'full', 'agent')
         case default
             ierr = 2
             return
@@ -259,7 +259,7 @@ contains
         end select
 
         open (newunit=u, file=trim(output_path), status='replace', &
-              action='write', iostat=io)
+            action='write', iostat=io)
         if (io /= 0) then
             ierr = 3
             return

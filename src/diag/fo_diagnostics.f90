@@ -44,7 +44,7 @@ contains
                 if (iostat /= 0) exit
 
                 call parse_location_line(line, parsed_file, parsed_line, &
-                                         parsed_column, has_location)
+                    parsed_column, has_location)
                 if (has_location) then
                     current_file = parsed_file
                     current_line = parsed_line
@@ -52,7 +52,7 @@ contains
                 end if
 
                 call consider_log_line(line, diag%message, fallback, &
-                                       best_priority, selected)
+                    best_priority, selected)
                 if (selected .and. len_trim(current_file) > 0) then
                     diag%file = current_file
                     diag%line = current_line
@@ -141,102 +141,102 @@ contains
         priority = 0
         if (index(clean, 'fo: test target ') > 0 .and. &
             index(clean, ' returned exit code') > 0) then
-            priority = 7
-        else if (index(clean, 'ERROR STOP') > 0) then
-            priority = 6
-        else if (index(clean, 'Fatal Error:') > 0 .or. &
-                 index(clean, 'Cannot open file') > 0) then
-            priority = 5
-        else if (index(clean, 'undefined reference') > 0 .or. &
-                 index(clean, 'ld: cannot find') > 0 .or. &
-                 index(clean, 'cannot find -l') > 0 .or. &
-                 index(clean, 'library not found') > 0) then
-            priority = 5
-        else if (index(clean, 'Error:') > 0 .or. &
-                 index(clean, 'error:') > 0) then
-            priority = 4
-        else if (index(clean, 'timeout') > 0 .or. &
-                 index(clean, 'Timeout') > 0) then
-            priority = 4
-        else if (index(clean, 'FAIL:') > 0) then
-            priority = 3
-        else if (index(clean, 'returned exit code') > 0) then
-            priority = 2
-        else if (index(clean, '<ERROR>') > 0 .or. &
-                 index(clean, 'FAIL') > 0) then
-            priority = 1
-        end if
+        priority = 7
+    else if (index(clean, 'ERROR STOP') > 0) then
+        priority = 6
+    else if (index(clean, 'Fatal Error:') > 0 .or. &
+            index(clean, 'Cannot open file') > 0) then
+        priority = 5
+    else if (index(clean, 'undefined reference') > 0 .or. &
+            index(clean, 'ld: cannot find') > 0 .or. &
+            index(clean, 'cannot find -l') > 0 .or. &
+            index(clean, 'library not found') > 0) then
+        priority = 5
+    else if (index(clean, 'Error:') > 0 .or. &
+            index(clean, 'error:') > 0) then
+        priority = 4
+    else if (index(clean, 'timeout') > 0 .or. &
+            index(clean, 'Timeout') > 0) then
+        priority = 4
+    else if (index(clean, 'FAIL:') > 0) then
+        priority = 3
+    else if (index(clean, 'returned exit code') > 0) then
+        priority = 2
+    else if (index(clean, '<ERROR>') > 0 .or. &
+            index(clean, 'FAIL') > 0) then
+        priority = 1
+    end if
 
-        if (priority > 0 .and. priority >= best_priority) then
-            summary = clean
-            best_priority = priority
-            selected = .true.
-        end if
-    end subroutine consider_log_line
+    if (priority > 0 .and. priority >= best_priority) then
+        summary = clean
+        best_priority = priority
+        selected = .true.
+    end if
+end subroutine consider_log_line
 
-    function default_hint(kind) result(hint)
-        character(len=*), intent(in) :: kind
-        character(len=256) :: hint
+function default_hint(kind) result(hint)
+    character(len=*), intent(in) :: kind
+    character(len=256) :: hint
 
-        select case (trim(kind))
-        case ('build')
-            hint = 'fix the first compiler diagnostic, then rerun fo build'
-        case ('test')
-            hint = 'rerun the failing test, then fix or mark it slow'
+    select case (trim(kind))
+    case ('build')
+        hint = 'fix the first compiler diagnostic, then rerun fo build'
+    case ('test')
+        hint = 'rerun the failing test, then fix or mark it slow'
+    case default
+        hint = 'rerun the reported fo command after fixing the input'
+    end select
+end function default_hint
+
+function infer_target(summary) result(target)
+    character(len=*), intent(in) :: summary
+    character(len=128) :: target
+
+    integer :: pos, start, finish
+
+    target = ''
+    pos = index(summary, 'test_')
+    if (pos == 0) return
+
+    start = pos
+    finish = start
+    do while (finish <= len_trim(summary))
+        select case (summary(finish:finish))
+        case (' ', ':', ';', ',', ')', '(', '"')
+            exit
         case default
-            hint = 'rerun the reported fo command after fixing the input'
+            finish = finish + 1
         end select
-    end function default_hint
+    end do
+    target = summary(start:finish - 1)
+end function infer_target
 
-    function infer_target(summary) result(target)
-        character(len=*), intent(in) :: summary
-        character(len=128) :: target
+logical function is_timeout_text(text)
+    character(len=*), intent(in) :: text
 
-        integer :: pos, start, finish
+    is_timeout_text = index(text, 'timeout') > 0 .or. &
+        index(text, 'Timeout') > 0 .or. &
+        index(text, 'timed out') > 0
+end function is_timeout_text
 
-        target = ''
-        pos = index(summary, 'test_')
-        if (pos == 0) return
+logical function is_linker_error(text)
+    character(len=*), intent(in) :: text
 
-        start = pos
-        finish = start
-        do while (finish <= len_trim(summary))
-            select case (summary(finish:finish))
-            case (' ', ':', ';', ',', ')', '(', '"')
-                exit
-            case default
-                finish = finish + 1
-            end select
-        end do
-        target = summary(start:finish - 1)
-    end function infer_target
+    is_linker_error = index(text, 'undefined reference') > 0 .or. &
+        index(text, 'ld: cannot find') > 0 .or. &
+        index(text, 'cannot find -l') > 0 .or. &
+        index(text, 'library not found') > 0
+end function is_linker_error
 
-    logical function is_timeout_text(text)
-        character(len=*), intent(in) :: text
+logical function is_runner_crash(text)
+    character(len=*), intent(in) :: text
 
-        is_timeout_text = index(text, 'timeout') > 0 .or. &
-                          index(text, 'Timeout') > 0 .or. &
-                          index(text, 'timed out') > 0
-    end function is_timeout_text
-
-    logical function is_linker_error(text)
-        character(len=*), intent(in) :: text
-
-        is_linker_error = index(text, 'undefined reference') > 0 .or. &
-                          index(text, 'ld: cannot find') > 0 .or. &
-                          index(text, 'cannot find -l') > 0 .or. &
-                          index(text, 'library not found') > 0
-    end function is_linker_error
-
-    logical function is_runner_crash(text)
-        character(len=*), intent(in) :: text
-
-        is_runner_crash = index(text, 'malloc') > 0 .or. &
-                          index(text, 'Assertion') > 0 .or. &
-                          index(text, 'SIGABRT') > 0 .or. &
-                          index(text, 'SIGSEGV') > 0 .or. &
-                          index(text, 'double free') > 0 .or. &
-                          index(text, 'corrupted') > 0
-    end function is_runner_crash
+    is_runner_crash = index(text, 'malloc') > 0 .or. &
+        index(text, 'Assertion') > 0 .or. &
+        index(text, 'SIGABRT') > 0 .or. &
+        index(text, 'SIGSEGV') > 0 .or. &
+        index(text, 'double free') > 0 .or. &
+        index(text, 'corrupted') > 0
+end function is_runner_crash
 
 end module fo_diagnostics

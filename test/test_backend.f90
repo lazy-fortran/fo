@@ -1,11 +1,11 @@
 program test_backend
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
-                                detect_jobs, backend_build, backend_test, &
-                                backend_test_names, &
-                                BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
+        detect_jobs, backend_build, backend_test, &
+        backend_test_names, &
+        BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
-                                 gfortran_test_names
+        gfortran_test_names
     implicit none
 
     integer :: n_pass, n_fail
@@ -85,7 +85,7 @@ contains
         b = detect_backend(trim(project_dir)//'/src/nested')
         call assert(b%kind == BACKEND_GFORTRAN, 'detect fpm.toml from child -> gfortran backend')
         call assert(trim(b%project_dir) == trim(project_dir), &
-                    'detected project root')
+            'detected project root')
 
         call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_detect_fpm_from_child
@@ -98,7 +98,7 @@ contains
         call make_tmp_path('fo_test_cmake', project_dir)
         call execute_command_line('mkdir -p '//trim(project_dir))
         open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
-              status='replace')
+            status='replace')
         write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
         close (u)
 
@@ -119,7 +119,7 @@ contains
         write (u, '(a)') 'name = "test"'
         close (u)
         open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
-              status='replace')
+            status='replace')
         write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
         close (u)
 
@@ -192,7 +192,7 @@ contains
         call backend_test_names(b, names, 1, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'gfortran named tests run selected test only')
         call assert(file_contains(log_file, 'selected test ran'), &
-                    'gfortran named log includes selected test output')
+            'gfortran named log includes selected test output')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
@@ -209,14 +209,14 @@ contains
 
         names(1) = 'test_a'
         call gfortran_test_names(project_dir, names, 1, log_file, exitcode, &
-                                 n_compiled=n_first)
+            n_compiled=n_first)
         call gfortran_test_names(project_dir, names, 1, log_file, exitcode, &
-                                 n_compiled=n_second)
+            n_compiled=n_second)
 
         call assert(exitcode == 0, 'gfortran named cached test succeeds')
         call assert(n_first > 0, 'gfortran named test first run compiles')
         call assert(n_second == 0, &
-                    'gfortran named test second run restores test object')
+            'gfortran named test second run restores test object')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
@@ -232,7 +232,7 @@ contains
         call make_simple_fpm_project(project_dir)
 
         open (newunit=u, file=trim(project_dir)//'/src/lib.f90', &
-              status='replace')
+            status='replace')
         write (u, '(a)') '! fixture '//trim(project_dir)
         write (u, '(a)') 'module lib'
         write (u, '(a)') 'implicit none'
@@ -245,7 +245,7 @@ contains
         close (u)
 
         open (newunit=u, file=trim(project_dir)//'/src/consumer.f90', &
-              status='replace')
+            status='replace')
         write (u, '(a)') '! fixture '//trim(project_dir)
         write (u, '(a)') 'module consumer'
         write (u, '(a)') 'use lib, only: noop'
@@ -265,9 +265,9 @@ contains
         call backend_build(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'gfortran build recovers from root .mod shadow')
         call assert(file_contains(log_file, 'fortran.linter.modOutput'), &
-                    'stale root module hint reaches build log')
+            'stale root module hint reaches build log')
         call assert(.not. file_exists(trim(project_dir)//'/lib.mod'), &
-                    'stale root module is removed after matched failure')
+            'stale root module is removed after matched failure')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
@@ -285,18 +285,18 @@ contains
 
         call gfortran_build(project_dir, log_file, exitcode, n_first)
         call assert(exitcode == 0 .and. n_first > 0, &
-                    'gfortran restore fixture first build compiles')
+            'gfortran restore fixture first build compiles')
         call execute_command_line('rm -rf '//trim(project_dir)// &
-                                  '/build/fo/obj '//trim(project_dir)// &
-                                  '/build/fo/mod', wait=.true.)
+            '/build/fo/obj '//trim(project_dir)// &
+            '/build/fo/mod', wait=.true.)
         call gfortran_build(project_dir, log_file, exitcode, n_restore)
         call assert(exitcode == 0 .and. n_restore == 0, &
-                    'deleted outputs restore without recompiling')
+            'deleted outputs restore without recompiling')
         inquire (file=trim(project_dir)//'/build/fo/obj/src_lib.f90.o', &
-                 exist=obj_exists)
+            exist=obj_exists)
         inquire (file=trim(project_dir)//'/build/fo/mod/lib.mod', exist=mod_exists)
         call assert(obj_exists .and. mod_exists, &
-                    'deleted object and module outputs are restored')
+            'deleted object and module outputs are restored')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
@@ -321,7 +321,7 @@ contains
         close (u)
         ! Sorts before main.f90; this is the program that used to steal the name.
         open (newunit=u, file=trim(project_dir)//'/app/aaa_extra.f90', &
-              status='replace')
+            status='replace')
         write (u, '(a)') '! fixture '//trim(project_dir)
         write (u, '(a)') 'program aaa_extra'
         write (u, '(a)') "print '(a)', 'FO_APPNAME_EXTRA'"
@@ -336,18 +336,18 @@ contains
 
         call gfortran_build(project_dir, log_file, exitcode, n_first)
         call assert(exitcode == 0 .and. n_first > 0, &
-                    'appname fixture builds')
+            'appname fixture builds')
 
         ! The package binary must be main, not the alphabetically-first program.
         call run_capture(trim(project_dir)//'/build/fo/bin/appnamepkg', &
-                         trim(out_file), line)
+            trim(out_file), line)
         call assert(trim(line) == 'FO_APPNAME_MAIN', &
-                    'package binary is app/main.f90, not the first app source')
+            'package binary is app/main.f90, not the first app source')
         ! The other program is named by its own stem, cleanly (no app_ prefix).
         call run_capture(trim(project_dir)//'/build/fo/bin/aaa_extra', &
-                         trim(out_file), line)
+            trim(out_file), line)
         call assert(trim(line) == 'FO_APPNAME_EXTRA', &
-                    'non-main app program is named by its source stem')
+            'non-main app program is named by its source stem')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file)//' '//trim(out_file))
@@ -364,7 +364,7 @@ contains
         inquire (file=trim(exe), exist=exists)
         if (.not. exists) return
         call execute_command_line('"'//trim(exe)//'" > "'//trim(out_file)// &
-                                  '" 2>/dev/null', wait=.true.)
+            '" 2>/dev/null', wait=.true.)
         open (newunit=u, file=trim(out_file), status='old', iostat=ios)
         if (ios /= 0) return
         read (u, '(a)', iostat=ios) first_line
@@ -382,13 +382,13 @@ contains
 
         call gfortran_build(project_dir, log_file, exitcode, n_first, '-O0')
         call assert(exitcode == 0 .and. n_first > 0, &
-                    'gfortran flags fixture first build compiles')
+            'gfortran flags fixture first build compiles')
         call gfortran_build(project_dir, log_file, exitcode, n_same, '-O0')
         call assert(exitcode == 0 .and. n_same == 0, &
-                    'same flags restore from action cache')
+            'same flags restore from action cache')
         call gfortran_build(project_dir, log_file, exitcode, n_changed, '-O3')
         call assert(exitcode == 0 .and. n_changed > 0, &
-                    'changed flags miss action cache')
+            'changed flags miss action cache')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
@@ -404,17 +404,17 @@ contains
         call rewrite_lib_unique(project_dir)
 
         call gfortran_build(project_dir, log_file, exitcode, n_first, &
-                            compiler_id='compiler-a')
+            compiler_id='compiler-a')
         call assert(exitcode == 0 .and. n_first > 0, &
-                    'compiler identity fixture first build compiles')
+            'compiler identity fixture first build compiles')
         call gfortran_build(project_dir, log_file, exitcode, n_same, &
-                            compiler_id='compiler-a')
+            compiler_id='compiler-a')
         call assert(exitcode == 0 .and. n_same == 0, &
-                    'same compiler identity restores from action cache')
+            'same compiler identity restores from action cache')
         call gfortran_build(project_dir, log_file, exitcode, n_changed, &
-                            compiler_id='compiler-b')
+            compiler_id='compiler-b')
         call assert(exitcode == 0 .and. n_changed > 0, &
-                    'changed compiler identity misses action cache')
+            'changed compiler identity misses action cache')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
@@ -447,11 +447,11 @@ contains
 
         call gfortran_build(project_dir, log_file, exitcode, n_first)
         call assert(exitcode == 0 .and. n_first == 2, &
-                    'private change fixture first build compiles two modules')
+            'private change fixture first build compiles two modules')
         call write_lib_private_body(project_dir, 2)
         call gfortran_build(project_dir, log_file, exitcode, n_update)
         call assert(exitcode == 0 .and. n_update == 1, &
-                    'private implementation change does not rebuild dependent')
+            'private implementation change does not rebuild dependent')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
@@ -467,11 +467,11 @@ contains
 
         call gfortran_build(project_dir, log_file, exitcode, n_first)
         call assert(exitcode == 0 .and. n_first == 2, &
-                    'interface change fixture first build compiles two modules')
+            'interface change fixture first build compiles two modules')
         call write_lib_interface(project_dir)
         call gfortran_build(project_dir, log_file, exitcode, n_update)
         call assert(exitcode == 0 .and. n_update == 2, &
-                    'interface change rebuilds dependent module')
+            'interface change rebuilds dependent module')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
@@ -492,7 +492,7 @@ contains
         call gfortran_test(project_dir, log_file, exitcode, n_compiled=n_second)
         call assert(exitcode == 0, 'parallel gfortran test suite rerun succeeds')
         call assert(n_second == 0, &
-                    'parallel gfortran test second run restores tests')
+            'parallel gfortran test second run restores tests')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
@@ -509,7 +509,7 @@ contains
         close (u)
         call write_lib_private_body(project_dir, 1)
         open (newunit=u, file=trim(project_dir)//'/src/consumer.f90', &
-              status='replace')
+            status='replace')
         write (u, '(a)') '! fixture '//trim(project_dir)
         write (u, '(a)') 'module consumer'
         write (u, '(a)') 'use lib, only: value'
@@ -594,9 +594,9 @@ contains
         call backend_test_names(b, names, 2, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'cmake named tests select requested tests')
         call assert(file_contains(log_file, 'Test #1: test_a') .or. &
-                    file_contains(log_file, 'Test #2: test_a') .or. &
-                    file_contains(log_file, 'test_a'), &
-                    'cmake named log includes selected test')
+            file_contains(log_file, 'Test #2: test_a') .or. &
+            file_contains(log_file, 'test_a'), &
+            'cmake named log includes selected test')
 
         call execute_command_line('rm -rf '//trim(project_dir))
         call execute_command_line('rm -f '//trim(log_file))
@@ -660,7 +660,7 @@ contains
         call backend_test_names(b, names, 1, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'ctest selected names escape regex metacharacters')
         call assert(file_contains(log_file, 'test.dot'), &
-                    'ctest regex fixture runs selected dotted name')
+            'ctest regex fixture runs selected dotted name')
 
         call execute_command_line('rm -rf '//trim(project_dir))
         call execute_command_line('rm -f '//trim(log_file))
@@ -679,7 +679,7 @@ contains
         close (u)
 
         open (newunit=u, file=trim(project_dir)//'/src/lib.f90', &
-              status='replace')
+            status='replace')
         write (u, '(a)') 'module lib'
         write (u, '(a)') 'implicit none'
         write (u, '(a)') 'contains'
@@ -689,7 +689,7 @@ contains
         close (u)
 
         open (newunit=u, file=trim(project_dir)//'/test/test_fast.f90', &
-              status='replace')
+            status='replace')
         write (u, '(a)') 'program test_fast'
         write (u, '(a)') 'use lib, only: noop'
         write (u, '(a)') 'call noop()'
@@ -697,7 +697,7 @@ contains
         close (u)
 
         open (newunit=u, file=trim(project_dir)// &
-              '/test/test_kernel_slow.f90', status='replace')
+            '/test/test_kernel_slow.f90', status='replace')
         write (u, '(a)') 'program test_kernel_slow'
         write (u, '(a)') 'use lib, only: noop'
         write (u, '(a)') 'call noop()'
@@ -719,7 +719,7 @@ contains
         close (u)
 
         open (newunit=u, file=trim(project_dir)//'/src/lib.f90', &
-              status='replace')
+            status='replace')
         write (u, '(a)') 'module lib'
         write (u, '(a)') 'implicit none'
         write (u, '(a)') 'contains'
@@ -729,7 +729,7 @@ contains
         close (u)
 
         open (newunit=u, file=trim(project_dir)//'/test/test_a.f90', &
-              status='replace')
+            status='replace')
         write (u, '(a)') '! fixture '//trim(project_dir)
         write (u, '(a)') 'program test_a'
         write (u, '(a)') 'use lib, only: noop'
@@ -739,7 +739,7 @@ contains
         close (u)
 
         open (newunit=u, file=trim(project_dir)//'/test/test_unselected.f90', &
-              status='replace')
+            status='replace')
         write (u, '(a)') '! fixture '//trim(project_dir)
         write (u, '(a)') 'program test_unselected'
         write (u, '(a)') 'use lib, only: noop'
@@ -762,7 +762,7 @@ contains
         close (u)
 
         open (newunit=u, file=trim(project_dir)//'/src/lib.f90', &
-              status='replace')
+            status='replace')
         write (u, '(a)') 'module lib'
         write (u, '(a)') 'implicit none'
         write (u, '(a)') 'contains'
@@ -772,7 +772,7 @@ contains
         close (u)
 
         open (newunit=u, file=trim(project_dir)//'/test/test_fast.f90', &
-              status='replace')
+            status='replace')
         write (u, '(a)') 'program test_fast'
         write (u, '(a)') 'use lib, only: noop'
         write (u, '(a)') 'call noop()'
@@ -795,7 +795,7 @@ contains
         close (u)
 
         open (newunit=u, file=trim(project_dir)//'/src/lib.f90', &
-              status='replace')
+            status='replace')
         write (u, '(a)') 'module lib'
         write (u, '(a)') 'implicit none'
         write (u, '(a)') 'contains'
@@ -807,7 +807,7 @@ contains
         do i = 1, n_tests
             write (name, '(a,i0)') 'test_', i
             open (newunit=u, file=trim(project_dir)//'/test/'//trim(name)//'.f90', &
-                  status='replace')
+                status='replace')
             write (u, '(a)') '! fixture '//trim(project_dir)
             write (u, '(a)') 'program '//trim(name)
             write (u, '(a)') 'use lib, only: noop'
@@ -826,7 +826,7 @@ contains
         call execute_command_line('mkdir -p '//trim(project_dir))
 
         open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
-              status='replace')
+            status='replace')
         write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
         write (u, '(a)') 'project(fo_backend_cmake_tests NONE)'
         write (u, '(a)') 'enable_testing()'
@@ -858,8 +858,8 @@ contains
         close (u)
 
         call execute_command_line('cd '//trim(project_dir)// &
-                                  ' && cmake -S . -B build >/dev/null 2>&1', &
-                                  exitstat=exitcode, wait=.true.)
+            ' && cmake -S . -B build >/dev/null 2>&1', &
+            exitstat=exitcode, wait=.true.)
     end subroutine make_cmake_tests_project
 
     subroutine make_cmake_space_project(project_dir)
@@ -870,7 +870,7 @@ contains
         call make_dir(project_dir)
 
         open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
-              status='replace')
+            status='replace')
         write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
         write (u, '(a)') 'project(fo_backend_cmake_spaces NONE)'
         write (u, '(a)') 'enable_testing()'
@@ -886,7 +886,7 @@ contains
         call execute_command_line('mkdir -p '//trim(project_dir))
 
         open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
-              status='replace')
+            status='replace')
         write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
         write (u, '(a)') 'project(fo_backend_cmake_regex NONE)'
         write (u, '(a)') 'enable_testing()'

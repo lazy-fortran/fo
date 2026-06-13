@@ -3,12 +3,10 @@ module fo_fmt
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
     use fo_cache, only: cache_store_root, HASH_LEN
     use fx_hash, only: sha256_file
+    use fo_format, only: format_file
     implicit none
     private
     public :: fo_fmt_run, fo_fmt_check_run
-
-    character(len=*), parameter :: FPRETTIFY_FLAGS = &
-                                   ' -i 4 -l 88 --strict-indent'
 
 contains
 
@@ -17,19 +15,37 @@ contains
         integer, intent(out) :: exitcode
 
         type(backend_t) :: b
-        character(len=512) :: scan_root
+        character(len=512) :: scan_root, list_file, fpath
         character(len=4096) :: cmd
+        integer :: u, ios, fmt_exit
 
         b = detect_backend(trim(dir))
         scan_root = trim(dir)
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
 
+        exitcode = 0
+        call make_tmpfile('fo_fmt_files', list_file)
         cmd = 'find '//trim(scan_root)// &
-              " -path '*/build' -prune -o"// &
-              " -path '*/.git' -prune -o"// &
-              " \( -name '*.f90' -o -name '*.F90' \) -print"// &
-              ' | xargs -r fprettify'//FPRETTIFY_FLAGS
-        call execute_command_line(trim(cmd), exitstat=exitcode, wait=.true.)
+            " -path '*/build' -prune -o"// &
+            " -path '*/.git' -prune -o"// &
+            " \( -name '*.f90' -o -name '*.F90' \) -print 2>/dev/null"// &
+            ' | sort > '//trim(list_file)
+        call execute_command_line(trim(cmd), wait=.true.)
+
+        open (newunit=u, file=trim(list_file), status='old', iostat=ios)
+        if (ios /= 0) then
+            call delete_tmpfile(list_file)
+            return
+        end if
+        do
+            read (u, '(a)', iostat=ios) fpath
+            if (ios /= 0) exit
+            if (len_trim(fpath) == 0) cycle
+            call format_file(trim(fpath), fmt_exit)
+            if (fmt_exit /= 0) exitcode = 1
+        end do
+        close (u)
+        call delete_tmpfile(list_file)
     end subroutine fo_fmt_run
 
     subroutine fo_fmt_check_run(dir, output, exitcode)
@@ -41,7 +57,7 @@ contains
         character(len=512) :: scan_root, list_file, fpath, tmpf
         character(len=HASH_LEN) :: action_id
         character(len=4096) :: cmd
-        integer :: u, iostat, diff_exit, n_bad
+        integer :: u, ios, diff_exit, n_bad, fmt_exit
 
         b = detect_backend(trim(dir))
         scan_root = trim(dir)
@@ -53,10 +69,10 @@ contains
         n_bad = 0
         call make_tmpfile('fo_fmt_files', list_file)
         cmd = 'find '//trim(scan_root)// &
-              " -path '*/build' -prune -o"// &
-              " -path '*/.git' -prune -o"// &
-              " \( -name '*.f90' -o -name '*.F90' \) -print 2>/dev/null"// &
-              ' | sort > '//trim(list_file)
+            " -path '*/build' -prune -o"// &
+            " -path '*/.git' -prune -o"// &
+            " \( -name '*.f90' -o -name '*.F90' \) -print 2>/dev/null"// &
+            ' | sort > '//trim(list_file)
         call execute_command_line(trim(cmd), wait=.true.)
 
         call fmt_action_id(list_file, action_id)
@@ -65,23 +81,26 @@ contains
             return
         end if
 
-        open (newunit=u, file=list_file, status='old', iostat=iostat)
-        if (iostat /= 0) then
+        open (newunit=u, file=trim(list_file), status='old', iostat=ios)
+        if (ios /= 0) then
             call delete_tmpfile(list_file)
             return
         end if
 
         do
-            read (u, '(a)', iostat=iostat) fpath
-            if (iostat /= 0) exit
+            read (u, '(a)', iostat=ios) fpath
+            if (ios /= 0) exit
             if (len_trim(fpath) == 0) cycle
 
             call make_tmpfile('fo_fmt_check', tmpf)
-            cmd = 'cp '//trim(fpath)//' '//trim(tmpf)
+            cmd = 'cp '//sq(trim(fpath))//' '//sq(trim(tmpf))
             call execute_command_line(trim(cmd), wait=.true.)
-            cmd = 'fprettify'//FPRETTIFY_FLAGS//' '//trim(tmpf)//' >/dev/null 2>&1'
-            call execute_command_line(trim(cmd), wait=.true.)
-            cmd = 'diff -q '//trim(fpath)//' '//trim(tmpf)//' >/dev/null 2>&1'
+            call format_file(trim(tmpf), fmt_exit)
+            if (fmt_exit /= 0) then
+                call delete_tmpfile(tmpf)
+                cycle
+            end if
+            cmd = 'diff -q '//sq(trim(fpath))//' '//sq(trim(tmpf))//' >/dev/null 2>&1'
             call execute_command_line(trim(cmd), exitstat=diff_exit, wait=.true.)
             call delete_tmpfile(tmpf)
 
@@ -104,27 +123,19 @@ contains
         character(len=*), intent(in) :: list_file
         character(len=*), intent(out) :: action_id
 
-        character(len=512) :: manifest, fpath, version_file
+        character(len=512) :: manifest, fpath
         character(len=HASH_LEN) :: file_hash
-        character(len=512) :: version
         integer :: in_u, out_u, ios, ierr
 
         action_id = ''
         call make_tmpfile('fo_fmt_manifest', manifest)
-        call make_tmpfile('fo_fmt_version', version_file)
-        call execute_command_line('fprettify --version > '//sq(trim(version_file))// &
-                                  ' 2>/dev/null', wait=.true.)
-        call read_first_line(version_file, version)
-        call delete_tmpfile(version_file)
 
         open (newunit=out_u, file=trim(manifest), status='replace', iostat=ios)
         if (ios /= 0) then
             call delete_tmpfile(manifest)
             return
         end if
-        write (out_u, '(a)') 'fo-fmt-check-v1'
-        write (out_u, '(a)') trim(FPRETTIFY_FLAGS)
-        write (out_u, '(a)') trim(version)
+        write (out_u, '(a)') 'fo-fmt-native-v1'
 
         open (newunit=in_u, file=trim(list_file), status='old', iostat=ios)
         if (ios == 0) then
@@ -162,8 +173,8 @@ contains
         call fmt_marker_path(action_id, path)
         call make_tmpfile('fo_fmt_marker', tmp)
         call execute_command_line('mkdir -p '//sq(dirname(path))//' && printf 1 > '// &
-                                  sq(trim(tmp))//' && mv -f '//sq(trim(tmp))//' '// &
-                                  sq(trim(path)), wait=.true., exitstat=exitcode)
+            sq(trim(tmp))//' && mv -f '//sq(trim(tmp))//' '// &
+            sq(trim(path)), wait=.true., exitstat=exitcode)
         if (exitcode /= 0) call delete_tmpfile(tmp)
     end subroutine store_fmt_marker
 
@@ -176,19 +187,6 @@ contains
         call cache_store_root(root)
         path = trim(root)//'/'//action_id(1:2)//'/'//trim(action_id)//'-fmt'
     end subroutine fmt_marker_path
-
-    subroutine read_first_line(path, line)
-        character(len=*), intent(in) :: path
-        character(len=*), intent(out) :: line
-
-        integer :: u, ios
-
-        line = ''
-        open (newunit=u, file=trim(path), status='old', iostat=ios)
-        if (ios /= 0) return
-        read (u, '(a)', iostat=ios) line
-        close (u)
-    end subroutine read_first_line
 
     pure function dirname(path) result(dir)
         character(len=*), intent(in) :: path

@@ -110,7 +110,7 @@ contains
         call scan_file(path, info, ierr)
         call assert(ierr == 0, 'scan_proc_name: no error')
         call assert(trim(info%module_name) == 'ast_nodes_procedure', &
-                    'scan_proc_name: module name')
+            'scan_proc_name: module name')
         call execute_command_line('rm -f '//trim(path))
 
         lines(1) = 'module procedure_classification'
@@ -122,7 +122,7 @@ contains
         call scan_file(path, info, ierr)
         call assert(ierr == 0, 'scan_proc_prefix: no error')
         call assert(trim(info%module_name) == 'procedure_classification', &
-                    'scan_proc_prefix: module name')
+            'scan_proc_prefix: module name')
         call execute_command_line('rm -f '//trim(path))
     end subroutine test_scan_module_name_containing_procedure
 
@@ -141,10 +141,10 @@ contains
         call scan_file(path, info, ierr)
         call assert(ierr == 0, 'scan_submodule: no error')
         call assert(trim(info%module_name) == 'semantic_analyzer_context_impl', &
-                    'scan_submodule: submodule name')
+            'scan_submodule: submodule name')
         call assert(info%n_deps == 1, 'scan_submodule: one parent dependency')
         call assert(trim(info%deps(1)) == 'semantic_analyzer', &
-                    'scan_submodule: parent dependency')
+            'scan_submodule: parent dependency')
         call execute_command_line('rm -f '//trim(path))
     end subroutine test_scan_submodule_def
 
@@ -163,7 +163,7 @@ contains
         call scan_file(path, info, ierr)
         call assert(ierr == 0, 'scan_external_subroutine: no error')
         call assert(trim(info%module_name) == 'ensure_if_do_registration_bridge', &
-                    'scan_external_subroutine: procedure name')
+            'scan_external_subroutine: procedure name')
         call execute_command_line('rm -f '//trim(path))
     end subroutine test_scan_external_subroutine_def
 
@@ -185,9 +185,9 @@ contains
         call scan_file(path, info, ierr)
         call assert(ierr == 0, 'scan_contained_subroutine: no error')
         call assert(trim(info%program_name) == 'test_named', &
-                    'scan_contained_subroutine: program name')
+            'scan_contained_subroutine: program name')
         call assert(len_trim(info%module_name) == 0, &
-                    'scan_contained_subroutine: no external unit')
+            'scan_contained_subroutine: no external unit')
         call execute_command_line('rm -f '//trim(path))
     end subroutine test_scan_contained_subroutine_keeps_program
 
@@ -237,25 +237,25 @@ contains
     subroutine test_slow_test_detection()
         ! *_slow suffix
         call assert(is_slow_test('test_integration_slow'), &
-                    'slow: test_integration_slow is slow')
+            'slow: test_integration_slow is slow')
         call assert(is_slow_test('perf_slow'), &
-                    'slow: perf_slow is slow')
+            'slow: perf_slow is slow')
 
         ! *_slow_* infix
         call assert(is_slow_test('test_slow_network'), &
-                    'slow: test_slow_network is slow')
+            'slow: test_slow_network is slow')
         call assert(is_slow_test('my_slow_test'), &
-                    'slow: my_slow_test is slow')
+            'slow: my_slow_test is slow')
 
         ! not slow
         call assert(.not. is_slow_test('test_fast'), &
-                    'slow: test_fast is not slow')
+            'slow: test_fast is not slow')
         call assert(.not. is_slow_test('test_slowly'), &
-                    'slow: test_slowly is not slow')
+            'slow: test_slowly is not slow')
         call assert(.not. is_slow_test('slowtest'), &
-                    'slow: slowtest is not slow')
+            'slow: slowtest is not slow')
         call assert(.not. is_slow_test('test_cache'), &
-                    'slow: test_cache is not slow')
+            'slow: test_cache is not slow')
     end subroutine test_slow_test_detection
 
     subroutine test_scan_dir_empty()
@@ -323,7 +323,7 @@ contains
         write (u, '(a)') 'name = "root"'
         close (u)
         open (newunit=u, file=trim(dir)//'/bench/nested/fpm.toml', &
-              status='replace')
+            status='replace')
         write (u, '(a)') 'name = "nested"'
         close (u)
 
@@ -336,13 +336,13 @@ contains
         nested_lines(2) = 'implicit none'
         nested_lines(3) = 'end module nested_mod'
         call write_file(trim(dir)//'/bench/nested/src/nested_mod.f90', &
-                        nested_lines, 3)
+            nested_lines, 3)
 
         call scan_dir(dir, units, n_units, ierr)
         call assert(ierr == 0, 'nested project: no scan error')
         call assert(n_units == 1, 'nested project: nested fpm tree skipped')
         call assert(trim(units(1)%module_name) == 'root_mod', &
-                    'nested project: root module remains')
+            'nested project: root module remains')
 
         call remove_tree(dir)
     end subroutine test_scan_dir_skips_nested_projects
@@ -368,13 +368,13 @@ contains
         nested_lines(2) = 'implicit none'
         nested_lines(3) = 'end module ghost_mod'
         call write_file(trim(dir)//'/.claude/worktrees/wf/src/ghost_mod.f90', &
-                        nested_lines, 3)
+            nested_lines, 3)
 
         call scan_dir(dir, units, n_units, ierr)
         call assert(ierr == 0, 'agent worktree: no scan error')
         call assert(n_units == 1, 'agent worktree: hidden worktree skipped')
         call assert(trim(units(1)%module_name) == 'root_mod', &
-                    'agent worktree: root module remains')
+            'agent worktree: root module remains')
 
         call remove_tree(dir)
     end subroutine test_scan_dir_skips_agent_worktrees

@@ -18,14 +18,14 @@ module fo_process
         end subroutine fo_c_detect_nproc
 
         subroutine fo_c_scan_sources(root, output_file, exitcode) &
-            bind(C, name='fo_c_scan_sources')
+                bind(C, name='fo_c_scan_sources')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: root(*), output_file(*)
             integer(c_int), intent(out) :: exitcode
         end subroutine fo_c_scan_sources
 
         subroutine fo_c_fpm_build(project_dir, flags, jobs, log_file, &
-                                  exitcode) bind(C, name='fo_c_fpm_build')
+                exitcode) bind(C, name='fo_c_fpm_build')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: project_dir(*), flags(*)
             character(kind=c_char), intent(in) :: log_file(*)
@@ -34,14 +34,14 @@ module fo_process
         end subroutine fo_c_fpm_build
 
         subroutine fo_c_fpm_test_list(project_dir, log_file, exitcode) &
-            bind(C, name='fo_c_fpm_test_list')
+                bind(C, name='fo_c_fpm_test_list')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: project_dir(*), log_file(*)
             integer(c_int), intent(out) :: exitcode
         end subroutine fo_c_fpm_test_list
 
         subroutine fo_c_fpm_test_all(project_dir, jobs, log_file, exitcode) &
-            bind(C, name='fo_c_fpm_test_all')
+                bind(C, name='fo_c_fpm_test_all')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: project_dir(*), log_file(*)
             integer(c_int), value :: jobs
@@ -49,7 +49,7 @@ module fo_process
         end subroutine fo_c_fpm_test_all
 
         subroutine fo_c_fpm_test_names(project_dir, names, jobs, log_file, &
-                                       exitcode) bind(C, name='fo_c_fpm_test_names')
+                exitcode) bind(C, name='fo_c_fpm_test_names')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: project_dir(*), names(*)
             character(kind=c_char), intent(in) :: log_file(*)
@@ -58,7 +58,7 @@ module fo_process
         end subroutine fo_c_fpm_test_names
 
         subroutine fo_c_cmake_build(project_dir, flags, jobs, log_file, &
-                                    exitcode) bind(C, name='fo_c_cmake_build')
+                exitcode) bind(C, name='fo_c_cmake_build')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: project_dir(*), flags(*)
             character(kind=c_char), intent(in) :: log_file(*)
@@ -67,7 +67,7 @@ module fo_process
         end subroutine fo_c_cmake_build
 
         subroutine fo_c_ctest(project_dir, jobs, regex, include_slow, &
-                              log_file, exitcode) bind(C, name='fo_c_ctest')
+                log_file, exitcode) bind(C, name='fo_c_ctest')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: project_dir(*), regex(*)
             character(kind=c_char), intent(in) :: log_file(*)
@@ -76,7 +76,7 @@ module fo_process
         end subroutine fo_c_ctest
 
         subroutine fo_c_start_fo_check(project_dir, mode, output_file, pid, &
-                                       exitcode) bind(C, name='fo_c_start_fo_check')
+                exitcode) bind(C, name='fo_c_start_fo_check')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: project_dir(*), mode(*)
             character(kind=c_char), intent(in) :: output_file(*)
@@ -84,7 +84,7 @@ module fo_process
         end subroutine fo_c_start_fo_check
 
         subroutine fo_c_run_logged(cwd, exe_path, log_file, append, timeout_s, &
-                                   exitcode) bind(C, name='fo_c_run_logged')
+                exitcode) bind(C, name='fo_c_run_logged')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: cwd(*), exe_path(*), log_file(*)
             integer(c_int), value :: append, timeout_s
@@ -92,7 +92,7 @@ module fo_process
         end subroutine fo_c_run_logged
 
         subroutine fo_c_poll_pid(pid, done, exitcode) &
-            bind(C, name='fo_c_poll_pid')
+                bind(C, name='fo_c_poll_pid')
             import :: c_int
             integer(c_int), value :: pid
             integer(c_int), intent(out) :: done, exitcode
@@ -175,7 +175,7 @@ contains
     end subroutine process_fpm_test_all
 
     subroutine process_fpm_test_names(project_dir, names, n_names, jobs, &
-                                      log_file, exitcode)
+            log_file, exitcode)
         character(len=*), intent(in) :: project_dir
         character(len=128), intent(in) :: names(:)
         integer, intent(in) :: n_names, jobs
@@ -190,7 +190,7 @@ contains
         call names_to_c_string(names, n_names, c_names)
         call to_c_string(log_file, c_log)
         call fo_c_fpm_test_names(c_project, c_names, int(jobs, c_int), c_log, &
-                                 c_exit)
+            c_exit)
         exitcode = int(c_exit)
     end subroutine process_fpm_test_names
 
@@ -211,7 +211,7 @@ contains
     end subroutine process_cmake_build
 
     subroutine process_ctest(project_dir, jobs, regex, include_slow, log_file, &
-                             exitcode)
+            exitcode)
         character(len=*), intent(in) :: project_dir, regex, log_file
         integer, intent(in) :: jobs
         logical, intent(in) :: include_slow
@@ -227,12 +227,12 @@ contains
         c_slow = 0
         if (include_slow) c_slow = 1
         call fo_c_ctest(c_project, int(jobs, c_int), c_regex, c_slow, c_log, &
-                        c_exit)
+            c_exit)
         exitcode = int(c_exit)
     end subroutine process_ctest
 
     subroutine process_start_fo_check(project_dir, mode, output_file, pid, &
-                                      exitcode)
+            exitcode)
         character(len=*), intent(in) :: project_dir, mode, output_file
         integer, intent(out) :: pid, exitcode
 
@@ -249,7 +249,7 @@ contains
     end subroutine process_start_fo_check
 
     subroutine process_run_logged(cwd, exe_path, log_file, append, timeout_s, &
-                                  exitcode)
+            exitcode)
         character(len=*), intent(in) :: cwd, exe_path, log_file
         logical, intent(in) :: append
         integer, intent(in) :: timeout_s
@@ -265,7 +265,7 @@ contains
         c_append = 0
         if (append) c_append = 1
         call fo_c_run_logged(c_cwd, c_exe, c_log, c_append, &
-                             int(timeout_s, c_int), c_exit)
+            int(timeout_s, c_int), c_exit)
         exitcode = int(c_exit)
     end subroutine process_run_logged
 

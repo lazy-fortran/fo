@@ -2,7 +2,7 @@ program test_dag
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_scan, only: scan_unit_t
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_affected_set, &
-                      MAX_NODES
+        MAX_NODES
     use fo_dag_bridge, only: build_dag_from_units
     implicit none
 
@@ -63,9 +63,9 @@ contains
 
         ! c must come before b, b before a
         call assert(position(order, n_order, dag_find_node(dag, 'c')) < &
-                position(order, n_order, dag_find_node(dag, 'b')), 'linear: c before b')
+            position(order, n_order, dag_find_node(dag, 'b')), 'linear: c before b')
         call assert(position(order, n_order, dag_find_node(dag, 'b')) < &
-                position(order, n_order, dag_find_node(dag, 'a')), 'linear: b before a')
+            position(order, n_order, dag_find_node(dag, 'a')), 'linear: b before a')
     end subroutine test_linear_chain
 
     subroutine test_diamond()
@@ -102,7 +102,7 @@ contains
         call assert(.not. has_cycle, 'diamond: no cycle')
         call assert(n_order == 4, 'diamond: all 4 ordered')
         call assert(position(order, n_order, dag_find_node(dag, 'a')) < &
-               position(order, n_order, dag_find_node(dag, 'd')), 'diamond: a before d')
+            position(order, n_order, dag_find_node(dag, 'd')), 'diamond: a before d')
     end subroutine test_diamond
 
     subroutine test_reverse_deps()
@@ -184,7 +184,7 @@ contains
         ! verify test_b is not affected
         do i = 1, n_affected
             call assert(trim(dag%nodes(affected(i))%label) /= 'test_b', &
-                        'affected_tests: test_b not affected')
+                'affected_tests: test_b not affected')
         end do
     end subroutine test_affected_tests
 

@@ -1,6 +1,6 @@
 module fo_dag_bridge
     use fx_dag, only: dag_t, dag_init, dag_add_node, dag_find_node, &
-                      dag_add_edge, MAX_NODES
+        dag_add_edge, MAX_NODES
     use fo_scan, only: scan_unit_t, MAX_NAME
     implicit none
     private
@@ -9,7 +9,7 @@ module fo_dag_bridge
 contains
 
     subroutine build_dag_from_units(units, n_units, dag, filenames, &
-                                    is_test_arr, is_prog_arr)
+            is_test_arr, is_prog_arr)
         type(scan_unit_t), intent(in) :: units(:)
         integer, intent(in) :: n_units
         type(dag_t), intent(out) :: dag

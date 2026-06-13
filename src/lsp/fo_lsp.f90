@@ -1,6 +1,6 @@
 module fo_lsp
     use fx_lsp, only: lsp_server_t, lsp_server_init, lsp_server_run, &
-                      lsp_publish_diagnostics, lsp_uri_to_path, lsp_path_to_uri
+        lsp_publish_diagnostics, lsp_uri_to_path, lsp_path_to_uri
     use fx_diag, only: diag_t, DIAG_ERROR
     use fo_check, only: check_result_t, fo_check_run
     implicit none
@@ -25,7 +25,7 @@ contains
         integer :: n_diags
         character(len=512) :: file_path, project_dir, diag_uri
 
-        if (len_trim(text) < 0) return  ! text required by interface; content not inspected
+        if (len_trim(text) < 0) return ! text required by interface; content not inspected
         file_path = lsp_uri_to_path(uri)
         call find_project_dir(file_path, project_dir)
         call fo_check_run(trim(project_dir), res)

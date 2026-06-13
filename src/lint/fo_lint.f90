@@ -63,12 +63,12 @@ contains
 
         do i = 1, n_lines
             call check_use_line(filename, i, lowered, n_lines, &
-                                findings, n_findings)
+                findings, n_findings)
         end do
     end subroutine lint_file
 
     subroutine check_use_line(filename, line_no, lowered, n_lines, &
-                              findings, n_findings)
+            findings, n_findings)
         character(len=*), intent(in) :: filename
         integer, intent(in) :: line_no, n_lines
         character(len=1024), intent(in) :: lowered(n_lines)
@@ -232,436 +232,436 @@ contains
                     after_ch = lowered(i) (abs_pos + sym_len:abs_pos + sym_len)
                 if (is_symbol_boundary_before(lowered(i), abs_pos) .and. &
                     .not. is_ident_char(after_ch)) then
-                    used = .true.
-                    return
-                end if
-                pos = abs_pos + 1
-            end do
+                used = .true.
+                return
+            end if
+            pos = abs_pos + 1
         end do
-    end subroutine is_symbol_used
+    end do
+end subroutine is_symbol_used
 
-    subroutine lint_dir(dir, findings, n_findings)
-        character(len=*), intent(in) :: dir
-        type(lint_finding_t), intent(out) :: findings(MAX_FINDINGS)
-        integer, intent(out) :: n_findings
+subroutine lint_dir(dir, findings, n_findings)
+    character(len=*), intent(in) :: dir
+    type(lint_finding_t), intent(out) :: findings(MAX_FINDINGS)
+    integer, intent(out) :: n_findings
 
-        character(len=512) :: tmpfile, cmd, fpath
-        integer :: u, iostat
+    character(len=512) :: tmpfile, cmd, fpath
+    integer :: u, iostat
 
-        n_findings = 0
-        call make_tmpfile('fo_lint_files', tmpfile)
-        cmd = 'find '//trim(dir)// &
-              " -path '*/build' -prune -o"// &
-              " -path '*/.git' -prune -o"// &
-              " \( -name '*.f90' -o -name '*.F90'"// &
-              " -o -name '*.f' -o -name '*.F' \) -print 2>/dev/null"// &
-              ' | sort > '//trim(tmpfile)
-        call execute_command_line(cmd, wait=.true.)
+    n_findings = 0
+    call make_tmpfile('fo_lint_files', tmpfile)
+    cmd = 'find '//trim(dir)// &
+        " -path '*/build' -prune -o"// &
+        " -path '*/.git' -prune -o"// &
+        " \( -name '*.f90' -o -name '*.F90'"// &
+        " -o -name '*.f' -o -name '*.F' \) -print 2>/dev/null"// &
+        ' | sort > '//trim(tmpfile)
+    call execute_command_line(cmd, wait=.true.)
 
-        open (newunit=u, file=tmpfile, status='old', iostat=iostat)
-        if (iostat /= 0) return
+    open (newunit=u, file=tmpfile, status='old', iostat=iostat)
+    if (iostat /= 0) return
 
-        do
-            read (u, '(a)', iostat=iostat) fpath
-            if (iostat /= 0) exit
-            if (len_trim(fpath) == 0) cycle
-            call lint_file(trim(fpath), findings, n_findings)
-        end do
-        close (u)
+    do
+        read (u, '(a)', iostat=iostat) fpath
+        if (iostat /= 0) exit
+        if (len_trim(fpath) == 0) cycle
+        call lint_file(trim(fpath), findings, n_findings)
+    end do
+    close (u)
+    call delete_tmpfile(tmpfile)
+end subroutine lint_dir
+
+function lint_findings_json(findings, n_findings) result(json)
+    type(lint_finding_t), intent(in) :: findings(*)
+    integer, intent(in) :: n_findings
+    character(len=8192) :: json
+
+    integer :: i
+
+    if (n_findings == 0) then
+        json = '{"unused_imports":[],"count":0}'
+        return
+    end if
+
+    json = '{"unused_imports":['
+    do i = 1, n_findings
+        if (i > 1) json = trim(json)//','
+        json = trim(json)//'{"file":"'// &
+            trim(json_escape_string(findings(i)%file))//'"'// &
+            ',"line":'//trim(json_int(findings(i)%line))// &
+            ',"module":"'// &
+            trim(json_escape_string(findings(i)%module_name))//'"'// &
+            ',"symbol":"'// &
+            trim(json_escape_string(findings(i)%symbol))//'"}'
+    end do
+    json = trim(json)//'],"count":'//trim(json_int(n_findings))//'}'
+end function lint_findings_json
+
+subroutine lint_compiler(dir, warnings, n_warnings)
+    character(len=*), intent(in) :: dir
+    type(lint_warning_t), intent(out) :: warnings(MAX_WARNINGS)
+    integer, intent(out) :: n_warnings
+
+    character(len=512) :: tmpfile, fpath
+    character(len=4096) :: cmd
+    character(len=2048) :: mod_flags
+    integer :: u, iostat
+
+    n_warnings = 0
+    call find_mod_include_flags(dir, mod_flags)
+
+    call make_tmpfile('fo_lint_warn_files', tmpfile)
+    cmd = 'find '//trim(dir)// &
+        " -path '*/build' -prune -o"// &
+        " -path '*/.git' -prune -o"// &
+        " \( -name '*.f90' -o -name '*.F90'"// &
+        " -o -name '*.f' -o -name '*.F' \) -print 2>/dev/null"// &
+        ' | sort > '//trim(tmpfile)
+    call execute_command_line(cmd, wait=.true.)
+
+    open (newunit=u, file=tmpfile, status='old', iostat=iostat)
+    if (iostat /= 0) then
         call delete_tmpfile(tmpfile)
-    end subroutine lint_dir
+        return
+    end if
 
-    function lint_findings_json(findings, n_findings) result(json)
-        type(lint_finding_t), intent(in) :: findings(*)
-        integer, intent(in) :: n_findings
-        character(len=8192) :: json
+    do
+        read (u, '(a)', iostat=iostat) fpath
+        if (iostat /= 0) exit
+        if (len_trim(fpath) == 0) cycle
+        call lint_file_compiler(trim(fpath), mod_flags, &
+            warnings, n_warnings)
+        call lint_file_lengths(trim(fpath), warnings, n_warnings)
+    end do
+    close (u)
+    call delete_tmpfile(tmpfile)
+end subroutine lint_compiler
 
-        integer :: i
+subroutine find_mod_include_flags(dir, flags)
+    character(len=*), intent(in) :: dir
+    character(len=*), intent(out) :: flags
 
-        if (n_findings == 0) then
-            json = '{"unused_imports":[],"count":0}'
-            return
-        end if
+    character(len=512) :: tmpfile, line
+    character(len=4096) :: cmd
+    integer :: u, iostat
 
-        json = '{"unused_imports":['
-        do i = 1, n_findings
-            if (i > 1) json = trim(json)//','
-            json = trim(json)//'{"file":"'// &
-                   trim(json_escape_string(findings(i)%file))//'"'// &
-                   ',"line":'//trim(json_int(findings(i)%line))// &
-                   ',"module":"'// &
-                   trim(json_escape_string(findings(i)%module_name))//'"'// &
-                   ',"symbol":"'// &
-                   trim(json_escape_string(findings(i)%symbol))//'"}'
-        end do
-        json = trim(json)//'],"count":'//trim(json_int(n_findings))//'}'
-    end function lint_findings_json
+    flags = ''
+    call make_tmpfile('fo_lint_moddirs', tmpfile)
+    cmd = 'find '//trim(dir)// &
+        "/build -name '*.mod' -type f"// &
+        ' -exec dirname {} \; 2>/dev/null'// &
+        ' | sort -u > '//trim(tmpfile)
+    call execute_command_line(cmd, wait=.true.)
 
-    subroutine lint_compiler(dir, warnings, n_warnings)
-        character(len=*), intent(in) :: dir
-        type(lint_warning_t), intent(out) :: warnings(MAX_WARNINGS)
-        integer, intent(out) :: n_warnings
-
-        character(len=512) :: tmpfile, fpath
-        character(len=4096) :: cmd
-        character(len=2048) :: mod_flags
-        integer :: u, iostat
-
-        n_warnings = 0
-        call find_mod_include_flags(dir, mod_flags)
-
-        call make_tmpfile('fo_lint_warn_files', tmpfile)
-        cmd = 'find '//trim(dir)// &
-              " -path '*/build' -prune -o"// &
-              " -path '*/.git' -prune -o"// &
-              " \( -name '*.f90' -o -name '*.F90'"// &
-              " -o -name '*.f' -o -name '*.F' \) -print 2>/dev/null"// &
-              ' | sort > '//trim(tmpfile)
-        call execute_command_line(cmd, wait=.true.)
-
-        open (newunit=u, file=tmpfile, status='old', iostat=iostat)
-        if (iostat /= 0) then
-            call delete_tmpfile(tmpfile)
-            return
-        end if
-
-        do
-            read (u, '(a)', iostat=iostat) fpath
-            if (iostat /= 0) exit
-            if (len_trim(fpath) == 0) cycle
-            call lint_file_compiler(trim(fpath), mod_flags, &
-                                    warnings, n_warnings)
-            call lint_file_lengths(trim(fpath), warnings, n_warnings)
-        end do
-        close (u)
-        call delete_tmpfile(tmpfile)
-    end subroutine lint_compiler
-
-    subroutine find_mod_include_flags(dir, flags)
-        character(len=*), intent(in) :: dir
-        character(len=*), intent(out) :: flags
-
-        character(len=512) :: tmpfile, line
-        character(len=4096) :: cmd
-        integer :: u, iostat
-
-        flags = ''
-        call make_tmpfile('fo_lint_moddirs', tmpfile)
-        cmd = 'find '//trim(dir)// &
-              "/build -name '*.mod' -type f"// &
-              ' -exec dirname {} \; 2>/dev/null'// &
-              ' | sort -u > '//trim(tmpfile)
-        call execute_command_line(cmd, wait=.true.)
-
-        open (newunit=u, file=tmpfile, status='old', iostat=iostat)
-        if (iostat == 0) then
-            do
-                read (u, '(a)', iostat=iostat) line
-                if (iostat /= 0) exit
-                if (len_trim(line) == 0) cycle
-                if (len_trim(flags) + len_trim(line) + 4 > len(flags)) exit
-                flags = trim(flags)//' -I'//trim(line)
-            end do
-            close (u)
-        end if
-        call delete_tmpfile(tmpfile)
-    end subroutine find_mod_include_flags
-
-    subroutine lint_file_lengths(filepath, warnings, n_warnings)
-        character(len=*), intent(in) :: filepath
-        type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
-        integer, intent(inout) :: n_warnings
-
-        character(len=2048) :: line
-        integer :: u, iostat, lineno, linelen
-
-        open (newunit=u, file=trim(filepath), status='old', iostat=iostat)
-        if (iostat /= 0) return
-
-        lineno = 0
+    open (newunit=u, file=tmpfile, status='old', iostat=iostat)
+    if (iostat == 0) then
         do
             read (u, '(a)', iostat=iostat) line
             if (iostat /= 0) exit
-            lineno = lineno + 1
-            linelen = len_trim(line)
-            if (linelen > 132) then
-                block
-                    character(len=len(line)) :: stripped
-                    stripped = adjustl(line)
-                    if (stripped(1:1) == '#') cycle
-                end block
-                if (n_warnings < MAX_WARNINGS) then
-                    n_warnings = n_warnings + 1
-                    warnings(n_warnings)%file = trim(filepath)
-                    warnings(n_warnings)%line = lineno
-                    warnings(n_warnings)%column = 133
-                    write (warnings(n_warnings)%message, '(a,i0,a)') &
-                        'line exceeds 132 characters (', linelen, ' chars)'
-                end if
-            end if
+            if (len_trim(line) == 0) cycle
+            if (len_trim(flags) + len_trim(line) + 4 > len(flags)) exit
+            flags = trim(flags)//' -I'//trim(line)
         end do
         close (u)
-    end subroutine lint_file_lengths
+    end if
+    call delete_tmpfile(tmpfile)
+end subroutine find_mod_include_flags
 
-    subroutine lint_file_compiler(filepath, mod_flags, warnings, n_warnings)
-        character(len=*), intent(in) :: filepath, mod_flags
-        type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
-        integer, intent(inout) :: n_warnings
+subroutine lint_file_lengths(filepath, warnings, n_warnings)
+    character(len=*), intent(in) :: filepath
+    type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
+    integer, intent(inout) :: n_warnings
 
-        character(len=512) :: errfile
-        character(len=4096) :: cmd
-        character(len=1024) :: line
-        character(len=256) :: cur_file
-        integer :: cur_line, cur_col
-        integer :: u, iostat
+    character(len=2048) :: line
+    integer :: u, iostat, lineno, linelen
 
-        call make_tmpfile('fo_lint_gfortran', errfile)
-        cmd = 'gfortran -fsyntax-only -Wall -Wextra'// &
-              ' -Wimplicit-interface -Wimplicit-procedure'// &
-              trim(mod_flags)//' '//trim(filepath)// &
-              ' 2>'//trim(errfile)
-        call execute_command_line(cmd, wait=.true.)
+    open (newunit=u, file=trim(filepath), status='old', iostat=iostat)
+    if (iostat /= 0) return
 
-        cur_file = ''
-        cur_line = 0
-        cur_col = 0
-
-        open (newunit=u, file=errfile, status='old', iostat=iostat)
-        if (iostat == 0) then
-            do
-                read (u, '(a)', iostat=iostat) line
-                if (iostat /= 0) exit
-                call parse_gfortran_warning(line, cur_file, cur_line, &
-                                            cur_col, warnings, n_warnings)
-            end do
-            close (u)
+    lineno = 0
+    do
+        read (u, '(a)', iostat=iostat) line
+        if (iostat /= 0) exit
+        lineno = lineno + 1
+        linelen = len_trim(line)
+        if (linelen > 132) then
+            block
+                character(len=len(line)) :: stripped
+                stripped = adjustl(line)
+                if (stripped(1:1) == '#') cycle
+            end block
+            if (n_warnings < MAX_WARNINGS) then
+                n_warnings = n_warnings + 1
+                warnings(n_warnings)%file = trim(filepath)
+                warnings(n_warnings)%line = lineno
+                warnings(n_warnings)%column = 133
+                write (warnings(n_warnings)%message, '(a,i0,a)') &
+                    'line exceeds 132 characters (', linelen, ' chars)'
+            end if
         end if
-        call delete_tmpfile(errfile)
-    end subroutine lint_file_compiler
+    end do
+    close (u)
+end subroutine lint_file_lengths
 
-    subroutine parse_gfortran_warning(line, cur_file, cur_line, cur_col, &
-                                      warnings, n_warnings)
-        character(len=*), intent(in) :: line
-        character(len=256), intent(inout) :: cur_file
-        integer, intent(inout) :: cur_line, cur_col
-        type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
-        integer, intent(inout) :: n_warnings
+subroutine lint_file_compiler(filepath, mod_flags, warnings, n_warnings)
+    character(len=*), intent(in) :: filepath, mod_flags
+    type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
+    integer, intent(inout) :: n_warnings
 
-        character(len=1024) :: clean
-        integer :: ext_pos, c1, c2, c3, iostat
-        character(len=32) :: num_str
+    character(len=512) :: errfile
+    character(len=4096) :: cmd
+    character(len=1024) :: line
+    character(len=256) :: cur_file
+    integer :: cur_line, cur_col
+    integer :: u, iostat
 
-        clean = adjustl(line)
-        if (len_trim(clean) == 0) return
+    call make_tmpfile('fo_lint_gfortran', errfile)
+    cmd = 'gfortran -fsyntax-only -Wall -Wextra'// &
+        ' -Wimplicit-interface -Wimplicit-procedure'// &
+        trim(mod_flags)//' '//trim(filepath)// &
+        ' 2>'//trim(errfile)
+    call execute_command_line(cmd, wait=.true.)
 
-        ext_pos = index(clean, '.f90:')
-        if (ext_pos == 0) ext_pos = index(clean, '.F90:')
-        if (ext_pos > 0) then
-            c1 = ext_pos + 4
-            c2 = index(clean(c1 + 1:), ':')
-            if (c2 > 0) then
-                c2 = c1 + c2
-                num_str = clean(c1 + 1:c2 - 1)
-                read (num_str, *, iostat=iostat) cur_line
-                if (iostat == 0) then
-                    cur_file = clean(1:c1 - 1)
-                    cur_col = 0
-                    c3 = index(clean(c2 + 1:), ':')
-                    if (c3 > 0) then
-                        c3 = c2 + c3
-                        num_str = clean(c2 + 1:c3 - 1)
-                        read (num_str, *, iostat=iostat) cur_col
-                        if (iostat /= 0) cur_col = 0
-                    end if
+    cur_file = ''
+    cur_line = 0
+    cur_col = 0
+
+    open (newunit=u, file=errfile, status='old', iostat=iostat)
+    if (iostat == 0) then
+        do
+            read (u, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            call parse_gfortran_warning(line, cur_file, cur_line, &
+                cur_col, warnings, n_warnings)
+        end do
+        close (u)
+    end if
+    call delete_tmpfile(errfile)
+end subroutine lint_file_compiler
+
+subroutine parse_gfortran_warning(line, cur_file, cur_line, cur_col, &
+        warnings, n_warnings)
+    character(len=*), intent(in) :: line
+    character(len=256), intent(inout) :: cur_file
+    integer, intent(inout) :: cur_line, cur_col
+    type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
+    integer, intent(inout) :: n_warnings
+
+    character(len=1024) :: clean
+    integer :: ext_pos, c1, c2, c3, iostat
+    character(len=32) :: num_str
+
+    clean = adjustl(line)
+    if (len_trim(clean) == 0) return
+
+    ext_pos = index(clean, '.f90:')
+    if (ext_pos == 0) ext_pos = index(clean, '.F90:')
+    if (ext_pos > 0) then
+        c1 = ext_pos + 4
+        c2 = index(clean(c1 + 1:), ':')
+        if (c2 > 0) then
+            c2 = c1 + c2
+            num_str = clean(c1 + 1:c2 - 1)
+            read (num_str, *, iostat=iostat) cur_line
+            if (iostat == 0) then
+                cur_file = clean(1:c1 - 1)
+                cur_col = 0
+                c3 = index(clean(c2 + 1:), ':')
+                if (c3 > 0) then
+                    c3 = c2 + c3
+                    num_str = clean(c2 + 1:c3 - 1)
+                    read (num_str, *, iostat=iostat) cur_col
+                    if (iostat /= 0) cur_col = 0
                 end if
             end if
-            return
         end if
+        return
+    end if
 
-        if (index(clean, 'Warning:') /= 1) return
-        if (index(clean, "Can't open module file") > 0) return
-        if (index(clean, 'Fatal Error') > 0) return
-        if (index(clean, 'stack-var-size') > 0) return
-        if (len_trim(cur_file) == 0) return
-        if (n_warnings >= MAX_WARNINGS) return
+    if (index(clean, 'Warning:') /= 1) return
+    if (index(clean, "Can't open module file") > 0) return
+    if (index(clean, 'Fatal Error') > 0) return
+    if (index(clean, 'stack-var-size') > 0) return
+    if (len_trim(cur_file) == 0) return
+    if (n_warnings >= MAX_WARNINGS) return
 
-        n_warnings = n_warnings + 1
-        warnings(n_warnings)%file = trim(cur_file)
-        warnings(n_warnings)%line = cur_line
-        warnings(n_warnings)%column = cur_col
-        warnings(n_warnings)%message = trim(clean)
-    end subroutine parse_gfortran_warning
+    n_warnings = n_warnings + 1
+    warnings(n_warnings)%file = trim(cur_file)
+    warnings(n_warnings)%line = cur_line
+    warnings(n_warnings)%column = cur_col
+    warnings(n_warnings)%message = trim(clean)
+end subroutine parse_gfortran_warning
 
-    function lint_warnings_json(warnings, n_warnings) result(json)
-        type(lint_warning_t), intent(in) :: warnings(*)
-        integer, intent(in) :: n_warnings
-        character(len=8192) :: json
+function lint_warnings_json(warnings, n_warnings) result(json)
+    type(lint_warning_t), intent(in) :: warnings(*)
+    integer, intent(in) :: n_warnings
+    character(len=8192) :: json
 
-        integer :: i
+    integer :: i
 
-        if (n_warnings == 0) then
-            json = '{"warnings":[],"count":0}'
-            return
-        end if
+    if (n_warnings == 0) then
+        json = '{"warnings":[],"count":0}'
+        return
+    end if
 
-        json = '{"warnings":['
-        do i = 1, n_warnings
-            if (i > 1) json = trim(json)//','
-            json = trim(json)//'{"file":"'// &
-                   trim(json_escape_string(warnings(i)%file))//'"'// &
-                   ',"line":'//trim(json_int(warnings(i)%line))// &
-                   ',"column":'//trim(json_int(warnings(i)%column))// &
-                   ',"message":"'// &
-                   trim(json_escape_string(warnings(i)%message))//'"}'
-        end do
-        json = trim(json)//'],"count":'//trim(json_int(n_warnings))//'}'
-    end function lint_warnings_json
+    json = '{"warnings":['
+    do i = 1, n_warnings
+        if (i > 1) json = trim(json)//','
+        json = trim(json)//'{"file":"'// &
+            trim(json_escape_string(warnings(i)%file))//'"'// &
+            ',"line":'//trim(json_int(warnings(i)%line))// &
+            ',"column":'//trim(json_int(warnings(i)%column))// &
+            ',"message":"'// &
+            trim(json_escape_string(warnings(i)%message))//'"}'
+    end do
+    json = trim(json)//'],"count":'//trim(json_int(n_warnings))//'}'
+end function lint_warnings_json
 
-    function lint_all_json(findings, n_findings, warnings, n_warnings) &
+function lint_all_json(findings, n_findings, warnings, n_warnings) &
         result(json)
-        type(lint_finding_t), intent(in) :: findings(*)
-        integer, intent(in) :: n_findings
-        type(lint_warning_t), intent(in) :: warnings(*)
-        integer, intent(in) :: n_warnings
-        character(len=16384) :: json
+    type(lint_finding_t), intent(in) :: findings(*)
+    integer, intent(in) :: n_findings
+    type(lint_warning_t), intent(in) :: warnings(*)
+    integer, intent(in) :: n_warnings
+    character(len=16384) :: json
 
-        integer, parameter :: LIMIT = 15000
-        integer :: i, total, n_emitted
+    integer, parameter :: LIMIT = 15000
+    integer :: i, total, n_emitted
 
-        total = n_findings + n_warnings
-        json = '{"unused_imports":['
+    total = n_findings + n_warnings
+    json = '{"unused_imports":['
 
-        do i = 1, n_findings
-            if (len_trim(json) > LIMIT) exit
-            if (i > 1) json = trim(json)//','
-            json = trim(json)//'{"file":"'// &
-                   trim(json_escape_string(findings(i)%file))//'"'// &
-                   ',"line":'//trim(json_int(findings(i)%line))// &
-                   ',"module":"'// &
-                   trim(json_escape_string(findings(i)%module_name))//'"'// &
-                   ',"symbol":"'// &
-                   trim(json_escape_string(findings(i)%symbol))//'"}'
-        end do
+    do i = 1, n_findings
+        if (len_trim(json) > LIMIT) exit
+        if (i > 1) json = trim(json)//','
+        json = trim(json)//'{"file":"'// &
+            trim(json_escape_string(findings(i)%file))//'"'// &
+            ',"line":'//trim(json_int(findings(i)%line))// &
+            ',"module":"'// &
+            trim(json_escape_string(findings(i)%module_name))//'"'// &
+            ',"symbol":"'// &
+            trim(json_escape_string(findings(i)%symbol))//'"}'
+    end do
 
-        json = trim(json)//'],"warnings":['
+    json = trim(json)//'],"warnings":['
 
-        n_emitted = 0
-        do i = 1, n_warnings
-            if (len_trim(json) > LIMIT) exit
-            if (n_emitted > 0) json = trim(json)//','
-            n_emitted = n_emitted + 1
-            json = trim(json)//'{"file":"'// &
-                   trim(json_escape_string(warnings(i)%file))//'"'// &
-                   ',"line":'//trim(json_int(warnings(i)%line))// &
-                   ',"column":'//trim(json_int(warnings(i)%column))// &
-                   ',"message":"'// &
-                   trim(json_escape_string(warnings(i)%message))//'"}'
-        end do
+    n_emitted = 0
+    do i = 1, n_warnings
+        if (len_trim(json) > LIMIT) exit
+        if (n_emitted > 0) json = trim(json)//','
+        n_emitted = n_emitted + 1
+        json = trim(json)//'{"file":"'// &
+            trim(json_escape_string(warnings(i)%file))//'"'// &
+            ',"line":'//trim(json_int(warnings(i)%line))// &
+            ',"column":'//trim(json_int(warnings(i)%column))// &
+            ',"message":"'// &
+            trim(json_escape_string(warnings(i)%message))//'"}'
+    end do
 
-        json = trim(json)//'],"count":'//trim(json_int(total))//'}'
-    end function lint_all_json
+    json = trim(json)//'],"count":'//trim(json_int(total))//'}'
+end function lint_all_json
 
-    pure function to_lower(str) result(low)
-        character(len=*), intent(in) :: str
-        character(len=len(str)) :: low
-        integer :: i, ic
+pure function to_lower(str) result(low)
+    character(len=*), intent(in) :: str
+    character(len=len(str)) :: low
+    integer :: i, ic
 
-        low = str
-        do i = 1, len_trim(low)
-            ic = iachar(low(i:i))
-            if (ic >= iachar('A') .and. ic <= iachar('Z')) &
-                low(i:i) = achar(ic + 32)
-        end do
-    end function to_lower
+    low = str
+    do i = 1, len_trim(low)
+        ic = iachar(low(i:i))
+        if (ic >= iachar('A') .and. ic <= iachar('Z')) &
+            low(i:i) = achar(ic + 32)
+    end do
+end function to_lower
 
-    pure subroutine strip_leading(str)
-        character(len=*), intent(inout) :: str
-        integer :: i
+pure subroutine strip_leading(str)
+character(len=*), intent(inout) :: str
+integer :: i
 
-        do i = 1, len_trim(str)
-            if (str(i:i) /= ' ' .and. str(i:i) /= char(9)) then
-                str = str(i:)
-                return
-            end if
-        end do
-        str = ''
-    end subroutine strip_leading
+do i = 1, len_trim(str)
+    if (str(i:i) /= ' ' .and. str(i:i) /= char(9)) then
+        str = str(i:)
+        return
+    end if
+end do
+str = ''
+end subroutine strip_leading
 
-    pure subroutine strip_trailing(str)
-        character(len=*), intent(inout) :: str
-        integer :: i
+pure subroutine strip_trailing(str)
+character(len=*), intent(inout) :: str
+integer :: i
 
-        do i = len_trim(str), 1, -1
-            if (str(i:i) /= ' ' .and. str(i:i) /= char(9)) then
-                str(i + 1:) = ''
-                return
-            end if
-        end do
-        str = ''
-    end subroutine strip_trailing
+do i = len_trim(str), 1, -1
+    if (str(i:i) /= ' ' .and. str(i:i) /= char(9)) then
+        str(i + 1:) = ''
+        return
+    end if
+end do
+str = ''
+end subroutine strip_trailing
 
-    pure logical function starts_with(str, prefix)
-        character(len=*), intent(in) :: str, prefix
+pure logical function starts_with(str, prefix)
+    character(len=*), intent(in) :: str, prefix
 
-        starts_with = (len_trim(str) >= len(prefix) .and. &
-                       str(1:len(prefix)) == prefix)
-    end function starts_with
+    starts_with = (len_trim(str) >= len(prefix) .and. &
+        str(1:len(prefix)) == prefix)
+end function starts_with
 
-    pure logical function is_ident_char(c)
-        character(len=1), intent(in) :: c
-        integer :: ic
+pure logical function is_ident_char(c)
+    character(len=1), intent(in) :: c
+    integer :: ic
 
-        ic = iachar(c)
-        is_ident_char = (ic >= iachar('a') .and. ic <= iachar('z')) .or. &
-                        (ic >= iachar('A') .and. ic <= iachar('Z')) .or. &
-                        (ic >= iachar('0') .and. ic <= iachar('9')) .or. &
-                        c == '_'
-    end function is_ident_char
+    ic = iachar(c)
+    is_ident_char = (ic >= iachar('a') .and. ic <= iachar('z')) .or. &
+        (ic >= iachar('A') .and. ic <= iachar('Z')) .or. &
+        (ic >= iachar('0') .and. ic <= iachar('9')) .or. &
+        c == '_'
+end function is_ident_char
 
-    pure logical function is_symbol_boundary_before(line, pos)
-        character(len=*), intent(in) :: line
-        integer, intent(in) :: pos
+pure logical function is_symbol_boundary_before(line, pos)
+    character(len=*), intent(in) :: line
+    integer, intent(in) :: pos
 
-        character(len=1) :: before_ch, kind_prefix
+    character(len=1) :: before_ch, kind_prefix
 
-        is_symbol_boundary_before = .true.
-        if (pos <= 1) return
+    is_symbol_boundary_before = .true.
+    if (pos <= 1) return
 
-        before_ch = line(pos - 1:pos - 1)
-        if (.not. is_ident_char(before_ch)) return
+    before_ch = line(pos - 1:pos - 1)
+    if (.not. is_ident_char(before_ch)) return
 
-        is_symbol_boundary_before = .false.
-        if (before_ch /= '_' .or. pos <= 2) return
+    is_symbol_boundary_before = .false.
+    if (before_ch /= '_' .or. pos <= 2) return
 
-        kind_prefix = line(pos - 2:pos - 2)
-        is_symbol_boundary_before = (kind_prefix >= '0' .and. kind_prefix <= '9') .or. &
-                                    kind_prefix == '"' .or. kind_prefix == "'"
-    end function is_symbol_boundary_before
+    kind_prefix = line(pos - 2:pos - 2)
+    is_symbol_boundary_before = (kind_prefix >= '0' .and. kind_prefix <= '9') .or. &
+        kind_prefix == '"' .or. kind_prefix == "'"
+end function is_symbol_boundary_before
 
-    subroutine lint_dedup_warnings(warnings, n_warnings)
-        type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
-        integer, intent(inout) :: n_warnings
+subroutine lint_dedup_warnings(warnings, n_warnings)
+    type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
+    integer, intent(inout) :: n_warnings
 
-        integer :: i, j, out
-        logical :: dup
+    integer :: i, j, out
+    logical :: dup
 
-        out = 0
-        do i = 1, n_warnings
-            dup = .false.
-            do j = 1, out
-                if (trim(warnings(j)%file) == trim(warnings(i)%file) .and. &
-                    warnings(j)%line == warnings(i)%line .and. &
-                    trim(warnings(j)%message) == trim(warnings(i)%message)) then
-                    dup = .true.
-                    exit
-                end if
-            end do
-            if (.not. dup) then
-                out = out + 1
-                if (out /= i) warnings(out) = warnings(i)
-            end if
-        end do
-        n_warnings = out
-    end subroutine lint_dedup_warnings
+    out = 0
+    do i = 1, n_warnings
+        dup = .false.
+        do j = 1, out
+            if (trim(warnings(j)%file) == trim(warnings(i)%file) .and. &
+                warnings(j)%line == warnings(i)%line .and. &
+                trim(warnings(j)%message) == trim(warnings(i)%message)) then
+            dup = .true.
+            exit
+        end if
+    end do
+    if (.not. dup) then
+        out = out + 1
+        if (out /= i) warnings(out) = warnings(i)
+    end if
+end do
+n_warnings = out
+end subroutine lint_dedup_warnings
 
 end module fo_lint
