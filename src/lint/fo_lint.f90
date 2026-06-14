@@ -1,5 +1,6 @@
 module fo_lint
-    use fo_util, only: json_int, make_tmpfile, delete_tmpfile
+    use fo_util, only: json_int, make_tmpfile, delete_tmpfile, &
+                       clean_root_build_artifacts
     use fx_json_build, only: json_escape_string
     implicit none
     private
@@ -305,10 +306,14 @@ subroutine lint_compiler(dir, warnings, n_warnings)
     character(len=512) :: tmpfile, fpath, moddir
     character(len=4096) :: cmd
     character(len=2048) :: mod_flags
-    integer :: u, iostat
+    integer :: u, iostat, n_removed
 
     n_warnings = 0
     call find_mod_include_flags(dir, mod_flags)
+
+    ! Defence in depth: clear any stray root .mod/.smod/.o before linting, the
+    ! same sweep the build does, so lint leaves the project root clean.
+    call clean_root_build_artifacts(dir, n_removed)
 
     ! Direct gfortran's module output to a temp dir. Without -J, even
     ! -fsyntax-only writes .mod into the cwd (the project root), where they
