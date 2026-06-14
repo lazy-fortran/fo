@@ -302,13 +302,21 @@ subroutine lint_compiler(dir, warnings, n_warnings)
     type(lint_warning_t), intent(out) :: warnings(MAX_WARNINGS)
     integer, intent(out) :: n_warnings
 
-    character(len=512) :: tmpfile, fpath
+    character(len=512) :: tmpfile, fpath, moddir
     character(len=4096) :: cmd
     character(len=2048) :: mod_flags
     integer :: u, iostat
 
     n_warnings = 0
     call find_mod_include_flags(dir, mod_flags)
+
+    ! Direct gfortran's module output to a temp dir. Without -J, even
+    ! -fsyntax-only writes .mod into the cwd (the project root), where they
+    ! shadow build/fo/mod and break later builds with stale module interfaces.
+    call make_tmpfile('fo_lint_mod', moddir)
+    call execute_command_line('mkdir -p '//trim(moddir), wait=.true.)
+    if (len_trim(mod_flags) + len_trim(moddir) + 4 <= len(mod_flags)) &
+        mod_flags = trim(mod_flags)//' -J'//trim(moddir)
 
     call make_tmpfile('fo_lint_warn_files', tmpfile)
     cmd = 'find '//trim(dir)// &
@@ -322,6 +330,7 @@ subroutine lint_compiler(dir, warnings, n_warnings)
     open (newunit=u, file=tmpfile, status='old', iostat=iostat)
     if (iostat /= 0) then
         call delete_tmpfile(tmpfile)
+        call execute_command_line('rm -rf '//trim(moddir), wait=.true.)
         return
     end if
 
@@ -335,6 +344,7 @@ subroutine lint_compiler(dir, warnings, n_warnings)
     end do
     close (u)
     call delete_tmpfile(tmpfile)
+    call execute_command_line('rm -rf '//trim(moddir), wait=.true.)
 end subroutine lint_compiler
 
 subroutine find_mod_include_flags(dir, flags)
