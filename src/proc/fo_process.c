@@ -63,11 +63,16 @@ static int is_project_root(const char *dir) {
 
 static int skip_dir_name(const char *name, int is_proj_root, int depth) {
     if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return 1;
-    if (strcmp(name, ".git") == 0) return 1;
-    if (strcmp(name, ".claude") == 0) return 1;
-    if (strcmp(name, ".codex") == 0) return 1;
-    if (strcmp(name, ".cache") == 0) return 1;
+    /* Hidden directories never hold project Fortran sources: .git, .venv,
+       .cache, .claude, .tox, .mypy_cache, ... Skipping any dot-directory
+       matches the ripgrep/fd default and avoids descending into vendored
+       Python virtualenvs whose dependencies ship .f90 fixtures. */
+    if (name[0] == '.') return 1;
+    /* Non-hidden vendored / environment trees. */
     if (strcmp(name, "node_modules") == 0) return 1;
+    if (strcmp(name, "venv") == 0) return 1;
+    if (strcmp(name, "__pycache__") == 0) return 1;
+    if (strcmp(name, "site-packages") == 0) return 1;
     /* skip 'build' only at depth 0 of a project root scan */
     if (is_proj_root && depth == 0 && strcmp(name, "build") == 0) return 1;
     return 0;

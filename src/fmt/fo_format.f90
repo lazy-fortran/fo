@@ -382,7 +382,8 @@ if (kw_starts(low, 'program ')) then
     opens = 1; return
 end if
 
-if (kw_starts(low, 'subroutine ')) then
+! subroutine: may start with a prefix (pure/elemental/recursive/module)
+if (has_subroutine_opener(low)) then
     opens = 1; return
 end if
 
@@ -554,5 +555,19 @@ logical function has_function_opener(low)
         has_function_opener = .true.
     end if
 end function has_function_opener
+
+! A subroutine definition, allowing a leading prefix such as
+! 'pure', 'elemental', 'recursive', or 'module subroutine'.
+logical function has_subroutine_opener(low)
+    character(len=*), intent(in) :: low
+    integer :: pos
+    has_subroutine_opener = .false.
+    pos = index(low, 'subroutine ')
+    if (pos > 0) then
+        ! Exclude 'end subroutine'
+        if (pos >= 5 .and. low(pos - 4:pos - 1) == 'end ') return
+        has_subroutine_opener = .true.
+    end if
+end function has_subroutine_opener
 
 end module fo_format
