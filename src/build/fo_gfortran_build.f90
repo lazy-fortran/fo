@@ -85,7 +85,8 @@ contains
         if (present(n_compiled)) n_compiled = nc
 
         call link_app_binaries(project_dir, config, bin_dir, src_objs, n_src_objs, &
-                               is_prog_arr, dep_objs, n_dep_objs, lf, exitcode)
+                               is_prog_arr, dep_objs, n_dep_objs, lf, exitcode, &
+                               flags=flag_text)
     end subroutine gfortran_build
 
     subroutine guard_root_mod_shadow(project_dir, log_file)
@@ -731,7 +732,8 @@ contains
     end subroutine append_log_file
 
     subroutine link_app_binaries(project_dir, config, bin_dir, src_objs, n_src_objs, &
-                                 is_prog_arr, dep_objs, n_dep_objs, log_file, exitcode)
+                                 is_prog_arr, dep_objs, n_dep_objs, log_file, exitcode, &
+                                 flags)
         character(len=*), intent(in) :: project_dir, bin_dir, log_file
         type(fpm_config_t), intent(in) :: config
         character(len=512), intent(in) :: src_objs(MAX_SRC_OBJS)
@@ -740,12 +742,16 @@ contains
         character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
         integer, intent(in) :: n_dep_objs
         integer, intent(out) :: exitcode
+        character(len=*), intent(in), optional :: flags
 
         integer :: i, n_lib
         character(len=512) :: lib_objs(MAX_SRC_OBJS)
         character(len=512) :: prog_obj, bin_path
         character(len=128) :: prog_name
+        character(len=512) :: link_flags
 
+        link_flags = ''
+        if (present(flags)) link_flags = flags
         exitcode = 0
         n_lib = 0
         do i = 1, n_src_objs
@@ -768,7 +774,7 @@ contains
             bin_path = trim(bin_dir)//'/'//trim(prog_name)
             call link_binary(prog_obj, lib_objs, n_lib, dep_objs, n_dep_objs, &
                              config%link_libs, config%n_link_libs, bin_path, &
-                             log_file, exitcode)
+                             log_file, exitcode, link_flags)
             if (exitcode /= 0) return
         end do
     end subroutine link_app_binaries
@@ -936,7 +942,7 @@ contains
                 bin_path = trim(bin_dir)//'/'//trim(tname)
                 call link_binary(obj_path, lib_objs, n_lib_objs, dep_objs, n_dep_objs, &
                                  link_libs, n_link_libs, bin_path, log_local, &
-                                 run_exits(i))
+                                 run_exits(i), test_flags)
             end if
             if (run_exits(i) == 0) then
                 call system_clock(clk0, clk_rate)
@@ -1278,7 +1284,7 @@ contains
     end subroutine compile_c
 
     subroutine link_binary(prog_obj, lib_objs, n_lib_objs, dep_objs, n_dep_objs, &
-                           link_libs, n_link_libs, output, log_file, exitcode)
+                           link_libs, n_link_libs, output, log_file, exitcode, flags)
         character(len=*), intent(in) :: prog_obj, output, log_file
         character(len=512), intent(in) :: lib_objs(MAX_SRC_OBJS)
         integer, intent(in) :: n_lib_objs
@@ -1287,6 +1293,9 @@ contains
         character(len=128), intent(in) :: link_libs(*)
         integer, intent(in) :: n_link_libs
         integer, intent(out) :: exitcode
+        ! user flags forwarded to linker (e.g. -fsanitize=address needs to be
+        ! present at link time so the runtime library is linked in)
+        character(len=*), intent(in), optional :: flags
 
         character(len=:), allocatable :: cmd
         character(len=8) :: debug_links
@@ -1302,6 +1311,9 @@ contains
             cmd = trim(cmd)//' '//sq(dep_objs(i))
         end do
         cmd = trim(cmd)//link_lib_flags(link_libs, n_link_libs)
+        if (present(flags) .and. len_trim(flags) > 0) then
+            cmd = trim(cmd)//' '//trim(flags)
+        end if
         cmd = trim(cmd)//' -o '//sq(output)//" >> '"//trim(log_file)//"' 2>&1"
         call get_environment_variable('FO_DEBUG_LINKS', debug_links, &
                                       status=debug_status)

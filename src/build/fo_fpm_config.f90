@@ -62,12 +62,19 @@ contains
         integer, intent(out) :: ierr
 
         character(len=1024) :: line, key, val, section
+        ! accumulated value for multi-line arrays (flags = [\n  "...",\n])
+        character(len=4096) :: accum
+        logical :: in_array
+        character(len=1024) :: pending_key
         integer :: u, ios
 
         call fpm_config_init(config)
         config%project_dir = trim(project_dir)
         ierr = 0
         section = ''
+        in_array = .false.
+        accum = ''
+        pending_key = ''
 
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', &
               status='old', iostat=ios)
@@ -83,6 +90,20 @@ contains
             line = adjustl(line)
             if (len_trim(line) == 0) cycle
 
+            ! while accumulating a multi-line array, append each line until ']'
+            if (in_array) then
+                accum = trim(accum)//trim(line)
+                if (index(line, ']') > 0) then
+                    in_array = .false.
+                    val = trim(accum)
+                    select case (trim(section))
+                    case ('build')
+                        call parse_build(pending_key, val, config)
+                    end select
+                end if
+                cycle
+            end if
+
             if (line(1:1) == '[') then
                 call get_section(line, section)
                 cycle
@@ -90,6 +111,14 @@ contains
 
             call split_kv(line, key, val)
             if (len_trim(key) == 0) cycle
+
+            ! detect a value that opens '[' without closing ']': multi-line array
+            if (index(val, '[') > 0 .and. index(val, ']') == 0) then
+                in_array = .true.
+                accum = trim(val)
+                pending_key = trim(key)
+                cycle
+            end if
 
             select case (trim(section))
             case ('')

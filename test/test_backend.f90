@@ -383,19 +383,19 @@ contains
         config%flags(1) = '-O2'
         config%flags(2) = '-fopenmp'
         call assert(trim(config_flags_str(config)) == '-O2 -fopenmp', &
-                    'config_flags_str joins two flags with a space')
+            'config_flags_str joins two flags with a space')
 
         config%n_flags = 3
         config%flags(1) = '-O2'
         config%flags(2) = '-fopenmp'
         config%flags(3) = '-funroll-loops'
         call assert(trim(config_flags_str(config)) == '-O2 -fopenmp -funroll-loops', &
-                    'config_flags_str joins three flags with spaces')
+            'config_flags_str joins three flags with spaces')
 
         config%n_flags = 1
         config%flags(1) = '-fopenmp'
         call assert(trim(config_flags_str(config)) == '-fopenmp', &
-                    'config_flags_str passes a single flag through')
+            'config_flags_str passes a single flag through')
     end subroutine test_config_flags_str_joins_with_spaces
 
     subroutine test_gfortran_flags_change_action_id()

@@ -11,6 +11,8 @@ program test_fpm_config
     call test_parse_fo_own_toml()
     call test_init_defaults()
     call test_parse_missing_file()
+    call test_flags_with_equals_inline()
+    call test_flags_multiline_array()
 
     write (output_unit, '(a,i0,a,i0,a)') 'fpm_config: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -80,5 +82,79 @@ contains
             call assert(found_fx, 'dep fx present')
         end block
     end subroutine test_parse_fo_own_toml
+
+    subroutine test_flags_with_equals_inline()
+        !! Flags with '=' (e.g. -fsanitize=address) must be preserved verbatim
+        !! when written as a single-line TOML array in [build] flags.
+        type(fpm_config_t) :: c
+        integer :: ierr, u, ios
+        character(len=256) :: dir
+        character(len=512) :: toml_path
+
+        dir = '/tmp/fo_test_flags_eq'
+        call execute_command_line('mkdir -p '//trim(dir), wait=.true.)
+        toml_path = trim(dir)//'/fpm.toml'
+        open (newunit=u, file=trim(toml_path), status='replace', iostat=ios)
+        if (ios /= 0) then
+            call assert(.false., 'flags_with_equals_inline: cannot write fpm.toml')
+            return
+        end if
+        write (u, '(a)') 'name = "test"'
+        write (u, '(a)') 'version = "0.1.0"'
+        write (u, '(a)') ''
+        write (u, '(a)') '[build]'
+        write (u, '(a)') 'flags = ["-O0", "-fsanitize=address"]'
+        close (u)
+
+        call fpm_config_parse(dir, c, ierr)
+        call assert(ierr == 0, 'flags_with_equals_inline: parse succeeds')
+        call assert(c%n_flags == 2, 'flags_with_equals_inline: 2 flags')
+        if (c%n_flags >= 1) &
+            call assert(trim(c%flags(1)) == '-O0', 'flags_with_equals_inline: first flag = -O0')
+        if (c%n_flags >= 2) &
+            call assert(trim(c%flags(2)) == '-fsanitize=address', &
+            'flags_with_equals_inline: second flag = -fsanitize=address')
+        call execute_command_line('rm -rf '//trim(dir), wait=.true.)
+    end subroutine test_flags_with_equals_inline
+
+    subroutine test_flags_multiline_array()
+        !! Flags in a multi-line TOML array must all be captured, including
+        !! flags containing '='.
+        type(fpm_config_t) :: c
+        integer :: ierr, u, ios
+        character(len=256) :: dir
+        character(len=512) :: toml_path
+
+        dir = '/tmp/fo_test_flags_ml'
+        call execute_command_line('mkdir -p '//trim(dir), wait=.true.)
+        toml_path = trim(dir)//'/fpm.toml'
+        open (newunit=u, file=trim(toml_path), status='replace', iostat=ios)
+        if (ios /= 0) then
+            call assert(.false., 'flags_multiline_array: cannot write fpm.toml')
+            return
+        end if
+        write (u, '(a)') 'name = "test2"'
+        write (u, '(a)') 'version = "0.1.0"'
+        write (u, '(a)') ''
+        write (u, '(a)') '[build]'
+        write (u, '(a)') 'flags = ['
+        write (u, '(a)') '  "-g",'
+        write (u, '(a)') '  "-O0",'
+        write (u, '(a)') '  "-fsanitize=address"'
+        write (u, '(a)') ']'
+        close (u)
+
+        call fpm_config_parse(dir, c, ierr)
+        call assert(ierr == 0, 'flags_multiline_array: parse succeeds')
+        call assert(c%n_flags == 3, 'flags_multiline_array: 3 flags')
+        if (c%n_flags >= 1) &
+            call assert(trim(c%flags(1)) == '-g', 'flags_multiline_array: first flag = -g')
+        if (c%n_flags >= 2) &
+            call assert(trim(c%flags(2)) == '-O0', 'flags_multiline_array: second flag = -O0')
+        if (c%n_flags >= 3) &
+            call assert(trim(c%flags(3)) == '-fsanitize=address', &
+            'flags_multiline_array: third flag = -fsanitize=address')
+        call execute_command_line('rm -rf '//trim(dir), wait=.true.)
+    end subroutine test_flags_multiline_array
 
 end program test_fpm_config

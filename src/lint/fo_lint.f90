@@ -1,6 +1,6 @@
 module fo_lint
     use fo_util, only: json_int, make_tmpfile, delete_tmpfile, &
-                       clean_root_build_artifacts
+        clean_root_build_artifacts
     use fx_json_build, only: json_escape_string
     implicit none
     private
@@ -590,29 +590,29 @@ pure function to_lower(str) result(low)
 end function to_lower
 
 pure subroutine strip_leading(str)
-character(len=*), intent(inout) :: str
-integer :: i
+    character(len=*), intent(inout) :: str
+    integer :: i
 
-do i = 1, len_trim(str)
-    if (str(i:i) /= ' ' .and. str(i:i) /= char(9)) then
-        str = str(i:)
-        return
-    end if
-end do
-str = ''
+    do i = 1, len_trim(str)
+        if (str(i:i) /= ' ' .and. str(i:i) /= char(9)) then
+            str = str(i:)
+            return
+        end if
+    end do
+    str = ''
 end subroutine strip_leading
 
 pure subroutine strip_trailing(str)
-character(len=*), intent(inout) :: str
-integer :: i
+    character(len=*), intent(inout) :: str
+    integer :: i
 
-do i = len_trim(str), 1, -1
-    if (str(i:i) /= ' ' .and. str(i:i) /= char(9)) then
-        str(i + 1:) = ''
-        return
-    end if
-end do
-str = ''
+    do i = len_trim(str), 1, -1
+        if (str(i:i) /= ' ' .and. str(i:i) /= char(9)) then
+            str(i + 1:) = ''
+            return
+        end if
+    end do
+    str = ''
 end subroutine strip_trailing
 
 pure logical function starts_with(str, prefix)
