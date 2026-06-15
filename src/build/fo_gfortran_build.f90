@@ -1342,21 +1342,32 @@ contains
         character(len=*), intent(out) :: token
 
         character(len=1024) :: cand
+        character(len=8) :: ext1, ext2
         integer :: i
         logical :: ex
 
-        ! Prefer a static archive linked by absolute path (no LIBRARY_PATH need).
+        ! On macOS prefer the shared .dylib: its absolute install name pulls in
+        ! transitive deps (CoreText, CoreGraphics, bz2, ...) that a static .a
+        ! would leave unresolved at link time, and dylib install names are
+        ! absolute so the binary needs no DYLD_LIBRARY_PATH at run time. On Linux
+        ! prefer a static .a linked by absolute path (no LIBRARY_PATH need).
+        if (is_macos()) then
+            ext1 = '.dylib'
+            ext2 = '.a'
+        else
+            ext1 = '.a'
+            ext2 = '.so'
+        end if
         do i = 1, n_dirs
-            cand = trim(dirs(i))//'/lib'//trim(name)//'.a'
+            cand = trim(dirs(i))//'/lib'//trim(name)//trim(ext1)
             inquire (file=trim(cand), exist=ex)
             if (ex) then
                 token = sq(trim(cand))
                 return
             end if
         end do
-        ! Then a shared object by absolute path.
         do i = 1, n_dirs
-            cand = trim(dirs(i))//'/lib'//trim(name)//'.so'
+            cand = trim(dirs(i))//'/lib'//trim(name)//trim(ext2)
             inquire (file=trim(cand), exist=ex)
             if (ex) then
                 token = sq(trim(cand))
@@ -1365,6 +1376,19 @@ contains
         end do
         token = '-l'//trim(name)
     end subroutine resolve_link_token
+
+    logical function is_macos()
+        !! True on macOS, detected by the always-present dynamic linker. Cached:
+        !! the filesystem layout does not change within a run.
+        logical, save :: checked = .false.
+        logical, save :: mac = .false.
+
+        if (.not. checked) then
+            inquire (file='/usr/lib/dyld', exist=mac)
+            checked = .true.
+        end if
+        is_macos = mac
+    end function is_macos
 
     subroutine build_lib_search_dirs(dirs, n)
         !! Search dirs for static external libs: LIBRARY_PATH and FO_LIBRARY_PATH
@@ -1377,6 +1401,7 @@ contains
         n = 0
         call add_env_path_list('LIBRARY_PATH', dirs, n)
         call add_env_path_list('FO_LIBRARY_PATH', dirs, n)
+        if (is_macos()) call add_search_dir('/opt/homebrew/lib', dirs, n)
         call add_search_dir('/usr/local/lib', dirs, n)
         call add_search_dir('/usr/lib', dirs, n)
         call add_search_dir('/usr/lib64', dirs, n)
