@@ -1172,6 +1172,41 @@ contains
         obj_path = trim(obj_dir)//'/'//trim(rel)//'.o'
     end subroutine make_obj_path
 
+    function fc_command() result(cmd)
+        !! Fortran compiler: $FO_FC if set, else gfortran. Lets a host opt into
+        !! a different compiler (e.g. flang to dodge a gfortran codegen bug)
+        !! without editing the project.
+        character(len=:), allocatable :: cmd
+        character(len=256) :: val
+        integer :: st
+
+        call get_environment_variable('FO_FC', val, status=st)
+        if (st == 0 .and. len_trim(val) > 0) then
+            cmd = trim(adjustl(val))
+        else
+            cmd = 'gfortran'
+        end if
+    end function fc_command
+
+    logical function fc_is_flang()
+        !! True when the selected compiler is LLVM flang. Drives flag dialect:
+        !! flang rejects gfortran-only flags and spells the module-output dir
+        !! differently.
+        fc_is_flang = index(fc_command(), 'flang') > 0
+    end function fc_is_flang
+
+    function fc_base_flags() result(flags)
+        !! Compiler-appropriate baseline compile flags. gfortran needs the long
+        !! free-form line length; flang has no line limit and rejects that flag.
+        character(len=:), allocatable :: flags
+
+        if (fc_is_flang()) then
+            flags = '-fimplicit-none'
+        else
+            flags = '-ffree-line-length-none -fimplicit-none'
+        end if
+    end function fc_base_flags
+
     subroutine make_includes_flag(mod_dir, dep_includes, n_dep_includes, flag)
         character(len=*), intent(in) :: mod_dir
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
@@ -1180,7 +1215,12 @@ contains
 
         integer :: i
 
-        flag = '-J '//sq(mod_dir)//' -I '//sq(mod_dir)
+        ! flang spells the module-output dir -module-dir; gfortran uses -J.
+        if (fc_is_flang()) then
+            flag = '-module-dir '//sq(mod_dir)//' -I '//sq(mod_dir)
+        else
+            flag = '-J '//sq(mod_dir)//' -I '//sq(mod_dir)
+        end if
         do i = 1, n_dep_includes
             flag = trim(flag)//' -I '//sq(dep_includes(i))
         end do
@@ -1193,9 +1233,9 @@ contains
         character(len=512) :: tmpfile
         integer :: u, iostat
 
-        compiler = 'gfortran'
+        compiler = fc_command()
         call make_tmpfile('fo_compiler_version', tmpfile)
-        call execute_command_line('gfortran --version 2>/dev/null | head -1 > '// &
+        call execute_command_line(fc_command()//' --version 2>/dev/null | head -1 > '// &
                                   trim(tmpfile), wait=.true.)
 
         open (newunit=u, file=tmpfile, status='old', iostat=iostat)
@@ -1221,8 +1261,8 @@ contains
         character(len=8192) :: cmd
         integer :: n_removed
 
-        cmd = 'cd '//sq(trim(project_dir))//' && gfortran -c '//trim(includes_flag)// &
-              ' -ffree-line-length-none -fimplicit-none'// &
+        cmd = 'cd '//sq(trim(project_dir))//' && '//fc_command()//' -c '// &
+              trim(includes_flag)//' '//fc_base_flags()// &
               ' -o '//sq(objfile)//' '//sq(source)// &
               " >> '"//trim(log_file)//"' 2>&1"
         call execute_command_line(trim(cmd), wait=.true., exitstat=exitcode)
@@ -1303,7 +1343,7 @@ contains
         integer :: i
 
         allocate (character(len=131072) :: cmd)
-        cmd = 'gfortran '//sq(prog_obj)
+        cmd = fc_command()//' '//sq(prog_obj)
         do i = 1, n_lib_objs
             cmd = trim(cmd)//' '//sq(lib_objs(i))
         end do
@@ -1311,6 +1351,13 @@ contains
             cmd = trim(cmd)//' '//sq(dep_objs(i))
         end do
         cmd = trim(cmd)//link_lib_flags(link_libs, n_link_libs)
+        ! flang's driver does not add Homebrew's libomp to the link search, so
+        ! -fopenmp links fail with "library 'omp' not found". Add it (harmless
+        ! when the build does not use OpenMP) plus an rpath for runtime.
+        if (fc_is_flang() .and. is_macos()) then
+            cmd = trim(cmd)//' -L/opt/homebrew/opt/libomp/lib'// &
+                  ' -Wl,-rpath,/opt/homebrew/opt/libomp/lib'
+        end if
         if (present(flags) .and. len_trim(flags) > 0) then
             cmd = trim(cmd)//' '//trim(flags)
         end if
