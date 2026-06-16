@@ -78,6 +78,7 @@ contains
         integer :: n_cached, i, n_test_names
         real :: t0, t1
         character(len=128) :: test_names(MAX_NODES)
+        character(len=512) :: build_log
         logical :: is_test_arr(MAX_NODES), has_cycle
 
         allocate (units(MAX_UNITS))
@@ -123,11 +124,14 @@ contains
             ' changed, ', n_affected, ' affected)'
 
         ! 2. build through the action/output store
-        call backend_build(b, exitcode)
+        call make_tmpfile('fo-build', build_log)
+        call backend_build(b, exitcode, log_file=build_log)
         if (exitcode /= 0) then
             write (error_unit, '(a)') 'Build: FAIL'
+            call report_build_result(build_log)
             stop 1
         end if
+        call delete_tmpfile(build_log)
         write (output_unit, '(a)') 'Build: OK'
 
         ! 3. test: skip if nothing changed, otherwise run affected tests only
@@ -395,7 +399,7 @@ end subroutine cmd_changed
 subroutine cmd_build()
     type(backend_t) :: b
     integer :: exitcode
-    character(len=512) :: flags
+    character(len=512) :: flags, build_log
 
     b = detect_backend('.')
     if (b%kind == BACKEND_NONE) then
@@ -404,13 +408,43 @@ subroutine cmd_build()
     end if
 
     call get_flags_arg(flags)
+    ! Capture the compiler output so a failed build shows the real diagnostic
+    ! (file:line: Error: ...) instead of a bare "STOP 1".
+    call make_tmpfile('fo-build', build_log)
+    ! Build the test binaries too so build/fo/bin/test_* never go stale against
+    ! the sources (running one directly after `fo build` used to give results
+    ! from the previous `fo test`).
     if (len_trim(flags) > 0) then
-        call backend_build(b, exitcode, flags)
+        call backend_build(b, exitcode, flags, build_log, with_tests=.true.)
     else
-        call backend_build(b, exitcode)
+        call backend_build(b, exitcode, log_file=build_log, with_tests=.true.)
     end if
-    if (exitcode /= 0) stop 1
+    if (exitcode /= 0) then
+        call report_build_result(build_log)
+        stop 1
+    end if
+    call delete_tmpfile(build_log)
 end subroutine cmd_build
+
+subroutine report_build_result(build_log)
+    !! Print the best compiler diagnostic from a failed build's log, with the
+    !! source location and the log path for the full output.
+    character(len=*), intent(in) :: build_log
+    type(diagnostic_t) :: diag
+    character(len=32) :: lnum
+
+    call diagnostic_from_log('build', build_log, 'fo build', diag)
+    write (error_unit, '(a,a)') 'fo: build failed: ', trim(diag%message)
+    if (len_trim(diag%file) > 0) then
+        write (lnum, '(i0)') diag%line
+        write (error_unit, '(a,a,a,a)') 'fo: at: ', trim(diag%file), ':', &
+            trim(lnum)
+    end if
+    if (len_trim(diag%hint) > 0) then
+        write (error_unit, '(a,a)') 'fo: hint: ', trim(diag%hint)
+    end if
+    write (error_unit, '(a,a)') 'fo: full log: ', trim(build_log)
+end subroutine report_build_result
 
 subroutine get_flags_arg(flags)
     character(len=*), intent(out) :: flags

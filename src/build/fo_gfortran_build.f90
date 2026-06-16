@@ -121,11 +121,14 @@ contains
     end subroutine guard_root_mod_shadow
 
     subroutine gfortran_test(project_dir, log_file, exitcode, include_slow, &
-                             n_compiled)
+                             n_compiled, build_only)
         character(len=*), intent(in) :: project_dir, log_file
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
         integer, intent(out), optional :: n_compiled
+        ! build_only: compile and link the test binaries without running them,
+        ! so `fo build` keeps build/fo/bin/test_* current.
+        logical, intent(in), optional :: build_only
 
         type(fpm_config_t) :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_lib_objs
@@ -135,12 +138,14 @@ contains
         character(len=512) :: lib_objs(MAX_SRC_OBJS)
         character(len=512) :: lf
         character(len=128) :: no_names(1)
-        logical :: slow
+        logical :: slow, bonly
 
         lf = log_file
         if (len_trim(lf) == 0) lf = '/dev/null'
         slow = .false.
         if (present(include_slow)) slow = include_slow
+        bonly = .false.
+        if (present(build_only)) bonly = build_only
         if (present(n_compiled)) n_compiled = 0
 
         call gfortran_build(project_dir, lf, exitcode)
@@ -165,7 +170,8 @@ contains
                                     dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
                                     config%link_libs, config%n_link_libs, lf, &
                                     no_names, 0, slow, exitcode, n_compiled, &
-                                    flags=config_flags_str(config))
+                                    flags=config_flags_str(config), &
+                                    build_only=bonly)
     end subroutine gfortran_test
 
     subroutine gfortran_test_names(project_dir, names, n_names, log_file, &
@@ -807,7 +813,7 @@ contains
                                      dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
                                      link_libs, n_link_libs, log_file, &
                                      selected_names, n_selected, include_slow, &
-                                     exitcode, n_compiled, flags)
+                                     exitcode, n_compiled, flags, build_only)
         character(len=*), intent(in) :: project_dir, test_dir, mod_dir
         character(len=*), intent(in) :: obj_dir, bin_dir, log_file
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
@@ -824,6 +830,10 @@ contains
         integer, intent(out) :: exitcode
         integer, intent(out), optional :: n_compiled
         character(len=*), intent(in), optional :: flags
+        ! build_only: compile and link the test binaries but do not run them.
+        ! Used by `fo build` so build/fo/bin/test_* stay current with the
+        ! sources, instead of going stale until the next `fo test`.
+        logical, intent(in), optional :: build_only
 
         type(scan_unit_t), allocatable :: tunits(:)
         integer :: n_tests, i, ierr, node_id, n_run
@@ -839,7 +849,7 @@ contains
         integer :: test_timeout, test_warn
         integer(8) :: clk0, clk1, clk_rate
         integer :: n_order
-        logical :: has_cycle, restored
+        logical :: has_cycle, restored, bonly
         character(len=512) :: obj_path, bin_path
         character(len=4096) :: incl_flag
         character(len=128) :: tname
@@ -853,6 +863,8 @@ contains
         character(len=512) :: test_includes(MAX_DEP_DIRS)
         character(len=1024) :: test_flags
 
+        bonly = .false.
+        if (present(build_only)) bonly = build_only
         test_flags = ''
         if (present(flags)) test_flags = flags
         exitcode = 0
@@ -944,7 +956,7 @@ contains
                                  link_libs, n_link_libs, bin_path, log_local, &
                                  run_exits(i), test_flags)
             end if
-            if (run_exits(i) == 0) then
+            if (run_exits(i) == 0 .and. .not. bonly) then
                 call system_clock(clk0, clk_rate)
                 call process_run_logged('', bin_path, log_local, .true., &
                                         test_timeout, run_exits(i))
@@ -974,8 +986,9 @@ contains
             call delete_tmpfile(run_logs(i))
         end do
 
-        call warn_slow_tests(filenames, run_nodes, run_exits, run_secs, n_run, &
-                             test_warn, log_file)
+        if (.not. bonly) &
+            call warn_slow_tests(filenames, run_nodes, run_exits, run_secs, n_run, &
+                                 test_warn, log_file)
     end subroutine compile_and_run_tests
 
     integer function test_timeout_seconds() result(t)

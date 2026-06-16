@@ -129,20 +129,27 @@ contains
         if (iostat /= 0 .or. jobs < 1) jobs = detect_nproc()
     end function detect_jobs
 
-    subroutine backend_build(self, exitcode, flags, log_file)
+    subroutine backend_build(self, exitcode, flags, log_file, with_tests)
         type(backend_t), intent(in) :: self
         integer, intent(out) :: exitcode
         character(len=*), intent(in), optional :: flags
         character(len=*), intent(in), optional :: log_file
+        ! with_tests: also compile and link the test binaries (gfortran backend)
+        ! so build/fo/bin/test_* stay current after a plain `fo build` instead of
+        ! going stale until the next `fo test`. fpm/cmake build tests anyway.
+        logical, intent(in), optional :: with_tests
 
         integer :: np, lock_ierr
         character(len=512) :: log_path, flag_text, lock_dir
+        logical :: want_tests
 
         np = detect_jobs()
         log_path = ''
         if (present(log_file)) log_path = log_file
         flag_text = ''
         if (present(flags)) flag_text = flags
+        want_tests = .false.
+        if (present(with_tests)) want_tests = with_tests
         call acquire_project_lock(self%project_dir, lock_dir, lock_ierr)
         if (lock_ierr /= 0) then
             exitcode = 1
@@ -153,6 +160,9 @@ contains
         case (BACKEND_GFORTRAN)
             call gfortran_build(self%project_dir, log_path, exitcode, &
                                 flags=flag_text)
+            if (exitcode == 0 .and. want_tests) &
+                call gfortran_test(self%project_dir, log_path, exitcode, &
+                                   build_only=.true.)
         case (BACKEND_FPM)
             call process_fpm_build(self%project_dir, flag_text, np, log_path, &
                                    exitcode)
