@@ -8,6 +8,7 @@ module fo_process
     public :: process_scan_sources
     public :: process_start_fo_check, process_poll_pid, process_cancel_pid
     public :: process_run_logged
+    public :: process_stderr_is_tty, process_write_stderr
     integer, parameter :: C_PATH_LEN = 4096
     integer, parameter :: C_ARG_LEN = 4096
 
@@ -16,6 +17,18 @@ module fo_process
             import :: c_int
             integer(c_int), intent(out) :: nproc
         end subroutine fo_c_detect_nproc
+
+        function fo_c_isatty(fd) bind(C, name='fo_c_isatty') result(r)
+            import :: c_int
+            integer(c_int), value :: fd
+            integer(c_int) :: r
+        end function fo_c_isatty
+
+        subroutine fo_c_write_stderr(buf, n) bind(C, name='fo_c_write_stderr')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: buf(*)
+            integer(c_int), value :: n
+        end subroutine fo_c_write_stderr
 
         subroutine fo_c_scan_sources(root, output_file, exitcode) &
                 bind(C, name='fo_c_scan_sources')
@@ -107,6 +120,18 @@ module fo_process
     end interface
 
 contains
+
+    logical function process_stderr_is_tty()
+        !! True when stderr (fd 2) is a terminal, so progress can use an
+        !! animated carriage-return bar instead of plain lines.
+        process_stderr_is_tty = fo_c_isatty(2_c_int) /= 0
+    end function process_stderr_is_tty
+
+    subroutine process_write_stderr(s)
+        !! Raw unbuffered write of s to stderr (no newline added, no fork).
+        character(len=*), intent(in) :: s
+        if (len(s) > 0) call fo_c_write_stderr(s, int(len(s), c_int))
+    end subroutine process_write_stderr
 
     function process_detect_nproc() result(nproc)
         integer :: nproc

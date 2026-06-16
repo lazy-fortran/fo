@@ -9,6 +9,7 @@ module fo_gfortran_build
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
                        clean_root_build_artifacts
     use fo_process, only: process_run_logged
+    use fo_progress, only: progress_begin, progress_step, progress_end
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
     private
@@ -352,7 +353,7 @@ contains
         character(len=MAX_NAME), allocatable :: filenames(:)
         logical, allocatable :: is_prog(:), is_test_arr(:)
         integer, allocatable :: topo_order(:), node_levels(:)
-        integer :: n_order, n_levels, lvl
+        integer :: n_order, n_levels, lvl, total_source
         logical :: has_cycle, restored
         character(len=512) :: obj_path
         character(len=4096) :: includes_flag
@@ -409,6 +410,15 @@ contains
         call load_mod_keys(mod_dir, dag, n_order, topo_order, old_mod_keys)
         call cache_init(c, cache_ierr)
 
+        total_source = 0
+        do i = 1, n_order
+            node_id = topo_order(i)
+            if (is_test_arr(node_id)) cycle
+            if (len_trim(filenames(node_id)) == 0) cycle
+            total_source = total_source + 1
+        end do
+        call progress_begin('build', total_source)
+
         if (cache_ierr == 0) then
             do lvl = 0, n_levels - 1
                 n_compile = 0
@@ -440,6 +450,7 @@ contains
                         if (restored) then
                             call get_mod_key(dag%nodes(node_id)%label, mod_dir, &
                                              new_mod_keys(node_id))
+                            call progress_step()
                             cycle
                         end if
                     end if
@@ -462,6 +473,7 @@ contains
                     call compile_f90(project_dir, fname_local, obj_path, &
                                      trim(includes_flag)//' '//trim(flags), &
                                      per_log_local, compile_exits(ii))
+                    call progress_step()
                 end do
                 !$omp end parallel do
 
@@ -470,6 +482,7 @@ contains
                 end do
                 do ii = 1, n_compile
                     if (compile_exits(ii) /= 0) then
+                        call progress_end()
                         exitcode = compile_exits(ii)
                         return
                     end if
@@ -494,10 +507,15 @@ contains
                 call compile_f90(project_dir, filenames(node_id), obj_path, &
                                  trim(includes_flag)//' '//trim(flags), log_file, &
                                  exitcode)
-                if (exitcode /= 0) return
+                if (exitcode /= 0) then
+                    call progress_end()
+                    return
+                end if
+                call progress_step()
                 n_compiled = n_compiled + 1
             end do
         end if
+        call progress_end()
 
         do i = 1, n_order
             node_id = topo_order(i)
@@ -931,6 +949,11 @@ contains
 
         run_exits = 0
         run_compiled = .false.
+        if (bonly) then
+            call progress_begin('build tests', n_run)
+        else
+            call progress_begin('test', n_run)
+        end if
         !$omp parallel do schedule(dynamic) private(node_id, fname_local, &
         !$omp& obj_path, bin_path, tname, log_local, restored, clk0, clk1, &
         !$omp& clk_rate)
@@ -963,8 +986,10 @@ contains
                 call system_clock(clk1)
                 if (clk_rate > 0) run_secs(i) = real(clk1 - clk0) / real(clk_rate)
             end if
+            call progress_step()
         end do
         !$omp end parallel do
+        call progress_end()
 
         do i = 1, n_run
             call append_log_file(trim(run_logs(i)), log_file)

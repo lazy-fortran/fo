@@ -469,3 +469,24 @@ void fo_c_cancel_pid(int pid, int *exitcode) {
         *exitcode = 1;
     }
 }
+
+/* Progress output helpers. isatty(2) lets the caller pick an animated bar vs
+ * plain lines; fo_c_write_stderr does a raw, unbuffered write(2) to fd 2 so a
+ * carriage-return progress line renders cleanly without Fortran record
+ * formatting, and a single write() is atomic enough for one-thread-at-a-time
+ * (the caller serializes it in an OpenMP critical). No fork: forking from a
+ * multithreaded region corrupts libgomp. */
+int fo_c_isatty(int fd) { return isatty(fd) ? 1 : 0; }
+
+void fo_c_write_stderr(const char *buf, int n) {
+    int off = 0;
+    if (n <= 0) return;
+    while (off < n) {
+        ssize_t w = write(2, buf + off, (size_t)(n - off));
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        off += (int)w;
+    }
+}
