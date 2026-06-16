@@ -150,13 +150,38 @@ void fo_c_scan_sources(const char *root, const char *output_file, int *exitcode)
     path_list_free(&list);
 }
 
+extern char **environ;
+
+/* Build environ + one extra "KEY=VALUE" entry, in the PARENT so the child does
+ * no malloc (async-signal-safe). Returns NULL on alloc failure. */
+static char **env_with_extra(const char *extra) {
+    int n = 0, i;
+    char **e;
+    while (environ[n]) n++;
+    e = (char **)malloc((size_t)(n + 2) * sizeof(char *));
+    if (!e) return NULL;
+    for (i = 0; i < n; i++) e[i] = environ[i];
+    e[n] = (char *)extra;
+    e[n + 1] = NULL;
+    return e;
+}
+
 static int run_argv(const char *cwd, char *const argv[], const char *log_file,
-                    int append, int jobs, int timeout_s) {
+                    int append, int jobs, int timeout_s, const char *env_extra) {
     pid_t pid;
     int status;
+    char **child_env = NULL;
+
+    /* Built before fork: setenv in the child is not async-signal-safe and
+     * corrupts libgomp when forked from an OpenMP thread. execve with this env
+     * keeps the spawn safe inside the parallel build/test loops. */
+    if (has_text(env_extra)) {
+        child_env = env_with_extra(env_extra);
+        if (!child_env) return 1;
+    }
 
     pid = fork();
-    if (pid < 0) return 1;
+    if (pid < 0) { free(child_env); return 1; }
 
     if (pid == 0) {
         /* own process group so a timeout can kill the whole subtree */
@@ -175,9 +200,11 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
             if (dup2(fd, STDERR_FILENO) < 0) _exit(126);
             close(fd);
         }
-        execvp(argv[0], argv);
+        if (child_env) execve(argv[0], argv, child_env);
+        else execvp(argv[0], argv);
         _exit(errno == ENOENT ? 127 : 126);
     }
+    free(child_env);
 
     /* race-free: also set the group from the parent side */
     setpgid(pid, pid);
@@ -243,7 +270,8 @@ void fo_c_getpid(int *pid_out) {
    returned (mirrors GNU timeout). Used for untrusted test binaries that may
    hang. */
 void fo_c_run_logged(const char *cwd, const char *exe_path, const char *log_file,
-                     int append, int timeout_s, int *exitcode) {
+                     int append, int timeout_s, const char *env_extra,
+                     int *exitcode) {
     char *argv[2];
 
     if (!has_text(exe_path)) {
@@ -253,7 +281,42 @@ void fo_c_run_logged(const char *cwd, const char *exe_path, const char *log_file
     argv[0] = (char *)exe_path;
     argv[1] = NULL;
     *exitcode = run_argv(has_text(cwd) ? cwd : NULL, argv, log_file, append, 0,
-                         timeout_s);
+                         timeout_s, has_text(env_extra) ? env_extra : NULL);
+}
+
+/* Run an arbitrary command given as an argv vector, with no shell. args is a
+   buffer of n_args NUL-terminated strings packed back-to-back (args_len bytes
+   total); argv[0] is the program. This is the quote-proof, async-signal-safe
+   path for compile/link invocations inside the OpenMP build loop: fork+execve
+   with no /bin/sh, so quoting never breaks and libgomp is never corrupted. */
+void fo_c_run_argv_logged(const char *cwd, const char *args, int args_len,
+                          int n_args, const char *log_file, int append,
+                          int timeout_s, const char *env_extra, int *exitcode) {
+    char **argv;
+    const char *p;
+    const char *end;
+    int idx;
+
+    if (n_args <= 0 || args == NULL) {
+        *exitcode = 127;
+        return;
+    }
+    argv = (char **)calloc((size_t)n_args + 1, sizeof(char *));
+    if (argv == NULL) {
+        *exitcode = 1;
+        return;
+    }
+    p = args;
+    end = args + args_len;
+    idx = 0;
+    while (idx < n_args && p < end) {
+        argv[idx++] = (char *)p;
+        p += strlen(p) + 1;
+    }
+    argv[idx] = NULL;
+    *exitcode = run_argv(has_text(cwd) ? cwd : NULL, argv, log_file, append, 0,
+                         timeout_s, has_text(env_extra) ? env_extra : NULL);
+    free(argv);
 }
 
 void fo_c_fpm_build(const char *project_dir, const char *flags, int jobs,
@@ -264,10 +327,10 @@ void fo_c_fpm_build(const char *project_dir, const char *flags, int jobs,
 
     if (has_text(flags)) {
         *exitcode = run_argv(project_dir, argv_with_flags, log_file, 0, jobs,
-                             timeout);
+                             timeout, NULL);
     } else {
         *exitcode = run_argv(project_dir, argv_plain, log_file, 0, jobs,
-                             timeout);
+                             timeout, NULL);
     }
 }
 
@@ -276,7 +339,7 @@ void fo_c_fpm_test_list(const char *project_dir, const char *log_file,
     char *argv[] = {"fpm", "test", "--list", NULL};
 
     *exitcode = run_argv(project_dir, argv, log_file, 0, 0,
-                         env_timeout("FO_TEST_TIMEOUT", 30));
+                         env_timeout("FO_TEST_TIMEOUT", 30), NULL);
 }
 
 void fo_c_fpm_test_all(const char *project_dir, int jobs, const char *log_file,
@@ -284,7 +347,7 @@ void fo_c_fpm_test_all(const char *project_dir, int jobs, const char *log_file,
     char *argv[] = {"fpm", "test", NULL};
 
     *exitcode = run_argv(project_dir, argv, log_file, 0, jobs,
-                         env_timeout("FO_TEST_TIMEOUT", 120));
+                         env_timeout("FO_TEST_TIMEOUT", 120), NULL);
 }
 
 void fo_c_fpm_test_names(const char *project_dir, const char *names, int jobs,
@@ -324,7 +387,7 @@ void fo_c_fpm_test_names(const char *project_dir, const char *names, int jobs,
     argv[n + 2] = NULL;
 
     *exitcode = run_argv(project_dir, argv, log_file, 0, jobs,
-                         env_timeout("FO_TEST_TIMEOUT", 120));
+                         env_timeout("FO_TEST_TIMEOUT", 120), NULL);
     free(argv);
     free(copy);
 }
@@ -349,13 +412,13 @@ void fo_c_cmake_build(const char *project_dir, const char *flags, int jobs,
     if (has_text(flags)) {
         snprintf(flag_arg, sizeof(flag_arg), "-DCMAKE_Fortran_FLAGS=%s", flags);
         *exitcode = run_argv(project_dir, configure_flags, log_file, 0, 0,
-                             build_timeout);
+                             build_timeout, NULL);
     } else {
         *exitcode = run_argv(project_dir, configure_plain, log_file, 0, 0,
-                             build_timeout);
+                             build_timeout, NULL);
     }
     if (*exitcode != 0) return;
-    *exitcode = run_argv(project_dir, build_argv, log_file, 1, 0, build_timeout);
+    *exitcode = run_argv(project_dir, build_argv, log_file, 1, 0, build_timeout, NULL);
 }
 
 void fo_c_ctest(const char *project_dir, int jobs, const char *regex,
@@ -383,7 +446,7 @@ void fo_c_ctest(const char *project_dir, int jobs, const char *regex,
     argv[n] = NULL;
 
     *exitcode = run_argv(build_dir, argv, log_file, 0, 0,
-                         env_timeout("FO_TEST_TIMEOUT", 120));
+                         env_timeout("FO_TEST_TIMEOUT", 120), NULL);
 }
 
 void fo_c_start_fo_check(const char *project_dir, const char *mode,
@@ -490,3 +553,4 @@ void fo_c_write_stderr(const char *buf, int n) {
         off += (int)w;
     }
 }
+

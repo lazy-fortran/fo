@@ -1,5 +1,6 @@
 module fo_fmt
     use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_fs, only: fs_make_dir, fs_write_text, fs_append_file, fs_collect_files
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
     use fo_cache, only: cache_store_root, HASH_LEN
     use fx_hash, only: sha256_file
@@ -10,13 +11,61 @@ module fo_fmt
 
 contains
 
+    subroutine write_source_list(scan_root, list_file)
+        !! Write the sorted list of *.f90/*.F90 files under scan_root, excluding
+        !! any */build or */.git path component, into list_file (one per line).
+        !! Replaces the `find ... | sort > list_file` pipeline.
+        character(len=*), intent(in) :: scan_root, list_file
+
+        character(len=512), allocatable :: hits(:)
+        character(len=512) :: key
+        integer :: n_hits, n_files, s, i, j, u, ios
+        character(len=4), parameter :: suffixes(2) = ['.f90', '.F90']
+        character(len=512), allocatable :: files(:)
+
+        allocate (files(20000))
+        allocate (hits(20000))
+        n_files = 0
+        do s = 1, size(suffixes)
+            call fs_collect_files(trim(scan_root), '', trim(suffixes(s)), '', &
+                                  hits, n_hits)
+            do i = 1, n_hits
+                if (index(hits(i), '/build/') > 0) cycle
+                if (index(hits(i), '/.git/') > 0) cycle
+                if (n_files >= size(files)) exit
+                n_files = n_files + 1
+                files(n_files) = hits(i)
+            end do
+        end do
+        ! Each suffix block is sorted; merge the union into a sorted order.
+        do i = 2, n_files
+            key = files(i)
+            j = i - 1
+            do while (j >= 1)
+                if (llt(files(j), key) .or. files(j) == key) exit
+                files(j + 1) = files(j)
+                j = j - 1
+            end do
+            files(j + 1) = key
+        end do
+
+        open (newunit=u, file=trim(list_file), status='replace', iostat=ios)
+        if (ios == 0) then
+            do i = 1, n_files
+                write (u, '(a)') trim(files(i))
+            end do
+            close (u)
+        end if
+        deallocate (hits)
+        deallocate (files)
+    end subroutine write_source_list
+
     subroutine fo_fmt_run(dir, exitcode)
         character(len=*), intent(in) :: dir
         integer, intent(out) :: exitcode
 
         type(backend_t) :: b
         character(len=512) :: scan_root, list_file, fpath
-        character(len=4096) :: cmd
         integer :: u, ios, fmt_exit
 
         b = detect_backend(trim(dir))
@@ -25,12 +74,7 @@ contains
 
         exitcode = 0
         call make_tmpfile('fo_fmt_files', list_file)
-        cmd = 'find '//trim(scan_root)// &
-            " -path '*/build' -prune -o"// &
-            " -path '*/.git' -prune -o"// &
-            " \( -name '*.f90' -o -name '*.F90' \) -print 2>/dev/null"// &
-            ' | sort > '//trim(list_file)
-        call execute_command_line(trim(cmd), wait=.true.)
+        call write_source_list(scan_root, list_file)
 
         open (newunit=u, file=trim(list_file), status='old', iostat=ios)
         if (ios /= 0) then
@@ -55,9 +99,8 @@ contains
 
         type(backend_t) :: b
         character(len=512) :: scan_root, list_file, fpath, tmpf
-        character(len=HASH_LEN) :: action_id
-        character(len=4096) :: cmd
-        integer :: u, ios, diff_exit, n_bad, fmt_exit
+        character(len=HASH_LEN) :: action_id, orig_hash, fmt_hash
+        integer :: u, ios, n_bad, fmt_exit, ho, hf
 
         b = detect_backend(trim(dir))
         scan_root = trim(dir)
@@ -68,12 +111,7 @@ contains
 
         n_bad = 0
         call make_tmpfile('fo_fmt_files', list_file)
-        cmd = 'find '//trim(scan_root)// &
-            " -path '*/build' -prune -o"// &
-            " -path '*/.git' -prune -o"// &
-            " \( -name '*.f90' -o -name '*.F90' \) -print 2>/dev/null"// &
-            ' | sort > '//trim(list_file)
-        call execute_command_line(trim(cmd), wait=.true.)
+        call write_source_list(scan_root, list_file)
 
         call fmt_action_id(list_file, action_id)
         if (len_trim(action_id) == HASH_LEN .and. fmt_marker_exists(action_id)) then
@@ -93,18 +131,18 @@ contains
             if (len_trim(fpath) == 0) cycle
 
             call make_tmpfile('fo_fmt_check', tmpf)
-            cmd = 'cp '//sq(trim(fpath))//' '//sq(trim(tmpf))
-            call execute_command_line(trim(cmd), wait=.true.)
+            call fs_append_file(trim(fpath), trim(tmpf))
             call format_file(trim(tmpf), fmt_exit)
             if (fmt_exit /= 0) then
                 call delete_tmpfile(tmpf)
                 cycle
             end if
-            cmd = 'diff -q '//sq(trim(fpath))//' '//sq(trim(tmpf))//' >/dev/null 2>&1'
-            call execute_command_line(trim(cmd), exitstat=diff_exit, wait=.true.)
+            ! diff -q via byte-exact content hash of original vs formatted copy.
+            call sha256_file(trim(fpath), orig_hash, ho)
+            call sha256_file(trim(tmpf), fmt_hash, hf)
             call delete_tmpfile(tmpf)
 
-            if (diff_exit /= 0) then
+            if (ho /= 0 .or. hf /= 0 .or. orig_hash /= fmt_hash) then
                 n_bad = n_bad + 1
                 output = trim(output)//trim(fpath)//': needs formatting'//achar(10)
             end if
@@ -167,15 +205,11 @@ contains
     subroutine store_fmt_marker(action_id)
         character(len=*), intent(in) :: action_id
 
-        character(len=512) :: path, tmp
-        integer :: exitcode
+        character(len=512) :: path
 
         call fmt_marker_path(action_id, path)
-        call make_tmpfile('fo_fmt_marker', tmp)
-        call execute_command_line('mkdir -p '//sq(dirname(path))//' && printf 1 > '// &
-            sq(trim(tmp))//' && mv -f '//sq(trim(tmp))//' '// &
-            sq(trim(path)), wait=.true., exitstat=exitcode)
-        if (exitcode /= 0) call delete_tmpfile(tmp)
+        call fs_make_dir(dirname(path))
+        call fs_write_text(trim(path), '1')
     end subroutine store_fmt_marker
 
     subroutine fmt_marker_path(action_id, path)
@@ -201,11 +235,5 @@ contains
             dir = '.'
         end if
     end function dirname
-
-    pure function sq(s) result(r)
-        character(len=*), intent(in) :: s
-        character(len=len_trim(s) + 2) :: r
-        r = "'"//trim(s)//"'"
-    end function sq
 
 end module fo_fmt

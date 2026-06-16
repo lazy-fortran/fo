@@ -250,13 +250,22 @@ contains
     end subroutine test_large_file_hashes_full_source
 
     subroutine test_schema_and_root()
-        character(len=512) :: text
+        character(len=512) :: text, override
 
         call cache_schema(text)
         call assert(trim(text) == 'action-output-v1', 'cache schema is reported')
         call cache_store_root(text)
-        call assert(index(text, '/.cache/fo/store/v1') > 0, &
-            'cache root points at store v1')
+        ! FO_CACHE_DIR overrides the root (the parallel test runner sets it so
+        ! each test gets an isolated cache). Honour it; otherwise the default is
+        ! under $HOME/.cache/fo. Either way the store lives under .../store/v1.
+        call get_environment_variable('FO_CACHE_DIR', override)
+        if (len_trim(override) > 0) then
+            call assert(index(text, trim(override)//'/store/v1') > 0, &
+                'FO_CACHE_DIR override points the store root at it')
+        else
+            call assert(index(text, '/.cache/fo/store/v1') > 0, &
+                'default cache root points at store v1')
+        end if
     end subroutine test_schema_and_root
 
     subroutine write_text(path, text)

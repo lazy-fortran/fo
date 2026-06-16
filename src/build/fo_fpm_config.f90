@@ -35,6 +35,10 @@ module fo_fpm_config
         character(len=128) :: link_libs(MAX_LINK_LIBS)
         integer :: n_flags = 0
         character(len=128) :: flags(MAX_FLAGS)
+        ! fpm "openmp" metapackage (openmp = "*" under [dependencies]). When set,
+        ! the backend compiles and links with -fopenmp so the project's `!$omp`
+        ! regions run in parallel. Without it gfortran ignores the directives.
+        logical :: openmp = .false.
     end type fpm_config_t
 
 contains
@@ -50,6 +54,7 @@ contains
         c%project_dir = '.'
         c%auto_executables = .true.
         c%auto_tests = .true.
+        c%openmp = .false.
         c%n_deps = 0
         c%n_dev_deps = 0
         c%n_link_libs = 0
@@ -126,7 +131,10 @@ contains
             case ('build')
                 call parse_build(key, val, config)
             case ('dependencies')
-                if (config%n_deps < MAX_DEPS) then
+                if (trim(key) == 'openmp') then
+                    ! fpm metapackage, not a real dependency: maps to -fopenmp.
+                    config%openmp = .true.
+                else if (config%n_deps < MAX_DEPS) then
                     config%n_deps = config%n_deps + 1
                     call parse_dep(key, val, config%deps(config%n_deps))
                 end if

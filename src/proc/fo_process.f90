@@ -9,6 +9,9 @@ module fo_process
     public :: process_start_fo_check, process_poll_pid, process_cancel_pid
     public :: process_run_logged
     public :: process_stderr_is_tty, process_write_stderr
+    public :: process_getpid
+    public :: process_run_argv_logged, argv_push, argv_push_split
+    public :: argv_push_split_nl
     integer, parameter :: C_PATH_LEN = 4096
     integer, parameter :: C_ARG_LEN = 4096
 
@@ -23,6 +26,11 @@ module fo_process
             integer(c_int), value :: fd
             integer(c_int) :: r
         end function fo_c_isatty
+
+        subroutine fo_c_getpid(pid_out) bind(C, name='fo_c_getpid')
+            import :: c_int
+            integer(c_int), intent(out) :: pid_out
+        end subroutine fo_c_getpid
 
         subroutine fo_c_write_stderr(buf, n) bind(C, name='fo_c_write_stderr')
             import :: c_char, c_int
@@ -97,12 +105,23 @@ module fo_process
         end subroutine fo_c_start_fo_check
 
         subroutine fo_c_run_logged(cwd, exe_path, log_file, append, timeout_s, &
-                exitcode) bind(C, name='fo_c_run_logged')
+                env_extra, exitcode) bind(C, name='fo_c_run_logged')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: cwd(*), exe_path(*), log_file(*)
+            character(kind=c_char), intent(in) :: env_extra(*)
             integer(c_int), value :: append, timeout_s
             integer(c_int), intent(out) :: exitcode
         end subroutine fo_c_run_logged
+
+        subroutine fo_c_run_argv_logged(cwd, args, args_len, n_args, log_file, &
+                append, timeout_s, env_extra, exitcode) &
+                bind(C, name='fo_c_run_argv_logged')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: cwd(*), args(*), log_file(*)
+            character(kind=c_char), intent(in) :: env_extra(*)
+            integer(c_int), value :: args_len, n_args, append, timeout_s
+            integer(c_int), intent(out) :: exitcode
+        end subroutine fo_c_run_argv_logged
 
         subroutine fo_c_poll_pid(pid, done, exitcode) &
                 bind(C, name='fo_c_poll_pid')
@@ -121,6 +140,14 @@ module fo_process
 
 contains
 
+    integer function process_getpid()
+        !! Current process id. Used to make per-process unique paths so parallel
+        !! test processes do not collide on shared /tmp names.
+        integer(c_int) :: pid
+        call fo_c_getpid(pid)
+        process_getpid = int(pid)
+    end function process_getpid
+
     logical function process_stderr_is_tty()
         !! True when stderr (fd 2) is a terminal, so progress can use an
         !! animated carriage-return bar instead of plain lines.
@@ -132,6 +159,88 @@ contains
         character(len=*), intent(in) :: s
         if (len(s) > 0) call fo_c_write_stderr(s, int(len(s), c_int))
     end subroutine process_write_stderr
+
+    subroutine process_run_argv_logged(cwd, packed, n_args, log_file, append, &
+            timeout_s, exitcode)
+        !! Run a command given as an argv vector with no shell. packed holds
+        !! n_args NUL-terminated tokens back-to-back (built by argv_begin/
+        !! argv_push). This is the quote-proof, async-signal-safe path for
+        !! compile/link inside the OpenMP build loop: fork+execve, no /bin/sh.
+        character(len=*), intent(in) :: cwd, packed, log_file
+        integer, intent(in) :: n_args
+        logical, intent(in) :: append
+        integer, intent(in) :: timeout_s
+        integer, intent(out) :: exitcode
+        integer(c_int) :: ec, ap
+
+        ap = 0
+        if (append) ap = 1
+        call fo_c_run_argv_logged(trim(cwd)//c_null_char, packed, &
+                                  int(len(packed), c_int), int(n_args, c_int), &
+                                  trim(log_file)//c_null_char, ap, &
+                                  int(timeout_s, c_int), c_null_char, ec)
+        exitcode = int(ec)
+    end subroutine process_run_argv_logged
+
+    subroutine argv_push(packed, n_args, token)
+        !! Append one argv token (a whole word) to the packed NUL-separated
+        !! buffer and bump the count. Empty tokens are skipped.
+        character(len=:), allocatable, intent(inout) :: packed
+        integer, intent(inout) :: n_args
+        character(len=*), intent(in) :: token
+
+        if (len_trim(token) == 0) return
+        if (.not. allocated(packed)) packed = ''
+        packed = packed//trim(token)//c_null_char
+        n_args = n_args + 1
+    end subroutine argv_push
+
+    subroutine argv_push_split(packed, n_args, words)
+        !! Split words on spaces and append each non-empty field as its own
+        !! argv token. Use for flag strings that hold several flags at once.
+        character(len=:), allocatable, intent(inout) :: packed
+        integer, intent(inout) :: n_args
+        character(len=*), intent(in) :: words
+        integer :: i, start, n
+
+        n = len(words)
+        start = 0
+        do i = 1, n
+            if (words(i:i) == ' ') then
+                if (start > 0) then
+                    call argv_push(packed, n_args, words(start:i - 1))
+                    start = 0
+                end if
+            else if (start == 0) then
+                start = i
+            end if
+        end do
+        if (start > 0) call argv_push(packed, n_args, words(start:n))
+    end subroutine argv_push_split
+
+    subroutine argv_push_split_nl(packed, n_args, words)
+        !! Split words on newlines and append each non-empty line as one argv
+        !! token, internal spaces preserved. Use for paths that may contain
+        !! spaces (compiler -I/-J dirs, resolved library paths).
+        character(len=:), allocatable, intent(inout) :: packed
+        integer, intent(inout) :: n_args
+        character(len=*), intent(in) :: words
+        integer :: i, start, n
+
+        n = len(words)
+        start = 0
+        do i = 1, n
+            if (words(i:i) == char(10)) then
+                if (start > 0) then
+                    call argv_push(packed, n_args, words(start:i - 1))
+                    start = 0
+                end if
+            else if (start == 0) then
+                start = i
+            end if
+        end do
+        if (start > 0) call argv_push(packed, n_args, words(start:n))
+    end subroutine argv_push_split_nl
 
     function process_detect_nproc() result(nproc)
         integer :: nproc
@@ -274,23 +383,33 @@ contains
     end subroutine process_start_fo_check
 
     subroutine process_run_logged(cwd, exe_path, log_file, append, timeout_s, &
-            exitcode)
+            exitcode, cache_dir)
         character(len=*), intent(in) :: cwd, exe_path, log_file
         logical, intent(in) :: append
         integer, intent(in) :: timeout_s
         integer, intent(out) :: exitcode
+        ! Optional: run the child with FO_CACHE_DIR set to this directory, so a
+        ! test built in parallel uses its own cache and cannot corrupt a shared
+        ! one. The KEY=VALUE env is applied via execve (async-signal-safe).
+        character(len=*), intent(in), optional :: cache_dir
 
         character(kind=c_char) :: c_cwd(C_PATH_LEN), c_exe(C_PATH_LEN)
         character(kind=c_char) :: c_log(C_PATH_LEN)
+        character(kind=c_char) :: c_env(C_PATH_LEN)
         integer(c_int) :: c_exit, c_append
 
         call to_c_string(cwd, c_cwd)
         call to_c_string(exe_path, c_exe)
         call to_c_string(log_file, c_log)
+        if (present(cache_dir) .and. len_trim(cache_dir) > 0) then
+            call to_c_string('FO_CACHE_DIR='//trim(cache_dir), c_env)
+        else
+            c_env(1) = c_null_char
+        end if
         c_append = 0
         if (append) c_append = 1
         call fo_c_run_logged(c_cwd, c_exe, c_log, c_append, &
-            int(timeout_s, c_int), c_exit)
+            int(timeout_s, c_int), c_env, c_exit)
         exitcode = int(c_exit)
     end subroutine process_run_logged
 

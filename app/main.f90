@@ -8,7 +8,9 @@ program fo_main
         BACKEND_GFORTRAN, BACKEND_CMAKE
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
-    use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_util, only: make_tmpfile, delete_tmpfile, clean_root_build_artifacts
+    use fo_fs, only: fs_make_dir, fs_remove_tree, fs_collect_files, &
+                     fs_copy_exec, fs_rename
     use fo_check_output, only: check_result_json, check_result_compact_json, &
         check_result_full_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
@@ -675,7 +677,6 @@ subroutine cmd_install()
     type(backend_t) :: b
     character(len=256) :: prefix, arg
     character(len=512) :: home
-    character(len=4096) :: cmd
     integer :: i, exitcode, status
 
     call get_environment_variable('HOME', home, status=status)
@@ -699,16 +700,30 @@ subroutine cmd_install()
     call backend_build(b, exitcode)
     if (exitcode /= 0) stop 1
 
-    call execute_command_line('mkdir -p "'//trim(prefix)//'/bin"', &
-        wait=.true., exitstat=status)
-    if (status /= 0) stop 1
+    call fs_make_dir(trim(prefix)//'/bin')
     ! Atomic per-binary replace: copy to a temp name then rename over the
     ! target. rename swaps the directory entry even when the existing binary
     ! is held open (e.g. a running fo MCP server), avoiding "text file busy".
-    cmd = 'set -e; for f in "'//trim(b%project_dir)//'/build/fo/bin/"*; do '// &
-        '[ -e "$f" ] || continue; d="'//trim(prefix)//'/bin/$(basename "$f")"; '// &
-        'cp -f "$f" "$d.fo-new" && mv -f "$d.fo-new" "$d"; done'
-    call execute_command_line(trim(cmd), exitstat=exitcode, wait=.true.)
+    block
+        character(len=512), allocatable :: bins(:)
+        character(len=512) :: dst, slash_name
+        integer :: nb, k, sl
+        logical :: installed_any
+        installed_any = .false.
+        allocate (bins(256))
+        call fs_collect_files(trim(b%project_dir)//'/build/fo/bin', '', '', '', &
+                              bins, nb, recursive=.false.)
+        do k = 1, nb
+            sl = index(trim(bins(k)), '/', back=.true.)
+            slash_name = bins(k) (sl + 1:)
+            dst = trim(prefix)//'/bin/'//trim(slash_name)
+            if (fs_copy_exec(trim(bins(k)), trim(dst)//'.fo-new') /= 0) cycle
+            if (fs_rename(trim(dst)//'.fo-new', trim(dst)) == 0) &
+                installed_any = .true.
+        end do
+        deallocate (bins)
+        exitcode = merge(0, 1, installed_any)
+    end block
     if (exitcode /= 0) then
         write (error_unit, '(a)') 'fo: install: no binaries found in build/fo/bin'
         stop 1
@@ -719,16 +734,15 @@ end subroutine cmd_install
 subroutine cmd_clean()
     use fo_cache, only: cache_root, cache_store_root
     character(len=512) :: root, store_root
+    integer :: n_removed
 
     call cache_root(root)
     call cache_store_root(store_root)
-    call execute_command_line('rm -rf '//trim(root), wait=.true.)
+    call fs_remove_tree(trim(root))
     ! Also drop this project's own build tree and any stale module artifacts
     ! left in the project root, which otherwise shadow build/fo/mod.
-    call execute_command_line('rm -rf build/fo', wait=.true.)
-    call execute_command_line('find . -maxdepth 1 -type f \( -name "*.mod" '// &
-        '-o -name "*.smod" -o -name "*.o" \) -delete '// &
-        '2>/dev/null', wait=.true.)
+    call fs_remove_tree('build/fo')
+    call clean_root_build_artifacts('.', n_removed)
     write (output_unit, '(a,a)') 'cache cleared: ', trim(store_root)
 end subroutine cmd_clean
 

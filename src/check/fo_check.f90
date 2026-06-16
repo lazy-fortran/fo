@@ -6,12 +6,13 @@ module fo_check
     use fo_process, only: process_detect_nproc, process_fpm_build, &
         process_fpm_test_list, process_fpm_test_all, &
         process_fpm_test_names, process_cmake_build, &
-        process_ctest
+        process_ctest, process_run_argv_logged, argv_push
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
         cache_action_mod_key, hash_mod_file, HASH_LEN
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, is_runner_crash
+    use fo_fs, only: fs_collect_files, fs_remove_file
     implicit none
     private
     public :: check_result_t, test_result_t, fo_check_run, fo_changed_modules
@@ -236,39 +237,130 @@ contains
     end do
 
     block
-        character(len=2048) :: cmd
-        character(len=512) :: tmpfile, line, cc_file, dep_dir, mod_file
-        integer :: u, iostat
+        character(len=512) :: cc_file, dep_dir, mod_file, candidate, best
+        character(len=512) :: gfdir
+        character(len=512), allocatable :: dep_items(:), gf_dirs(:)
+        integer :: n_dep, n_gf, k
+        logical :: exists
 
-        call make_tmpfile('fo_find_mod', tmpfile)
         cc_file = trim(project_dir)//'/build/compile_commands.json'
         dep_dir = trim(project_dir)//'/build/dependencies'
         mod_file = trim(lower_name)//'.mod'
-        cmd = '( test -d '//sq(trim(project_dir)//'/build/fo/mod')// &
-            ' && printf "%s\n" '//sq(trim(project_dir)//'/build/fo/mod')// &
-            '; if [ -f '//sq(trim(cc_file))// &
-            ' ]; then grep -o ''build/gfortran_[A-Za-z0-9_]*'' '// &
-            sq(trim(cc_file))//' | awk -v p='//sq(trim(project_dir))// &
-            ' ''{print p "/" $0}''; fi; '// &
-            'find '//sq(trim(dep_dir))// &
-            ' -type f -name "*.mod" -printf "%h\n" 2>/dev/null ) | '// &
-            'sort -u | while IFS= read -r d; do test -f "$d/'// &
-            trim(mod_file)//'" && printf "%s\n" "$d/'//trim(mod_file)// &
-            '"; done | head -1 > '//trim(tmpfile)
-        call execute_command_line(cmd, wait=.true.)
+        best = ''
 
-        open (newunit=u, file=tmpfile, status='old', iostat=iostat)
-        if (iostat == 0) then
-            read (u, '(a)', iostat=iostat) line
-            if (iostat == 0 .and. len_trim(line) > 0) then
-                modpath = trim(line)
-                found = .true.
-            end if
-            close (u)
+        ! Candidate 1: build/fo/mod/<lower>.mod
+        candidate = trim(project_dir)//'/build/fo/mod/'//trim(mod_file)
+        inquire (file=trim(candidate), exist=exists)
+        if (exists) call keep_smaller(best, candidate)
+
+        ! Candidate 2: build/gfortran_* dirs from compile_commands.json
+        allocate (gf_dirs(MAX_EXT_DEPS))
+        call collect_gfortran_dirs(trim(cc_file), trim(project_dir), gf_dirs, n_gf)
+        do k = 1, n_gf
+            gfdir = gf_dirs(k)
+            candidate = trim(gfdir)//'/'//trim(mod_file)
+            inquire (file=trim(candidate), exist=exists)
+            if (exists) call keep_smaller(best, candidate)
+        end do
+        deallocate (gf_dirs)
+
+        ! Candidate 3: build/dependencies/**/<lower>.mod
+        allocate (dep_items(MAX_EXT_DEPS))
+        call fs_collect_files(trim(dep_dir), '', trim(mod_file), '', &
+            dep_items, n_dep)
+        do k = 1, n_dep
+            if (basename_eq(trim(dep_items(k)), trim(mod_file))) &
+                call keep_smaller(best, dep_items(k))
+        end do
+        deallocate (dep_items)
+
+        if (len_trim(best) > 0) then
+            modpath = trim(best)
+            found = .true.
         end if
-        call delete_tmpfile(tmpfile)
     end block
 end subroutine find_mod_file
+
+subroutine keep_smaller(best, candidate)
+    !! Keep the lexically smaller of best and candidate in best (sort -u |
+    !! head -1 over candidate directories). Empty best is replaced.
+    character(len=*), intent(inout) :: best
+    character(len=*), intent(in) :: candidate
+
+    if (len_trim(best) == 0 .or. trim(candidate) < trim(best)) &
+        best = trim(candidate)
+end subroutine keep_smaller
+
+logical function basename_eq(path, name) result(yes)
+    !! True if the basename of path equals name exactly.
+    character(len=*), intent(in) :: path, name
+
+    integer :: slash
+
+    slash = index(trim(path), '/', back=.true.)
+    yes = trim(path(slash + 1:)) == trim(name)
+end function basename_eq
+
+subroutine collect_gfortran_dirs(cc_file, project_dir, dirs, n_dirs)
+    !! Scan compile_commands.json for build/gfortran_[A-Za-z0-9_]* substrings
+    !! and emit unique <project_dir>/<match> directories.
+    character(len=*), intent(in) :: cc_file, project_dir
+    character(len=*), intent(out) :: dirs(:)
+    integer, intent(out) :: n_dirs
+
+    character(len=4096) :: line
+    character(len=512) :: match, full
+    integer :: u, iostat, pos, n, e, k, j
+    logical :: dup
+    character(len=*), parameter :: pat = 'build/gfortran_'
+
+    n_dirs = 0
+    open (newunit=u, file=trim(cc_file), status='old', iostat=iostat)
+    if (iostat /= 0) return
+
+    do
+        read (u, '(a)', iostat=iostat) line
+        if (iostat /= 0) exit
+        n = len_trim(line)
+        pos = 1
+        do
+            if (pos > n) exit
+            k = index(line(pos:n), pat)
+            if (k == 0) exit
+            k = pos + k - 1
+            e = k + len(pat)
+            do while (e <= n)
+                if (is_alnum_us(line(e:e))) then
+                    e = e + 1
+                else
+                    exit
+                end if
+            end do
+            match = line(k:e - 1)
+            full = trim(project_dir)//'/'//trim(match)
+            dup = .false.
+            do j = 1, n_dirs
+                if (trim(dirs(j)) == trim(full)) then
+                    dup = .true.
+                    exit
+                end if
+            end do
+            if (.not. dup .and. n_dirs < size(dirs)) then
+                n_dirs = n_dirs + 1
+                dirs(n_dirs) = full
+            end if
+            pos = e
+        end do
+    end do
+    close (u)
+end subroutine collect_gfortran_dirs
+
+logical function is_alnum_us(ch) result(yes)
+    character(len=1), intent(in) :: ch
+
+    yes = (ch >= 'A' .and. ch <= 'Z') .or. (ch >= 'a' .and. ch <= 'z') .or. &
+        (ch >= '0' .and. ch <= '9') .or. ch == '_'
+end function is_alnum_us
 
 subroutine collect_dep_keys_source_order(units, n_units, dag, node_id, &
         mod_keys, ext_names, ext_keys, n_ext, &
@@ -515,13 +607,17 @@ subroutine detect_compiler(compiler)
     character(len=*), intent(out) :: compiler
 
     character(len=256) :: line
-    character(len=512) :: tmpfile, cmd
-    integer :: u, iostat
+    character(len=512) :: tmpfile
+    character(len=:), allocatable :: packed
+    integer :: u, iostat, n_args, exitcode
 
     compiler = 'unknown'
     call make_tmpfile('fo_compiler_version', tmpfile)
-    cmd = 'gfortran --version 2>/dev/null | head -1 > '//trim(tmpfile)
-    call execute_command_line(cmd, wait=.true.)
+    n_args = 0
+    call argv_push(packed, n_args, 'gfortran')
+    call argv_push(packed, n_args, '--version')
+    call process_run_argv_logged('', packed, n_args, trim(tmpfile), .false., &
+        120, exitcode)
 
     open (newunit=u, file=tmpfile, status='old', iostat=iostat)
     if (iostat == 0) then
@@ -868,27 +964,59 @@ end function log_has_vtable_mismatch
 subroutine clear_fpm_mod_cache(project_dir)
     character(len=*), intent(in) :: project_dir
 
-    character(len=1024) :: cmd
-    integer :: ierr
+    character(len=512) :: build_root
+    character(len=512), allocatable :: items(:)
+    integer :: n_items, i, depth
 
-    cmd = 'find '//trim(project_dir)//'/build' &
-        //' -maxdepth 2 -name "*.mod"' &
-        //' -not -path "*/dependencies/*"' &
-        //' -delete 2>/dev/null'
-    call execute_command_line(cmd, exitstat=ierr, wait=.true.)
+    build_root = trim(project_dir)//'/build'
+    allocate (items(8192))
 
-    cmd = 'find '//trim(project_dir)//'/build' &
-        //' -mindepth 3 -maxdepth 3 -name "src_*.o"' &
-        //' -not -path "*/dependencies/*"' &
-        //' -delete 2>/dev/null'
-    call execute_command_line(cmd, exitstat=ierr, wait=.true.)
+    ! find build -maxdepth 2 -name '*.mod' -not -path '*/dependencies/*' -delete
+    call fs_collect_files(trim(build_root), '', '.mod', '', items, n_items)
+    do i = 1, n_items
+        if (index(items(i), '/dependencies/') > 0) cycle
+        depth = build_rel_depth(trim(build_root), trim(items(i)))
+        if (depth >= 1 .and. depth <= 2) call fs_remove_file(trim(items(i)))
+    end do
+
+    ! find build -mindepth 3 -maxdepth 3 -name 'src_*.o'
+    !   -not -path '*/dependencies/*' -delete
+    call fs_collect_files(trim(build_root), 'src_', '.o', '', items, n_items)
+    do i = 1, n_items
+        if (index(items(i), '/dependencies/') > 0) cycle
+        if (.not. basename_starts_with(trim(items(i)), 'src_')) cycle
+        depth = build_rel_depth(trim(build_root), trim(items(i)))
+        if (depth == 3) call fs_remove_file(trim(items(i)))
+    end do
+
+    deallocate (items)
 end subroutine clear_fpm_mod_cache
 
-pure function sq(s) result(r)
-    character(len=*), intent(in) :: s
-    character(len=len_trim(s) + 2) :: r
+integer function build_rel_depth(root, path) result(depth)
+    !! Number of path components below root (find's depth from root).
+    character(len=*), intent(in) :: root, path
 
-    r = "'"//trim(s)//"'"
-end function sq
+    integer :: i, n
+
+    depth = 0
+    n = len_trim(root)
+    if (len_trim(path) <= n + 1) return
+    if (path(1:n) /= root(1:n)) return
+    do i = n + 1, len_trim(path)
+        if (path(i:i) == '/') depth = depth + 1
+    end do
+end function build_rel_depth
+
+logical function basename_starts_with(path, prefix) result(yes)
+    character(len=*), intent(in) :: path, prefix
+
+    integer :: slash, b
+
+    slash = index(trim(path), '/', back=.true.)
+    b = slash + 1
+    yes = .false.
+    if (b + len(prefix) - 1 > len_trim(path)) return
+    yes = path(b:b + len(prefix) - 1) == prefix
+end function basename_starts_with
 
 end module fo_check

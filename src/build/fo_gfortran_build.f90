@@ -8,7 +8,11 @@ module fo_gfortran_build
                         HASH_LEN
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
                        clean_root_build_artifacts
-    use fo_process, only: process_run_logged
+    use fo_process, only: process_run_logged, &
+                          process_run_argv_logged, argv_push, argv_push_split, &
+                          argv_push_split_nl
+    use fo_fs, only: fs_make_dir, fs_remove_file, fs_append_file, &
+                     fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs
     use fo_progress, only: progress_begin, progress_step, progress_end
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
@@ -64,9 +68,10 @@ contains
         mod_dir = trim(project_dir)//'/build/fo/mod'
         obj_dir = trim(project_dir)//'/build/fo/obj'
         bin_dir = trim(project_dir)//'/build/fo/bin'
-        call execute_command_line('mkdir -p '//sq(mod_dir)//' '// &
-                                  sq(obj_dir)//' '//sq(bin_dir), &
-                                  wait=.true., exitstat=exitcode)
+        call fs_make_dir(mod_dir)
+        call fs_make_dir(obj_dir)
+        call fs_make_dir(bin_dir)
+        exitcode = 0
         if (exitcode /= 0) return
 
         call truncate_file(trim(lf))
@@ -233,89 +238,76 @@ contains
         character(len=512), intent(out) :: dep_objs(MAX_DEP_OBJS)
         integer, intent(out) :: n_dep_objs
 
-        character(len=512) :: dirfile, objfile, line
-        character(len=4096) :: cmd
-        integer :: u, ios, i
+        character(len=512) :: line
+        integer :: i, j
         integer :: n_obj_seen
         character(len=512) :: obj_basenames(MAX_DEP_OBJS)
         character(len=512) :: obj_key
+        character(len=512) :: found(MAX_DEP_OBJS)
+        integer :: n_found
         integer :: slash
+        character(len=8) :: suffixes(2)
 
         n_dep_includes = 0
         n_dep_objs = 0
         n_obj_seen = 0
         if (config%n_deps == 0) return
 
-        call make_tmpfile('fo_dep_dirs', dirfile)
-        cmd = '( if [ -f '//sq(trim(project_dir)//'/build/compile_commands.json')// &
-              ' ]; then grep -o ''build/gfortran_[A-Za-z0-9_]*'' '// &
-              sq(trim(project_dir)//'/build/compile_commands.json')// &
-              ' | awk -v p='//sq(trim(project_dir))//' ''{print p "/" $0}''; fi; '// &
-              'find '//sq(trim(project_dir)//'/build/dependencies')//' -type f '// &
-              '-name "*.mod" -printf "%h\n" 2>/dev/null ) | sort -u > '// &
-              trim(dirfile)
-        call execute_command_line(trim(cmd), wait=.true.)
+        ! Every directory holding a .mod under build/ is an include candidate:
+        ! the project's own gfortran_* profile dir and each dependency's mod
+        ! dir. Replaces grep over compile_commands.json plus find -printf %h.
+        call fs_collect_mod_dirs(trim(project_dir)//'/build', dep_includes, &
+                                 n_dep_includes)
 
-        open (newunit=u, file=dirfile, status='old', iostat=ios)
-        if (ios == 0) then
-            do
-                read (u, '(a)', iostat=ios) line
-                if (ios /= 0) exit
-                if (len_trim(line) == 0) cycle
-                if (n_dep_includes < MAX_DEP_DIRS) then
-                    n_dep_includes = n_dep_includes + 1
-                    dep_includes(n_dep_includes) = trim(line)
-                end if
-            end do
-            close (u)
-        end if
-
-        call make_tmpfile('fo_dep_objs', objfile)
+        suffixes(1) = '.f90.o'
+        suffixes(2) = '.c.o'
         do i = 1, config%n_deps
             ! fpm names a dependency's compiled objects from the relative path to
             ! its source: git deps under build/dependencies become
             ! build_dependencies_<dep>_src_*, path deps (path = "../dep") become
             ! .._<dep>_src_*. Both share the _<dep>_src_ infix. Scan every
-            ! gfortran_* profile dir directly (compile_commands.json lists only
-            ! the project's own profile, not the deps') and dedup by basename.
-            cmd = 'find '//sq(trim(project_dir)//'/build')// &
-                  ' -path "'//'*'//'/gfortran_'//'*'//'/'//'*'//'" \( '// &
-                  '-name "*_'//trim(config%deps(i)%name)//'_src_*.f90.o" -o '// &
-                  '-name "*_'//trim(config%deps(i)%name)//'_src_*.c.o" '// &
-                  '\) 2>/dev/null >> '//trim(objfile)
-            call execute_command_line(trim(cmd), wait=.true.)
-        end do
-
-        open (newunit=u, file=objfile, status='old', iostat=ios)
-        if (ios == 0) then
-            do
-                read (u, '(a)', iostat=ios) line
-                if (ios /= 0) exit
-                if (len_trim(line) == 0) cycle
-                if (index(line, '_app_') > 0) cycle
-                if (index(line, '_test_') > 0) cycle
-                ! Deduplicate by module identity, not full basename. The same
-                ! dependency module can appear under different prefixes -
-                ! build_dependencies_<dep>_src_<mod> (git dep) and
-                ! .._<dep>_src_<mod> (path dep) - and across gfortran_* profile
-                ! dirs. Keying on the part after _src_ collapses all of them, so
-                ! a project that has built the dependency both ways does not link
-                ! the module twice (which fails with multiple-definition errors).
-                slash = index(trim(line), '/', back=.true.)
-                obj_key = dep_object_module_key(line(slash + 1:))
-                if (any(obj_basenames(1:n_obj_seen) == obj_key)) cycle
-                if (n_dep_objs < MAX_DEP_OBJS) then
-                    n_dep_objs = n_dep_objs + 1
-                    dep_objs(n_dep_objs) = trim(line)
-                    n_obj_seen = n_obj_seen + 1
-                    obj_basenames(n_obj_seen) = obj_key
-                end if
+            ! gfortran_* profile dir directly and dedup by module identity.
+            do j = 1, 2
+                call fs_collect_files(trim(project_dir)//'/build', &
+                                      '_'//trim(config%deps(i)%name)//'_src_', &
+                                      trim(suffixes(j)), '/gfortran_', found, &
+                                      n_found)
+                call add_dep_objs(found, n_found, dep_objs, n_dep_objs, &
+                                  obj_basenames, n_obj_seen)
             end do
-            close (u)
-        end if
-        call delete_tmpfile(objfile)
-        call delete_tmpfile(dirfile)
+        end do
     end subroutine find_dep_artifacts
+
+    subroutine add_dep_objs(found, n_found, dep_objs, n_dep_objs, &
+                            obj_basenames, n_obj_seen)
+        !! Filter collected dependency object paths (drop app/test objects) and
+        !! append the rest to dep_objs, deduplicating by module identity so the
+        !! same module built under different prefixes or profiles links once.
+        character(len=512), intent(in) :: found(:)
+        integer, intent(in) :: n_found
+        character(len=512), intent(inout) :: dep_objs(MAX_DEP_OBJS)
+        integer, intent(inout) :: n_dep_objs
+        character(len=512), intent(inout) :: obj_basenames(MAX_DEP_OBJS)
+        integer, intent(inout) :: n_obj_seen
+        character(len=512) :: line, obj_key
+        integer :: k, slash
+
+        do k = 1, n_found
+            line = found(k)
+            if (len_trim(line) == 0) cycle
+            if (index(line, '_app_') > 0) cycle
+            if (index(line, '_test_') > 0) cycle
+            slash = index(trim(line), '/', back=.true.)
+            obj_key = dep_object_module_key(line(slash + 1:))
+            if (any(obj_basenames(1:n_obj_seen) == obj_key)) cycle
+            if (n_dep_objs < MAX_DEP_OBJS) then
+                n_dep_objs = n_dep_objs + 1
+                dep_objs(n_dep_objs) = trim(line)
+                n_obj_seen = n_obj_seen + 1
+                obj_basenames(n_obj_seen) = obj_key
+            end if
+        end do
+    end subroutine add_dep_objs
 
     function dep_object_module_key(basename) result(key)
         !! Reduce an fpm dependency object basename to its module identity by
@@ -357,8 +349,9 @@ contains
         logical :: has_cycle, restored
         character(len=512) :: obj_path
         character(len=4096) :: includes_flag
-        character(len=512) :: c_list, c_line
-        integer :: uc, cios
+        character(len=512) :: c_line
+        character(len=512), allocatable :: cfiles(:)
+        integer :: n_cfiles, ic
 
         type(cache_t) :: c
         integer :: cache_ierr
@@ -471,7 +464,7 @@ contains
                     per_log_local = per_logs(ii)
                     call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
                     call compile_f90(project_dir, fname_local, obj_path, &
-                                     trim(includes_flag)//' '//trim(flags), &
+                                     with_user_flags(includes_flag, flags), &
                                      per_log_local, compile_exits(ii))
                     call progress_step()
                 end do
@@ -505,7 +498,7 @@ contains
                 if (is_test_arr(node_id)) cycle
                 call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
                 call compile_f90(project_dir, filenames(node_id), obj_path, &
-                                 trim(includes_flag)//' '//trim(flags), log_file, &
+                                 with_user_flags(includes_flag, flags), log_file, &
                                  exitcode)
                 if (exitcode /= 0) then
                     call progress_end()
@@ -529,31 +522,25 @@ contains
             end if
         end do
 
-        call make_tmpfile('fo_c_files', c_list)
-        call execute_command_line('find '//sq(trim(project_dir)//'/'//trim(src_dir))// &
-            ' -name "*.c" 2>/dev/null | sort > '//trim(c_list), wait=.true.)
-        open (newunit=uc, file=c_list, status='old', iostat=cios)
-        if (cios == 0) then
-            do
-                read (uc, '(a)', iostat=cios) c_line
-                if (cios /= 0) exit
-                if (len_trim(c_line) == 0) cycle
-                call make_obj_path(trim(c_line), project_dir, obj_dir, obj_path)
-                call compile_c(trim(c_line), obj_path, log_file, exitcode)
-                if (exitcode /= 0) then
-                    close (uc)
-                    call delete_tmpfile(c_list)
-                    return
-                end if
-                if (n_src_objs < MAX_SRC_OBJS) then
-                    n_src_objs = n_src_objs + 1
-                    src_objs(n_src_objs) = obj_path
-                    is_prog_arr(n_src_objs) = .false.
-                end if
-            end do
-            close (uc)
-        end if
-        call delete_tmpfile(c_list)
+        allocate (cfiles(MAX_SRC_OBJS))
+        call fs_collect_files(trim(project_dir)//'/'//trim(src_dir), '', '.c', &
+                              '', cfiles, n_cfiles)
+        do ic = 1, n_cfiles
+            c_line = cfiles(ic)
+            if (len_trim(c_line) == 0) cycle
+            call make_obj_path(trim(c_line), project_dir, obj_dir, obj_path)
+            call compile_c(trim(c_line), obj_path, log_file, exitcode)
+            if (exitcode /= 0) then
+                deallocate (cfiles)
+                return
+            end if
+            if (n_src_objs < MAX_SRC_OBJS) then
+                n_src_objs = n_src_objs + 1
+                src_objs(n_src_objs) = obj_path
+                is_prog_arr(n_src_objs) = .false.
+            end if
+        end do
+        deallocate (cfiles)
     end subroutine compile_sources
 
     subroutine add_external_dep_keys(units, n_units, dag, node_id, &
@@ -734,8 +721,7 @@ contains
         character(len=*), intent(in) :: project_dir
         type(dag_t), intent(in) :: dag
         character(len=MAX_NAME) :: lower_label
-        character(len=1024) :: cmd
-        integer :: i, j, exitcode
+        integer :: i, j
 
         do i = 1, dag%n_nodes
             lower_label = dag%nodes(i)%label
@@ -743,16 +729,15 @@ contains
                 if (lower_label(j:j) >= 'A' .and. lower_label(j:j) <= 'Z') &
                     lower_label(j:j) = achar(iachar(lower_label(j:j)) + 32)
             end do
-            cmd = 'find '//sq(trim(project_dir)//'/build/dependencies')// &
-                  ' -type f -name "'//trim(lower_label)//'.mod" -delete 2>/dev/null'
-            call execute_command_line(trim(cmd), wait=.true., exitstat=exitcode)
+            call fs_delete_suffix(trim(project_dir)//'/build/dependencies', &
+                                  trim(lower_label)//'.mod', .true.)
         end do
     end subroutine remove_shadow_mods
 
     subroutine append_log_file(src, dst)
         character(len=*), intent(in) :: src, dst
-        call execute_command_line('cat '//sq(trim(src))//' >> '//sq(trim(dst))// &
-                                  ' 2>/dev/null; rm -f '//sq(trim(src)), wait=.true.)
+        call fs_append_file(trim(src), trim(dst))
+        call fs_remove_file(trim(src))
     end subroutine append_log_file
 
     subroutine link_app_binaries(project_dir, config, bin_dir, src_objs, n_src_objs, &
@@ -863,6 +848,7 @@ contains
         character(len=512), allocatable :: run_logs(:)
         character(len=HASH_LEN), allocatable :: run_keys(:)
         logical, allocatable :: run_compiled(:)
+        logical, allocatable :: ran(:), flaky(:)
         real, allocatable :: run_secs(:)
         integer :: test_timeout, test_warn
         integer(8) :: clk0, clk1, clk_rate
@@ -893,6 +879,9 @@ contains
         allocate (run_nodes(MAX_NODES), run_exits(MAX_NODES), run_logs(MAX_NODES))
         allocate (run_keys(MAX_NODES))
         allocate (run_compiled(MAX_NODES), run_secs(MAX_NODES))
+        allocate (ran(MAX_NODES), flaky(MAX_NODES))
+        ran = .false.
+        flaky = .false.
         run_secs = 0.0
         test_timeout = test_timeout_seconds()
         test_warn = test_warn_seconds(test_timeout)
@@ -903,7 +892,7 @@ contains
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
         call make_includes_flag(mod_dir, dep_includes, n_dep_includes, incl_flag)
         if (present(flags) .and. len_trim(flags) > 0) then
-            incl_flag = trim(incl_flag)//' '//trim(flags)
+            incl_flag = with_user_flags(incl_flag, flags)
         end if
         call cache_init(c, cache_ierr)
         call detect_compiler(compiler)
@@ -980,6 +969,7 @@ contains
                                  run_exits(i), test_flags)
             end if
             if (run_exits(i) == 0 .and. .not. bonly) then
+                ran(i) = .true.
                 call system_clock(clk0, clk_rate)
                 call process_run_logged('', bin_path, log_local, .true., &
                                         test_timeout, run_exits(i))
@@ -990,6 +980,24 @@ contains
         end do
         !$omp end parallel do
         call progress_end()
+
+        ! Flaky-test diagnosis: a test that compiled and ran but failed may have
+        ! lost a race with a concurrently-running test (shared /tmp path, shared
+        ! global state). Re-run each such failure once, serially and in isolation.
+        ! If it now passes it was flaky: report it as a likely parallel-race
+        ! candidate and do not fail the build on it. A genuine failure fails both
+        ! times and is kept.
+        if (.not. bonly) then
+            do i = 1, n_run
+                if (.not. ran(i)) cycle
+                if (run_exits(i) == 0 .or. run_exits(i) == 124) cycle
+                call file_basename(filenames(run_nodes(i)), tname)
+                bin_path = trim(bin_dir)//'/'//trim(tname)
+                call process_run_logged('', bin_path, run_logs(i), .true., &
+                                        test_timeout, run_exits(i))
+                if (run_exits(i) == 0) flaky(i) = .true.
+            end do
+        end if
 
         do i = 1, n_run
             call append_log_file(trim(run_logs(i)), log_file)
@@ -1011,10 +1019,35 @@ contains
             call delete_tmpfile(run_logs(i))
         end do
 
+        do i = 1, n_run
+            if (flaky(i)) then
+                call file_basename(filenames(run_nodes(i)), tname)
+                call append_flaky_status(log_file, tname)
+            end if
+        end do
+
         if (.not. bonly) &
             call warn_slow_tests(filenames, run_nodes, run_exits, run_secs, n_run, &
                                  test_warn, log_file)
     end subroutine compile_and_run_tests
+
+    subroutine append_flaky_status(log_file, test_name)
+        !! Report a test that failed under parallel execution but passed on an
+        !! isolated rerun: a likely parallel-execution race. Named so the user
+        !! can fix it (usually a shared /tmp path or global state between tests).
+        character(len=*), intent(in) :: log_file, test_name
+        integer :: u, ios
+
+        open (newunit=u, file=trim(log_file), position='append', &
+              status='old', iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a,a,a)') 'fo: FLAKY test ', trim(test_name), &
+            ': failed in parallel, passed on isolated rerun -- a '// &
+            'test-parallelism race that MUST be fixed in code (a shared /tmp '// &
+            'path or global state between tests). Make every path the test '// &
+            'creates process-unique. Tests always run on all cores in parallel.'
+        close (u)
+    end subroutine append_flaky_status
 
     integer function test_timeout_seconds() result(t)
         character(len=32) :: buf
@@ -1026,6 +1059,38 @@ contains
         read (buf, *, iostat=iostat) t
         if (iostat /= 0 .or. t < 1) t = 120
     end function test_timeout_seconds
+
+    integer function build_timeout_seconds() result(t)
+        !! Per-invocation wall clock for a single compile or link. A hung
+        !! compiler is killed at this deadline (exit 124) instead of stalling
+        !! the whole build; tune with FO_BUILD_TIMEOUT.
+        character(len=32) :: buf
+        integer :: status, iostat
+
+        t = 600
+        call get_environment_variable('FO_BUILD_TIMEOUT', buf, status=status)
+        if (status /= 0 .or. len_trim(buf) == 0) return
+        read (buf, *, iostat=iostat) t
+        if (iostat /= 0 .or. t < 1) t = 600
+    end function build_timeout_seconds
+
+    subroutine append_build_hang_hint(log_file, what, timeout_s)
+        !! Note a compile/link that hit the wall clock and was killed, so the
+        !! 124 exit reads as a hang rather than a silent build failure.
+        character(len=*), intent(in) :: log_file, what
+        integer, intent(in) :: timeout_s
+        integer :: u, ios
+        character(len=32) :: tbuf
+
+        write (tbuf, '(i0)') timeout_s
+        open (newunit=u, file=trim(log_file), position='append', action='write', &
+              status='unknown', iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a)') 'fo: '//trim(what)//' exceeded FO_BUILD_TIMEOUT='// &
+            trim(tbuf)//'s and was killed (treated as a hang).'
+        write (u, '(a)') 'fo: raise FO_BUILD_TIMEOUT if this step is legitimately slow.'
+        close (u)
+    end subroutine append_build_hang_hint
 
     integer function test_warn_seconds(timeout_s) result(w)
         integer, intent(in) :: timeout_s
@@ -1157,36 +1222,31 @@ contains
         character(len=512), intent(out) :: lib_objs(MAX_SRC_OBJS)
         integer, intent(out) :: n_lib_objs
 
-        character(len=512) :: tmpfile, line, bname
-        integer :: u, ios, slash, n
+        character(len=512) :: line, bname
+        character(len=512), allocatable :: objs(:)
+        integer :: n_objs, k, slash, n
 
         n_lib_objs = 0
-        call make_tmpfile('fo_lib_objs', tmpfile)
-        call execute_command_line('find '//sq(obj_dir)// &
-            ' -name "*.o" 2>/dev/null | sort > '//trim(tmpfile), wait=.true.)
-        open (newunit=u, file=tmpfile, status='old', iostat=ios)
-        if (ios == 0) then
-            do
-                read (u, '(a)', iostat=ios) line
-                if (ios /= 0) exit
-                if (len_trim(line) == 0) cycle
-                n = len_trim(line)
-                slash = index(line(1:n), '/', back=.true.)
-                if (slash > 0) then
-                    bname = line(slash + 1:n)
-                else
-                    bname = trim(line)
-                end if
-                if (bname(1:4) == 'app_') cycle
-                if (bname(1:5) == 'test_') cycle
-                if (n_lib_objs < MAX_SRC_OBJS) then
-                    n_lib_objs = n_lib_objs + 1
-                    lib_objs(n_lib_objs) = trim(line)
-                end if
-            end do
-            close (u)
-        end if
-        call delete_tmpfile(tmpfile)
+        allocate (objs(MAX_SRC_OBJS))
+        call fs_collect_files(trim(obj_dir), '', '.o', '', objs, n_objs)
+        do k = 1, n_objs
+            line = objs(k)
+            if (len_trim(line) == 0) cycle
+            n = len_trim(line)
+            slash = index(line(1:n), '/', back=.true.)
+            if (slash > 0) then
+                bname = line(slash + 1:n)
+            else
+                bname = trim(line)
+            end if
+            if (bname(1:4) == 'app_') cycle
+            if (bname(1:5) == 'test_') cycle
+            if (n_lib_objs < MAX_SRC_OBJS) then
+                n_lib_objs = n_lib_objs + 1
+                lib_objs(n_lib_objs) = trim(line)
+            end if
+        end do
+        deallocate (objs)
     end subroutine collect_lib_objs
 
     subroutine hash_lib_objs(lib_objs, n_lib_objs, combined)
@@ -1260,6 +1320,8 @@ contains
     function fc_base_flags() result(flags)
         !! Compiler-appropriate baseline compile flags. gfortran needs the long
         !! free-form line length; flang has no line limit and rejects that flag.
+        !! -fopenmp is added per project via the fpm openmp metapackage (see
+        !! config_flags_str), not here.
         character(len=:), allocatable :: flags
 
         if (fc_is_flang()) then
@@ -1277,28 +1339,63 @@ contains
 
         integer :: i
 
+        ! Newline-separated argv tokens with raw, unquoted paths. compile_f90
+        ! splits this on newlines so each -I/-J path stays one whole token even
+        ! when it contains spaces; shell quoting must not be applied, or quotes
+        ! would land literally in the path and the .mod would not be found.
         ! flang spells the module-output dir -module-dir; gfortran uses -J.
         if (fc_is_flang()) then
-            flag = '-module-dir '//sq(mod_dir)//' -I '//sq(mod_dir)
+            flag = '-module-dir'//char(10)//trim(mod_dir)//char(10)//'-I'// &
+                   char(10)//trim(mod_dir)
         else
-            flag = '-J '//sq(mod_dir)//' -I '//sq(mod_dir)
+            flag = '-J'//char(10)//trim(mod_dir)//char(10)//'-I'//char(10)// &
+                   trim(mod_dir)
         end if
         do i = 1, n_dep_includes
-            flag = trim(flag)//' -I '//sq(dep_includes(i))
+            flag = trim(flag)//char(10)//'-I'//char(10)//trim(dep_includes(i))
         end do
     end subroutine make_includes_flag
+
+    function with_user_flags(includes_nl, flags) result(combined)
+        !! Append space-separated user flags onto the newline-separated include
+        !! token list as their own newline tokens, so the whole string stays
+        !! newline-delimited and -I/-J paths containing spaces survive the split
+        !! in compile_f90.
+        character(len=*), intent(in) :: includes_nl, flags
+        character(len=:), allocatable :: combined
+        integer :: i, start, n
+
+        combined = trim(includes_nl)
+        n = len_trim(flags)
+        start = 0
+        do i = 1, n
+            if (flags(i:i) == ' ') then
+                if (start > 0) then
+                    combined = combined//char(10)//flags(start:i - 1)
+                    start = 0
+                end if
+            else if (start == 0) then
+                start = i
+            end if
+        end do
+        if (start > 0) combined = combined//char(10)//flags(start:n)
+    end function with_user_flags
 
     subroutine detect_compiler(compiler)
         character(len=*), intent(out) :: compiler
 
         character(len=256) :: line
         character(len=512) :: tmpfile
-        integer :: u, iostat
+        character(len=:), allocatable :: packed
+        integer :: u, iostat, n_args, exitcode
 
         compiler = fc_command()
         call make_tmpfile('fo_compiler_version', tmpfile)
-        call execute_command_line(fc_command()//' --version 2>/dev/null | head -1 > '// &
-                                  trim(tmpfile), wait=.true.)
+        n_args = 0
+        call argv_push_split(packed, n_args, fc_command())
+        call argv_push(packed, n_args, '--version')
+        call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
+                                     .false., 30, exitcode)
 
         open (newunit=u, file=tmpfile, status='old', iostat=iostat)
         if (iostat == 0) then
@@ -1320,21 +1417,36 @@ contains
         character(len=*), intent(in) :: project_dir, source, objfile, includes_flag
         character(len=*), intent(in) :: log_file
         integer, intent(out) :: exitcode
-        character(len=8192) :: cmd
-        integer :: n_removed
+        character(len=:), allocatable :: packed
+        integer :: n_args, n_removed
 
-        cmd = 'cd '//sq(trim(project_dir))//' && '//fc_command()//' -c '// &
-              trim(includes_flag)//' '//fc_base_flags()// &
-              ' -o '//sq(objfile)//' '//sq(source)// &
-              " >> '"//trim(log_file)//"' 2>&1"
-        call execute_command_line(trim(cmd), wait=.true., exitstat=exitcode)
+        ! Build an argv vector and spawn via the async-signal-safe argv runner
+        ! (fork+execve, no /bin/sh): it is safe inside the OpenMP parallel
+        ! compile/test loops, where system()/fork from a multithreaded process
+        ! corrupts libgomp, and it is quote-proof, unlike a shell command line.
+        n_args = 0
+        call argv_push_split(packed, n_args, fc_command())
+        call argv_push(packed, n_args, '-c')
+        call argv_push_split_nl(packed, n_args, includes_flag)
+        call argv_push_split(packed, n_args, fc_base_flags())
+        call argv_push(packed, n_args, '-o')
+        call argv_push(packed, n_args, objfile)
+        call argv_push(packed, n_args, source)
+
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+                                     .true., build_timeout_seconds(), exitcode)
+        if (exitcode == 124) call append_build_hang_hint(log_file, &
+            'compile of '//trim(source), build_timeout_seconds())
         if (exitcode == 0) return
         if (.not. looks_like_stale_mod_failure(log_file)) return
 
         call clean_root_build_artifacts(project_dir, n_removed)
         call append_stale_mod_hint(log_file, n_removed)
 
-        call execute_command_line(trim(cmd), wait=.true., exitstat=exitcode)
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+                                     .true., build_timeout_seconds(), exitcode)
+        if (exitcode == 124) call append_build_hang_hint(log_file, &
+            'compile of '//trim(source), build_timeout_seconds())
     end subroutine compile_f90
 
     logical function looks_like_stale_mod_failure(log_file) result(matches)
@@ -1379,10 +1491,17 @@ contains
     subroutine compile_c(source, objfile, log_file, exitcode)
         character(len=*), intent(in) :: source, objfile, log_file
         integer, intent(out) :: exitcode
-        character(len=4096) :: cmd
-        cmd = 'gcc -c -o '//sq(objfile)//' '//sq(source)// &
-              " >> '"//trim(log_file)//"' 2>&1"
-        call execute_command_line(trim(cmd), wait=.true., exitstat=exitcode)
+        character(len=:), allocatable :: packed
+        integer :: n_args
+
+        n_args = 0
+        call argv_push(packed, n_args, 'gcc')
+        call argv_push(packed, n_args, '-c')
+        call argv_push(packed, n_args, '-o')
+        call argv_push(packed, n_args, objfile)
+        call argv_push(packed, n_args, source)
+        call process_run_argv_logged('', packed, n_args, log_file, .true., &
+                                     build_timeout_seconds(), exitcode)
     end subroutine compile_c
 
     subroutine link_binary(prog_obj, lib_objs, n_lib_objs, dep_objs, n_dep_objs, &
@@ -1399,38 +1518,60 @@ contains
         ! present at link time so the runtime library is linked in)
         character(len=*), intent(in), optional :: flags
 
-        character(len=:), allocatable :: cmd
+        character(len=:), allocatable :: packed
         character(len=8) :: debug_links
         integer :: debug_status
-        integer :: i
+        integer :: i, n_args
 
-        allocate (character(len=131072) :: cmd)
-        cmd = fc_command()//' '//sq(prog_obj)
+        ! Build an argv vector (no /bin/sh): quote-proof and async-signal-safe,
+        ! since link_binary runs inside the parallel test loop where a shell
+        ! fork would corrupt libgomp.
+        n_args = 0
+        call argv_push_split(packed, n_args, fc_command())
+        call argv_push(packed, n_args, prog_obj)
         do i = 1, n_lib_objs
-            cmd = trim(cmd)//' '//sq(lib_objs(i))
+            call argv_push(packed, n_args, lib_objs(i))
         end do
         do i = 1, n_dep_objs
-            cmd = trim(cmd)//' '//sq(dep_objs(i))
+            call argv_push(packed, n_args, dep_objs(i))
         end do
-        cmd = trim(cmd)//link_lib_flags(link_libs, n_link_libs)
+        call argv_push_split(packed, n_args, link_lib_flags(link_libs, n_link_libs))
         ! flang's driver does not add Homebrew's libomp to the link search, so
         ! -fopenmp links fail with "library 'omp' not found". Add it (harmless
         ! when the build does not use OpenMP) plus an rpath for runtime.
         if (fc_is_flang() .and. is_macos()) then
-            cmd = trim(cmd)//' -L/opt/homebrew/opt/libomp/lib'// &
-                  ' -Wl,-rpath,/opt/homebrew/opt/libomp/lib'
+            call argv_push(packed, n_args, '-L/opt/homebrew/opt/libomp/lib')
+            call argv_push(packed, n_args, '-Wl,-rpath,/opt/homebrew/opt/libomp/lib')
         end if
         if (present(flags) .and. len_trim(flags) > 0) then
-            cmd = trim(cmd)//' '//trim(flags)
+            call argv_push_split(packed, n_args, flags)
         end if
-        cmd = trim(cmd)//' -o '//sq(output)//" >> '"//trim(log_file)//"' 2>&1"
+        call argv_push(packed, n_args, '-o')
+        call argv_push(packed, n_args, output)
         call get_environment_variable('FO_DEBUG_LINKS', debug_links, &
                                       status=debug_status)
         if (debug_status == 0 .and. len_trim(debug_links) > 0) then
-            write (error_unit, '(a)') 'fo link: '//trim(cmd)
+            write (error_unit, '(a)') 'fo link: '//argv_display(packed)
         end if
-        call execute_command_line(trim(cmd), wait=.true., exitstat=exitcode)
+        call process_run_argv_logged('', packed, n_args, log_file, .true., &
+                                     build_timeout_seconds(), exitcode)
+        if (exitcode == 124) call append_build_hang_hint(log_file, &
+            'link of '//trim(output), build_timeout_seconds())
     end subroutine link_binary
+
+    function argv_display(packed) result(text)
+        !! Render a packed NUL-separated argv buffer as a space-joined string
+        !! for human-readable debug output only.
+        character(len=*), intent(in) :: packed
+        character(len=:), allocatable :: text
+        integer :: i
+
+        text = packed
+        do i = 1, len(text)
+            if (text(i:i) == char(0)) text(i:i) = ' '
+        end do
+        text = trim(text)
+    end function argv_display
 
     function link_lib_flags(link_libs, n_link_libs) result(flags)
         !! Resolve each `link` lib to a concrete archive on a search path and
@@ -1600,6 +1741,8 @@ contains
         character(len=1024) :: combined
 
         combined = ''
+        ! fpm openmp metapackage -> -fopenmp on compile and link.
+        if (config%openmp) combined = '-fopenmp'
         do i = 1, config%n_flags
             if (len_trim(combined) > 0) then
                 combined = trim(combined)//' '//trim(config%flags(i))
@@ -1623,6 +1766,7 @@ contains
         integer :: i
 
         s = ''
+        if (config%openmp) s = '-fopenmp'
         do i = 1, config%n_flags
             if (len_trim(s) > 0) then
                 s = trim(s)//' '//trim(config%flags(i))

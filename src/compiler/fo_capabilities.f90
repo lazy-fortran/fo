@@ -1,6 +1,8 @@
 module fo_capabilities
     use, intrinsic :: iso_c_binding, only: c_int
     use fo_util, only: make_tmpfile, delete_tmpfile, json_bool
+    use fo_fs, only: fs_make_dir, fs_remove_tree
+    use fo_process, only: process_run_argv_logged, argv_push, argv_push_split
     implicit none
     private
     public :: capabilities_t, detect_capabilities
@@ -41,15 +43,18 @@ contains
         type(capabilities_t), intent(inout) :: cap
 
         character(len=512) :: line, tmpfile
-        integer :: u, iostat
+        character(len=:), allocatable :: packed
+        integer :: u, iostat, n_args, exitcode
 
         cap%compiler_id = 'unknown'
         cap%compiler_version = ''
         call make_tmpfile('fo_cap_detect', tmpfile)
 
-        call execute_command_line( &
-            'gfortran --version 2>/dev/null | head -1 > '//trim(tmpfile), &
-            wait=.true.)
+        n_args = 0
+        call argv_push(packed, n_args, 'gfortran')
+        call argv_push(packed, n_args, '--version')
+        call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
+                                     .false., 120, exitcode)
 
         open (newunit=u, file=tmpfile, status='old', iostat=iostat)
         if (iostat == 0) then
@@ -76,9 +81,11 @@ contains
         call delete_tmpfile(tmpfile)
 
         if (trim(cap%compiler_id) == 'unknown') then
-            call execute_command_line( &
-                'ifx --version 2>/dev/null | head -1 > '//trim(tmpfile), &
-                wait=.true.)
+            n_args = 0
+            call argv_push(packed, n_args, 'ifx')
+            call argv_push(packed, n_args, '--version')
+            call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
+                                         .false., 120, exitcode)
             open (newunit=u, file=tmpfile, status='old', iostat=iostat)
             if (iostat == 0) then
                 read (u, '(a)', iostat=iostat) line
@@ -95,48 +102,71 @@ contains
     subroutine detect_compiler_path(cap)
         type(capabilities_t), intent(inout) :: cap
 
-        character(len=512) :: line, tmpfile, cmd
-        integer :: u, iostat
+        character(len=512) :: found
 
         cap%compiler_path = ''
 
         select case (trim(cap%compiler_id))
         case ('gfortran')
-            cmd = 'which gfortran'
+            call which_in_path('gfortran', found)
         case ('intel')
-            cmd = 'which ifx 2>/dev/null || which ifort'
+            call which_in_path('ifx', found)
+            if (len_trim(found) == 0) call which_in_path('ifort', found)
         case ('flang')
-            cmd = 'which flang'
+            call which_in_path('flang', found)
         case ('lfortran')
-            cmd = 'which lfortran'
+            call which_in_path('lfortran', found)
         case default
             return
         end select
 
-        call make_tmpfile('fo_cap_path', tmpfile)
-        call execute_command_line( &
-            trim(cmd)//' > '//trim(tmpfile)//' 2>/dev/null', wait=.true.)
-
-        open (newunit=u, file=tmpfile, status='old', iostat=iostat)
-        if (iostat == 0) then
-            read (u, '(a)', iostat=iostat) line
-            close (u)
-            if (iostat == 0 .and. len_trim(line) > 0) then
-                cap%compiler_path = trim(line)
-            end if
-        end if
-        call delete_tmpfile(tmpfile)
+        if (len_trim(found) > 0) cap%compiler_path = trim(found)
     end subroutine detect_compiler_path
+
+    subroutine which_in_path(name, path)
+        !! Locate an executable on $PATH without a shell. Mirrors `which name`:
+        !! returns the first PATH entry holding an existing file by that name.
+        character(len=*), intent(in) :: name
+        character(len=*), intent(out) :: path
+
+        character(len=:), allocatable :: env
+        character(len=1024) :: candidate
+        integer :: env_len, i, start, stat
+        logical :: present
+
+        path = ''
+        call get_environment_variable('PATH', length=env_len, status=stat)
+        if (stat /= 0 .or. env_len <= 0) return
+        allocate (character(len=env_len) :: env)
+        call get_environment_variable('PATH', value=env, status=stat)
+        if (stat /= 0) return
+
+        start = 1
+        do i = 1, env_len + 1
+            if (i > env_len .or. env(i:i) == ':') then
+                if (i > start) then
+                    candidate = env(start:i - 1)//'/'//trim(name)
+                    inquire (file=trim(candidate), exist=present)
+                    if (present) then
+                        path = trim(candidate)
+                        return
+                    end if
+                end if
+                start = i + 1
+            end if
+        end do
+    end subroutine which_in_path
 
     subroutine probe_openmp(cap)
         type(capabilities_t), intent(inout) :: cap
 
         character(len=512) :: tmpdir, srcfile, tmpfile
-        integer :: u, exitcode
+        character(len=:), allocatable :: packed
+        integer :: u, exitcode, n_args
 
         cap%has_openmp = .false.
         call make_tmpfile('fo_cap_omp', tmpdir)
-        call execute_command_line('mkdir -p '//trim(tmpdir), wait=.true.)
+        call fs_make_dir(trim(tmpdir))
 
         srcfile = trim(tmpdir)//'/test_omp.f90'
         open (newunit=u, file=srcfile, status='replace')
@@ -151,21 +181,25 @@ contains
         call make_tmpfile('fo_cap_omp_log', tmpfile)
         select case (trim(cap%compiler_id))
         case ('gfortran')
-            call execute_command_line( &
-                'gfortran -fopenmp -o /dev/null '//trim(srcfile)// &
-                ' > '//trim(tmpfile)//' 2>&1', &
-                exitstat=exitcode, wait=.true.)
+            n_args = 0
+            call argv_push(packed, n_args, 'gfortran')
+            call argv_push_split(packed, n_args, '-fopenmp -o /dev/null')
+            call argv_push(packed, n_args, trim(srcfile))
+            call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
+                                         .false., 120, exitcode)
         case ('intel')
-            call execute_command_line( &
-                'ifx -qopenmp -o /dev/null '//trim(srcfile)// &
-                ' > '//trim(tmpfile)//' 2>&1', &
-                exitstat=exitcode, wait=.true.)
+            n_args = 0
+            call argv_push(packed, n_args, 'ifx')
+            call argv_push_split(packed, n_args, '-qopenmp -o /dev/null')
+            call argv_push(packed, n_args, trim(srcfile))
+            call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
+                                         .false., 120, exitcode)
         case default
             exitcode = 1
         end select
 
         cap%has_openmp = (exitcode == 0)
-        call execute_command_line('rm -rf '//trim(tmpdir), wait=.true.)
+        call fs_remove_tree(trim(tmpdir))
         call delete_tmpfile(tmpfile)
     end subroutine probe_openmp
 

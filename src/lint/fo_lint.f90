@@ -1,6 +1,9 @@
 module fo_lint
     use fo_util, only: json_int, make_tmpfile, delete_tmpfile, &
         clean_root_build_artifacts
+    use fo_fs, only: fs_make_dir, fs_remove_tree, fs_collect_files, &
+        fs_collect_mod_dirs
+    use fo_process, only: process_run_argv_logged, argv_push, argv_push_split
     use fx_json_build, only: json_escape_string
     implicit none
     private
@@ -241,35 +244,64 @@ contains
     end do
 end subroutine is_symbol_used
 
+subroutine collect_fortran_sources(dir, files, n_files)
+    !! Collect *.f90/*.F90/*.f/*.F under dir, sorted, excluding any path
+    !! component */build or */.git. Replaces the find | sort pipeline.
+    character(len=*), intent(in) :: dir
+    character(len=512), allocatable, intent(out) :: files(:)
+    integer, intent(out) :: n_files
+
+    character(len=512), allocatable :: hits(:)
+    integer :: n_hits, s, i
+    character(len=4), parameter :: suffixes(4) = &
+        ['.f90', '.F90', '.f  ', '.F  ']
+
+    allocate (files(20000))
+    allocate (hits(20000))
+    n_files = 0
+    do s = 1, size(suffixes)
+        call fs_collect_files(dir, '', trim(suffixes(s)), '', hits, n_hits)
+        do i = 1, n_hits
+            if (index(hits(i), '/build/') > 0) cycle
+            if (index(hits(i), '/.git/') > 0) cycle
+            if (n_files >= size(files)) exit
+            n_files = n_files + 1
+            files(n_files) = hits(i)
+        end do
+    end do
+    ! merge-sort not needed for correctness, but keep deterministic order:
+    ! each suffix block is already sorted; sort the union by simple insertion.
+    do i = 2, n_files
+        block
+            character(len=512) :: key
+            integer :: j
+            key = files(i)
+            j = i - 1
+            do while (j >= 1)
+                if (llt(files(j), key) .or. files(j) == key) exit
+                files(j + 1) = files(j)
+                j = j - 1
+            end do
+            files(j + 1) = key
+        end block
+    end do
+    deallocate (hits)
+end subroutine collect_fortran_sources
+
 subroutine lint_dir(dir, findings, n_findings)
     character(len=*), intent(in) :: dir
     type(lint_finding_t), intent(out) :: findings(MAX_FINDINGS)
     integer, intent(out) :: n_findings
 
-    character(len=512) :: tmpfile, cmd, fpath
-    integer :: u, iostat
+    character(len=512), allocatable :: files(:)
+    integer :: n_files, i
 
     n_findings = 0
-    call make_tmpfile('fo_lint_files', tmpfile)
-    cmd = 'find '//trim(dir)// &
-        " -path '*/build' -prune -o"// &
-        " -path '*/.git' -prune -o"// &
-        " \( -name '*.f90' -o -name '*.F90'"// &
-        " -o -name '*.f' -o -name '*.F' \) -print 2>/dev/null"// &
-        ' | sort > '//trim(tmpfile)
-    call execute_command_line(cmd, wait=.true.)
-
-    open (newunit=u, file=tmpfile, status='old', iostat=iostat)
-    if (iostat /= 0) return
-
-    do
-        read (u, '(a)', iostat=iostat) fpath
-        if (iostat /= 0) exit
-        if (len_trim(fpath) == 0) cycle
-        call lint_file(trim(fpath), findings, n_findings)
+    call collect_fortran_sources(dir, files, n_files)
+    do i = 1, n_files
+        if (len_trim(files(i)) == 0) cycle
+        call lint_file(trim(files(i)), findings, n_findings)
     end do
-    close (u)
-    call delete_tmpfile(tmpfile)
 end subroutine lint_dir
 
 function lint_findings_json(findings, n_findings) result(json)
@@ -303,10 +335,10 @@ subroutine lint_compiler(dir, warnings, n_warnings)
     type(lint_warning_t), intent(out) :: warnings(MAX_WARNINGS)
     integer, intent(out) :: n_warnings
 
-    character(len=512) :: tmpfile, fpath, moddir
-    character(len=4096) :: cmd
+    character(len=512) :: moddir
+    character(len=512), allocatable :: files(:)
     character(len=2048) :: mod_flags
-    integer :: u, iostat, n_removed
+    integer :: n_files, i, n_removed
 
     n_warnings = 0
     call find_mod_include_flags(dir, mod_flags)
@@ -319,67 +351,36 @@ subroutine lint_compiler(dir, warnings, n_warnings)
     ! -fsyntax-only writes .mod into the cwd (the project root), where they
     ! shadow build/fo/mod and break later builds with stale module interfaces.
     call make_tmpfile('fo_lint_mod', moddir)
-    call execute_command_line('mkdir -p '//trim(moddir), wait=.true.)
+    call fs_make_dir(trim(moddir))
     if (len_trim(mod_flags) + len_trim(moddir) + 4 <= len(mod_flags)) &
         mod_flags = trim(mod_flags)//' -J'//trim(moddir)
 
-    call make_tmpfile('fo_lint_warn_files', tmpfile)
-    cmd = 'find '//trim(dir)// &
-        " -path '*/build' -prune -o"// &
-        " -path '*/.git' -prune -o"// &
-        " \( -name '*.f90' -o -name '*.F90'"// &
-        " -o -name '*.f' -o -name '*.F' \) -print 2>/dev/null"// &
-        ' | sort > '//trim(tmpfile)
-    call execute_command_line(cmd, wait=.true.)
-
-    open (newunit=u, file=tmpfile, status='old', iostat=iostat)
-    if (iostat /= 0) then
-        call delete_tmpfile(tmpfile)
-        call execute_command_line('rm -rf '//trim(moddir), wait=.true.)
-        return
-    end if
-
-    do
-        read (u, '(a)', iostat=iostat) fpath
-        if (iostat /= 0) exit
-        if (len_trim(fpath) == 0) cycle
-        call lint_file_compiler(trim(fpath), mod_flags, &
+    call collect_fortran_sources(dir, files, n_files)
+    do i = 1, n_files
+        if (len_trim(files(i)) == 0) cycle
+        call lint_file_compiler(trim(files(i)), mod_flags, &
             warnings, n_warnings)
-        call lint_file_lengths(trim(fpath), warnings, n_warnings)
+        call lint_file_lengths(trim(files(i)), warnings, n_warnings)
     end do
-    close (u)
-    call delete_tmpfile(tmpfile)
-    call execute_command_line('rm -rf '//trim(moddir), wait=.true.)
+    call fs_remove_tree(trim(moddir))
 end subroutine lint_compiler
 
 subroutine find_mod_include_flags(dir, flags)
     character(len=*), intent(in) :: dir
     character(len=*), intent(out) :: flags
 
-    character(len=512) :: tmpfile, line
-    character(len=4096) :: cmd
-    integer :: u, iostat
+    character(len=512), allocatable :: moddirs(:)
+    integer :: n_moddirs, i
 
     flags = ''
-    call make_tmpfile('fo_lint_moddirs', tmpfile)
-    cmd = 'find '//trim(dir)// &
-        "/build -name '*.mod' -type f"// &
-        ' -exec dirname {} \; 2>/dev/null'// &
-        ' | sort -u > '//trim(tmpfile)
-    call execute_command_line(cmd, wait=.true.)
-
-    open (newunit=u, file=tmpfile, status='old', iostat=iostat)
-    if (iostat == 0) then
-        do
-            read (u, '(a)', iostat=iostat) line
-            if (iostat /= 0) exit
-            if (len_trim(line) == 0) cycle
-            if (len_trim(flags) + len_trim(line) + 4 > len(flags)) exit
-            flags = trim(flags)//' -I'//trim(line)
-        end do
-        close (u)
-    end if
-    call delete_tmpfile(tmpfile)
+    allocate (moddirs(4096))
+    call fs_collect_mod_dirs(trim(dir)//'/build', moddirs, n_moddirs)
+    do i = 1, n_moddirs
+        if (len_trim(moddirs(i)) == 0) cycle
+        if (len_trim(flags) + len_trim(moddirs(i)) + 4 > len(flags)) exit
+        flags = trim(flags)//' -I'//trim(moddirs(i))
+    end do
+    deallocate (moddirs)
 end subroutine find_mod_include_flags
 
 subroutine lint_file_lengths(filepath, warnings, n_warnings)
@@ -424,18 +425,25 @@ subroutine lint_file_compiler(filepath, mod_flags, warnings, n_warnings)
     integer, intent(inout) :: n_warnings
 
     character(len=512) :: errfile
-    character(len=4096) :: cmd
     character(len=1024) :: line
     character(len=256) :: cur_file
     integer :: cur_line, cur_col
     integer :: u, iostat
+    character(len=:), allocatable :: packed
+    integer :: n_args, exitcode
 
     call make_tmpfile('fo_lint_gfortran', errfile)
-    cmd = 'gfortran -fsyntax-only -Wall -Wextra'// &
-        ' -Wimplicit-interface -Wimplicit-procedure'// &
-        trim(mod_flags)//' '//trim(filepath)// &
-        ' 2>'//trim(errfile)
-    call execute_command_line(cmd, wait=.true.)
+    n_args = 0
+    call argv_push(packed, n_args, 'gfortran')
+    call argv_push(packed, n_args, '-fsyntax-only')
+    call argv_push(packed, n_args, '-Wall')
+    call argv_push(packed, n_args, '-Wextra')
+    call argv_push(packed, n_args, '-Wimplicit-interface')
+    call argv_push(packed, n_args, '-Wimplicit-procedure')
+    call argv_push_split(packed, n_args, trim(mod_flags))
+    call argv_push(packed, n_args, trim(filepath))
+    call process_run_argv_logged('', packed, n_args, trim(errfile), &
+        .false., 120, exitcode)
 
     cur_file = ''
     cur_line = 0

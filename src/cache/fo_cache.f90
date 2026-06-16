@@ -25,8 +25,18 @@ contains
     subroutine cache_root(root)
         character(len=*), intent(out) :: root
 
-        character(len=512) :: home
+        character(len=512) :: home, override
 
+        ! FO_CACHE_DIR overrides the cache location. The parallel test runner
+        ! sets it to a per-test-process directory so concurrent test processes
+        ! never share (and corrupt) one $HOME/.cache/fo while building scratch
+        ! projects. Tests always run on all cores; isolating the cache keeps
+        ! that safe without serializing anything.
+        call get_environment_variable('FO_CACHE_DIR', override)
+        if (len_trim(override) > 0) then
+            root = trim(override)
+            return
+        end if
         call get_environment_variable('HOME', home)
         if (len_trim(home) == 0) call get_environment_variable('USERPROFILE', home)
         root = trim(home)//'/.cache/fo'
@@ -578,21 +588,12 @@ contains
         character(len=*), intent(in) :: path
         integer, intent(out) :: size_bytes
 
-        character(len=4096) :: cmd
-        character(len=512) :: tmpfile, text
-        integer :: u, ios
+        integer :: nbytes, ios
+        logical :: exists
 
         size_bytes = 0
-        call make_tmpfile('fo_size', tmpfile)
-        cmd = 'wc -c < '//sq(trim(path))//' > '//sq(trim(tmpfile))
-        call execute_command_line(trim(cmd), wait=.true.)
-        open (newunit=u, file=trim(tmpfile), status='old', iostat=ios)
-        if (ios == 0) then
-            read (u, '(a)', iostat=ios) text
-            if (ios == 0) read (text, *, iostat=ios) size_bytes
-            close (u)
-        end if
-        call delete_tmpfile(tmpfile)
+        inquire (file=trim(path), exist=exists, size=nbytes, iostat=ios)
+        if (ios == 0 .and. exists .and. nbytes > 0) size_bytes = nbytes
     end subroutine file_size
 
     pure function lowercase(s) result(out)

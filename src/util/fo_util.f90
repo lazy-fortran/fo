@@ -1,5 +1,6 @@
 module fo_util
     use, intrinsic :: iso_c_binding, only: c_int
+    use fo_fs, only: fs_collect_files, fs_remove_file
     use fx_mcp, only: mcp_send_response, MCP_FRAME_UNKNOWN
     implicit none
     private
@@ -79,32 +80,28 @@ contains
         character(len=*), intent(in) :: dir
         integer, intent(out) :: n_removed
 
-        character(len=512) :: tmpfile, line
-        character(len=2048) :: cmd
-        integer :: u, ios, status
+        character(len=512), allocatable :: hits(:)
+        integer :: n, k, s
+        character(len=8) :: suffixes(3)
 
         n_removed = 0
-        call make_tmpfile('fo-root-artifacts', tmpfile)
-        cmd = 'find '//sq(trim(dir))//' -maxdepth 1 -type f \( '// &
-            '-name "*.mod" -o -name "*.smod" -o -name "*.o" \) '// &
-            '2>/dev/null > '//sq(trim(tmpfile))
-        call execute_command_line(trim(cmd), wait=.true.)
-
-        open (newunit=u, file=trim(tmpfile), status='old', iostat=ios)
-        if (ios /= 0) then
-            call delete_tmpfile(tmpfile)
-            return
-        end if
-        do
-            read (u, '(a)', iostat=ios) line
-            if (ios /= 0) exit
-            if (len_trim(line) == 0) cycle
-            call execute_command_line('rm -f '//sq(trim(line)), wait=.true., &
-                exitstat=status)
-            if (status == 0) n_removed = n_removed + 1
+        suffixes(1) = '.mod'
+        suffixes(2) = '.smod'
+        suffixes(3) = '.o'
+        allocate (hits(1024))
+        do s = 1, 3
+            ! Top-level build artifacts only (find -maxdepth 1), removed one by
+            ! one. Editors and stray builds drop these in the project root where
+            ! they shadow build/fo/mod.
+            call fs_collect_files(trim(dir), '', trim(suffixes(s)), '', hits, n, &
+                                  recursive=.false.)
+            do k = 1, n
+                if (len_trim(hits(k)) == 0) cycle
+                call fs_remove_file(trim(hits(k)))
+                n_removed = n_removed + 1
+            end do
         end do
-        close (u)
-        call delete_tmpfile(tmpfile)
+        deallocate (hits)
     end subroutine clean_root_build_artifacts
 
     subroutine strip_path_prefix_in_str(text, prefix)

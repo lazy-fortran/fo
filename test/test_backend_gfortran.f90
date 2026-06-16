@@ -1,0 +1,32 @@
+program test_backend_gfortran
+    !! Gfortran cache/identity/rebuild tests (second half). Runs in parallel
+    !! with test_backend and test_backend_cmake.
+    use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
+    use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
+        detect_jobs, backend_build, backend_test, &
+        backend_test_names, &
+        BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
+    use fo_gfortran_build, only: gfortran_build, gfortran_test, &
+        gfortran_test_names, config_flags_str
+    use fo_fpm_config, only: fpm_config_t
+    use fo_process, only: process_getpid
+    implicit none
+    integer :: n_pass, n_fail
+
+    n_pass = 0
+    n_fail = 0
+
+    call test_gfortran_flags_change_action_id()
+    call test_gfortran_compiler_identity_changes_action_id()
+    call test_gfortran_private_change_keeps_dependent_cached()
+    call test_gfortran_interface_change_rebuilds_dependent()
+    call test_gfortran_parallel_test_loop_restores_cached_objects()
+    call test_fpm_path_with_spaces()
+
+    call report('backend_gfortran')
+
+contains
+
+    include 'test_backend_helpers.inc'
+
+end program test_backend_gfortran

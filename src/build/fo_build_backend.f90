@@ -1,10 +1,12 @@
 module fo_build_backend
     use, intrinsic :: iso_fortran_env, only: error_unit
     use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_fs, only: fs_make_dir, fs_remove_tree, fs_mkdir_excl, fs_sleep_ms, &
+                     fs_pid_alive, fs_collect_files, fs_remove_file
     use fo_process, only: process_detect_nproc, process_fpm_build, &
                           process_fpm_test_list, process_fpm_test_all, &
                           process_fpm_test_names, process_cmake_build, &
-                          process_ctest
+                          process_ctest, process_getpid
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
                                  gfortran_test_names
     implicit none
@@ -342,27 +344,51 @@ contains
         character(len=*), intent(out) :: lock_dir
         integer, intent(out) :: ierr
 
-        character(len=4096) :: cmd
+        character(len=:), allocatable :: base, pid_file
+        integer :: state, u, ios, owner
 
-        lock_dir = trim(project_dir)//'/build/fo/.lock'
-        cmd = 'base='//sq(trim(project_dir)//'/build/fo')//'; '// &
-              'lock="$base/.lock"; mkdir -p "$base" || exit 1; '// &
-              'while ! mkdir "$lock" 2>/dev/null; do '// &
-              'if [ -r "$lock/pid" ]; then pid=$(cat "$lock/pid" 2>/dev/null || true); '// &
-              'if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then '// &
-              'rm -rf "$lock"; continue; fi; fi; '// &
-              'sleep 0.05; done; printf "%s\n" "$PPID" > "$lock/pid"'
-        call execute_command_line(trim(cmd), wait=.true., exitstat=ierr)
+        base = trim(project_dir)//'/build/fo'
+        lock_dir = trim(base)//'/.lock'
+        pid_file = trim(lock_dir)//'/pid'
+        call fs_make_dir(base)
+        ierr = 0
+
+        ! Spin on an atomic exclusive mkdir of the lock directory. When the
+        ! lock is held, reclaim it only if the recorded owner pid is gone.
+        do
+            state = fs_mkdir_excl(lock_dir)
+            if (state == 0) exit
+            if (state < 0) then
+                ierr = 1
+                return
+            end if
+            owner = 0
+            open (newunit=u, file=pid_file, status='old', action='read', &
+                  iostat=ios)
+            if (ios == 0) then
+                read (u, *, iostat=ios) owner
+                close (u)
+            end if
+            if (owner > 0 .and. .not. fs_pid_alive(owner)) then
+                call fs_remove_tree(lock_dir)
+                cycle
+            end if
+            call fs_sleep_ms(50)
+        end do
+
+        open (newunit=u, file=pid_file, status='replace', action='write', &
+              iostat=ios)
+        if (ios == 0) then
+            write (u, '(i0)') process_getpid()
+            close (u)
+        end if
     end subroutine acquire_project_lock
 
     subroutine release_project_lock(lock_dir)
         character(len=*), intent(in) :: lock_dir
 
-        integer :: exitcode
-
         if (len_trim(lock_dir) == 0) return
-        call execute_command_line('rm -rf '//sq(trim(lock_dir)), wait=.true., &
-                                  exitstat=exitcode)
+        call fs_remove_tree(trim(lock_dir))
     end subroutine release_project_lock
 
     pure function sq(s) result(r)
@@ -563,31 +589,61 @@ contains
     subroutine clear_fpm_mod_cache(project_dir)
         character(len=*), intent(in) :: project_dir
 
-        character(len=1024) :: cmd
-        integer :: ierr
+        character(len=:), allocatable :: build_root
+        character(len=512), allocatable :: hits(:)
+        integer :: n, k, base_depth
 
-        cmd = 'find '//trim(project_dir)//'/build' &
-              //' -maxdepth 2 -name "*.mod"' &
-              //' -not -path "*/dependencies/*"' &
-              //' -delete 2>/dev/null'
-        call execute_command_line(cmd, exitstat=ierr, wait=.true.)
+        build_root = trim(project_dir)//'/build'
+        base_depth = path_depth(build_root)
+        allocate (hits(4096))
 
-        ! Also remove .o files for the main project (not dependencies)
-        ! to force recompilation with fresh module interfaces.
-        cmd = 'find '//trim(project_dir)//'/build' &
-              //' -mindepth 3 -maxdepth 3 -name "src_*.o"' &
-              //' -not -path "*/dependencies/*"' &
-              //' -delete 2>/dev/null'
-        call execute_command_line(cmd, exitstat=ierr, wait=.true.)
+        ! Project module interfaces at depth <= 2 under build, never a
+        ! dependency's. Replaces find -maxdepth 2 -name '*.mod' -delete.
+        call fs_collect_files(build_root, '', '.mod', '', hits, n)
+        do k = 1, n
+            if (index(hits(k), '/dependencies/') > 0) cycle
+            if (path_depth(trim(hits(k))) - base_depth > 2) cycle
+            call fs_remove_file(trim(hits(k)))
+        end do
+
+        ! Project objects at exactly depth 3 (src_*.o), to force recompilation
+        ! with fresh interfaces. Replaces find -mindepth 3 -maxdepth 3.
+        call fs_collect_files(build_root, 'src_', '.o', '', hits, n)
+        do k = 1, n
+            if (index(hits(k), '/dependencies/') > 0) cycle
+            if (.not. basename_starts(trim(hits(k)), 'src_')) cycle
+            if (path_depth(trim(hits(k))) - base_depth /= 3) cycle
+            call fs_remove_file(trim(hits(k)))
+        end do
+        deallocate (hits)
     end subroutine clear_fpm_mod_cache
+
+    integer function path_depth(path) result(d)
+        !! Number of path components (count of '/' separators) in a path, used
+        !! to emulate find's -maxdepth/-mindepth without a shell.
+        character(len=*), intent(in) :: path
+        integer :: i
+        d = 0
+        do i = 1, len_trim(path)
+            if (path(i:i) == '/') d = d + 1
+        end do
+    end function path_depth
+
+    logical function basename_starts(path, prefix) result(yes)
+        !! True when the final path component begins with prefix.
+        character(len=*), intent(in) :: path, prefix
+        integer :: slash, n
+        n = len_trim(path)
+        slash = index(path(1:n), '/', back=.true.)
+        yes = .false.
+        if (n - slash < len(prefix)) return
+        yes = path(slash + 1:slash + len(prefix)) == prefix
+    end function basename_starts
 
     subroutine clear_cmake_build_tree(project_dir)
         character(len=*), intent(in) :: project_dir
 
-        integer :: ierr
-
-        call execute_command_line('rm -rf '//sq(trim(project_dir)//'/build'), &
-                                  exitstat=ierr, wait=.true.)
+        call fs_remove_tree(trim(project_dir)//'/build')
     end subroutine clear_cmake_build_tree
 
 end module fo_build_backend

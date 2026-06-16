@@ -4,6 +4,7 @@ module fo_mcp
         jsonrpc_error, jsonrpc_null, strip_path_prefix_in_str
     use fx_json_build, only: json_escape_string
     use fx_mcp, only: mcp_read_message, mcp_send_response, MCP_FRAME_UNKNOWN
+    use fo_fs, only: fs_remove_tree
     use fo_check, only: check_result_t, fo_check_run
     use fo_check_output, only: check_result_compact_json, &
         check_result_full_json
@@ -427,7 +428,7 @@ contains
 
         call cache_root(root)
         call cache_store_root(store_root)
-        call execute_command_line('rm -rf '//trim(root), wait=.true.)
+        call fs_remove_tree(trim(root))
         output_text = 'cache cleared: '//trim(store_root)
         exitcode = 0
         call make_tool_text_response(id_str, output_text, exitcode, response)
