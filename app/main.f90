@@ -129,7 +129,7 @@ contains
         if (exitcode /= 0) then
             write (error_unit, '(a)') 'Build: FAIL'
             call report_build_result(build_log)
-            stop 1
+            stop 1, quiet=.true.
         end if
         call delete_tmpfile(build_log)
         write (output_unit, '(a)') 'Build: OK'
@@ -421,7 +421,7 @@ subroutine cmd_build()
     end if
     if (exitcode /= 0) then
         call report_build_result(build_log)
-        stop 1
+        stop 1, quiet=.true.
     end if
     call delete_tmpfile(build_log)
 end subroutine cmd_build

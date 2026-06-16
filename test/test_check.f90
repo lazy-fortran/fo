@@ -25,6 +25,7 @@ program test_check
     call test_check_result_full_json_diagnostics()
     call test_check_write_outputs()
     call test_diagnostic_timeout_hint()
+    call test_diagnostic_crash_hint()
     call test_diagnostic_unknown_line()
     call test_run_queue_coalesces_requests()
     call test_run_queue_single_returns_idle()
@@ -264,6 +265,33 @@ contains
 
         call execute_command_line('rm -f '//trim(log_path))
     end subroutine test_diagnostic_timeout_hint
+
+    subroutine test_diagnostic_crash_hint()
+        !! A 128+signal exit (crash) gets a memory-bug hint, not "make it slow".
+        type(diagnostic_t) :: diag
+        character(len=512) :: log_path
+        integer :: u
+
+        call make_tmp_path('fo_crash_log', log_path)
+        open (newunit=u, file=log_path, status='replace')
+        write (u, '(a)') 'fo: test target test_seg returned exit code 139'// &
+            ' (crashed: SIGSEGV)'
+        close (u)
+
+        call diagnostic_from_log('test', log_path, 'fo test', diag)
+
+        call assert(index(diag%hint, 'crashed') > 0, &
+            'crash diagnostic hint mentions a crash')
+        call assert(index(diag%hint, 'stack') > 0 .or. &
+            index(diag%hint, 'memory') > 0, &
+            'crash hint points at memory/stack causes')
+        call assert(index(diag%hint, '*_slow') == 0, &
+            'crash hint does not suggest the slow-test fix')
+        call assert(trim(diag%rerun) == 'fo test test_seg', &
+            'crash diagnostic includes target rerun')
+
+        call execute_command_line('rm -f '//trim(log_path))
+    end subroutine test_diagnostic_crash_hint
 
     subroutine test_diagnostic_unknown_line()
         type(diagnostic_t) :: diag

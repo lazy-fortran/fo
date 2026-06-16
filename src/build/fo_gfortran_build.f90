@@ -1068,10 +1068,34 @@ contains
         open (newunit=u, file=trim(log_file), position='append', &
               status='old', iostat=ios)
         if (ios /= 0) return
-        write (u, '(a,a,a,i0)') 'fo: test target ', trim(test_name), &
-            ' returned exit code ', status
+        ! Shell-style 128+signal exit codes mean the test crashed, not that it
+        ! returned a normal failure. Name the signal so the report and hint can
+        ! point at a memory bug / stack overflow instead of "make it faster".
+        if (status > 128) then
+            write (u, '(a,a,a,i0,a,a,a)') 'fo: test target ', trim(test_name), &
+                ' returned exit code ', status, ' (crashed: ', &
+                trim(signal_name(status - 128)), ')'
+        else
+            write (u, '(a,a,a,i0)') 'fo: test target ', trim(test_name), &
+                ' returned exit code ', status
+        end if
         close (u)
     end subroutine append_test_status
+
+    pure function signal_name(sig) result(name)
+        integer, intent(in) :: sig
+        character(len=16) :: name
+        select case (sig)
+        case (11); name = 'SIGSEGV'
+        case (6);  name = 'SIGABRT'
+        case (8);  name = 'SIGFPE'
+        case (4);  name = 'SIGILL'
+        case (10); name = 'SIGBUS'
+        case (7);  name = 'SIGBUS'
+        case default
+            write (name, '(a,i0)') 'signal ', sig
+        end select
+    end function signal_name
 
     logical function selected_test(name, selected_names, n_selected) result(found)
         character(len=*), intent(in) :: name

@@ -78,6 +78,12 @@ contains
             end if
             if (is_timeout_text(diag%message)) then
                 diag%hint = 'make this test faster or rename it *_slow'
+            else if (index(diag%message, 'crashed:') > 0) then
+                ! A 128+signal exit is a crash, not a slow test. Point at the
+                ! usual causes and the tools that localize them.
+                diag%hint = 'test crashed (memory bug or stack overflow): '// &
+                    'rerun it alone, raise the stack (ulimit -s unlimited), '// &
+                    'or rebuild with --flag "-fcheck=all -fbacktrace -g"'
             end if
         end if
     end subroutine diagnostic_from_log
