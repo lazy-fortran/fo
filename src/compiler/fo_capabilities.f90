@@ -54,7 +54,7 @@ contains
         call argv_push(packed, n_args, 'gfortran')
         call argv_push(packed, n_args, '--version')
         call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
-                                     .false., 120, exitcode)
+            .false., 120, exitcode)
 
         open (newunit=u, file=tmpfile, status='old', iostat=iostat)
         if (iostat == 0) then
@@ -85,7 +85,7 @@ contains
             call argv_push(packed, n_args, 'ifx')
             call argv_push(packed, n_args, '--version')
             call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
-                                         .false., 120, exitcode)
+                .false., 120, exitcode)
             open (newunit=u, file=tmpfile, status='old', iostat=iostat)
             if (iostat == 0) then
                 read (u, '(a)', iostat=iostat) line
@@ -132,7 +132,7 @@ contains
         character(len=:), allocatable :: env
         character(len=1024) :: candidate
         integer :: env_len, i, start, stat
-        logical :: present
+        logical :: present, sc_ok
 
         path = ''
         call get_environment_variable('PATH', length=env_len, status=stat)
@@ -143,7 +143,9 @@ contains
 
         start = 1
         do i = 1, env_len + 1
-            if (i > env_len .or. env(i:i) == ':') then
+            sc_ok = (i > env_len)
+            if (.not. sc_ok) sc_ok = (env(i:i) == ':')
+            if (sc_ok) then
                 if (i > start) then
                     candidate = env(start:i - 1)//'/'//trim(name)
                     inquire (file=trim(candidate), exist=present)
@@ -186,14 +188,14 @@ contains
             call argv_push_split(packed, n_args, '-fopenmp -o /dev/null')
             call argv_push(packed, n_args, trim(srcfile))
             call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
-                                         .false., 120, exitcode)
+                .false., 120, exitcode)
         case ('intel')
             n_args = 0
             call argv_push(packed, n_args, 'ifx')
             call argv_push_split(packed, n_args, '-qopenmp -o /dev/null')
             call argv_push(packed, n_args, trim(srcfile))
             call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
-                                         .false., 120, exitcode)
+                .false., 120, exitcode)
         case default
             exitcode = 1
         end select
@@ -257,7 +259,9 @@ contains
             end if
         end do
         fin = fin - 1
-        if (fin > start .and. line(fin:fin) == '.') fin = fin - 1
+        if (fin > start) then
+            if (line(fin:fin) == '.') fin = fin - 1
+        end if
         version = line(start:fin)
     end if
 end subroutine extract_version

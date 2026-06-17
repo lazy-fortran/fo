@@ -160,8 +160,8 @@ contains
         n = n + 1
         lines_no(n) = line_no
         msgs(n) = "short-circuit reliance: "//trim(kind)//" guard on '"// &
-                  trim(var)//"' may not protect its use ("// &
-                  ".and./.or. operand order is not guaranteed; split the test)"
+            trim(var)//"' may not protect its use ("// &
+            ".and./.or. operand order is not guaranteed; split the test)"
     end subroutine record
 
     subroutine analyze_pair(left, right, hazard, var, kind)
@@ -428,7 +428,7 @@ contains
         character(len=*), intent(in) :: expr, idx
 
         has_index_use = subscript_open(expr, idx) .or. &
-                        bounded_after(expr, ','//trim(idx))
+            bounded_after(expr, ','//trim(idx))
     end function has_index_use
 
     logical function subscript_open(expr, idx)
@@ -614,8 +614,8 @@ contains
 
         ic = iachar(c)
         is_ident_char = (ic >= iachar('a') .and. ic <= iachar('z')) .or. &
-                        (ic >= iachar('A') .and. ic <= iachar('Z')) .or. &
-                        (ic >= iachar('0') .and. ic <= iachar('9')) .or. c == '_'
+            (ic >= iachar('A') .and. ic <= iachar('Z')) .or. &
+            (ic >= iachar('0') .and. ic <= iachar('9')) .or. c == '_'
     end function is_ident_char
 
     pure logical function is_expr_char(c)

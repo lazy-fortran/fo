@@ -10,7 +10,7 @@ program fo_main
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
     use fo_util, only: make_tmpfile, delete_tmpfile, clean_root_build_artifacts
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_collect_files, &
-                     fs_copy_exec, fs_rename
+        fs_copy_exec, fs_rename
     use fo_check_output, only: check_result_json, check_result_compact_json, &
         check_result_full_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
@@ -712,7 +712,7 @@ subroutine cmd_install()
         installed_any = .false.
         allocate (bins(256))
         call fs_collect_files(trim(b%project_dir)//'/build/fo/bin', '', '', '', &
-                              bins, nb, recursive=.false.)
+            bins, nb, recursive=.false.)
         do k = 1, nb
             sl = index(trim(bins(k)), '/', back=.true.)
             slash_name = bins(k) (sl + 1:)

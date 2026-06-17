@@ -692,7 +692,8 @@ subroutine parent_dir(path, parent)
 
     clean = trim(path)
     n = len_trim(clean)
-    do while (n > 1 .and. clean(n:n) == '/')
+    do while (n > 1)
+        if (.not. (clean(n:n) == '/')) exit
         clean(n:n) = ' '
         n = n - 1
     end do
@@ -867,13 +868,15 @@ subroutine parse_words(line, names, n_names)
     n = len_trim(line)
     pos = 1
     do while (pos <= n)
-        do while (pos <= n .and. line(pos:pos) == ' ')
+        do while (pos <= n)
+            if (.not. (line(pos:pos) == ' ')) exit
             pos = pos + 1
         end do
         if (pos > n) exit
 
         start = pos
-        do while (pos <= n .and. line(pos:pos) /= ' ')
+        do while (pos <= n)
+            if (.not. (line(pos:pos) /= ' ')) exit
             pos = pos + 1
         end do
         finish = pos - 1

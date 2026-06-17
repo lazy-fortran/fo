@@ -28,7 +28,7 @@ contains
         n_files = 0
         do s = 1, size(suffixes)
             call fs_collect_files(trim(scan_root), '', trim(suffixes(s)), '', &
-                                  hits, n_hits)
+                hits, n_hits)
             do i = 1, n_hits
                 if (index(hits(i), '/build/') > 0) cycle
                 if (index(hits(i), '/.git/') > 0) cycle

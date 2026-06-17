@@ -777,8 +777,8 @@ end subroutine strip_trailing
 pure logical function starts_with(str, prefix)
     character(len=*), intent(in) :: str, prefix
 
-    starts_with = (len_trim(str) >= len(prefix) .and. &
-        str(1:len(prefix)) == prefix)
+    starts_with = .false.
+    if (len_trim(str) >= len(prefix)) starts_with = (str(1:len(prefix)) == prefix)
 end function starts_with
 
 pure logical function is_ident_char(c)

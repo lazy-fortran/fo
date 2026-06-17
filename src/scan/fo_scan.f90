@@ -201,7 +201,8 @@ subroutine extract_use(line, name)
     end if
 
     ! skip whitespace
-    do while (start <= len_trim(line) .and. line(start:start) == ' ')
+    do while (start <= len_trim(line))
+        if (line(start:start) /= ' ') exit
         start = start + 1
     end do
 
@@ -216,7 +217,8 @@ subroutine extract_use(line, name)
         fin = len_trim(line)
     end if
 
-    do while (fin >= start .and. line(fin:fin) == ' ')
+    do while (fin >= start)
+        if (line(fin:fin) /= ' ') exit
         fin = fin - 1
     end do
 
@@ -241,13 +243,14 @@ subroutine extract_module_def(line, name)
     if (len_trim(lower_line) < 8) return
     if (lower_line(1:7) /= 'module ') return
     start = 8
-    do while (start <= len_trim(line) .and. line(start:start) == ' ')
+    do while (start <= len_trim(line))
+        if (line(start:start) /= ' ') exit
         start = start + 1
     end do
 
     fin = start
-    do while (fin <= len_trim(line) .and. line(fin:fin) /= ' ' .and. &
-            line(fin:fin) /= '!')
+    do while (fin <= len_trim(line))
+        if (line(fin:fin) == ' ' .or. line(fin:fin) == '!') exit
         fin = fin + 1
     end do
     first_name = adjustl(line(start:fin - 1))
@@ -288,12 +291,13 @@ subroutine extract_submodule_def(line, name, parent)
     if (present(parent)) parent = trim(parent_text)
 
     start = close_pos + 1
-    do while (start <= len_trim(line) .and. line(start:start) == ' ')
+    do while (start <= len_trim(line))
+        if (line(start:start) /= ' ') exit
         start = start + 1
     end do
     fin = start
-    do while (fin <= len_trim(line) .and. line(fin:fin) /= ' ' .and. &
-            line(fin:fin) /= '!')
+    do while (fin <= len_trim(line))
+        if (line(fin:fin) == ' ' .or. line(fin:fin) == '!') exit
         fin = fin + 1
     end do
 
@@ -322,7 +326,8 @@ subroutine extract_external_procedure_def(line, name)
         return
     end if
 
-    do while (start <= len_trim(line) .and. line(start:start) == ' ')
+    do while (start <= len_trim(line))
+        if (line(start:start) /= ' ') exit
         start = start + 1
     end do
 
@@ -348,7 +353,8 @@ subroutine extract_program_def(line, name)
     if (lower_line(1:8) /= 'program ') return
 
     start = 9
-    do while (start <= len_trim(line) .and. line(start:start) == ' ')
+    do while (start <= len_trim(line))
+        if (line(start:start) /= ' ') exit
         start = start + 1
     end do
 

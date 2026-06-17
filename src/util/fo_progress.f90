@@ -98,7 +98,7 @@ contains
         d = done
         if (d > g_total) d = g_total
         if (d < 0) d = 0
-        if (d == g_shown) return  ! skip a redundant redraw (e.g. final 100%)
+        if (d == g_shown) return ! skip a redundant redraw (e.g. final 100%)
         g_shown = d
         pct = 0
         if (g_total > 0) pct = int(100.0 * real(d) / real(g_total))

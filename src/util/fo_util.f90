@@ -94,7 +94,7 @@ contains
             ! one. Editors and stray builds drop these in the project root where
             ! they shadow build/fo/mod.
             call fs_collect_files(trim(dir), '', trim(suffixes(s)), '', hits, n, &
-                                  recursive=.false.)
+                recursive=.false.)
             do k = 1, n
                 if (len_trim(hits(k)) == 0) cycle
                 call fs_remove_file(trim(hits(k)))
@@ -201,8 +201,12 @@ subroutine extract_json_field(line, key, val)
     ! Strip surrounding quotes from key
     k1 = 1
     k2 = len_trim(key)
-    if (k2 >= k1 .and. key(k1:k1) == '"') k1 = k1 + 1
-    if (k2 >= k1 .and. key(k2:k2) == '"') k2 = k2 - 1
+    if (k2 >= k1) then
+        if (key(k1:k1) == '"') k1 = k1 + 1
+    end if
+    if (k2 >= k1) then
+        if (key(k2:k2) == '"') k2 = k2 - 1
+    end if
     if (k2 < k1) return
     clean_key = key(k1:k2)
 
@@ -216,7 +220,8 @@ subroutine extract_json_field(line, key, val)
     end do
     pos = pos + 1
 
-    do while (pos <= len_trim(line) .and. line(pos:pos) == ' ')
+    do while (pos <= len_trim(line))
+        if (.not. (line(pos:pos) == ' ')) exit
         pos = pos + 1
     end do
 

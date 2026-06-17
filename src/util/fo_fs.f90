@@ -126,7 +126,7 @@ contains
         rec = 0
         if (recursive) rec = 1
         rc = fo_c_delete_suffix(trim(root)//c_null_char, &
-                                trim(suffix)//c_null_char, rec)
+            trim(suffix)//c_null_char, rec)
     end subroutine fs_delete_suffix
 
     subroutine fs_append_file(src, dst)
@@ -141,14 +141,14 @@ contains
         character(len=*), intent(in) :: path, text
         integer :: u, ios
         open (newunit=u, file=trim(path), status='replace', action='write', &
-              iostat=ios)
+            iostat=ios)
         if (ios /= 0) return
         write (u, '(a)') text
         close (u)
     end subroutine fs_write_text
 
     subroutine fs_collect_files(root, infix, suffix, path_needle, items, &
-                                n_items, recursive)
+            n_items, recursive)
         !! Collect regular files under root whose basename contains infix and
         !! ends with suffix and whose path contains path_needle, into items
         !! (each a full path). Recurses unless recursive is .false. Replaces a
@@ -166,9 +166,9 @@ contains
         end if
         allocate (buf(FS_COLLECT_CAP))
         rc = fo_c_collect_files(trim(root)//c_null_char, trim(infix)//c_null_char, &
-                                trim(suffix)//c_null_char, &
-                                trim(path_needle)//c_null_char, rec, buf, &
-                                int(FS_COLLECT_CAP, c_int))
+            trim(suffix)//c_null_char, &
+            trim(path_needle)//c_null_char, rec, buf, &
+            int(FS_COLLECT_CAP, c_int))
         call unpack_buffer(buf, int(rc), items, n_items)
         call sort_items(items, n_items)
         deallocate (buf)
@@ -217,7 +217,7 @@ contains
 
         allocate (buf(FS_COLLECT_CAP))
         rc = fo_c_collect_mod_dirs(trim(root)//c_null_char, buf, &
-                                   int(FS_COLLECT_CAP, c_int))
+            int(FS_COLLECT_CAP, c_int))
         call unpack_buffer(buf, int(rc), items, n_items)
         call sort_items(items, n_items)
         deallocate (buf)

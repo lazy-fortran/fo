@@ -1,8 +1,8 @@
 module fo_watch
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fx_watch, only: watcher_t, watcher_init, watcher_add, watcher_poll, &
-                        watcher_close, watcher_mark_self_written, &
-                        WATCH_MODIFY, WATCH_CREATE, WATCH_DELETE
+        watcher_close, watcher_mark_self_written, &
+        WATCH_MODIFY, WATCH_CREATE, WATCH_DELETE
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_util, only: make_tmpfile, delete_tmpfile
     implicit none
@@ -100,7 +100,7 @@ contains
         call argv_push(packed, n_args, '--strict-indent')
         call argv_push(packed, n_args, file)
         call process_run_argv_logged('', packed, n_args, trim(logf), .false., &
-                                     120, exitcode)
+            120, exitcode)
         call delete_tmpfile(logf)
     end subroutine format_in_place
 
@@ -116,7 +116,7 @@ contains
         call argv_push(packed, n_args, 'fo')
         call argv_push(packed, n_args, 'check')
         call process_run_argv_logged('', packed, n_args, trim(logf), .false., &
-                                     600, exitcode)
+            600, exitcode)
 
         open (newunit=u, file=trim(logf), status='old', action='read', iostat=ios)
         if (ios == 0) then

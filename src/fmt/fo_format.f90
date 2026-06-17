@@ -30,8 +30,10 @@ contains
         do i = 1, n_input
             call split_line(lines(i), content, comment)
 
-            ! Preprocessor directives: pass through unchanged.
-            if (len_trim(content) > 0 .and. content(1:1) == '#') then
+            ! Preprocessor directives: pass through unchanged. content is a
+            ! fixed-length buffer, so content(1:1) is always in range and is '#'
+            ! only when the line is non-blank.
+            if (content(1:1) == '#') then
                 output(i) = lines(i)
                 in_continuation = .false.
                 prev_content = content
@@ -431,7 +433,8 @@ logical function continuation_pending(content)
     character(len=*), intent(in) :: content
     integer :: n
     n = len_trim(content)
-    continuation_pending = (n > 0 .and. content(n:n) == '&')
+    continuation_pending = .false.
+    if (n > 0) continuation_pending = (content(n:n) == '&')
 end function continuation_pending
 
 ! Case-insensitive tolower for ASCII.
@@ -451,7 +454,10 @@ pure logical function kw_starts(line, kw)
     character(len=*), intent(in) :: line, kw
     integer :: n
     n = len(kw)
-    kw_starts = (len_trim(line) >= n .and. line(1:n) == kw)
+    ! len_trim(line) >= n implies len(line) >= n, so the substring is in range
+    ! whenever the guard holds; keep them in separate tests (no short-circuit).
+    kw_starts = .false.
+    if (len_trim(line) >= n) kw_starts = line(1:n) == kw
 end function kw_starts
 
 ! True if the entire (trimmed) lowercased line equals kw or kw+optional name.
@@ -459,9 +465,12 @@ pure logical function kw_eq(line, kw)
     character(len=*), intent(in) :: line, kw
     integer :: n
     n = len(kw)
-    kw_eq = (len_trim(line) == n .and. line(1:n) == kw) .or. &
-        (len_trim(line) > n .and. line(1:n) == kw .and. &
-        line(n + 1:n + 1) == ' ')
+    kw_eq = .false.
+    if (len_trim(line) == n) then
+        kw_eq = line(1:n) == kw
+    else if (len_trim(line) > n) then
+        kw_eq = line(1:n) == kw .and. line(n + 1:n + 1) == ' '
+    end if
 end function kw_eq
 
 ! True if trimmed line exactly equals kw, or starts with 'kw ' or 'kw('.
@@ -487,8 +496,10 @@ logical function has_keyword_then(low)
     n = len_trim(low)
     has_keyword_then = .false.
     ! Look for 'then' at end of line (possibly after closing paren/space).
-    if (n >= 4 .and. low(n - 3:n) == 'then') then
-        has_keyword_then = .true.
+    if (n >= 4) then
+        if (low(n - 3:n) == 'then') then
+            has_keyword_then = .true.
+        end if
     end if
 end function has_keyword_then
 
@@ -551,7 +562,9 @@ logical function has_function_opener(low)
     pos = index(low, 'function ')
     if (pos > 0) then
         ! Exclude 'end function'
-        if (pos >= 5 .and. low(pos - 4:pos - 1) == 'end ') return
+        if (pos >= 5) then
+            if (low(pos - 4:pos - 1) == 'end ') return
+        end if
         has_function_opener = .true.
     end if
 end function has_function_opener
@@ -565,7 +578,9 @@ logical function has_subroutine_opener(low)
     pos = index(low, 'subroutine ')
     if (pos > 0) then
         ! Exclude 'end subroutine'
-        if (pos >= 5 .and. low(pos - 4:pos - 1) == 'end ') return
+        if (pos >= 5) then
+            if (low(pos - 4:pos - 1) == 'end ') return
+        end if
         has_subroutine_opener = .true.
     end if
 end function has_subroutine_opener

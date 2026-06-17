@@ -176,9 +176,9 @@ contains
         ap = 0
         if (append) ap = 1
         call fo_c_run_argv_logged(trim(cwd)//c_null_char, packed, &
-                                  int(len(packed), c_int), int(n_args, c_int), &
-                                  trim(log_file)//c_null_char, ap, &
-                                  int(timeout_s, c_int), c_null_char, ec)
+            int(len(packed), c_int), int(n_args, c_int), &
+            trim(log_file)//c_null_char, ap, &
+            int(timeout_s, c_int), c_null_char, ec)
         exitcode = int(ec)
     end subroutine process_run_argv_logged
 
@@ -397,11 +397,14 @@ contains
         character(kind=c_char) :: c_log(C_PATH_LEN)
         character(kind=c_char) :: c_env(C_PATH_LEN)
         integer(c_int) :: c_exit, c_append
+        logical :: sc_ok
 
         call to_c_string(cwd, c_cwd)
         call to_c_string(exe_path, c_exe)
         call to_c_string(log_file, c_log)
-        if (present(cache_dir) .and. len_trim(cache_dir) > 0) then
+        sc_ok = present(cache_dir)
+        if (sc_ok) sc_ok = (len_trim(cache_dir) > 0)
+        if (sc_ok) then
             call to_c_string('FO_CACHE_DIR='//trim(cache_dir), c_env)
         else
             c_env(1) = c_null_char
