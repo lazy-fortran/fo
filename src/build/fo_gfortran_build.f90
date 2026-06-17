@@ -1406,12 +1406,6 @@ contains
         call delete_tmpfile(tmpfile)
     end subroutine detect_compiler
 
-    pure function sq(s) result(r)
-        character(len=*), intent(in) :: s
-        character(len=len_trim(s) + 2) :: r
-        r = "'"//trim(s)//"'"
-    end function sq
-
     subroutine compile_f90(project_dir, source, objfile, includes_flag, log_file, &
                            exitcode)
         character(len=*), intent(in) :: project_dir, source, objfile, includes_flag
@@ -1535,7 +1529,7 @@ contains
         do i = 1, n_dep_objs
             call argv_push(packed, n_args, dep_objs(i))
         end do
-        call argv_push_split(packed, n_args, link_lib_flags(link_libs, n_link_libs))
+        call argv_push_split_nl(packed, n_args, link_lib_flags(link_libs, n_link_libs))
         ! flang's driver does not add Homebrew's libomp to the link search, so
         ! -fopenmp links fail with "library 'omp' not found". Add it (harmless
         ! when the build does not use OpenMP) plus an rpath for runtime.
@@ -1593,7 +1587,11 @@ contains
         call build_lib_search_dirs(dirs, n_dirs)
         do i = 1, n_link_libs
             call resolve_link_token(trim(link_libs(i)), dirs, n_dirs, token)
-            flags = flags//' '//trim(token)
+            ! Newline-join so the caller can split with argv_push_split_nl,
+            ! which preserves spaces in resolved library paths. Tokens are
+            ! passed straight to the linker via argv (shell-free build), so
+            ! they must NOT be shell-quoted.
+            flags = flags//new_line('a')//trim(token)
         end do
     end function link_lib_flags
 
@@ -1624,7 +1622,7 @@ contains
             cand = trim(dirs(i))//'/lib'//trim(name)//trim(ext1)
             inquire (file=trim(cand), exist=ex)
             if (ex) then
-                token = sq(trim(cand))
+                token = trim(cand)
                 return
             end if
         end do
@@ -1632,7 +1630,7 @@ contains
             cand = trim(dirs(i))//'/lib'//trim(name)//trim(ext2)
             inquire (file=trim(cand), exist=ex)
             if (ex) then
-                token = sq(trim(cand))
+                token = trim(cand)
                 return
             end if
         end do
