@@ -17,6 +17,7 @@ program fo_main
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
     use fo_fmt, only: fo_fmt_run, fo_fmt_check_run
+    use fo_process, only: process_run_argv_logged, argv_push
     implicit none
 
     character(len=256) :: action
@@ -41,6 +42,8 @@ program fo_main
         call cmd_build()
     case ('test')
         call cmd_test()
+    case ('exec', 'run')
+        call cmd_exec()
     case ('info')
         call cmd_info()
     case ('lint')
@@ -222,6 +225,8 @@ contains
         write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt --check'
         write (output_unit, '(a)') '  build      build only (--flag "-O0")'
         write (output_unit, '(a)') '  test       run tests (--only-changed, --all)'
+        write (output_unit, '(a)') '  exec <t> [args]  build then run build/fo/bin/<t> '// &
+            '(never run it by hand: may be stale)'
         write (output_unit, '(a)') '  check      build + test, one-line status'
         write (output_unit, '(a)') '  check --json  build + test, JSON status'
         write (output_unit, '(a)') '  check --json=compact  bounded agent JSON'
@@ -335,6 +340,60 @@ contains
             'fo: rerun one with: fo test <name>  (never run build/fo/bin/* '// &
             'directly; that can be stale)'
     end subroutine report_failed_tests
+
+    subroutine cmd_exec()
+        !! Build incrementally, then exec build/fo/bin/<target> with the
+        !! remaining args, inheriting the terminal. The sanctioned way to run a
+        !! built binary (app or test): it can never be stale, because the build
+        !! runs first and fo's cache is content-addressed. Running
+        !! build/fo/bin/* by hand skips that and may execute an artifact older
+        !! than the current sources.
+        type(backend_t) :: b
+        integer :: exitcode, i
+        character(len=256) :: target, arg
+        character(len=512) :: build_log, bin_path
+        character(len=:), allocatable :: packed
+        integer :: n_args
+        logical :: exists
+
+        if (command_argument_count() < 2) then
+            write (error_unit, '(a)') 'fo exec: usage: fo exec <target> [args...]'
+            stop 1
+        end if
+        call get_command_argument(2, target)
+        b = detect_backend('.')
+        if (b%kind == BACKEND_NONE) then
+            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            stop 1
+        end if
+
+        call make_tmpfile('fo-exec-build', build_log)
+        call backend_build(b, exitcode, log_file=build_log, with_tests=.true.)
+        if (exitcode /= 0) then
+            write (error_unit, '(a)') 'fo exec: build failed'
+            call report_build_result(build_log)
+            stop 1, quiet=.true.
+        end if
+        call delete_tmpfile(build_log)
+
+        bin_path = trim(b%project_dir)//'/build/fo/bin/'//trim(target)
+        inquire (file=trim(bin_path), exist=exists)
+        if (.not. exists) then
+            write (error_unit, '(a)') 'fo exec: no such target: '//trim(target)
+            stop 1, quiet=.true.
+        end if
+
+        n_args = 0
+        call argv_push(packed, n_args, trim(bin_path))
+        do i = 3, command_argument_count()
+            call get_command_argument(i, arg)
+            call argv_push(packed, n_args, trim(arg))
+        end do
+        ! Empty log_file makes the child inherit this terminal's stdout/stderr;
+        ! timeout 0 means no limit (an interactive app may run arbitrarily long).
+        call process_run_argv_logged('', packed, n_args, '', .false., 0, exitcode)
+        if (exitcode /= 0) stop 1, quiet=.true.
+    end subroutine cmd_exec
 
     subroutine check_output_mode(mode, ierr)
         integer, intent(out) :: mode, ierr
