@@ -44,7 +44,7 @@ contains
         integer, intent(inout) :: n_findings
 
         character(len=1024), allocatable :: lines(:), lowered(:)
-        integer :: n_lines, u, iostat, i
+        integer :: n_lines, n_main, u, iostat, i
 
         allocate (lines(10000), lowered(10000))
 
@@ -66,15 +66,80 @@ contains
         end do
         close (u)
 
+        ! Append the bodies of any `include 'file'` so a symbol used only inside
+        ! an included fragment is not mis-reported as an unused import. Usage
+        ! scanning sees the extra lines; use-line detection still fires only on
+        ! the main file's own lines (1..n_main).
+        n_main = n_lines
+        call append_include_bodies(filename, lines, n_lines)
+
         do i = 1, n_lines
             lowered(i) = to_lower(lines(i))
         end do
 
-        do i = 1, n_lines
+        do i = 1, n_main
             call check_use_line(filename, i, lowered, n_lines, &
                 findings, n_findings)
         end do
     end subroutine lint_file
+
+    subroutine append_include_bodies(filename, lines, n_lines)
+        !! For each `include 'frag'` in the source, append frag's lines to the
+        !! buffer (resolved relative to the source's directory). Symbol-usage
+        !! scanning then covers included code; a one-level expansion is enough
+        !! for the test fixtures that share an .inc body.
+        character(len=*), intent(in) :: filename
+        character(len=1024), intent(inout) :: lines(:)
+        integer, intent(inout) :: n_lines
+
+        character(len=1024) :: line, incpath, dir
+        character(len=:), allocatable :: incname
+        integer :: i, n0, slash, u, iostat
+
+        n0 = n_lines
+        slash = index(filename, '/', back=.true.)
+        dir = ''
+        if (slash > 0) dir = filename(1:slash)
+
+        do i = 1, n0
+            line = adjustl(lines(i))
+            call include_target(line, incname)
+            if (.not. allocated(incname)) cycle
+            incpath = trim(dir)//trim(incname)
+            open (newunit=u, file=trim(incpath), status='old', iostat=iostat)
+            if (iostat /= 0) then
+                open (newunit=u, file=trim(incname), status='old', iostat=iostat)
+                if (iostat /= 0) cycle
+            end if
+            do
+                if (n_lines >= size(lines)) exit
+                read (u, '(a)', iostat=iostat) line
+                if (iostat /= 0) exit
+                n_lines = n_lines + 1
+                lines(n_lines) = line
+            end do
+            close (u)
+        end do
+    end subroutine append_include_bodies
+
+    subroutine include_target(line, incname)
+        !! Extract frag from `include 'frag'` / `include "frag"`; else unset.
+        character(len=*), intent(in) :: line
+        character(len=:), allocatable, intent(out) :: incname
+
+        character(len=1) :: q
+        integer :: lo, hi
+
+        if (allocated(incname)) deallocate (incname)
+        if (.not. starts_with(to_lower(line), 'include ')) return
+        lo = index(line, "'")
+        if (lo == 0) lo = index(line, '"')
+        if (lo == 0) return
+        q = line(lo:lo)
+        hi = index(line(lo + 1:), q)
+        if (hi == 0) return
+        incname = line(lo + 1:lo + hi - 1)
+    end subroutine include_target
 
     subroutine check_use_line(filename, line_no, lowered, n_lines, &
             findings, n_findings)

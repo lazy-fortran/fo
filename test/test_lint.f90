@@ -13,6 +13,7 @@ program test_lint
     call test_kind_suffix_counts_as_use()
     call test_use_prefixed_symbol_assignment_counts_as_use()
     call test_unused_import_still_reported()
+    call test_symbol_used_only_in_include()
 
     write (output_unit, '(a,i0,a,i0,a)') 'lint: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -104,6 +105,41 @@ contains
                 'unused import finding names the imported symbol')
         end if
     end subroutine test_unused_import_still_reported
+
+    subroutine test_symbol_used_only_in_include()
+        type(lint_finding_t) :: findings(MAX_FINDINGS)
+        integer :: n_findings, u, slash
+        character(len=512) :: main_path, inc_path, inc_base
+
+        call make_tmpfile('fo_lint_incmain', main_path)
+        call make_tmpfile('fo_lint_incfrag', inc_path)
+        slash = index(trim(inc_path), '/', back=.true.)
+        inc_base = inc_path(slash + 1:)
+
+        open (newunit=u, file=trim(inc_path), status='replace')
+        write (u, '(a)') '    b = detect_backend(project_dir)'
+        close (u)
+
+        open (newunit=u, file=trim(main_path), status='replace')
+        write (u, '(a)') 'module m'
+        write (u, '(a)') '    use fo_build_backend, only: backend_t, detect_backend'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '    subroutine s(project_dir)'
+        write (u, '(a)') '        character(len=*), intent(in) :: project_dir'
+        write (u, '(a)') '        type(backend_t) :: b'
+        write (u, '(a)') "        include '"//trim(inc_base)//"'"
+        write (u, '(a)') '    end subroutine s'
+        write (u, '(a)') 'end module m'
+        close (u)
+
+        n_findings = 0
+        call lint_file(trim(main_path), findings, n_findings)
+        call delete_tmpfile(main_path)
+        call delete_tmpfile(inc_path)
+
+        call assert(n_findings == 0, &
+            'import used only inside an included file is not flagged unused')
+    end subroutine test_symbol_used_only_in_include
 
     subroutine lint_lines(prefix, lines, n_lines, findings, n_findings)
         character(len=*), intent(in) :: prefix
