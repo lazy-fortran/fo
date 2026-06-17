@@ -25,6 +25,8 @@ program test_lint_shortcircuit
     call test_flags_or_range_guard()
     call test_flags_derived_type_cursor()
     call test_ignores_function_call_of_component()
+    call test_ignores_alloc_guard_other_component()
+    call test_flags_alloc_guard_same_component()
 
     write (output_unit, '(a,i0,a,i0,a)') 'lint_shortcircuit: ', n_pass, &
         ' pass, ', n_fail, ' fail'
@@ -171,6 +173,24 @@ contains
         call scan_lines(lines, 1, flagged, n)
         call assert(n == 1, 'or-form index bound + real subscript flagged')
     end subroutine test_flags_or_range_guard
+
+    subroutine test_ignores_alloc_guard_other_component()
+        integer :: flagged(64), n
+        character(len=200) :: lines(1)
+
+        lines(1) = '        if (.not. allocated(self%buf) .or. self%n <= 0) return'
+        call scan_lines(lines, 1, flagged, n)
+        call assert(n == 0, 'alloc guard on buf, scalar read of another component, not flagged')
+    end subroutine test_ignores_alloc_guard_other_component
+
+    subroutine test_flags_alloc_guard_same_component()
+        integer :: flagged(64), n
+        character(len=200) :: lines(1)
+
+        lines(1) = '        if (allocated(self%buf) .and. self%buf(1) > 0) then'
+        call scan_lines(lines, 1, flagged, n)
+        call assert(n == 1, 'alloc guard + subscript of the same component flagged')
+    end subroutine test_flags_alloc_guard_same_component
 
     subroutine test_flags_derived_type_cursor()
         integer :: flagged(64), n

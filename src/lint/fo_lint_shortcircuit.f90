@@ -357,7 +357,7 @@ contains
         s = i
         do
             if (i > L) exit
-            if (.not. is_ident_char(expr(i:i))) exit
+            if (.not. is_expr_char(expr(i:i))) exit
             i = i + 1
         end do
         if (i > s) var = expr(s:i - 1)
