@@ -6,7 +6,8 @@ program fo_main
     use fo_build_backend, only: backend_t, detect_backend, backend_build, &
         backend_test, backend_test_names, BACKEND_NONE, &
         BACKEND_GFORTRAN, BACKEND_CMAKE
-    use fo_check, only: check_result_t, fo_check_run, fo_changed_modules
+    use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
+        collect_failed_test_names, MAX_TEST_RESULTS
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
     use fo_util, only: make_tmpfile, delete_tmpfile, clean_root_build_artifacts
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_collect_files, &
@@ -80,7 +81,9 @@ contains
         integer :: n_cached, i, n_test_names
         real :: t0, t1
         character(len=128) :: test_names(MAX_NODES)
-        character(len=512) :: build_log
+        character(len=512) :: build_log, test_log
+        character(len=128) :: failed_tests(MAX_TEST_RESULTS)
+        integer :: n_failed_tests
         logical :: is_test_arr(MAX_NODES), has_cycle
 
         allocate (units(MAX_UNITS))
@@ -157,11 +160,17 @@ contains
             if (n_test_names == 0) then
                 write (output_unit, '(a)') 'Tests: skipped, no affected tests'
             else
-                call backend_test_names(b, test_names, n_test_names, exitcode)
+                call make_tmpfile('fo-test', test_log)
+                call backend_test_names(b, test_names, n_test_names, exitcode, &
+                    log_file=test_log)
                 if (exitcode /= 0) then
+                    call collect_failed_test_names(test_log, failed_tests, &
+                        n_failed_tests)
                     write (error_unit, '(a)') 'Tests: FAIL'
-                    stop 1
+                    call report_failed_tests(failed_tests, n_failed_tests)
+                    stop 1, quiet=.true.
                 end if
+                call delete_tmpfile(test_log)
                 write (output_unit, '(a)') 'Tests: OK'
             end if
         end if
@@ -298,9 +307,34 @@ contains
                 'Build: OK (', res%n_cached, ' cached, ', res%n_changed, &
                 ' changed, ', res%n_affected, &
                 ' affected) Tests: FAIL ', trim(res%error_msg)
+            call report_failed_tests(res%failed_tests, res%n_failed_tests)
             stop 1, quiet = .true.
         end if
     end subroutine cmd_check
+
+    subroutine report_failed_tests(failed, n_failed)
+        !! List every failing test, not just the first. A single reported
+        !! failure hides the rest and pushes the user to run raw build/fo/bin
+        !! binaries to find them -- which serves stale artifacts when sources
+        !! changed since the last fo run. The full list keeps everything inside
+        !! fo, where the content-addressed cache guarantees fresh binaries.
+        character(len=128), intent(in) :: failed(:)
+        integer, intent(in) :: n_failed
+        integer :: i
+
+        if (n_failed < 1) return
+        if (n_failed == 1) then
+            write (error_unit, '(a)') 'fo: 1 test failed:'
+        else
+            write (error_unit, '(a,i0,a)') 'fo: ', n_failed, ' tests failed:'
+        end if
+        do i = 1, n_failed
+            write (error_unit, '(a,a)') '  - ', trim(failed(i))
+        end do
+        write (error_unit, '(a)') &
+            'fo: rerun one with: fo test <name>  (never run build/fo/bin/* '// &
+            'directly; that can be stale)'
+    end subroutine report_failed_tests
 
     subroutine check_output_mode(mode, ierr)
         integer, intent(out) :: mode, ierr
@@ -547,10 +581,14 @@ subroutine report_test_result(exitcode, test_log)
     character(len=*), intent(in) :: test_log
 
     type(diagnostic_t) :: diag
+    character(len=128) :: failed_tests(MAX_TEST_RESULTS)
+    integer :: n_failed_tests
 
     if (exitcode == 0) return
     call diagnostic_from_log('test', test_log, 'fo test', diag)
     write (error_unit, '(a,a)') 'fo: test failed: ', trim(diag%message)
+    call collect_failed_test_names(test_log, failed_tests, n_failed_tests)
+    if (n_failed_tests > 1) call report_failed_tests(failed_tests, n_failed_tests)
     if (len_trim(diag%target) > 0) then
         write (error_unit, '(a,a)') 'fo: target: ', trim(diag%target)
     end if

@@ -16,7 +16,7 @@ module fo_check
     implicit none
     private
     public :: check_result_t, test_result_t, fo_check_run, fo_changed_modules
-    public :: MAX_TEST_RESULTS
+    public :: MAX_TEST_RESULTS, collect_failed_test_names
 
     integer, parameter :: MAX_EXT_DEPS = 256
     integer, parameter :: MAX_TEST_RESULTS = 64
@@ -55,6 +55,8 @@ module fo_check
         integer :: diag_column = 0
         type(test_result_t) :: test_results(MAX_TEST_RESULTS)
         integer :: n_test_results = 0
+        character(len=128) :: failed_tests(MAX_TEST_RESULTS) = ''
+        integer :: n_failed_tests = 0
     end type check_result_t
 
 contains
@@ -521,8 +523,11 @@ subroutine summarize_backend_failure(stage, log_file, rerun, res)
     type(diagnostic_t) :: diag
 
     call diagnostic_from_log(stage, log_file, rerun, diag)
-    if (trim(stage) == 'test' .and. is_runner_crash(diag%message)) then
-        diag%hint = 'runner crash (not a test failure); check fpm/OpenMP'
+    if (trim(stage) == 'test') then
+        call collect_failed_test_names(log_file, res%failed_tests, &
+            res%n_failed_tests)
+        if (is_runner_crash(diag%message)) &
+            diag%hint = 'runner crash (not a test failure); check fpm/OpenMP'
     end if
     call set_failure(res, stage, diag%target, diag%message, &
         diag%hint, diag%rerun, log_file)
@@ -602,6 +607,46 @@ subroutine parse_test_log(log_file, results, n_results)
     end do
     close (u)
 end subroutine parse_test_log
+
+subroutine collect_failed_test_names(log_file, names, n_names)
+    !! Scan a test log for every failing target, not just the first. The runner
+    !! appends one 'fo: test target <name> ...' line per failure (normal exit,
+    !! crash, or timeout); collect each distinct name so the report lists the
+    !! full set. A single failing target then never hides the others, which is
+    !! what otherwise pushes a user to run the raw binaries (and get stale ones).
+    character(len=*), intent(in) :: log_file
+    character(len=128), intent(out) :: names(MAX_TEST_RESULTS)
+    integer, intent(out) :: n_names
+
+    character(len=*), parameter :: pfx = 'fo: test target '
+    character(len=1024) :: line
+    character(len=128) :: nm
+    integer :: u, ios, p, q, j
+    logical :: seen
+
+    n_names = 0
+    open (newunit=u, file=trim(log_file), status='old', iostat=ios)
+    if (ios /= 0) return
+    do
+        read (u, '(a)', iostat=ios) line
+        if (ios /= 0) exit
+        p = index(line, pfx)
+        if (p == 0) cycle
+        p = p + len(pfx)
+        q = index(line(p:), ' ')
+        if (q <= 1) cycle
+        nm = line(p:p + q - 2)
+        seen = .false.
+        do j = 1, n_names
+            if (trim(names(j)) == trim(nm)) seen = .true.
+        end do
+        if (.not. seen .and. n_names < MAX_TEST_RESULTS) then
+            n_names = n_names + 1
+            names(n_names) = nm
+        end if
+    end do
+    close (u)
+end subroutine collect_failed_test_names
 
 subroutine detect_compiler(compiler)
     character(len=*), intent(out) :: compiler

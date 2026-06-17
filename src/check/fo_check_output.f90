@@ -87,8 +87,28 @@ contains
                 trim(test_summary_str(res))//'"'
             line = trim(line)//trim(test_results_json(res))
         end if
+        line = trim(line)//trim(failed_tests_json(res))
         line = trim(line)//'}'
     end function check_result_json
+
+    function failed_tests_json(res) result(s)
+        !! Every failing test target by name, so an agent sees the full set in
+        !! one call instead of only the primary diagnostic.
+        type(check_result_t), intent(in) :: res
+        character(len=4096) :: s
+        integer :: i
+
+        if (res%n_failed_tests == 0) then
+            s = ''
+            return
+        end if
+        s = ',"failed_tests":['
+        do i = 1, res%n_failed_tests
+            if (i > 1) s = trim(s)//','
+            s = trim(s)//'"'//trim(json_escape_string(res%failed_tests(i)))//'"'
+        end do
+        s = trim(s)//']'
+    end function failed_tests_json
 
     function test_summary_str(res) result(s)
         type(check_result_t), intent(in) :: res
