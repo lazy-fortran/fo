@@ -195,10 +195,11 @@ contains
         character(len=*), intent(out) :: response
 
         type(lint_finding_t) :: findings(MAX_FINDINGS)
-        type(lint_warning_t) :: warnings(MAX_WARNINGS)
+        type(lint_warning_t), allocatable :: warnings(:)
         integer :: n_findings, n_warnings
         character(len=16384) :: lint_output
         character(len=514) :: dir_prefix
+        allocate (warnings(MAX_WARNINGS))
         call lint_dir(trim(dir), findings, n_findings)
         call lint_compiler(trim(dir), warnings, n_warnings)
         call lint_dedup_warnings(warnings, n_warnings)

@@ -14,7 +14,11 @@ module fo_lint
     public :: MAX_FINDINGS, MAX_WARNINGS
 
     integer, parameter :: MAX_FINDINGS = 512
-    integer, parameter :: MAX_WARNINGS = 256
+    ! Global aggregate cap across all files. Large so big projects are not
+    ! silently truncated (which also made the parallel-collected count
+    ! nondeterministic). Per-file passes use the smaller MAX_FILE_WARN buffer.
+    integer, parameter :: MAX_WARNINGS = 16384
+    integer, parameter :: MAX_FILE_WARN = 512
     integer, parameter :: MAX_SYMS = 64
     integer, parameter :: MAX_SYM_LEN = 128
 
@@ -365,7 +369,7 @@ subroutine lint_compiler(dir, warnings, n_warnings)
     ! section. process_run and make_tmpfile are async-signal-safe and OpenMP-safe,
     ! the same primitives the build's parallel compile uses.
     !$omp parallel default(shared) private(i, k, local_w, local_n)
-    allocate (local_w(MAX_WARNINGS))
+    allocate (local_w(MAX_FILE_WARN))
     !$omp do schedule(dynamic)
     do i = 1, n_files
         if (len_trim(files(i)) /= 0) then
@@ -411,7 +415,7 @@ end subroutine find_mod_include_flags
 
 subroutine lint_file_lengths(filepath, warnings, n_warnings)
     character(len=*), intent(in) :: filepath
-    type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
+    type(lint_warning_t), intent(inout) :: warnings(:)
     integer, intent(inout) :: n_warnings
 
     character(len=2048) :: line
@@ -432,7 +436,7 @@ subroutine lint_file_lengths(filepath, warnings, n_warnings)
                 stripped = adjustl(line)
                 if (stripped(1:1) == '#') cycle
             end block
-            if (n_warnings < MAX_WARNINGS) then
+            if (n_warnings < size(warnings)) then
                 n_warnings = n_warnings + 1
                 warnings(n_warnings)%file = trim(filepath)
                 warnings(n_warnings)%line = lineno
@@ -447,7 +451,7 @@ end subroutine lint_file_lengths
 
 subroutine lint_file_compiler(filepath, mod_flags, warnings, n_warnings)
     character(len=*), intent(in) :: filepath, mod_flags
-    type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
+    type(lint_warning_t), intent(inout) :: warnings(:)
     integer, intent(inout) :: n_warnings
 
     character(len=512) :: errfile
@@ -491,7 +495,7 @@ end subroutine lint_file_compiler
 subroutine sort_warnings(warnings, n_warnings)
     !! Stable order by (file, line, column) so parallel collection still yields
     !! deterministic output. Insertion sort: n_warnings is small (<= MAX).
-    type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
+    type(lint_warning_t), intent(inout) :: warnings(:)
     integer, intent(in) :: n_warnings
 
     type(lint_warning_t) :: key
@@ -526,16 +530,16 @@ end function warning_after
 subroutine lint_file_shortcircuit(filepath, warnings, n_warnings)
     !! Append short-circuit-evaluation hazards found by the textual detector.
     character(len=*), intent(in) :: filepath
-    type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
+    type(lint_warning_t), intent(inout) :: warnings(:)
     integer, intent(inout) :: n_warnings
 
-    integer :: hit_line(MAX_WARNINGS), n_hits, k
-    character(len=512) :: hit_msg(MAX_WARNINGS)
+    integer :: hit_line(MAX_FILE_WARN), n_hits, k
+    character(len=512) :: hit_msg(MAX_FILE_WARN)
 
     n_hits = 0
-    call shortcircuit_scan_file(filepath, hit_line, hit_msg, n_hits, MAX_WARNINGS)
+    call shortcircuit_scan_file(filepath, hit_line, hit_msg, n_hits, MAX_FILE_WARN)
     do k = 1, n_hits
-        if (n_warnings >= MAX_WARNINGS) exit
+        if (n_warnings >= size(warnings)) exit
         n_warnings = n_warnings + 1
         warnings(n_warnings)%file = trim(filepath)
         warnings(n_warnings)%line = hit_line(k)
@@ -549,7 +553,7 @@ subroutine parse_gfortran_warning(line, cur_file, cur_line, cur_col, &
     character(len=*), intent(in) :: line
     character(len=256), intent(inout) :: cur_file
     integer, intent(inout) :: cur_line, cur_col
-    type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
+    type(lint_warning_t), intent(inout) :: warnings(:)
     integer, intent(inout) :: n_warnings
 
     character(len=1024) :: clean
@@ -588,7 +592,7 @@ subroutine parse_gfortran_warning(line, cur_file, cur_line, cur_col, &
     if (index(clean, 'Fatal Error') > 0) return
     if (index(clean, 'stack-var-size') > 0) return
     if (len_trim(cur_file) == 0) return
-    if (n_warnings >= MAX_WARNINGS) return
+    if (n_warnings >= size(warnings)) return
 
     n_warnings = n_warnings + 1
     warnings(n_warnings)%file = trim(cur_file)
@@ -744,7 +748,7 @@ pure logical function is_symbol_boundary_before(line, pos)
 end function is_symbol_boundary_before
 
 subroutine lint_dedup_warnings(warnings, n_warnings)
-    type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
+    type(lint_warning_t), intent(inout) :: warnings(:)
     integer, intent(inout) :: n_warnings
 
     integer :: i, j, out
