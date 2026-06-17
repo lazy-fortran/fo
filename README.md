@@ -19,6 +19,8 @@ fo build            build only
 fo build --flag -O0 fast debug build
 fo test             run tests
 fo test --only-changed  run only tests affected by changes
+fo test <name>      rebuild and run one test (never run build/fo/bin/* by hand)
+fo exec <target> [args]  build, then run build/fo/bin/<target> with a fresh binary
 fo check            build + test, one-line status
 fo check --json     build + test, JSON status for agents
 fo check --json=compact  bounded JSON status for small local agents
