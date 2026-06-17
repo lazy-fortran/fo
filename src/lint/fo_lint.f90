@@ -339,7 +339,8 @@ subroutine lint_compiler(dir, warnings, n_warnings)
     character(len=512) :: moddir
     character(len=512), allocatable :: files(:)
     character(len=2048) :: mod_flags
-    integer :: n_files, i, n_removed
+    integer :: n_files, i, n_removed, k, local_n
+    type(lint_warning_t), allocatable :: local_w(:)
 
     n_warnings = 0
     call find_mod_include_flags(dir, mod_flags)
@@ -357,13 +358,36 @@ subroutine lint_compiler(dir, warnings, n_warnings)
         mod_flags = trim(mod_flags)//' -J'//trim(moddir)
 
     call collect_fortran_sources(dir, files, n_files)
+
+    ! Each file's -fsyntax-only pass is independent (dependency interfaces come
+    ! from the build's -I dirs, not the throwaway -J output), so compile them in
+    ! parallel: a per-thread buffer collects findings, merged under a critical
+    ! section. process_run and make_tmpfile are async-signal-safe and OpenMP-safe,
+    ! the same primitives the build's parallel compile uses.
+    !$omp parallel default(shared) private(i, k, local_w, local_n)
+    allocate (local_w(MAX_WARNINGS))
+    !$omp do schedule(dynamic)
     do i = 1, n_files
-        if (len_trim(files(i)) == 0) cycle
-        call lint_file_compiler(trim(files(i)), mod_flags, &
-            warnings, n_warnings)
-        call lint_file_lengths(trim(files(i)), warnings, n_warnings)
-        call lint_file_shortcircuit(trim(files(i)), warnings, n_warnings)
+        if (len_trim(files(i)) /= 0) then
+            local_n = 0
+            call lint_file_compiler(trim(files(i)), mod_flags, local_w, local_n)
+            call lint_file_lengths(trim(files(i)), local_w, local_n)
+            call lint_file_shortcircuit(trim(files(i)), local_w, local_n)
+            !$omp critical (lint_merge)
+            do k = 1, local_n
+                if (n_warnings < MAX_WARNINGS) then
+                    n_warnings = n_warnings + 1
+                    warnings(n_warnings) = local_w(k)
+                end if
+            end do
+            !$omp end critical (lint_merge)
+        end if
     end do
+    !$omp end do
+    deallocate (local_w)
+    !$omp end parallel
+
+    call sort_warnings(warnings, n_warnings)
     call fs_remove_tree(trim(moddir))
 end subroutine lint_compiler
 
@@ -463,6 +487,41 @@ subroutine lint_file_compiler(filepath, mod_flags, warnings, n_warnings)
     end if
     call delete_tmpfile(errfile)
 end subroutine lint_file_compiler
+
+subroutine sort_warnings(warnings, n_warnings)
+    !! Stable order by (file, line, column) so parallel collection still yields
+    !! deterministic output. Insertion sort: n_warnings is small (<= MAX).
+    type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
+    integer, intent(in) :: n_warnings
+
+    type(lint_warning_t) :: key
+    integer :: i, j
+
+    do i = 2, n_warnings
+        key = warnings(i)
+        j = i - 1
+        do while (j >= 1)
+            if (.not. warning_after(warnings(j), key)) exit
+            warnings(j + 1) = warnings(j)
+            j = j - 1
+        end do
+        warnings(j + 1) = key
+    end do
+end subroutine sort_warnings
+
+logical function warning_after(a, b)
+    !! True if a sorts after b by file, then line, then column.
+    type(lint_warning_t), intent(in) :: a, b
+
+    warning_after = .false.
+    if (trim(a%file) /= trim(b%file)) then
+        warning_after = trim(a%file) > trim(b%file)
+    else if (a%line /= b%line) then
+        warning_after = a%line > b%line
+    else
+        warning_after = a%column > b%column
+    end if
+end function warning_after
 
 subroutine lint_file_shortcircuit(filepath, warnings, n_warnings)
     !! Append short-circuit-evaluation hazards found by the textual detector.
