@@ -4,6 +4,7 @@ module fo_lint
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_collect_files, &
         fs_collect_mod_dirs
     use fo_process, only: process_run_argv_logged, argv_push, argv_push_split
+    use fo_lint_shortcircuit, only: shortcircuit_scan_file
     use fx_json_build, only: json_escape_string
     implicit none
     private
@@ -361,6 +362,7 @@ subroutine lint_compiler(dir, warnings, n_warnings)
         call lint_file_compiler(trim(files(i)), mod_flags, &
             warnings, n_warnings)
         call lint_file_lengths(trim(files(i)), warnings, n_warnings)
+        call lint_file_shortcircuit(trim(files(i)), warnings, n_warnings)
     end do
     call fs_remove_tree(trim(moddir))
 end subroutine lint_compiler
@@ -461,6 +463,27 @@ subroutine lint_file_compiler(filepath, mod_flags, warnings, n_warnings)
     end if
     call delete_tmpfile(errfile)
 end subroutine lint_file_compiler
+
+subroutine lint_file_shortcircuit(filepath, warnings, n_warnings)
+    !! Append short-circuit-evaluation hazards found by the textual detector.
+    character(len=*), intent(in) :: filepath
+    type(lint_warning_t), intent(inout) :: warnings(MAX_WARNINGS)
+    integer, intent(inout) :: n_warnings
+
+    integer :: hit_line(MAX_WARNINGS), n_hits, k
+    character(len=512) :: hit_msg(MAX_WARNINGS)
+
+    n_hits = 0
+    call shortcircuit_scan_file(filepath, hit_line, hit_msg, n_hits, MAX_WARNINGS)
+    do k = 1, n_hits
+        if (n_warnings >= MAX_WARNINGS) exit
+        n_warnings = n_warnings + 1
+        warnings(n_warnings)%file = trim(filepath)
+        warnings(n_warnings)%line = hit_line(k)
+        warnings(n_warnings)%column = 0
+        warnings(n_warnings)%message = trim(hit_msg(k))
+    end do
+end subroutine lint_file_shortcircuit
 
 subroutine parse_gfortran_warning(line, cur_file, cur_line, cur_col, &
         warnings, n_warnings)
