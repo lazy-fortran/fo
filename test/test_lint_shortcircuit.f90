@@ -23,6 +23,8 @@ program test_lint_shortcircuit
     call test_ignores_plain_logical_and()
     call test_ignores_grouping_paren_after_or()
     call test_flags_or_range_guard()
+    call test_flags_derived_type_cursor()
+    call test_ignores_function_call_of_component()
 
     write (output_unit, '(a,i0,a,i0,a)') 'lint_shortcircuit: ', n_pass, &
         ' pass, ', n_fail, ' fail'
@@ -169,6 +171,24 @@ contains
         call scan_lines(lines, 1, flagged, n)
         call assert(n == 1, 'or-form index bound + real subscript flagged')
     end subroutine test_flags_or_range_guard
+
+    subroutine test_flags_derived_type_cursor()
+        integer :: flagged(64), n
+        character(len=200) :: lines(1)
+
+        lines(1) = '        if (p%pos <= p%n .and. kind(p%tokens(p%pos)) == 3) then'
+        call scan_lines(lines, 1, flagged, n)
+        call assert(n == 1, 'derived-type cursor p%pos guard + subscript flagged')
+    end subroutine test_flags_derived_type_cursor
+
+    subroutine test_ignores_function_call_of_component()
+        integer :: flagged(64), n
+        character(len=200) :: lines(1)
+
+        lines(1) = '        if (p%pos <= p%n .and. ready(p%flag)) then'
+        call scan_lines(lines, 1, flagged, n)
+        call assert(n == 0, 'function call of an unrelated component not flagged')
+    end subroutine test_ignores_function_call_of_component
 
     subroutine scan_lines(lines, n_lines, flagged, n_flag)
         character(len=200), intent(in) :: lines(:)

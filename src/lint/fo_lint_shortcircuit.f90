@@ -295,7 +295,7 @@ contains
         e = j
         do
             if (j < 1) exit
-            if (.not. is_ident_char(expr(j:j))) exit
+            if (.not. is_expr_char(expr(j:j))) exit
             j = j - 1
         end do
         if (e > j) var = expr(j + 1:e)
@@ -319,7 +319,7 @@ contains
         s = i
         do
             if (i > L) exit
-            if (.not. is_ident_char(expr(i:i))) exit
+            if (.not. is_expr_char(expr(i:i))) exit
             i = i + 1
         end do
         if (i <= s) return
@@ -617,6 +617,14 @@ contains
                         (ic >= iachar('A') .and. ic <= iachar('Z')) .or. &
                         (ic >= iachar('0') .and. ic <= iachar('9')) .or. c == '_'
     end function is_ident_char
+
+    pure logical function is_expr_char(c)
+        !! Identifier char or '%', so a derived-type index like p%pos is read as
+        !! one subscript expression rather than the bare component name.
+        character(len=1), intent(in) :: c
+
+        is_expr_char = is_ident_char(c) .or. c == '%'
+    end function is_expr_char
 
     pure character(len=1) function lower_ch(c)
         character(len=1), intent(in) :: c
