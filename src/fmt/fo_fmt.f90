@@ -32,6 +32,13 @@ contains
             do i = 1, n_hits
                 if (index(hits(i), '/build/') > 0) cycle
                 if (index(hits(i), '/.git/') > 0) cycle
+                ! Vendored/virtualenv trees (numpy ships .f90 under site-packages)
+                ! are not project sources; the build scanner skips them too, so
+                ! the format check must not flag them. Keep the two scanners in sync.
+                if (index(hits(i), '/.venv/') > 0) cycle
+                if (index(hits(i), '/venv/') > 0) cycle
+                if (index(hits(i), '/site-packages/') > 0) cycle
+                if (index(hits(i), '/node_modules/') > 0) cycle
                 if (n_files >= size(files)) exit
                 n_files = n_files + 1
                 files(n_files) = hits(i)
