@@ -235,7 +235,7 @@ contains
         write (output_unit, '(a)') '  changed    list changed and affected modules'
         write (output_unit, '(a)') '  graph      module dependency graph'
         write (output_unit, '(a)') '  graph --dot  graph in Graphviz DOT format'
-        write (output_unit, '(a)') '  fmt        format sources (native, 88 col, 4 sp)'
+        write (output_unit, '(a)') '  fmt        format sources (project fprettify config if present)'
         write (output_unit, '(a)') '  fmt --check  check formatting without modifying files'
         write (output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
         write (output_unit, '(a)') '  watch --fmt  auto-format changed files before rebuild'
@@ -753,6 +753,15 @@ contains
     subroutine cmd_fmt()
         integer :: exitcode
         character(len=8192) :: fmt_output
+
+        if (has_arg('--help') .or. has_arg('-h')) then
+            write (output_unit, '(a)') 'usage: fo fmt [--check]'
+            write (output_unit, '(a)') ''
+            write (output_unit, '(a)') 'Formats project Fortran sources.'
+            write (output_unit, '(a)') 'Uses .fprettify or .fprettify.rc at the project root when present.'
+            write (output_unit, '(a)') 'Falls back to fo native formatting when no fprettify config exists.'
+            return
+        end if
 
         if (has_arg('--check')) then
             call fo_fmt_check_run('.', fmt_output, exitcode)
