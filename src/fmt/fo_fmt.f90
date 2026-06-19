@@ -5,6 +5,7 @@ module fo_fmt
     use fo_cache, only: cache_store_root, HASH_LEN
     use fx_hash, only: sha256_file
     use fo_format, only: format_file
+    use fo_process, only: process_run_argv_logged, argv_push
     implicit none
     private
     public :: fo_fmt_run, fo_fmt_check_run
@@ -100,12 +101,13 @@ contains
         integer, intent(out) :: exitcode
 
         type(backend_t) :: b
-        character(len=512) :: scan_root, list_file, fpath
+        character(len=512) :: scan_root, list_file, fpath, config_file
         integer :: u, ios, fmt_exit
 
         b = detect_backend(trim(dir))
         scan_root = trim(dir)
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+        call find_fprettify_config(scan_root, config_file)
 
         exitcode = 0
         call make_tmpfile('fo_fmt_files', list_file)
@@ -120,7 +122,7 @@ contains
             read (u, '(a)', iostat=ios) fpath
             if (ios /= 0) exit
             if (len_trim(fpath) == 0) cycle
-            call format_file(trim(fpath), fmt_exit)
+            call format_project_file(config_file, trim(fpath), fmt_exit)
             if (fmt_exit /= 0) exitcode = 1
         end do
         close (u)
@@ -133,13 +135,14 @@ contains
         integer, intent(out) :: exitcode
 
         type(backend_t) :: b
-        character(len=512) :: scan_root, list_file, fpath, tmpf
+        character(len=512) :: scan_root, list_file, fpath, tmpf, config_file
         character(len=HASH_LEN) :: action_id, orig_hash, fmt_hash
         integer :: u, ios, n_bad, fmt_exit, ho, hf
 
         b = detect_backend(trim(dir))
         scan_root = trim(dir)
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+        call find_fprettify_config(scan_root, config_file)
 
         exitcode = 0
         output = ''
@@ -148,7 +151,7 @@ contains
         call make_tmpfile('fo_fmt_files', list_file)
         call write_source_list(scan_root, list_file)
 
-        call fmt_action_id(list_file, action_id)
+        call fmt_action_id(list_file, config_file, action_id)
         if (len_trim(action_id) == HASH_LEN .and. fmt_marker_exists(action_id)) then
             call delete_tmpfile(list_file)
             return
@@ -167,9 +170,11 @@ contains
 
             call make_tmpfile('fo_fmt_check', tmpf)
             call fs_append_file(trim(fpath), trim(tmpf))
-            call format_file(trim(tmpf), fmt_exit)
+            call format_project_file(config_file, trim(tmpf), fmt_exit)
             if (fmt_exit /= 0) then
                 call delete_tmpfile(tmpf)
+                n_bad = n_bad + 1
+                output = trim(output)//trim(fpath)//': formatting failed'//achar(10)
                 cycle
             end if
             ! diff -q via byte-exact content hash of original vs formatted copy.
@@ -192,8 +197,58 @@ contains
         end if
     end subroutine fo_fmt_check_run
 
-    subroutine fmt_action_id(list_file, action_id)
+    subroutine find_fprettify_config(project_dir, config_file)
+        character(len=*), intent(in) :: project_dir
+        character(len=*), intent(out) :: config_file
+
+        logical :: exists
+
+        config_file = ''
+        inquire (file=trim(project_dir)//'/.fprettify', exist=exists)
+        if (exists) then
+            config_file = trim(project_dir)//'/.fprettify'
+            return
+        end if
+
+        inquire (file=trim(project_dir)//'/.fprettify.rc', exist=exists)
+        if (exists) config_file = trim(project_dir)//'/.fprettify.rc'
+    end subroutine find_fprettify_config
+
+    subroutine format_project_file(config_file, filepath, exitcode)
+        character(len=*), intent(in) :: config_file, filepath
+        integer, intent(out) :: exitcode
+
+        if (len_trim(config_file) == 0) then
+            call format_file(filepath, exitcode)
+        else
+            call fprettify_file(config_file, filepath, exitcode)
+        end if
+    end subroutine format_project_file
+
+    subroutine fprettify_file(config_file, filepath, exitcode)
+        character(len=*), intent(in) :: config_file, filepath
+        integer, intent(out) :: exitcode
+
+        character(len=:), allocatable :: packed
+        character(len=512) :: log_file
+        integer :: n_args
+
+        packed = ''
+        n_args = 0
+        call argv_push(packed, n_args, 'fprettify')
+        call argv_push(packed, n_args, '-c')
+        call argv_push(packed, n_args, trim(config_file))
+        call argv_push(packed, n_args, trim(filepath))
+
+        call make_tmpfile('fo_fprettify', log_file)
+        call process_run_argv_logged('', packed, n_args, trim(log_file), &
+            .false., 0, exitcode)
+        call delete_tmpfile(log_file)
+    end subroutine fprettify_file
+
+    subroutine fmt_action_id(list_file, config_file, action_id)
         character(len=*), intent(in) :: list_file
+        character(len=*), intent(in) :: config_file
         character(len=*), intent(out) :: action_id
 
         character(len=512) :: manifest, fpath
@@ -208,7 +263,14 @@ contains
             call delete_tmpfile(manifest)
             return
         end if
-        write (out_u, '(a)') 'fo-fmt-native-v1'
+        if (len_trim(config_file) == 0) then
+            write (out_u, '(a)') 'fo-fmt-native-v1'
+        else
+            write (out_u, '(a)') 'fo-fmt-fprettify-v1'
+            call sha256_file(trim(config_file), file_hash, ierr)
+            if (ierr == 0) write (out_u, '(a,1x,a)') &
+                trim(file_hash), trim(config_file)
+        end if
 
         open (newunit=in_u, file=trim(list_file), status='old', iostat=ios)
         if (ios == 0) then

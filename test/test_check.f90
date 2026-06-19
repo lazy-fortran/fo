@@ -37,6 +37,7 @@ program test_check
     call test_capabilities_unknown_compiler()
     call test_full_json_includes_capabilities()
     call test_fmt_check_caches_success()
+    call test_fmt_check_uses_fprettify_config()
     call test_compact_json_includes_test_results()
     call test_full_json_includes_test_results()
     call test_test_results_parse()
@@ -539,6 +540,46 @@ contains
         call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
     end subroutine test_fmt_check_caches_success
 
+    subroutine test_fmt_check_uses_fprettify_config()
+        character(len=512) :: project_dir, src_dir, output
+        integer :: u, exitcode
+
+        if (.not. fprettify_available()) then
+            call assert(.true., 'fprettify config test skipped when unavailable')
+            return
+        end if
+
+        call make_tmp_path('fo_fmt_config_project', project_dir)
+        src_dir = trim(project_dir)//'/src'
+        call execute_command_line('mkdir -p '//trim(src_dir), wait=.true.)
+
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "fmt_config_project"'
+        close (u)
+
+        open (newunit=u, file=trim(project_dir)//'/.fprettify', status='replace')
+        write (u, '(a)') 'indent = 2'
+        write (u, '(a)') 'line-length = 88'
+        close (u)
+
+        open (newunit=u, file=trim(src_dir)//'/lib.f90', status='replace')
+        write (u, '(a)') 'module lib'
+        write (u, '(a)') '  implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  subroutine noop()'
+        write (u, '(a)') '  end subroutine noop'
+        write (u, '(a)') 'end module lib'
+        close (u)
+
+        call fo_fmt_check_run(project_dir, output, exitcode)
+
+        call assert(exitcode == 0, 'format check honors .fprettify')
+        call assert(len_trim(output) == 0, &
+            'format check accepts project fprettify style')
+
+        call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
+    end subroutine test_fmt_check_uses_fprettify_config
+
     subroutine test_full_json_includes_capabilities()
         use fo_capabilities, only: capabilities_t, capabilities_json
         type(check_result_t) :: res
@@ -704,6 +745,14 @@ contains
         end do
         close (u)
     end function file_contains
+
+    logical function fprettify_available()
+        integer :: exitstat
+
+        call execute_command_line('command -v fprettify >/dev/null 2>&1', &
+            wait=.true., exitstat=exitstat)
+        fprettify_available = exitstat == 0
+    end function fprettify_available
 
     subroutine test_compact_json_includes_test_results()
         type(check_result_t) :: res
