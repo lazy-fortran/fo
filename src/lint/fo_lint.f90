@@ -306,573 +306,573 @@ contains
                     after_ch = lowered(i) (abs_pos + sym_len:abs_pos + sym_len)
                 if (is_symbol_boundary_before(lowered(i), abs_pos) .and. &
                     .not. is_ident_char(after_ch)) then
-                used = .true.
-                return
-            end if
-            pos = abs_pos + 1
-        end do
-    end do
-end subroutine is_symbol_used
-
-subroutine collect_fortran_sources(dir, files, n_files)
-    !! Collect *.f90/*.F90/*.f/*.F under dir, sorted, excluding any path
-    !! component */build or */.git. Replaces the find | sort pipeline.
-    character(len=*), intent(in) :: dir
-    character(len=512), allocatable, intent(out) :: files(:)
-    integer, intent(out) :: n_files
-
-    character(len=512), allocatable :: hits(:)
-    integer :: n_hits, s, i
-    character(len=4), parameter :: suffixes(4) = &
-        ['.f90', '.F90', '.f  ', '.F  ']
-
-    allocate (files(20000))
-    allocate (hits(20000))
-    n_files = 0
-    do s = 1, size(suffixes)
-        call fs_collect_files(dir, '', trim(suffixes(s)), '', hits, n_hits)
-        do i = 1, n_hits
-            if (skip_generated_source(dir, hits(i))) cycle
-            if (n_files >= size(files)) exit
-            n_files = n_files + 1
-            files(n_files) = hits(i)
-        end do
-    end do
-    ! merge-sort not needed for correctness, but keep deterministic order:
-    ! each suffix block is already sorted; sort the union by simple insertion.
-    do i = 2, n_files
-        block
-            character(len=512) :: key
-            integer :: j
-            key = files(i)
-            j = i - 1
-            do while (j >= 1)
-                if (llt(files(j), key) .or. files(j) == key) exit
-                files(j + 1) = files(j)
-                j = j - 1
-            end do
-            files(j + 1) = key
-        end block
-    end do
-    deallocate (hits)
-end subroutine collect_fortran_sources
-
-logical function skip_generated_source(root, path)
-    character(len=*), intent(in) :: root, path
-
-    character(len=512) :: rel, first, padded
-    integer :: root_len, slash
-
-    rel = trim(path)
-    root_len = len_trim(root)
-    if (root_len > 0 .and. len_trim(path) > root_len) then
-        if (path(1:root_len) == root(1:root_len)) then
-            rel = path(root_len + 1:)
-            if (rel(1:1) == '/') rel = rel(2:)
-        end if
-    end if
-
-    first = rel
-    slash = index(first, '/')
-    if (slash > 0) first = first(1:slash - 1)
-
-    skip_generated_source = .true.
-    if (index(trim(first), 'build') == 1) return
-    if (trim(first) == 'SRC') return
-    if (len_trim(first) > 0 .and. first(1:1) == '.') return
-
-    padded = '/'//trim(rel)//'/'
-    if (index(padded, '/_deps/') > 0) return
-    if (index(padded, '/dependencies/') > 0) return
-    if (index(padded, '/deps-src/') > 0) return
-    if (index(padded, '/.git/') > 0) return
-    if (index(padded, '/.venv/') > 0) return
-    if (index(padded, '/venv/') > 0) return
-    if (index(padded, '/site-packages/') > 0) return
-    if (index(padded, '/node_modules/') > 0) return
-
-    skip_generated_source = .false.
-end function skip_generated_source
-
-subroutine lint_dir(dir, findings, n_findings)
-    character(len=*), intent(in) :: dir
-    type(lint_finding_t), intent(out) :: findings(MAX_FINDINGS)
-    integer, intent(out) :: n_findings
-
-    character(len=512), allocatable :: files(:)
-    integer :: n_files, i
-
-    n_findings = 0
-    call collect_fortran_sources(dir, files, n_files)
-    do i = 1, n_files
-        if (len_trim(files(i)) == 0) cycle
-        call lint_file(trim(files(i)), findings, n_findings)
-    end do
-end subroutine lint_dir
-
-function lint_findings_json(findings, n_findings) result(json)
-    type(lint_finding_t), intent(in) :: findings(*)
-    integer, intent(in) :: n_findings
-    character(len=8192) :: json
-
-    integer :: i
-
-    if (n_findings == 0) then
-        json = '{"unused_imports":[],"count":0}'
-        return
-    end if
-
-    json = '{"unused_imports":['
-    do i = 1, n_findings
-        if (i > 1) json = trim(json)//','
-        json = trim(json)//'{"file":"'// &
-            trim(json_escape_string(findings(i)%file))//'"'// &
-            ',"line":'//trim(json_int(findings(i)%line))// &
-            ',"module":"'// &
-            trim(json_escape_string(findings(i)%module_name))//'"'// &
-            ',"symbol":"'// &
-            trim(json_escape_string(findings(i)%symbol))//'"}'
-    end do
-    json = trim(json)//'],"count":'//trim(json_int(n_findings))//'}'
-end function lint_findings_json
-
-subroutine lint_compiler(dir, warnings, n_warnings)
-    character(len=*), intent(in) :: dir
-    type(lint_warning_t), intent(out) :: warnings(MAX_WARNINGS)
-    integer, intent(out) :: n_warnings
-
-    character(len=512) :: moddir
-    character(len=512), allocatable :: files(:)
-    character(len=2048) :: mod_flags
-    integer :: n_files, i, n_removed, k, local_n
-    type(lint_warning_t), allocatable :: local_w(:)
-
-    n_warnings = 0
-    call find_mod_include_flags(dir, mod_flags)
-
-    ! Defence in depth: clear any stray root .mod/.smod/.o before linting, the
-    ! same sweep the build does, so lint leaves the project root clean.
-    call clean_root_build_artifacts(dir, n_removed)
-
-    ! Direct gfortran's module output to a temp dir. Without -J, even
-    ! -fsyntax-only writes .mod into the cwd (the project root), where they
-    ! shadow build/fo/mod and break later builds with stale module interfaces.
-    call make_tmpfile('fo_lint_mod', moddir)
-    call fs_make_dir(trim(moddir))
-    if (len_trim(mod_flags) + len_trim(moddir) + 4 <= len(mod_flags)) &
-        mod_flags = trim(mod_flags)//' -J'//trim(moddir)
-
-    call collect_fortran_sources(dir, files, n_files)
-
-    ! Each file's -fsyntax-only pass is independent (dependency interfaces come
-    ! from the build's -I dirs, not the throwaway -J output), so compile them in
-    ! parallel: a per-thread buffer collects findings, merged under a critical
-    ! section. process_run and make_tmpfile are async-signal-safe and OpenMP-safe,
-    ! the same primitives the build's parallel compile uses.
-    !$omp parallel default(shared) private(i, k, local_w, local_n)
-    allocate (local_w(MAX_FILE_WARN))
-    !$omp do schedule(dynamic)
-    do i = 1, n_files
-        if (len_trim(files(i)) /= 0) then
-            local_n = 0
-            call lint_file_compiler(trim(files(i)), mod_flags, local_w, local_n)
-            call lint_file_lengths(trim(files(i)), local_w, local_n)
-            call lint_file_shortcircuit(trim(files(i)), local_w, local_n)
-            !$omp critical (lint_merge)
-            do k = 1, local_n
-                if (n_warnings < MAX_WARNINGS) then
-                    n_warnings = n_warnings + 1
-                    warnings(n_warnings) = local_w(k)
+                    used = .true.
+                    return
                 end if
+                pos = abs_pos + 1
             end do
-            !$omp end critical (lint_merge)
-        end if
-    end do
-    !$omp end do
-    deallocate (local_w)
-    !$omp end parallel
+        end do
+    end subroutine is_symbol_used
 
-    call sort_warnings(warnings, n_warnings)
-    call fs_remove_tree(trim(moddir))
-end subroutine lint_compiler
+    subroutine collect_fortran_sources(dir, files, n_files)
+        !! Collect *.f90/*.F90/*.f/*.F under dir, sorted, excluding any path
+        !! component */build or */.git. Replaces the find | sort pipeline.
+        character(len=*), intent(in) :: dir
+        character(len=512), allocatable, intent(out) :: files(:)
+        integer, intent(out) :: n_files
 
-subroutine find_mod_include_flags(dir, flags)
-    character(len=*), intent(in) :: dir
-    character(len=*), intent(out) :: flags
+        character(len=512), allocatable :: hits(:)
+        integer :: n_hits, s, i
+        character(len=4), parameter :: suffixes(4) = &
+            ['.f90', '.F90', '.f  ', '.F  ']
 
-    character(len=512), allocatable :: moddirs(:)
-    integer :: n_moddirs, i
-
-    flags = ''
-    allocate (moddirs(4096))
-    call fs_collect_mod_dirs(trim(dir)//'/build', moddirs, n_moddirs)
-    do i = 1, n_moddirs
-        if (len_trim(moddirs(i)) == 0) cycle
-        if (len_trim(flags) + len_trim(moddirs(i)) + 4 > len(flags)) exit
-        flags = trim(flags)//' -I'//trim(moddirs(i))
-    end do
-    deallocate (moddirs)
-end subroutine find_mod_include_flags
-
-subroutine lint_file_lengths(filepath, warnings, n_warnings)
-    character(len=*), intent(in) :: filepath
-    type(lint_warning_t), intent(inout) :: warnings(:)
-    integer, intent(inout) :: n_warnings
-
-    character(len=2048) :: line
-    integer :: u, iostat, lineno, linelen
-
-    open (newunit=u, file=trim(filepath), status='old', iostat=iostat)
-    if (iostat /= 0) return
-
-    lineno = 0
-    do
-        read (u, '(a)', iostat=iostat) line
-        if (iostat /= 0) exit
-        lineno = lineno + 1
-        linelen = len_trim(line)
-        if (linelen > 132) then
+        allocate (files(20000))
+        allocate (hits(20000))
+        n_files = 0
+        do s = 1, size(suffixes)
+            call fs_collect_files(dir, '', trim(suffixes(s)), '', hits, n_hits)
+            do i = 1, n_hits
+                if (skip_generated_source(dir, hits(i))) cycle
+                if (n_files >= size(files)) exit
+                n_files = n_files + 1
+                files(n_files) = hits(i)
+            end do
+        end do
+        ! merge-sort not needed for correctness, but keep deterministic order:
+        ! each suffix block is already sorted; sort the union by simple insertion.
+        do i = 2, n_files
             block
-                character(len=len(line)) :: stripped
-                stripped = adjustl(line)
-                if (stripped(1:1) == '#') cycle
+                character(len=512) :: key
+                integer :: j
+                key = files(i)
+                j = i - 1
+                do while (j >= 1)
+                    if (llt(files(j), key) .or. files(j) == key) exit
+                    files(j + 1) = files(j)
+                    j = j - 1
+                end do
+                files(j + 1) = key
             end block
-            if (n_warnings < size(warnings)) then
-                n_warnings = n_warnings + 1
-                warnings(n_warnings)%file = trim(filepath)
-                warnings(n_warnings)%line = lineno
-                warnings(n_warnings)%column = 133
-                write (warnings(n_warnings)%message, '(a,i0,a)') &
-                    'line exceeds 132 characters (', linelen, ' chars)'
+        end do
+        deallocate (hits)
+    end subroutine collect_fortran_sources
+
+    logical function skip_generated_source(root, path)
+        character(len=*), intent(in) :: root, path
+
+        character(len=512) :: rel, first, padded
+        integer :: root_len, slash
+
+        rel = trim(path)
+        root_len = len_trim(root)
+        if (root_len > 0 .and. len_trim(path) > root_len) then
+            if (path(1:root_len) == root(1:root_len)) then
+                rel = path(root_len + 1:)
+                if (rel(1:1) == '/') rel = rel(2:)
             end if
         end if
-    end do
-    close (u)
-end subroutine lint_file_lengths
 
-subroutine lint_file_compiler(filepath, mod_flags, warnings, n_warnings)
-    character(len=*), intent(in) :: filepath, mod_flags
-    type(lint_warning_t), intent(inout) :: warnings(:)
-    integer, intent(inout) :: n_warnings
+        first = rel
+        slash = index(first, '/')
+        if (slash > 0) first = first(1:slash - 1)
 
-    character(len=512) :: errfile
-    character(len=1024) :: line
-    character(len=256) :: cur_file
-    integer :: cur_line, cur_col
-    integer :: u, iostat
-    character(len=:), allocatable :: packed
-    integer :: n_args, exitcode
+        skip_generated_source = .true.
+        if (index(trim(first), 'build') == 1) return
+        if (trim(first) == 'SRC') return
+        if (len_trim(first) > 0 .and. first(1:1) == '.') return
 
-    call make_tmpfile('fo_lint_gfortran', errfile)
-    n_args = 0
-    call argv_push(packed, n_args, 'gfortran')
-    call argv_push(packed, n_args, '-fsyntax-only')
-    call argv_push(packed, n_args, '-Wall')
-    call argv_push(packed, n_args, '-Wextra')
-    call argv_push(packed, n_args, '-Wno-unused')
-    call argv_push(packed, n_args, '-Wimplicit-interface')
-    call argv_push(packed, n_args, '-Wimplicit-procedure')
-    call argv_push_split(packed, n_args, trim(mod_flags))
-    call argv_push(packed, n_args, trim(filepath))
-    call process_run_argv_logged('', packed, n_args, trim(errfile), &
-        .false., 120, exitcode)
+        padded = '/'//trim(rel)//'/'
+        if (index(padded, '/_deps/') > 0) return
+        if (index(padded, '/dependencies/') > 0) return
+        if (index(padded, '/deps-src/') > 0) return
+        if (index(padded, '/.git/') > 0) return
+        if (index(padded, '/.venv/') > 0) return
+        if (index(padded, '/venv/') > 0) return
+        if (index(padded, '/site-packages/') > 0) return
+        if (index(padded, '/node_modules/') > 0) return
 
-    cur_file = ''
-    cur_line = 0
-    cur_col = 0
+        skip_generated_source = .false.
+    end function skip_generated_source
 
-    open (newunit=u, file=errfile, status='old', iostat=iostat)
-    if (iostat == 0) then
+    subroutine lint_dir(dir, findings, n_findings)
+        character(len=*), intent(in) :: dir
+        type(lint_finding_t), intent(out) :: findings(MAX_FINDINGS)
+        integer, intent(out) :: n_findings
+
+        character(len=512), allocatable :: files(:)
+        integer :: n_files, i
+
+        n_findings = 0
+        call collect_fortran_sources(dir, files, n_files)
+        do i = 1, n_files
+            if (len_trim(files(i)) == 0) cycle
+            call lint_file(trim(files(i)), findings, n_findings)
+        end do
+    end subroutine lint_dir
+
+    function lint_findings_json(findings, n_findings) result(json)
+        type(lint_finding_t), intent(in) :: findings(*)
+        integer, intent(in) :: n_findings
+        character(len=8192) :: json
+
+        integer :: i
+
+        if (n_findings == 0) then
+            json = '{"unused_imports":[],"count":0}'
+            return
+        end if
+
+        json = '{"unused_imports":['
+        do i = 1, n_findings
+            if (i > 1) json = trim(json)//','
+            json = trim(json)//'{"file":"'// &
+                trim(json_escape_string(findings(i)%file))//'"'// &
+                ',"line":'//trim(json_int(findings(i)%line))// &
+                ',"module":"'// &
+                trim(json_escape_string(findings(i)%module_name))//'"'// &
+                ',"symbol":"'// &
+                trim(json_escape_string(findings(i)%symbol))//'"}'
+        end do
+        json = trim(json)//'],"count":'//trim(json_int(n_findings))//'}'
+    end function lint_findings_json
+
+    subroutine lint_compiler(dir, warnings, n_warnings)
+        character(len=*), intent(in) :: dir
+        type(lint_warning_t), intent(out) :: warnings(MAX_WARNINGS)
+        integer, intent(out) :: n_warnings
+
+        character(len=512) :: moddir
+        character(len=512), allocatable :: files(:)
+        character(len=2048) :: mod_flags
+        integer :: n_files, i, n_removed, k, local_n
+        type(lint_warning_t), allocatable :: local_w(:)
+
+        n_warnings = 0
+        call find_mod_include_flags(dir, mod_flags)
+
+        ! Defence in depth: clear any stray root .mod/.smod/.o before linting, the
+        ! same sweep the build does, so lint leaves the project root clean.
+        call clean_root_build_artifacts(dir, n_removed)
+
+        ! Direct gfortran's module output to a temp dir. Without -J, even
+        ! -fsyntax-only writes .mod into the cwd (the project root), where they
+        ! shadow build/fo/mod and break later builds with stale module interfaces.
+        call make_tmpfile('fo_lint_mod', moddir)
+        call fs_make_dir(trim(moddir))
+        if (len_trim(mod_flags) + len_trim(moddir) + 4 <= len(mod_flags)) &
+            mod_flags = trim(mod_flags)//' -J'//trim(moddir)
+
+        call collect_fortran_sources(dir, files, n_files)
+
+        ! Each file's -fsyntax-only pass is independent (dependency interfaces come
+        ! from the build's -I dirs, not the throwaway -J output), so compile them in
+        ! parallel: a per-thread buffer collects findings, merged under a critical
+        ! section. process_run and make_tmpfile are async-signal-safe and OpenMP-safe,
+        ! the same primitives the build's parallel compile uses.
+        !$omp parallel default(shared) private(i, k, local_w, local_n)
+        allocate (local_w(MAX_FILE_WARN))
+        !$omp do schedule(dynamic)
+        do i = 1, n_files
+            if (len_trim(files(i)) /= 0) then
+                local_n = 0
+                call lint_file_compiler(trim(files(i)), mod_flags, local_w, local_n)
+                call lint_file_lengths(trim(files(i)), local_w, local_n)
+                call lint_file_shortcircuit(trim(files(i)), local_w, local_n)
+                !$omp critical (lint_merge)
+                do k = 1, local_n
+                    if (n_warnings < MAX_WARNINGS) then
+                        n_warnings = n_warnings + 1
+                        warnings(n_warnings) = local_w(k)
+                    end if
+                end do
+                !$omp end critical (lint_merge)
+            end if
+        end do
+        !$omp end do
+        deallocate (local_w)
+        !$omp end parallel
+
+        call sort_warnings(warnings, n_warnings)
+        call fs_remove_tree(trim(moddir))
+    end subroutine lint_compiler
+
+    subroutine find_mod_include_flags(dir, flags)
+        character(len=*), intent(in) :: dir
+        character(len=*), intent(out) :: flags
+
+        character(len=512), allocatable :: moddirs(:)
+        integer :: n_moddirs, i
+
+        flags = ''
+        allocate (moddirs(4096))
+        call fs_collect_mod_dirs(trim(dir)//'/build', moddirs, n_moddirs)
+        do i = 1, n_moddirs
+            if (len_trim(moddirs(i)) == 0) cycle
+            if (len_trim(flags) + len_trim(moddirs(i)) + 4 > len(flags)) exit
+            flags = trim(flags)//' -I'//trim(moddirs(i))
+        end do
+        deallocate (moddirs)
+    end subroutine find_mod_include_flags
+
+    subroutine lint_file_lengths(filepath, warnings, n_warnings)
+        character(len=*), intent(in) :: filepath
+        type(lint_warning_t), intent(inout) :: warnings(:)
+        integer, intent(inout) :: n_warnings
+
+        character(len=2048) :: line
+        integer :: u, iostat, lineno, linelen
+
+        open (newunit=u, file=trim(filepath), status='old', iostat=iostat)
+        if (iostat /= 0) return
+
+        lineno = 0
         do
             read (u, '(a)', iostat=iostat) line
             if (iostat /= 0) exit
-            call parse_gfortran_warning(line, cur_file, cur_line, &
-                cur_col, warnings, n_warnings)
-        end do
-        close (u)
-    end if
-    call delete_tmpfile(errfile)
-end subroutine lint_file_compiler
-
-subroutine sort_warnings(warnings, n_warnings)
-    !! Stable order by (file, line, column) so parallel collection still yields
-    !! deterministic output. Insertion sort: n_warnings is small (<= MAX).
-    type(lint_warning_t), intent(inout) :: warnings(:)
-    integer, intent(in) :: n_warnings
-
-    type(lint_warning_t) :: key
-    integer :: i, j
-
-    do i = 2, n_warnings
-        key = warnings(i)
-        j = i - 1
-        do while (j >= 1)
-            if (.not. warning_after(warnings(j), key)) exit
-            warnings(j + 1) = warnings(j)
-            j = j - 1
-        end do
-        warnings(j + 1) = key
-    end do
-end subroutine sort_warnings
-
-logical function warning_after(a, b)
-    !! True if a sorts after b by file, then line, then column.
-    type(lint_warning_t), intent(in) :: a, b
-
-    warning_after = .false.
-    if (trim(a%file) /= trim(b%file)) then
-        warning_after = trim(a%file) > trim(b%file)
-    else if (a%line /= b%line) then
-        warning_after = a%line > b%line
-    else
-        warning_after = a%column > b%column
-    end if
-end function warning_after
-
-subroutine lint_file_shortcircuit(filepath, warnings, n_warnings)
-    !! Append short-circuit-evaluation hazards found by the textual detector.
-    character(len=*), intent(in) :: filepath
-    type(lint_warning_t), intent(inout) :: warnings(:)
-    integer, intent(inout) :: n_warnings
-
-    integer :: hit_line(MAX_FILE_WARN), n_hits, k
-    character(len=512) :: hit_msg(MAX_FILE_WARN)
-
-    n_hits = 0
-    call shortcircuit_scan_file(filepath, hit_line, hit_msg, n_hits, MAX_FILE_WARN)
-    do k = 1, n_hits
-        if (n_warnings >= size(warnings)) exit
-        n_warnings = n_warnings + 1
-        warnings(n_warnings)%file = trim(filepath)
-        warnings(n_warnings)%line = hit_line(k)
-        warnings(n_warnings)%column = 0
-        warnings(n_warnings)%message = trim(hit_msg(k))
-    end do
-end subroutine lint_file_shortcircuit
-
-subroutine parse_gfortran_warning(line, cur_file, cur_line, cur_col, &
-        warnings, n_warnings)
-    character(len=*), intent(in) :: line
-    character(len=256), intent(inout) :: cur_file
-    integer, intent(inout) :: cur_line, cur_col
-    type(lint_warning_t), intent(inout) :: warnings(:)
-    integer, intent(inout) :: n_warnings
-
-    character(len=1024) :: clean
-    integer :: ext_pos, c1, c2, c3, iostat
-    character(len=32) :: num_str
-
-    clean = adjustl(line)
-    if (len_trim(clean) == 0) return
-
-    ext_pos = index(clean, '.f90:')
-    if (ext_pos == 0) ext_pos = index(clean, '.F90:')
-    if (ext_pos > 0) then
-        c1 = ext_pos + 4
-        c2 = index(clean(c1 + 1:), ':')
-        if (c2 > 0) then
-            c2 = c1 + c2
-            num_str = clean(c1 + 1:c2 - 1)
-            read (num_str, *, iostat=iostat) cur_line
-            if (iostat == 0) then
-                cur_file = clean(1:c1 - 1)
-                cur_col = 0
-                c3 = index(clean(c2 + 1:), ':')
-                if (c3 > 0) then
-                    c3 = c2 + c3
-                    num_str = clean(c2 + 1:c3 - 1)
-                    read (num_str, *, iostat=iostat) cur_col
-                    if (iostat /= 0) cur_col = 0
+            lineno = lineno + 1
+            linelen = len_trim(line)
+            if (linelen > 132) then
+                block
+                    character(len=len(line)) :: stripped
+                    stripped = adjustl(line)
+                    if (stripped(1:1) == '#') cycle
+                end block
+                if (n_warnings < size(warnings)) then
+                    n_warnings = n_warnings + 1
+                    warnings(n_warnings)%file = trim(filepath)
+                    warnings(n_warnings)%line = lineno
+                    warnings(n_warnings)%column = 133
+                    write (warnings(n_warnings)%message, '(a,i0,a)') &
+                        'line exceeds 132 characters (', linelen, ' chars)'
                 end if
             end if
+        end do
+        close (u)
+    end subroutine lint_file_lengths
+
+    subroutine lint_file_compiler(filepath, mod_flags, warnings, n_warnings)
+        character(len=*), intent(in) :: filepath, mod_flags
+        type(lint_warning_t), intent(inout) :: warnings(:)
+        integer, intent(inout) :: n_warnings
+
+        character(len=512) :: errfile
+        character(len=1024) :: line
+        character(len=256) :: cur_file
+        integer :: cur_line, cur_col
+        integer :: u, iostat
+        character(len=:), allocatable :: packed
+        integer :: n_args, exitcode
+
+        call make_tmpfile('fo_lint_gfortran', errfile)
+        n_args = 0
+        call argv_push(packed, n_args, 'gfortran')
+        call argv_push(packed, n_args, '-fsyntax-only')
+        call argv_push(packed, n_args, '-Wall')
+        call argv_push(packed, n_args, '-Wextra')
+        call argv_push(packed, n_args, '-Wno-unused')
+        call argv_push(packed, n_args, '-Wimplicit-interface')
+        call argv_push(packed, n_args, '-Wimplicit-procedure')
+        call argv_push_split(packed, n_args, trim(mod_flags))
+        call argv_push(packed, n_args, trim(filepath))
+        call process_run_argv_logged('', packed, n_args, trim(errfile), &
+            .false., 120, exitcode)
+
+        cur_file = ''
+        cur_line = 0
+        cur_col = 0
+
+        open (newunit=u, file=errfile, status='old', iostat=iostat)
+        if (iostat == 0) then
+            do
+                read (u, '(a)', iostat=iostat) line
+                if (iostat /= 0) exit
+                call parse_gfortran_warning(line, cur_file, cur_line, &
+                    cur_col, warnings, n_warnings)
+            end do
+            close (u)
         end if
-        return
-    end if
+        call delete_tmpfile(errfile)
+    end subroutine lint_file_compiler
 
-    if (index(clean, 'Warning:') /= 1) return
-    if (index(clean, "Can't open module file") > 0) return
-    if (index(clean, 'Fatal Error') > 0) return
-    if (index(clean, 'stack-var-size') > 0) return
-    if (len_trim(cur_file) == 0) return
-    if (n_warnings >= size(warnings)) return
+    subroutine sort_warnings(warnings, n_warnings)
+        !! Stable order by (file, line, column) so parallel collection still yields
+        !! deterministic output. Insertion sort: n_warnings is small (<= MAX).
+        type(lint_warning_t), intent(inout) :: warnings(:)
+        integer, intent(in) :: n_warnings
 
-    n_warnings = n_warnings + 1
-    warnings(n_warnings)%file = trim(cur_file)
-    warnings(n_warnings)%line = cur_line
-    warnings(n_warnings)%column = cur_col
-    warnings(n_warnings)%message = trim(clean)
-end subroutine parse_gfortran_warning
+        type(lint_warning_t) :: key
+        integer :: i, j
 
-function lint_warnings_json(warnings, n_warnings) result(json)
-    type(lint_warning_t), intent(in) :: warnings(*)
-    integer, intent(in) :: n_warnings
-    character(len=8192) :: json
+        do i = 2, n_warnings
+            key = warnings(i)
+            j = i - 1
+            do while (j >= 1)
+                if (.not. warning_after(warnings(j), key)) exit
+                warnings(j + 1) = warnings(j)
+                j = j - 1
+            end do
+            warnings(j + 1) = key
+        end do
+    end subroutine sort_warnings
 
-    integer :: i
+    logical function warning_after(a, b)
+        !! True if a sorts after b by file, then line, then column.
+        type(lint_warning_t), intent(in) :: a, b
 
-    if (n_warnings == 0) then
-        json = '{"warnings":[],"count":0}'
-        return
-    end if
+        warning_after = .false.
+        if (trim(a%file) /= trim(b%file)) then
+            warning_after = trim(a%file) > trim(b%file)
+        else if (a%line /= b%line) then
+            warning_after = a%line > b%line
+        else
+            warning_after = a%column > b%column
+        end if
+    end function warning_after
 
-    json = '{"warnings":['
-    do i = 1, n_warnings
-        if (i > 1) json = trim(json)//','
-        json = trim(json)//'{"file":"'// &
-            trim(json_escape_string(warnings(i)%file))//'"'// &
-            ',"line":'//trim(json_int(warnings(i)%line))// &
-            ',"column":'//trim(json_int(warnings(i)%column))// &
-            ',"message":"'// &
-            trim(json_escape_string(warnings(i)%message))//'"}'
-    end do
-    json = trim(json)//'],"count":'//trim(json_int(n_warnings))//'}'
-end function lint_warnings_json
+    subroutine lint_file_shortcircuit(filepath, warnings, n_warnings)
+        !! Append short-circuit-evaluation hazards found by the textual detector.
+        character(len=*), intent(in) :: filepath
+        type(lint_warning_t), intent(inout) :: warnings(:)
+        integer, intent(inout) :: n_warnings
 
-function lint_all_json(findings, n_findings, warnings, n_warnings) &
-        result(json)
-    type(lint_finding_t), intent(in) :: findings(*)
-    integer, intent(in) :: n_findings
-    type(lint_warning_t), intent(in) :: warnings(*)
-    integer, intent(in) :: n_warnings
-    character(len=16384) :: json
+        integer :: hit_line(MAX_FILE_WARN), n_hits, k
+        character(len=512) :: hit_msg(MAX_FILE_WARN)
 
-    integer, parameter :: LIMIT = 15000
-    integer :: i, total, n_emitted
+        n_hits = 0
+        call shortcircuit_scan_file(filepath, hit_line, hit_msg, n_hits, MAX_FILE_WARN)
+        do k = 1, n_hits
+            if (n_warnings >= size(warnings)) exit
+            n_warnings = n_warnings + 1
+            warnings(n_warnings)%file = trim(filepath)
+            warnings(n_warnings)%line = hit_line(k)
+            warnings(n_warnings)%column = 0
+            warnings(n_warnings)%message = trim(hit_msg(k))
+        end do
+    end subroutine lint_file_shortcircuit
 
-    total = n_findings + n_warnings
-    json = '{"unused_imports":['
+    subroutine parse_gfortran_warning(line, cur_file, cur_line, cur_col, &
+            warnings, n_warnings)
+        character(len=*), intent(in) :: line
+        character(len=256), intent(inout) :: cur_file
+        integer, intent(inout) :: cur_line, cur_col
+        type(lint_warning_t), intent(inout) :: warnings(:)
+        integer, intent(inout) :: n_warnings
 
-    do i = 1, n_findings
-        if (len_trim(json) > LIMIT) exit
-        if (i > 1) json = trim(json)//','
-        json = trim(json)//'{"file":"'// &
-            trim(json_escape_string(findings(i)%file))//'"'// &
-            ',"line":'//trim(json_int(findings(i)%line))// &
-            ',"module":"'// &
-            trim(json_escape_string(findings(i)%module_name))//'"'// &
-            ',"symbol":"'// &
-            trim(json_escape_string(findings(i)%symbol))//'"}'
-    end do
+        character(len=1024) :: clean
+        integer :: ext_pos, c1, c2, c3, iostat
+        character(len=32) :: num_str
 
-    json = trim(json)//'],"warnings":['
+        clean = adjustl(line)
+        if (len_trim(clean) == 0) return
 
-    n_emitted = 0
-    do i = 1, n_warnings
-        if (len_trim(json) > LIMIT) exit
-        if (n_emitted > 0) json = trim(json)//','
-        n_emitted = n_emitted + 1
-        json = trim(json)//'{"file":"'// &
-            trim(json_escape_string(warnings(i)%file))//'"'// &
-            ',"line":'//trim(json_int(warnings(i)%line))// &
-            ',"column":'//trim(json_int(warnings(i)%column))// &
-            ',"message":"'// &
-            trim(json_escape_string(warnings(i)%message))//'"}'
-    end do
-
-    json = trim(json)//'],"count":'//trim(json_int(total))//'}'
-end function lint_all_json
-
-pure function to_lower(str) result(low)
-    character(len=*), intent(in) :: str
-    character(len=len(str)) :: low
-    integer :: i, ic
-
-    low = str
-    do i = 1, len_trim(low)
-        ic = iachar(low(i:i))
-        if (ic >= iachar('A') .and. ic <= iachar('Z')) &
-            low(i:i) = achar(ic + 32)
-    end do
-end function to_lower
-
-pure subroutine strip_leading(str)
-    character(len=*), intent(inout) :: str
-    integer :: i
-
-    do i = 1, len_trim(str)
-        if (str(i:i) /= ' ' .and. str(i:i) /= char(9)) then
-            str = str(i:)
+        ext_pos = index(clean, '.f90:')
+        if (ext_pos == 0) ext_pos = index(clean, '.F90:')
+        if (ext_pos > 0) then
+            c1 = ext_pos + 4
+            c2 = index(clean(c1 + 1:), ':')
+            if (c2 > 0) then
+                c2 = c1 + c2
+                num_str = clean(c1 + 1:c2 - 1)
+                read (num_str, *, iostat=iostat) cur_line
+                if (iostat == 0) then
+                    cur_file = clean(1:c1 - 1)
+                    cur_col = 0
+                    c3 = index(clean(c2 + 1:), ':')
+                    if (c3 > 0) then
+                        c3 = c2 + c3
+                        num_str = clean(c2 + 1:c3 - 1)
+                        read (num_str, *, iostat=iostat) cur_col
+                        if (iostat /= 0) cur_col = 0
+                    end if
+                end if
+            end if
             return
         end if
-    end do
-    str = ''
-end subroutine strip_leading
 
-pure subroutine strip_trailing(str)
-    character(len=*), intent(inout) :: str
-    integer :: i
+        if (index(clean, 'Warning:') /= 1) return
+        if (index(clean, "Can't open module file") > 0) return
+        if (index(clean, 'Fatal Error') > 0) return
+        if (index(clean, 'stack-var-size') > 0) return
+        if (len_trim(cur_file) == 0) return
+        if (n_warnings >= size(warnings)) return
 
-    do i = len_trim(str), 1, -1
-        if (str(i:i) /= ' ' .and. str(i:i) /= char(9)) then
-            str(i + 1:) = ''
+        n_warnings = n_warnings + 1
+        warnings(n_warnings)%file = trim(cur_file)
+        warnings(n_warnings)%line = cur_line
+        warnings(n_warnings)%column = cur_col
+        warnings(n_warnings)%message = trim(clean)
+    end subroutine parse_gfortran_warning
+
+    function lint_warnings_json(warnings, n_warnings) result(json)
+        type(lint_warning_t), intent(in) :: warnings(*)
+        integer, intent(in) :: n_warnings
+        character(len=8192) :: json
+
+        integer :: i
+
+        if (n_warnings == 0) then
+            json = '{"warnings":[],"count":0}'
             return
         end if
-    end do
-    str = ''
-end subroutine strip_trailing
 
-pure logical function starts_with(str, prefix)
-    character(len=*), intent(in) :: str, prefix
+        json = '{"warnings":['
+        do i = 1, n_warnings
+            if (i > 1) json = trim(json)//','
+            json = trim(json)//'{"file":"'// &
+                trim(json_escape_string(warnings(i)%file))//'"'// &
+                ',"line":'//trim(json_int(warnings(i)%line))// &
+                ',"column":'//trim(json_int(warnings(i)%column))// &
+                ',"message":"'// &
+                trim(json_escape_string(warnings(i)%message))//'"}'
+        end do
+        json = trim(json)//'],"count":'//trim(json_int(n_warnings))//'}'
+    end function lint_warnings_json
 
-    starts_with = .false.
-    if (len_trim(str) >= len(prefix)) starts_with = (str(1:len(prefix)) == prefix)
-end function starts_with
+    function lint_all_json(findings, n_findings, warnings, n_warnings) &
+            result(json)
+        type(lint_finding_t), intent(in) :: findings(*)
+        integer, intent(in) :: n_findings
+        type(lint_warning_t), intent(in) :: warnings(*)
+        integer, intent(in) :: n_warnings
+        character(len=16384) :: json
 
-pure logical function is_ident_char(c)
-    character(len=1), intent(in) :: c
-    integer :: ic
+        integer, parameter :: LIMIT = 15000
+        integer :: i, total, n_emitted
 
-    ic = iachar(c)
-    is_ident_char = (ic >= iachar('a') .and. ic <= iachar('z')) .or. &
-        (ic >= iachar('A') .and. ic <= iachar('Z')) .or. &
-        (ic >= iachar('0') .and. ic <= iachar('9')) .or. &
-        c == '_'
-end function is_ident_char
+        total = n_findings + n_warnings
+        json = '{"unused_imports":['
 
-pure logical function is_symbol_boundary_before(line, pos)
-    character(len=*), intent(in) :: line
-    integer, intent(in) :: pos
+        do i = 1, n_findings
+            if (len_trim(json) > LIMIT) exit
+            if (i > 1) json = trim(json)//','
+            json = trim(json)//'{"file":"'// &
+                trim(json_escape_string(findings(i)%file))//'"'// &
+                ',"line":'//trim(json_int(findings(i)%line))// &
+                ',"module":"'// &
+                trim(json_escape_string(findings(i)%module_name))//'"'// &
+                ',"symbol":"'// &
+                trim(json_escape_string(findings(i)%symbol))//'"}'
+        end do
 
-    character(len=1) :: before_ch, kind_prefix
+        json = trim(json)//'],"warnings":['
 
-    is_symbol_boundary_before = .true.
-    if (pos <= 1) return
+        n_emitted = 0
+        do i = 1, n_warnings
+            if (len_trim(json) > LIMIT) exit
+            if (n_emitted > 0) json = trim(json)//','
+            n_emitted = n_emitted + 1
+            json = trim(json)//'{"file":"'// &
+                trim(json_escape_string(warnings(i)%file))//'"'// &
+                ',"line":'//trim(json_int(warnings(i)%line))// &
+                ',"column":'//trim(json_int(warnings(i)%column))// &
+                ',"message":"'// &
+                trim(json_escape_string(warnings(i)%message))//'"}'
+        end do
 
-    before_ch = line(pos - 1:pos - 1)
-    if (.not. is_ident_char(before_ch)) return
+        json = trim(json)//'],"count":'//trim(json_int(total))//'}'
+    end function lint_all_json
 
-    is_symbol_boundary_before = .false.
-    if (before_ch /= '_' .or. pos <= 2) return
+    pure function to_lower(str) result(low)
+        character(len=*), intent(in) :: str
+        character(len=len(str)) :: low
+        integer :: i, ic
 
-    kind_prefix = line(pos - 2:pos - 2)
-    is_symbol_boundary_before = (kind_prefix >= '0' .and. kind_prefix <= '9') .or. &
-        kind_prefix == '"' .or. kind_prefix == "'"
-end function is_symbol_boundary_before
+        low = str
+        do i = 1, len_trim(low)
+            ic = iachar(low(i:i))
+            if (ic >= iachar('A') .and. ic <= iachar('Z')) &
+                low(i:i) = achar(ic + 32)
+        end do
+    end function to_lower
 
-subroutine lint_dedup_warnings(warnings, n_warnings)
-    type(lint_warning_t), intent(inout) :: warnings(:)
-    integer, intent(inout) :: n_warnings
+    pure subroutine strip_leading(str)
+        character(len=*), intent(inout) :: str
+        integer :: i
 
-    integer :: i, j, out
-    logical :: dup
+        do i = 1, len_trim(str)
+            if (str(i:i) /= ' ' .and. str(i:i) /= char(9)) then
+                str = str(i:)
+                return
+            end if
+        end do
+        str = ''
+    end subroutine strip_leading
 
-    out = 0
-    do i = 1, n_warnings
-        dup = .false.
-        do j = 1, out
-            if (trim(warnings(j)%file) == trim(warnings(i)%file) .and. &
-                warnings(j)%line == warnings(i)%line .and. &
-                trim(warnings(j)%message) == trim(warnings(i)%message)) then
-            dup = .true.
-            exit
-        end if
-    end do
-    if (.not. dup) then
-        out = out + 1
-        if (out /= i) warnings(out) = warnings(i)
-    end if
-end do
-n_warnings = out
-end subroutine lint_dedup_warnings
+    pure subroutine strip_trailing(str)
+        character(len=*), intent(inout) :: str
+        integer :: i
+
+        do i = len_trim(str), 1, -1
+            if (str(i:i) /= ' ' .and. str(i:i) /= char(9)) then
+                str(i + 1:) = ''
+                return
+            end if
+        end do
+        str = ''
+    end subroutine strip_trailing
+
+    pure logical function starts_with(str, prefix)
+        character(len=*), intent(in) :: str, prefix
+
+        starts_with = .false.
+        if (len_trim(str) >= len(prefix)) starts_with = (str(1:len(prefix)) == prefix)
+    end function starts_with
+
+    pure logical function is_ident_char(c)
+        character(len=1), intent(in) :: c
+        integer :: ic
+
+        ic = iachar(c)
+        is_ident_char = (ic >= iachar('a') .and. ic <= iachar('z')) .or. &
+            (ic >= iachar('A') .and. ic <= iachar('Z')) .or. &
+            (ic >= iachar('0') .and. ic <= iachar('9')) .or. &
+            c == '_'
+    end function is_ident_char
+
+    pure logical function is_symbol_boundary_before(line, pos)
+        character(len=*), intent(in) :: line
+        integer, intent(in) :: pos
+
+        character(len=1) :: before_ch, kind_prefix
+
+        is_symbol_boundary_before = .true.
+        if (pos <= 1) return
+
+        before_ch = line(pos - 1:pos - 1)
+        if (.not. is_ident_char(before_ch)) return
+
+        is_symbol_boundary_before = .false.
+        if (before_ch /= '_' .or. pos <= 2) return
+
+        kind_prefix = line(pos - 2:pos - 2)
+        is_symbol_boundary_before = (kind_prefix >= '0' .and. kind_prefix <= '9') .or. &
+            kind_prefix == '"' .or. kind_prefix == "'"
+    end function is_symbol_boundary_before
+
+    subroutine lint_dedup_warnings(warnings, n_warnings)
+        type(lint_warning_t), intent(inout) :: warnings(:)
+        integer, intent(inout) :: n_warnings
+
+        integer :: i, j, out
+        logical :: dup
+
+        out = 0
+        do i = 1, n_warnings
+            dup = .false.
+            do j = 1, out
+                if (trim(warnings(j)%file) == trim(warnings(i)%file) .and. &
+                    warnings(j)%line == warnings(i)%line .and. &
+                    trim(warnings(j)%message) == trim(warnings(i)%message)) then
+                    dup = .true.
+                    exit
+                end if
+            end do
+            if (.not. dup) then
+                out = out + 1
+                if (out /= i) warnings(out) = warnings(i)
+            end if
+        end do
+        n_warnings = out
+    end subroutine lint_dedup_warnings
 
 end module fo_lint

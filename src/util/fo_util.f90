@@ -122,131 +122,131 @@ contains
         do while (pos <= tlen)
             if (pos + plen - 1 <= tlen .and. &
                 text(pos:pos + plen - 1) == prefix(1:plen)) then
-            pos = pos + plen
-        else
-            if (n + 1 <= len(buf)) then
-                n = n + 1
-                buf(n:n) = text(pos:pos)
+                pos = pos + plen
+            else
+                if (n + 1 <= len(buf)) then
+                    n = n + 1
+                    buf(n:n) = text(pos:pos)
+                end if
+                pos = pos + 1
             end if
-            pos = pos + 1
+        end do
+
+        text = buf(1:n)
+    end subroutine strip_path_prefix_in_str
+
+    subroutine send_jsonrpc(response)
+        character(len=*), intent(in) :: response
+
+        call mcp_send_response(trim(response), MCP_FRAME_UNKNOWN)
+    end subroutine send_jsonrpc
+
+    subroutine jsonrpc_error(id_str, code, msg, response)
+        character(len=*), intent(in) :: id_str, msg
+        integer, intent(in) :: code
+        character(len=*), intent(out) :: response
+
+        character(len=16) :: code_str
+
+        write (code_str, '(i0)') code
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+            '"error":{"code":'//trim(code_str)//','// &
+            '"message":"'//trim(msg)//'"}}'
+    end subroutine jsonrpc_error
+
+    pure function sq(s) result(r)
+        character(len=*), intent(in) :: s
+        character(len=len_trim(s) + 2) :: r
+        r = "'"//trim(s)//"'"
+    end function sq
+
+    subroutine jsonrpc_null(id_str, response)
+        character(len=*), intent(in) :: id_str
+        character(len=*), intent(out) :: response
+
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//',"result":null}'
+    end subroutine jsonrpc_null
+
+    function json_bool(value) result(text)
+        logical, intent(in) :: value
+        character(len=5) :: text
+
+        if (value) then
+            text = 'true'
+        else
+            text = 'false'
         end if
-    end do
+    end function json_bool
 
-    text = buf(1:n)
-end subroutine strip_path_prefix_in_str
+    function json_int(value) result(text)
+        integer, intent(in) :: value
+        character(len=32) :: text
 
-subroutine send_jsonrpc(response)
-    character(len=*), intent(in) :: response
+        write (text, '(i0)') value
+    end function json_int
 
-    call mcp_send_response(trim(response), MCP_FRAME_UNKNOWN)
-end subroutine send_jsonrpc
+    ! Extract a value from flat JSON by key. key may include surrounding
+    ! double-quotes (e.g. '"method"') or omit them ('method').
+    ! Handles both quoted string values and bare values (numbers, booleans).
+    subroutine extract_json_field(line, key, val)
+        character(len=*), intent(in) :: line, key
+        character(len=*), intent(out) :: val
 
-subroutine jsonrpc_error(id_str, code, msg, response)
-    character(len=*), intent(in) :: id_str, msg
-    integer, intent(in) :: code
-    character(len=*), intent(out) :: response
+        integer :: pos, start, fin, k1, k2
+        character(len=len_trim(key)) :: clean_key
+        character(len=1) :: ch
 
-    character(len=16) :: code_str
+        val = ''
 
-    write (code_str, '(i0)') code
-    response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-        '"error":{"code":'//trim(code_str)//','// &
-        '"message":"'//trim(msg)//'"}}'
-end subroutine jsonrpc_error
+        ! Strip surrounding quotes from key
+        k1 = 1
+        k2 = len_trim(key)
+        if (k2 >= k1) then
+            if (key(k1:k1) == '"') k1 = k1 + 1
+        end if
+        if (k2 >= k1) then
+            if (key(k2:k2) == '"') k2 = k2 - 1
+        end if
+        if (k2 < k1) return
+        clean_key = key(k1:k2)
 
-pure function sq(s) result(r)
-    character(len=*), intent(in) :: s
-    character(len=len_trim(s) + 2) :: r
-    r = "'"//trim(s)//"'"
-end function sq
+        pos = index(line, '"'//trim(clean_key)//'"')
+        if (pos == 0) return
 
-subroutine jsonrpc_null(id_str, response)
-    character(len=*), intent(in) :: id_str
-    character(len=*), intent(out) :: response
-
-    response = '{"jsonrpc":"2.0","id":'//trim(id_str)//',"result":null}'
-end subroutine jsonrpc_null
-
-function json_bool(value) result(text)
-    logical, intent(in) :: value
-    character(len=5) :: text
-
-    if (value) then
-        text = 'true'
-    else
-        text = 'false'
-    end if
-end function json_bool
-
-function json_int(value) result(text)
-    integer, intent(in) :: value
-    character(len=32) :: text
-
-    write (text, '(i0)') value
-end function json_int
-
-! Extract a value from flat JSON by key. key may include surrounding
-! double-quotes (e.g. '"method"') or omit them ('method').
-! Handles both quoted string values and bare values (numbers, booleans).
-subroutine extract_json_field(line, key, val)
-    character(len=*), intent(in) :: line, key
-    character(len=*), intent(out) :: val
-
-    integer :: pos, start, fin, k1, k2
-    character(len=len_trim(key)) :: clean_key
-    character(len=1) :: ch
-
-    val = ''
-
-    ! Strip surrounding quotes from key
-    k1 = 1
-    k2 = len_trim(key)
-    if (k2 >= k1) then
-        if (key(k1:k1) == '"') k1 = k1 + 1
-    end if
-    if (k2 >= k1) then
-        if (key(k2:k2) == '"') k2 = k2 - 1
-    end if
-    if (k2 < k1) return
-    clean_key = key(k1:k2)
-
-    pos = index(line, '"'//trim(clean_key)//'"')
-    if (pos == 0) return
-
-    pos = pos + len_trim(clean_key) + 2
-    do while (pos <= len_trim(line))
-        if (line(pos:pos) == ':') exit
-        pos = pos + 1
-    end do
-    pos = pos + 1
-
-    do while (pos <= len_trim(line))
-        if (.not. (line(pos:pos) == ' ')) exit
-        pos = pos + 1
-    end do
-
-    if (pos > len_trim(line)) return
-
-    ch = line(pos:pos)
-    if (ch == '"') then
-        start = pos + 1
-        fin = start
-        do while (fin <= len_trim(line))
-            if (line(fin:fin) == '"' .and. &
-                (fin == start .or. line(fin - 1:fin - 1) /= '\')) exit
-            fin = fin + 1
+        pos = pos + len_trim(clean_key) + 2
+        do while (pos <= len_trim(line))
+            if (line(pos:pos) == ':') exit
+            pos = pos + 1
         end do
-        val = line(start:fin - 1)
-    else
-        start = pos
-        fin = pos
-        do while (fin <= len_trim(line))
-            ch = line(fin:fin)
-            if (ch == ',' .or. ch == '}' .or. ch == ' ') exit
-            fin = fin + 1
+        pos = pos + 1
+
+        do while (pos <= len_trim(line))
+            if (.not. (line(pos:pos) == ' ')) exit
+            pos = pos + 1
         end do
-        val = line(start:fin - 1)
-    end if
-end subroutine extract_json_field
+
+        if (pos > len_trim(line)) return
+
+        ch = line(pos:pos)
+        if (ch == '"') then
+            start = pos + 1
+            fin = start
+            do while (fin <= len_trim(line))
+                if (line(fin:fin) == '"' .and. &
+                    (fin == start .or. line(fin - 1:fin - 1) /= '\')) exit
+                fin = fin + 1
+            end do
+            val = line(start:fin - 1)
+        else
+            start = pos
+            fin = pos
+            do while (fin <= len_trim(line))
+                ch = line(fin:fin)
+                if (ch == ',' .or. ch == '}' .or. ch == ' ') exit
+                fin = fin + 1
+            end do
+            val = line(start:fin - 1)
+        end if
+    end subroutine extract_json_field
 
 end module fo_util

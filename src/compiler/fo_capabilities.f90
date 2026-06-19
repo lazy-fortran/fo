@@ -253,70 +253,70 @@ contains
             do while (fin <= n)
                 if ((line(fin:fin) >= '0' .and. line(fin:fin) <= '9') .or. &
                     line(fin:fin) == '.') then
-                fin = fin + 1
-            else
-                exit
+                    fin = fin + 1
+                else
+                    exit
+                end if
+            end do
+            fin = fin - 1
+            if (fin > start) then
+                if (line(fin:fin) == '.') fin = fin - 1
             end if
-        end do
-        fin = fin - 1
-        if (fin > start) then
-            if (line(fin:fin) == '.') fin = fin - 1
+            version = line(start:fin)
         end if
-        version = line(start:fin)
-    end if
-end subroutine extract_version
+    end subroutine extract_version
 
-subroutine capabilities_text(cap, text)
-    type(capabilities_t), intent(in) :: cap
-    character(len=*), intent(out) :: text
+    subroutine capabilities_text(cap, text)
+        type(capabilities_t), intent(in) :: cap
+        character(len=*), intent(out) :: text
 
-    character(len=5) :: yesno
+        character(len=5) :: yesno
 
-    text = 'compiler: '//trim(cap%compiler_id)
-    if (len_trim(cap%compiler_version) > 0) then
-        text = trim(text)//' '//trim(cap%compiler_version)
-    end if
-    text = trim(text)//char(10)
+        text = 'compiler: '//trim(cap%compiler_id)
+        if (len_trim(cap%compiler_version) > 0) then
+            text = trim(text)//' '//trim(cap%compiler_version)
+        end if
+        text = trim(text)//char(10)
 
-    yesno = 'no'
-    if (cap%has_openmp) yesno = 'yes'
-    text = trim(text)//'openmp: '//trim(yesno)//char(10)
+        yesno = 'no'
+        if (cap%has_openmp) yesno = 'yes'
+        text = trim(text)//'openmp: '//trim(yesno)//char(10)
 
-    yesno = 'no'
-    if (cap%has_module_output_dir) yesno = 'yes'
-    text = trim(text)//'module-output-dir: '//trim(yesno)//char(10)
+        yesno = 'no'
+        if (cap%has_module_output_dir) yesno = 'yes'
+        text = trim(text)//'module-output-dir: '//trim(yesno)//char(10)
 
-    yesno = 'no'
-    if (cap%has_depfile) yesno = 'yes'
-    text = trim(text)//'depfile: '//trim(yesno)//char(10)
+        yesno = 'no'
+        if (cap%has_depfile) yesno = 'yes'
+        text = trim(text)//'depfile: '//trim(yesno)//char(10)
 
-    text = trim(text)//'parallel-compile-limit: '// &
-        trim(cap%parallel_compile_limit)//char(10)
-    text = trim(text)//'fo-can-optimize: '// &
-        'discovery, scheduling, cache, test runner, diagnostics'//char(10)
-    text = trim(text)//'compiler-limited: '// &
-        'front-end parse, module generation, codegen'
-end subroutine capabilities_text
+        text = trim(text)//'parallel-compile-limit: '// &
+            trim(cap%parallel_compile_limit)//char(10)
+        text = trim(text)//'fo-can-optimize: '// &
+            'discovery, scheduling, cache, test runner, diagnostics'//char(10)
+        text = trim(text)//'compiler-limited: '// &
+            'front-end parse, module generation, codegen'
+    end subroutine capabilities_text
 
-subroutine capabilities_json(cap, json)
-    type(capabilities_t), intent(in) :: cap
-    character(len=*), intent(out) :: json
+    subroutine capabilities_json(cap, json)
+        type(capabilities_t), intent(in) :: cap
+        character(len=*), intent(out) :: json
 
-    json = '{"compiler":"'//trim(cap%compiler_id)//'"'
-    json = trim(json)//',"compiler_version":"'// &
-        trim(cap%compiler_version)//'"'
-    json = trim(json)//',"compiler_path":"'// &
-        trim(cap%compiler_path)//'"'
-    json = trim(json)//',"openmp":'//trim(json_bool(cap%has_openmp))
-    json = trim(json)//',"module_output_dir":'// &
-        trim(json_bool(cap%has_module_output_dir))
-    json = trim(json)//',"depfile":'//trim(json_bool(cap%has_depfile))
-    json = trim(json)//',"parallel_compile_limit":"'// &
-        trim(cap%parallel_compile_limit)//'"'
-    json = trim(json)//',"fo_can_optimize":'// &
-        '["discovery","scheduling","cache","test_runner","diagnostics"]'
-    json = trim(json)//',"compiler_limited":'// &
-        '["front_end_parse","module_generation","codegen"]}'
-end subroutine capabilities_json
+        json = '{"compiler":"'//trim(cap%compiler_id)//'"'
+        json = trim(json)//',"compiler_version":"'// &
+            trim(cap%compiler_version)//'"'
+        json = trim(json)//',"compiler_path":"'// &
+            trim(cap%compiler_path)//'"'
+        json = trim(json)//',"openmp":'//trim(json_bool(cap%has_openmp))
+        json = trim(json)//',"module_output_dir":'// &
+            trim(json_bool(cap%has_module_output_dir))
+        json = trim(json)//',"depfile":'//trim(json_bool(cap%has_depfile))
+        json = trim(json)//',"parallel_compile_limit":"'// &
+            trim(cap%parallel_compile_limit)//'"'
+        json = trim(json)//',"fo_can_optimize":'// &
+            '["discovery","scheduling","cache","test_runner","diagnostics"]'
+        json = trim(json)//',"compiler_limited":'// &
+            '["front_end_parse","module_generation","codegen"]}'
+    end subroutine capabilities_json
 
 end module fo_capabilities

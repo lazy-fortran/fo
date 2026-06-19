@@ -450,349 +450,349 @@ contains
 
         if (trim(uri) == 'fo://diagnostics' .or. &
             index(line, 'fo://diagnostics') > 0) then
-        if (len_trim(async_state%last_output) > 0) then
-            call read_text_file(async_state%last_output, output_text)
-            exitcode = async_state%last_exitcode
+            if (len_trim(async_state%last_output) > 0) then
+                call read_text_file(async_state%last_output, output_text)
+                exitcode = async_state%last_exitcode
+            else
+                call fo_check_run('.', check_res)
+                output_text = check_result_compact_json(check_res)
+                exitcode = 0
+                if (.not. (check_res%build_ok .and. check_res%tests_ok)) exitcode = 1
+            end if
+
+            output_text = json_escape_string(output_text)
+            response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+                '"result":{"contents":[{"uri":"fo://diagnostics",'// &
+                '"mimeType":"text/plain",'// &
+                '"text":"'//trim(output_text)//'"}]}}'
         else
-            call fo_check_run('.', check_res)
-            output_text = check_result_compact_json(check_res)
-            exitcode = 0
-            if (.not. (check_res%build_ok .and. check_res%tests_ok)) exitcode = 1
+            call jsonrpc_error(id_str, -32602, &
+                'unknown resource', response)
+        end if
+    end subroutine handle_resources_read
+
+    subroutine handle_async_start(line, id_str, response, async_state)
+        character(len=*), intent(in) :: line, id_str
+        character(len=*), intent(out) :: response
+        type(mcp_async_state_t), intent(inout) :: async_state
+
+        character(len=512) :: root
+        character(len=32) :: output_mode
+        integer :: ierr, run_id, started_before
+        logical :: pending
+
+        call extract_json_field(line, '"root"', root)
+        if (len_trim(root) == 0) root = '.'
+        output_mode = 'agent'
+        if (index(line, '"json":"full"') > 0 .or. index(line, '"full"') > 0) then
+            output_mode = 'full'
         end if
 
-        output_text = json_escape_string(output_text)
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-            '"result":{"contents":[{"uri":"fo://diagnostics",'// &
-            '"mimeType":"text/plain",'// &
-            '"text":"'//trim(output_text)//'"}]}}'
-    else
-        call jsonrpc_error(id_str, -32602, &
-            'unknown resource', response)
-    end if
-end subroutine handle_resources_read
-
-subroutine handle_async_start(line, id_str, response, async_state)
-    character(len=*), intent(in) :: line, id_str
-    character(len=*), intent(out) :: response
-    type(mcp_async_state_t), intent(inout) :: async_state
-
-    character(len=512) :: root
-    character(len=32) :: output_mode
-    integer :: ierr, run_id, started_before
-    logical :: pending
-
-    call extract_json_field(line, '"root"', root)
-    if (len_trim(root) == 0) root = '.'
-    output_mode = 'agent'
-    if (index(line, '"json":"full"') > 0 .or. index(line, '"full"') > 0) then
-        output_mode = 'full'
-    end if
-
-    started_before = async_state%queue%started
-    call async_state%queue%request(root, output_mode, ierr)
-    if (ierr /= 0) then
-        call jsonrpc_error(id_str, -32602, 'invalid root', response)
-        return
-    end if
-
-    pending = async_state%queue%started == started_before
-    if (pending) then
-        async_state%next_run_id = async_state%next_run_id + 1
-        async_state%pending_run_id = async_state%next_run_id
-        run_id = async_state%pending_run_id
-    else
-        call async_start_current(async_state, 0, ierr)
+        started_before = async_state%queue%started
+        call async_state%queue%request(root, output_mode, ierr)
         if (ierr /= 0) then
-            call jsonrpc_error(id_str, -32603, &
-                'could not start check', response)
+            call jsonrpc_error(id_str, -32602, 'invalid root', response)
             return
         end if
-        run_id = async_state%active_run_id
-    end if
 
-    call make_run_start_response(id_str, run_id, pending, response)
-end subroutine handle_async_start
+        pending = async_state%queue%started == started_before
+        if (pending) then
+            async_state%next_run_id = async_state%next_run_id + 1
+            async_state%pending_run_id = async_state%next_run_id
+            run_id = async_state%pending_run_id
+        else
+            call async_start_current(async_state, 0, ierr)
+            if (ierr /= 0) then
+                call jsonrpc_error(id_str, -32603, &
+                    'could not start check', response)
+                return
+            end if
+            run_id = async_state%active_run_id
+        end if
 
-subroutine handle_async_status(id_str, response, async_state)
-    character(len=*), intent(in) :: id_str
-    character(len=*), intent(out) :: response
-    type(mcp_async_state_t), intent(inout) :: async_state
+        call make_run_start_response(id_str, run_id, pending, response)
+    end subroutine handle_async_start
 
-    character(len=1024) :: status_text
+    subroutine handle_async_status(id_str, response, async_state)
+        character(len=*), intent(in) :: id_str
+        character(len=*), intent(out) :: response
+        type(mcp_async_state_t), intent(inout) :: async_state
 
-    call async_poll(async_state)
+        character(len=1024) :: status_text
 
-    if (async_state%active_pid > 0) then
-        status_text = '{"state":"running"'// &
-            ',"run_id":'//trim(json_int(async_state%active_run_id))//'}'
-    else if (async_state%pending_run_id > 0) then
-        status_text = '{"state":"rerun-pending"'// &
-            ',"run_id":'//trim(json_int(async_state%pending_run_id))//'}'
-    else if (async_state%last_run_id > 0) then
-        status_text = '{"state":"finished"'// &
-            ',"run_id":'//trim(json_int(async_state%last_run_id))// &
-            ',"exitcode":'// &
-            trim(json_int(async_state%last_exitcode))//'}'
-    else
-        status_text = '{"state":"idle"}'
-    end if
+        call async_poll(async_state)
 
-    call make_tool_text_response(id_str, status_text, 0, response)
-end subroutine handle_async_status
+        if (async_state%active_pid > 0) then
+            status_text = '{"state":"running"'// &
+                ',"run_id":'//trim(json_int(async_state%active_run_id))//'}'
+        else if (async_state%pending_run_id > 0) then
+            status_text = '{"state":"rerun-pending"'// &
+                ',"run_id":'//trim(json_int(async_state%pending_run_id))//'}'
+        else if (async_state%last_run_id > 0) then
+            status_text = '{"state":"finished"'// &
+                ',"run_id":'//trim(json_int(async_state%last_run_id))// &
+                ',"exitcode":'// &
+                trim(json_int(async_state%last_exitcode))//'}'
+        else
+            status_text = '{"state":"idle"}'
+        end if
 
-subroutine handle_async_diagnostics(line, id_str, response, async_state)
-    character(len=*), intent(in) :: line, id_str
-    character(len=*), intent(out) :: response
-    type(mcp_async_state_t), intent(inout) :: async_state
+        call make_tool_text_response(id_str, status_text, 0, response)
+    end subroutine handle_async_status
 
-    character(len=8192) :: output_text
-    integer :: run_id, ierr
+    subroutine handle_async_diagnostics(line, id_str, response, async_state)
+        character(len=*), intent(in) :: line, id_str
+        character(len=*), intent(out) :: response
+        type(mcp_async_state_t), intent(inout) :: async_state
 
-    call async_poll(async_state)
-    call requested_run_id(line, async_state, run_id, ierr)
-    if (ierr /= 0) then
-        call jsonrpc_error(id_str, -32602, 'unknown run_id', response)
-        return
-    end if
+        character(len=8192) :: output_text
+        integer :: run_id, ierr
 
-    output_text = ''
-    if (run_id > 0 .and. run_id == async_state%last_run_id .and. &
-        len_trim(async_state%last_output) > 0) then
-    call read_text_file(async_state%last_output, output_text)
-end if
+        call async_poll(async_state)
+        call requested_run_id(line, async_state, run_id, ierr)
+        if (ierr /= 0) then
+            call jsonrpc_error(id_str, -32602, 'unknown run_id', response)
+            return
+        end if
 
-if (len_trim(output_text) == 0) then
-    output_text = '{"state":"idle","diagnostics":""}'
-end if
+        output_text = ''
+        if (run_id > 0 .and. run_id == async_state%last_run_id .and. &
+            len_trim(async_state%last_output) > 0) then
+            call read_text_file(async_state%last_output, output_text)
+        end if
 
-call make_tool_text_response(id_str, output_text, 0, response)
-end subroutine handle_async_diagnostics
+        if (len_trim(output_text) == 0) then
+            output_text = '{"state":"idle","diagnostics":""}'
+        end if
 
-subroutine handle_async_cancel(line, id_str, response, async_state)
-    character(len=*), intent(in) :: line, id_str
-    character(len=*), intent(out) :: response
-    type(mcp_async_state_t), intent(inout) :: async_state
+        call make_tool_text_response(id_str, output_text, 0, response)
+    end subroutine handle_async_diagnostics
 
-    integer :: run_id, ierr, exitcode
+    subroutine handle_async_cancel(line, id_str, response, async_state)
+        character(len=*), intent(in) :: line, id_str
+        character(len=*), intent(out) :: response
+        type(mcp_async_state_t), intent(inout) :: async_state
 
-    call requested_run_id(line, async_state, run_id, ierr)
-    if (ierr /= 0) then
-        call jsonrpc_error(id_str, -32602, 'unknown run_id', response)
-        return
-    end if
-    if (run_id /= async_state%active_run_id .or. async_state%active_pid <= 0) then
-        call jsonrpc_error(id_str, -32602, 'run is not active', response)
-        return
-    end if
+        integer :: run_id, ierr, exitcode
 
-    call process_cancel_pid(async_state%active_pid, exitcode)
-    async_state%active_pid = 0
-    call async_state%queue%finish(130)
-    async_state%last_run_id = run_id
-    async_state%last_exitcode = 130
-    async_state%last_output = async_state%active_output
-    async_state%active_output = ''
-    async_state%active_run_id = 0
-    call async_start_pending_if_ready(async_state)
+        call requested_run_id(line, async_state, run_id, ierr)
+        if (ierr /= 0) then
+            call jsonrpc_error(id_str, -32602, 'unknown run_id', response)
+            return
+        end if
+        if (run_id /= async_state%active_run_id .or. async_state%active_pid <= 0) then
+            call jsonrpc_error(id_str, -32602, 'run is not active', response)
+            return
+        end if
 
-    block
-        character(len=256) :: cancel_text
-        cancel_text = '{"cancelled":true,"run_id":'// &
-            trim(json_int(run_id))//'}'
-        call make_tool_text_response(id_str, cancel_text, 0, response)
-    end block
-end subroutine handle_async_cancel
-
-subroutine async_poll(async_state)
-    type(mcp_async_state_t), intent(inout) :: async_state
-
-    logical :: done
-    integer :: exitcode
-
-    if (async_state%active_pid <= 0) then
-        call async_start_pending_if_ready(async_state)
-        return
-    end if
-
-    call process_poll_pid(async_state%active_pid, done, exitcode)
-    if (.not. done) return
-
-    async_state%last_run_id = async_state%active_run_id
-    async_state%last_exitcode = exitcode
-    async_state%last_output = async_state%active_output
-    async_state%active_pid = 0
-    async_state%active_run_id = 0
-    async_state%active_output = ''
-    call async_state%queue%finish(exitcode)
-    call async_start_pending_if_ready(async_state)
-end subroutine async_poll
-
-subroutine async_start_pending_if_ready(async_state)
-    type(mcp_async_state_t), intent(inout) :: async_state
-
-    integer :: ierr, run_id
-
-    if (async_state%active_pid > 0) return
-    if (async_state%queue%state /= RUN_RUNNING) return
-
-    run_id = async_state%pending_run_id
-    async_state%pending_run_id = 0
-    call async_start_current(async_state, run_id, ierr)
-end subroutine async_start_pending_if_ready
-
-subroutine async_start_current(async_state, requested_id, ierr)
-    type(mcp_async_state_t), intent(inout) :: async_state
-    integer, intent(in) :: requested_id
-    integer, intent(out) :: ierr
-
-    integer :: pid, exitcode, run_id
-    character(len=512) :: output_file
-
-    ierr = 0
-    run_id = requested_id
-    if (run_id <= 0) then
-        async_state%next_run_id = async_state%next_run_id + 1
-        run_id = async_state%next_run_id
-    end if
-
-    call make_tmpfile('fo_mcp_async', output_file)
-    call process_start_fo_check(async_state%queue%current_root, &
-        async_state%queue%current_mode, output_file, &
-        pid, exitcode)
-    if (exitcode /= 0 .or. pid <= 0) then
-        ierr = 1
-        return
-    end if
-
-    async_state%active_pid = pid
-    async_state%active_run_id = run_id
-    async_state%active_output = output_file
-end subroutine async_start_current
-
-subroutine async_cancel_all(async_state)
-    type(mcp_async_state_t), intent(inout) :: async_state
-
-    integer :: exitcode
-
-    if (async_state%active_pid > 0) then
         call process_cancel_pid(async_state%active_pid, exitcode)
         async_state%active_pid = 0
-        async_state%last_run_id = async_state%active_run_id
+        call async_state%queue%finish(130)
+        async_state%last_run_id = run_id
         async_state%last_exitcode = 130
         async_state%last_output = async_state%active_output
-    end if
-    async_state%active_run_id = 0
-    async_state%pending_run_id = 0
-    async_state%active_output = ''
-    async_state%queue%state = RUN_IDLE
-    async_state%queue%rerun_pending = .false.
-    async_state%queue%current_root = ''
-    async_state%queue%current_mode = ''
-    async_state%queue%pending_root = ''
-    async_state%queue%pending_mode = ''
-end subroutine async_cancel_all
+        async_state%active_output = ''
+        async_state%active_run_id = 0
+        call async_start_pending_if_ready(async_state)
 
-subroutine requested_run_id(line, async_state, run_id, ierr)
-    character(len=*), intent(in) :: line
-    type(mcp_async_state_t), intent(in) :: async_state
-    integer, intent(out) :: run_id, ierr
+        block
+            character(len=256) :: cancel_text
+            cancel_text = '{"cancelled":true,"run_id":'// &
+                trim(json_int(run_id))//'}'
+            call make_tool_text_response(id_str, cancel_text, 0, response)
+        end block
+    end subroutine handle_async_cancel
 
-    character(len=64) :: run_text
-    integer :: iostat
+    subroutine async_poll(async_state)
+        type(mcp_async_state_t), intent(inout) :: async_state
 
-    ierr = 0
-    run_id = async_state%last_run_id
-    if (index(line, '"latest"') > 0 .or. index(line, '"run_id"') == 0) then
-        if (async_state%active_run_id > 0) run_id = async_state%active_run_id
-        if (async_state%pending_run_id > 0) run_id = async_state%pending_run_id
-        return
-    end if
+        logical :: done
+        integer :: exitcode
 
-    call extract_json_field(line, '"run_id"', run_text)
-    read (run_text, *, iostat=iostat) run_id
-    if (iostat /= 0) then
+        if (async_state%active_pid <= 0) then
+            call async_start_pending_if_ready(async_state)
+            return
+        end if
+
+        call process_poll_pid(async_state%active_pid, done, exitcode)
+        if (.not. done) return
+
+        async_state%last_run_id = async_state%active_run_id
+        async_state%last_exitcode = exitcode
+        async_state%last_output = async_state%active_output
+        async_state%active_pid = 0
+        async_state%active_run_id = 0
+        async_state%active_output = ''
+        call async_state%queue%finish(exitcode)
+        call async_start_pending_if_ready(async_state)
+    end subroutine async_poll
+
+    subroutine async_start_pending_if_ready(async_state)
+        type(mcp_async_state_t), intent(inout) :: async_state
+
+        integer :: ierr, run_id
+
+        if (async_state%active_pid > 0) return
+        if (async_state%queue%state /= RUN_RUNNING) return
+
+        run_id = async_state%pending_run_id
+        async_state%pending_run_id = 0
+        call async_start_current(async_state, run_id, ierr)
+    end subroutine async_start_pending_if_ready
+
+    subroutine async_start_current(async_state, requested_id, ierr)
+        type(mcp_async_state_t), intent(inout) :: async_state
+        integer, intent(in) :: requested_id
+        integer, intent(out) :: ierr
+
+        integer :: pid, exitcode, run_id
+        character(len=512) :: output_file
+
+        ierr = 0
+        run_id = requested_id
+        if (run_id <= 0) then
+            async_state%next_run_id = async_state%next_run_id + 1
+            run_id = async_state%next_run_id
+        end if
+
+        call make_tmpfile('fo_mcp_async', output_file)
+        call process_start_fo_check(async_state%queue%current_root, &
+            async_state%queue%current_mode, output_file, &
+            pid, exitcode)
+        if (exitcode /= 0 .or. pid <= 0) then
+            ierr = 1
+            return
+        end if
+
+        async_state%active_pid = pid
+        async_state%active_run_id = run_id
+        async_state%active_output = output_file
+    end subroutine async_start_current
+
+    subroutine async_cancel_all(async_state)
+        type(mcp_async_state_t), intent(inout) :: async_state
+
+        integer :: exitcode
+
+        if (async_state%active_pid > 0) then
+            call process_cancel_pid(async_state%active_pid, exitcode)
+            async_state%active_pid = 0
+            async_state%last_run_id = async_state%active_run_id
+            async_state%last_exitcode = 130
+            async_state%last_output = async_state%active_output
+        end if
+        async_state%active_run_id = 0
+        async_state%pending_run_id = 0
+        async_state%active_output = ''
+        async_state%queue%state = RUN_IDLE
+        async_state%queue%rerun_pending = .false.
+        async_state%queue%current_root = ''
+        async_state%queue%current_mode = ''
+        async_state%queue%pending_root = ''
+        async_state%queue%pending_mode = ''
+    end subroutine async_cancel_all
+
+    subroutine requested_run_id(line, async_state, run_id, ierr)
+        character(len=*), intent(in) :: line
+        type(mcp_async_state_t), intent(in) :: async_state
+        integer, intent(out) :: run_id, ierr
+
+        character(len=64) :: run_text
+        integer :: iostat
+
+        ierr = 0
+        run_id = async_state%last_run_id
+        if (index(line, '"latest"') > 0 .or. index(line, '"run_id"') == 0) then
+            if (async_state%active_run_id > 0) run_id = async_state%active_run_id
+            if (async_state%pending_run_id > 0) run_id = async_state%pending_run_id
+            return
+        end if
+
+        call extract_json_field(line, '"run_id"', run_text)
+        read (run_text, *, iostat=iostat) run_id
+        if (iostat /= 0) then
+            ierr = 1
+            return
+        end if
+        if (run_id == async_state%active_run_id) return
+        if (run_id == async_state%pending_run_id) return
+        if (run_id == async_state%last_run_id) return
         ierr = 1
-        return
-    end if
-    if (run_id == async_state%active_run_id) return
-    if (run_id == async_state%pending_run_id) return
-    if (run_id == async_state%last_run_id) return
-    ierr = 1
-end subroutine requested_run_id
+    end subroutine requested_run_id
 
-subroutine make_initialize_response(id_str, line, response)
-    character(len=*), intent(in) :: id_str, line
-    character(len=*), intent(out) :: response
+    subroutine make_initialize_response(id_str, line, response)
+        character(len=*), intent(in) :: id_str, line
+        character(len=*), intent(out) :: response
 
-    character(len=32) :: proto_ver
+        character(len=32) :: proto_ver
 
-    call extract_json_field(line, '"protocolVersion"', proto_ver)
-    if (len_trim(proto_ver) == 0) proto_ver = '2025-03-26'
-    response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-        '"result":{"protocolVersion":"'//trim(proto_ver)//'",'// &
-        '"capabilities":{"tools":{"listChanged":false},'// &
-        '"resources":{"listChanged":false}},'// &
-        '"serverInfo":{"name":"fo","version":"0.1.0"}}}'
-end subroutine make_initialize_response
+        call extract_json_field(line, '"protocolVersion"', proto_ver)
+        if (len_trim(proto_ver) == 0) proto_ver = '2025-03-26'
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+            '"result":{"protocolVersion":"'//trim(proto_ver)//'",'// &
+            '"capabilities":{"tools":{"listChanged":false},'// &
+            '"resources":{"listChanged":false}},'// &
+            '"serverInfo":{"name":"fo","version":"0.1.0"}}}'
+    end subroutine make_initialize_response
 
-subroutine make_tools_list_response(id_str, response)
-    character(len=*), intent(in) :: id_str
-    character(len=*), intent(out) :: response
+    subroutine make_tools_list_response(id_str, response)
+        character(len=*), intent(in) :: id_str
+        character(len=*), intent(out) :: response
 
-    response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-        '"result":{"tools":[{"name":"fo",'// &
-        '"description":"Fortran build driver",'// &
-        '"inputSchema":{"type":"object","properties":{'// &
-        '"action":{"type":"string",'// &
-        '"enum":["check","status","diagnostics","cancel",'// &
-        '"build","test","graph","info","changed","clean",'// &
-        '"lint","fmt"],'// &
-        '"description":"Action to run"},'// &
-        '"dir":{"type":"string",'// &
-        '"description":"Project directory (default: cwd)"}},'// &
-        '"required":["action"]}}]}}'
-end subroutine make_tools_list_response
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+            '"result":{"tools":[{"name":"fo",'// &
+            '"description":"Fortran build driver",'// &
+            '"inputSchema":{"type":"object","properties":{'// &
+            '"action":{"type":"string",'// &
+            '"enum":["check","status","diagnostics","cancel",'// &
+            '"build","test","graph","info","changed","clean",'// &
+            '"lint","fmt"],'// &
+            '"description":"Action to run"},'// &
+            '"dir":{"type":"string",'// &
+            '"description":"Project directory (default: cwd)"}},'// &
+            '"required":["action"]}}]}}'
+    end subroutine make_tools_list_response
 
-subroutine make_resources_list_response(id_str, response)
-    character(len=*), intent(in) :: id_str
-    character(len=*), intent(out) :: response
+    subroutine make_resources_list_response(id_str, response)
+        character(len=*), intent(in) :: id_str
+        character(len=*), intent(out) :: response
 
-    response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-        '"result":{"resources":[{"uri":"fo://diagnostics",'// &
-        '"name":"diagnostics",'// &
-        '"description":"Current fo check diagnostics",'// &
-        '"mimeType":"text/plain"}]}}'
-end subroutine make_resources_list_response
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+            '"result":{"resources":[{"uri":"fo://diagnostics",'// &
+            '"name":"diagnostics",'// &
+            '"description":"Current fo check diagnostics",'// &
+            '"mimeType":"text/plain"}]}}'
+    end subroutine make_resources_list_response
 
-subroutine make_run_start_response(id_str, run_id, pending, response)
-    character(len=*), intent(in) :: id_str
-    integer, intent(in) :: run_id
-    logical, intent(in) :: pending
-    character(len=*), intent(out) :: response
+    subroutine make_run_start_response(id_str, run_id, pending, response)
+        character(len=*), intent(in) :: id_str
+        integer, intent(in) :: run_id
+        logical, intent(in) :: pending
+        character(len=*), intent(out) :: response
 
-    response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-        '"result":{"run_id":'//trim(json_int(run_id))// &
-        ',"state":"'
-    if (pending) then
-        response = trim(response)//'rerun-pending"'
-    else
-        response = trim(response)//'running"'
-    end if
-    response = trim(response)//',"pending":'//trim(json_bool(pending))//'}}'
-end subroutine make_run_start_response
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+            '"result":{"run_id":'//trim(json_int(run_id))// &
+            ',"state":"'
+        if (pending) then
+            response = trim(response)//'rerun-pending"'
+        else
+            response = trim(response)//'running"'
+        end if
+        response = trim(response)//',"pending":'//trim(json_bool(pending))//'}}'
+    end subroutine make_run_start_response
 
-subroutine make_tool_text_response(id_str, output_text, exitcode, response)
-    character(len=*), intent(in) :: id_str, output_text
-    integer, intent(in) :: exitcode
-    character(len=*), intent(out) :: response
+    subroutine make_tool_text_response(id_str, output_text, exitcode, response)
+        character(len=*), intent(in) :: id_str, output_text
+        integer, intent(in) :: exitcode
+        character(len=*), intent(out) :: response
 
-    character(len=16384) :: escaped
+        character(len=16384) :: escaped
 
-    escaped = json_escape_string(output_text)
-    response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-        '"result":{"content":[{"type":"text",'// &
-        '"text":"'//trim(escaped)//'"}],"isError":'// &
-        trim(json_bool(exitcode /= 0))//'}}'
-end subroutine make_tool_text_response
+        escaped = json_escape_string(output_text)
+        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
+            '"result":{"content":[{"type":"text",'// &
+            '"text":"'//trim(escaped)//'"}],"isError":'// &
+            trim(json_bool(exitcode /= 0))//'}}'
+    end subroutine make_tool_text_response
 
 end module fo_mcp

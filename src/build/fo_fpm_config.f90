@@ -253,190 +253,190 @@ contains
                     lib = val(start:pos - 1)
                     if (len_trim(lib) > 0 .and. &
                         config%n_link_libs < MAX_LINK_LIBS) then
-                    config%n_link_libs = config%n_link_libs + 1
-                    config%link_libs(config%n_link_libs) = trim(lib)
+                        config%n_link_libs = config%n_link_libs + 1
+                        config%link_libs(config%n_link_libs) = trim(lib)
+                    end if
                 end if
             end if
-        end if
-        pos = pos + 1
-    end do
-end subroutine parse_link_libs
+            pos = pos + 1
+        end do
+    end subroutine parse_link_libs
 
-subroutine parse_flags(val, config)
-    character(len=*), intent(in) :: val
-    type(fpm_config_t), intent(inout) :: config
+    subroutine parse_flags(val, config)
+        character(len=*), intent(in) :: val
+        type(fpm_config_t), intent(inout) :: config
 
-    integer :: pos, start, n
-    character(len=128) :: flag
-    logical :: in_str
+        integer :: pos, start, n
+        character(len=128) :: flag
+        logical :: in_str
 
-    pos = 1
-    n = len_trim(val)
-    in_str = .false.
+        pos = 1
+        n = len_trim(val)
+        in_str = .false.
 
-    do while (pos <= n)
-        if (val(pos:pos) == '"') then
-            if (.not. in_str) then
-                in_str = .true.
-                start = pos + 1
-            else
-                in_str = .false.
-                flag = val(start:pos - 1)
-                if (len_trim(flag) > 0 .and. &
-                    config%n_flags < MAX_FLAGS) then
-                config%n_flags = config%n_flags + 1
-                config%flags(config%n_flags) = trim(flag)
+        do while (pos <= n)
+            if (val(pos:pos) == '"') then
+                if (.not. in_str) then
+                    in_str = .true.
+                    start = pos + 1
+                else
+                    in_str = .false.
+                    flag = val(start:pos - 1)
+                    if (len_trim(flag) > 0 .and. &
+                        config%n_flags < MAX_FLAGS) then
+                        config%n_flags = config%n_flags + 1
+                        config%flags(config%n_flags) = trim(flag)
+                    end if
+                end if
             end if
+            pos = pos + 1
+        end do
+    end subroutine parse_flags
+
+    subroutine strip_comment(line)
+        character(len=*), intent(inout) :: line
+
+        integer :: i
+        logical :: in_str
+
+        in_str = .false.
+        do i = 1, len_trim(line)
+            if (line(i:i) == '"') then
+                in_str = .not. in_str
+            else if (line(i:i) == '#' .and. .not. in_str) then
+                line(i:) = ' '
+                return
+            end if
+        end do
+    end subroutine strip_comment
+
+    subroutine get_section(line, section)
+        character(len=*), intent(in) :: line
+        character(len=*), intent(out) :: section
+
+        integer :: i1, i2, n
+
+        section = ''
+        n = len_trim(line)
+        if (n < 2) return
+
+        ! strip [[ ]] for array-of-tables (treat same as regular section)
+        if (n >= 4 .and. line(1:2) == '[[') then
+            i1 = 3
+            i2 = index(line, ']]') - 1
+        else
+            i1 = 2
+            i2 = index(line, ']') - 1
         end if
-    end if
-    pos = pos + 1
-end do
-end subroutine parse_flags
+        if (i2 < i1) return
+        section = adjustl(line(i1:i2))
+    end subroutine get_section
 
-subroutine strip_comment(line)
-    character(len=*), intent(inout) :: line
+    subroutine split_kv(line, key, val)
+        character(len=*), intent(in) :: line
+        character(len=*), intent(out) :: key, val
 
-    integer :: i
-    logical :: in_str
+        integer :: eq_pos
 
-    in_str = .false.
-    do i = 1, len_trim(line)
-        if (line(i:i) == '"') then
-            in_str = .not. in_str
-        else if (line(i:i) == '#' .and. .not. in_str) then
-            line(i:) = ' '
+        key = ''
+        val = ''
+        eq_pos = index(line, '=')
+        if (eq_pos < 2) return
+
+        key = adjustl(line(1:eq_pos - 1))
+        ! trim trailing whitespace from key
+        key = trim(key)
+        val = adjustl(line(eq_pos + 1:))
+    end subroutine split_kv
+
+    subroutine extract_string(raw_val, str_val)
+        character(len=*), intent(in) :: raw_val
+        character(len=*), intent(out) :: str_val
+
+        integer :: q1, q2, n
+
+        str_val = ''
+        n = len_trim(raw_val)
+        if (n < 2) then
+            ! bare value (e.g. "*")
+            str_val = trim(raw_val)
             return
         end if
-    end do
-end subroutine strip_comment
 
-subroutine get_section(line, section)
-    character(len=*), intent(in) :: line
-    character(len=*), intent(out) :: section
-
-    integer :: i1, i2, n
-
-    section = ''
-    n = len_trim(line)
-    if (n < 2) return
-
-    ! strip [[ ]] for array-of-tables (treat same as regular section)
-    if (n >= 4 .and. line(1:2) == '[[') then
-        i1 = 3
-        i2 = index(line, ']]') - 1
-    else
-        i1 = 2
-        i2 = index(line, ']') - 1
-    end if
-    if (i2 < i1) return
-    section = adjustl(line(i1:i2))
-end subroutine get_section
-
-subroutine split_kv(line, key, val)
-    character(len=*), intent(in) :: line
-    character(len=*), intent(out) :: key, val
-
-    integer :: eq_pos
-
-    key = ''
-    val = ''
-    eq_pos = index(line, '=')
-    if (eq_pos < 2) return
-
-    key = adjustl(line(1:eq_pos - 1))
-    ! trim trailing whitespace from key
-    key = trim(key)
-    val = adjustl(line(eq_pos + 1:))
-end subroutine split_kv
-
-subroutine extract_string(raw_val, str_val)
-    character(len=*), intent(in) :: raw_val
-    character(len=*), intent(out) :: str_val
-
-    integer :: q1, q2, n
-
-    str_val = ''
-    n = len_trim(raw_val)
-    if (n < 2) then
-        ! bare value (e.g. "*")
-        str_val = trim(raw_val)
-        return
-    end if
-
-    q1 = index(raw_val, '"')
-    if (q1 == 0) then
-        str_val = trim(raw_val)
-        return
-    end if
-    q2 = index(raw_val(q1 + 1:), '"')
-    if (q2 == 0) return
-    q2 = q1 + q2
-    str_val = raw_val(q1 + 1:q2 - 1)
-end subroutine extract_string
-
-subroutine parse_inline_table(val, keys, vals, n_fields)
-    character(len=*), intent(in) :: val
-    character(len=*), intent(out) :: keys(:), vals(:)
-    integer, intent(out) :: n_fields
-
-    character(len=1024) :: inner
-    integer :: i1, i2, max_fields, pos, eq_pos, comma_pos, n
-
-    n_fields = 0
-    max_fields = min(size(keys), size(vals))
-
-    ! find content between { }
-    i1 = index(val, '{')
-    i2 = index(val, '}')
-    if (i1 == 0 .or. i2 <= i1) return
-    inner = adjustl(val(i1 + 1:i2 - 1))
-
-    pos = 1
-    n = len_trim(inner)
-    do while (pos <= n .and. n_fields < max_fields)
-        ! skip whitespace and commas
-        do while (pos <= n .and. &
-                (inner(pos:pos) == ' ' .or. inner(pos:pos) == ','))
-            pos = pos + 1
-        end do
-        if (pos > n) exit
-
-        ! find '=' for this key
-        eq_pos = index(inner(pos:), '=')
-        if (eq_pos == 0) exit
-        eq_pos = pos + eq_pos - 1
-
-        n_fields = n_fields + 1
-        keys(n_fields) = trim(adjustl(inner(pos:eq_pos - 1)))
-
-        ! find the value (quoted string or bare)
-        pos = eq_pos + 1
-        do while (pos <= n .and. inner(pos:pos) == ' ')
-            pos = pos + 1
-        end do
-        if (pos > n) exit
-
-        if (inner(pos:pos) == '"') then
-            ! quoted string: find closing quote
-            i1 = index(inner(pos + 1:), '"')
-            if (i1 == 0) then
-                vals(n_fields) = ''
-                exit
-            end if
-            vals(n_fields) = inner(pos:pos + i1)
-            pos = pos + i1 + 1
-        else
-            ! bare value: ends at comma or end of string
-            comma_pos = index(inner(pos:), ',')
-            if (comma_pos == 0) then
-                vals(n_fields) = trim(inner(pos:n))
-                pos = n + 1
-            else
-                vals(n_fields) = trim(inner(pos:pos + comma_pos - 2))
-                pos = pos + comma_pos
-            end if
+        q1 = index(raw_val, '"')
+        if (q1 == 0) then
+            str_val = trim(raw_val)
+            return
         end if
-    end do
-end subroutine parse_inline_table
+        q2 = index(raw_val(q1 + 1:), '"')
+        if (q2 == 0) return
+        q2 = q1 + q2
+        str_val = raw_val(q1 + 1:q2 - 1)
+    end subroutine extract_string
+
+    subroutine parse_inline_table(val, keys, vals, n_fields)
+        character(len=*), intent(in) :: val
+        character(len=*), intent(out) :: keys(:), vals(:)
+        integer, intent(out) :: n_fields
+
+        character(len=1024) :: inner
+        integer :: i1, i2, max_fields, pos, eq_pos, comma_pos, n
+
+        n_fields = 0
+        max_fields = min(size(keys), size(vals))
+
+        ! find content between { }
+        i1 = index(val, '{')
+        i2 = index(val, '}')
+        if (i1 == 0 .or. i2 <= i1) return
+        inner = adjustl(val(i1 + 1:i2 - 1))
+
+        pos = 1
+        n = len_trim(inner)
+        do while (pos <= n .and. n_fields < max_fields)
+            ! skip whitespace and commas
+            do while (pos <= n .and. &
+                    (inner(pos:pos) == ' ' .or. inner(pos:pos) == ','))
+                pos = pos + 1
+            end do
+            if (pos > n) exit
+
+            ! find '=' for this key
+            eq_pos = index(inner(pos:), '=')
+            if (eq_pos == 0) exit
+            eq_pos = pos + eq_pos - 1
+
+            n_fields = n_fields + 1
+            keys(n_fields) = trim(adjustl(inner(pos:eq_pos - 1)))
+
+            ! find the value (quoted string or bare)
+            pos = eq_pos + 1
+            do while (pos <= n .and. inner(pos:pos) == ' ')
+                pos = pos + 1
+            end do
+            if (pos > n) exit
+
+            if (inner(pos:pos) == '"') then
+                ! quoted string: find closing quote
+                i1 = index(inner(pos + 1:), '"')
+                if (i1 == 0) then
+                    vals(n_fields) = ''
+                    exit
+                end if
+                vals(n_fields) = inner(pos:pos + i1)
+                pos = pos + i1 + 1
+            else
+                ! bare value: ends at comma or end of string
+                comma_pos = index(inner(pos:), ',')
+                if (comma_pos == 0) then
+                    vals(n_fields) = trim(inner(pos:n))
+                    pos = n + 1
+                else
+                    vals(n_fields) = trim(inner(pos:pos + comma_pos - 2))
+                    pos = pos + comma_pos
+                end if
+            end if
+        end do
+    end subroutine parse_inline_table
 
 end module fo_fpm_config

@@ -417,506 +417,506 @@ contains
             case default
                 if (index(trim(arg), '--json=') == 1 .or. &
                     index(trim(arg), '--agent=') == 1) then
-                ierr = 1
+                    ierr = 1
+                    return
+                end if
+            end select
+        end do
+    end subroutine check_output_mode
+
+    logical function has_arg(name)
+        character(len=*), intent(in) :: name
+
+        character(len=256) :: arg
+        integer :: i
+
+        has_arg = .false.
+        do i = 2, command_argument_count()
+            call get_command_argument(i, arg)
+            if (trim(arg) == trim(name)) then
+                has_arg = .true.
                 return
             end if
-        end select
-    end do
-end subroutine check_output_mode
-
-logical function has_arg(name)
-    character(len=*), intent(in) :: name
-
-    character(len=256) :: arg
-    integer :: i
-
-    has_arg = .false.
-    do i = 2, command_argument_count()
-        call get_command_argument(i, arg)
-        if (trim(arg) == trim(name)) then
-            has_arg = .true.
-            return
-        end if
-    end do
-end function has_arg
-
-subroutine cmd_changed()
-    type(dag_t) :: dag
-    integer :: changed_ids(MAX_NODES), n_changed
-    integer :: affected_ids(MAX_NODES), n_affected
-    integer :: n_cached, ierr, i, n_tests
-    character(len=MAX_NAME) :: filenames(MAX_NODES)
-    logical :: is_test_arr(MAX_NODES)
-
-    call fo_changed_modules('.', dag, changed_ids, n_changed, &
-        affected_ids, n_affected, n_cached, ierr, &
-        filenames=filenames, is_test_arr=is_test_arr)
-    if (ierr /= 0) then
-        write (error_unit, '(a)') 'fo: scan or dag failed'
-        stop 1
-    end if
-
-    if (n_changed == 0) then
-        write (output_unit, '(a,i0,a)') 'all ', n_cached, ' modules cached'
-        return
-    end if
-
-    write (output_unit, '(a,i0,a)') 'changed (', n_changed, '):'
-    do i = 1, n_changed
-        write (output_unit, '(a,a,a,a)') '  ', &
-            trim(dag%nodes(changed_ids(i))%label), &
-            '  ', trim(filenames(changed_ids(i)))
-    end do
-
-    write (output_unit, '(a,i0,a)') 'affected (', n_affected, '):'
-    do i = 1, n_affected
-        write (output_unit, '(a,a,a,a)') '  ', &
-            trim(dag%nodes(affected_ids(i))%label), &
-            '  ', trim(filenames(affected_ids(i)))
-    end do
-
-    n_tests = 0
-    do i = 1, n_affected
-        if (is_test_arr(affected_ids(i))) n_tests = n_tests + 1
-    end do
-    if (n_tests > 0) then
-        write (output_unit, '(a,i0,a)') 'affected tests (', n_tests, '):'
-        do i = 1, n_affected
-            if (is_test_arr(affected_ids(i))) then
-                write (output_unit, '(a,a,a,a)') '  ', &
-                    trim(dag%nodes(affected_ids(i))%label), &
-                    '  ', trim(filenames(affected_ids(i)))
-            end if
         end do
-    end if
-end subroutine cmd_changed
+    end function has_arg
 
-subroutine cmd_build()
-    type(backend_t) :: b
-    integer :: exitcode
-    character(len=512) :: flags, build_log
+    subroutine cmd_changed()
+        type(dag_t) :: dag
+        integer :: changed_ids(MAX_NODES), n_changed
+        integer :: affected_ids(MAX_NODES), n_affected
+        integer :: n_cached, ierr, i, n_tests
+        character(len=MAX_NAME) :: filenames(MAX_NODES)
+        logical :: is_test_arr(MAX_NODES)
 
-    b = detect_backend('.')
-    if (b%kind == BACKEND_NONE) then
-        write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
-        stop 1
-    end if
-
-    call get_flags_arg(flags)
-    ! Capture the compiler output so a failed build shows the real diagnostic
-    ! (file:line: Error: ...) instead of a bare "STOP 1".
-    call make_tmpfile('fo-build', build_log)
-    ! Build the test binaries too so build/fo/bin/test_* never go stale against
-    ! the sources (running one directly after `fo build` used to give results
-    ! from the previous `fo test`).
-    if (len_trim(flags) > 0) then
-        call backend_build(b, exitcode, flags, build_log, with_tests=.true.)
-    else
-        call backend_build(b, exitcode, log_file=build_log, with_tests=.true.)
-    end if
-    if (exitcode /= 0) then
-        call report_build_result(build_log)
-        stop 1, quiet=.true.
-    end if
-    call delete_tmpfile(build_log)
-end subroutine cmd_build
-
-subroutine report_build_result(build_log)
-    !! Print the best compiler diagnostic from a failed build's log, with the
-    !! source location and the log path for the full output.
-    character(len=*), intent(in) :: build_log
-    type(diagnostic_t) :: diag
-    character(len=32) :: lnum
-
-    call diagnostic_from_log('build', build_log, 'fo build', diag)
-    write (error_unit, '(a,a)') 'fo: build failed: ', trim(diag%message)
-    if (len_trim(diag%file) > 0) then
-        write (lnum, '(i0)') diag%line
-        write (error_unit, '(a,a,a,a)') 'fo: at: ', trim(diag%file), ':', &
-            trim(lnum)
-    end if
-    if (len_trim(diag%hint) > 0) then
-        write (error_unit, '(a,a)') 'fo: hint: ', trim(diag%hint)
-    end if
-    write (error_unit, '(a,a)') 'fo: full log: ', trim(build_log)
-end subroutine report_build_result
-
-subroutine get_flags_arg(flags)
-    character(len=*), intent(out) :: flags
-    character(len=256) :: arg
-    integer :: i
-
-    flags = ''
-    do i = 2, command_argument_count()
-        call get_command_argument(i, arg)
-        if (trim(arg) == '--flag' .and. i < command_argument_count()) then
-            call get_command_argument(i + 1, flags)
-            return
-        end if
-    end do
-end subroutine get_flags_arg
-
-subroutine cmd_test()
-    type(backend_t) :: b
-    type(dag_t) :: dag
-    integer :: exitcode
-    integer :: changed_ids(MAX_NODES), n_changed
-    integer :: affected_ids(MAX_NODES), n_affected
-    integer :: n_cached, ierr, i, n_test_names, n_arg_names
-    logical :: only_changed, include_all
-    character(len=256) :: arg
-    character(len=128) :: test_names(MAX_NODES)
-    character(len=512) :: test_log
-    logical :: is_test_arr(MAX_NODES)
-
-    b = detect_backend('.')
-    if (b%kind == BACKEND_NONE) then
-        write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
-        stop 1
-    end if
-
-    only_changed = .false.
-    include_all = .false.
-    n_arg_names = 0
-    do i = 2, command_argument_count()
-        call get_command_argument(i, arg)
-        if (trim(arg) == '--only-changed') only_changed = .true.
-        if (trim(arg) == '--all') include_all = .true.
-        if (arg(1:1) /= '-') then
-            n_arg_names = n_arg_names + 1
-            test_names(n_arg_names) = arg(1:128)
-        end if
-    end do
-
-    if (n_arg_names > 0) then
-        call make_tmpfile('fo-test', test_log)
-        call backend_test_names(b, test_names, n_arg_names, exitcode, &
-            include_all, test_log)
-        call report_test_result(exitcode, test_log)
-        call delete_tmpfile(test_log)
-    else if (only_changed) then
         call fo_changed_modules('.', dag, changed_ids, n_changed, &
             affected_ids, n_affected, n_cached, ierr, &
-            is_test_arr=is_test_arr)
+            filenames=filenames, is_test_arr=is_test_arr)
         if (ierr /= 0) then
             write (error_unit, '(a)') 'fo: scan or dag failed'
             stop 1
         end if
 
         if (n_changed == 0) then
-            write (output_unit, '(a)') 'all cached, skipping tests'
+            write (output_unit, '(a,i0,a)') 'all ', n_cached, ' modules cached'
             return
         end if
 
-        ! collect affected test names
-        n_test_names = 0
+        write (output_unit, '(a,i0,a)') 'changed (', n_changed, '):'
+        do i = 1, n_changed
+            write (output_unit, '(a,a,a,a)') '  ', &
+                trim(dag%nodes(changed_ids(i))%label), &
+                '  ', trim(filenames(changed_ids(i)))
+        end do
+
+        write (output_unit, '(a,i0,a)') 'affected (', n_affected, '):'
         do i = 1, n_affected
-            if (is_test_arr(affected_ids(i))) then
-                n_test_names = n_test_names + 1
-                test_names(n_test_names) = dag%nodes(affected_ids(i))%label(1:128)
+            write (output_unit, '(a,a,a,a)') '  ', &
+                trim(dag%nodes(affected_ids(i))%label), &
+                '  ', trim(filenames(affected_ids(i)))
+        end do
+
+        n_tests = 0
+        do i = 1, n_affected
+            if (is_test_arr(affected_ids(i))) n_tests = n_tests + 1
+        end do
+        if (n_tests > 0) then
+            write (output_unit, '(a,i0,a)') 'affected tests (', n_tests, '):'
+            do i = 1, n_affected
+                if (is_test_arr(affected_ids(i))) then
+                    write (output_unit, '(a,a,a,a)') '  ', &
+                        trim(dag%nodes(affected_ids(i))%label), &
+                        '  ', trim(filenames(affected_ids(i)))
+                end if
+            end do
+        end if
+    end subroutine cmd_changed
+
+    subroutine cmd_build()
+        type(backend_t) :: b
+        integer :: exitcode
+        character(len=512) :: flags, build_log
+
+        b = detect_backend('.')
+        if (b%kind == BACKEND_NONE) then
+            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            stop 1
+        end if
+
+        call get_flags_arg(flags)
+        ! Capture the compiler output so a failed build shows the real diagnostic
+        ! (file:line: Error: ...) instead of a bare "STOP 1".
+        call make_tmpfile('fo-build', build_log)
+        ! Build the test binaries too so build/fo/bin/test_* never go stale against
+        ! the sources (running one directly after `fo build` used to give results
+        ! from the previous `fo test`).
+        if (len_trim(flags) > 0) then
+            call backend_build(b, exitcode, flags, build_log, with_tests=.true.)
+        else
+            call backend_build(b, exitcode, log_file=build_log, with_tests=.true.)
+        end if
+        if (exitcode /= 0) then
+            call report_build_result(build_log)
+            stop 1, quiet=.true.
+        end if
+        call delete_tmpfile(build_log)
+    end subroutine cmd_build
+
+    subroutine report_build_result(build_log)
+        !! Print the best compiler diagnostic from a failed build's log, with the
+        !! source location and the log path for the full output.
+        character(len=*), intent(in) :: build_log
+        type(diagnostic_t) :: diag
+        character(len=32) :: lnum
+
+        call diagnostic_from_log('build', build_log, 'fo build', diag)
+        write (error_unit, '(a,a)') 'fo: build failed: ', trim(diag%message)
+        if (len_trim(diag%file) > 0) then
+            write (lnum, '(i0)') diag%line
+            write (error_unit, '(a,a,a,a)') 'fo: at: ', trim(diag%file), ':', &
+                trim(lnum)
+        end if
+        if (len_trim(diag%hint) > 0) then
+            write (error_unit, '(a,a)') 'fo: hint: ', trim(diag%hint)
+        end if
+        write (error_unit, '(a,a)') 'fo: full log: ', trim(build_log)
+    end subroutine report_build_result
+
+    subroutine get_flags_arg(flags)
+        character(len=*), intent(out) :: flags
+        character(len=256) :: arg
+        integer :: i
+
+        flags = ''
+        do i = 2, command_argument_count()
+            call get_command_argument(i, arg)
+            if (trim(arg) == '--flag' .and. i < command_argument_count()) then
+                call get_command_argument(i + 1, flags)
+                return
+            end if
+        end do
+    end subroutine get_flags_arg
+
+    subroutine cmd_test()
+        type(backend_t) :: b
+        type(dag_t) :: dag
+        integer :: exitcode
+        integer :: changed_ids(MAX_NODES), n_changed
+        integer :: affected_ids(MAX_NODES), n_affected
+        integer :: n_cached, ierr, i, n_test_names, n_arg_names
+        logical :: only_changed, include_all
+        character(len=256) :: arg
+        character(len=128) :: test_names(MAX_NODES)
+        character(len=512) :: test_log
+        logical :: is_test_arr(MAX_NODES)
+
+        b = detect_backend('.')
+        if (b%kind == BACKEND_NONE) then
+            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            stop 1
+        end if
+
+        only_changed = .false.
+        include_all = .false.
+        n_arg_names = 0
+        do i = 2, command_argument_count()
+            call get_command_argument(i, arg)
+            if (trim(arg) == '--only-changed') only_changed = .true.
+            if (trim(arg) == '--all') include_all = .true.
+            if (arg(1:1) /= '-') then
+                n_arg_names = n_arg_names + 1
+                test_names(n_arg_names) = arg(1:128)
             end if
         end do
 
-        if (n_test_names == 0) then
-            write (output_unit, '(a)') 'no affected tests'
+        if (n_arg_names > 0) then
+            call make_tmpfile('fo-test', test_log)
+            call backend_test_names(b, test_names, n_arg_names, exitcode, &
+                include_all, test_log)
+            call report_test_result(exitcode, test_log)
+            call delete_tmpfile(test_log)
+        else if (only_changed) then
+            call fo_changed_modules('.', dag, changed_ids, n_changed, &
+                affected_ids, n_affected, n_cached, ierr, &
+                is_test_arr=is_test_arr)
+            if (ierr /= 0) then
+                write (error_unit, '(a)') 'fo: scan or dag failed'
+                stop 1
+            end if
+
+            if (n_changed == 0) then
+                write (output_unit, '(a)') 'all cached, skipping tests'
+                return
+            end if
+
+            ! collect affected test names
+            n_test_names = 0
+            do i = 1, n_affected
+                if (is_test_arr(affected_ids(i))) then
+                    n_test_names = n_test_names + 1
+                    test_names(n_test_names) = dag%nodes(affected_ids(i))%label(1:128)
+                end if
+            end do
+
+            if (n_test_names == 0) then
+                write (output_unit, '(a)') 'no affected tests'
+                return
+            end if
+
+            call make_tmpfile('fo-test', test_log)
+            call backend_test_names(b, test_names, n_test_names, exitcode, &
+                include_all, test_log)
+            call report_test_result(exitcode, test_log)
+            call delete_tmpfile(test_log)
+        else
+            call make_tmpfile('fo-test', test_log)
+            call backend_test(b, exitcode, include_all, test_log)
+            call report_test_result(exitcode, test_log)
+            call delete_tmpfile(test_log)
+        end if
+    end subroutine cmd_test
+
+    subroutine report_test_result(exitcode, test_log)
+        integer, intent(in) :: exitcode
+        character(len=*), intent(in) :: test_log
+
+        type(diagnostic_t) :: diag
+        character(len=128) :: failed_tests(MAX_TEST_RESULTS)
+        integer :: n_failed_tests
+
+        if (exitcode == 0) return
+        call diagnostic_from_log('test', test_log, 'fo test', diag)
+        write (error_unit, '(a,a)') 'fo: test failed: ', trim(diag%message)
+        call collect_failed_test_names(test_log, failed_tests, n_failed_tests)
+        if (n_failed_tests > 1) call report_failed_tests(failed_tests, n_failed_tests)
+        if (len_trim(diag%target) > 0) then
+            write (error_unit, '(a,a)') 'fo: target: ', trim(diag%target)
+        end if
+        if (len_trim(diag%hint) > 0) then
+            write (error_unit, '(a,a)') 'fo: hint: ', trim(diag%hint)
+        end if
+        if (len_trim(diag%rerun) > 0) then
+            write (error_unit, '(a,a)') 'fo: rerun: ', trim(diag%rerun)
+        end if
+        write (error_unit, '(a,a)') 'fo: log: ', trim(test_log)
+        stop 1, quiet = .true.
+    end subroutine report_test_result
+
+    subroutine cmd_graph()
+        type(scan_unit_t), allocatable :: units(:)
+        type(dag_t) :: dag
+        type(backend_t) :: b
+        character(len=512) :: scan_root
+        integer :: n_units, ierr, i, j
+        logical :: dot_mode
+        character(len=:), allocatable :: dot_output
+
+        allocate (units(MAX_UNITS))
+        b = detect_backend('.')
+        scan_root = '.'
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+        dot_mode = has_arg('--dot')
+
+        call scan_dir(trim(scan_root), units, n_units, ierr)
+        if (ierr /= 0) then
+            write (error_unit, '(a)') 'fo: scan failed'
+            stop 1
+        end if
+
+        call build_dag_from_units(units, n_units, dag)
+
+        if (dot_mode) then
+            call dag_to_dot(dag, dot_output)
+            write (output_unit, '(a)') trim(dot_output)
+        else
+            do i = 1, dag%n_nodes
+                if (dag%nodes(i)%n_edges == 0) then
+                    write (output_unit, '(a)') trim(dag%nodes(i)%label)
+                else
+                    do j = 1, dag%nodes(i)%n_edges
+                        write (output_unit, '(a,a,a)') &
+                            trim(dag%nodes(i)%label), &
+                            ' -> ', &
+                            trim(dag%nodes(dag%nodes(i)%edges(j))%label)
+                    end do
+                end if
+            end do
+        end if
+    end subroutine cmd_graph
+
+    subroutine cmd_lint()
+        use fo_lint, only: lint_finding_t, lint_warning_t, &
+            lint_dir, lint_compiler, lint_dedup_warnings, &
+            lint_all_json, MAX_FINDINGS, MAX_WARNINGS
+        type(backend_t) :: b
+        type(lint_finding_t), allocatable :: findings(:)
+        type(lint_warning_t), allocatable :: warnings(:)
+        integer :: n_findings, n_warnings, i, output_mode, mode_ierr
+        character(len=512) :: scan_root
+
+        allocate (findings(MAX_FINDINGS), warnings(MAX_WARNINGS))
+        b = detect_backend('.')
+        scan_root = '.'
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+
+        call check_output_mode(output_mode, mode_ierr)
+
+        call lint_dir(trim(scan_root), findings, n_findings)
+        call lint_compiler(trim(scan_root), warnings, n_warnings)
+        call lint_dedup_warnings(warnings, n_warnings)
+
+        if (output_mode > 0) then
+            write (output_unit, '(a)') &
+                trim(lint_all_json(findings, n_findings, &
+                warnings, n_warnings))
+        else if (n_findings == 0 .and. n_warnings == 0) then
+            write (output_unit, '(a)') 'no issues found'
+        else
+            do i = 1, n_findings
+                write (output_unit, '(a,a,i0,a,a,a,a)') &
+                    trim(findings(i)%file), ':', findings(i)%line, &
+                    ': unused import ', trim(findings(i)%symbol), &
+                    ' from ', trim(findings(i)%module_name)
+            end do
+            do i = 1, n_warnings
+                write (output_unit, '(a,a,i0,a,i0,a,a)') &
+                    trim(warnings(i)%file), ':', warnings(i)%line, &
+                    ':', warnings(i)%column, ': ', &
+                    trim(warnings(i)%message)
+            end do
+            write (output_unit, '(i0,a,i0,a)') &
+                n_findings, ' unused import(s), ', &
+                n_warnings, ' compiler warning(s)'
+            stop 1, quiet = .true.
+        end if
+    end subroutine cmd_lint
+
+    subroutine cmd_fmt()
+        integer :: exitcode
+        character(len=8192) :: fmt_output
+
+        if (has_arg('--check')) then
+            call fo_fmt_check_run('.', fmt_output, exitcode)
+            if (len_trim(fmt_output) > 0) &
+                write (error_unit, '(a)') trim(fmt_output)
+            if (exitcode /= 0) stop 1, quiet = .true.
             return
         end if
 
-        call make_tmpfile('fo-test', test_log)
-        call backend_test_names(b, test_names, n_test_names, exitcode, &
-            include_all, test_log)
-        call report_test_result(exitcode, test_log)
-        call delete_tmpfile(test_log)
-    else
-        call make_tmpfile('fo-test', test_log)
-        call backend_test(b, exitcode, include_all, test_log)
-        call report_test_result(exitcode, test_log)
-        call delete_tmpfile(test_log)
-    end if
-end subroutine cmd_test
+        call fo_fmt_run('.', exitcode)
+        if (exitcode /= 0) then
+            write (error_unit, '(a)') 'fo fmt: fprettify failed'
+            stop 1, quiet = .true.
+        end if
+        write (output_unit, '(a)') 'formatted'
+    end subroutine cmd_fmt
 
-subroutine report_test_result(exitcode, test_log)
-    integer, intent(in) :: exitcode
-    character(len=*), intent(in) :: test_log
+    subroutine cmd_install()
+        type(backend_t) :: b
+        character(len=256) :: prefix, arg
+        character(len=512) :: home
+        integer :: i, exitcode, status
 
-    type(diagnostic_t) :: diag
-    character(len=128) :: failed_tests(MAX_TEST_RESULTS)
-    integer :: n_failed_tests
+        call get_environment_variable('HOME', home, status=status)
+        if (status /= 0 .or. len_trim(home) == 0) home = '/usr/local'
+        prefix = trim(home)//'/.local'
 
-    if (exitcode == 0) return
-    call diagnostic_from_log('test', test_log, 'fo test', diag)
-    write (error_unit, '(a,a)') 'fo: test failed: ', trim(diag%message)
-    call collect_failed_test_names(test_log, failed_tests, n_failed_tests)
-    if (n_failed_tests > 1) call report_failed_tests(failed_tests, n_failed_tests)
-    if (len_trim(diag%target) > 0) then
-        write (error_unit, '(a,a)') 'fo: target: ', trim(diag%target)
-    end if
-    if (len_trim(diag%hint) > 0) then
-        write (error_unit, '(a,a)') 'fo: hint: ', trim(diag%hint)
-    end if
-    if (len_trim(diag%rerun) > 0) then
-        write (error_unit, '(a,a)') 'fo: rerun: ', trim(diag%rerun)
-    end if
-    write (error_unit, '(a,a)') 'fo: log: ', trim(test_log)
-    stop 1, quiet = .true.
-end subroutine report_test_result
-
-subroutine cmd_graph()
-    type(scan_unit_t), allocatable :: units(:)
-    type(dag_t) :: dag
-    type(backend_t) :: b
-    character(len=512) :: scan_root
-    integer :: n_units, ierr, i, j
-    logical :: dot_mode
-    character(len=:), allocatable :: dot_output
-
-    allocate (units(MAX_UNITS))
-    b = detect_backend('.')
-    scan_root = '.'
-    if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-    dot_mode = has_arg('--dot')
-
-    call scan_dir(trim(scan_root), units, n_units, ierr)
-    if (ierr /= 0) then
-        write (error_unit, '(a)') 'fo: scan failed'
-        stop 1
-    end if
-
-    call build_dag_from_units(units, n_units, dag)
-
-    if (dot_mode) then
-        call dag_to_dot(dag, dot_output)
-        write (output_unit, '(a)') trim(dot_output)
-    else
-        do i = 1, dag%n_nodes
-            if (dag%nodes(i)%n_edges == 0) then
-                write (output_unit, '(a)') trim(dag%nodes(i)%label)
-            else
-                do j = 1, dag%nodes(i)%n_edges
-                    write (output_unit, '(a,a,a)') &
-                        trim(dag%nodes(i)%label), &
-                        ' -> ', &
-                        trim(dag%nodes(dag%nodes(i)%edges(j))%label)
-                end do
+        do i = 2, command_argument_count()
+            call get_command_argument(i, arg)
+            if (trim(arg) == '--prefix' .and. i < command_argument_count()) then
+                call get_command_argument(i + 1, prefix)
             end if
         end do
-    end if
-end subroutine cmd_graph
 
-subroutine cmd_lint()
-    use fo_lint, only: lint_finding_t, lint_warning_t, &
-        lint_dir, lint_compiler, lint_dedup_warnings, &
-        lint_all_json, MAX_FINDINGS, MAX_WARNINGS
-    type(backend_t) :: b
-    type(lint_finding_t), allocatable :: findings(:)
-    type(lint_warning_t), allocatable :: warnings(:)
-    integer :: n_findings, n_warnings, i, output_mode, mode_ierr
-    character(len=512) :: scan_root
-
-    allocate (findings(MAX_FINDINGS), warnings(MAX_WARNINGS))
-    b = detect_backend('.')
-    scan_root = '.'
-    if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-
-    call check_output_mode(output_mode, mode_ierr)
-
-    call lint_dir(trim(scan_root), findings, n_findings)
-    call lint_compiler(trim(scan_root), warnings, n_warnings)
-    call lint_dedup_warnings(warnings, n_warnings)
-
-    if (output_mode > 0) then
-        write (output_unit, '(a)') &
-            trim(lint_all_json(findings, n_findings, &
-            warnings, n_warnings))
-    else if (n_findings == 0 .and. n_warnings == 0) then
-        write (output_unit, '(a)') 'no issues found'
-    else
-        do i = 1, n_findings
-            write (output_unit, '(a,a,i0,a,a,a,a)') &
-                trim(findings(i)%file), ':', findings(i)%line, &
-                ': unused import ', trim(findings(i)%symbol), &
-                ' from ', trim(findings(i)%module_name)
-        end do
-        do i = 1, n_warnings
-            write (output_unit, '(a,a,i0,a,i0,a,a)') &
-                trim(warnings(i)%file), ':', warnings(i)%line, &
-                ':', warnings(i)%column, ': ', &
-                trim(warnings(i)%message)
-        end do
-        write (output_unit, '(i0,a,i0,a)') &
-            n_findings, ' unused import(s), ', &
-            n_warnings, ' compiler warning(s)'
-        stop 1, quiet = .true.
-    end if
-end subroutine cmd_lint
-
-subroutine cmd_fmt()
-    integer :: exitcode
-    character(len=8192) :: fmt_output
-
-    if (has_arg('--check')) then
-        call fo_fmt_check_run('.', fmt_output, exitcode)
-        if (len_trim(fmt_output) > 0) &
-            write (error_unit, '(a)') trim(fmt_output)
-        if (exitcode /= 0) stop 1, quiet = .true.
-        return
-    end if
-
-    call fo_fmt_run('.', exitcode)
-    if (exitcode /= 0) then
-        write (error_unit, '(a)') 'fo fmt: fprettify failed'
-        stop 1, quiet = .true.
-    end if
-    write (output_unit, '(a)') 'formatted'
-end subroutine cmd_fmt
-
-subroutine cmd_install()
-    type(backend_t) :: b
-    character(len=256) :: prefix, arg
-    character(len=512) :: home
-    integer :: i, exitcode, status
-
-    call get_environment_variable('HOME', home, status=status)
-    if (status /= 0 .or. len_trim(home) == 0) home = '/usr/local'
-    prefix = trim(home)//'/.local'
-
-    do i = 2, command_argument_count()
-        call get_command_argument(i, arg)
-        if (trim(arg) == '--prefix' .and. i < command_argument_count()) then
-            call get_command_argument(i + 1, prefix)
+        ! Native build, then copy the produced app binaries into prefix/bin.
+        ! No fpm: the binaries come from the gfortran backend's build/fo/bin.
+        b = detect_backend('.')
+        if (b%kind == BACKEND_NONE) then
+            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            stop 1
         end if
-    end do
+        call backend_build(b, exitcode)
+        if (exitcode /= 0) stop 1
 
-    ! Native build, then copy the produced app binaries into prefix/bin.
-    ! No fpm: the binaries come from the gfortran backend's build/fo/bin.
-    b = detect_backend('.')
-    if (b%kind == BACKEND_NONE) then
-        write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
-        stop 1
-    end if
-    call backend_build(b, exitcode)
-    if (exitcode /= 0) stop 1
-
-    call fs_make_dir(trim(prefix)//'/bin')
-    ! Atomic per-binary replace: copy to a temp name then rename over the
-    ! target. rename swaps the directory entry even when the existing binary
-    ! is held open (e.g. a running fo MCP server), avoiding "text file busy".
-    block
-        character(len=512), allocatable :: bins(:)
-        character(len=512) :: dst, slash_name
-        integer :: nb, k, sl
-        logical :: installed_any
-        installed_any = .false.
-        allocate (bins(256))
-        call fs_collect_files(trim(b%project_dir)//'/build/fo/bin', '', '', '', &
-            bins, nb, recursive=.false.)
-        do k = 1, nb
-            sl = index(trim(bins(k)), '/', back=.true.)
-            slash_name = bins(k) (sl + 1:)
-            dst = trim(prefix)//'/bin/'//trim(slash_name)
-            if (fs_copy_exec(trim(bins(k)), trim(dst)//'.fo-new') /= 0) cycle
-            if (fs_rename(trim(dst)//'.fo-new', trim(dst)) == 0) &
-                installed_any = .true.
-        end do
-        deallocate (bins)
-        exitcode = merge(0, 1, installed_any)
-    end block
-    if (exitcode /= 0) then
-        write (error_unit, '(a)') 'fo: install: no binaries found in build/fo/bin'
-        stop 1
-    end if
-    write (output_unit, '(a,a)') 'installed: ', trim(prefix)//'/bin/'
-end subroutine cmd_install
-
-subroutine cmd_clean()
-    use fo_cache, only: cache_root, cache_store_root
-    character(len=512) :: root, store_root
-    integer :: n_removed
-
-    call cache_root(root)
-    call cache_store_root(store_root)
-    call fs_remove_tree(trim(root))
-    ! Also drop this project's own build tree and any stale module artifacts
-    ! left in the project root, which otherwise shadow build/fo/mod.
-    call fs_remove_tree('build/fo')
-    call clean_root_build_artifacts('.', n_removed)
-    write (output_unit, '(a,a)') 'cache cleared: ', trim(store_root)
-end subroutine cmd_clean
-
-subroutine cmd_info()
-    use fo_capabilities, only: capabilities_t, detect_capabilities, &
-        capabilities_text, capabilities_json
-    use fo_cache, only: cache_schema, cache_store_root
-    type(scan_unit_t), allocatable :: units(:)
-    type(dag_t) :: dag
-    type(backend_t) :: b
-    character(len=512) :: scan_root
-    integer :: n_units, ierr
-    logical :: show_caps
-    type(capabilities_t) :: cap
-    character(len=512) :: cache_text
-
-    allocate (units(MAX_UNITS))
-    b = detect_backend('.')
-    scan_root = '.'
-    if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-
-    show_caps = has_arg('--capabilities')
-
-    if (show_caps) then
-        call detect_capabilities(cap)
+        call fs_make_dir(trim(prefix)//'/bin')
+        ! Atomic per-binary replace: copy to a temp name then rename over the
+        ! target. rename swaps the directory entry even when the existing binary
+        ! is held open (e.g. a running fo MCP server), avoiding "text file busy".
         block
-            character(len=2048) :: text
-            call capabilities_text(cap, text)
-            write (output_unit, '(a)') trim(text)
+            character(len=512), allocatable :: bins(:)
+            character(len=512) :: dst, slash_name
+            integer :: nb, k, sl
+            logical :: installed_any
+            installed_any = .false.
+            allocate (bins(256))
+            call fs_collect_files(trim(b%project_dir)//'/build/fo/bin', '', '', '', &
+                bins, nb, recursive=.false.)
+            do k = 1, nb
+                sl = index(trim(bins(k)), '/', back=.true.)
+                slash_name = bins(k) (sl + 1:)
+                dst = trim(prefix)//'/bin/'//trim(slash_name)
+                if (fs_copy_exec(trim(bins(k)), trim(dst)//'.fo-new') /= 0) cycle
+                if (fs_rename(trim(dst)//'.fo-new', trim(dst)) == 0) &
+                    installed_any = .true.
+            end do
+            deallocate (bins)
+            exitcode = merge(0, 1, installed_any)
         end block
-        return
-    end if
+        if (exitcode /= 0) then
+            write (error_unit, '(a)') 'fo: install: no binaries found in build/fo/bin'
+            stop 1
+        end if
+        write (output_unit, '(a,a)') 'installed: ', trim(prefix)//'/bin/'
+    end subroutine cmd_install
 
-    select case (b%kind)
-    case (BACKEND_GFORTRAN)
-        write (output_unit, '(a)') 'backend: gfortran'
-    case (BACKEND_CMAKE)
-        write (output_unit, '(a)') 'backend: cmake'
-    case default
-        write (output_unit, '(a)') 'backend: none'
-    end select
-    call cache_schema(cache_text)
-    write (output_unit, '(a,a)') 'cache-schema: ', trim(cache_text)
-    call cache_store_root(cache_text)
-    write (output_unit, '(a,a)') 'cache-root: ', trim(cache_text)
-    write (output_unit, '(a)') 'cache-shards: 256'
+    subroutine cmd_clean()
+        use fo_cache, only: cache_root, cache_store_root
+        character(len=512) :: root, store_root
+        integer :: n_removed
 
-    call scan_dir(trim(scan_root), units, n_units, ierr)
-    if (ierr == 0) then
-        call build_dag_from_units(units, n_units, dag)
-        write (output_unit, '(a,i0)') 'files: ', n_units
-        write (output_unit, '(a,i0)') 'modules: ', dag%n_nodes
-    end if
-end subroutine cmd_info
+        call cache_root(root)
+        call cache_store_root(store_root)
+        call fs_remove_tree(trim(root))
+        ! Also drop this project's own build tree and any stale module artifacts
+        ! left in the project root, which otherwise shadow build/fo/mod.
+        call fs_remove_tree('build/fo')
+        call clean_root_build_artifacts('.', n_removed)
+        write (output_unit, '(a,a)') 'cache cleared: ', trim(store_root)
+    end subroutine cmd_clean
 
-subroutine cmd_watch()
-    use fo_watch, only: watch_loop
-    character(len=256) :: arg
-    logical :: fmt_mode
-    integer :: i
+    subroutine cmd_info()
+        use fo_capabilities, only: capabilities_t, detect_capabilities, &
+            capabilities_text, capabilities_json
+        use fo_cache, only: cache_schema, cache_store_root
+        type(scan_unit_t), allocatable :: units(:)
+        type(dag_t) :: dag
+        type(backend_t) :: b
+        character(len=512) :: scan_root
+        integer :: n_units, ierr
+        logical :: show_caps
+        type(capabilities_t) :: cap
+        character(len=512) :: cache_text
 
-    fmt_mode = .false.
-    do i = 2, command_argument_count()
-        call get_command_argument(i, arg)
-        if (trim(arg) == '--fmt') fmt_mode = .true.
-    end do
-    call watch_loop('.', fmt_mode=fmt_mode)
-end subroutine cmd_watch
+        allocate (units(MAX_UNITS))
+        b = detect_backend('.')
+        scan_root = '.'
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
 
-subroutine cmd_mcp_server()
-    use fo_mcp, only: mcp_serve
-    call mcp_serve()
-end subroutine cmd_mcp_server
+        show_caps = has_arg('--capabilities')
 
-subroutine cmd_lsp()
-    use fo_lsp, only: lsp_serve
-    call lsp_serve()
-end subroutine cmd_lsp
+        if (show_caps) then
+            call detect_capabilities(cap)
+            block
+                character(len=2048) :: text
+                call capabilities_text(cap, text)
+                write (output_unit, '(a)') trim(text)
+            end block
+            return
+        end if
+
+        select case (b%kind)
+        case (BACKEND_GFORTRAN)
+            write (output_unit, '(a)') 'backend: gfortran'
+        case (BACKEND_CMAKE)
+            write (output_unit, '(a)') 'backend: cmake'
+        case default
+            write (output_unit, '(a)') 'backend: none'
+        end select
+        call cache_schema(cache_text)
+        write (output_unit, '(a,a)') 'cache-schema: ', trim(cache_text)
+        call cache_store_root(cache_text)
+        write (output_unit, '(a,a)') 'cache-root: ', trim(cache_text)
+        write (output_unit, '(a)') 'cache-shards: 256'
+
+        call scan_dir(trim(scan_root), units, n_units, ierr)
+        if (ierr == 0) then
+            call build_dag_from_units(units, n_units, dag)
+            write (output_unit, '(a,i0)') 'files: ', n_units
+            write (output_unit, '(a,i0)') 'modules: ', dag%n_nodes
+        end if
+    end subroutine cmd_info
+
+    subroutine cmd_watch()
+        use fo_watch, only: watch_loop
+        character(len=256) :: arg
+        logical :: fmt_mode
+        integer :: i
+
+        fmt_mode = .false.
+        do i = 2, command_argument_count()
+            call get_command_argument(i, arg)
+            if (trim(arg) == '--fmt') fmt_mode = .true.
+        end do
+        call watch_loop('.', fmt_mode=fmt_mode)
+    end subroutine cmd_watch
+
+    subroutine cmd_mcp_server()
+        use fo_mcp, only: mcp_serve
+        call mcp_serve()
+    end subroutine cmd_mcp_server
+
+    subroutine cmd_lsp()
+        use fo_lsp, only: lsp_serve
+        call lsp_serve()
+    end subroutine cmd_lsp
 
 end program fo_main

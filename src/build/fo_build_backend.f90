@@ -577,73 +577,73 @@ contains
             if (iostat /= 0) exit
             if (index(line, 'Mismatch in components of derived type') > 0 .or. &
                 index(line, '__vtype_') > 0) then
-            log_has_vtable_mismatch = .true.
-            exit
-        end if
-    end do
-    close (u)
-end function log_has_vtable_mismatch
+                log_has_vtable_mismatch = .true.
+                exit
+            end if
+        end do
+        close (u)
+    end function log_has_vtable_mismatch
 
-! Delete all .mod files from fpm build directories to clear stale module interfaces.
-! Keeps dependency build artifacts (.o files) intact to avoid full dependency rebuild.
-subroutine clear_fpm_mod_cache(project_dir)
-    character(len=*), intent(in) :: project_dir
+    ! Delete all .mod files from fpm build directories to clear stale module interfaces.
+    ! Keeps dependency build artifacts (.o files) intact to avoid full dependency rebuild.
+    subroutine clear_fpm_mod_cache(project_dir)
+        character(len=*), intent(in) :: project_dir
 
-    character(len=:), allocatable :: build_root
-    character(len=512), allocatable :: hits(:)
-    integer :: n, k, base_depth
+        character(len=:), allocatable :: build_root
+        character(len=512), allocatable :: hits(:)
+        integer :: n, k, base_depth
 
-    build_root = trim(project_dir)//'/build'
-    base_depth = path_depth(build_root)
-    allocate (hits(4096))
+        build_root = trim(project_dir)//'/build'
+        base_depth = path_depth(build_root)
+        allocate (hits(4096))
 
-    ! Project module interfaces at depth <= 2 under build, never a
-    ! dependency's. Replaces find -maxdepth 2 -name '*.mod' -delete.
-    call fs_collect_files(build_root, '', '.mod', '', hits, n)
-    do k = 1, n
-        if (index(hits(k), '/dependencies/') > 0) cycle
-        if (path_depth(trim(hits(k))) - base_depth > 2) cycle
-        call fs_remove_file(trim(hits(k)))
-    end do
+        ! Project module interfaces at depth <= 2 under build, never a
+        ! dependency's. Replaces find -maxdepth 2 -name '*.mod' -delete.
+        call fs_collect_files(build_root, '', '.mod', '', hits, n)
+        do k = 1, n
+            if (index(hits(k), '/dependencies/') > 0) cycle
+            if (path_depth(trim(hits(k))) - base_depth > 2) cycle
+            call fs_remove_file(trim(hits(k)))
+        end do
 
-    ! Project objects at exactly depth 3 (src_*.o), to force recompilation
-    ! with fresh interfaces. Replaces find -mindepth 3 -maxdepth 3.
-    call fs_collect_files(build_root, 'src_', '.o', '', hits, n)
-    do k = 1, n
-        if (index(hits(k), '/dependencies/') > 0) cycle
-        if (.not. basename_starts(trim(hits(k)), 'src_')) cycle
-        if (path_depth(trim(hits(k))) - base_depth /= 3) cycle
-        call fs_remove_file(trim(hits(k)))
-    end do
-    deallocate (hits)
-end subroutine clear_fpm_mod_cache
+        ! Project objects at exactly depth 3 (src_*.o), to force recompilation
+        ! with fresh interfaces. Replaces find -mindepth 3 -maxdepth 3.
+        call fs_collect_files(build_root, 'src_', '.o', '', hits, n)
+        do k = 1, n
+            if (index(hits(k), '/dependencies/') > 0) cycle
+            if (.not. basename_starts(trim(hits(k)), 'src_')) cycle
+            if (path_depth(trim(hits(k))) - base_depth /= 3) cycle
+            call fs_remove_file(trim(hits(k)))
+        end do
+        deallocate (hits)
+    end subroutine clear_fpm_mod_cache
 
-integer function path_depth(path) result(d)
-    !! Number of path components (count of '/' separators) in a path, used
-    !! to emulate find's -maxdepth/-mindepth without a shell.
-    character(len=*), intent(in) :: path
-    integer :: i
-    d = 0
-    do i = 1, len_trim(path)
-        if (path(i:i) == '/') d = d + 1
-    end do
-end function path_depth
+    integer function path_depth(path) result(d)
+        !! Number of path components (count of '/' separators) in a path, used
+        !! to emulate find's -maxdepth/-mindepth without a shell.
+        character(len=*), intent(in) :: path
+        integer :: i
+        d = 0
+        do i = 1, len_trim(path)
+            if (path(i:i) == '/') d = d + 1
+        end do
+    end function path_depth
 
-logical function basename_starts(path, prefix) result(yes)
-    !! True when the final path component begins with prefix.
-    character(len=*), intent(in) :: path, prefix
-    integer :: slash, n
-    n = len_trim(path)
-    slash = index(path(1:n), '/', back=.true.)
-    yes = .false.
-    if (n - slash < len(prefix)) return
-    yes = path(slash + 1:slash + len(prefix)) == prefix
-end function basename_starts
+    logical function basename_starts(path, prefix) result(yes)
+        !! True when the final path component begins with prefix.
+        character(len=*), intent(in) :: path, prefix
+        integer :: slash, n
+        n = len_trim(path)
+        slash = index(path(1:n), '/', back=.true.)
+        yes = .false.
+        if (n - slash < len(prefix)) return
+        yes = path(slash + 1:slash + len(prefix)) == prefix
+    end function basename_starts
 
-subroutine clear_cmake_build_tree(project_dir)
-    character(len=*), intent(in) :: project_dir
+    subroutine clear_cmake_build_tree(project_dir)
+        character(len=*), intent(in) :: project_dir
 
-    call fs_remove_tree(trim(project_dir)//'/build')
-end subroutine clear_cmake_build_tree
+        call fs_remove_tree(trim(project_dir)//'/build')
+    end subroutine clear_cmake_build_tree
 
 end module fo_build_backend
