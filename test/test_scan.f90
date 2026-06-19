@@ -20,6 +20,7 @@ program test_scan
     call test_scan_dir_empty()
     call test_scan_dir_path_with_spaces()
     call test_scan_dir_skips_nested_projects()
+    call test_scan_dir_skips_build_outputs()
     call test_scan_dir_skips_agent_worktrees()
 
     write (output_unit, '(a,i0,a,i0,a)') 'scan: ', n_pass, ' pass, ', n_fail, ' fail'
@@ -346,6 +347,48 @@ contains
 
         call remove_tree(dir)
     end subroutine test_scan_dir_skips_nested_projects
+
+    subroutine test_scan_dir_skips_build_outputs()
+        type(scan_unit_t), allocatable :: units(:)
+        integer :: n_units, ierr, u
+        character(len=512) :: dir
+        character(len=80) :: root_lines(3), generated_lines(3)
+
+        allocate (units(MAX_UNITS))
+        call make_tmp_path('fo_test_build_outputs', dir, '')
+        call remove_tree(dir)
+        call make_dir(trim(dir)//'/src')
+        call make_dir(trim(dir)//'/build/_deps/libneo-src/src')
+        call make_dir(trim(dir)//'/build_axisheal/dependencies/libneo/src')
+        call make_dir(trim(dir)//'/SRC/libneo/src')
+
+        open (newunit=u, file=trim(dir)//'/CMakeLists.txt', status='replace')
+        write (u, '(a)') 'project(root Fortran)'
+        close (u)
+
+        root_lines(1) = 'module root_mod'
+        root_lines(2) = 'implicit none'
+        root_lines(3) = 'end module root_mod'
+        call write_file(trim(dir)//'/src/root_mod.f90', root_lines, 3)
+
+        generated_lines(1) = 'module generated_mod'
+        generated_lines(2) = 'implicit none'
+        generated_lines(3) = 'end module generated_mod'
+        call write_file(trim(dir)//'/build/_deps/libneo-src/src/generated_mod.f90', &
+            generated_lines, 3)
+        call write_file(trim(dir)//'/build_axisheal/dependencies/libneo/src/generated_mod.f90', &
+            generated_lines, 3)
+        call write_file(trim(dir)//'/SRC/libneo/src/generated_mod.f90', &
+            generated_lines, 3)
+
+        call scan_dir(dir, units, n_units, ierr)
+        call assert(ierr == 0, 'build outputs: no scan error')
+        call assert(n_units == 1, 'build outputs: generated trees skipped')
+        call assert(trim(units(1)%module_name) == 'root_mod', &
+            'build outputs: root module remains')
+
+        call remove_tree(dir)
+    end subroutine test_scan_dir_skips_build_outputs
 
     subroutine test_scan_dir_skips_agent_worktrees()
         type(scan_unit_t), allocatable :: units(:)

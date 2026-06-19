@@ -73,8 +73,15 @@ static int skip_dir_name(const char *name, int is_proj_root, int depth) {
     if (strcmp(name, "venv") == 0) return 1;
     if (strcmp(name, "__pycache__") == 0) return 1;
     if (strcmp(name, "site-packages") == 0) return 1;
-    /* skip 'build' only at depth 0 of a project root scan */
+    /* Build/output trees are never source roots for the current project.
+       SIMPLE and CMake branches leave build_axisheal, build_verify*, and
+       SRC/libneo work trees next to the real sources; counting those copies
+       trips MAX_UNITS and builds stale generated files. */
+    if (strcmp(name, "_deps") == 0) return 1;
+    if (strcmp(name, "dependencies") == 0) return 1;
     if (is_proj_root && depth == 0 && strcmp(name, "build") == 0) return 1;
+    if (is_proj_root && depth == 0 && strncmp(name, "build_", 6) == 0) return 1;
+    if (is_proj_root && depth == 0 && strcmp(name, "SRC") == 0) return 1;
     return 0;
 }
 
@@ -553,4 +560,3 @@ void fo_c_write_stderr(const char *buf, int n) {
         off += (int)w;
     }
 }
-
