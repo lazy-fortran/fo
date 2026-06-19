@@ -16,6 +16,7 @@ program test_fmt
     call test_contains_dual()
     call test_one_line_if()
     call test_continuation_line()
+    call test_multiline_if_then()
     call test_comment_only_line()
     call test_preprocessor_passthrough()
     call test_empty_line_preserved()
@@ -185,6 +186,35 @@ contains
         call assert(trim(out(3)) == '        b', 'continuation: second line double-indented')
         call assert(trim(out(4)) == 'end subroutine foo', 'continuation: end at 0')
     end subroutine test_continuation_line
+
+    subroutine test_multiline_if_then()
+        !! An `if (...) then` whose `then` is pushed onto a continuation line
+        !! must still open the block: the body indents and code after `end if`
+        !! stays at the block's level (no -1 drift). An `else if` head that
+        !! already opened must not be opened a second time.
+        character(len=MAX_LINE_LEN) :: out(11)
+        integer :: n_out
+        character(len=64) :: inp(11)
+        inp(1) = 'subroutine s(a, b, c)'
+        inp(2) = 'if (a .and. &'
+        inp(3) = 'b) then'
+        inp(4) = 'x = 1'
+        inp(5) = 'else if (b .and. &'
+        inp(6) = 'c) then'
+        inp(7) = 'x = 2'
+        inp(8) = 'end if'
+        inp(9) = 'y = 3'
+        inp(10) = 'end subroutine s'
+        inp(11) = ''
+        call fmt(inp, 11, out, n_out)
+        call assert(trim(out(3)) == '        b) then', 'mlif: head continuation +1')
+        call assert(trim(out(4)) == '        x = 1', 'mlif: if body indented')
+        call assert(trim(out(5)) == '    else if (b .and. &', 'mlif: else if at block level')
+        call assert(trim(out(7)) == '        x = 2', 'mlif: else-if body indented')
+        call assert(trim(out(8)) == '    end if', 'mlif: end if aligned')
+        call assert(trim(out(9)) == '    y = 3', 'mlif: no drift after end if')
+        call assert(trim(out(10)) == 'end subroutine s', 'mlif: end subroutine at 0')
+    end subroutine test_multiline_if_then
 
     subroutine test_comment_only_line()
         character(len=MAX_LINE_LEN) :: out(6)
