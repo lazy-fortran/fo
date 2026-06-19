@@ -360,6 +360,7 @@ contains
         call make_dir(trim(dir)//'/src')
         call make_dir(trim(dir)//'/build/_deps/libneo-src/src')
         call make_dir(trim(dir)//'/build_axisheal/dependencies/libneo/src')
+        call make_dir(trim(dir)//'/build-mgd/deps-src/hdf5/src')
         call make_dir(trim(dir)//'/SRC/libneo/src')
 
         open (newunit=u, file=trim(dir)//'/CMakeLists.txt', status='replace')
@@ -377,6 +378,8 @@ contains
         call write_file(trim(dir)//'/build/_deps/libneo-src/src/generated_mod.f90', &
             generated_lines, 3)
         call write_file(trim(dir)//'/build_axisheal/dependencies/libneo/src/generated_mod.f90', &
+            generated_lines, 3)
+        call write_file(trim(dir)//'/build-mgd/deps-src/hdf5/src/generated_mod.f90', &
             generated_lines, 3)
         call write_file(trim(dir)//'/SRC/libneo/src/generated_mod.f90', &
             generated_lines, 3)

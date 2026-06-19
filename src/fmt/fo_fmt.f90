@@ -12,8 +12,7 @@ module fo_fmt
 contains
 
     subroutine write_source_list(scan_root, list_file)
-        !! Write the sorted list of *.f90/*.F90 files under scan_root, excluding
-        !! any */build or */.git path component, into list_file (one per line).
+        !! Write the sorted list of *.f90/*.F90 project sources under scan_root.
         !! Replaces the `find ... | sort > list_file` pipeline.
         character(len=*), intent(in) :: scan_root, list_file
 
@@ -30,15 +29,7 @@ contains
             call fs_collect_files(trim(scan_root), '', trim(suffixes(s)), '', &
                 hits, n_hits)
             do i = 1, n_hits
-                if (index(hits(i), '/build/') > 0) cycle
-                if (index(hits(i), '/.git/') > 0) cycle
-                ! Vendored/virtualenv trees (numpy ships .f90 under site-packages)
-                ! are not project sources; the build scanner skips them too, so
-                ! the format check must not flag them. Keep the two scanners in sync.
-                if (index(hits(i), '/.venv/') > 0) cycle
-                if (index(hits(i), '/venv/') > 0) cycle
-                if (index(hits(i), '/site-packages/') > 0) cycle
-                if (index(hits(i), '/node_modules/') > 0) cycle
+                if (skip_generated_source(scan_root, hits(i))) cycle
                 if (n_files >= size(files)) exit
                 n_files = n_files + 1
                 files(n_files) = hits(i)
@@ -66,6 +57,43 @@ contains
         deallocate (hits)
         deallocate (files)
     end subroutine write_source_list
+
+    logical function skip_generated_source(root, path)
+        character(len=*), intent(in) :: root, path
+
+        character(len=512) :: rel, first, padded
+        integer :: root_len, slash
+
+        rel = trim(path)
+        root_len = len_trim(root)
+        if (root_len > 0 .and. len_trim(path) > root_len) then
+            if (path(1:root_len) == root(1:root_len)) then
+                rel = path(root_len + 1:)
+                if (rel(1:1) == '/') rel = rel(2:)
+            end if
+        end if
+
+        first = rel
+        slash = index(first, '/')
+        if (slash > 0) first = first(1:slash - 1)
+
+        skip_generated_source = .true.
+        if (index(trim(first), 'build') == 1) return
+        if (trim(first) == 'SRC') return
+        if (len_trim(first) > 0 .and. first(1:1) == '.') return
+
+        padded = '/'//trim(rel)//'/'
+        if (index(padded, '/_deps/') > 0) return
+        if (index(padded, '/dependencies/') > 0) return
+        if (index(padded, '/deps-src/') > 0) return
+        if (index(padded, '/.git/') > 0) return
+        if (index(padded, '/.venv/') > 0) return
+        if (index(padded, '/venv/') > 0) return
+        if (index(padded, '/site-packages/') > 0) return
+        if (index(padded, '/node_modules/') > 0) return
+
+        skip_generated_source = .false.
+    end function skip_generated_source
 
     subroutine fo_fmt_run(dir, exitcode)
         character(len=*), intent(in) :: dir

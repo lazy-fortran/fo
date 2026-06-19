@@ -2,13 +2,13 @@ module fo_build_backend
     use, intrinsic :: iso_fortran_env, only: error_unit
     use fo_util, only: make_tmpfile, delete_tmpfile
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_mkdir_excl, fs_sleep_ms, &
-                     fs_pid_alive, fs_collect_files, fs_remove_file
+        fs_pid_alive, fs_collect_files, fs_remove_file
     use fo_process, only: process_detect_nproc, process_fpm_build, &
-                          process_fpm_test_list, process_fpm_test_all, &
-                          process_fpm_test_names, process_cmake_build, &
-                          process_ctest, process_getpid
+        process_fpm_test_list, process_fpm_test_all, &
+        process_fpm_test_names, process_cmake_build, &
+        process_ctest, process_getpid
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
-                                 gfortran_test_names
+        gfortran_test_names
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
@@ -161,13 +161,13 @@ contains
         select case (self%kind)
         case (BACKEND_GFORTRAN)
             call gfortran_build(self%project_dir, log_path, exitcode, &
-                                flags=flag_text)
+                flags=flag_text)
             if (exitcode == 0 .and. want_tests) &
                 call gfortran_test(self%project_dir, log_path, exitcode, &
-                                   build_only=.true.)
+                build_only=.true.)
         case (BACKEND_FPM)
             call process_fpm_build(self%project_dir, flag_text, np, log_path, &
-                                   exitcode)
+                exitcode)
             if (exitcode /= 0 .and. exitcode /= 124 .and. len_trim(log_path) > 0) then
                 if (log_has_vtable_mismatch(log_path)) then
                     write (error_unit, '(a)') &
@@ -175,12 +175,12 @@ contains
                         ' clearing module interface cache and retrying'
                     call clear_fpm_mod_cache(self%project_dir)
                     call process_fpm_build(self%project_dir, flag_text, np, log_path, &
-                                           exitcode)
+                        exitcode)
                 end if
             end if
         case (BACKEND_CMAKE)
             call process_cmake_build(self%project_dir, flag_text, np, log_path, &
-                                     exitcode)
+                exitcode)
             if (exitcode /= 0 .and. exitcode /= 124 .and. len_trim(log_path) > 0) then
                 if (log_has_vtable_mismatch(log_path)) then
                     write (error_unit, '(a)') &
@@ -188,7 +188,7 @@ contains
                         ' clearing build tree and retrying'
                     call clear_cmake_build_tree(self%project_dir)
                     call process_cmake_build(self%project_dir, flag_text, np, log_path, &
-                                             exitcode)
+                        exitcode)
                 end if
             end if
         case default
@@ -230,13 +230,13 @@ contains
         select case (self%kind)
         case (BACKEND_GFORTRAN)
             call gfortran_test(self%project_dir, log_path, exitcode, &
-                               include_slow=slow)
+                include_slow=slow)
         case (BACKEND_FPM)
             if (slow) then
                 call process_fpm_test_all(self%project_dir, jobs, log_path, exitcode)
             else
                 call fpm_list_tests(self%project_dir, names, n_names, &
-                                    list_ierr, log_path)
+                    list_ierr, log_path)
                 if (list_ierr /= 0) then
                     exitcode = 1
                     call release_project_lock(lock_dir)
@@ -249,11 +249,11 @@ contains
                     return
                 end if
                 call fpm_run_tests(self%project_dir, names, n_names, &
-                                   exitcode, log_path)
+                    exitcode, log_path)
             end if
         case (BACKEND_CMAKE)
             inquire (file=trim(self%project_dir)//'/build/CTestTestfile.cmake', &
-                     exist=has_tests)
+                exist=has_tests)
             if (.not. has_tests) then
                 exitcode = 0
                 call release_project_lock(lock_dir)
@@ -275,7 +275,7 @@ contains
     end subroutine backend_test
 
     subroutine backend_test_names(self, names, n_names, exitcode, include_slow, &
-                                  log_file)
+            log_file)
         use fo_scan, only: is_slow_test
         type(backend_t), intent(in) :: self
         character(len=128), intent(in) :: names(:)
@@ -315,14 +315,14 @@ contains
 
         if (self%kind == BACKEND_GFORTRAN) then
             call gfortran_test_names(self%project_dir, fast_names, n_fast, &
-                                     log_path, exitcode, include_slow=slow)
+                log_path, exitcode, include_slow=slow)
             call release_project_lock(lock_dir)
             return
         end if
 
         if (self%kind == BACKEND_FPM) then
             call fpm_run_tests(self%project_dir, fast_names, n_fast, &
-                               exitcode, log_path)
+                exitcode, log_path)
             call release_project_lock(lock_dir)
             return
         end if
@@ -330,7 +330,7 @@ contains
         if (self%kind == BACKEND_CMAKE) then
             call names_to_ctest_regex(fast_names, n_fast, regex)
             call process_ctest(self%project_dir, jobs, regex, slow, log_path, &
-                               exitcode)
+                exitcode)
             call release_project_lock(lock_dir)
             return
         end if
@@ -364,7 +364,7 @@ contains
             end if
             owner = 0
             open (newunit=u, file=pid_file, status='old', action='read', &
-                  iostat=ios)
+                iostat=ios)
             if (ios == 0) then
                 read (u, *, iostat=ios) owner
                 close (u)
@@ -377,7 +377,7 @@ contains
         end do
 
         open (newunit=u, file=pid_file, status='replace', action='write', &
-              iostat=ios)
+            iostat=ios)
         if (ios == 0) then
             write (u, '(i0)') process_getpid()
             close (u)
@@ -553,10 +553,10 @@ contains
 
         if (present(log_file)) then
             call process_fpm_test_names(project_dir, names, n_names, jobs, log_file, &
-                                        exitcode)
+                exitcode)
         else
             call process_fpm_test_names(project_dir, names, n_names, jobs, '', &
-                                        exitcode)
+                exitcode)
         end if
     end subroutine fpm_run_tests
 
@@ -577,73 +577,73 @@ contains
             if (iostat /= 0) exit
             if (index(line, 'Mismatch in components of derived type') > 0 .or. &
                 index(line, '__vtype_') > 0) then
-                log_has_vtable_mismatch = .true.
-                exit
-            end if
-        end do
-        close (u)
-    end function log_has_vtable_mismatch
+            log_has_vtable_mismatch = .true.
+            exit
+        end if
+    end do
+    close (u)
+end function log_has_vtable_mismatch
 
-    ! Delete all .mod files from fpm build directories to clear stale module interfaces.
-    ! Keeps dependency build artifacts (.o files) intact to avoid full dependency rebuild.
-    subroutine clear_fpm_mod_cache(project_dir)
-        character(len=*), intent(in) :: project_dir
+! Delete all .mod files from fpm build directories to clear stale module interfaces.
+! Keeps dependency build artifacts (.o files) intact to avoid full dependency rebuild.
+subroutine clear_fpm_mod_cache(project_dir)
+    character(len=*), intent(in) :: project_dir
 
-        character(len=:), allocatable :: build_root
-        character(len=512), allocatable :: hits(:)
-        integer :: n, k, base_depth
+    character(len=:), allocatable :: build_root
+    character(len=512), allocatable :: hits(:)
+    integer :: n, k, base_depth
 
-        build_root = trim(project_dir)//'/build'
-        base_depth = path_depth(build_root)
-        allocate (hits(4096))
+    build_root = trim(project_dir)//'/build'
+    base_depth = path_depth(build_root)
+    allocate (hits(4096))
 
-        ! Project module interfaces at depth <= 2 under build, never a
-        ! dependency's. Replaces find -maxdepth 2 -name '*.mod' -delete.
-        call fs_collect_files(build_root, '', '.mod', '', hits, n)
-        do k = 1, n
-            if (index(hits(k), '/dependencies/') > 0) cycle
-            if (path_depth(trim(hits(k))) - base_depth > 2) cycle
-            call fs_remove_file(trim(hits(k)))
-        end do
+    ! Project module interfaces at depth <= 2 under build, never a
+    ! dependency's. Replaces find -maxdepth 2 -name '*.mod' -delete.
+    call fs_collect_files(build_root, '', '.mod', '', hits, n)
+    do k = 1, n
+        if (index(hits(k), '/dependencies/') > 0) cycle
+        if (path_depth(trim(hits(k))) - base_depth > 2) cycle
+        call fs_remove_file(trim(hits(k)))
+    end do
 
-        ! Project objects at exactly depth 3 (src_*.o), to force recompilation
-        ! with fresh interfaces. Replaces find -mindepth 3 -maxdepth 3.
-        call fs_collect_files(build_root, 'src_', '.o', '', hits, n)
-        do k = 1, n
-            if (index(hits(k), '/dependencies/') > 0) cycle
-            if (.not. basename_starts(trim(hits(k)), 'src_')) cycle
-            if (path_depth(trim(hits(k))) - base_depth /= 3) cycle
-            call fs_remove_file(trim(hits(k)))
-        end do
-        deallocate (hits)
-    end subroutine clear_fpm_mod_cache
+    ! Project objects at exactly depth 3 (src_*.o), to force recompilation
+    ! with fresh interfaces. Replaces find -mindepth 3 -maxdepth 3.
+    call fs_collect_files(build_root, 'src_', '.o', '', hits, n)
+    do k = 1, n
+        if (index(hits(k), '/dependencies/') > 0) cycle
+        if (.not. basename_starts(trim(hits(k)), 'src_')) cycle
+        if (path_depth(trim(hits(k))) - base_depth /= 3) cycle
+        call fs_remove_file(trim(hits(k)))
+    end do
+    deallocate (hits)
+end subroutine clear_fpm_mod_cache
 
-    integer function path_depth(path) result(d)
-        !! Number of path components (count of '/' separators) in a path, used
-        !! to emulate find's -maxdepth/-mindepth without a shell.
-        character(len=*), intent(in) :: path
-        integer :: i
-        d = 0
-        do i = 1, len_trim(path)
-            if (path(i:i) == '/') d = d + 1
-        end do
-    end function path_depth
+integer function path_depth(path) result(d)
+    !! Number of path components (count of '/' separators) in a path, used
+    !! to emulate find's -maxdepth/-mindepth without a shell.
+    character(len=*), intent(in) :: path
+    integer :: i
+    d = 0
+    do i = 1, len_trim(path)
+        if (path(i:i) == '/') d = d + 1
+    end do
+end function path_depth
 
-    logical function basename_starts(path, prefix) result(yes)
-        !! True when the final path component begins with prefix.
-        character(len=*), intent(in) :: path, prefix
-        integer :: slash, n
-        n = len_trim(path)
-        slash = index(path(1:n), '/', back=.true.)
-        yes = .false.
-        if (n - slash < len(prefix)) return
-        yes = path(slash + 1:slash + len(prefix)) == prefix
-    end function basename_starts
+logical function basename_starts(path, prefix) result(yes)
+    !! True when the final path component begins with prefix.
+    character(len=*), intent(in) :: path, prefix
+    integer :: slash, n
+    n = len_trim(path)
+    slash = index(path(1:n), '/', back=.true.)
+    yes = .false.
+    if (n - slash < len(prefix)) return
+    yes = path(slash + 1:slash + len(prefix)) == prefix
+end function basename_starts
 
-    subroutine clear_cmake_build_tree(project_dir)
-        character(len=*), intent(in) :: project_dir
+subroutine clear_cmake_build_tree(project_dir)
+    character(len=*), intent(in) :: project_dir
 
-        call fs_remove_tree(trim(project_dir)//'/build')
-    end subroutine clear_cmake_build_tree
+    call fs_remove_tree(trim(project_dir)//'/build')
+end subroutine clear_cmake_build_tree
 
 end module fo_build_backend

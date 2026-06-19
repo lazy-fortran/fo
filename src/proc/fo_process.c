@@ -79,8 +79,9 @@ static int skip_dir_name(const char *name, int is_proj_root, int depth) {
        trips MAX_UNITS and builds stale generated files. */
     if (strcmp(name, "_deps") == 0) return 1;
     if (strcmp(name, "dependencies") == 0) return 1;
+    if (strcmp(name, "deps-src") == 0) return 1;
     if (is_proj_root && depth == 0 && strcmp(name, "build") == 0) return 1;
-    if (is_proj_root && depth == 0 && strncmp(name, "build_", 6) == 0) return 1;
+    if (is_proj_root && depth == 0 && strncmp(name, "build", 5) == 0) return 1;
     if (is_proj_root && depth == 0 && strcmp(name, "SRC") == 0) return 1;
     return 0;
 }

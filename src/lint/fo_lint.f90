@@ -332,8 +332,7 @@ subroutine collect_fortran_sources(dir, files, n_files)
     do s = 1, size(suffixes)
         call fs_collect_files(dir, '', trim(suffixes(s)), '', hits, n_hits)
         do i = 1, n_hits
-            if (index(hits(i), '/build/') > 0) cycle
-            if (index(hits(i), '/.git/') > 0) cycle
+            if (skip_generated_source(dir, hits(i))) cycle
             if (n_files >= size(files)) exit
             n_files = n_files + 1
             files(n_files) = hits(i)
@@ -357,6 +356,43 @@ subroutine collect_fortran_sources(dir, files, n_files)
     end do
     deallocate (hits)
 end subroutine collect_fortran_sources
+
+logical function skip_generated_source(root, path)
+    character(len=*), intent(in) :: root, path
+
+    character(len=512) :: rel, first, padded
+    integer :: root_len, slash
+
+    rel = trim(path)
+    root_len = len_trim(root)
+    if (root_len > 0 .and. len_trim(path) > root_len) then
+        if (path(1:root_len) == root(1:root_len)) then
+            rel = path(root_len + 1:)
+            if (rel(1:1) == '/') rel = rel(2:)
+        end if
+    end if
+
+    first = rel
+    slash = index(first, '/')
+    if (slash > 0) first = first(1:slash - 1)
+
+    skip_generated_source = .true.
+    if (index(trim(first), 'build') == 1) return
+    if (trim(first) == 'SRC') return
+    if (len_trim(first) > 0 .and. first(1:1) == '.') return
+
+    padded = '/'//trim(rel)//'/'
+    if (index(padded, '/_deps/') > 0) return
+    if (index(padded, '/dependencies/') > 0) return
+    if (index(padded, '/deps-src/') > 0) return
+    if (index(padded, '/.git/') > 0) return
+    if (index(padded, '/.venv/') > 0) return
+    if (index(padded, '/venv/') > 0) return
+    if (index(padded, '/site-packages/') > 0) return
+    if (index(padded, '/node_modules/') > 0) return
+
+    skip_generated_source = .false.
+end function skip_generated_source
 
 subroutine lint_dir(dir, findings, n_findings)
     character(len=*), intent(in) :: dir
