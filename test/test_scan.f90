@@ -353,15 +353,23 @@ contains
         integer :: n_units, ierr, u
         character(len=512) :: dir
         character(len=80) :: root_lines(3), generated_lines(3)
+        logical :: ci_fs
 
         allocate (units(MAX_UNITS))
         call make_tmp_path('fo_test_build_outputs', dir, '')
         call remove_tree(dir)
         call make_dir(trim(dir)//'/src')
+        ! On a case-insensitive filesystem (macOS default) 'SRC' aliases 'src',
+        ! so the uppercase-SRC fixture would merge into the real source dir and
+        ! its vendored tree would be reached below the depth-0 skip. Detect it
+        ! with a probe and exercise the SRC case only where it is distinct.
+        open (newunit=u, file=trim(dir)//'/src/.fo_probe', status='replace')
+        close (u)
+        inquire (file=trim(dir)//'/SRC/.fo_probe', exist=ci_fs)
         call make_dir(trim(dir)//'/build/_deps/libneo-src/src')
         call make_dir(trim(dir)//'/build_axisheal/dependencies/libneo/src')
         call make_dir(trim(dir)//'/build-mgd/deps-src/hdf5/src')
-        call make_dir(trim(dir)//'/SRC/libneo/src')
+        if (.not. ci_fs) call make_dir(trim(dir)//'/SRC/libneo/src')
 
         open (newunit=u, file=trim(dir)//'/CMakeLists.txt', status='replace')
         write (u, '(a)') 'project(root Fortran)'
@@ -381,7 +389,7 @@ contains
             generated_lines, 3)
         call write_file(trim(dir)//'/build-mgd/deps-src/hdf5/src/generated_mod.f90', &
             generated_lines, 3)
-        call write_file(trim(dir)//'/SRC/libneo/src/generated_mod.f90', &
+        if (.not. ci_fs) call write_file(trim(dir)//'/SRC/libneo/src/generated_mod.f90', &
             generated_lines, 3)
 
         call scan_dir(dir, units, n_units, ierr)
