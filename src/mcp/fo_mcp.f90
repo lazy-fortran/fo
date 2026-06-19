@@ -129,7 +129,7 @@ contains
             if (exitcode == 0) then
                 output_text = 'formatted'
             else
-                output_text = 'fo fmt: fprettify failed'
+                output_text = 'fo fmt: formatting failed'
             end if
             call make_tool_text_response(id_str, output_text, exitcode, response)
         case ('build')

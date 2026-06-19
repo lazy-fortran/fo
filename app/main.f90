@@ -235,7 +235,7 @@ contains
         write (output_unit, '(a)') '  changed    list changed and affected modules'
         write (output_unit, '(a)') '  graph      module dependency graph'
         write (output_unit, '(a)') '  graph --dot  graph in Graphviz DOT format'
-        write (output_unit, '(a)') '  fmt        format sources (fprettify, 88 col, 4 sp)'
+        write (output_unit, '(a)') '  fmt        format sources (native, 88 col, 4 sp)'
         write (output_unit, '(a)') '  fmt --check  check formatting without modifying files'
         write (output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
         write (output_unit, '(a)') '  watch --fmt  auto-format changed files before rebuild'
@@ -764,7 +764,7 @@ contains
 
         call fo_fmt_run('.', exitcode)
         if (exitcode /= 0) then
-            write (error_unit, '(a)') 'fo fmt: fprettify failed'
+            write (error_unit, '(a)') 'fo fmt: formatting failed'
             stop 1, quiet = .true.
         end if
         write (output_unit, '(a)') 'formatted'

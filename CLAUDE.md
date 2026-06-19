@@ -17,7 +17,7 @@ fo test           # run tests
 fo exec <t> [args] # build, then run build/fo/bin/<t> (never run it by hand: may be stale)
 fo lint           # unused imports + gfortran warnings
 fo lint --json    # lint results as JSON
-fo fmt            # format sources (fprettify, 88 col, 4 sp)
+fo fmt            # format sources (native, 88 col, 4 sp)
 fo graph --dot    # module DAG in Graphviz DOT format
 fo install        # fpm install --prefix ~/.local
 fo install --prefix /path  # install to custom prefix

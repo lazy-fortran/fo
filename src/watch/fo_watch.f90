@@ -5,6 +5,7 @@ module fo_watch
         WATCH_MODIFY, WATCH_CREATE, WATCH_DELETE
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_format, only: format_file
     implicit none
     private
     public :: watch_loop
@@ -84,24 +85,13 @@ contains
     end function is_fortran_source
 
     subroutine format_in_place(file)
-        !! Run fprettify on one file (no shell). Output is discarded.
+        !! Format one changed file in place with fo's native formatter, so
+        !! watch --fmt and the `fo fmt` / format-check path agree. Best-effort:
+        !! a formatting failure is ignored (the rebuild reports real errors).
         character(len=*), intent(in) :: file
-        character(len=:), allocatable :: packed
-        character(len=512) :: logf
-        integer :: n_args, exitcode
+        integer :: exitcode
 
-        call make_tmpfile('fo_watch_fmt', logf)
-        n_args = 0
-        call argv_push(packed, n_args, 'fprettify')
-        call argv_push(packed, n_args, '-i')
-        call argv_push(packed, n_args, '4')
-        call argv_push(packed, n_args, '-l')
-        call argv_push(packed, n_args, '88')
-        call argv_push(packed, n_args, '--strict-indent')
-        call argv_push(packed, n_args, file)
-        call process_run_argv_logged('', packed, n_args, trim(logf), .false., &
-            120, exitcode)
-        call delete_tmpfile(logf)
+        call format_file(file, exitcode)
     end subroutine format_in_place
 
     subroutine run_check()
