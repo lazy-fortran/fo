@@ -18,6 +18,7 @@ program fo_main
         capabilities_json
     use fo_fmt, only: fo_fmt_run, fo_fmt_check_run
     use fo_process, only: process_run_argv_logged, argv_push
+    use fo_exec_target, only: resolve_exec_target
     implicit none
 
     character(len=256) :: action
@@ -376,8 +377,7 @@ contains
         end if
         call delete_tmpfile(build_log)
 
-        bin_path = trim(b%project_dir)//'/build/fo/bin/'//trim(target)
-        inquire (file=trim(bin_path), exist=exists)
+        call resolve_exec_target(b, target, bin_path, exists)
         if (.not. exists) then
             write (error_unit, '(a)') 'fo exec: no such target: '//trim(target)
             stop 1, quiet=.true.
