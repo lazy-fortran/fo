@@ -226,8 +226,8 @@ contains
         write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt --check'
         write (output_unit, '(a)') '  build      build only (--flag "-O0")'
         write (output_unit, '(a)') '  test       run tests (--only-changed, --all)'
-        write (output_unit, '(a)') '  exec [--cwd <dir>] <t> [args]  build then run target '// &
-            '(never run it by hand: may be stale)'
+        write (output_unit, '(a)') &
+            '  exec [--cwd <dir>] [--no-build] <t> [args]  build then run target'
         write (output_unit, '(a)') '  check      build + test, one-line status'
         write (output_unit, '(a)') '  check --json  build + test, JSON status'
         write (output_unit, '(a)') '  check --json=compact  bounded agent JSON'
@@ -355,14 +355,15 @@ contains
         character(len=512) :: build_log, bin_path, run_cwd
         character(len=:), allocatable :: packed
         integer :: n_args
-        logical :: exists
+        logical :: exists, skip_build
 
         if (command_argument_count() < 2) then
             write (error_unit, '(a)') &
-                'fo exec: usage: fo exec [--cwd <dir>] <target> [args...]'
+                'fo exec: usage: fo exec [--cwd <dir>] [--no-build] <target> [args...]'
             stop 1
         end if
         run_cwd = ''
+        skip_build = .false.
         target = ''
         target_index = 0
         i = 2
@@ -377,6 +378,8 @@ contains
                 call get_command_argument(i, run_cwd)
             else if (index(trim(arg), '--cwd=') == 1) then
                 run_cwd = trim(arg(7:))
+            else if (trim(arg) == '--no-build') then
+                skip_build = .true.
             else
                 target = arg
                 target_index = i
@@ -386,7 +389,7 @@ contains
         end do
         if (target_index == 0) then
             write (error_unit, '(a)') &
-                'fo exec: usage: fo exec [--cwd <dir>] <target> [args...]'
+                'fo exec: usage: fo exec [--cwd <dir>] [--no-build] <target> [args...]'
             stop 1
         end if
         b = detect_backend('.')
@@ -395,14 +398,16 @@ contains
             stop 1
         end if
 
-        call make_tmpfile('fo-exec-build', build_log)
-        call backend_build(b, exitcode, log_file=build_log, with_tests=.true.)
-        if (exitcode /= 0) then
-            write (error_unit, '(a)') 'fo exec: build failed'
-            call report_build_result(build_log)
-            stop 1, quiet=.true.
+        if (.not. skip_build) then
+            call make_tmpfile('fo-exec-build', build_log)
+            call backend_build(b, exitcode, log_file=build_log, with_tests=.true.)
+            if (exitcode /= 0) then
+                write (error_unit, '(a)') 'fo exec: build failed'
+                call report_build_result(build_log)
+                stop 1, quiet=.true.
+            end if
+            call delete_tmpfile(build_log)
         end if
-        call delete_tmpfile(build_log)
 
         call resolve_exec_target(b, target, bin_path, exists)
         if (.not. exists) then
