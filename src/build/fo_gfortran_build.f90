@@ -1,6 +1,6 @@
 module fo_gfortran_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
-    use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME
+    use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
@@ -342,7 +342,7 @@ contains
         type(scan_unit_t), allocatable :: units_a(:), units_b(:), all_units(:)
         integer :: na, nb, n_all, i, ii, ierr, node_id
         type(dag_t) :: dag
-        character(len=MAX_NAME), allocatable :: filenames(:)
+        character(len=MAX_PATH), allocatable :: filenames(:)
         logical, allocatable :: is_prog(:), is_test_arr(:)
         integer, allocatable :: topo_order(:), node_levels(:)
         integer :: n_order, n_levels, lvl, total_source
@@ -363,7 +363,7 @@ contains
         integer, allocatable :: compile_exits(:)
         character(len=512), allocatable :: per_logs(:)
         integer :: n_compile
-        character(len=MAX_NAME) :: fname_local
+        character(len=MAX_PATH) :: fname_local
         character(len=512) :: per_log_local
 
         n_src_objs = 0
@@ -841,7 +841,7 @@ contains
         type(scan_unit_t), allocatable :: tunits(:)
         integer :: n_tests, i, ierr, node_id, n_run
         type(dag_t) :: dag
-        character(len=MAX_NAME), allocatable :: filenames(:)
+        character(len=MAX_PATH), allocatable :: filenames(:)
         logical, allocatable :: is_prog(:), is_test_arr(:)
         integer, allocatable :: topo_order(:)
         integer, allocatable :: run_nodes(:), run_exits(:)
@@ -857,7 +857,7 @@ contains
         character(len=512) :: obj_path, bin_path
         character(len=4096) :: incl_flag
         character(len=128) :: tname
-        character(len=MAX_NAME) :: fname_local
+        character(len=MAX_PATH) :: fname_local
         character(len=512) :: log_local
         type(cache_t) :: c
         integer :: cache_ierr
@@ -866,6 +866,9 @@ contains
         integer :: n_dep, n_test_includes
         character(len=512) :: test_includes(MAX_DEP_DIRS)
         character(len=1024) :: test_flags
+        character(len=512), allocatable :: helper_objs(:)
+        character(len=512), allocatable :: all_lib_objs(:)
+        integer :: n_helper_objs, n_all_lib
 
         bonly = .false.
         if (present(build_only)) bonly = build_only
@@ -896,6 +899,47 @@ contains
         end if
         call cache_init(c, cache_ierr)
         call detect_compiler(compiler)
+
+        ! Select the test programs to run first, so helper compilation and the
+        ! link line are scoped to exactly the tests' dependency closure (as fpm
+        ! does) and never pull in an unrelated, possibly broken, test module.
+        n_run = 0
+        do i = 1, n_order
+            node_id = topo_order(i)
+            if (len_trim(filenames(node_id)) == 0) cycle
+            if (.not. is_prog(node_id)) cycle
+            call file_basename(filenames(node_id), tname)
+            if (.not. include_slow .and. is_slow_name(tname)) cycle
+            if (n_selected > 0 .and. .not. selected_test(tname, selected_names, &
+                n_selected)) cycle
+            n_run = n_run + 1
+            run_nodes(n_run) = node_id
+            call make_tmpfile('fo_test_case', run_logs(n_run))
+        end do
+
+        ! Module-only files under test/ are helper modules a test program uses
+        ! (fpm compiles them and links their objects into the test executable).
+        ! Compile only those reachable from a selected test, in dependency order,
+        ! so their .mod files exist before the test programs compile, then fold
+        ! their objects into the link line.
+        allocate (helper_objs(MAX_SRC_OBJS))
+        call compile_test_helpers(project_dir, obj_dir, dag, filenames, is_prog, &
+            topo_order, n_order, run_nodes, n_run, incl_flag, log_file, &
+            helper_objs, n_helper_objs, exitcode)
+        if (exitcode /= 0) return
+
+        allocate (all_lib_objs(MAX_SRC_OBJS))
+        n_all_lib = 0
+        do i = 1, n_lib_objs
+            if (n_all_lib >= MAX_SRC_OBJS) exit
+            n_all_lib = n_all_lib + 1
+            all_lib_objs(n_all_lib) = lib_objs(i)
+        end do
+        do i = 1, n_helper_objs
+            if (n_all_lib >= MAX_SRC_OBJS) exit
+            n_all_lib = n_all_lib + 1
+            all_lib_objs(n_all_lib) = helper_objs(i)
+        end do
         test_includes = ''
         test_includes(1) = trim(mod_dir)
         n_test_includes = 1
@@ -910,20 +954,10 @@ contains
         ! could survive a behaviour change in a dependency. Fold a hash of the
         ! linked library objects into every test key so any implementation
         ! change invalidates the cached result.
-        call hash_lib_objs(lib_objs, n_lib_objs, lib_hash)
+        call hash_lib_objs(all_lib_objs, n_all_lib, lib_hash)
 
-        n_run = 0
-        do i = 1, n_order
-            node_id = topo_order(i)
-            if (len_trim(filenames(node_id)) == 0) cycle
-            if (.not. is_prog(node_id)) cycle
-            call file_basename(filenames(node_id), tname)
-            if (.not. include_slow .and. is_slow_name(tname)) cycle
-            if (n_selected > 0 .and. .not. selected_test(tname, selected_names, &
-                n_selected)) cycle
-            n_run = n_run + 1
-            run_nodes(n_run) = node_id
-            call make_tmpfile('fo_test_case', run_logs(n_run))
+        do i = 1, n_run
+            node_id = run_nodes(i)
             n_dep = 0
             call add_external_dep_keys(tunits, n_tests, dag, node_id, &
                 test_includes, n_test_includes, &
@@ -932,7 +966,7 @@ contains
                 n_dep = n_dep + 1
                 dep_keys(n_dep) = lib_hash
             end if
-            run_keys(n_run) = cache_key_for(filenames(node_id), compiler, &
+            run_keys(i) = cache_key_for(filenames(node_id), compiler, &
                 test_flags, dep_keys, n_dep)
         end do
 
@@ -964,8 +998,8 @@ contains
             if (run_exits(i) == 0) then
                 call file_basename(fname_local, tname)
                 bin_path = trim(bin_dir)//'/'//trim(tname)
-                call link_binary(obj_path, lib_objs, n_lib_objs, dep_objs, n_dep_objs, &
-                    link_libs, n_link_libs, bin_path, log_local, &
+                call link_binary(obj_path, all_lib_objs, n_all_lib, dep_objs, &
+                    n_dep_objs, link_libs, n_link_libs, bin_path, log_local, &
                     run_exits(i), test_flags)
             end if
             if (run_exits(i) == 0 .and. .not. bonly) then
@@ -1030,6 +1064,70 @@ contains
             call warn_slow_tests(filenames, run_nodes, run_exits, run_secs, n_run, &
             test_warn, log_file)
     end subroutine compile_and_run_tests
+
+    subroutine compile_test_helpers(project_dir, obj_dir, dag, filenames, is_prog, &
+            topo_order, n_order, run_nodes, n_run, incl_flag, log_file, &
+            helper_objs, n_helper_objs, exitcode)
+        !! Compile the module-only helper files a selected test program depends
+        !! on, in dependency order, so their .mod files exist before the test
+        !! programs compile and their objects can be linked in. Scoped to the
+        !! dependency closure of the run set, exactly as fpm builds a test
+        !! target: an unrelated (possibly broken) test module is never compiled.
+        character(len=*), intent(in) :: project_dir, obj_dir, log_file
+        type(dag_t), intent(in) :: dag
+        character(len=MAX_PATH), intent(in) :: filenames(:)
+        logical, intent(in) :: is_prog(:)
+        integer, intent(in) :: topo_order(:), n_order, run_nodes(:), n_run
+        character(len=*), intent(in) :: incl_flag
+        character(len=512), intent(out) :: helper_objs(:)
+        integer, intent(out) :: n_helper_objs
+        integer, intent(out) :: exitcode
+
+        integer :: i, node_id
+        character(len=512) :: obj_path
+        logical, allocatable :: needed(:)
+
+        n_helper_objs = 0
+        exitcode = 0
+        allocate (needed(MAX_NODES))
+        needed = .false.
+        do i = 1, n_run
+            call mark_reachable(dag, run_nodes(i), needed)
+        end do
+
+        do i = 1, n_order
+            node_id = topo_order(i)
+            if (len_trim(filenames(node_id)) == 0) cycle
+            if (is_prog(node_id)) cycle
+            if (.not. needed(node_id)) cycle
+            call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
+            call compile_f90(project_dir, filenames(node_id), obj_path, incl_flag, &
+                log_file, exitcode)
+            if (exitcode /= 0) return
+            if (n_helper_objs >= size(helper_objs)) cycle
+            n_helper_objs = n_helper_objs + 1
+            helper_objs(n_helper_objs) = obj_path
+        end do
+    end subroutine compile_test_helpers
+
+    recursive subroutine mark_reachable(dag, node_id, needed)
+        !! Mark every node reachable from node_id along dependency edges
+        !! (edges point node -> dependency), so the caller can scope work to a
+        !! test program's transitive dependency closure.
+        type(dag_t), intent(in) :: dag
+        integer, intent(in) :: node_id
+        logical, intent(inout) :: needed(:)
+        integer :: j, dep_id
+
+        if (node_id <= 0 .or. node_id > dag%n_nodes) return
+        do j = 1, dag%nodes(node_id)%n_edges
+            dep_id = dag%nodes(node_id)%edges(j)
+            if (dep_id <= 0 .or. dep_id > dag%n_nodes) cycle
+            if (needed(dep_id)) cycle
+            needed(dep_id) = .true.
+            call mark_reachable(dag, dep_id, needed)
+        end do
+    end subroutine mark_reachable
 
     subroutine append_flaky_status(log_file, test_name)
         !! Report a test that failed under parallel execution but passed on an
@@ -1108,7 +1206,7 @@ contains
 
     subroutine warn_slow_tests(filenames, run_nodes, run_exits, run_secs, n_run, &
             test_warn, log_file)
-        character(len=MAX_NAME), intent(in) :: filenames(:)
+        character(len=MAX_PATH), intent(in) :: filenames(:)
         integer, intent(in) :: run_nodes(:), run_exits(:), n_run, test_warn
         real, intent(in) :: run_secs(:)
         character(len=*), intent(in) :: log_file

@@ -21,6 +21,7 @@ program test_backend_gfortran
     call test_gfortran_private_change_keeps_dependent_cached()
     call test_gfortran_interface_change_rebuilds_dependent()
     call test_gfortran_parallel_test_loop_restores_cached_objects()
+    call test_gfortran_test_links_helper_modules_and_lib()
     call test_fpm_path_with_spaces()
 
     call report('backend_gfortran')

@@ -1,6 +1,7 @@
 module fo_check
     use fo_util, only: make_tmpfile, delete_tmpfile
-    use fo_scan, only: scan_unit_t, scan_dir, MAX_NAME, MAX_UNITS, is_slow_test
+    use fo_scan, only: scan_unit_t, scan_dir, MAX_NAME, MAX_PATH, MAX_UNITS, &
+        is_slow_test
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_affected_set, MAX_NODES
     use fo_dag_bridge, only: build_dag_from_units
     use fo_process, only: process_detect_nproc, process_fpm_build, &
@@ -70,7 +71,7 @@ contains
         integer, intent(out) :: affected_ids(MAX_NODES), n_affected
         integer, intent(out) :: n_cached, ierr
         integer, intent(out), optional :: n_in_cycle
-        character(len=MAX_NAME), optional, intent(out) :: filenames(MAX_NODES)
+        character(len=MAX_PATH), optional, intent(out) :: filenames(MAX_NODES)
         logical, optional, intent(out) :: is_test_arr(MAX_NODES)
 
         call fo_changed_modules_impl(dir, dag, changed_ids, n_changed, &
@@ -87,7 +88,7 @@ contains
         integer, intent(out) :: affected_ids(MAX_NODES), n_affected
         integer, intent(out) :: n_cached, ierr
         integer, intent(out), optional :: n_in_cycle
-        character(len=MAX_NAME), optional, intent(out) :: filenames(MAX_NODES)
+        character(len=MAX_PATH), optional, intent(out) :: filenames(MAX_NODES)
         logical, optional, intent(out) :: is_test_arr(MAX_NODES)
 
         type(scan_unit_t), allocatable :: units(:)
@@ -105,7 +106,7 @@ contains
         character(len=MAX_NAME) :: ext_names(MAX_EXT_DEPS)
         character(len=HASH_LEN) :: ext_keys(MAX_EXT_DEPS)
         integer :: n_ext
-        character(len=MAX_NAME), allocatable :: local_filenames(:)
+        character(len=MAX_PATH), allocatable :: local_filenames(:)
         logical, allocatable :: local_is_test_arr(:)
         logical :: has_cycle, found_mod_key
 

@@ -1,7 +1,7 @@
 module fo_dag_bridge
     use fx_dag, only: dag_t, dag_init, dag_add_node, dag_find_node, &
         dag_add_edge, MAX_NODES
-    use fo_scan, only: scan_unit_t, MAX_NAME
+    use fo_scan, only: scan_unit_t, MAX_PATH
     implicit none
     private
     public :: build_dag_from_units
@@ -13,7 +13,7 @@ contains
         type(scan_unit_t), intent(in) :: units(:)
         integer, intent(in) :: n_units
         type(dag_t), intent(out) :: dag
-        character(len=MAX_NAME), optional, intent(out) :: filenames(MAX_NODES)
+        character(len=MAX_PATH), optional, intent(out) :: filenames(MAX_NODES)
         logical, optional, intent(out) :: is_test_arr(MAX_NODES)
         logical, optional, intent(out) :: is_prog_arr(MAX_NODES)
 

@@ -5,13 +5,18 @@ module fo_scan
     implicit none
     private
     integer, parameter, public :: MAX_NAME = 128
+    ! Module and program identifiers fit MAX_NAME, but source paths do not: an
+    ! absolute project path plus a nested test path easily exceeds 128 chars and
+    ! truncating it (e.g. ".f90" -> ".f9") breaks compile and link. Store paths
+    ! in their own wider buffer.
+    integer, parameter, public :: MAX_PATH = 512
     integer, parameter, public :: MAX_UNITS = 2048
     integer, parameter :: MAX_DEPS = 64
 
     public :: scan_unit_t, scan_file, scan_dir, is_slow_test
 
     type :: scan_unit_t
-        character(len=MAX_NAME) :: filename = ''
+        character(len=MAX_PATH) :: filename = ''
         character(len=MAX_NAME) :: module_name = ''
         character(len=MAX_NAME) :: program_name = ''
         logical :: is_program = .false.
@@ -116,22 +121,18 @@ contains
     end subroutine scan_dir
 
     logical function is_test_path(path)
+        !! A unit is a test iff it lives under a test directory, matching fpm's
+        !! directory-based classification. A test_ filename prefix alone does NOT
+        !! make a library source a test: src/utilities/test_shell_commands.f90 is
+        !! a library module, and classifying it as a test would drop it from the
+        !! library build and break the link of anything that uses it.
         character(len=*), intent(in) :: path
 
-        character(len=512) :: clean, base
-        integer :: slash
+        character(len=512) :: clean
 
         clean = trim(path)
-        slash = index(clean, '/', back=.true.)
-        if (slash > 0) then
-            base = clean(slash + 1:)
-        else
-            base = clean
-        end if
-
         is_test_path = index(clean, '/test/') > 0 .or. &
-            index(clean, '/tests/') > 0 .or. &
-            index(base, 'test_') == 1
+            index(clean, '/tests/') > 0
     end function is_test_path
 
     subroutine parse_line(line, unit_info)

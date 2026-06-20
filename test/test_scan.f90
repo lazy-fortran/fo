@@ -22,6 +22,7 @@ program test_scan
     call test_scan_dir_skips_nested_projects()
     call test_scan_dir_skips_build_outputs()
     call test_scan_dir_skips_agent_worktrees()
+    call test_scan_classifies_test_by_directory()
 
     write (output_unit, '(a,i0,a,i0,a)') 'scan: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -432,6 +433,46 @@ contains
 
         call remove_tree(dir)
     end subroutine test_scan_dir_skips_agent_worktrees
+
+    subroutine test_scan_classifies_test_by_directory()
+        ! Classification follows fpm: a unit is a test iff it lives under a test
+        ! directory. A library module whose name starts with test_ (e.g.
+        ! src/utilities/test_shell_commands.f90) is NOT a test, or it would be
+        ! dropped from the library build and break the link.
+        type(scan_unit_t) :: unit_info
+        integer :: ierr
+        character(len=512) :: dir, libpath, testpath
+        character(len=80) :: lines(3)
+
+        call make_tmp_path('fo_test_classify', dir, '')
+        call remove_tree(dir)
+        call make_dir(trim(dir)//'/src/utilities')
+        call make_dir(trim(dir)//'/test')
+
+        lines(1) = 'module test_shell_commands'
+        lines(2) = 'implicit none'
+        lines(3) = 'end module test_shell_commands'
+        libpath = trim(dir)//'/src/utilities/test_shell_commands.f90'
+        call write_file(trim(libpath), lines, 3)
+
+        lines(1) = 'module test_helper'
+        lines(2) = 'implicit none'
+        lines(3) = 'end module test_helper'
+        testpath = trim(dir)//'/test/test_helper.f90'
+        call write_file(trim(testpath), lines, 3)
+
+        call scan_file(trim(libpath), unit_info, ierr)
+        call assert(ierr == 0, 'classify: library file scanned')
+        call assert(.not. unit_info%is_test, &
+            'classify: src test_ module is not a test')
+
+        call scan_file(trim(testpath), unit_info, ierr)
+        call assert(ierr == 0, 'classify: test file scanned')
+        call assert(unit_info%is_test, &
+            'classify: file under test/ is a test')
+
+        call remove_tree(dir)
+    end subroutine test_scan_classifies_test_by_directory
 
     subroutine make_tmp_path(prefix, path, suffix)
         character(len=*), intent(in) :: prefix, suffix

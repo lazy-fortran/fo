@@ -488,6 +488,77 @@
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_parallel_test_loop_restores_cached_objects
 
+    subroutine test_gfortran_test_links_helper_modules_and_lib()
+        !! A test program that uses a module-only helper file under test/ and a
+        !! library module whose name starts with test_ must build and link: the
+        !! helper module is compiled and linked, and the test_-named library
+        !! module is part of the library (not mistaken for a test). Mirrors fpm.
+        integer :: exitcode
+        character(len=512) :: project_dir, log_file
+
+        call make_tmp_path('fo_test_helpers_link', project_dir)
+        call make_tmp_path('fo_backend_helpers_link', log_file)
+        call make_helper_module_project(project_dir)
+
+        call gfortran_test(project_dir, log_file, exitcode)
+        call assert(exitcode == 0, &
+            'test links module-only test helper and test_ library module')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_test_links_helper_modules_and_lib
+
+    subroutine make_helper_module_project(project_dir)
+        character(len=*), intent(in) :: project_dir
+        integer :: u
+
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        call make_dir(trim(project_dir)//'/test')
+
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "fo_helper_modules"'
+        close (u)
+
+        ! Library module with a test_ name prefix: it is a library source, not a
+        ! test, and must end up in the linked library.
+        open (newunit=u, file=trim(project_dir)//'/src/test_lib_helpers.f90', &
+            status='replace')
+        write (u, '(a)') 'module test_lib_helpers'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'function lib_answer() result(r)'
+        write (u, '(a)') 'integer :: r'
+        write (u, '(a)') 'r = 42'
+        write (u, '(a)') 'end function lib_answer'
+        write (u, '(a)') 'end module test_lib_helpers'
+        close (u)
+
+        ! Module-only helper file under test/ (not a program).
+        open (newunit=u, file=trim(project_dir)//'/test/test_support.f90', &
+            status='replace')
+        write (u, '(a)') 'module test_support'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'function support_value() result(r)'
+        write (u, '(a)') 'integer :: r'
+        write (u, '(a)') 'r = 1'
+        write (u, '(a)') 'end function support_value'
+        write (u, '(a)') 'end module test_support'
+        close (u)
+
+        ! Test program using both the helper module and the test_ library module.
+        open (newunit=u, file=trim(project_dir)//'/test/test_uses_helpers.f90', &
+            status='replace')
+        write (u, '(a)') 'program test_uses_helpers'
+        write (u, '(a)') 'use test_support, only: support_value'
+        write (u, '(a)') 'use test_lib_helpers, only: lib_answer'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'if (support_value() + lib_answer() /= 43) stop 1'
+        write (u, '(a)') 'end program test_uses_helpers'
+        close (u)
+    end subroutine make_helper_module_project
+
     subroutine make_two_module_project(project_dir)
         character(len=*), intent(in) :: project_dir
         integer :: u

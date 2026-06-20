@@ -1,6 +1,7 @@
 program fo_main
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME, is_slow_test
+    use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_PATH, &
+        is_slow_test
     use fx_dag, only: dag_t, dag_topo_sort, dag_to_dot, MAX_NODES
     use fo_dag_bridge, only: build_dag_from_units
     use fo_build_backend, only: backend_t, detect_backend, backend_build, &
@@ -86,8 +87,8 @@ contains
         integer :: n_cached, i, n_test_names
         real :: t0, t1
         character(len=128) :: test_names(MAX_NODES)
-        character(len=MAX_NAME) :: filenames(MAX_NODES)
-        character(len=MAX_NAME) :: changed_files(MAX_NODES)
+        character(len=MAX_PATH) :: filenames(MAX_NODES)
+        character(len=MAX_PATH) :: changed_files(MAX_NODES)
         character(len=512) :: build_log, test_log
         character(len=128) :: failed_tests(MAX_TEST_RESULTS)
         integer :: n_failed_tests
@@ -531,7 +532,7 @@ contains
         integer :: changed_ids(MAX_NODES), n_changed
         integer :: affected_ids(MAX_NODES), n_affected
         integer :: n_cached, ierr, i, n_tests
-        character(len=MAX_NAME) :: filenames(MAX_NODES)
+        character(len=MAX_PATH) :: filenames(MAX_NODES)
         logical :: is_test_arr(MAX_NODES)
 
         call fo_changed_modules('.', dag, changed_ids, n_changed, &

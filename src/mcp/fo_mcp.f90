@@ -359,7 +359,7 @@ contains
     subroutine handle_changed(id_str, dir, output_text, exitcode, response)
         use fo_check, only: fo_changed_modules
         use fx_dag, only: dag_t, MAX_NODES
-        use fo_scan, only: MAX_NAME
+        use fo_scan, only: MAX_PATH
         character(len=*), intent(in) :: id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
@@ -369,7 +369,7 @@ contains
         integer :: changed_ids(MAX_NODES), n_changed
         integer :: affected_ids(MAX_NODES), n_affected
         integer :: n_cached, ierr, i, n_tests
-        character(len=MAX_NAME) :: filenames(MAX_NODES)
+        character(len=MAX_PATH) :: filenames(MAX_NODES)
         logical :: is_test_arr(MAX_NODES)
         call fo_changed_modules(trim(dir), dag, changed_ids, n_changed, &
             affected_ids, n_affected, n_cached, ierr, &
