@@ -254,6 +254,49 @@ contains
         write (output_unit, '(a)') 'fo version    print version'
     end subroutine print_usage
 
+    subroutine print_test_usage(unit)
+        integer, optional, intent(in) :: unit
+        integer :: out
+
+        out = output_unit
+        if (present(unit)) out = unit
+        write (out, '(a)') 'usage: fo test [--only-changed] [--all] [name ...]'
+        write (out, '(a)') ''
+        write (out, '(a)') 'Run project tests through the detected backend.'
+        write (out, '(a)') ''
+        write (out, '(a)') 'options:'
+        write (out, '(a)') '  --only-changed  run tests affected by changed modules'
+        write (out, '(a)') '  --all           include slow tests'
+        write (out, '(a)') '  -h, --help      show this help'
+        write (out, '(a)') ''
+        write (out, '(a)') 'examples:'
+        write (out, '(a)') '  fo test'
+        write (out, '(a)') '  fo test test_cpp6d_vs_gc'
+        write (out, '(a)') '  fo test --only-changed'
+    end subroutine print_test_usage
+
+    subroutine print_exec_usage(unit)
+        integer, optional, intent(in) :: unit
+        integer :: out
+
+        out = output_unit
+        if (present(unit)) out = unit
+        write (out, '(a)') &
+            'usage: fo exec [--cwd <dir>] [--no-build] <target> [args...]'
+        write (out, '(a)') ''
+        write (out, '(a)') 'Build incrementally, resolve a target, then run it.'
+        write (out, '(a)') ''
+        write (out, '(a)') 'options:'
+        write (out, '(a)') '  --cwd <dir>     run the target in this directory'
+        write (out, '(a)') '  --no-build      resolve and run without rebuilding'
+        write (out, '(a)') '  -h, --help      show this help'
+        write (out, '(a)') ''
+        write (out, '(a)') 'examples:'
+        write (out, '(a)') '  fo exec simple simple.in'
+        write (out, '(a)') '  fo exec --cwd /tmp/run simple simple.in'
+        write (out, '(a)') '  fo exec --no-build --cwd /tmp/run simple simple.in'
+    end subroutine print_exec_usage
+
     subroutine cmd_check()
         type(check_result_t) :: res
         type(capabilities_t) :: cap
@@ -357,9 +400,12 @@ contains
         integer :: n_args
         logical :: exists, skip_build
 
+        if (has_arg('--help') .or. has_arg('-h')) then
+            call print_exec_usage()
+            return
+        end if
         if (command_argument_count() < 2) then
-            write (error_unit, '(a)') &
-                'fo exec: usage: fo exec [--cwd <dir>] [--no-build] <target> [args...]'
+            call print_exec_usage(error_unit)
             stop 1
         end if
         run_cwd = ''
@@ -388,8 +434,7 @@ contains
             i = i + 1
         end do
         if (target_index == 0) then
-            write (error_unit, '(a)') &
-                'fo exec: usage: fo exec [--cwd <dir>] [--no-build] <target> [args...]'
+            call print_exec_usage(error_unit)
             stop 1
         end if
         b = detect_backend('.')
@@ -602,6 +647,10 @@ contains
         character(len=512) :: test_log
         logical :: is_test_arr(MAX_NODES)
 
+        if (has_arg('--help') .or. has_arg('-h')) then
+            call print_test_usage()
+            return
+        end if
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
             write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
