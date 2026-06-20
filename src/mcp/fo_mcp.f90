@@ -1,6 +1,6 @@
 module fo_mcp
     use fo_util, only: json_bool, json_int, extract_json_field, make_tmpfile, &
-        delete_tmpfile, read_text_file, &
+        delete_tmpfile, read_text_file, clean_root_build_artifacts, &
         jsonrpc_error, jsonrpc_null, strip_path_prefix_in_str
     use fx_json_build, only: json_escape_string
     use fx_mcp, only: mcp_read_message, mcp_send_response, MCP_FRAME_UNKNOWN
@@ -15,6 +15,7 @@ module fo_mcp
         process_cancel_pid
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
         RUN_RERUN_PENDING
+    use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
     implicit none
     private
     public :: mcp_serve
@@ -145,7 +146,7 @@ contains
         case ('changed')
             call handle_changed(id_str, dir, output_text, exitcode, response)
         case ('clean')
-            call handle_clean(id_str, output_text, exitcode, response)
+            call handle_clean(id_str, dir, output_text, exitcode, response)
         case default
             call jsonrpc_error(id_str, -32602, &
                 'unknown action: '//trim(action), response)
@@ -418,19 +419,28 @@ contains
         call make_tool_text_response(id_str, output_text, exitcode, response)
     end subroutine handle_changed
 
-    subroutine handle_clean(id_str, output_text, exitcode, response)
+    subroutine handle_clean(id_str, dir, output_text, exitcode, response)
         use fo_cache, only: cache_root, cache_store_root
-        character(len=*), intent(in) :: id_str
+        character(len=*), intent(in) :: id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
         character(len=*), intent(out) :: response
 
         character(len=512) :: root, store_root
+        type(backend_t) :: b
+        integer :: n_removed
 
         call cache_root(root)
         call cache_store_root(store_root)
         call fs_remove_tree(trim(root))
+        b = detect_backend(trim(dir))
+        if (b%kind /= BACKEND_NONE) then
+            call fs_remove_tree(trim(b%project_dir)//'/build')
+            call clean_root_build_artifacts(trim(b%project_dir), n_removed)
+        end if
         output_text = 'cache cleared: '//trim(store_root)
+        if (b%kind /= BACKEND_NONE) output_text = trim(output_text)//achar(10)// &
+            'build tree cleared: '//trim(b%project_dir)//'/build'
         exitcode = 0
         call make_tool_text_response(id_str, output_text, exitcode, response)
     end subroutine handle_clean

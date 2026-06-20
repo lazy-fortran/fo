@@ -226,7 +226,7 @@ contains
         write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt --check'
         write (output_unit, '(a)') '  build      build only (--flag "-O0")'
         write (output_unit, '(a)') '  test       run tests (--only-changed, --all)'
-        write (output_unit, '(a)') '  exec <t> [args]  build then run build/fo/bin/<t> '// &
+        write (output_unit, '(a)') '  exec [--cwd <dir>] <t> [args]  build then run target '// &
             '(never run it by hand: may be stale)'
         write (output_unit, '(a)') '  check      build + test, one-line status'
         write (output_unit, '(a)') '  check --json  build + test, JSON status'
@@ -242,7 +242,7 @@ contains
         write (output_unit, '(a)') '  watch --fmt  auto-format changed files before rebuild'
         write (output_unit, '(a)') '  lint       unused imports + gfortran warnings'
         write (output_unit, '(a)') '  lint --json  lint results as JSON'
-        write (output_unit, '(a)') '  clean      clear global cache (~/.cache/fo)'
+        write (output_unit, '(a)') '  clean      clear global cache and project build tree'
         write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/.local)'
         write (output_unit, '(a)') '  info       backend, file count, module count'
         write (output_unit, '(a)') '  info --capabilities  compiler and tooling limits'
@@ -350,18 +350,45 @@ contains
         !! build/fo/bin/* by hand skips that and may execute an artifact older
         !! than the current sources.
         type(backend_t) :: b
-        integer :: exitcode, i
+        integer :: exitcode, i, target_index
         character(len=256) :: target, arg
-        character(len=512) :: build_log, bin_path
+        character(len=512) :: build_log, bin_path, run_cwd
         character(len=:), allocatable :: packed
         integer :: n_args
         logical :: exists
 
         if (command_argument_count() < 2) then
-            write (error_unit, '(a)') 'fo exec: usage: fo exec <target> [args...]'
+            write (error_unit, '(a)') &
+                'fo exec: usage: fo exec [--cwd <dir>] <target> [args...]'
             stop 1
         end if
-        call get_command_argument(2, target)
+        run_cwd = ''
+        target = ''
+        target_index = 0
+        i = 2
+        do while (i <= command_argument_count())
+            call get_command_argument(i, arg)
+            if (trim(arg) == '--cwd') then
+                if (i == command_argument_count()) then
+                    write (error_unit, '(a)') 'fo exec: --cwd requires a directory'
+                    stop 1
+                end if
+                i = i + 1
+                call get_command_argument(i, run_cwd)
+            else if (index(trim(arg), '--cwd=') == 1) then
+                run_cwd = trim(arg(7:))
+            else
+                target = arg
+                target_index = i
+                exit
+            end if
+            i = i + 1
+        end do
+        if (target_index == 0) then
+            write (error_unit, '(a)') &
+                'fo exec: usage: fo exec [--cwd <dir>] <target> [args...]'
+            stop 1
+        end if
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
             write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
@@ -385,13 +412,14 @@ contains
 
         n_args = 0
         call argv_push(packed, n_args, trim(bin_path))
-        do i = 3, command_argument_count()
+        do i = target_index + 1, command_argument_count()
             call get_command_argument(i, arg)
             call argv_push(packed, n_args, trim(arg))
         end do
         ! Empty log_file makes the child inherit this terminal's stdout/stderr;
         ! timeout 0 means no limit (an interactive app may run arbitrarily long).
-        call process_run_argv_logged('', packed, n_args, '', .false., 0, exitcode)
+        call process_run_argv_logged(trim(run_cwd), packed, n_args, '', .false., &
+            0, exitcode)
         if (exitcode /= 0) stop 1, quiet=.true.
     end subroutine cmd_exec
 
@@ -839,17 +867,22 @@ contains
 
     subroutine cmd_clean()
         use fo_cache, only: cache_root, cache_store_root
+        type(backend_t) :: b
         character(len=512) :: root, store_root
         integer :: n_removed
 
         call cache_root(root)
         call cache_store_root(store_root)
         call fs_remove_tree(trim(root))
-        ! Also drop this project's own build tree and any stale module artifacts
-        ! left in the project root, which otherwise shadow build/fo/mod.
-        call fs_remove_tree('build/fo')
-        call clean_root_build_artifacts('.', n_removed)
+        b = detect_backend('.')
+        if (b%kind /= BACKEND_NONE) then
+            call fs_remove_tree(trim(b%project_dir)//'/build')
+            call clean_root_build_artifacts(trim(b%project_dir), n_removed)
+        end if
         write (output_unit, '(a,a)') 'cache cleared: ', trim(store_root)
+        if (b%kind /= BACKEND_NONE) &
+            write (output_unit, '(a,a)') 'build tree cleared: ', &
+            trim(b%project_dir)//'/build'
     end subroutine cmd_clean
 
     subroutine cmd_info()
