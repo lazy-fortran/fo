@@ -16,7 +16,7 @@ program fo_main
         check_result_full_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
-    use fo_fmt, only: fo_fmt_run, fo_fmt_check_run, &
+    use fo_fmt, only: fo_fmt_run, fo_fmt_changed_run, fo_fmt_check_run, &
         fo_fmt_check_changed_run
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_exec_target, only: resolve_exec_target
@@ -244,6 +244,7 @@ contains
         write (output_unit, '(a)') '  graph      module dependency graph'
         write (output_unit, '(a)') '  graph --dot  graph in Graphviz DOT format'
         write (output_unit, '(a)') '  fmt        format sources (project fprettify config if present)'
+        write (output_unit, '(a)') '  fmt --changed  format Git-dirty Fortran sources'
         write (output_unit, '(a)') '  fmt --check  check formatting without modifying files'
         write (output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
         write (output_unit, '(a)') '  watch --fmt  auto-format changed files before rebuild'
@@ -844,9 +845,10 @@ contains
         character(len=8192) :: fmt_output
 
         if (has_arg('--help') .or. has_arg('-h')) then
-            write (output_unit, '(a)') 'usage: fo fmt [--check]'
+            write (output_unit, '(a)') 'usage: fo fmt [--check] [--changed]'
             write (output_unit, '(a)') ''
             write (output_unit, '(a)') 'Formats project Fortran sources.'
+            write (output_unit, '(a)') 'With --changed, formats Git-dirty Fortran sources only.'
             write (output_unit, '(a)') 'Uses .fprettify or .fprettify.rc at the project root when present.'
             write (output_unit, '(a)') 'Falls back to fo native formatting when no fprettify config exists.'
             return
@@ -857,6 +859,16 @@ contains
             if (len_trim(fmt_output) > 0) &
                 write (error_unit, '(a)') trim(fmt_output)
             if (exitcode /= 0) stop 1, quiet = .true.
+            return
+        end if
+
+        if (has_arg('--changed')) then
+            call fo_fmt_changed_run('.', exitcode)
+            if (exitcode /= 0) then
+                write (error_unit, '(a)') 'fo fmt --changed: no Git worktree'
+                stop 1, quiet = .true.
+            end if
+            write (output_unit, '(a)') 'formatted changed sources'
             return
         end if
 

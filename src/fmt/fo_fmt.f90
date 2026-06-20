@@ -8,7 +8,8 @@ module fo_fmt
     use fo_process, only: process_run_argv_logged, argv_push
     implicit none
     private
-    public :: fo_fmt_run, fo_fmt_check_run, fo_fmt_check_files
+    public :: fo_fmt_run, fo_fmt_changed_run
+    public :: fo_fmt_check_run, fo_fmt_check_files
     public :: fo_fmt_check_changed_run
 
 contains
@@ -102,8 +103,7 @@ contains
         integer, intent(out) :: exitcode
 
         type(backend_t) :: b
-        character(len=512) :: scan_root, list_file, fpath, config_file
-        integer :: u, ios, fmt_exit
+        character(len=512) :: scan_root, list_file, config_file
 
         b = detect_backend(trim(dir))
         scan_root = trim(dir)
@@ -114,11 +114,46 @@ contains
         call make_tmpfile('fo_fmt_files', list_file)
         call write_source_list(scan_root, list_file)
 
-        open (newunit=u, file=trim(list_file), status='old', iostat=ios)
-        if (ios /= 0) then
+        call fo_fmt_list(config_file, list_file, exitcode)
+        call delete_tmpfile(list_file)
+    end subroutine fo_fmt_run
+
+    subroutine fo_fmt_changed_run(dir, exitcode)
+        character(len=*), intent(in) :: dir
+        integer, intent(out) :: exitcode
+
+        type(backend_t) :: b
+        character(len=512) :: scan_root, list_file, config_file
+        integer :: n_git
+        logical :: git_ok
+
+        b = detect_backend(trim(dir))
+        scan_root = trim(dir)
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+        call find_fprettify_config(scan_root, config_file)
+
+        call make_tmpfile('fo_fmt_files', list_file)
+        call write_git_changed_source_list(scan_root, list_file, git_ok, n_git)
+        if (.not. git_ok) then
+            exitcode = 1
             call delete_tmpfile(list_file)
             return
         end if
+
+        call fo_fmt_list(config_file, list_file, exitcode)
+        call delete_tmpfile(list_file)
+    end subroutine fo_fmt_changed_run
+
+    subroutine fo_fmt_list(config_file, list_file, exitcode)
+        character(len=*), intent(in) :: config_file, list_file
+        integer, intent(out) :: exitcode
+
+        character(len=512) :: fpath
+        integer :: u, ios, fmt_exit
+
+        exitcode = 0
+        open (newunit=u, file=trim(list_file), status='old', iostat=ios)
+        if (ios /= 0) return
         do
             read (u, '(a)', iostat=ios) fpath
             if (ios /= 0) exit
@@ -127,8 +162,7 @@ contains
             if (fmt_exit /= 0) exitcode = 1
         end do
         close (u)
-        call delete_tmpfile(list_file)
-    end subroutine fo_fmt_run
+    end subroutine fo_fmt_list
 
     subroutine fo_fmt_check_run(dir, output, exitcode)
         character(len=*), intent(in) :: dir
