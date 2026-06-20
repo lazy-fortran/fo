@@ -16,7 +16,8 @@ program fo_main
         check_result_full_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
-    use fo_fmt, only: fo_fmt_run, fo_fmt_check_run, fo_fmt_check_files
+    use fo_fmt, only: fo_fmt_run, fo_fmt_check_run, &
+        fo_fmt_check_changed_run
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_exec_target, only: resolve_exec_target
     implicit none
@@ -211,7 +212,7 @@ contains
             do i = 1, n_changed
                 changed_files(i) = filenames(changed_ids(i))
             end do
-            call fo_fmt_check_files(trim(b%project_dir), changed_files, &
+            call fo_fmt_check_changed_run(trim(b%project_dir), changed_files, &
                 n_changed, fmt_out, fmt_exit)
             if (len_trim(fmt_out) > 0) write (error_unit, '(a)') trim(fmt_out)
             if (fmt_exit /= 0) stop 1

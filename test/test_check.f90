@@ -8,7 +8,8 @@ program test_check
         RUN_RERUN_PENDING, RUN_FINISHED
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_text, capabilities_json
-    use fo_fmt, only: fo_fmt_check_run, fo_fmt_check_files
+    use fo_fmt, only: fo_fmt_check_run, fo_fmt_check_files, &
+        fo_fmt_check_changed_run
     use fo_cache, only: cache_store_root
     implicit none
 
@@ -39,6 +40,7 @@ program test_check
     call test_fmt_check_caches_success()
     call test_fmt_check_uses_fprettify_config()
     call test_fmt_check_files_limits_scope()
+    call test_fmt_check_changed_uses_git_dirty_files()
     call test_compact_json_includes_test_results()
     call test_full_json_includes_test_results()
     call test_test_results_parse()
@@ -625,6 +627,72 @@ contains
 
         call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
     end subroutine test_fmt_check_files_limits_scope
+
+    subroutine test_fmt_check_changed_uses_git_dirty_files()
+        character(len=512) :: project_dir, src_dir, output
+        character(len=512) :: fallback_files(1)
+        integer :: u, exitcode
+
+        call make_tmp_path('fo_fmt_git_project', project_dir)
+        src_dir = trim(project_dir)//'/src'
+        call execute_command_line('mkdir -p '//trim(src_dir), wait=.true.)
+
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "fmt_git_project"'
+        close (u)
+
+        open (newunit=u, file=trim(src_dir)//'/good.f90', status='replace')
+        write (u, '(a)') 'module good'
+        write (u, '(a)') '    implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '    subroutine noop()'
+        write (u, '(a)') '    end subroutine noop'
+        write (u, '(a)') 'end module good'
+        close (u)
+
+        open (newunit=u, file=trim(src_dir)//'/bad.f90', status='replace')
+        write (u, '(a)') 'module bad'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine noop()'
+        write (u, '(a)') 'end subroutine noop'
+        write (u, '(a)') 'end module bad'
+        close (u)
+
+        call execute_command_line('git -C '//trim(project_dir)// &
+            ' init >/dev/null', wait=.true.)
+        call execute_command_line('git -C '//trim(project_dir)// &
+            ' config user.email fo@example.invalid', wait=.true.)
+        call execute_command_line('git -C '//trim(project_dir)// &
+            ' config user.name fo-test', wait=.true.)
+        call execute_command_line('git -C '//trim(project_dir)// &
+            ' add fpm.toml src/good.f90 src/bad.f90', wait=.true.)
+        call execute_command_line('git -C '//trim(project_dir)// &
+            ' commit -m init >/dev/null', wait=.true.)
+
+        open (newunit=u, file=trim(src_dir)//'/good.f90', status='replace')
+        write (u, '(a)') 'module good'
+        write (u, '(a)') '    implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '    subroutine noop()'
+        write (u, '(a)') '    end subroutine noop'
+        write (u, '(a)') '    subroutine noop2()'
+        write (u, '(a)') '    end subroutine noop2'
+        write (u, '(a)') 'end module good'
+        close (u)
+
+        fallback_files(1) = trim(src_dir)//'/bad.f90'
+        call fo_fmt_check_changed_run(project_dir, fallback_files, 1, output, &
+            exitcode)
+        call assert(exitcode == 0, 'changed format check uses git dirty files')
+        call assert(len_trim(output) == 0, &
+            'changed format check ignores clean unformatted baseline files')
+
+        call fo_fmt_check_run(project_dir, output, exitcode)
+        call assert(exitcode /= 0, 'full format check still sees baseline file')
+
+        call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
+    end subroutine test_fmt_check_changed_uses_git_dirty_files
 
     subroutine test_full_json_includes_capabilities()
         use fo_capabilities, only: capabilities_t, capabilities_json

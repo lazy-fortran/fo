@@ -9,6 +9,7 @@ module fo_fmt
     implicit none
     private
     public :: fo_fmt_run, fo_fmt_check_run, fo_fmt_check_files
+    public :: fo_fmt_check_changed_run
 
 contains
 
@@ -155,34 +156,175 @@ contains
         character(len=*), intent(out) :: output
         integer, intent(out) :: exitcode
 
-        character(len=512) :: list_file, fpath, config_file
-        integer :: u, ios, i, n_selected
+        character(len=512) :: list_file, config_file
 
         call find_fprettify_config(project_dir, config_file)
         call make_tmpfile('fo_fmt_files', list_file)
+        call write_explicit_source_list(project_dir, files, n_files, list_file)
+        call fo_fmt_check_list(config_file, list_file, output, exitcode)
+        call delete_tmpfile(list_file)
+    end subroutine fo_fmt_check_files
+
+    subroutine fo_fmt_check_changed_run(project_dir, fallback_files, n_files, &
+            output, exitcode)
+        character(len=*), intent(in) :: project_dir
+        character(len=*), intent(in) :: fallback_files(:)
+        integer, intent(in) :: n_files
+        character(len=*), intent(out) :: output
+        integer, intent(out) :: exitcode
+
+        character(len=512) :: list_file, config_file
+        integer :: n_git
+        logical :: git_ok
+
+        call find_fprettify_config(project_dir, config_file)
+        call make_tmpfile('fo_fmt_files', list_file)
+        call write_git_changed_source_list(project_dir, list_file, git_ok, n_git)
+        if (.not. git_ok) then
+            call write_explicit_source_list(project_dir, fallback_files, n_files, &
+                list_file)
+        end if
+
+        call fo_fmt_check_list(config_file, list_file, output, exitcode)
+        call delete_tmpfile(list_file)
+    end subroutine fo_fmt_check_changed_run
+
+    subroutine write_explicit_source_list(project_dir, files, n_files, list_file)
+        character(len=*), intent(in) :: project_dir
+        character(len=*), intent(in) :: files(:)
+        integer, intent(in) :: n_files
+        character(len=*), intent(in) :: list_file
+
+        character(len=512) :: fpath
+        integer :: u, ios, i, n_selected
 
         open (newunit=u, file=trim(list_file), status='replace', iostat=ios)
-        if (ios /= 0) then
-            output = ''
-            exitcode = 0
-            call delete_tmpfile(list_file)
-            return
-        end if
+        if (ios /= 0) return
 
         n_selected = min(n_files, size(files))
         do i = 1, n_selected
             fpath = trim(files(i))
-            if (len_trim(fpath) == 0) cycle
-            if (.not. is_fortran_source(fpath)) cycle
-            if (fpath(1:1) /= '/') fpath = trim(project_dir)//'/'//trim(fpath)
-            if (skip_generated_source(project_dir, fpath)) cycle
-            write (u, '(a)') trim(fpath)
+            call write_source_path(project_dir, fpath, u)
         end do
         close (u)
+    end subroutine write_explicit_source_list
 
-        call fo_fmt_check_list(config_file, list_file, output, exitcode)
-        call delete_tmpfile(list_file)
-    end subroutine fo_fmt_check_files
+    subroutine write_git_changed_source_list(project_dir, list_file, git_ok, &
+            n_written)
+        character(len=*), intent(in) :: project_dir, list_file
+        logical, intent(out) :: git_ok
+        integer, intent(out) :: n_written
+
+        character(len=:), allocatable :: packed
+        character(len=512) :: raw_file, line
+        integer :: n_args, exitcode, raw_u, out_u, ios
+
+        git_ok = .false.
+        n_written = 0
+        call make_tmpfile('fo_git_changed', raw_file)
+
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, 'git')
+        call argv_push(packed, n_args, '-C')
+        call argv_push(packed, n_args, trim(project_dir))
+        call argv_push(packed, n_args, 'diff')
+        call argv_push(packed, n_args, '--name-only')
+        call argv_push(packed, n_args, '--')
+        call argv_push(packed, n_args, '*.f90')
+        call argv_push(packed, n_args, '*.F90')
+        call process_run_argv_logged('', packed, n_args, trim(raw_file), &
+            .false., 0, exitcode)
+        if (exitcode /= 0) then
+            call delete_tmpfile(raw_file)
+            return
+        end if
+
+        call append_git_changed(project_dir, raw_file, '--cached')
+        call append_git_others(project_dir, raw_file)
+
+        open (newunit=out_u, file=trim(list_file), status='replace', iostat=ios)
+        if (ios /= 0) then
+            call delete_tmpfile(raw_file)
+            return
+        end if
+
+        open (newunit=raw_u, file=trim(raw_file), status='old', iostat=ios)
+        if (ios == 0) then
+            do
+                read (raw_u, '(a)', iostat=ios) line
+                if (ios /= 0) exit
+                call write_source_path(project_dir, line, out_u, n_written)
+            end do
+            close (raw_u)
+        end if
+        close (out_u)
+
+        git_ok = .true.
+        call delete_tmpfile(raw_file)
+    end subroutine write_git_changed_source_list
+
+    subroutine append_git_changed(project_dir, raw_file, diff_arg)
+        character(len=*), intent(in) :: project_dir, raw_file, diff_arg
+
+        character(len=:), allocatable :: packed
+        integer :: n_args, exitcode
+
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, 'git')
+        call argv_push(packed, n_args, '-C')
+        call argv_push(packed, n_args, trim(project_dir))
+        call argv_push(packed, n_args, 'diff')
+        call argv_push(packed, n_args, '--name-only')
+        call argv_push(packed, n_args, trim(diff_arg))
+        call argv_push(packed, n_args, '--')
+        call argv_push(packed, n_args, '*.f90')
+        call argv_push(packed, n_args, '*.F90')
+        call process_run_argv_logged('', packed, n_args, trim(raw_file), &
+            .true., 0, exitcode)
+    end subroutine append_git_changed
+
+    subroutine append_git_others(project_dir, raw_file)
+        character(len=*), intent(in) :: project_dir, raw_file
+
+        character(len=:), allocatable :: packed
+        integer :: n_args, exitcode
+
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, 'git')
+        call argv_push(packed, n_args, '-C')
+        call argv_push(packed, n_args, trim(project_dir))
+        call argv_push(packed, n_args, 'ls-files')
+        call argv_push(packed, n_args, '--others')
+        call argv_push(packed, n_args, '--exclude-standard')
+        call argv_push(packed, n_args, '--')
+        call argv_push(packed, n_args, '*.f90')
+        call argv_push(packed, n_args, '*.F90')
+        call process_run_argv_logged('', packed, n_args, trim(raw_file), &
+            .true., 0, exitcode)
+    end subroutine append_git_others
+
+    subroutine write_source_path(project_dir, path, u, n_written)
+        character(len=*), intent(in) :: project_dir, path
+        integer, intent(in) :: u
+        integer, optional, intent(inout) :: n_written
+
+        character(len=512) :: fpath
+        logical :: exists
+
+        fpath = trim(path)
+        if (len_trim(fpath) == 0) return
+        if (.not. is_fortran_source(fpath)) return
+        if (fpath(1:1) /= '/') fpath = trim(project_dir)//'/'//trim(fpath)
+        if (skip_generated_source(project_dir, fpath)) return
+        inquire (file=trim(fpath), exist=exists)
+        if (.not. exists) return
+
+        write (u, '(a)') trim(fpath)
+        if (present(n_written)) n_written = n_written + 1
+    end subroutine write_source_path
 
     subroutine fo_fmt_check_list(config_file, list_file, output, exitcode)
         character(len=*), intent(in) :: config_file, list_file
