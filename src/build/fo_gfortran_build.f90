@@ -1581,12 +1581,12 @@ contains
 
         character(len=512) :: dirs(2*MAX_DEP_DIRS)
         character(len=1024) :: token
-        integer :: n_dirs, i
+        integer :: n_dirs, n_env, i
 
         flags = ''
-        call build_lib_search_dirs(dirs, n_dirs)
+        call build_lib_search_dirs(dirs, n_dirs, n_env)
         do i = 1, n_link_libs
-            call resolve_link_token(trim(link_libs(i)), dirs, n_dirs, token)
+            call resolve_link_token(trim(link_libs(i)), dirs, n_dirs, n_env, token)
             ! Newline-join so the caller can split with argv_push_split_nl,
             ! which preserves spaces in resolved library paths. Tokens are
             ! passed straight to the linker via argv (shell-free build), so
@@ -1595,10 +1595,10 @@ contains
         end do
     end function link_lib_flags
 
-    subroutine resolve_link_token(name, dirs, n_dirs, token)
+    subroutine resolve_link_token(name, dirs, n_dirs, n_env, token)
         character(len=*), intent(in) :: name
         character(len=512), intent(in) :: dirs(:)
-        integer, intent(in) :: n_dirs
+        integer, intent(in) :: n_dirs, n_env
         character(len=*), intent(out) :: token
 
         character(len=1024) :: cand
@@ -1609,24 +1609,32 @@ contains
         ! On macOS prefer the shared .dylib: its absolute install name pulls in
         ! transitive deps (CoreText, CoreGraphics, bz2, ...) that a static .a
         ! would leave unresolved at link time, and dylib install names are
-        ! absolute so the binary needs no DYLD_LIBRARY_PATH at run time. On Linux
-        ! prefer a static .a linked by absolute path (no LIBRARY_PATH need).
-        if (is_macos()) then
-            ext1 = '.dylib'
-            ext2 = '.a'
-        else
-            ext1 = '.a'
-            ext2 = '.so'
-        end if
+        ! absolute so the binary needs no DYLD_LIBRARY_PATH at run time.
+        !
+        ! On Linux the preference is per directory. Env dirs (the first n_env,
+        ! from LIBRARY_PATH/FO_LIBRARY_PATH) are non-default paths: prefer a
+        ! static .a there so the binary does not need LIBRARY_PATH at run time.
+        ! System dirs (/usr/lib, ...) prefer the shared .so: it is always on the
+        ! default runtime search path, and a system static .a often needs a long
+        ! chain of transitive deps (glib -> pcre2, ffi, sysprof, ...) that the
+        ! project's `link` list does not enumerate, which would break the link.
         do i = 1, n_dirs
+            if (is_macos()) then
+                ext1 = '.dylib'
+                ext2 = '.a'
+            else if (i <= n_env) then
+                ext1 = '.a'
+                ext2 = '.so'
+            else
+                ext1 = '.so'
+                ext2 = '.a'
+            end if
             cand = trim(dirs(i))//'/lib'//trim(name)//trim(ext1)
             inquire (file=trim(cand), exist=ex)
             if (ex) then
                 token = trim(cand)
                 return
             end if
-        end do
-        do i = 1, n_dirs
             cand = trim(dirs(i))//'/lib'//trim(name)//trim(ext2)
             inquire (file=trim(cand), exist=ex)
             if (ex) then
@@ -1650,17 +1658,24 @@ contains
         is_macos = mac
     end function is_macos
 
-    subroutine build_lib_search_dirs(dirs, n)
-        !! Search dirs for static external libs: LIBRARY_PATH and FO_LIBRARY_PATH
+    subroutine build_lib_search_dirs(dirs, n, n_env)
+        !! Search dirs for external libs: LIBRARY_PATH and FO_LIBRARY_PATH
         !! (colon-separated, as understood by the toolchain) plus common system
         !! library locations. FO_LIBRARY_PATH lets a daemonized fo (MCP/LSP) that
         !! did not inherit LIBRARY_PATH still locate project-external archives.
+        !! n_env returns how many leading dirs came from the environment; those
+        !! are non-default paths where a static .a is preferred for runtime
+        !! independence, while the trailing system dirs prefer the shared .so
+        !! (always on the default runtime search path), avoiding broken links
+        !! when a system .a needs transitive deps not listed in `link`.
         character(len=512), intent(out) :: dirs(:)
         integer, intent(out) :: n
+        integer, intent(out) :: n_env
 
         n = 0
         call add_env_path_list('LIBRARY_PATH', dirs, n)
         call add_env_path_list('FO_LIBRARY_PATH', dirs, n)
+        n_env = n
         if (is_macos()) call add_search_dir('/opt/homebrew/lib', dirs, n)
         call add_search_dir('/usr/local/lib', dirs, n)
         call add_search_dir('/usr/lib', dirs, n)
