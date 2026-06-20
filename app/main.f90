@@ -16,7 +16,7 @@ program fo_main
         check_result_full_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
-    use fo_fmt, only: fo_fmt_run, fo_fmt_check_run
+    use fo_fmt, only: fo_fmt_run, fo_fmt_check_run, fo_fmt_check_files
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_exec_target, only: resolve_exec_target
     implicit none
@@ -85,6 +85,8 @@ contains
         integer :: n_cached, i, n_test_names
         real :: t0, t1
         character(len=128) :: test_names(MAX_NODES)
+        character(len=MAX_NAME) :: filenames(MAX_NODES)
+        character(len=MAX_NAME) :: changed_files(MAX_NODES)
         character(len=512) :: build_log, test_log
         character(len=128) :: failed_tests(MAX_TEST_RESULTS)
         integer :: n_failed_tests
@@ -122,7 +124,7 @@ contains
         ! compute changed modules (rebuilds dag internally)
         call fo_changed_modules(trim(b%project_dir), dag, changed_ids, n_changed, &
             affected_ids, n_affected, n_cached, ierr, &
-            is_test_arr=is_test_arr)
+            filenames=filenames, is_test_arr=is_test_arr)
         if (ierr /= 0) then
             write (error_unit, '(a)') 'Static: FAIL scan or dag error'
             stop 1
@@ -206,7 +208,11 @@ contains
         block
             integer :: fmt_exit
             character(len=8192) :: fmt_out
-            call fo_fmt_check_run(trim(b%project_dir), fmt_out, fmt_exit)
+            do i = 1, n_changed
+                changed_files(i) = filenames(changed_ids(i))
+            end do
+            call fo_fmt_check_files(trim(b%project_dir), changed_files, &
+                n_changed, fmt_out, fmt_exit)
             if (len_trim(fmt_out) > 0) write (error_unit, '(a)') trim(fmt_out)
             if (fmt_exit /= 0) stop 1
         end block

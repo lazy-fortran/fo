@@ -8,7 +8,7 @@ module fo_fmt
     use fo_process, only: process_run_argv_logged, argv_push
     implicit none
     private
-    public :: fo_fmt_run, fo_fmt_check_run
+    public :: fo_fmt_run, fo_fmt_check_run, fo_fmt_check_files
 
 contains
 
@@ -135,33 +135,76 @@ contains
         integer, intent(out) :: exitcode
 
         type(backend_t) :: b
-        character(len=512) :: scan_root, list_file, fpath, tmpf, config_file
-        character(len=HASH_LEN) :: action_id, orig_hash, fmt_hash
-        integer :: u, ios, n_bad, fmt_exit, ho, hf
+        character(len=512) :: scan_root, list_file, config_file
 
         b = detect_backend(trim(dir))
         scan_root = trim(dir)
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
         call find_fprettify_config(scan_root, config_file)
 
+        call make_tmpfile('fo_fmt_files', list_file)
+        call write_source_list(scan_root, list_file)
+        call fo_fmt_check_list(config_file, list_file, output, exitcode)
+        call delete_tmpfile(list_file)
+    end subroutine fo_fmt_check_run
+
+    subroutine fo_fmt_check_files(project_dir, files, n_files, output, exitcode)
+        character(len=*), intent(in) :: project_dir
+        character(len=*), intent(in) :: files(:)
+        integer, intent(in) :: n_files
+        character(len=*), intent(out) :: output
+        integer, intent(out) :: exitcode
+
+        character(len=512) :: list_file, fpath, config_file
+        integer :: u, ios, i, n_selected
+
+        call find_fprettify_config(project_dir, config_file)
+        call make_tmpfile('fo_fmt_files', list_file)
+
+        open (newunit=u, file=trim(list_file), status='replace', iostat=ios)
+        if (ios /= 0) then
+            output = ''
+            exitcode = 0
+            call delete_tmpfile(list_file)
+            return
+        end if
+
+        n_selected = min(n_files, size(files))
+        do i = 1, n_selected
+            fpath = trim(files(i))
+            if (len_trim(fpath) == 0) cycle
+            if (.not. is_fortran_source(fpath)) cycle
+            if (fpath(1:1) /= '/') fpath = trim(project_dir)//'/'//trim(fpath)
+            if (skip_generated_source(project_dir, fpath)) cycle
+            write (u, '(a)') trim(fpath)
+        end do
+        close (u)
+
+        call fo_fmt_check_list(config_file, list_file, output, exitcode)
+        call delete_tmpfile(list_file)
+    end subroutine fo_fmt_check_files
+
+    subroutine fo_fmt_check_list(config_file, list_file, output, exitcode)
+        character(len=*), intent(in) :: config_file, list_file
+        character(len=*), intent(out) :: output
+        integer, intent(out) :: exitcode
+
+        character(len=512) :: fpath, tmpf
+        character(len=HASH_LEN) :: action_id, orig_hash, fmt_hash
+        integer :: u, ios, n_bad, fmt_exit, ho, hf
+
         exitcode = 0
         output = ''
 
         n_bad = 0
-        call make_tmpfile('fo_fmt_files', list_file)
-        call write_source_list(scan_root, list_file)
 
         call fmt_action_id(list_file, config_file, action_id)
-        if (len_trim(action_id) == HASH_LEN .and. fmt_marker_exists(action_id)) then
-            call delete_tmpfile(list_file)
-            return
+        if (len_trim(action_id) == HASH_LEN) then
+            if (fmt_marker_exists(action_id)) return
         end if
 
         open (newunit=u, file=trim(list_file), status='old', iostat=ios)
-        if (ios /= 0) then
-            call delete_tmpfile(list_file)
-            return
-        end if
+        if (ios /= 0) return
 
         do
             read (u, '(a)', iostat=ios) fpath
@@ -188,14 +231,25 @@ contains
             end if
         end do
         close (u)
-        call delete_tmpfile(list_file)
 
         if (n_bad > 0) then
             exitcode = 1
         else if (len_trim(action_id) == HASH_LEN) then
             call store_fmt_marker(action_id)
         end if
-    end subroutine fo_fmt_check_run
+    end subroutine fo_fmt_check_list
+
+    logical function is_fortran_source(path)
+        character(len=*), intent(in) :: path
+
+        integer :: n
+
+        is_fortran_source = .false.
+        n = len_trim(path)
+        if (n < 4) return
+        if (path(n - 3:n) == '.f90') is_fortran_source = .true.
+        if (path(n - 3:n) == '.F90') is_fortran_source = .true.
+    end function is_fortran_source
 
     subroutine find_fprettify_config(project_dir, config_file)
         character(len=*), intent(in) :: project_dir
