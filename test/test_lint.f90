@@ -14,6 +14,7 @@ program test_lint
     call test_use_prefixed_symbol_assignment_counts_as_use()
     call test_unused_import_still_reported()
     call test_symbol_used_only_in_include()
+    call test_symbol_used_only_in_nested_include()
 
     write (output_unit, '(a,i0,a,i0,a)') 'lint: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -35,17 +36,18 @@ contains
     subroutine test_symbol_used_after_prefixed_occurrence()
         type(lint_finding_t) :: findings(MAX_FINDINGS)
         integer :: n_findings
-        character(len=1024) :: lines(7)
+        character(len=1024) :: lines(8)
 
         lines(1) = 'module m'
-        lines(2) = 'contains'
-        lines(3) = 'function wrapper_lambda_over_b_squared(phi)'
-        lines(4) = 'use fieldline_integrands, only: lambda_over_b_squared'
-        lines(5) = 'wrapper_lambda_over_b_squared = lambda_over_b_squared(phi)'
-        lines(6) = 'end function wrapper_lambda_over_b_squared'
-        lines(7) = 'end module m'
+        lines(2) = 'private'
+        lines(3) = 'contains'
+        lines(4) = 'function wrapper_lambda_over_b_squared(phi)'
+        lines(5) = 'use fieldline_integrands, only: lambda_over_b_squared'
+        lines(6) = 'wrapper_lambda_over_b_squared = lambda_over_b_squared(phi)'
+        lines(7) = 'end function wrapper_lambda_over_b_squared'
+        lines(8) = 'end module m'
 
-        call lint_lines('fo_lint_prefixed_use', lines, 7, findings, n_findings)
+        call lint_lines('fo_lint_prefixed_use', lines, 8, findings, n_findings)
 
         call assert(n_findings == 0, &
             'lint accepts symbol used after prefixed occurrence on same line')
@@ -54,15 +56,16 @@ contains
     subroutine test_kind_suffix_counts_as_use()
         type(lint_finding_t) :: findings(MAX_FINDINGS)
         integer :: n_findings
-        character(len=1024) :: lines(5)
+        character(len=1024) :: lines(6)
 
         lines(1) = 'module m'
         lines(2) = 'use constants, only: dp'
         lines(3) = 'implicit none'
-        lines(4) = 'real(dp), parameter :: x = 1.0_dp'
-        lines(5) = 'end module m'
+        lines(4) = 'private'
+        lines(5) = 'real(dp), parameter :: x = 1.0_dp'
+        lines(6) = 'end module m'
 
-        call lint_lines('fo_lint_kind_suffix', lines, 5, findings, n_findings)
+        call lint_lines('fo_lint_kind_suffix', lines, 6, findings, n_findings)
 
         call assert(n_findings == 0, 'lint counts kind suffix use as symbol use')
     end subroutine test_kind_suffix_counts_as_use
@@ -70,17 +73,18 @@ contains
     subroutine test_use_prefixed_symbol_assignment_counts_as_use()
         type(lint_finding_t) :: findings(MAX_FINDINGS)
         integer :: n_findings
-        character(len=1024) :: lines(7)
+        character(len=1024) :: lines(8)
 
         lines(1) = 'module m'
-        lines(2) = 'contains'
-        lines(3) = 'subroutine s()'
-        lines(4) = 'use boozer_coordinates_mod, only: use_b_r'
-        lines(5) = 'use_b_r = .true.'
-        lines(6) = 'end subroutine s'
-        lines(7) = 'end module m'
+        lines(2) = 'private'
+        lines(3) = 'contains'
+        lines(4) = 'subroutine s()'
+        lines(5) = 'use boozer_coordinates_mod, only: use_b_r'
+        lines(6) = 'use_b_r = .true.'
+        lines(7) = 'end subroutine s'
+        lines(8) = 'end module m'
 
-        call lint_lines('fo_lint_use_prefix_assignment', lines, 7, findings, n_findings)
+        call lint_lines('fo_lint_use_prefix_assignment', lines, 8, findings, n_findings)
 
         call assert(n_findings == 0, &
             'lint accepts imported names that start with use')
@@ -89,15 +93,16 @@ contains
     subroutine test_unused_import_still_reported()
         type(lint_finding_t) :: findings(MAX_FINDINGS)
         integer :: n_findings
-        character(len=1024) :: lines(5)
+        character(len=1024) :: lines(6)
 
         lines(1) = 'module m'
         lines(2) = 'use constants, only: dp'
         lines(3) = 'implicit none'
-        lines(4) = 'integer :: i'
-        lines(5) = 'end module m'
+        lines(4) = 'private'
+        lines(5) = 'integer :: i'
+        lines(6) = 'end module m'
 
-        call lint_lines('fo_lint_unused_import', lines, 5, findings, n_findings)
+        call lint_lines('fo_lint_unused_import', lines, 6, findings, n_findings)
 
         call assert(n_findings == 1, 'lint still reports a genuinely unused import')
         if (n_findings == 1) then
@@ -123,6 +128,7 @@ contains
         open (newunit=u, file=trim(main_path), status='replace')
         write (u, '(a)') 'module m'
         write (u, '(a)') '    use fo_build_backend, only: backend_t, detect_backend'
+        write (u, '(a)') '    private'
         write (u, '(a)') 'contains'
         write (u, '(a)') '    subroutine s(project_dir)'
         write (u, '(a)') '        character(len=*), intent(in) :: project_dir'
@@ -140,6 +146,52 @@ contains
         call assert(n_findings == 0, &
             'import used only inside an included file is not flagged unused')
     end subroutine test_symbol_used_only_in_include
+
+    subroutine test_symbol_used_only_in_nested_include()
+        !! main includes frag1, frag1 includes frag2, and the import is used only
+        !! in frag2. Include expansion must be transitive to see it.
+        type(lint_finding_t) :: findings(MAX_FINDINGS)
+        integer :: n_findings, u, slash
+        character(len=512) :: main_path, f1_path, f2_path, f1_base, f2_base
+
+        call make_tmpfile('fo_lint_nmain', main_path)
+        call make_tmpfile('fo_lint_nfrag1', f1_path)
+        call make_tmpfile('fo_lint_nfrag2', f2_path)
+        slash = index(trim(f1_path), '/', back=.true.)
+        f1_base = f1_path(slash + 1:)
+        slash = index(trim(f2_path), '/', back=.true.)
+        f2_base = f2_path(slash + 1:)
+
+        open (newunit=u, file=trim(f2_path), status='replace')
+        write (u, '(a)') '    b = detect_backend(project_dir)'
+        close (u)
+
+        open (newunit=u, file=trim(f1_path), status='replace')
+        write (u, '(a)') "        include '"//trim(f2_base)//"'"
+        close (u)
+
+        open (newunit=u, file=trim(main_path), status='replace')
+        write (u, '(a)') 'module m'
+        write (u, '(a)') '    use fo_build_backend, only: backend_t, detect_backend'
+        write (u, '(a)') '    private'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '    subroutine s(project_dir)'
+        write (u, '(a)') '        character(len=*), intent(in) :: project_dir'
+        write (u, '(a)') '        type(backend_t) :: b'
+        write (u, '(a)') "        include '"//trim(f1_base)//"'"
+        write (u, '(a)') '    end subroutine s'
+        write (u, '(a)') 'end module m'
+        close (u)
+
+        n_findings = 0
+        call lint_file(trim(main_path), findings, n_findings)
+        call delete_tmpfile(main_path)
+        call delete_tmpfile(f1_path)
+        call delete_tmpfile(f2_path)
+
+        call assert(n_findings == 0, &
+            'import used only in a transitively included file is not flagged')
+    end subroutine test_symbol_used_only_in_nested_include
 
     subroutine lint_lines(prefix, lines, n_lines, findings, n_findings)
         character(len=*), intent(in) :: prefix

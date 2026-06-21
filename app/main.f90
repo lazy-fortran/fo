@@ -251,6 +251,7 @@ contains
         write (output_unit, '(a)') '  watch --fmt  auto-format changed files before rebuild'
         write (output_unit, '(a)') '  lint       unused imports + gfortran warnings'
         write (output_unit, '(a)') '  lint --json  lint results as JSON'
+        write (output_unit, '(a)') '  lint --fix   remove unused imports in place'
         write (output_unit, '(a)') '  clean      clear global cache and project build tree'
         write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/.local)'
         write (output_unit, '(a)') '  info       backend, file count, module count'
@@ -797,11 +798,12 @@ contains
     subroutine cmd_lint()
         use fo_lint, only: lint_finding_t, lint_warning_t, &
             lint_dir, lint_compiler, lint_dedup_warnings, &
-            lint_all_json, MAX_FINDINGS, MAX_WARNINGS
+            lint_all_json, lint_fix_dir, MAX_FINDINGS, MAX_WARNINGS
         type(backend_t) :: b
         type(lint_finding_t), allocatable :: findings(:)
         type(lint_warning_t), allocatable :: warnings(:)
         integer :: n_findings, n_warnings, i, output_mode, mode_ierr
+        integer :: n_removed, n_remaining
         character(len=512) :: scan_root
 
         allocate (findings(MAX_FINDINGS), warnings(MAX_WARNINGS))
@@ -810,6 +812,15 @@ contains
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
 
         call check_output_mode(output_mode, mode_ierr)
+
+        if (has_arg('--fix')) then
+            call lint_fix_dir(trim(scan_root), n_removed, n_remaining)
+            write (output_unit, '(i0,a)') n_removed, ' unused import(s) removed'
+            if (n_remaining > 0) write (output_unit, '(i0,a)') &
+                n_remaining, ' unused import(s) remaining (not auto-removable)'
+            if (n_remaining > 0) stop 1, quiet=.true.
+            return
+        end if
 
         call lint_dir(trim(scan_root), findings, n_findings)
         call lint_compiler(trim(scan_root), warnings, n_warnings)

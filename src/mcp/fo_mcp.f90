@@ -124,7 +124,7 @@ contains
             call handle_async_cancel(line, id_str, response, async_state)
             return
         case ('lint')
-            call handle_lint(id_str, dir, output_text, exitcode, response)
+            call handle_lint(line, id_str, dir, output_text, exitcode, response)
         case ('fmt')
             call fo_fmt_run(trim(dir), exitcode)
             if (exitcode == 0) then
@@ -186,20 +186,34 @@ contains
         call make_tool_text_response(id_str, output_text, exitcode, response)
     end subroutine handle_check
 
-    subroutine handle_lint(id_str, dir, output_text, exitcode, response)
+    subroutine handle_lint(line, id_str, dir, output_text, exitcode, response)
         use fo_lint, only: lint_finding_t, lint_warning_t, lint_dir, &
             lint_compiler, lint_dedup_warnings, lint_all_json, &
-            MAX_FINDINGS, MAX_WARNINGS
-        character(len=*), intent(in) :: id_str, dir
+            lint_fix_dir, MAX_FINDINGS, MAX_WARNINGS
+        character(len=*), intent(in) :: line, id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
         character(len=*), intent(out) :: response
 
         type(lint_finding_t) :: findings(MAX_FINDINGS)
         type(lint_warning_t), allocatable :: warnings(:)
-        integer :: n_findings, n_warnings
+        integer :: n_findings, n_warnings, n_removed, n_remaining
         character(len=16384) :: lint_output
         character(len=514) :: dir_prefix
+        character(len=16) :: fix_flag
+
+        call extract_json_field(line, '"fix"', fix_flag)
+        if (trim(fix_flag) == 'true') then
+            call lint_fix_dir(trim(dir), n_removed, n_remaining)
+            write (lint_output, '(a,i0,a,i0,a)') &
+                '{"removed":', n_removed, ',"remaining":', n_remaining, '}'
+            output_text = trim(lint_output)
+            exitcode = 0
+            if (n_remaining > 0) exitcode = 1
+            call make_tool_text_response(id_str, lint_output, exitcode, response)
+            return
+        end if
+
         allocate (warnings(MAX_WARNINGS))
         call lint_dir(trim(dir), findings, n_findings)
         call lint_compiler(trim(dir), warnings, n_warnings)
@@ -759,7 +773,9 @@ contains
             '"lint","fmt"],'// &
             '"description":"Action to run"},'// &
             '"dir":{"type":"string",'// &
-            '"description":"Project directory (default: cwd)"}},'// &
+            '"description":"Project directory (default: cwd)"},'// &
+            '"fix":{"type":"boolean",'// &
+            '"description":"lint: remove unused imports in place"}},'// &
             '"required":["action"]}}]}}'
     end subroutine make_tools_list_response
 

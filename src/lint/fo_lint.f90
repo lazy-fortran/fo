@@ -11,6 +11,7 @@ module fo_lint
     public :: lint_finding_t, lint_file, lint_dir, lint_findings_json
     public :: lint_warning_t, lint_compiler, lint_warnings_json, lint_all_json
     public :: lint_dedup_warnings
+    public :: lint_fix_dir
     public :: MAX_FINDINGS, MAX_WARNINGS
 
     integer, parameter :: MAX_FINDINGS = 512
@@ -21,6 +22,9 @@ module fo_lint
     integer, parameter :: MAX_FILE_WARN = 512
     integer, parameter :: MAX_SYMS = 64
     integer, parameter :: MAX_SYM_LEN = 128
+    ! Usage-scan buffer. Sized for a module plus all of its submodule bodies and
+    ! their includes appended together (see lint_file_ex).
+    integer, parameter :: MAX_LINT_LINES = 60000
 
     type :: lint_finding_t
         character(len=256) :: file = ''
@@ -43,18 +47,40 @@ contains
         type(lint_finding_t), intent(inout) :: findings(MAX_FINDINGS)
         integer, intent(inout) :: n_findings
 
-        character(len=1024), allocatable :: lines(:), lowered(:)
-        integer :: n_lines, n_main, u, iostat, i
+        character(len=512) :: no_extra(1)
 
-        allocate (lines(10000), lowered(10000))
+        no_extra(1) = ''
+        call lint_file_ex(filename, no_extra, 0, findings, n_findings)
+    end subroutine lint_file
+
+    subroutine lint_file_ex(filename, extra_files, n_extra, findings, n_findings)
+        !! Report unused imports in filename. extra_files are sibling sources
+        !! (the module's submodules, or vice versa) whose bodies are appended to
+        !! the usage scan only: a submodule inherits its parent module's
+        !! imports, so an import used solely in a submodule is not unused.
+        character(len=*), intent(in) :: filename
+        character(len=*), intent(in) :: extra_files(:)
+        integer, intent(in) :: n_extra
+        type(lint_finding_t), intent(inout) :: findings(MAX_FINDINGS)
+        integer, intent(inout) :: n_findings
+
+        character(len=1024), allocatable :: lines(:), lowered(:)
+        character(len=256), allocatable :: seen(:)
+        integer :: n_lines, n_main, u, iostat, i, n_seen
+
+        allocate (lines(MAX_LINT_LINES), lowered(MAX_LINT_LINES), seen(2048))
+        n_seen = 0
 
         n_lines = 0
         open (newunit=u, file=filename, status='old', iostat=iostat)
-        if (iostat /= 0) return
+        if (iostat /= 0) then
+            deallocate (lines, lowered, seen)
+            return
+        end if
 
         do
             n_lines = n_lines + 1
-            if (n_lines > 10000) then
+            if (n_lines > MAX_LINT_LINES) then
                 n_lines = n_lines - 1
                 exit
             end if
@@ -69,47 +95,118 @@ contains
         ! Append the bodies of any `include 'file'` so a symbol used only inside
         ! an included fragment is not mis-reported as an unused import. Usage
         ! scanning sees the extra lines; use-line detection still fires only on
-        ! the main file's own lines (1..n_main).
+        ! the main file's own lines (1..n_main). The seen set is shared across
+        ! all expansions so each fragment is appended at most once.
         n_main = n_lines
-        call append_include_bodies(filename, lines, n_lines)
+        call append_include_bodies(filename, lines, n_lines, seen, n_seen)
+
+        ! Append sibling module/submodule bodies (and their includes) so imports
+        ! consumed only through submodule scope inheritance count as used.
+        do i = 1, n_extra
+            call append_file_body(trim(extra_files(i)), lines, n_lines)
+            call append_include_bodies(trim(extra_files(i)), lines, n_lines, &
+                seen, n_seen)
+        end do
 
         do i = 1, n_lines
             lowered(i) = to_lower(lines(i))
         end do
 
+        ! A module with no bare `private` statement is default-public: its
+        ! USE-associated names are re-exported to anything that uses it, so an
+        ! import that looks unused here may still be a deliberate re-export.
+        ! Skip such modules. Programs and submodules never re-export, so they
+        ! are always linted.
+        if (module_reexports_imports(lowered, n_main)) then
+            deallocate (lines, lowered, seen)
+            return
+        end if
+
         do i = 1, n_main
             call check_use_line(filename, i, lowered, n_lines, &
                 findings, n_findings)
         end do
-    end subroutine lint_file
+        deallocate (lines, lowered)
+    end subroutine lint_file_ex
 
-    subroutine append_include_bodies(filename, lines, n_lines)
-        !! For each `include 'frag'` in the source, append frag's lines to the
-        !! buffer (resolved relative to the source's directory). Symbol-usage
-        !! scanning then covers included code; a one-level expansion is enough
-        !! for the test fixtures that share an .inc body.
+    subroutine append_file_body(filename, lines, n_lines)
+        !! Append every line of filename to the usage-scan buffer.
         character(len=*), intent(in) :: filename
         character(len=1024), intent(inout) :: lines(:)
         integer, intent(inout) :: n_lines
 
+        character(len=1024) :: line
+        integer :: u, iostat
+
+        open (newunit=u, file=filename, status='old', iostat=iostat)
+        if (iostat /= 0) return
+        do
+            if (n_lines >= size(lines)) exit
+            read (u, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            n_lines = n_lines + 1
+            lines(n_lines) = line
+        end do
+        close (u)
+    end subroutine append_file_body
+
+    subroutine append_include_bodies(filename, lines, n_lines, seen, n_seen)
+        !! Append the body of every `include 'frag'` (resolved relative to the
+        !! source's directory) so symbol-usage scanning covers included code.
+        !! Expansion is transitive: a fragment that itself includes another is
+        !! followed too. seen carries across calls so each fragment is appended
+        !! at most once (no duplication when many siblings share includes), which
+        !! also breaks circular includes.
+        character(len=*), intent(in) :: filename
+        character(len=1024), intent(inout) :: lines(:)
+        integer, intent(inout) :: n_lines
+        character(len=256), intent(inout) :: seen(:)
+        integer, intent(inout) :: n_seen
+
         character(len=1024) :: line, incpath, dir
         character(len=:), allocatable :: incname
-        integer :: i, n0, slash, u, iostat
+        integer :: i, slash, u, iostat, k
+        logical :: dup
 
-        n0 = n_lines
         slash = index(filename, '/', back=.true.)
         dir = ''
         if (slash > 0) dir = filename(1:slash)
 
-        do i = 1, n0
+        i = 1
+        ! Walk every line, including ones appended below, so nested includes are
+        ! expanded as they come into view.
+        do while (i <= n_lines)
             line = adjustl(lines(i))
             call include_target(line, incname)
-            if (.not. allocated(incname)) cycle
+            if (.not. allocated(incname)) then
+                i = i + 1
+                cycle
+            end if
+
+            dup = .false.
+            do k = 1, n_seen
+                if (trim(seen(k)) == trim(incname)) then
+                    dup = .true.
+                    exit
+                end if
+            end do
+            if (dup) then
+                i = i + 1
+                cycle
+            end if
+            if (n_seen < size(seen)) then
+                n_seen = n_seen + 1
+                seen(n_seen) = incname
+            end if
+
             incpath = trim(dir)//trim(incname)
             open (newunit=u, file=trim(incpath), status='old', iostat=iostat)
             if (iostat /= 0) then
                 open (newunit=u, file=trim(incname), status='old', iostat=iostat)
-                if (iostat /= 0) cycle
+                if (iostat /= 0) then
+                    i = i + 1
+                    cycle
+                end if
             end if
             do
                 if (n_lines >= size(lines)) exit
@@ -119,8 +216,49 @@ contains
                 lines(n_lines) = line
             end do
             close (u)
+            i = i + 1
         end do
     end subroutine append_include_bodies
+
+    logical function module_reexports_imports(lowered, n_main) result(reexports)
+        !! True when the file's first program unit is a module (not a submodule
+        !! or program) that has no bare `private` statement. Such a module is
+        !! default-public, so its USE-associated names are re-exported and must
+        !! not be reported as unused.
+        character(len=1024), intent(in) :: lowered(:)
+        integer, intent(in) :: n_main
+
+        character(len=1024) :: line
+        integer :: i, bang
+        logical :: is_module, header_seen, has_bare_private
+
+        reexports = .false.
+        is_module = .false.
+        header_seen = .false.
+        has_bare_private = .false.
+
+        do i = 1, n_main
+            line = lowered(i)
+            call strip_leading(line)
+            bang = index(line, '!')
+            if (bang > 0) line = line(1:bang - 1)
+            call strip_trailing(line)
+
+            if (.not. header_seen) then
+                if (starts_with(line, 'submodule')) then
+                    return
+                else if (starts_with(line, 'module ') .and. &
+                         .not. starts_with(line, 'module procedure')) then
+                    is_module = .true.
+                    header_seen = .true.
+                end if
+            end if
+
+            if (trim(line) == 'private') has_bare_private = .true.
+        end do
+
+        reexports = is_module .and. .not. has_bare_private
+    end function module_reexports_imports
 
     subroutine include_target(line, incname)
         !! Extract frag from `include 'frag'` / `include "frag"`; else unset.
@@ -399,16 +537,85 @@ contains
         type(lint_finding_t), intent(out) :: findings(MAX_FINDINGS)
         integer, intent(out) :: n_findings
 
-        character(len=512), allocatable :: files(:)
-        integer :: n_files, i
+        character(len=512), allocatable :: files(:), extra(:)
+        character(len=128), allocatable :: roots(:)
+        integer :: n_files, i, j, n_extra
 
         n_findings = 0
         call collect_fortran_sources(dir, files, n_files)
+
+        ! Root module identity per file: the module it defines, or for a
+        ! submodule its root ancestor module. Files sharing a root form one
+        ! scope for unused-import purposes (a submodule sees its module's
+        ! imports), so each is linted with the others appended to its usage scan.
+        allocate (roots(max(1, n_files)), extra(max(1, n_files)))
+        do i = 1, n_files
+            call file_root_module(trim(files(i)), roots(i))
+        end do
+
         do i = 1, n_files
             if (len_trim(files(i)) == 0) cycle
-            call lint_file(trim(files(i)), findings, n_findings)
+            n_extra = 0
+            if (len_trim(roots(i)) > 0) then
+                do j = 1, n_files
+                    if (j == i) cycle
+                    if (len_trim(roots(j)) == 0) cycle
+                    if (roots(j) == roots(i)) then
+                        n_extra = n_extra + 1
+                        extra(n_extra) = files(j)
+                    end if
+                end do
+            end if
+            call lint_file_ex(trim(files(i)), extra, n_extra, findings, n_findings)
         end do
+        deallocate (roots, extra)
     end subroutine lint_dir
+
+    subroutine file_root_module(filename, root)
+        !! Root module identity (lowercased): the name of the module the file
+        !! defines, or for a `submodule(parent...) name` the root parent module
+        !! (the part before any ':'). Empty when the file defines neither.
+        character(len=*), intent(in) :: filename
+        character(len=*), intent(out) :: root
+
+        character(len=1024) :: line, low
+        integer :: u, iostat, lo, hi, colon, scanned
+
+        root = ''
+        open (newunit=u, file=filename, status='old', iostat=iostat)
+        if (iostat /= 0) return
+        scanned = 0
+        do
+            read (u, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            scanned = scanned + 1
+            if (scanned > 500) exit
+            low = to_lower(line)
+            call strip_leading(low)
+            if (starts_with(low, 'submodule')) then
+                lo = index(low, '(')
+                hi = index(low, ')')
+                if (lo > 0 .and. hi > lo) then
+                    root = adjustl(low(lo + 1:hi - 1))
+                    colon = index(root, ':')
+                    if (colon > 0) root = root(1:colon - 1)
+                    call strip_trailing(root)
+                    call strip_leading(root)
+                end if
+                exit
+            else if (starts_with(low, 'module ')) then
+                if (.not. starts_with(low, 'module procedure')) then
+                    root = adjustl(low(8:))
+                    ! keep only the first token (the module name)
+                    hi = index(trim(root), ' ')
+                    if (hi > 0) root = root(1:hi - 1)
+                    call strip_trailing(root)
+                end if
+                exit
+            end if
+        end do
+        close (u)
+    end subroutine file_root_module
 
     function lint_findings_json(findings, n_findings) result(json)
         type(lint_finding_t), intent(in) :: findings(*)
@@ -874,5 +1081,246 @@ contains
         end do
         n_warnings = out
     end subroutine lint_dedup_warnings
+
+    subroutine lint_fix_dir(dir, n_removed, n_remaining)
+        !! Remove unused imports in place across all sources under dir.
+        !! Each pass removes up to MAX_FINDINGS imports, so several passes clear
+        !! projects that exceed the per-pass cap. n_remaining is the count still
+        !! flagged after fixing (symbols the rewriter could not place, e.g. on a
+        !! continuation line rather than the use line itself).
+        character(len=*), intent(in) :: dir
+        integer, intent(out) :: n_removed, n_remaining
+
+        type(lint_finding_t), allocatable :: findings(:)
+        integer :: n_findings, pass, removed_this_pass
+
+        n_removed = 0
+        n_remaining = 0
+        allocate (findings(MAX_FINDINGS))
+        do pass = 1, 200
+            call lint_dir(dir, findings, n_findings)
+            if (n_findings == 0) exit
+            call apply_findings(findings, n_findings, removed_this_pass)
+            n_removed = n_removed + removed_this_pass
+            if (removed_this_pass == 0) exit   ! no progress; stop looping
+        end do
+        call lint_dir(dir, findings, n_findings)
+        n_remaining = n_findings
+        deallocate (findings)
+    end subroutine lint_fix_dir
+
+    subroutine apply_findings(findings, n_findings, n_removed)
+        !! Apply findings file by file. lint_dir emits findings grouped by file
+        !! (sources are scanned in sorted order), so equal-file findings are
+        !! contiguous.
+        type(lint_finding_t), intent(in) :: findings(:)
+        integer, intent(in) :: n_findings
+        integer, intent(out) :: n_removed
+
+        integer :: i, j, removed_file
+
+        n_removed = 0
+        i = 1
+        do while (i <= n_findings)
+            j = i
+            do while (j < n_findings)
+                if (trim(findings(j + 1)%file) /= trim(findings(i)%file)) exit
+                j = j + 1
+            end do
+            call fix_one_file(trim(findings(i)%file), findings(i:j), j - i + 1, &
+                removed_file)
+            n_removed = n_removed + removed_file
+            i = j + 1
+        end do
+    end subroutine apply_findings
+
+    subroutine fix_one_file(filename, ff, nf, n_removed)
+        character(len=*), intent(in) :: filename
+        type(lint_finding_t), intent(in) :: ff(nf)
+        integer, intent(in) :: nf
+        integer, intent(out) :: n_removed
+
+        character(len=1024), allocatable :: lines(:)
+        logical, allocatable :: drop(:), handled(:)
+        character(len=MAX_SYM_LEN) :: flagged(MAX_SYMS)
+        integer :: n_lines, u, iostat, i, k, nflag, removed_here, target_line
+        character(len=:), allocatable :: newline
+        logical :: delete_line, changed
+
+        n_removed = 0
+        allocate (lines(20000), drop(20000), handled(20000))
+        drop = .false.
+        handled = .false.
+        n_lines = 0
+        open (newunit=u, file=filename, status='old', iostat=iostat)
+        if (iostat /= 0) then
+            deallocate (lines, drop, handled)
+            return
+        end if
+        do
+            if (n_lines >= size(lines)) exit
+            read (u, '(a)', iostat=iostat) lines(n_lines + 1)
+            if (iostat /= 0) exit
+            n_lines = n_lines + 1
+        end do
+        close (u)
+
+        changed = .false.
+        do i = 1, nf
+            target_line = ff(i)%line
+            if (target_line < 1 .or. target_line > n_lines) cycle
+            if (handled(target_line)) cycle
+            handled(target_line) = .true.
+
+            ! A use line may carry several unused symbols; gather them all and
+            ! rewrite the line once.
+            nflag = 0
+            do k = 1, nf
+                if (ff(k)%line /= target_line) cycle
+                if (nflag >= MAX_SYMS) exit
+                nflag = nflag + 1
+                flagged(nflag) = normalize_sym(ff(k)%symbol)
+            end do
+
+            call rewrite_use_line(lines(target_line), flagged, nflag, newline, &
+                delete_line, removed_here)
+            if (removed_here == 0) cycle
+            n_removed = n_removed + removed_here
+            changed = .true.
+            if (delete_line) then
+                drop(target_line) = .true.
+            else
+                lines(target_line) = newline
+            end if
+        end do
+
+        if (changed) then
+            open (newunit=u, file=filename, status='replace', iostat=iostat)
+            if (iostat == 0) then
+                do i = 1, n_lines
+                    if (drop(i)) cycle
+                    write (u, '(a)') trim(lines(i))
+                end do
+                close (u)
+            end if
+        end if
+        deallocate (lines, drop, handled)
+    end subroutine fix_one_file
+
+    subroutine rewrite_use_line(orig, flagged, nflag, newline, delete_line, &
+            n_removed)
+        !! Drop the flagged symbols from a `use ..., only:` line, preserving the
+        !! module prefix, indentation, a trailing continuation '&', and any
+        !! trailing comment. delete_line is set when the only-list becomes empty
+        !! and the statement does not continue onto the next line.
+        character(len=*), intent(in) :: orig
+        character(len=MAX_SYM_LEN), intent(in) :: flagged(:)
+        integer, intent(in) :: nflag
+        character(len=:), allocatable, intent(out) :: newline
+        logical, intent(out) :: delete_line
+        integer, intent(out) :: n_removed
+
+        character(len=1024) :: lowered, rest, comment, token
+        character(len=:), allocatable :: prefix, kept
+        integer :: op, cpos, start, comma_pos, i
+        logical :: drop_tok, has_amp
+
+        newline = ''
+        delete_line = .false.
+        n_removed = 0
+
+        lowered = to_lower(orig)
+        op = index(lowered, 'only:')
+        if (op == 0) return
+        prefix = orig(1:op + 4)             ! through the ':' of 'only:'
+        rest = orig(op + 5:)
+
+        comment = ''
+        cpos = index(rest, '!')
+        if (cpos > 0) then
+            comment = rest(cpos:)
+            rest = rest(1:cpos - 1)
+        end if
+
+        has_amp = .false.
+        call strip_trailing(rest)
+        if (len_trim(rest) > 0) then
+            if (rest(len_trim(rest):len_trim(rest)) == '&') then
+                has_amp = .true.
+                rest(len_trim(rest):len_trim(rest)) = ' '
+            end if
+        end if
+
+        kept = ''
+        start = 1
+        do
+            if (start > len_trim(rest)) exit
+            comma_pos = index(rest(start:), ',')
+            if (comma_pos > 0) then
+                token = rest(start:start + comma_pos - 2)
+                start = start + comma_pos
+            else
+                token = rest(start:)
+                start = len_trim(rest) + 1
+            end if
+            call strip_leading(token)
+            call strip_trailing(token)
+            if (len_trim(token) == 0) cycle
+            drop_tok = .false.
+            do i = 1, nflag
+                if (normalize_sym(token) == flagged(i)) then
+                    drop_tok = .true.
+                    exit
+                end if
+            end do
+            if (drop_tok) then
+                n_removed = n_removed + 1
+            else if (len_trim(kept) == 0) then
+                kept = trim(token)
+            else
+                kept = kept//', '//trim(token)
+            end if
+        end do
+
+        if (n_removed == 0) return
+
+        if (len_trim(kept) == 0 .and. .not. has_amp) then
+            delete_line = .true.
+            return
+        end if
+
+        if (len_trim(kept) == 0) then
+            ! Whole first-line list removed but the statement continues; the
+            ! continuation supplies the remaining symbols.
+            newline = trim(prefix)//' &'
+        else if (has_amp) then
+            ! Kept symbols precede a continuation, so the list needs its
+            ! trailing comma before '&'.
+            newline = trim(prefix)//' '//trim(kept)//', &'
+        else
+            newline = trim(prefix)//' '//trim(kept)
+        end if
+        if (len_trim(comment) > 0) newline = newline//' '//trim(comment)
+    end subroutine rewrite_use_line
+
+    pure function normalize_sym(s) result(norm)
+        !! Lowercase and strip all blanks so renames compare regardless of the
+        !! spacing around '=>'.
+        character(len=*), intent(in) :: s
+        character(len=MAX_SYM_LEN) :: norm
+
+        character(len=len(s)) :: low
+        integer :: i, k
+
+        low = to_lower(s)
+        norm = ''
+        k = 0
+        do i = 1, len_trim(low)
+            if (low(i:i) == ' ' .or. low(i:i) == char(9)) cycle
+            k = k + 1
+            if (k > MAX_SYM_LEN) exit
+            norm(k:k) = low(i:i)
+        end do
+    end function normalize_sym
 
 end module fo_lint
