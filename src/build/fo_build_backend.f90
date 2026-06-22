@@ -12,7 +12,7 @@ module fo_build_backend
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
-    public :: backend_build, backend_test, backend_test_names
+    public :: backend_build, backend_test, backend_test_names, backend_clean
     public :: BACKEND_FPM, BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
 
     integer, parameter :: BACKEND_NONE = 0
@@ -645,5 +645,35 @@ contains
 
         call fs_remove_tree(trim(project_dir)//'/build')
     end subroutine clear_cmake_build_tree
+
+    subroutine backend_clean(project_dir, purge_store, build_removed, &
+            store_removed)
+        !! Project-scoped clean. Always drops the project's build/ tree (a
+        !! disposable view fo regenerates from the cache). The shared
+        !! content-addressed store under cache_root is removed only when
+        !! purge_store is set: it is the cross-project source of truth, so a
+        !! per-project clean must not cold-start every other project.
+        use fo_cache, only: cache_root
+        use fo_util, only: clean_root_build_artifacts
+        character(len=*), intent(in) :: project_dir
+        logical, intent(in) :: purge_store
+        logical, intent(out) :: build_removed, store_removed
+
+        character(len=512) :: root
+        integer :: n_removed
+
+        build_removed = .false.
+        store_removed = .false.
+        if (len_trim(project_dir) > 0) then
+            call fs_remove_tree(trim(project_dir)//'/build')
+            call clean_root_build_artifacts(trim(project_dir), n_removed)
+            build_removed = .true.
+        end if
+        if (purge_store) then
+            call cache_root(root)
+            call fs_remove_tree(trim(root))
+            store_removed = .true.
+        end if
+    end subroutine backend_clean
 
 end module fo_build_backend

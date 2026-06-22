@@ -10,8 +10,8 @@ program fo_main
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
         collect_failed_test_names, MAX_TEST_RESULTS
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
-    use fo_util, only: make_tmpfile, delete_tmpfile, clean_root_build_artifacts
-    use fo_fs, only: fs_make_dir, fs_remove_tree, fs_collect_files, &
+    use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_fs, only: fs_make_dir, fs_collect_files, &
         fs_copy_exec, fs_rename
     use fo_check_output, only: check_result_json, check_result_compact_json, &
         check_result_full_json
@@ -252,7 +252,7 @@ contains
         write (output_unit, '(a)') '  lint       unused imports + gfortran warnings'
         write (output_unit, '(a)') '  lint --json  lint results as JSON'
         write (output_unit, '(a)') '  lint --fix   remove unused imports in place'
-        write (output_unit, '(a)') '  clean      clear global cache and project build tree'
+        write (output_unit, '(a)') '  clean      drop project build tree (--cache also purges shared store)'
         write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/.local)'
         write (output_unit, '(a)') '  info       backend, file count, module count'
         write (output_unit, '(a)') '  info --capabilities  compiler and tooling limits'
@@ -1009,23 +1009,37 @@ contains
     end subroutine cmd_install
 
     subroutine cmd_clean()
-        use fo_cache, only: cache_root, cache_store_root
+        use fo_cache, only: cache_store_root
+        use fo_build_backend, only: backend_clean
         type(backend_t) :: b
-        character(len=512) :: root, store_root
-        integer :: n_removed
+        character(len=512) :: store_root, arg
+        integer :: i
+        logical :: purge_store, build_removed, store_removed
 
-        call cache_root(root)
+        ! Default clean is project-scoped: drop only this project's build/ tree
+        ! (a disposable view that fo regenerates from the cache). The store at
+        ! ~/.cache/fo/store/v1 is the shared, content-addressed source of truth
+        ! across all projects; wiping it on a per-project clean cold-starts every
+        ! other project. Purge it only when explicitly asked.
+        purge_store = .false.
+        do i = 2, command_argument_count()
+            call get_command_argument(i, arg)
+            if (trim(arg) == '--cache' .or. trim(arg) == '--all') &
+                purge_store = .true.
+        end do
+
         call cache_store_root(store_root)
-        call fs_remove_tree(trim(root))
         b = detect_backend('.')
-        if (b%kind /= BACKEND_NONE) then
-            call fs_remove_tree(trim(b%project_dir)//'/build')
-            call clean_root_build_artifacts(trim(b%project_dir), n_removed)
-        end if
-        write (output_unit, '(a,a)') 'cache cleared: ', trim(store_root)
-        if (b%kind /= BACKEND_NONE) &
-            write (output_unit, '(a,a)') 'build tree cleared: ', &
+        call backend_clean(trim(b%project_dir), purge_store, build_removed, &
+            store_removed)
+        if (build_removed) write (output_unit, '(a,a)') 'build tree cleared: ', &
             trim(b%project_dir)//'/build'
+        if (store_removed) then
+            write (output_unit, '(a,a)') 'cache cleared: ', trim(store_root)
+        else
+            write (output_unit, '(a)') &
+                'cache kept (shared store); use `fo clean --cache` to purge it'
+        end if
     end subroutine cmd_clean
 
     subroutine cmd_info()
