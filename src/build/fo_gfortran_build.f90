@@ -6,14 +6,15 @@ module fo_gfortran_build
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
         cache_restore_action, cache_store_action, hash_mod_file, &
-        HASH_LEN
+        HASH_LEN, cache_digest, cache_file_digest, &
+        cache_store_binary, cache_restore_binary, cache_binary_matches
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
         clean_root_build_artifacts
     use fo_process, only: process_run_logged, &
         process_run_argv_logged, argv_push, argv_push_split, &
         argv_push_split_nl
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_append_file, &
-        fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs
+        fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec
     use fo_progress, only: progress_begin, progress_step, progress_end
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
@@ -845,6 +846,9 @@ contains
         character(len=512) :: prog_obj, bin_path
         character(len=128) :: prog_name
         character(len=512) :: link_flags
+        type(cache_t) :: c
+        integer :: cache_ierr
+        character(len=HASH_LEN) :: base_digest
 
         link_flags = ''
         if (present(flags)) link_flags = flags
@@ -856,6 +860,13 @@ contains
                 lib_objs(n_lib) = src_objs(i)
             end if
         end do
+
+        ! Precompute the shared link inputs digest once, then link each program
+        ! through the link cache (a relink is skipped on a digest hit).
+        call cache_init(c, cache_ierr)
+        base_digest = ''
+        if (cache_ierr == 0) call link_base_digest(lib_objs, n_lib, dep_objs, &
+            n_dep_objs, config%link_libs, config%n_link_libs, base_digest)
 
         do i = 1, n_src_objs
             if (.not. is_prog_arr(i)) cycle
@@ -870,10 +881,58 @@ contains
             bin_path = trim(bin_dir)//'/'//trim(prog_name)
             call link_binary(prog_obj, lib_objs, n_lib, dep_objs, n_dep_objs, &
                 config%link_libs, config%n_link_libs, bin_path, &
-                log_file, exitcode, link_flags)
+                log_file, exitcode, link_flags, c, base_digest)
             if (exitcode /= 0) return
         end do
     end subroutine link_app_binaries
+
+    subroutine link_base_digest(lib_objs, n_lib, dep_objs, n_dep, link_libs, &
+            n_link, digest)
+        !! One digest standing for every shared link input: the library objects,
+        !! the dependency objects, and the resolved external archives (hashed by
+        !! content so a rebuilt liric.a relinks). Computed once per build; each
+        !! per-program link folds in only its own object, so the link key is
+        !! cheap and correct.
+        character(len=512), intent(in) :: lib_objs(MAX_SRC_OBJS)
+        integer, intent(in) :: n_lib
+        character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
+        integer, intent(in) :: n_dep
+        character(len=128), intent(in) :: link_libs(*)
+        integer, intent(in) :: n_link
+        character(len=HASH_LEN), intent(out) :: digest
+
+        character(len=HASH_LEN) :: lib_hash, h
+        character(len=1024) :: token
+        character(len=512) :: tmpfile, dirs(2*MAX_DEP_DIRS)
+        integer :: n_dirs, n_env, i, u, ios
+        logical :: exists
+
+        digest = ''
+        call hash_lib_objs(lib_objs, n_lib, lib_hash)
+        call make_tmpfile('fo_link_base', tmpfile)
+        open (newunit=u, file=trim(tmpfile), status='replace', iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a)') trim(lib_hash)
+        do i = 1, n_dep
+            call hash_mod_file(dep_objs(i), h)
+            write (u, '(a)') trim(h)//' '//trim(dep_objs(i))
+        end do
+        call build_lib_search_dirs(dirs, n_dirs, n_env)
+        do i = 1, n_link
+            call resolve_link_token(trim(link_libs(i)), dirs, n_dirs, n_env, &
+                token)
+            inquire (file=trim(token), exist=exists)
+            if (exists) then
+                call hash_mod_file(trim(token), h)
+                write (u, '(a)') trim(h)//' '//trim(token)
+            else
+                write (u, '(a)') trim(token)
+            end if
+        end do
+        close (u)
+        call hash_mod_file(tmpfile, digest)
+        call delete_tmpfile(tmpfile)
+    end subroutine link_base_digest
 
     subroutine app_prog_stem(obj_path, app_dir, stem)
         !! Source stem of an app program from its object path. Object names
@@ -950,6 +1009,7 @@ contains
         integer :: cache_ierr
         character(len=256) :: compiler
         character(len=HASH_LEN) :: dep_keys(64), output_key, lib_hash
+        character(len=HASH_LEN) :: link_base
         integer :: n_dep, n_test_includes
         character(len=512) :: test_includes(MAX_DEP_DIRS)
         character(len=1024) :: test_flags
@@ -1042,6 +1102,9 @@ contains
         ! linked library objects into every test key so any implementation
         ! change invalidates the cached result.
         call hash_lib_objs(all_lib_objs, n_all_lib, lib_hash)
+        link_base = ''
+        if (cache_ierr == 0) call link_base_digest(all_lib_objs, n_all_lib, &
+            dep_objs, n_dep_objs, link_libs, n_link_libs, link_base)
 
         do i = 1, n_run
             node_id = run_nodes(i)
@@ -1087,7 +1150,7 @@ contains
                 bin_path = trim(bin_dir)//'/'//trim(tname)
                 call link_binary(obj_path, all_lib_objs, n_all_lib, dep_objs, &
                     n_dep_objs, link_libs, n_link_libs, bin_path, log_local, &
-                    run_exits(i), test_flags)
+                    run_exits(i), test_flags, c, link_base)
             end if
             if (run_exits(i) == 0 .and. .not. bonly) then
                 ran(i) = .true.
@@ -1684,7 +1747,8 @@ contains
     end subroutine compile_c
 
     subroutine link_binary(prog_obj, lib_objs, n_lib_objs, dep_objs, n_dep_objs, &
-            link_libs, n_link_libs, output, log_file, exitcode, flags)
+            link_libs, n_link_libs, output, log_file, exitcode, flags, &
+            cache, base_digest)
         character(len=*), intent(in) :: prog_obj, output, log_file
         character(len=512), intent(in) :: lib_objs(MAX_SRC_OBJS)
         integer, intent(in) :: n_lib_objs
@@ -1696,11 +1760,60 @@ contains
         ! user flags forwarded to linker (e.g. -fsanitize=address needs to be
         ! present at link time so the runtime library is linked in)
         character(len=*), intent(in), optional :: flags
+        ! Link-cache handle and the precomputed digest of all shared link
+        ! inputs (library + dep objects + resolved archives). When both are
+        ! present, the link is an action keyed by (toolchain, flags, base_digest,
+        ! this program object): a cache hit restores the binary instead of
+        ! relinking. Linking is the dominant warm-build cost otherwise.
+        type(cache_t), intent(in), optional :: cache
+        character(len=*), intent(in), optional :: base_digest
 
         character(len=:), allocatable :: packed
         character(len=8) :: debug_links
         integer :: debug_status
         integer :: i, n_args
+        logical :: do_cache, restored
+        character(len=HASH_LEN) :: action_id, prog_key
+        character(len=512) :: tmp_bin, key_parts(6)
+        character(len=:), allocatable :: flags_str
+        integer :: store_ierr
+
+        flags_str = ''
+        if (present(flags)) flags_str = trim(flags)
+
+        do_cache = present(cache) .and. present(base_digest)
+        if (do_cache) do_cache = len_trim(base_digest) > 0
+        if (do_cache) then
+            call cache_file_digest(prog_obj, prog_key)
+            key_parts(1) = 'fo-link-1'
+            key_parts(2) = trim(fc_command())
+            key_parts(3) = flags_str
+            key_parts(4) = trim(link_lib_flags(link_libs, n_link_libs))
+            key_parts(5) = trim(base_digest)
+            key_parts(6) = trim(prog_key)
+            action_id = cache_digest(key_parts, 6)
+            ! Fast path: the output is already the binary this action produces.
+            ! Leave it untouched - no relink, no copy. This is what keeps warm
+            ! builds cheap when outputs are large (2.4 GB of static binaries).
+            call cache_binary_matches(cache, action_id, output, restored)
+            if (restored) then
+                exitcode = 0
+                return
+            end if
+            ! Output missing or stale but the binary is in the CAS: restore it
+            ! (to a temp, then copy with the execute bit) instead of relinking.
+            tmp_bin = trim(output)//'.fo-link'
+            call cache_restore_binary(cache, action_id, tmp_bin, restored)
+            if (restored) then
+                if (fs_copy_exec(trim(tmp_bin), trim(output)) == 0) then
+                    call fs_remove_file(trim(tmp_bin))
+                    call cache_store_binary(cache, action_id, output, store_ierr)
+                    exitcode = 0
+                    return
+                end if
+                call fs_remove_file(trim(tmp_bin))
+            end if
+        end if
 
         ! Build an argv vector (no /bin/sh): quote-proof and async-signal-safe,
         ! since link_binary runs inside the parallel test loop where a shell
@@ -1736,6 +1849,9 @@ contains
             build_timeout_seconds(), exitcode)
         if (exitcode == 124) call append_build_hang_hint(log_file, &
             'link of '//trim(output), build_timeout_seconds())
+
+        if (do_cache .and. exitcode == 0) &
+            call cache_store_binary(cache, action_id, output, store_ierr)
     end subroutine link_binary
 
     function argv_display(packed) result(text)

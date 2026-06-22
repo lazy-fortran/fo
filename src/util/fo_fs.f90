@@ -2,7 +2,8 @@ module fo_fs
     !! Shell-free filesystem operations. Every routine here calls a libc
     !! primitive (via fo_fs.c) or pure Fortran I/O, never execute_command_line,
     !! so nothing forks /bin/sh and nothing is corrupted from an OpenMP region.
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, &
+        c_long_long
     implicit none
     private
 
@@ -10,7 +11,7 @@ module fo_fs
     public :: fs_delete_suffix, fs_append_file, fs_write_text
     public :: fs_collect_files, fs_collect_mod_dirs
     public :: fs_mkdir_excl, fs_sleep_ms, fs_pid_alive
-    public :: fs_copy_exec, fs_rename
+    public :: fs_copy_exec, fs_rename, fs_stat
 
     interface
         integer(c_int) function fo_c_rm_rf(path) bind(C, name='fo_c_rm_rf')
@@ -80,6 +81,13 @@ module fo_fs
             import :: c_int
             integer(c_int), value :: pid
         end function fo_c_pid_alive
+
+        integer(c_int) function fo_c_stat_fingerprint(path, mtime_ns, size) &
+                bind(C, name='fo_c_stat_fingerprint')
+            import :: c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_long_long), intent(out) :: mtime_ns, size
+        end function fo_c_stat_fingerprint
 
         integer(c_int) function fo_c_collect_mod_dirs(root, out, cap) &
                 bind(C, name='fo_c_collect_mod_dirs')
@@ -205,6 +213,21 @@ contains
         character(len=*), intent(in) :: src, dst
         rc = int(fo_c_rename_path(trim(src)//c_null_char, trim(dst)//c_null_char))
     end function fs_rename
+
+    subroutine fs_stat(path, mtime_ns, size, ok)
+        !! Filesystem fingerprint of path: nanosecond mtime and byte size.
+        !! ok is .false. if the path does not exist or cannot be stat'd.
+        character(len=*), intent(in) :: path
+        integer(c_long_long), intent(out) :: mtime_ns, size
+        logical, intent(out) :: ok
+
+        integer(c_int) :: rc
+
+        mtime_ns = 0_c_long_long
+        size = 0_c_long_long
+        rc = fo_c_stat_fingerprint(trim(path)//c_null_char, mtime_ns, size)
+        ok = (rc == 0)
+    end subroutine fs_stat
 
     subroutine fs_collect_mod_dirs(root, items, n_items)
         !! Recursively collect unique parent directories of *.mod files under

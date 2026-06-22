@@ -6,6 +6,8 @@ module fo_cache
         fx_cache_restore_bytes => cache_restore_bytes
     use fx_hash, only: sha256_file, sha256_string
     use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_fs, only: fs_stat
+    use, intrinsic :: iso_c_binding, only: c_long_long
     implicit none
     private
     public :: cache_t, cache_init, cache_lookup, cache_key_for, &
@@ -14,6 +16,8 @@ module fo_cache
     public :: cache_debug_write_action_record
     public :: cache_debug_corrupt_object_payload
     public :: hash_mod_file, HASH_LEN
+    public :: cache_digest, cache_file_digest
+    public :: cache_store_binary, cache_restore_binary, cache_binary_matches
 
     integer, parameter :: HASH_LEN = 64
     integer, parameter :: MAX_PARTS = 132
@@ -348,6 +352,140 @@ contains
         call fx_cache_store(c, trim(action_id)//'-a', record_path, ierr)
         call delete_tmpfile(record_path)
     end subroutine cache_store_action
+
+    function cache_digest(parts, n_parts) result(key)
+        !! Public content digest over string parts (link-action keys etc.).
+        character(len=*), intent(in) :: parts(:)
+        integer, intent(in) :: n_parts
+        character(len=HASH_LEN) :: key
+
+        key = digest_parts(parts, n_parts)
+    end function cache_digest
+
+    subroutine cache_file_digest(path, key)
+        !! Content key of an arbitrary file (e.g. an object or archive), used to
+        !! build link-action keys. Empty on failure.
+        character(len=*), intent(in) :: path
+        character(len=HASH_LEN), intent(out) :: key
+
+        integer :: sz, ierr
+
+        call file_content_key(path, 'file', key, sz, ierr)
+        if (ierr /= 0) key = ''
+    end subroutine cache_file_digest
+
+    subroutine cache_store_binary(c, action_id, bin_path, ierr)
+        !! Store a linked binary in the CAS keyed by its content, and record
+        !! action_id -> (content key, mtime, size) for the just-written file.
+        !! Mirrors the Bazel/Go action-cache shape (ActionID over inputs ->
+        !! output in a content-addressable store), for the link step. The
+        !! recorded mtime/size let a later build skip rewriting an unchanged
+        !! output without re-hashing it (cache_binary_matches).
+        type(cache_t), intent(in) :: c
+        character(len=*), intent(in) :: action_id, bin_path
+        integer, intent(out) :: ierr
+
+        character(len=HASH_LEN) :: content_key
+        character(len=:), allocatable :: rec_text
+        character(len=1), allocatable :: rec(:)
+        character(len=40) :: mt_text, sz_text
+        integer(c_long_long) :: mtime, fsize
+        integer :: sz, i, n
+        logical :: ok
+
+        ierr = 1
+        if (.not. c%initialized) return
+        call file_content_key(bin_path, 'bin', content_key, sz, ierr)
+        if (ierr /= 0) return
+        call fx_cache_store(c, trim(content_key)//'-d', bin_path, ierr)
+        if (ierr /= 0) return
+        call fs_stat(bin_path, mtime, fsize, ok)
+        if (.not. ok) then
+            ierr = 1
+            return
+        end if
+        write (mt_text, '(i0)') mtime
+        write (sz_text, '(i0)') fsize
+        rec_text = trim(content_key)//' '//trim(mt_text)//' '//trim(sz_text)
+        n = len(rec_text)
+        allocate (rec(n))
+        do i = 1, n
+            rec(i) = rec_text(i:i)
+        end do
+        call fx_cache_store_bytes(c, trim(action_id)//'-l', rec, n, ierr)
+        deallocate (rec)
+    end subroutine cache_store_binary
+
+    subroutine read_link_record(c, action_id, content_key, mtime, fsize, ok)
+        !! Parse the action_id -> (content key, mtime, size) link record.
+        type(cache_t), intent(in) :: c
+        character(len=*), intent(in) :: action_id
+        character(len=HASH_LEN), intent(out) :: content_key
+        integer(c_long_long), intent(out) :: mtime, fsize
+        logical, intent(out) :: ok
+
+        character(len=1) :: rec(256)
+        character(len=256) :: text
+        integer :: n_rec, ierr, i
+
+        ok = .false.
+        content_key = ''
+        mtime = 0_c_long_long
+        fsize = 0_c_long_long
+        if (.not. c%initialized) return
+        if (.not. fx_cache_has(c, trim(action_id)//'-l')) return
+        call fx_cache_restore_bytes(c, trim(action_id)//'-l', rec, n_rec, ierr)
+        if (ierr /= 0 .or. n_rec <= 0 .or. n_rec > 256) return
+        text = ''
+        do i = 1, n_rec
+            text(i:i) = rec(i)
+        end do
+        read (text(1:n_rec), *, iostat=ierr) content_key, mtime, fsize
+        if (ierr /= 0) return
+        ok = .true.
+    end subroutine read_link_record
+
+    subroutine cache_binary_matches(c, action_id, bin_path, matches)
+        !! True iff bin_path already exists and its (mtime, size) equal what the
+        !! link record stored. The warm-build fast path: an unchanged output is
+        !! left untouched, so a build that relinks nothing rewrites nothing -
+        !! essential when outputs are large (statically linked binaries).
+        type(cache_t), intent(in) :: c
+        character(len=*), intent(in) :: action_id, bin_path
+        logical, intent(out) :: matches
+
+        character(len=HASH_LEN) :: content_key
+        integer(c_long_long) :: rec_mtime, rec_size, cur_mtime, cur_size
+        logical :: ok
+
+        matches = .false.
+        call read_link_record(c, action_id, content_key, rec_mtime, rec_size, ok)
+        if (.not. ok) return
+        call fs_stat(bin_path, cur_mtime, cur_size, ok)
+        if (.not. ok) return
+        matches = (cur_mtime == rec_mtime .and. cur_size == rec_size)
+    end subroutine cache_binary_matches
+
+    subroutine cache_restore_binary(c, action_id, dest_path, restored)
+        !! Restore a cached binary for action_id to dest_path (raw bytes; the
+        !! caller sets the execute bit). restored is .false. on any miss.
+        type(cache_t), intent(in) :: c
+        character(len=*), intent(in) :: action_id, dest_path
+        logical, intent(out) :: restored
+
+        character(len=HASH_LEN) :: content_key
+        integer(c_long_long) :: mtime, fsize
+        integer :: ierr
+        logical :: ok
+
+        restored = .false.
+        call read_link_record(c, action_id, content_key, mtime, fsize, ok)
+        if (.not. ok) return
+        if (.not. fx_cache_has(c, trim(content_key)//'-d')) return
+        call fx_cache_restore(c, trim(content_key)//'-d', dest_path, ierr)
+        if (ierr /= 0) return
+        restored = .true.
+    end subroutine cache_restore_binary
 
     subroutine hash_mod_file(modpath, key)
         character(len=*), intent(in) :: modpath

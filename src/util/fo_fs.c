@@ -212,6 +212,25 @@ int fo_c_pid_alive(int pid) {
     return (errno == EPERM) ? 1 : 0;
 }
 
+/* File modification fingerprint for cache "outputs already match" checks:
+   nanosecond mtime and byte size. Returns 0 on success, -1 if the path
+   cannot be stat'd. Lets the build skip rewriting a large unchanged output
+   (e.g. a 14MB statically linked binary) without re-hashing its contents. */
+int fo_c_stat_fingerprint(const char *path, long long *mtime_ns,
+                          long long *size) {
+    struct stat st;
+    if (!fo_has(path) || stat(path, &st) != 0) return -1;
+#if defined(__APPLE__)
+    *mtime_ns = (long long)st.st_mtimespec.tv_sec * 1000000000LL +
+                (long long)st.st_mtimespec.tv_nsec;
+#else
+    *mtime_ns = (long long)st.st_mtim.tv_sec * 1000000000LL +
+                (long long)st.st_mtim.tv_nsec;
+#endif
+    *size = (long long)st.st_size;
+    return 0;
+}
+
 #include <time.h>
 /* Sleep for the given milliseconds (no shell `sleep`). */
 void fo_c_sleep_ms(int ms) {

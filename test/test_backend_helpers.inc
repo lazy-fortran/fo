@@ -517,7 +517,7 @@
         integer :: exitcode, u, ios
         character(len=512) :: base, libdir, appdir, log_file, outfile, depobj
         character(len=64) :: line
-        integer :: mtime_a, mtime_b
+        integer :: mtime_a, mtime_b, bin_a, bin_b
 
         call make_tmp_path('fo_test_pathdep', base)
         libdir = trim(base)//'/lib'
@@ -563,15 +563,20 @@
         call assert(trim(adjustl(line)) == '7', &
             'binary links path dep and prints the dep value')
 
-        ! warm rebuild must not recompile the cached dep object
+        ! warm rebuild must not recompile the cached dep object, nor relink the
+        ! unchanged binary (the link cache leaves a matching output untouched)
         depobj = ''
         call first_match(trim(appdir)//'/build/fo/obj', 'depmod', depobj)
         mtime_a = file_mtime(depobj)
+        bin_a = file_mtime(trim(appdir)//'/build/fo/bin/depapp')
         call backend_build(b, exitcode, log_file=log_file)
         mtime_b = file_mtime(depobj)
+        bin_b = file_mtime(trim(appdir)//'/build/fo/bin/depapp')
         call assert(exitcode == 0, 'warm rebuild of path-dep project succeeds')
         call assert(mtime_a > 0 .and. mtime_a == mtime_b, &
             'warm rebuild leaves cached dep object untouched')
+        call assert(bin_a > 0 .and. bin_a == bin_b, &
+            'warm rebuild leaves the unchanged binary unrelinked (link cache)')
 
         call remove_tree(base)
         call execute_command_line('rm -f '//trim(log_file))
