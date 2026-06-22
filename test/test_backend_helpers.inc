@@ -508,6 +508,114 @@
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_test_links_helper_modules_and_lib
 
+    subroutine test_gfortran_builds_path_dependency()
+        !! A project with a path dependency compiles the dependency's library
+        !! sources through fo's own cache and links them, with no prior fpm
+        !! build of build/dependencies. The app prints a value defined in the
+        !! dep, and a warm rebuild leaves the dep object untouched (cached).
+        type(backend_t) :: b
+        integer :: exitcode, u, ios
+        character(len=512) :: base, libdir, appdir, log_file, outfile, depobj
+        character(len=64) :: line
+        integer :: mtime_a, mtime_b
+
+        call make_tmp_path('fo_test_pathdep', base)
+        libdir = trim(base)//'/lib'
+        appdir = trim(base)//'/app'
+        call make_tmp_path('fo_backend_pathdep', log_file)
+
+        call execute_command_line('mkdir -p '//trim(libdir)//'/src '// &
+            trim(appdir)//'/app')
+        open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "deplib"'
+        close (u)
+        open (newunit=u, file=trim(libdir)//'/src/depmod.f90', status='replace')
+        write (u, '(a)') 'module depmod'
+        write (u, '(a)') '  implicit none'
+        write (u, '(a)') '  integer, parameter :: dep_value = 7'
+        write (u, '(a)') 'end module depmod'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "depapp"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'deplib = { path = "../lib" }'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/app/main.f90', status='replace')
+        write (u, '(a)') 'program main'
+        write (u, '(a)') '  use depmod, only: dep_value'
+        write (u, '(a)') '  print "(i0)", dep_value'
+        write (u, '(a)') 'end program main'
+        close (u)
+
+        b = detect_backend(appdir)
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'project with path dependency builds + links')
+
+        outfile = trim(base)//'/out.txt'
+        call execute_command_line(trim(appdir)//'/build/fo/bin/depapp > '// &
+            trim(outfile))
+        line = ''
+        open (newunit=u, file=trim(outfile), status='old', iostat=ios)
+        if (ios == 0) then
+            read (u, '(a)', iostat=ios) line
+            close (u)
+        end if
+        call assert(trim(adjustl(line)) == '7', &
+            'binary links path dep and prints the dep value')
+
+        ! warm rebuild must not recompile the cached dep object
+        depobj = ''
+        call first_match(trim(appdir)//'/build/fo/obj', 'depmod', depobj)
+        mtime_a = file_mtime(depobj)
+        call backend_build(b, exitcode, log_file=log_file)
+        mtime_b = file_mtime(depobj)
+        call assert(exitcode == 0, 'warm rebuild of path-dep project succeeds')
+        call assert(mtime_a > 0 .and. mtime_a == mtime_b, &
+            'warm rebuild leaves cached dep object untouched')
+
+        call remove_tree(base)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_builds_path_dependency
+
+    subroutine first_match(dir, infix, path)
+        !! Return the first file under dir whose name contains infix. Shell-based
+        !! to match the other build-test helpers and avoid extra module imports.
+        character(len=*), intent(in) :: dir, infix
+        character(len=*), intent(out) :: path
+        character(len=512) :: tmp
+        integer :: u, ios
+
+        path = ''
+        call make_tmp_path('fo_match', tmp)
+        call execute_command_line('find "'//trim(dir)//'" -name "*'// &
+            trim(infix)//'*" 2>/dev/null | head -1 > '//trim(tmp))
+        open (newunit=u, file=trim(tmp), status='old', iostat=ios)
+        if (ios == 0) then
+            read (u, '(a)', iostat=ios) path
+            close (u)
+        end if
+        call execute_command_line('rm -f '//trim(tmp))
+    end subroutine first_match
+
+    integer function file_mtime(path) result(t)
+        !! Seconds-resolution mtime via stat(1); 0 if missing. Test-only helper.
+        character(len=*), intent(in) :: path
+        character(len=512) :: tmp
+        integer :: u, ios
+
+        t = 0
+        if (len_trim(path) == 0) return
+        call make_tmp_path('fo_mtime', tmp)
+        call execute_command_line('stat -c %Y "'//trim(path)//'" > '// &
+            trim(tmp)//' 2>/dev/null')
+        open (newunit=u, file=trim(tmp), status='old', iostat=ios)
+        if (ios == 0) then
+            read (u, *, iostat=ios) t
+            close (u)
+        end if
+        call execute_command_line('rm -f '//trim(tmp))
+    end function file_mtime
+
     subroutine make_helper_module_project(project_dir)
         character(len=*), intent(in) :: project_dir
         integer :: u

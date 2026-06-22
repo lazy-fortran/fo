@@ -3,6 +3,15 @@ module fo_fpm_config
     private
     public :: fpm_dep_t, fpm_config_t
     public :: fpm_config_init, fpm_config_parse
+    public :: dep_kind, DEP_PATH, DEP_GIT, DEP_REGISTRY
+
+    ! How a dependency is acquired, derived from which fields the manifest set.
+    ! path = local dir (mutable, may be edited); git = cloned at a ref (pinned,
+    ! immutable); registry = a bare version spec like `stdlib = "*"` resolved
+    ! through the package registry (pinned, immutable).
+    integer, parameter :: DEP_PATH = 1
+    integer, parameter :: DEP_GIT = 2
+    integer, parameter :: DEP_REGISTRY = 3
 
     integer, parameter :: MAX_DEPS = 64
     integer, parameter :: MAX_DEV_DEPS = 32
@@ -42,6 +51,22 @@ module fo_fpm_config
     end type fpm_config_t
 
 contains
+
+    pure function dep_kind(dep) result(kind)
+        !! Classify a parsed dependency by which source field the manifest set.
+        !! path wins over git wins over a bare version (registry), matching how
+        !! fpm treats a dependency table.
+        type(fpm_dep_t), intent(in) :: dep
+        integer :: kind
+
+        if (len_trim(dep%path) > 0) then
+            kind = DEP_PATH
+        else if (len_trim(dep%git) > 0) then
+            kind = DEP_GIT
+        else
+            kind = DEP_REGISTRY
+        end if
+    end function dep_kind
 
     subroutine fpm_config_init(c)
         type(fpm_config_t), intent(out) :: c

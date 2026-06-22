@@ -2,6 +2,7 @@ module fo_gfortran_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
+    use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, MAX_RESOLVED
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
         cache_restore_action, cache_store_action, hash_mod_file, &
@@ -352,6 +353,8 @@ contains
         character(len=512) :: c_line
         character(len=512), allocatable :: cfiles(:)
         integer :: n_cfiles, ic
+        type(resolved_src_t) :: deps(MAX_RESOLVED)
+        integer :: n_deps_resolved
 
         type(cache_t) :: c
         integer :: cache_ierr
@@ -391,6 +394,13 @@ contains
         do i = 1, na
             all_units(i) = units_a(i)
         end do
+
+        ! Fold path-dependency library sources into the same unit set, so the
+        ! module DAG spans packages and the existing content-addressed compile
+        ! loop builds deps once and caches them like first-party modules. Only
+        ! modules actually reached by a `use` edge get compiled, so an unused
+        ! dep (e.g. a declared-but-unreferenced stdlib) costs nothing.
+        call add_dep_sources(project_dir, all_units, n_all, deps, n_deps_resolved)
 
         call build_dag_from_units(all_units, n_all, dag, filenames, is_test_arr, is_prog)
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
@@ -541,7 +551,84 @@ contains
             end if
         end do
         deallocate (cfiles)
+
+        call compile_dep_c_sources(deps, n_deps_resolved, project_dir, obj_dir, &
+            log_file, src_objs, n_src_objs, is_prog_arr, exitcode)
     end subroutine compile_sources
+
+    subroutine add_dep_sources(project_dir, all_units, n_all, deps, n_deps)
+        !! Scan every transitive path-dependency's library source dir and append
+        !! its module units to all_units. Program units in a dep are skipped: a
+        !! dependency contributes a library, never an executable of ours. The
+        !! resolved dep list is returned so the caller can also compile each
+        !! dep's C sources for linking.
+        character(len=*), intent(in) :: project_dir
+        type(scan_unit_t), intent(inout) :: all_units(MAX_UNITS)
+        integer, intent(inout) :: n_all
+        type(resolved_src_t), intent(out) :: deps(MAX_RESOLVED)
+        integer, intent(out) :: n_deps
+
+        type(scan_unit_t), allocatable :: ud(:)
+        integer :: n_unres, ierr, d, j, nu
+
+        n_deps = 0
+        call resolve_dep_srcs(project_dir, deps, n_deps, n_unres, ierr)
+        if (ierr /= 0 .or. n_deps == 0) return
+
+        allocate (ud(MAX_UNITS))
+        do d = 1, n_deps
+            call scan_dir(trim(deps(d)%src_dir), ud, nu, ierr)
+            if (ierr /= 0) cycle
+            do j = 1, nu
+                if (ud(j)%is_program) cycle
+                if (n_all < MAX_UNITS) then
+                    n_all = n_all + 1
+                    all_units(n_all) = ud(j)
+                end if
+            end do
+        end do
+        deallocate (ud)
+    end subroutine add_dep_sources
+
+    subroutine compile_dep_c_sources(deps, n_deps, project_dir, obj_dir, &
+            log_file, src_objs, n_src_objs, is_prog_arr, exitcode)
+        !! Compile each path-dependency's C sources (e.g. fortfront's
+        !! stdout_sanitizer.c) and add the objects to the link set, so symbols
+        !! a dep's Fortran calls into are resolved.
+        type(resolved_src_t), intent(in) :: deps(MAX_RESOLVED)
+        integer, intent(in) :: n_deps
+        character(len=*), intent(in) :: project_dir, obj_dir, log_file
+        character(len=512), intent(inout) :: src_objs(MAX_SRC_OBJS)
+        integer, intent(inout) :: n_src_objs
+        logical, intent(inout) :: is_prog_arr(MAX_SRC_OBJS)
+        integer, intent(inout) :: exitcode
+
+        character(len=512), allocatable :: cfiles(:)
+        character(len=512) :: c_line, obj_path
+        integer :: d, ic, n_cfiles
+
+        allocate (cfiles(MAX_SRC_OBJS))
+        do d = 1, n_deps
+            call fs_collect_files(trim(deps(d)%src_dir), '', '.c', '', &
+                cfiles, n_cfiles)
+            do ic = 1, n_cfiles
+                c_line = cfiles(ic)
+                if (len_trim(c_line) == 0) cycle
+                call make_obj_path(trim(c_line), project_dir, obj_dir, obj_path)
+                call compile_c(trim(c_line), obj_path, log_file, exitcode)
+                if (exitcode /= 0) then
+                    deallocate (cfiles)
+                    return
+                end if
+                if (n_src_objs < MAX_SRC_OBJS) then
+                    n_src_objs = n_src_objs + 1
+                    src_objs(n_src_objs) = obj_path
+                    is_prog_arr(n_src_objs) = .false.
+                end if
+            end do
+        end do
+        deallocate (cfiles)
+    end subroutine compile_dep_c_sources
 
     subroutine add_external_dep_keys(units, n_units, dag, node_id, &
             dep_includes, n_dep_includes, dep_keys, n_dep)
