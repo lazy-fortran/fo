@@ -3,6 +3,7 @@ module fo_gfortran_build
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, MAX_RESOLVED
+    use fo_stat_memo, only: memo_save
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
         cache_restore_action, cache_store_action, hash_mod_file, &
@@ -95,6 +96,7 @@ contains
         call link_app_binaries(project_dir, config, bin_dir, src_objs, n_src_objs, &
             is_prog_arr, dep_objs, n_dep_objs, lf, exitcode, &
             flags=flag_text)
+        call memo_save()
     end subroutine gfortran_build
 
     subroutine guard_root_mod_shadow(project_dir, log_file)
@@ -180,6 +182,7 @@ contains
             no_names, 0, slow, exitcode, n_compiled, &
             flags=config_flags_str(config), &
             build_only=bonly)
+        call memo_save()
     end subroutine gfortran_test
 
     subroutine gfortran_test_names(project_dir, names, n_names, log_file, &

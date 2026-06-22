@@ -4,9 +4,10 @@ module fo_cache
         fx_cache_restore => cache_restore, &
         fx_cache_store_bytes => cache_store_bytes, &
         fx_cache_restore_bytes => cache_restore_bytes
-    use fx_hash, only: sha256_file, sha256_string
+    use fx_hash, only: sha256_string
     use fo_util, only: make_tmpfile, delete_tmpfile
     use fo_fs, only: fs_stat
+    use fo_stat_memo, only: memo_hash_file
     use, intrinsic :: iso_c_binding, only: c_long_long
     implicit none
     private
@@ -130,7 +131,7 @@ contains
 
         if (depth > 16 .or. n_parts >= size(parts)) return
 
-        call sha256_file(filename, fh, ierr)
+        call memo_hash_file(filename, fh, ierr)
         if (ierr == 0) then
             n_parts = n_parts + 1
             parts(n_parts) = fh
@@ -584,7 +585,7 @@ contains
         character(len=HASH_LEN) :: hex
         character(len=512) :: parts(3)
 
-        call sha256_file(path, hex, ierr)
+        call memo_hash_file(path, hex, ierr)
         if (ierr /= 0) then
             key = ''
             size_bytes = 0
