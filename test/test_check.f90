@@ -548,11 +548,6 @@ contains
         character(len=512) :: project_dir, src_dir, output
         integer :: u, exitcode
 
-        if (.not. fprettify_available()) then
-            call assert(.true., 'fprettify config test skipped when unavailable')
-            return
-        end if
-
         call make_tmp_path('fo_fmt_config_project', project_dir)
         src_dir = trim(project_dir)//'/src'
         call execute_command_line('mkdir -p '//trim(src_dir), wait=.true.)
@@ -564,6 +559,9 @@ contains
         open (newunit=u, file=trim(project_dir)//'/.fprettify', status='replace')
         write (u, '(a)') 'indent = 2'
         write (u, '(a)') 'line-length = 88'
+        write (u, '(a)') 'whitespace-concat = true'
+        write (u, '(a)') 'comment-spacing = 2'
+        write (u, '(a)') 'case = [1, 1, 1, 1]'
         close (u)
 
         open (newunit=u, file=trim(src_dir)//'/lib.f90', status='replace')
@@ -579,7 +577,7 @@ contains
 
         call assert(exitcode == 0, 'format check honors .fprettify')
         call assert(len_trim(output) == 0, &
-            'format check accepts project fprettify style')
+            'format check accepts compatible fprettify options')
 
         call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
     end subroutine test_fmt_check_uses_fprettify_config
@@ -908,14 +906,6 @@ contains
         end do
         close (u)
     end function file_contains
-
-    logical function fprettify_available()
-        integer :: exitstat
-
-        call execute_command_line('command -v fprettify >/dev/null 2>&1', &
-            wait=.true., exitstat=exitstat)
-        fprettify_available = exitstat == 0
-    end function fprettify_available
 
     subroutine test_compact_json_includes_test_results()
         type(check_result_t) :: res

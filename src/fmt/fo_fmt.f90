@@ -4,7 +4,7 @@ module fo_fmt
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
     use fo_cache, only: cache_store_root, HASH_LEN
     use fx_hash, only: sha256_file
-    use fo_format, only: format_file
+    use fo_format, only: format_file_with_indent
     use fo_process, only: process_run_argv_logged, argv_push
     implicit none
     private
@@ -468,33 +468,83 @@ contains
         character(len=*), intent(in) :: config_file, filepath
         integer, intent(out) :: exitcode
 
-        if (len_trim(config_file) == 0) then
-            call format_file(filepath, exitcode)
-        else
-            call fprettify_file(config_file, filepath, exitcode)
-        end if
+        integer :: indent_width
+
+        call fprettify_indent_width(config_file, indent_width)
+        call format_file_with_indent(filepath, exitcode, indent_width)
     end subroutine format_project_file
 
-    subroutine fprettify_file(config_file, filepath, exitcode)
-        character(len=*), intent(in) :: config_file, filepath
-        integer, intent(out) :: exitcode
+    subroutine fprettify_indent_width(config_file, indent_width)
+        character(len=*), intent(in) :: config_file
+        integer, intent(out) :: indent_width
 
-        character(len=:), allocatable :: packed
-        character(len=512) :: log_file
-        integer :: n_args
+        character(len=512) :: line, key, value
+        integer :: u, ios, eq, parsed
 
-        packed = ''
-        n_args = 0
-        call argv_push(packed, n_args, 'fprettify')
-        call argv_push(packed, n_args, '-c')
-        call argv_push(packed, n_args, trim(config_file))
-        call argv_push(packed, n_args, trim(filepath))
+        indent_width = 4
+        if (len_trim(config_file) == 0) return
 
-        call make_tmpfile('fo_fprettify', log_file)
-        call process_run_argv_logged('', packed, n_args, trim(log_file), &
-            .false., 0, exitcode)
-        call delete_tmpfile(log_file)
-    end subroutine fprettify_file
+        open (newunit=u, file=trim(config_file), status='old', iostat=ios)
+        if (ios /= 0) return
+
+        do
+            read (u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            call strip_config_comment(line)
+            eq = index(line, '=')
+            if (eq <= 0) cycle
+            key = adjustl(line(1:eq - 1))
+            value = adjustl(line(eq + 1:))
+            call rstrip_local(key)
+            call rstrip_local(value)
+            key = lower_ascii(key)
+            if (trim(key) == 'indent') then
+                read (value, *, iostat=ios) parsed
+                if (ios == 0) then
+                    if (parsed > 0) indent_width = parsed
+                end if
+            end if
+        end do
+        close (u)
+    end subroutine fprettify_indent_width
+
+    subroutine strip_config_comment(line)
+        character(len=*), intent(inout) :: line
+
+        integer :: pos
+
+        pos = index(line, '#')
+        if (pos == 0) return
+        if (pos == 1) then
+            line = ''
+        else
+            line = line(1:pos - 1)
+        end if
+    end subroutine strip_config_comment
+
+    subroutine rstrip_local(line)
+        character(len=*), intent(inout) :: line
+
+        integer :: n
+
+        n = len_trim(line)
+        line = line(1:n)
+    end subroutine rstrip_local
+
+    pure function lower_ascii(line) result(lower)
+        character(len=*), intent(in) :: line
+        character(len=len(line)) :: lower
+
+        integer :: i, c
+
+        lower = line
+        do i = 1, len(line)
+            c = iachar(line(i:i))
+            if (c >= 65) then
+                if (c <= 90) lower(i:i) = achar(c + 32)
+            end if
+        end do
+    end function lower_ascii
 
     subroutine fmt_action_id(list_file, config_file, action_id)
         character(len=*), intent(in) :: list_file
@@ -513,10 +563,8 @@ contains
             call delete_tmpfile(manifest)
             return
         end if
-        if (len_trim(config_file) == 0) then
-            write (out_u, '(a)') 'fo-fmt-native-v1'
-        else
-            write (out_u, '(a)') 'fo-fmt-fprettify-v1'
+        write (out_u, '(a)') 'fo-fmt-native-v2'
+        if (len_trim(config_file) > 0) then
             call sha256_file(trim(config_file), file_hash, ierr)
             if (ierr == 0) write (out_u, '(a,1x,a)') &
                 trim(file_hash), trim(config_file)

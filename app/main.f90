@@ -868,7 +868,7 @@ contains
             write (output_unit, '(a)') 'With paths, formats only the listed Fortran sources.'
             write (output_unit, '(a)') 'With --changed, formats Git-dirty Fortran sources only.'
             write (output_unit, '(a)') 'With --check, checks formatting without modifying files.'
-            write (output_unit, '(a)') 'Uses .fprettify or .fprettify.rc at the project root when present.'
+            write (output_unit, '(a)') 'Reads compatible .fprettify settings with fo native formatting.'
             write (output_unit, '(a)') 'Falls back to fo native formatting when no fprettify config exists.'
             return
         end if

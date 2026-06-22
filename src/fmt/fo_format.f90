@@ -1,7 +1,7 @@
 module fo_format
     implicit none
     private
-    public :: format_lines, format_file, MAX_LINE_LEN
+    public :: format_lines, format_file, format_file_with_indent, MAX_LINE_LEN
 
     integer, parameter :: MAX_LINE_LEN = 512
     integer, parameter :: INDENT_WIDTH = 4
@@ -17,9 +17,21 @@ contains
         character(len=MAX_LINE_LEN), intent(out) :: output(n_input)
         integer, intent(out) :: n_output
 
+        call format_lines_with_indent(lines, n_input, output, n_output, &
+            INDENT_WIDTH)
+    end subroutine format_lines
+
+    subroutine format_lines_with_indent(lines, n_input, output, n_output, &
+            indent_width)
+        character(len=MAX_LINE_LEN), intent(in) :: lines(n_input)
+        integer, intent(in) :: n_input
+        character(len=MAX_LINE_LEN), intent(out) :: output(n_input)
+        integer, intent(out) :: n_output
+        integer, intent(in) :: indent_width
+
         character(len=MAX_LINE_LEN) :: content, comment, masked
         character(len=MAX_LINE_LEN) :: prev_content, stmt_head
-        integer :: i, indent_level, opens, closes, is_both
+        integer :: i, indent_level, opens, closes, is_both, width
         logical :: in_continuation
 
         n_output = n_input
@@ -27,6 +39,8 @@ contains
         in_continuation = .false.
         prev_content = ''
         stmt_head = ''
+        width = INDENT_WIDTH
+        if (indent_width > 0) width = indent_width
 
         do i = 1, n_input
             call split_line(lines(i), content, comment)
@@ -51,7 +65,7 @@ contains
 
             ! Comment-only line: apply current indent to the comment.
             if (len_trim(content) == 0 .and. len_trim(comment) > 0) then
-                call apply_indent('', comment, indent_level, output(i))
+                call apply_indent('', comment, indent_level, width, output(i))
                 in_continuation = .false.
                 prev_content = content
                 cycle
@@ -72,9 +86,9 @@ contains
 
             ! Emit with current indent.
             if (in_continuation) then
-                call apply_indent(content, comment, indent_level + 1, output(i))
+                call apply_indent(content, comment, indent_level + 1, width, output(i))
             else
-                call apply_indent(content, comment, indent_level, output(i))
+                call apply_indent(content, comment, indent_level, width, output(i))
             end if
 
             ! Increase indent after emitting open keywords.
@@ -97,18 +111,28 @@ contains
             if (.not. in_continuation) stmt_head = masked
             prev_content = content
         end do
-    end subroutine format_lines
+    end subroutine format_lines_with_indent
 
     ! Format a file in place. Returns exitcode 0 on success, 1 on I/O error.
     subroutine format_file(filepath, exitcode)
         character(len=*), intent(in) :: filepath
         integer, intent(out) :: exitcode
 
+        call format_file_with_indent(filepath, exitcode, INDENT_WIDTH)
+    end subroutine format_file
+
+    subroutine format_file_with_indent(filepath, exitcode, indent_width)
+        character(len=*), intent(in) :: filepath
+        integer, intent(out) :: exitcode
+        integer, intent(in) :: indent_width
+
         character(len=MAX_LINE_LEN), allocatable :: lines(:), output(:)
-        integer :: n_lines, n_output, u, ios, i
+        integer :: n_lines, n_output, u, ios, i, width
 
         exitcode = 0
         allocate (lines(MAX_LINES), output(MAX_LINES))
+        width = INDENT_WIDTH
+        if (indent_width > 0) width = indent_width
 
         n_lines = 0
         open (newunit=u, file=trim(filepath), status='old', &
@@ -128,7 +152,7 @@ contains
         end do
         close (u)
 
-        call format_lines(lines, n_lines, output, n_output)
+        call format_lines_with_indent(lines, n_lines, output, n_output, width)
 
         open (newunit=u, file=trim(filepath), status='replace', &
             action='write', iostat=ios)
@@ -140,7 +164,7 @@ contains
             write (u, '(a)') trim(output(i))
         end do
         close (u)
-    end subroutine format_file
+    end subroutine format_file_with_indent
 
     ! Split a source line into content (stripped of leading whitespace) and
     ! the trailing comment (starting with '!', including the '!').
@@ -410,15 +434,15 @@ contains
     end subroutine classify_line
 
     ! Apply indent to content and comment, write result to out_line.
-    subroutine apply_indent(content, comment, level, out_line)
+    subroutine apply_indent(content, comment, level, indent_width, out_line)
         character(len=*), intent(in) :: content, comment
-        integer, intent(in) :: level
+        integer, intent(in) :: level, indent_width
         character(len=*), intent(out) :: out_line
 
         integer :: nsp
-        character(len=4*64) :: spaces
+        character(len=1024) :: spaces
 
-        nsp = level*INDENT_WIDTH
+        nsp = level*indent_width
         if (nsp < 0) nsp = 0
         if (nsp > len(spaces)) nsp = len(spaces)
         spaces = repeat(' ', nsp)
