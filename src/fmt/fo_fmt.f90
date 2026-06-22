@@ -8,7 +8,7 @@ module fo_fmt
     use fo_process, only: process_run_argv_logged, argv_push
     implicit none
     private
-    public :: fo_fmt_run, fo_fmt_changed_run
+    public :: fo_fmt_run, fo_fmt_files, fo_fmt_changed_run
     public :: fo_fmt_check_run, fo_fmt_check_files
     public :: fo_fmt_check_changed_run
 
@@ -117,6 +117,26 @@ contains
         call fo_fmt_list(config_file, list_file, exitcode)
         call delete_tmpfile(list_file)
     end subroutine fo_fmt_run
+
+    subroutine fo_fmt_files(dir, files, n_files, exitcode)
+        character(len=*), intent(in) :: dir
+        character(len=*), intent(in) :: files(:)
+        integer, intent(in) :: n_files
+        integer, intent(out) :: exitcode
+
+        type(backend_t) :: b
+        character(len=512) :: scan_root, list_file, config_file
+
+        b = detect_backend(trim(dir))
+        scan_root = trim(dir)
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+        call find_fprettify_config(scan_root, config_file)
+
+        call make_tmpfile('fo_fmt_files', list_file)
+        call write_explicit_source_list(scan_root, files, n_files, list_file)
+        call fo_fmt_list(config_file, list_file, exitcode)
+        call delete_tmpfile(list_file)
+    end subroutine fo_fmt_files
 
     subroutine fo_fmt_changed_run(dir, exitcode)
         character(len=*), intent(in) :: dir

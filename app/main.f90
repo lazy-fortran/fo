@@ -17,8 +17,8 @@ program fo_main
         check_result_full_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
-    use fo_fmt, only: fo_fmt_run, fo_fmt_changed_run, fo_fmt_check_run, &
-        fo_fmt_check_changed_run
+    use fo_fmt, only: fo_fmt_run, fo_fmt_files, fo_fmt_changed_run, &
+        fo_fmt_check_run, fo_fmt_check_files, fo_fmt_check_changed_run
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_exec_target, only: resolve_exec_target
     implicit none
@@ -244,7 +244,7 @@ contains
         write (output_unit, '(a)') '  changed    list changed and affected modules'
         write (output_unit, '(a)') '  graph      module dependency graph'
         write (output_unit, '(a)') '  graph --dot  graph in Graphviz DOT format'
-        write (output_unit, '(a)') '  fmt        format sources (project fprettify config if present)'
+        write (output_unit, '(a)') '  fmt [paths...]  format sources (project fprettify config if present)'
         write (output_unit, '(a)') '  fmt --changed  format Git-dirty Fortran sources'
         write (output_unit, '(a)') '  fmt --check  check formatting without modifying files'
         write (output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
@@ -853,28 +853,78 @@ contains
     end subroutine cmd_lint
 
     subroutine cmd_fmt()
+        type(backend_t) :: b
         integer :: exitcode
+        integer :: i, n_fmt_files
+        character(len=MAX_PATH) :: arg, project_dir
+        character(len=MAX_PATH) :: fmt_files(MAX_NODES)
         character(len=8192) :: fmt_output
+        logical :: check_mode, changed_mode
 
         if (has_arg('--help') .or. has_arg('-h')) then
-            write (output_unit, '(a)') 'usage: fo fmt [--check] [--changed]'
+            write (output_unit, '(a)') 'usage: fo fmt [--check] [--changed] [path ...]'
             write (output_unit, '(a)') ''
             write (output_unit, '(a)') 'Formats project Fortran sources.'
+            write (output_unit, '(a)') 'With paths, formats only the listed Fortran sources.'
             write (output_unit, '(a)') 'With --changed, formats Git-dirty Fortran sources only.'
+            write (output_unit, '(a)') 'With --check, checks formatting without modifying files.'
             write (output_unit, '(a)') 'Uses .fprettify or .fprettify.rc at the project root when present.'
             write (output_unit, '(a)') 'Falls back to fo native formatting when no fprettify config exists.'
             return
         end if
 
-        if (has_arg('--check')) then
-            call fo_fmt_check_run('.', fmt_output, exitcode)
+        check_mode = has_arg('--check')
+        changed_mode = has_arg('--changed')
+        n_fmt_files = 0
+        do i = 2, command_argument_count()
+            call get_command_argument(i, arg)
+            select case (trim(arg))
+            case ('--check', '--changed')
+                cycle
+            case default
+                if (len_trim(arg) > 0) then
+                    if (arg(1:1) == '-') then
+                        write (error_unit, '(a)') 'fo fmt: unknown option: '//trim(arg)
+                        stop 1, quiet = .true.
+                    end if
+                end if
+                if (n_fmt_files >= size(fmt_files)) then
+                    write (error_unit, '(a)') 'fo fmt: too many paths'
+                    stop 1, quiet = .true.
+                end if
+                n_fmt_files = n_fmt_files + 1
+                fmt_files(n_fmt_files) = arg
+            end select
+        end do
+
+        if (changed_mode) then
+            if (check_mode) then
+                write (error_unit, '(a)') 'fo fmt: --check and --changed cannot be combined'
+                stop 1, quiet = .true.
+            end if
+            if (n_fmt_files > 0) then
+                write (error_unit, '(a)') 'fo fmt: --changed does not accept paths'
+                stop 1, quiet = .true.
+            end if
+        end if
+
+        if (check_mode) then
+            if (n_fmt_files > 0) then
+                b = detect_backend('.')
+                project_dir = '.'
+                if (b%kind /= BACKEND_NONE) project_dir = b%project_dir
+                call fo_fmt_check_files(trim(project_dir), fmt_files, n_fmt_files, &
+                    fmt_output, exitcode)
+            else
+                call fo_fmt_check_run('.', fmt_output, exitcode)
+            end if
             if (len_trim(fmt_output) > 0) &
                 write (error_unit, '(a)') trim(fmt_output)
             if (exitcode /= 0) stop 1, quiet = .true.
             return
         end if
 
-        if (has_arg('--changed')) then
+        if (changed_mode) then
             call fo_fmt_changed_run('.', exitcode)
             if (exitcode /= 0) then
                 write (error_unit, '(a)') 'fo fmt --changed: no Git worktree'
@@ -884,12 +934,20 @@ contains
             return
         end if
 
-        call fo_fmt_run('.', exitcode)
+        if (n_fmt_files > 0) then
+            call fo_fmt_files('.', fmt_files, n_fmt_files, exitcode)
+        else
+            call fo_fmt_run('.', exitcode)
+        end if
         if (exitcode /= 0) then
             write (error_unit, '(a)') 'fo fmt: formatting failed'
             stop 1, quiet = .true.
         end if
-        write (output_unit, '(a)') 'formatted'
+        if (n_fmt_files > 0) then
+            write (output_unit, '(a)') 'formatted selected sources'
+        else
+            write (output_unit, '(a)') 'formatted'
+        end if
     end subroutine cmd_fmt
 
     subroutine cmd_install()

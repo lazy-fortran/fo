@@ -8,7 +8,7 @@ program test_check
         RUN_RERUN_PENDING, RUN_FINISHED
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_text, capabilities_json
-    use fo_fmt, only: fo_fmt_check_run, fo_fmt_check_files, &
+    use fo_fmt, only: fo_fmt_files, fo_fmt_check_run, fo_fmt_check_files, &
         fo_fmt_check_changed_run
     use fo_cache, only: cache_store_root
     implicit none
@@ -40,6 +40,7 @@ program test_check
     call test_fmt_check_caches_success()
     call test_fmt_check_uses_fprettify_config()
     call test_fmt_check_files_limits_scope()
+    call test_fmt_files_limits_scope()
     call test_fmt_check_changed_uses_git_dirty_files()
     call test_compact_json_includes_test_results()
     call test_full_json_includes_test_results()
@@ -627,6 +628,54 @@ contains
 
         call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
     end subroutine test_fmt_check_files_limits_scope
+
+    subroutine test_fmt_files_limits_scope()
+        character(len=512) :: project_dir, src_dir, output
+        character(len=512) :: files(1)
+        integer :: u, exitcode
+
+        call make_tmp_path('fo_fmt_selected_project', project_dir)
+        src_dir = trim(project_dir)//'/src'
+        call execute_command_line('mkdir -p '//trim(src_dir), wait=.true.)
+
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "fmt_selected_project"'
+        close (u)
+
+        open (newunit=u, file=trim(src_dir)//'/selected.f90', status='replace')
+        write (u, '(a)') 'module selected'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine noop()'
+        write (u, '(a)') 'end subroutine noop'
+        write (u, '(a)') 'end module selected'
+        close (u)
+
+        open (newunit=u, file=trim(src_dir)//'/unlisted.f90', status='replace')
+        write (u, '(a)') 'module unlisted'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine noop()'
+        write (u, '(a)') 'end subroutine noop'
+        write (u, '(a)') 'end module unlisted'
+        close (u)
+
+        files(1) = trim(src_dir)//'/selected.f90'
+        call fo_fmt_files(project_dir, files, 1, exitcode)
+        call assert(exitcode == 0, 'format file list formats selected file')
+
+        call fo_fmt_check_files(project_dir, files, 1, output, exitcode)
+        call assert(exitcode == 0, 'format file list leaves selected file clean')
+        call assert(len_trim(output) == 0, &
+            'format file list reports no selected file changes')
+
+        call fo_fmt_check_run(project_dir, output, exitcode)
+        call assert(exitcode /= 0, 'full format check still scans unlisted files')
+        call assert(index(output, 'unlisted.f90') > 0, &
+            'full format check reports unlisted unformatted file')
+
+        call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
+    end subroutine test_fmt_files_limits_scope
 
     subroutine test_fmt_check_changed_uses_git_dirty_files()
         character(len=512) :: project_dir, src_dir, output
