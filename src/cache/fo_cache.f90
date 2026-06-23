@@ -376,38 +376,35 @@ contains
     end subroutine cache_file_digest
 
     subroutine cache_store_binary(c, action_id, bin_path, ierr)
-        !! Store a linked binary in the CAS keyed by its content, and record
-        !! action_id -> (content key, mtime, size) for the just-written file.
-        !! Mirrors the Bazel/Go action-cache shape (ActionID over inputs ->
-        !! output in a content-addressable store), for the link step. The
-        !! recorded mtime/size let a later build skip rewriting an unchanged
-        !! output without re-hashing it (cache_binary_matches).
+        !! Record action_id -> (mtime, size) for a just-linked binary so a later
+        !! build can skip relinking an unchanged output (cache_binary_matches).
+        !!
+        !! The binary payload is deliberately NOT stored in the CAS. Linked
+        !! binaries can be huge (a statically linked test is ~14 MB; a project
+        !! with hundreds of tests is gigabytes) and caching every distinct one
+        !! across many builds fills the disk. The warm-build win comes from the
+        !! mtime/size skip, not from restoring bytes; on a genuine miss (output
+        !! gone, e.g. after `fo clean`) the caller simply relinks. The record
+        !! stores a placeholder content key in the slot cache_restore_binary
+        !! would read, so restore always misses and the link runs.
         type(cache_t), intent(in) :: c
         character(len=*), intent(in) :: action_id, bin_path
         integer, intent(out) :: ierr
 
-        character(len=HASH_LEN) :: content_key
         character(len=:), allocatable :: rec_text
         character(len=1), allocatable :: rec(:)
         character(len=40) :: mt_text, sz_text
         integer(c_long_long) :: mtime, fsize
-        integer :: sz, i, n
+        integer :: i, n
         logical :: ok
 
         ierr = 1
         if (.not. c%initialized) return
-        call file_content_key(bin_path, 'bin', content_key, sz, ierr)
-        if (ierr /= 0) return
-        call fx_cache_store(c, trim(content_key)//'-d', bin_path, ierr)
-        if (ierr /= 0) return
         call fs_stat(bin_path, mtime, fsize, ok)
-        if (.not. ok) then
-            ierr = 1
-            return
-        end if
+        if (.not. ok) return
         write (mt_text, '(i0)') mtime
         write (sz_text, '(i0)') fsize
-        rec_text = trim(content_key)//' '//trim(mt_text)//' '//trim(sz_text)
+        rec_text = 'nopayload '//trim(mt_text)//' '//trim(sz_text)
         n = len(rec_text)
         allocate (rec(n))
         do i = 1, n
