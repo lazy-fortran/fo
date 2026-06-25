@@ -2,6 +2,7 @@ program test_backend_cmake
     !! CMake backend tests (configure+build+ctest), split out so the slow
     !! CMake cycles run in parallel with the gfortran tests.
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
         detect_jobs, backend_build, backend_test, &
         backend_test_names, &
@@ -14,6 +15,21 @@ program test_backend_cmake
     implicit none
     integer :: n_pass, n_fail
 
+    interface
+        function setenv(name, value, overwrite) bind(C, name='setenv') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: name(*), value(*)
+            integer(c_int), value :: overwrite
+            integer(c_int) :: ierr
+        end function setenv
+
+        function unsetenv(name) bind(C, name='unsetenv') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: name(*)
+            integer(c_int) :: ierr
+        end function unsetenv
+    end interface
+
     n_pass = 0
     n_fail = 0
 
@@ -22,6 +38,7 @@ program test_backend_cmake
     call test_cmake_path_with_spaces()
     call test_cmake_regex_metachar_name()
     call test_cmake_dirty_fetchcontent_retries_clean()
+    call test_cmake_env_args_reach_configure()
     call test_cmake_exec_resolves_build_root_binary()
 
     call report('backend_cmake')
@@ -85,6 +102,38 @@ contains
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_cmake_dirty_fetchcontent_retries_clean
+
+    subroutine test_cmake_env_args_reach_configure()
+        type(backend_t) :: b
+        integer :: exitcode, u, ierr
+        character(len=512) :: project_dir, log_file
+
+        call make_tmp_path('fo_test_cmake_env_args', project_dir)
+        call make_tmp_path('fo_backend_cmake_env_args', log_file)
+        call remove_tree(project_dir)
+        call make_dir(project_dir)
+
+        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', status='replace')
+        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
+        write (u, '(a)') 'project(fo_backend_cmake_env_args NONE)'
+        write (u, '(a)') 'if(NOT FO_TEST_OPTION STREQUAL "enabled")'
+        write (u, '(a)') '  message(FATAL_ERROR "FO_TEST_OPTION not configured")'
+        write (u, '(a)') 'endif()'
+        close (u)
+
+        ierr = setenv('FO_CMAKE_ARGS'//c_null_char, &
+            '-DFO_TEST_OPTION=enabled'//c_null_char, 1_c_int)
+        call assert(ierr == 0, 'set FO_CMAKE_ARGS')
+
+        b = detect_backend(project_dir)
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'cmake configure receives FO_CMAKE_ARGS')
+
+        ierr = unsetenv('FO_CMAKE_ARGS'//c_null_char)
+        call assert(ierr == 0, 'unset FO_CMAKE_ARGS')
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_cmake_env_args_reach_configure
 
     include 'test_backend_helpers.inc'
 

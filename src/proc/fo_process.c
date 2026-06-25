@@ -405,26 +405,47 @@ void fo_c_cmake_build(const char *project_dir, const char *flags, int jobs,
     char jobs_text[32];
     char flag_arg[2048];
     char compiler_arg[2048];
+    char extra_copy[4096];
+    char *configure_argv[128];
+    char *tok;
+    char *saveptr;
     const char *fc;
-    char *configure_plain[] = {"cmake", "-S", ".", "-B", "build", "-G",
-                               "Ninja", compiler_arg, NULL};
-    char *configure_flags[] = {"cmake", "-S", ".", "-B", "build", "-G",
-                               "Ninja", compiler_arg, flag_arg, NULL};
+    const char *extra_args;
     char *build_argv[] = {"cmake", "--build", "build", "-j", jobs_text, NULL};
+    int n;
 
     snprintf(jobs_text, sizeof(jobs_text), "%d", jobs > 0 ? jobs : 1);
     fc = getenv("FC");
     if (!has_text(fc)) fc = "gfortran";
     snprintf(compiler_arg, sizeof(compiler_arg), "-DCMAKE_Fortran_COMPILER=%s", fc);
-    int build_timeout = env_timeout("FO_BUILD_TIMEOUT", 300);
+    extra_args = getenv("FO_CMAKE_ARGS");
+
+    n = 0;
+    configure_argv[n++] = "cmake";
+    configure_argv[n++] = "-S";
+    configure_argv[n++] = ".";
+    configure_argv[n++] = "-B";
+    configure_argv[n++] = "build";
+    configure_argv[n++] = "-G";
+    configure_argv[n++] = "Ninja";
+    configure_argv[n++] = compiler_arg;
     if (has_text(flags)) {
         snprintf(flag_arg, sizeof(flag_arg), "-DCMAKE_Fortran_FLAGS=%s", flags);
-        *exitcode = run_argv(project_dir, configure_flags, log_file, 0, 0,
-                             build_timeout, NULL);
-    } else {
-        *exitcode = run_argv(project_dir, configure_plain, log_file, 0, 0,
-                             build_timeout, NULL);
+        configure_argv[n++] = flag_arg;
     }
+    if (has_text(extra_args)) {
+        snprintf(extra_copy, sizeof(extra_copy), "%s", extra_args);
+        tok = strtok_r(extra_copy, " \t\r\n", &saveptr);
+        while (tok != NULL && n < (int)(sizeof(configure_argv) / sizeof(configure_argv[0])) - 1) {
+            configure_argv[n++] = tok;
+            tok = strtok_r(NULL, " \t\r\n", &saveptr);
+        }
+    }
+    configure_argv[n] = NULL;
+
+    int build_timeout = env_timeout("FO_BUILD_TIMEOUT", 300);
+    *exitcode = run_argv(project_dir, configure_argv, log_file, 0, 0,
+                         build_timeout, NULL);
     if (*exitcode != 0) return;
     *exitcode = run_argv(project_dir, build_argv, log_file, 1, 0, build_timeout, NULL);
 }
