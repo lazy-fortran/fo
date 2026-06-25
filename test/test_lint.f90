@@ -1,7 +1,8 @@
 program test_lint
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_lint, only: lint_finding_t, lint_file, MAX_FINDINGS
+    use fo_lint, only: lint_finding_t, lint_file, lint_dir, MAX_FINDINGS
     use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_fs, only: fs_make_dir, fs_remove_tree
     implicit none
 
     integer :: n_pass, n_fail
@@ -15,6 +16,7 @@ program test_lint
     call test_unused_import_still_reported()
     call test_symbol_used_only_in_include()
     call test_symbol_used_only_in_nested_include()
+    call test_lint_dir_skips_nested_build_tree()
 
     write (output_unit, '(a,i0,a,i0,a)') 'lint: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -192,6 +194,40 @@ contains
         call assert(n_findings == 0, &
             'import used only in a transitively included file is not flagged')
     end subroutine test_symbol_used_only_in_nested_include
+
+    subroutine test_lint_dir_skips_nested_build_tree()
+        type(lint_finding_t) :: findings(MAX_FINDINGS)
+        integer :: n_findings, u
+        character(len=512) :: root, src_dir, build_dir
+
+        call make_tmpfile('fo_lint_nested_build', root)
+        src_dir = trim(root)//'/src'
+        build_dir = trim(root)//'/pkg/build/generated'
+        call fs_make_dir(src_dir)
+        call fs_make_dir(build_dir)
+
+        open (newunit=u, file=trim(src_dir)//'/m.f90', status='replace')
+        write (u, '(a)') 'module m'
+        write (u, '(a)') '    use constants, only: dp'
+        write (u, '(a)') '    private'
+        write (u, '(a)') '    real(dp) :: x'
+        write (u, '(a)') 'end module m'
+        close (u)
+
+        open (newunit=u, file=trim(build_dir)//'/generated.f90', status='replace')
+        write (u, '(a)') 'module generated'
+        write (u, '(a)') '    use constants, only: unused'
+        write (u, '(a)') '    private'
+        write (u, '(a)') 'end module generated'
+        close (u)
+
+        n_findings = 0
+        call lint_dir(trim(root), findings, n_findings)
+        call fs_remove_tree(root)
+
+        call assert(n_findings == 0, &
+            'lint_dir skips nested build trees')
+    end subroutine test_lint_dir_skips_nested_build_tree
 
     subroutine lint_lines(prefix, lines, n_lines, findings, n_findings)
         character(len=*), intent(in) :: prefix

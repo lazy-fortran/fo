@@ -248,7 +248,7 @@ contains
                 if (starts_with(line, 'submodule')) then
                     return
                 else if (starts_with(line, 'module ') .and. &
-                         .not. starts_with(line, 'module procedure')) then
+                        .not. starts_with(line, 'module procedure')) then
                     is_module = .true.
                     header_seen = .true.
                 end if
@@ -453,8 +453,8 @@ contains
     end subroutine is_symbol_used
 
     subroutine collect_fortran_sources(dir, files, n_files)
-        !! Collect *.f90/*.F90/*.f/*.F under dir, sorted, excluding any path
-        !! component */build or */.git. Replaces the find | sort pipeline.
+        !! Collect *.f90/*.F90/*.f/*.F under dir, sorted, excluding generated
+        !! and dependency trees. Replaces the find | sort pipeline.
         character(len=*), intent(in) :: dir
         character(len=512), allocatable, intent(out) :: files(:)
         integer, intent(out) :: n_files
@@ -520,6 +520,7 @@ contains
         if (len_trim(first) > 0 .and. first(1:1) == '.') return
 
         padded = '/'//trim(rel)//'/'
+        if (index(padded, '/build/') > 0) return
         if (index(padded, '/_deps/') > 0) return
         if (index(padded, '/dependencies/') > 0) return
         if (index(padded, '/deps-src/') > 0) return
@@ -1102,7 +1103,7 @@ contains
             if (n_findings == 0) exit
             call apply_findings(findings, n_findings, removed_this_pass)
             n_removed = n_removed + removed_this_pass
-            if (removed_this_pass == 0) exit   ! no progress; stop looping
+            if (removed_this_pass == 0) exit ! no progress; stop looping
         end do
         call lint_dir(dir, findings, n_findings)
         n_remaining = n_findings
@@ -1232,7 +1233,7 @@ contains
         lowered = to_lower(orig)
         op = index(lowered, 'only:')
         if (op == 0) return
-        prefix = orig(1:op + 4)             ! through the ':' of 'only:'
+        prefix = orig(1:op + 4) ! through the ':' of 'only:'
         rest = orig(op + 5:)
 
         comment = ''
