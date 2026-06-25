@@ -21,6 +21,7 @@ program test_backend_cmake
     call test_cmake_named_tests_select_regex()
     call test_cmake_path_with_spaces()
     call test_cmake_regex_metachar_name()
+    call test_cmake_dirty_fetchcontent_retries_clean()
     call test_cmake_exec_resolves_build_root_binary()
 
     call report('backend_cmake')
@@ -55,6 +56,35 @@ contains
 
         call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_cmake_exec_resolves_build_root_binary
+
+    subroutine test_cmake_dirty_fetchcontent_retries_clean()
+        type(backend_t) :: b
+        integer :: exitcode, u
+        character(len=512) :: project_dir, log_file
+
+        call make_tmp_path('fo_test_cmake_dirty_fetchcontent', project_dir)
+        call make_tmp_path('fo_backend_cmake_dirty_fetchcontent', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/build/_deps/libneo-src')
+
+        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', status='replace')
+        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
+        write (u, '(a)') 'project(fo_backend_cmake_dirty_fetchcontent NONE)'
+        write (u, '(a)') 'if(EXISTS "${CMAKE_BINARY_DIR}/_deps/libneo-src")'
+        write (u, '(a)') '  message(FATAL_ERROR "Failed to unstash changes in: ${CMAKE_BINARY_DIR}/_deps/libneo-src")'
+        write (u, '(a)') 'endif()'
+        close (u)
+
+        b = detect_backend(project_dir)
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, &
+            'cmake dirty FetchContent checkout clears build tree and retries')
+        call assert(file_exists(trim(project_dir)//'/build/CMakeCache.txt'), &
+            'cmake retry leaves configured build tree')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_cmake_dirty_fetchcontent_retries_clean
 
     include 'test_backend_helpers.inc'
 

@@ -189,6 +189,13 @@ contains
                     call clear_cmake_build_tree(self%project_dir)
                     call process_cmake_build(self%project_dir, flag_text, np, log_path, &
                         exitcode)
+                else if (log_has_cmake_fetchcontent_unstash(log_path)) then
+                    write (error_unit, '(a)') &
+                        'fo: WARNING: dirty CMake FetchContent checkout detected;' // &
+                        ' clearing build tree and retrying'
+                    call clear_cmake_build_tree(self%project_dir)
+                    call process_cmake_build(self%project_dir, flag_text, np, log_path, &
+                        exitcode)
                 end if
             end if
         case default
@@ -583,6 +590,27 @@ contains
         end do
         close (u)
     end function log_has_vtable_mismatch
+
+    logical function log_has_cmake_fetchcontent_unstash(log_file)
+        character(len=*), intent(in) :: log_file
+
+        integer :: u, iostat
+        character(len=512) :: line
+
+        log_has_cmake_fetchcontent_unstash = .false.
+        open (newunit=u, file=trim(log_file), status='old', iostat=iostat)
+        if (iostat /= 0) return
+
+        do
+            read (u, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            if (index(line, 'Failed to unstash changes in:') > 0) then
+                log_has_cmake_fetchcontent_unstash = .true.
+                exit
+            end if
+        end do
+        close (u)
+    end function log_has_cmake_fetchcontent_unstash
 
     ! Delete all .mod files from fpm build directories to clear stale module interfaces.
     ! Keeps dependency build artifacts (.o files) intact to avoid full dependency rebuild.
