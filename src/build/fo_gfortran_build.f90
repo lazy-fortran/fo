@@ -15,6 +15,7 @@ module fo_gfortran_build
     use fo_process, only: process_run_logged, &
         process_run_argv_logged, argv_push, argv_push_split, &
         argv_push_split_nl
+    use fo_lock, only: lock_check
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_append_file, &
         fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec
     use fo_progress, only: progress_begin, progress_step, progress_end
@@ -49,6 +50,8 @@ contains
         logical :: is_prog_arr(MAX_SRC_OBJS)
         character(len=512) :: lf
         character(len=512) :: flag_text, compiler
+        character(len=256) :: lock_message
+        logical :: lock_ok
 
         lf = log_file
         if (len_trim(lf) == 0) lf = '/dev/null'
@@ -69,6 +72,12 @@ contains
 
         ! Combine config flags with CLI flags
         call merge_flags(config, flag_text)
+        call lock_check(project_dir, flag_text, lock_ok, lock_message)
+        if (.not. lock_ok) then
+            write (error_unit, '(a)') 'fo: '//trim(lock_message)
+            exitcode = 1
+            return
+        end if
 
         mod_dir = trim(project_dir)//'/build/fo/mod'
         obj_dir = trim(project_dir)//'/build/fo/obj'

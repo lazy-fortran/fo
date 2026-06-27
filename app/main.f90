@@ -20,6 +20,7 @@ program fo_main
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_exec_target, only: resolve_exec_target
     use fo_cover, only: fo_cover_run
+    use fo_lock, only: lock_write
     implicit none
 
     character(len=256) :: action
@@ -58,6 +59,8 @@ program fo_main
         call cmd_clean()
     case ('install')
         call cmd_install()
+    case ('lock')
+        call cmd_lock()
     case ('watch')
         call cmd_watch()
     case ('mcp-server')
@@ -260,6 +263,7 @@ contains
         write (output_unit, '(a)') '  lint --fix   remove unused imports in place'
         write (output_unit, '(a)') '  clean      drop project build tree (--cache also purges shared store)'
         write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/.local)'
+        write (output_unit, '(a)') '  lock       write fo.lock for current compiler, flags, and deps'
         write (output_unit, '(a)') '  info       backend, file count, module count'
         write (output_unit, '(a)') '  info --capabilities  compiler and tooling limits'
         write (output_unit, '(a)') ''
@@ -624,6 +628,42 @@ contains
         end if
         call delete_tmpfile(build_log)
     end subroutine cmd_build
+
+    subroutine cmd_lock()
+        type(backend_t) :: b
+        integer :: ierr
+        character(len=512) :: flags
+        character(len=64) :: profile
+        character(len=1024) :: all_flags
+
+        b = detect_backend('.')
+        if (b%kind == BACKEND_NONE) then
+            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            stop 1
+        end if
+
+        call get_flags_arg(flags)
+        call get_profile_arg(profile)
+        if (len_trim(profile) > 0 .and. len_trim(profile_flags(profile)) == 0) then
+            write (error_unit, '(a)') 'fo: unknown build profile: '//trim(profile)
+            stop 1
+        end if
+        all_flags = trim(profile_flags(profile))
+        if (len_trim(flags) > 0) then
+            if (len_trim(all_flags) > 0) then
+                all_flags = trim(all_flags)//' '//trim(flags)
+            else
+                all_flags = trim(flags)
+            end if
+        end if
+
+        call lock_write(trim(b%project_dir), all_flags, ierr)
+        if (ierr /= 0) then
+            write (error_unit, '(a)') 'fo: lock failed'
+            stop 1
+        end if
+        write (output_unit, '(a)') 'wrote fo.lock'
+    end subroutine cmd_lock
 
     subroutine report_build_result(build_log)
         !! Print the best compiler diagnostic from a failed build's log, with the
