@@ -187,6 +187,8 @@ contains
         select case (trim(kind))
         case ('build')
             hint = 'fix the first compiler diagnostic, then rerun fo build'
+        case ('install')
+            hint = 'fix the first install diagnostic, then rerun fo install'
         case ('test')
             hint = 'rerun the failing test, then fix or mark it slow'
         case default
