@@ -4,16 +4,14 @@ module fo_check
         is_slow_test
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_affected_set, MAX_NODES
     use fo_dag_bridge, only: build_dag_from_units
-    use fo_process, only: process_detect_nproc, process_fpm_build, &
-        process_fpm_test_list, process_fpm_test_all, &
-        process_fpm_test_names, process_cmake_build, &
+    use fo_process, only: process_detect_nproc, process_cmake_build, &
         process_ctest, process_run_argv_logged, argv_push
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
         cache_action_mod_key, hash_mod_file, HASH_LEN
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, is_runner_crash
-    use fo_fs, only: fs_collect_files, fs_remove_file
+    use fo_fs, only: fs_collect_files
     implicit none
     private
     public :: check_result_t, test_result_t, fo_check_run, fo_changed_modules
@@ -23,7 +21,6 @@ module fo_check
     integer, parameter :: MAX_TEST_RESULTS = 64
     integer, parameter :: MAX_TEST_TARGETS = 512
     integer, parameter :: BACKEND_NONE = 0
-    integer, parameter :: BACKEND_FPM = 1
     integer, parameter :: BACKEND_CMAKE = 2
     integer, parameter :: BACKEND_GFORTRAN = 3
 
@@ -779,16 +776,6 @@ contains
         select case (kind)
         case (BACKEND_GFORTRAN)
             call gfortran_build(project_dir, log_file, exitcode)
-        case (BACKEND_FPM)
-            jobs = detect_jobs()
-            call process_fpm_build(project_dir, '', jobs, log_file, exitcode)
-            if (exitcode /= 0 .and. exitcode /= 124 .and. len_trim(log_file) > 0) then
-                if (log_has_vtable_mismatch(log_file)) then
-                    call clear_fpm_mod_cache(project_dir)
-                    call process_fpm_build(project_dir, '', jobs, log_file, &
-                        exitcode)
-                end if
-            end if
         case (BACKEND_CMAKE)
             jobs = detect_jobs()
             call process_cmake_build(project_dir, '', jobs, log_file, exitcode)
@@ -816,14 +803,6 @@ contains
             else
                 call gfortran_test(project_dir, log_file, exitcode)
             end if
-        case (BACKEND_FPM)
-            jobs = detect_jobs()
-            if (n_names > 0) then
-                call process_fpm_test_names(project_dir, names, n_names, jobs, &
-                    log_file, exitcode)
-            else
-                call run_fpm_tests(project_dir, log_file, exitcode)
-            end if
         case (BACKEND_CMAKE)
             jobs = detect_jobs()
             if (n_names > 0) then
@@ -838,120 +817,6 @@ contains
             exitcode = 1
         end select
     end subroutine run_backend_tests
-
-    subroutine run_fpm_tests(project_dir, log_file, exitcode)
-        character(len=*), intent(in) :: project_dir, log_file
-        integer, intent(out) :: exitcode
-
-        character(len=128) :: names(MAX_TEST_TARGETS)
-        integer :: n_names, list_ierr
-
-        call fpm_list_tests(project_dir, names, n_names, list_ierr, log_file)
-        if (list_ierr /= 0) then
-            exitcode = 1
-            return
-        end if
-        call filter_slow_tests(names, n_names)
-        if (n_names == 0) then
-            exitcode = 0
-            return
-        end if
-        call process_fpm_test_names(project_dir, names, n_names, detect_jobs(), &
-            log_file, exitcode)
-    end subroutine run_fpm_tests
-
-    subroutine fpm_list_tests(project_dir, names, n_names, exitcode, log_file)
-        character(len=*), intent(in) :: project_dir
-        character(len=128), intent(out) :: names(MAX_TEST_TARGETS)
-        integer, intent(out) :: n_names, exitcode
-        character(len=*), intent(in) :: log_file
-
-        character(len=512) :: list_file
-
-        names = ''
-        n_names = 0
-        call process_fpm_test_list(project_dir, log_file, exitcode)
-        if (exitcode /= 0) return
-        list_file = log_file
-        call parse_fpm_test_list(list_file, names, n_names)
-    end subroutine fpm_list_tests
-
-    subroutine parse_fpm_test_list(path, names, n_names)
-        character(len=*), intent(in) :: path
-        character(len=128), intent(inout) :: names(MAX_TEST_TARGETS)
-        integer, intent(inout) :: n_names
-
-        character(len=512) :: line
-        integer :: u, iostat, colon
-        logical :: in_names
-
-        in_names = .false.
-        open (newunit=u, file=path, status='old', iostat=iostat)
-        if (iostat /= 0) return
-
-        do
-            read (u, '(a)', iostat=iostat) line
-            if (iostat /= 0) exit
-            colon = index(line, 'Matched names:')
-            if (colon > 0) then
-                in_names = .true.
-                line = line(colon + len('Matched names:'):)
-            else if (.not. in_names) then
-                cycle
-            end if
-            call parse_words(line, names, n_names)
-        end do
-        close (u)
-    end subroutine parse_fpm_test_list
-
-    subroutine parse_words(line, names, n_names)
-        character(len=*), intent(in) :: line
-        character(len=128), intent(inout) :: names(MAX_TEST_TARGETS)
-        integer, intent(inout) :: n_names
-
-        integer :: pos, start, finish, n
-
-        n = len_trim(line)
-        pos = 1
-        do while (pos <= n)
-            do while (pos <= n)
-                if (.not. (line(pos:pos) == ' ')) exit
-                pos = pos + 1
-            end do
-            if (pos > n) exit
-
-            start = pos
-            do while (pos <= n)
-                if (.not. (line(pos:pos) /= ' ')) exit
-                pos = pos + 1
-            end do
-            finish = pos - 1
-
-            if (n_names < MAX_TEST_TARGETS) then
-                n_names = n_names + 1
-                names(n_names) = line(start:finish)
-            end if
-        end do
-    end subroutine parse_words
-
-    subroutine filter_slow_tests(names, n_names)
-        character(len=128), intent(inout) :: names(MAX_TEST_TARGETS)
-        integer, intent(inout) :: n_names
-
-        character(len=128) :: fast_names(MAX_TEST_TARGETS)
-        integer :: i, n_fast
-
-        fast_names = ''
-        n_fast = 0
-        do i = 1, n_names
-            if (is_slow_test(names(i))) cycle
-            n_fast = n_fast + 1
-            fast_names(n_fast) = names(i)
-        end do
-
-        names = fast_names
-        n_names = n_fast
-    end subroutine filter_slow_tests
 
     subroutine names_to_ctest_regex(names, n_names, regex)
         character(len=128), intent(in) :: names(MAX_TEST_TARGETS)
@@ -987,85 +852,5 @@ contains
             end select
         end do
     end subroutine append_ctest_regex_name
-
-    logical function log_has_vtable_mismatch(log_file)
-        character(len=*), intent(in) :: log_file
-
-        integer :: u, iostat
-        character(len=512) :: line
-
-        log_has_vtable_mismatch = .false.
-        open (newunit=u, file=trim(log_file), status='old', iostat=iostat)
-        if (iostat /= 0) return
-
-        do
-            read (u, '(a)', iostat=iostat) line
-            if (iostat /= 0) exit
-            if (index(line, 'Mismatch in components of derived type') > 0 .or. &
-                index(line, '__vtype_') > 0) then
-                log_has_vtable_mismatch = .true.
-                exit
-            end if
-        end do
-        close (u)
-    end function log_has_vtable_mismatch
-
-    subroutine clear_fpm_mod_cache(project_dir)
-        character(len=*), intent(in) :: project_dir
-
-        character(len=512) :: build_root
-        character(len=512), allocatable :: items(:)
-        integer :: n_items, i, depth
-
-        build_root = trim(project_dir)//'/build'
-        allocate (items(8192))
-
-        ! find build -maxdepth 2 -name '*.mod' -not -path '*/dependencies/*' -delete
-        call fs_collect_files(trim(build_root), '', '.mod', '', items, n_items)
-        do i = 1, n_items
-            if (index(items(i), '/dependencies/') > 0) cycle
-            depth = build_rel_depth(trim(build_root), trim(items(i)))
-            if (depth >= 1 .and. depth <= 2) call fs_remove_file(trim(items(i)))
-        end do
-
-        ! find build -mindepth 3 -maxdepth 3 -name 'src_*.o'
-        !   -not -path '*/dependencies/*' -delete
-        call fs_collect_files(trim(build_root), 'src_', '.o', '', items, n_items)
-        do i = 1, n_items
-            if (index(items(i), '/dependencies/') > 0) cycle
-            if (.not. basename_starts_with(trim(items(i)), 'src_')) cycle
-            depth = build_rel_depth(trim(build_root), trim(items(i)))
-            if (depth == 3) call fs_remove_file(trim(items(i)))
-        end do
-
-        deallocate (items)
-    end subroutine clear_fpm_mod_cache
-
-    integer function build_rel_depth(root, path) result(depth)
-        !! Number of path components below root (find's depth from root).
-        character(len=*), intent(in) :: root, path
-
-        integer :: i, n
-
-        depth = 0
-        n = len_trim(root)
-        if (len_trim(path) <= n + 1) return
-        if (path(1:n) /= root(1:n)) return
-        do i = n + 1, len_trim(path)
-            if (path(i:i) == '/') depth = depth + 1
-        end do
-    end function build_rel_depth
-
-    logical function basename_starts_with(path, prefix) result(yes)
-        character(len=*), intent(in) :: path, prefix
-
-        integer :: slash, b
-
-        slash = index(trim(path), '/', back=.true.)
-        b = slash + 1
-        yes = .false.
-        if (b + len(prefix) - 1 > len_trim(path)) return
-        yes = path(b:b + len(prefix) - 1) == prefix
-    end function basename_starts_with
 
 end module fo_check

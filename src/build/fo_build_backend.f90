@@ -1,11 +1,8 @@
 module fo_build_backend
     use, intrinsic :: iso_fortran_env, only: error_unit
-    use fo_util, only: make_tmpfile, delete_tmpfile
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_mkdir_excl, fs_sleep_ms, &
-        fs_pid_alive, fs_collect_files, fs_remove_file
-    use fo_process, only: process_detect_nproc, process_fpm_build, &
-        process_fpm_test_list, process_fpm_test_all, &
-        process_fpm_test_names, process_cmake_build, &
+        fs_pid_alive
+    use fo_process, only: process_detect_nproc, process_cmake_build, &
         process_ctest, process_getpid
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names
@@ -13,10 +10,9 @@ module fo_build_backend
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
     public :: backend_build, backend_test, backend_test_names, backend_clean
-    public :: BACKEND_FPM, BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
+    public :: BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
 
     integer, parameter :: BACKEND_NONE = 0
-    integer, parameter :: BACKEND_FPM = 1
     integer, parameter :: BACKEND_CMAKE = 2
     integer, parameter :: BACKEND_GFORTRAN = 3
     integer, parameter :: MAX_TEST_TARGETS = 512
@@ -165,19 +161,6 @@ contains
             if (exitcode == 0 .and. want_tests) &
                 call gfortran_test(self%project_dir, log_path, exitcode, &
                 build_only=.true.)
-        case (BACKEND_FPM)
-            call process_fpm_build(self%project_dir, flag_text, np, log_path, &
-                exitcode)
-            if (exitcode /= 0 .and. exitcode /= 124 .and. len_trim(log_path) > 0) then
-                if (log_has_vtable_mismatch(log_path)) then
-                    write (error_unit, '(a)') &
-                        'fo: WARNING: stale .mod files detected (vtable mismatch);' // &
-                        ' clearing module interface cache and retrying'
-                    call clear_fpm_mod_cache(self%project_dir)
-                    call process_fpm_build(self%project_dir, flag_text, np, log_path, &
-                        exitcode)
-                end if
-            end if
         case (BACKEND_CMAKE)
             call process_cmake_build(self%project_dir, flag_text, np, log_path, &
                 exitcode)
@@ -218,8 +201,7 @@ contains
         logical, intent(in), optional :: include_slow
         character(len=*), intent(in), optional :: log_file
 
-        integer :: list_ierr, n_names, jobs, lock_ierr
-        character(len=128) :: names(MAX_TEST_TARGETS)
+        integer :: jobs, lock_ierr
         character(len=512) :: log_path, lock_dir
         logical :: has_tests, slow
 
@@ -238,26 +220,6 @@ contains
         case (BACKEND_GFORTRAN)
             call gfortran_test(self%project_dir, log_path, exitcode, &
                 include_slow=slow)
-        case (BACKEND_FPM)
-            if (slow) then
-                call process_fpm_test_all(self%project_dir, jobs, log_path, exitcode)
-            else
-                call fpm_list_tests(self%project_dir, names, n_names, &
-                    list_ierr, log_path)
-                if (list_ierr /= 0) then
-                    exitcode = 1
-                    call release_project_lock(lock_dir)
-                    return
-                end if
-                call filter_slow_tests(names, n_names)
-                if (n_names == 0) then
-                    exitcode = 0
-                    call release_project_lock(lock_dir)
-                    return
-                end if
-                call fpm_run_tests(self%project_dir, names, n_names, &
-                    exitcode, log_path)
-            end if
         case (BACKEND_CMAKE)
             inquire (file=trim(self%project_dir)//'/build/CTestTestfile.cmake', &
                 exist=has_tests)
@@ -323,13 +285,6 @@ contains
         if (self%kind == BACKEND_GFORTRAN) then
             call gfortran_test_names(self%project_dir, fast_names, n_fast, &
                 log_path, exitcode, include_slow=slow)
-            call release_project_lock(lock_dir)
-            return
-        end if
-
-        if (self%kind == BACKEND_FPM) then
-            call fpm_run_tests(self%project_dir, fast_names, n_fast, &
-                exitcode, log_path)
             call release_project_lock(lock_dir)
             return
         end if
@@ -439,134 +394,6 @@ contains
         end do
     end subroutine append_ctest_regex_name
 
-    subroutine fpm_list_tests(project_dir, names, n_names, exitcode, log_file)
-        character(len=*), intent(in) :: project_dir
-        character(len=128), intent(out) :: names(MAX_TEST_TARGETS)
-        integer, intent(out) :: n_names, exitcode
-        character(len=*), intent(in), optional :: log_file
-
-        character(len=512) :: list_file, parse_file
-
-        names = ''
-        n_names = 0
-        exitcode = 0
-
-        if (present(log_file) .and. len_trim(log_file) > 0) then
-            list_file = log_file
-            parse_file = log_file
-        else
-            call make_tmpfile('fo-fpm-tests', list_file)
-            parse_file = list_file
-        end if
-
-        call process_fpm_test_list(project_dir, list_file, exitcode)
-        if (exitcode == 0) call parse_fpm_test_list(parse_file, names, n_names)
-        if (.not. present(log_file) .or. len_trim(log_file) == 0) then
-            call delete_tmpfile(list_file)
-        end if
-    end subroutine fpm_list_tests
-
-    subroutine parse_fpm_test_list(path, names, n_names)
-        character(len=*), intent(in) :: path
-        character(len=128), intent(inout) :: names(MAX_TEST_TARGETS)
-        integer, intent(inout) :: n_names
-
-        character(len=512) :: line
-        integer :: u, iostat, colon
-        logical :: in_names
-
-        in_names = .false.
-        open (newunit=u, file=path, status='old', iostat=iostat)
-        if (iostat /= 0) return
-
-        do
-            read (u, '(a)', iostat=iostat) line
-            if (iostat /= 0) exit
-            colon = index(line, 'Matched names:')
-            if (colon > 0) then
-                in_names = .true.
-                line = line(colon + len('Matched names:'):)
-            else if (.not. in_names) then
-                cycle
-            end if
-            call parse_words(line, names, n_names)
-        end do
-        close (u)
-    end subroutine parse_fpm_test_list
-
-    subroutine parse_words(line, names, n_names)
-        character(len=*), intent(in) :: line
-        character(len=128), intent(inout) :: names(MAX_TEST_TARGETS)
-        integer, intent(inout) :: n_names
-
-        integer :: pos, start, finish, n
-
-        n = len_trim(line)
-        pos = 1
-        do while (pos <= n)
-            do while (pos <= n .and. line(pos:pos) == ' ')
-                pos = pos + 1
-            end do
-            if (pos > n) exit
-
-            start = pos
-            do while (pos <= n .and. line(pos:pos) /= ' ')
-                pos = pos + 1
-            end do
-            finish = pos - 1
-
-            if (n_names < MAX_TEST_TARGETS) then
-                n_names = n_names + 1
-                names(n_names) = line(start:finish)
-            end if
-        end do
-    end subroutine parse_words
-
-    subroutine filter_slow_tests(names, n_names)
-        use fo_scan, only: is_slow_test
-        character(len=128), intent(inout) :: names(MAX_TEST_TARGETS)
-        integer, intent(inout) :: n_names
-
-        character(len=128) :: fast_names(MAX_TEST_TARGETS)
-        integer :: i, n_fast
-
-        fast_names = ''
-        n_fast = 0
-        do i = 1, n_names
-            if (is_slow_test(names(i))) cycle
-            n_fast = n_fast + 1
-            fast_names(n_fast) = names(i)
-        end do
-
-        names = fast_names
-        n_names = n_fast
-    end subroutine filter_slow_tests
-
-    subroutine fpm_run_tests(project_dir, names, n_names, exitcode, log_file)
-        character(len=*), intent(in) :: project_dir
-        character(len=128), intent(in) :: names(MAX_TEST_TARGETS)
-        integer, intent(in) :: n_names
-        integer, intent(out) :: exitcode
-        character(len=*), intent(in), optional :: log_file
-
-        integer :: jobs
-
-        if (n_names == 0) then
-            exitcode = 0
-            return
-        end if
-
-        jobs = detect_jobs()
-
-        if (present(log_file)) then
-            call process_fpm_test_names(project_dir, names, n_names, jobs, log_file, &
-                exitcode)
-        else
-            call process_fpm_test_names(project_dir, names, n_names, jobs, '', &
-                exitcode)
-        end if
-    end subroutine fpm_run_tests
-
     ! Returns true if the build log contains a gfortran vtable mismatch error.
     ! These occur when .mod files compiled under different dependency sets are mixed.
     logical function log_has_vtable_mismatch(log_file)
@@ -611,62 +438,6 @@ contains
         end do
         close (u)
     end function log_has_cmake_fetchcontent_unstash
-
-    ! Delete all .mod files from fpm build directories to clear stale module interfaces.
-    ! Keeps dependency build artifacts (.o files) intact to avoid full dependency rebuild.
-    subroutine clear_fpm_mod_cache(project_dir)
-        character(len=*), intent(in) :: project_dir
-
-        character(len=:), allocatable :: build_root
-        character(len=512), allocatable :: hits(:)
-        integer :: n, k, base_depth
-
-        build_root = trim(project_dir)//'/build'
-        base_depth = path_depth(build_root)
-        allocate (hits(4096))
-
-        ! Project module interfaces at depth <= 2 under build, never a
-        ! dependency's. Replaces find -maxdepth 2 -name '*.mod' -delete.
-        call fs_collect_files(build_root, '', '.mod', '', hits, n)
-        do k = 1, n
-            if (index(hits(k), '/dependencies/') > 0) cycle
-            if (path_depth(trim(hits(k))) - base_depth > 2) cycle
-            call fs_remove_file(trim(hits(k)))
-        end do
-
-        ! Project objects at exactly depth 3 (src_*.o), to force recompilation
-        ! with fresh interfaces. Replaces find -mindepth 3 -maxdepth 3.
-        call fs_collect_files(build_root, 'src_', '.o', '', hits, n)
-        do k = 1, n
-            if (index(hits(k), '/dependencies/') > 0) cycle
-            if (.not. basename_starts(trim(hits(k)), 'src_')) cycle
-            if (path_depth(trim(hits(k))) - base_depth /= 3) cycle
-            call fs_remove_file(trim(hits(k)))
-        end do
-        deallocate (hits)
-    end subroutine clear_fpm_mod_cache
-
-    integer function path_depth(path) result(d)
-        !! Number of path components (count of '/' separators) in a path, used
-        !! to emulate find's -maxdepth/-mindepth without a shell.
-        character(len=*), intent(in) :: path
-        integer :: i
-        d = 0
-        do i = 1, len_trim(path)
-            if (path(i:i) == '/') d = d + 1
-        end do
-    end function path_depth
-
-    logical function basename_starts(path, prefix) result(yes)
-        !! True when the final path component begins with prefix.
-        character(len=*), intent(in) :: path, prefix
-        integer :: slash, n
-        n = len_trim(path)
-        slash = index(path(1:n), '/', back=.true.)
-        yes = .false.
-        if (n - slash < len(prefix)) return
-        yes = path(slash + 1:slash + len(prefix)) == prefix
-    end function basename_starts
 
     subroutine clear_cmake_build_tree(project_dir)
         character(len=*), intent(in) :: project_dir

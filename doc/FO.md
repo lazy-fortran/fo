@@ -188,11 +188,12 @@ does not duplicate it.
 
 ## Relationship to fpm
 
-logos is fpm-centered and does not support cmake. `fpm` is the package manifest and
-build system (`bootstrap/FPM_SUPPORT.md`, `--std=f2003` on a hosted target, F5+). `fo` wraps and
-feeds it: it consumes `fpm.toml`, writes `fo.lock`, and adds the cache, store,
-capsules, and surfaces around it. The two are complementary; `fo`'s store is the
-substrate an fpm-class workflow builds on.
+`fo` conforms to the `fpm.toml` manifest standard (`bootstrap/FPM_SUPPORT.md`): it
+consumes `fpm.toml` as the project descriptor (sources, targets, tests, path
+dependencies) and writes `fo.lock`. It does not invoke the `fpm` tool to build or
+test; it compiles the module DAG natively through its own content-addressed cache,
+and also drives cmake + ninja for CMake projects. The manifest format is the shared
+contract; the cache, store, capsules, and surfaces are `fo`'s own.
 
 ## Status and interim loop
 

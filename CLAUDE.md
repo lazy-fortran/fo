@@ -32,7 +32,7 @@ If `fo` is slower than the backend or cannot handle the project, fix
 - `src/scan/`: module dependency scanner. Parses `use` and `module` statements.
 - `src/dag/`: directed acyclic graph. Topological sort, reverse-dependency closure.
 - `src/check/`: build + test runner (`fo_check`) and output formatters (`fo_check_output`).
-- `src/build/`: backend detection and dispatch (fpm, CMake). Argv execution via C shim.
+- `src/build/`: backend detection and dispatch (native gfortran, CMake). Argv execution via C shim.
 - `src/cache/`: content-addressed module cache. FNV-1a hashing of source + compiler + flags + deps.
 - `src/lint/`: linter. Unused-import detection + gfortran compiler warnings (stack-size filtered, deduplicated).
 - `src/diag/`: log parser. Extracts file, line, column, target, hint from compiler and test output.

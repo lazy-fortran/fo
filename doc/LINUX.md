@@ -32,7 +32,8 @@ Reuse:
 - **CRIU**: process checkpoint and restore. fo wraps CRIU for arbitrary
   process trees and feeds page images into the store for incremental dedup.
 - **git**: source history. fo reads the working tree that git manages.
-- **fpm**: Fortran package manifest and build driver. fo wraps fpm.
+- **fpm**: Fortran package manifest standard. fo reads `fpm.toml` and builds
+  natively; it does not invoke the `fpm` tool.
 - **Slurm/HTCondor**: cluster job scheduling. fo submits capsules as jobs.
   (Their "checkpoint" support is a trigger for CRIU, not a store-integrated
   incremental mechanism. The store integration is fo's work.)
@@ -396,7 +397,7 @@ Each step is independently useful:
    incremental rebuild, inotify watch, affected-test selection. Replaces the
    interim `tools/fo.py` (#904).
 3. **Capsules.** Mount-namespace isolation, Landlock + seccomp sandbox,
-   lineage recording, reproducibility verification. Wraps fpm for the package
+   lineage recording, reproducibility verification. Reads the `fpm.toml` package
    manifest.
 4. **Checkpoint.** CRIU wrapper with userfaultfd dirty tracking, FastCDC +
    BLAKE3 chunking of page images, incremental store-backed chain.

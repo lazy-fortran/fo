@@ -1,7 +1,8 @@
 # fo
 
 Fortran build driver with module DAG, content-addressed cache, and
-affected-test selection. Wraps fpm or cmake.
+affected-test selection. Reads the `fpm.toml` manifest and builds natively
+through its own cache; drives cmake + ninja for CMake projects.
 
 ## Install
 
@@ -65,21 +66,24 @@ only when the caller needs diagnostic arrays or log paths.
 
 ## Backend detection
 
-`fpm.toml` -> fpm. `CMakeLists.txt` -> cmake + ninja. fpm takes
-precedence when both exist. Non-Fortran directories exit silently.
+`fpm.toml` -> native gfortran build. `CMakeLists.txt` -> cmake + ninja.
+CMake takes precedence when both exist. Non-Fortran directories exit silently.
+
+The `fpm.toml` manifest is consumed as the project descriptor (sources, targets,
+tests, path dependencies); the `fpm` tool is not invoked to build or test.
 
 ## Slow test exclusion
 
 Tests named `*_slow` or `*_slow_*` are excluded by default.
-Use `fo test --all` to include them. fpm lists targets and runs the
-non-slow subset; cmake passes `-LE slow`.
+Use `fo test --all` to include them. The native build enumerates test targets
+and runs the non-slow subset; cmake passes `-LE slow`.
 
 ## Test parallelism
 
 `FO_JOBS=N` caps build and test fanout. Missing or invalid `FO_JOBS` falls
-back to `nproc`. fpm receives the limit through `OMP_NUM_THREADS`; CMake and
-CTest receive `-j N`. CMake selected tests run through one `ctest -R` expression
-instead of one process per test.
+back to `nproc`. The native build parallelizes the module DAG through
+`OMP_NUM_THREADS`; CMake and CTest receive `-j N`. CMake selected tests run
+through one `ctest -R` expression instead of one process per test.
 
 ## Go parity
 
@@ -88,7 +92,7 @@ instead of one process per test.
 | Global content-addressed cache | `~/.cache/fo/store/v1`, SHA-256 |
 | Cache key = hash(source + compiler + flags + `.mod` payload hashes) | yes |
 | Affected-test selection | `fo changed`, `fo test --only-changed` |
-| Parallel builds | `FO_JOBS` or nproc for fpm, cmake, ctest |
+| Parallel builds | `FO_JOBS` or nproc for native build, cmake, ctest |
 | Flag passthrough | `fo build --flag` |
 | Cache clear | `fo clean` |
 | Backend autodetection | fpm.toml or CMakeLists.txt |
