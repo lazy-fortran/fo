@@ -6,7 +6,7 @@ program fo_main
     use fo_dag_bridge, only: build_dag_from_units
     use fo_build_backend, only: backend_t, detect_backend, backend_build, &
         backend_test, backend_test_names, BACKEND_NONE, &
-        BACKEND_GFORTRAN, BACKEND_CMAKE
+        BACKEND_GFORTRAN, BACKEND_CMAKE, profile_flags
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
         collect_failed_test_names, MAX_TEST_RESULTS
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
@@ -233,6 +233,10 @@ contains
         write (output_unit, '(a)') ''
         write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt --check'
         write (output_unit, '(a)') '  build      build only (--flag "-O0")'
+        write (output_unit, '(a)') &
+            '  build --debug   add -g -O0 -fcheck=all -fbacktrace'
+        write (output_unit, '(a)') &
+            '  build --asan    debug flags plus -fsanitize=address,undefined'
         write (output_unit, '(a)') '  test       run tests (--only-changed, --all)'
         write (output_unit, '(a)') &
             '  exec [--cwd <dir>] [--no-build] <t> [args]  build then run target'
@@ -583,6 +587,8 @@ contains
         type(backend_t) :: b
         integer :: exitcode
         character(len=512) :: flags, build_log
+        character(len=64) :: profile
+        character(len=1024) :: all_flags
 
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
@@ -591,14 +597,22 @@ contains
         end if
 
         call get_flags_arg(flags)
-        ! Capture the compiler output so a failed build shows the real diagnostic
-        ! (file:line: Error: ...) instead of a bare "STOP 1".
-        call make_tmpfile('fo-build', build_log)
-        ! Build the test binaries too so build/fo/bin/test_* never go stale against
-        ! the sources (running one directly after `fo build` used to give results
-        ! from the previous `fo test`).
+        call get_profile_arg(profile)
+        if (len_trim(profile) > 0 .and. len_trim(profile_flags(profile)) == 0) then
+            write (error_unit, '(a)') 'fo: unknown build profile: '//trim(profile)
+            stop 1
+        end if
+        all_flags = trim(profile_flags(profile))
         if (len_trim(flags) > 0) then
-            call backend_build(b, exitcode, flags, build_log, with_tests=.true.)
+            if (len_trim(all_flags) > 0) then
+                all_flags = trim(all_flags)//' '//trim(flags)
+            else
+                all_flags = trim(flags)
+            end if
+        end if
+        call make_tmpfile('fo-build', build_log)
+        if (len_trim(all_flags) > 0) then
+            call backend_build(b, exitcode, all_flags, build_log, with_tests=.true.)
         else
             call backend_build(b, exitcode, log_file=build_log, with_tests=.true.)
         end if
@@ -643,6 +657,27 @@ contains
             end if
         end do
     end subroutine get_flags_arg
+
+    subroutine get_profile_arg(profile)
+        character(len=*), intent(out) :: profile
+        character(len=256) :: arg
+        integer :: i
+
+        profile = ''
+        do i = 2, command_argument_count()
+            call get_command_argument(i, arg)
+            select case (trim(arg))
+            case ('--debug')
+                profile = 'debug'
+            case ('--asan')
+                profile = 'asan'
+            case ('--profile')
+                if (i < command_argument_count()) &
+                    call get_command_argument(i + 1, profile)
+            end select
+            if (index(trim(arg), '--profile=') == 1) profile = trim(arg(11:))
+        end do
+    end subroutine get_profile_arg
 
     subroutine cmd_test()
         type(backend_t) :: b

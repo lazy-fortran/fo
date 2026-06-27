@@ -10,6 +10,7 @@ module fo_build_backend
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
     public :: backend_build, backend_test, backend_test_names, backend_clean
+    public :: profile_flags
     public :: BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
 
     integer, parameter :: BACKEND_NONE = 0
@@ -194,6 +195,20 @@ contains
                 ' set FO_BUILD_TIMEOUT env var or investigate slow build'
         end if
     end subroutine backend_build
+
+    function profile_flags(name) result(flags)
+        character(len=*), intent(in) :: name
+        character(len=:), allocatable :: flags
+        select case (trim(name))
+        case ('debug')
+            flags = '-g -O0 -fcheck=all -fbacktrace'
+        case ('asan')
+            flags = '-g -O0 -fcheck=all -fbacktrace '// &
+                '-fsanitize=address,undefined'
+        case default
+            flags = ''
+        end select
+    end function profile_flags
 
     subroutine backend_test(self, exitcode, include_slow, log_file)
         type(backend_t), intent(in) :: self
