@@ -83,6 +83,9 @@ contains
 
         call guard_root_mod_shadow(project_dir, lf)
 
+        call bootstrap_external_deps(project_dir, config, lf, exitcode)
+        if (exitcode /= 0) return
+
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
 
@@ -100,6 +103,55 @@ contains
             flags=flag_text, use_cache=use_cache)
         call memo_save()
     end subroutine gfortran_build
+
+    subroutine bootstrap_external_deps(project_dir, config, log_file, exitcode)
+        character(len=*), intent(in) :: project_dir, log_file
+        type(fpm_config_t), intent(in) :: config
+        integer, intent(out) :: exitcode
+
+        character(len=512) :: dep_includes(MAX_DEP_DIRS)
+        character(len=512) :: dep_objs(MAX_DEP_OBJS)
+        integer :: n_dep_includes, n_dep_objs
+
+        exitcode = 0
+        if (.not. has_external_dep_closure(project_dir)) return
+
+        call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
+            dep_objs, n_dep_objs)
+        if (n_dep_objs > 0) return
+
+        call run_fpm_bootstrap(project_dir, log_file, exitcode)
+    end subroutine bootstrap_external_deps
+
+    logical function has_external_dep_closure(project_dir) result(found)
+        character(len=*), intent(in) :: project_dir
+        type(resolved_src_t) :: deps(MAX_RESOLVED)
+        integer :: n_deps, n_unres, ierr
+
+        found = .false.
+        call resolve_dep_srcs(project_dir, deps, n_deps, n_unres, ierr)
+        if (ierr == 0 .and. n_unres > 0) found = .true.
+    end function has_external_dep_closure
+
+    subroutine run_fpm_bootstrap(project_dir, log_file, exitcode)
+        character(len=*), intent(in) :: project_dir, log_file
+        integer, intent(out) :: exitcode
+
+        character(len=:), allocatable :: packed
+        integer :: n_args
+
+        n_args = 0
+        call argv_push(packed, n_args, 'fpm')
+        call argv_push(packed, n_args, 'build')
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+            .true., build_timeout_seconds(), exitcode)
+        if (exitcode == 0) return
+
+        write (error_unit, '(a)') 'fo: fpm bootstrap failed for git/registry dependencies'
+        if (len_trim(log_file) > 0) then
+            write (error_unit, '(a)') 'fo: see '//trim(log_file)
+        end if
+    end subroutine run_fpm_bootstrap
 
     subroutine guard_root_mod_shadow(project_dir, log_file)
         !! Stale root module and object files silently shadow

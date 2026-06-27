@@ -582,6 +582,66 @@
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_builds_path_dependency
 
+    subroutine test_gfortran_bootstraps_git_dependency()
+        type(backend_t) :: b
+        integer :: exitcode, u, ios
+        character(len=512) :: base, libdir, appdir, log_file, outfile
+        character(len=64) :: line
+
+        call make_tmp_path('fo_test_gitdep', base)
+        libdir = trim(base)//'/lib'
+        appdir = trim(base)//'/app'
+        call make_tmp_path('fo_backend_gitdep', log_file)
+
+        call execute_command_line('mkdir -p '//trim(libdir)//'/src '// &
+            trim(appdir)//'/app')
+        open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "deplib"'
+        close (u)
+        open (newunit=u, file=trim(libdir)//'/src/depmod.f90', status='replace')
+        write (u, '(a)') 'module depmod'
+        write (u, '(a)') '  implicit none'
+        write (u, '(a)') '  integer, parameter :: dep_value = 13'
+        write (u, '(a)') 'end module depmod'
+        close (u)
+        call execute_command_line('git -C '//trim(libdir)//' init -q')
+        call execute_command_line('git -C '//trim(libdir)// &
+            ' -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src/depmod.f90')
+        call execute_command_line('git -C '//trim(libdir)// &
+            ' -c user.email=fo@example.invalid -c user.name=fo commit -q -m init')
+
+        open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "depapp"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a,a,a)') 'deplib = { git = "file://', trim(libdir), '" }'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/app/main.f90', status='replace')
+        write (u, '(a)') 'program main'
+        write (u, '(a)') '  use depmod, only: dep_value'
+        write (u, '(a)') '  print "(i0)", dep_value'
+        write (u, '(a)') 'end program main'
+        close (u)
+
+        b = detect_backend(appdir)
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'project with git dependency bootstraps through fpm')
+
+        outfile = trim(base)//'/out.txt'
+        call execute_command_line(trim(appdir)//'/build/fo/bin/depapp > '// &
+            trim(outfile))
+        line = ''
+        open (newunit=u, file=trim(outfile), status='old', iostat=ios)
+        if (ios == 0) then
+            read (u, '(a)', iostat=ios) line
+            close (u)
+        end if
+        call assert(trim(adjustl(line)) == '13', &
+            'binary links git dep and prints the dep value')
+
+        call remove_tree(base)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_bootstraps_git_dependency
+
     subroutine first_match(dir, infix, path)
         !! Return the first file under dir whose name contains infix. Shell-based
         !! to match the other build-test helpers and avoid extra module imports.
