@@ -19,6 +19,7 @@ program fo_main
         fo_fmt_check_run, fo_fmt_check_files, fo_fmt_check_changed_run
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_exec_target, only: resolve_exec_target
+    use fo_cover, only: fo_cover_run
     implicit none
 
     character(len=256) :: action
@@ -43,6 +44,8 @@ program fo_main
         call cmd_build()
     case ('test')
         call cmd_test()
+    case ('cover')
+        call fo_cover_run()
     case ('exec', 'run')
         call cmd_exec()
     case ('info')
@@ -236,6 +239,7 @@ contains
         write (output_unit, '(a)') &
             '  build --asan    debug flags plus -fsanitize=address,undefined'
         write (output_unit, '(a)') '  test       run tests (--only-changed, --all)'
+        write (output_unit, '(a)') '  cover      run tests with coverage, then fortcov'
         write (output_unit, '(a)') &
             '  exec [--cwd <dir>] [--no-build] <t> [args]  build then run target'
         write (output_unit, '(a)') '  check      build + test, one-line status'

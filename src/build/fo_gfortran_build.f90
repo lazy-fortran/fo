@@ -31,12 +31,13 @@ module fo_gfortran_build
 contains
 
     subroutine gfortran_build(project_dir, log_file, exitcode, n_compiled, flags, &
-            compiler_id)
+            compiler_id, use_cache)
         character(len=*), intent(in) :: project_dir, log_file
         integer, intent(out) :: exitcode
         integer, intent(out), optional :: n_compiled
         character(len=*), intent(in), optional :: flags
         character(len=*), intent(in), optional :: compiler_id
+        logical, intent(in), optional :: use_cache
 
         type(fpm_config_t) :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_src_objs, nc
@@ -88,14 +89,14 @@ contains
         call compile_sources(project_dir, config%source_dir, config%app_dir, &
             mod_dir, obj_dir, dep_includes, n_dep_includes, lf, &
             src_objs, n_src_objs, is_prog_arr, exitcode, nc, &
-            flag_text, compiler)
+            flag_text, compiler, use_cache)
         if (exitcode /= 0) return
 
         if (present(n_compiled)) n_compiled = nc
 
         call link_app_binaries(project_dir, config, bin_dir, src_objs, n_src_objs, &
             is_prog_arr, dep_objs, n_dep_objs, lf, exitcode, &
-            flags=flag_text)
+            flags=flag_text, use_cache=use_cache)
         call memo_save()
     end subroutine gfortran_build
 
@@ -131,14 +132,14 @@ contains
     end subroutine guard_root_mod_shadow
 
     subroutine gfortran_test(project_dir, log_file, exitcode, include_slow, &
-            n_compiled, build_only)
+            n_compiled, flags, build_only, use_cache)
         character(len=*), intent(in) :: project_dir, log_file
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
         integer, intent(out), optional :: n_compiled
-        ! build_only: compile and link the test binaries without running them,
-        ! so `fo build` keeps build/fo/bin/test_* current.
+        character(len=*), intent(in), optional :: flags
         logical, intent(in), optional :: build_only
+        logical, intent(in), optional :: use_cache
 
         type(fpm_config_t) :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_lib_objs
@@ -146,7 +147,7 @@ contains
         character(len=512) :: dep_includes(MAX_DEP_DIRS)
         character(len=512) :: dep_objs(MAX_DEP_OBJS)
         character(len=512) :: lib_objs(MAX_SRC_OBJS)
-        character(len=512) :: lf
+        character(len=512) :: lf, flag_text
         character(len=128) :: no_names(1)
         logical :: slow, bonly
 
@@ -154,11 +155,14 @@ contains
         if (len_trim(lf) == 0) lf = '/dev/null'
         slow = .false.
         if (present(include_slow)) slow = include_slow
+        flag_text = ''
+        if (present(flags)) flag_text = flags
         bonly = .false.
         if (present(build_only)) bonly = build_only
         if (present(n_compiled)) n_compiled = 0
 
-        call gfortran_build(project_dir, lf, exitcode)
+        call gfortran_build(project_dir, lf, exitcode, flags=flag_text, &
+            use_cache=use_cache)
         if (exitcode /= 0) return
 
         call fpm_config_parse(project_dir, config, ierr)
@@ -166,6 +170,7 @@ contains
             exitcode = 1
             return
         end if
+        call merge_flags(config, flag_text)
 
         mod_dir = trim(project_dir)//'/build/fo/mod'
         obj_dir = trim(project_dir)//'/build/fo/obj'
@@ -180,19 +185,21 @@ contains
             dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
             config%link_libs, config%n_link_libs, lf, &
             no_names, 0, slow, exitcode, n_compiled, &
-            flags=config_flags_str(config), &
-            build_only=bonly)
+            flags=flag_text, &
+            build_only=bonly, use_cache=use_cache)
         call memo_save()
     end subroutine gfortran_test
 
     subroutine gfortran_test_names(project_dir, names, n_names, log_file, &
-            exitcode, include_slow, n_compiled)
+            exitcode, include_slow, n_compiled, flags, use_cache)
         character(len=*), intent(in) :: project_dir, log_file
         character(len=128), intent(in) :: names(:)
         integer, intent(in) :: n_names
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
         integer, intent(out), optional :: n_compiled
+        character(len=*), intent(in), optional :: flags
+        logical, intent(in), optional :: use_cache
 
         type(fpm_config_t) :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_lib_objs
@@ -200,16 +207,19 @@ contains
         character(len=512) :: dep_includes(MAX_DEP_DIRS)
         character(len=512) :: dep_objs(MAX_DEP_OBJS)
         character(len=512) :: lib_objs(MAX_SRC_OBJS)
-        character(len=512) :: lf
+        character(len=512) :: lf, flag_text
         logical :: slow
 
         lf = log_file
         if (len_trim(lf) == 0) lf = '/dev/null'
         slow = .false.
         if (present(include_slow)) slow = include_slow
+        flag_text = ''
+        if (present(flags)) flag_text = flags
         if (present(n_compiled)) n_compiled = 0
 
-        call gfortran_build(project_dir, lf, exitcode)
+        call gfortran_build(project_dir, lf, exitcode, flags=flag_text, &
+            use_cache=use_cache)
         if (exitcode /= 0) return
 
         call fpm_config_parse(project_dir, config, ierr)
@@ -217,6 +227,7 @@ contains
             exitcode = 1
             return
         end if
+        call merge_flags(config, flag_text)
 
         mod_dir = trim(project_dir)//'/build/fo/mod'
         obj_dir = trim(project_dir)//'/build/fo/obj'
@@ -231,7 +242,7 @@ contains
             dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
             config%link_libs, config%n_link_libs, lf, &
             names, n_names, slow, exitcode, n_compiled, &
-            flags=config_flags_str(config))
+            flags=flag_text, use_cache=use_cache)
     end subroutine gfortran_test_names
 
     subroutine find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
@@ -333,7 +344,7 @@ contains
     subroutine compile_sources(project_dir, src_dir, app_dir, mod_dir, obj_dir, &
             dep_includes, n_dep_includes, log_file, &
             src_objs, n_src_objs, is_prog_arr, exitcode, &
-            n_compiled, flags, compiler)
+            n_compiled, flags, compiler, use_cache)
         character(len=*), intent(in) :: project_dir, src_dir, app_dir
         character(len=*), intent(in) :: mod_dir, obj_dir, log_file
         character(len=*), intent(in) :: flags, compiler
@@ -343,6 +354,7 @@ contains
         integer, intent(out) :: n_src_objs
         logical, intent(out) :: is_prog_arr(MAX_SRC_OBJS)
         integer, intent(out) :: exitcode, n_compiled
+        logical, intent(in), optional :: use_cache
 
         type(scan_unit_t), allocatable :: units_a(:), units_b(:), all_units(:)
         integer :: na, nb, n_all, i, ii, ierr, node_id
@@ -352,6 +364,7 @@ contains
         integer, allocatable :: topo_order(:), node_levels(:)
         integer :: n_order, n_levels, lvl, total_source
         logical :: has_cycle, restored
+        logical :: allow_cache
         character(len=512) :: obj_path
         character(len=4096) :: includes_flag
         character(len=512) :: c_line
@@ -416,6 +429,9 @@ contains
         new_mod_keys = ''
         call load_mod_keys(mod_dir, dag, n_order, topo_order, old_mod_keys)
         call cache_init(c, cache_ierr)
+        allow_cache = .true.
+        if (present(use_cache)) allow_cache = use_cache
+        if (.not. allow_cache) cache_ierr = 1
 
         total_source = 0
         do i = 1, n_order
@@ -833,7 +849,7 @@ contains
 
     subroutine link_app_binaries(project_dir, config, bin_dir, src_objs, n_src_objs, &
             is_prog_arr, dep_objs, n_dep_objs, log_file, exitcode, &
-            flags)
+            flags, use_cache)
         character(len=*), intent(in) :: project_dir, bin_dir, log_file
         type(fpm_config_t), intent(in) :: config
         character(len=512), intent(in) :: src_objs(MAX_SRC_OBJS)
@@ -843,6 +859,7 @@ contains
         integer, intent(in) :: n_dep_objs
         integer, intent(out) :: exitcode
         character(len=*), intent(in), optional :: flags
+        logical, intent(in), optional :: use_cache
 
         integer :: i, n_lib
         character(len=512) :: lib_objs(MAX_SRC_OBJS)
@@ -852,6 +869,7 @@ contains
         type(cache_t) :: c
         integer :: cache_ierr
         character(len=HASH_LEN) :: base_digest
+        logical :: allow_cache
 
         link_flags = ''
         if (present(flags)) link_flags = flags
@@ -867,6 +885,9 @@ contains
         ! Precompute the shared link inputs digest once, then link each program
         ! through the link cache (a relink is skipped on a digest hit).
         call cache_init(c, cache_ierr)
+        allow_cache = .true.
+        if (present(use_cache)) allow_cache = use_cache
+        if (.not. allow_cache) cache_ierr = 1
         base_digest = ''
         if (cache_ierr == 0) call link_base_digest(lib_objs, n_lib, dep_objs, &
             n_dep_objs, config%link_libs, config%n_link_libs, base_digest)
@@ -965,7 +986,7 @@ contains
             dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
             link_libs, n_link_libs, log_file, &
             selected_names, n_selected, include_slow, &
-            exitcode, n_compiled, flags, build_only)
+            exitcode, n_compiled, flags, build_only, use_cache)
         character(len=*), intent(in) :: project_dir, test_dir, mod_dir
         character(len=*), intent(in) :: obj_dir, bin_dir, log_file
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
@@ -986,6 +1007,7 @@ contains
         ! Used by `fo build` so build/fo/bin/test_* stay current with the
         ! sources, instead of going stale until the next `fo test`.
         logical, intent(in), optional :: build_only
+        logical, intent(in), optional :: use_cache
 
         type(scan_unit_t), allocatable :: tunits(:)
         integer :: n_tests, i, ierr, node_id, n_run
@@ -1003,6 +1025,7 @@ contains
         integer(8) :: clk0, clk1, clk_rate
         integer :: n_order
         logical :: has_cycle, restored, bonly
+        logical :: allow_cache
         character(len=512) :: obj_path, bin_path
         character(len=4096) :: incl_flag
         character(len=128) :: tname
@@ -1048,6 +1071,9 @@ contains
             incl_flag = with_user_flags(incl_flag, flags)
         end if
         call cache_init(c, cache_ierr)
+        allow_cache = .true.
+        if (present(use_cache)) allow_cache = use_cache
+        if (.not. allow_cache) cache_ierr = 1
         call detect_compiler(compiler)
 
         ! Select the test programs to run first, so helper compilation and the
