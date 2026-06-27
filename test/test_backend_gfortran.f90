@@ -22,6 +22,7 @@ program test_backend_gfortran
     call test_gfortran_interface_change_rebuilds_dependent()
     call test_gfortran_parallel_test_loop_restores_cached_objects()
     call test_gfortran_test_links_helper_modules_and_lib()
+    call test_gfortran_named_test_links_helper_modules()
     call test_gfortran_builds_path_dependency()
     call test_gfortran_bootstraps_git_dependency()
     call test_fpm_path_with_spaces()

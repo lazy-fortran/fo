@@ -508,6 +508,26 @@
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_test_links_helper_modules_and_lib
 
+    subroutine test_gfortran_named_test_links_helper_modules()
+        !! fo test <target> must compile and link sibling helper modules from
+        !! test/ that the selected test program uses. Mirrors fpm test <target>.
+        integer :: exitcode
+        character(len=512) :: project_dir, log_file
+        character(len=128) :: names(1)
+
+        call make_tmp_path('fo_test_helpers_named', project_dir)
+        call make_tmp_path('fo_backend_helpers_named', log_file)
+        call make_helper_module_project(project_dir)
+
+        names(1) = 'test_uses_helpers'
+        call gfortran_test_names(project_dir, names, 1, log_file, exitcode)
+        call assert(exitcode == 0, &
+            'named test links module-only test helper')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_named_test_links_helper_modules
+
     subroutine test_gfortran_builds_path_dependency()
         !! A project with a path dependency compiles the dependency's library
         !! sources through fo's own cache and links them, with no prior fpm
