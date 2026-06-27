@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,6 +13,54 @@
 #include <unistd.h>
 
 static int has_text(const char *text) { return text != NULL && text[0] != '\0'; }
+
+struct watchdog_state {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    pid_t pgid;
+    int timeout_s;
+    int done;
+    int fired;
+};
+
+static void add_seconds(struct timespec *ts, int seconds) {
+    ts->tv_sec += seconds;
+}
+
+static void sleep_ms(int ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+    }
+}
+
+static void *timeout_watchdog(void *arg) {
+    struct watchdog_state *wd = (struct watchdog_state *)arg;
+    struct timespec deadline;
+    int rc;
+
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    add_seconds(&deadline, wd->timeout_s);
+
+    pthread_mutex_lock(&wd->mu);
+    while (!wd->done) {
+        rc = pthread_cond_timedwait(&wd->cv, &wd->mu, &deadline);
+        if (rc == ETIMEDOUT && !wd->done) {
+            wd->fired = 1;
+            pthread_mutex_unlock(&wd->mu);
+            kill(-wd->pgid, SIGTERM);
+            for (int k = 0; k < 15; k++) {
+                if (kill(-wd->pgid, 0) != 0 && errno == ESRCH) return NULL;
+                sleep_ms(200);
+            }
+            kill(-wd->pgid, SIGKILL);
+            return NULL;
+        }
+    }
+    pthread_mutex_unlock(&wd->mu);
+    return NULL;
+}
 
 struct path_list {
     char **items;
@@ -217,37 +266,53 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
     /* race-free: also set the group from the parent side */
     setpgid(pid, pid);
 
-    if (timeout_s <= 0) {
-        if (waitpid(pid, &status, 0) < 0) return 1;
+    if (timeout_s > 0) {
+        pthread_t watchdog;
+        struct watchdog_state wd;
+        int thread_ok;
+
+        wd.pgid = pid;
+        wd.timeout_s = timeout_s;
+        wd.done = 0;
+        wd.fired = 0;
+        pthread_mutex_init(&wd.mu, NULL);
+        pthread_cond_init(&wd.cv, NULL);
+        thread_ok = pthread_create(&watchdog, NULL, timeout_watchdog, &wd) == 0;
+        if (!thread_ok) {
+            pthread_cond_destroy(&wd.cv);
+            pthread_mutex_destroy(&wd.mu);
+            kill(-pid, SIGKILL);
+            waitpid(pid, NULL, 0);
+            return 1;
+        }
+
+        while (waitpid(pid, &status, 0) < 0) {
+            if (errno == EINTR) continue;
+            pthread_mutex_lock(&wd.mu);
+            wd.done = 1;
+            pthread_cond_signal(&wd.cv);
+            pthread_mutex_unlock(&wd.mu);
+            pthread_join(watchdog, NULL);
+            pthread_cond_destroy(&wd.cv);
+            pthread_mutex_destroy(&wd.mu);
+            return 1;
+        }
+
+        pthread_mutex_lock(&wd.mu);
+        wd.done = 1;
+        pthread_cond_signal(&wd.cv);
+        pthread_mutex_unlock(&wd.mu);
+        pthread_join(watchdog, NULL);
+        pthread_mutex_lock(&wd.mu);
+        thread_ok = !wd.fired;
+        pthread_mutex_unlock(&wd.mu);
+        pthread_cond_destroy(&wd.cv);
+        pthread_mutex_destroy(&wd.mu);
+        if (!thread_ok) return 124;
     } else {
-        int elapsed = 0;
-        struct timespec ts = {1, 0};
-        for (;;) {
-            pid_t got = waitpid(pid, &status, WNOHANG);
-            if (got > 0) break;
-            if (got < 0) {
-                kill(-pid, SIGKILL);
-                waitpid(pid, NULL, 0);
-                return 1;
-            }
-            if (elapsed >= timeout_s) {
-                /* hard timeout: TERM the whole group, then KILL on grace expiry */
-                int reaped = 0, k;
-                struct timespec g = {0, 200000000L};  /* 200 ms */
-                kill(-pid, SIGTERM);
-                for (k = 0; k < 15 && !reaped; k++) {
-                    if (waitpid(pid, &status, WNOHANG) > 0) reaped = 1;
-                    else nanosleep(&g, NULL);
-                }
-                if (!reaped) {
-                    kill(-pid, SIGKILL);
-                    waitpid(pid, &status, 0);
-                }
-                kill(-pid, SIGKILL);  /* sweep any straggler grandchildren */
-                return 124;  /* timeout — same as GNU timeout exit code */
-            }
-            nanosleep(&ts, NULL);
-            elapsed++;
+        while (waitpid(pid, &status, 0) < 0) {
+            if (errno == EINTR) continue;
+            return 1;
         }
     }
     if (WIFEXITED(status)) return WEXITSTATUS(status);

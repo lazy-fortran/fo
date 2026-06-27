@@ -611,8 +611,8 @@
         t = 0
         if (len_trim(path) == 0) return
         call make_tmp_path('fo_mtime', tmp)
-        call execute_command_line('stat -c %Y "'//trim(path)//'" > '// &
-            trim(tmp)//' 2>/dev/null')
+        call execute_command_line('(stat -c %Y "'//trim(path)//'" 2>/dev/null || '// &
+            'stat -f %m "'//trim(path)//'" 2>/dev/null) > '//trim(tmp))
         open (newunit=u, file=trim(tmp), status='old', iostat=ios)
         if (ios == 0) then
             read (u, *, iostat=ios) t
