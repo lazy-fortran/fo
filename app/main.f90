@@ -11,8 +11,6 @@ program fo_main
         collect_failed_test_names, MAX_TEST_RESULTS
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
     use fo_util, only: make_tmpfile, delete_tmpfile
-    use fo_fs, only: fs_make_dir, fs_collect_files, &
-        fs_copy_exec, fs_rename
     use fo_check_output, only: check_result_json, check_result_compact_json, &
         check_result_full_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
@@ -21,6 +19,7 @@ program fo_main
         fo_fmt_check_run, fo_fmt_check_files, fo_fmt_check_changed_run
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_exec_target, only: resolve_exec_target
+    use fo_cover, only: fo_cover_run
     implicit none
 
     character(len=256) :: action
@@ -45,6 +44,8 @@ program fo_main
         call cmd_build()
     case ('test')
         call cmd_test()
+    case ('cover')
+        call fo_cover_run()
     case ('exec', 'run')
         call cmd_exec()
     case ('info')
@@ -238,6 +239,7 @@ contains
         write (output_unit, '(a)') &
             '  build --asan    debug flags plus -fsanitize=address,undefined'
         write (output_unit, '(a)') '  test       run tests (--only-changed, --all)'
+        write (output_unit, '(a)') '  cover      run tests with coverage, then fortcov'
         write (output_unit, '(a)') &
             '  exec [--cwd <dir>] [--no-build] <t> [args]  build then run target'
         write (output_unit, '(a)') '  check      build + test, one-line status'
@@ -643,6 +645,24 @@ contains
         write (error_unit, '(a,a)') 'fo: full log: ', trim(build_log)
     end subroutine report_build_result
 
+    subroutine report_install_result(install_log)
+        character(len=*), intent(in) :: install_log
+        type(diagnostic_t) :: diag
+        character(len=32) :: lnum
+
+        call diagnostic_from_log('install', install_log, 'fo install', diag)
+        write (error_unit, '(a,a)') 'fo: install failed: ', trim(diag%message)
+        if (len_trim(diag%file) > 0) then
+            write (lnum, '(i0)') diag%line
+            write (error_unit, '(a,a,a,a)') 'fo: at: ', trim(diag%file), ':', &
+                trim(lnum)
+        end if
+        if (len_trim(diag%hint) > 0) then
+            write (error_unit, '(a,a)') 'fo: hint: ', trim(diag%hint)
+        end if
+        write (error_unit, '(a,a)') 'fo: full log: ', trim(install_log)
+    end subroutine report_install_result
+
     subroutine get_flags_arg(flags)
         character(len=*), intent(out) :: flags
         character(len=256) :: arg
@@ -989,7 +1009,10 @@ contains
         type(backend_t) :: b
         character(len=256) :: prefix, arg
         character(len=512) :: home
+        character(len=512) :: install_log
+        character(len=:), allocatable :: packed
         integer :: i, exitcode, status
+        integer :: n_args
 
         call get_environment_variable('HOME', home, status=status)
         if (status /= 0 .or. len_trim(home) == 0) home = '/usr/local'
@@ -1002,44 +1025,25 @@ contains
             end if
         end do
 
-        ! Native build, then copy the produced app binaries into prefix/bin.
-        ! No fpm: the binaries come from the gfortran backend's build/fo/bin.
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
             write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
-            stop 1
+            stop 1, quiet=.true.
         end if
-        call backend_build(b, exitcode)
-        if (exitcode /= 0) stop 1
 
-        call fs_make_dir(trim(prefix)//'/bin')
-        ! Atomic per-binary replace: copy to a temp name then rename over the
-        ! target. rename swaps the directory entry even when the existing binary
-        ! is held open (e.g. a running fo MCP server), avoiding "text file busy".
-        block
-            character(len=512), allocatable :: bins(:)
-            character(len=512) :: dst, slash_name
-            integer :: nb, k, sl
-            logical :: installed_any
-            installed_any = .false.
-            allocate (bins(256))
-            call fs_collect_files(trim(b%project_dir)//'/build/fo/bin', '', '', '', &
-                bins, nb, recursive=.false.)
-            do k = 1, nb
-                sl = index(trim(bins(k)), '/', back=.true.)
-                slash_name = bins(k) (sl + 1:)
-                dst = trim(prefix)//'/bin/'//trim(slash_name)
-                if (fs_copy_exec(trim(bins(k)), trim(dst)//'.fo-new') /= 0) cycle
-                if (fs_rename(trim(dst)//'.fo-new', trim(dst)) == 0) &
-                    installed_any = .true.
-            end do
-            deallocate (bins)
-            exitcode = merge(0, 1, installed_any)
-        end block
+        call make_tmpfile('fo-install', install_log)
+        n_args = 0
+        call argv_push(packed, n_args, 'fpm')
+        call argv_push(packed, n_args, 'install')
+        call argv_push(packed, n_args, '--prefix')
+        call argv_push(packed, n_args, trim(prefix))
+        call process_run_argv_logged('.', packed, n_args, install_log, &
+            .false., 0, exitcode)
         if (exitcode /= 0) then
-            write (error_unit, '(a)') 'fo: install: no binaries found in build/fo/bin'
-            stop 1
+            call report_install_result(install_log)
+            stop 1, quiet=.true.
         end if
+        call delete_tmpfile(install_log)
         write (output_unit, '(a,a)') 'installed: ', trim(prefix)//'/bin/'
     end subroutine cmd_install
 

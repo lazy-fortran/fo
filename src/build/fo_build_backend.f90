@@ -128,7 +128,7 @@ contains
         if (iostat /= 0 .or. jobs < 1) jobs = detect_nproc()
     end function detect_jobs
 
-    subroutine backend_build(self, exitcode, flags, log_file, with_tests)
+    subroutine backend_build(self, exitcode, flags, log_file, with_tests, use_cache)
         type(backend_t), intent(in) :: self
         integer, intent(out) :: exitcode
         character(len=*), intent(in), optional :: flags
@@ -137,6 +137,7 @@ contains
         ! so build/fo/bin/test_* stay current after a plain `fo build` instead of
         ! going stale until the next `fo test`. fpm/cmake build tests anyway.
         logical, intent(in), optional :: with_tests
+        logical, intent(in), optional :: use_cache
 
         integer :: np, lock_ierr
         character(len=512) :: log_path, flag_text, lock_dir
@@ -158,10 +159,10 @@ contains
         select case (self%kind)
         case (BACKEND_GFORTRAN)
             call gfortran_build(self%project_dir, log_path, exitcode, &
-                flags=flag_text)
+                flags=flag_text, use_cache=use_cache)
             if (exitcode == 0 .and. want_tests) &
                 call gfortran_test(self%project_dir, log_path, exitcode, &
-                build_only=.true.)
+                flags=flag_text, build_only=.true., use_cache=use_cache)
         case (BACKEND_CMAKE)
             call process_cmake_build(self%project_dir, flag_text, np, log_path, &
                 exitcode)
@@ -210,14 +211,16 @@ contains
         end select
     end function profile_flags
 
-    subroutine backend_test(self, exitcode, include_slow, log_file)
+    subroutine backend_test(self, exitcode, include_slow, log_file, flags, use_cache)
         type(backend_t), intent(in) :: self
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
         character(len=*), intent(in), optional :: log_file
+        character(len=*), intent(in), optional :: flags
+        logical, intent(in), optional :: use_cache
 
         integer :: jobs, lock_ierr
-        character(len=512) :: log_path, lock_dir
+        character(len=512) :: log_path, lock_dir, flag_text
         logical :: has_tests, slow
 
         slow = .false.
@@ -225,6 +228,8 @@ contains
         jobs = detect_jobs()
         log_path = ''
         if (present(log_file)) log_path = log_file
+        flag_text = ''
+        if (present(flags)) flag_text = flags
         call acquire_project_lock(self%project_dir, lock_dir, lock_ierr)
         if (lock_ierr /= 0) then
             exitcode = 1
@@ -234,7 +239,7 @@ contains
         select case (self%kind)
         case (BACKEND_GFORTRAN)
             call gfortran_test(self%project_dir, log_path, exitcode, &
-                include_slow=slow)
+                include_slow=slow, flags=flag_text, use_cache=use_cache)
         case (BACKEND_CMAKE)
             inquire (file=trim(self%project_dir)//'/build/CTestTestfile.cmake', &
                 exist=has_tests)
@@ -259,7 +264,7 @@ contains
     end subroutine backend_test
 
     subroutine backend_test_names(self, names, n_names, exitcode, include_slow, &
-            log_file)
+            log_file, flags, use_cache)
         use fo_scan, only: is_slow_test
         type(backend_t), intent(in) :: self
         character(len=128), intent(in) :: names(:)
@@ -267,13 +272,15 @@ contains
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
         character(len=*), intent(in), optional :: log_file
+        character(len=*), intent(in), optional :: flags
+        logical, intent(in), optional :: use_cache
 
         integer :: i, lock_ierr
         character(len=128) :: fast_names(MAX_TEST_TARGETS)
         logical :: slow
         integer :: n_fast, jobs
         character(len=1024) :: regex
-        character(len=512) :: log_path, lock_dir
+        character(len=512) :: log_path, lock_dir, flag_text
 
         slow = .false.
         if (present(include_slow)) slow = include_slow
@@ -281,6 +288,8 @@ contains
         jobs = detect_jobs()
         log_path = ''
         if (present(log_file)) log_path = log_file
+        flag_text = ''
+        if (present(flags)) flag_text = flags
 
         n_fast = 0
         do i = 1, n_names
@@ -299,7 +308,8 @@ contains
 
         if (self%kind == BACKEND_GFORTRAN) then
             call gfortran_test_names(self%project_dir, fast_names, n_fast, &
-                log_path, exitcode, include_slow=slow)
+                log_path, exitcode, include_slow=slow, flags=flag_text, &
+                use_cache=use_cache)
             call release_project_lock(lock_dir)
             return
         end if
