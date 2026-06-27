@@ -4,6 +4,7 @@ module fo_gfortran_build
     use fo_dag_bridge, only: build_dag_from_units
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, MAX_RESOLVED
     use fo_stat_memo, only: memo_save
+    use fo_compdb, only: compdb_write
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
         cache_restore_action, cache_store_action, hash_mod_file, &
@@ -369,7 +370,10 @@ contains
         character(len=4096) :: includes_flag
         character(len=512) :: c_line
         character(len=512), allocatable :: cfiles(:)
+        character(len=MAX_PATH), allocatable :: compdb_sources(:)
+        character(len=512), allocatable :: compdb_objects(:)
         integer :: n_cfiles, ic
+        integer :: n_compdb
         type(resolved_src_t) :: deps(MAX_RESOLVED)
         integer :: n_deps_resolved
 
@@ -397,6 +401,7 @@ contains
         allocate (old_mod_keys(MAX_NODES), new_mod_keys(MAX_NODES))
         allocate (compile_nodes(MAX_NODES), compile_keys(MAX_NODES))
         allocate (compile_exits(MAX_NODES), per_logs(MAX_NODES))
+        allocate (compdb_sources(MAX_NODES), compdb_objects(MAX_NODES))
 
         call scan_dir(trim(project_dir)//'/'//trim(src_dir), units_a, na, ierr)
         call scan_dir(trim(project_dir)//'/'//trim(app_dir), units_b, nb, ierr)
@@ -434,11 +439,16 @@ contains
         if (.not. allow_cache) cache_ierr = 1
 
         total_source = 0
+        n_compdb = 0
         do i = 1, n_order
             node_id = topo_order(i)
             if (is_test_arr(node_id)) cycle
             if (len_trim(filenames(node_id)) == 0) cycle
             total_source = total_source + 1
+            n_compdb = n_compdb + 1
+            compdb_sources(n_compdb) = filenames(node_id)
+            call make_obj_path(filenames(node_id), project_dir, obj_dir, &
+                compdb_objects(n_compdb))
         end do
         call progress_begin('build', total_source)
 
@@ -539,6 +549,10 @@ contains
             end do
         end if
         call progress_end()
+
+        call compdb_write(trim(project_dir)//'/build/compile_commands.json', &
+            project_dir, compdb_sources, compdb_objects, n_compdb, &
+            fc_command(), fc_base_flags(), includes_flag, flags)
 
         do i = 1, n_order
             node_id = topo_order(i)
