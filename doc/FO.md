@@ -195,6 +195,17 @@ test; it compiles the module DAG natively through its own content-addressed cach
 and also drives cmake + ninja for CMake projects. The manifest format is the shared
 contract; the cache, store, capsules, and surfaces are `fo`'s own.
 
+## Relationship to fortrun
+
+`fo` supersedes the earlier fortrun project as the runner and orchestrator for Fortran builds.
+Fortrun was experimental and on hold; `fo` implements the intended role of a build driver with
+dependency resolution, caching, and FPM integration, but does so more comprehensively and is
+the active path for the lazy-fortran compiler bootstrap. Nothing from fortrun merits porting:
+`fo`'s module scanner is more complete (handles submodules and external procedures), its
+dependency resolver is more efficient (transitive closure with deduplication), and its caching
+is stronger (content-addressed by source, compiler, flags, and `.mod` payloads vs. fortrun's
+file-based locking). The fortrun repository is superseded and no longer the active path.
+
 ## Status and interim loop
 
 The `fo` build core landed (#904: content-addressed cache, incremental rebuild,
