@@ -2,7 +2,8 @@ module fo_gfortran_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
-    use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, MAX_RESOLVED
+    use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
+        resolve_dev_dep_srcs, MAX_RESOLVED
     use fo_stat_memo, only: memo_save
     use fo_compdb, only: compdb_write
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
@@ -329,7 +330,7 @@ contains
         n_dep_includes = 0
         n_dep_objs = 0
         n_obj_seen = 0
-        if (config%n_deps == 0) return
+        if (config%n_deps == 0 .and. config%n_dev_deps == 0) return
 
         ! Every directory holding a .mod under build/ is an include candidate:
         ! the project's own gfortran_* profile dir and each dependency's mod
@@ -1117,6 +1118,9 @@ contains
         character(len=512), allocatable :: helper_objs(:)
         character(len=512), allocatable :: all_lib_objs(:)
         integer :: n_helper_objs, n_all_lib
+        type(resolved_src_t) :: devsrcs(MAX_RESOLVED)
+        integer :: n_dev, d, k, nud
+        type(scan_unit_t), allocatable :: udev(:)
 
         bonly = .false.
         if (present(build_only)) bonly = build_only
@@ -1138,6 +1142,22 @@ contains
         test_warn = test_warn_seconds(test_timeout)
         call scan_dir(trim(project_dir)//'/'//trim(test_dir), tunits, n_tests, ierr)
         if (n_tests == 0) return
+
+        call resolve_dev_dep_srcs(project_dir, devsrcs, n_dev, ierr)
+        if (ierr == 0 .and. n_dev > 0) then
+            allocate (udev(MAX_UNITS))
+            do d = 1, n_dev
+                call scan_dir(trim(devsrcs(d)%src_dir), udev, nud, ierr)
+                if (ierr /= 0) cycle
+                do k = 1, nud
+                    if (udev(k)%is_program) cycle
+                    if (n_tests >= MAX_UNITS) exit
+                    n_tests = n_tests + 1
+                    tunits(n_tests) = udev(k)
+                end do
+            end do
+            deallocate (udev)
+        end if
 
         call build_dag_from_units(tunits, n_tests, dag, filenames, is_test_arr, is_prog)
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)

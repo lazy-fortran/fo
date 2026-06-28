@@ -12,7 +12,7 @@ module fo_dep_resolve
         DEP_PATH, DEP_GIT, DEP_REGISTRY
     implicit none
     private
-    public :: resolved_src_t, resolve_dep_srcs, MAX_RESOLVED
+    public :: resolved_src_t, resolve_dep_srcs, resolve_dev_dep_srcs, MAX_RESOLVED
     public :: normalize_path, join_path
 
     integer, parameter :: MAX_RESOLVED = 256
@@ -43,6 +43,48 @@ contains
         call normalize_path(project_dir, root)
         call walk(root, out, n_out, n_unresolved, ierr, 0)
     end subroutine resolve_dep_srcs
+
+    subroutine resolve_dev_dep_srcs(project_dir, out, n_out, ierr)
+        !! Collect dev-dependency library source dirs for the test build.
+        !! Path dev-deps resolve to their local dir; git/registry dev-deps
+        !! resolve to the fpm bootstrapped layout build/dependencies/<name>.
+        !! Transitive regular deps of a dev-dep are not walked (deferred):
+        !! the test build scans direct dev-dep sources only.
+        character(len=*), intent(in) :: project_dir
+        type(resolved_src_t), intent(out) :: out(MAX_RESOLVED)
+        integer, intent(out) :: n_out, ierr
+
+        type(fpm_config_t) :: cfg
+        character(len=512) :: root, dep_dir
+        integer :: i, k, kind
+        logical :: seen
+
+        n_out = 0
+        ierr = 0
+        call normalize_path(project_dir, root)
+        call fpm_config_parse(root, cfg, ierr)
+        if (ierr /= 0) return
+
+        do i = 1, cfg%n_dev_deps
+            kind = dep_kind(cfg%dev_deps(i))
+            if (kind == DEP_PATH) then
+                call join_path(root, trim(cfg%dev_deps(i)%path), dep_dir)
+            else
+                dep_dir = trim(root)//'/build/dependencies/'// &
+                    trim(cfg%dev_deps(i)%name)
+            end if
+            seen = .false.
+            do k = 1, n_out
+                if (trim(out(k)%dir) == trim(dep_dir)) then
+                    seen = .true.
+                    exit
+                end if
+            end do
+            if (.not. seen) then
+                call record_dep_src(cfg%dev_deps(i)%name, dep_dir, out, n_out)
+            end if
+        end do
+    end subroutine resolve_dev_dep_srcs
 
     recursive subroutine walk(dir, out, n_out, n_unresolved, ierr, depth)
         character(len=*), intent(in) :: dir
