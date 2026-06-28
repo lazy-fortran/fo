@@ -1,7 +1,6 @@
 program test_fmt_deep
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_util, only: make_tmpfile, delete_tmpfile
-    use fo_fs, only: fs_write_text
     use fo_process, only: process_run_argv_logged, argv_push
     implicit none
 
