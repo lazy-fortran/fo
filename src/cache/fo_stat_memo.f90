@@ -15,7 +15,7 @@ module fo_stat_memo
     private
     public :: memo_hash_file, memo_save, memo_reset
 
-    integer, parameter :: CAP = 16384          ! power of two, >> any real build
+    integer, parameter :: CAP = 16384 ! power of two, >> any real build
     integer, parameter :: PATH_LEN = 512
     integer, parameter :: HASH_LEN = 64
 

@@ -19,8 +19,8 @@ module fo_dep_resolve
 
     type :: resolved_src_t
         character(len=256) :: name = ''
-        character(len=512) :: dir = ''       ! absolute dep root (dedup key)
-        character(len=512) :: src_dir = ''   ! absolute dir holding library sources
+        character(len=512) :: dir = '' ! absolute dep root (dedup key)
+        character(len=512) :: src_dir = '' ! absolute dir holding library sources
         integer :: kind = DEP_PATH
     end type resolved_src_t
 

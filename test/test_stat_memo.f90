@@ -73,7 +73,7 @@ contains
         call write_file(f, 'persist me')
         call memo_hash_file(trim(f), h1, ierr)
         call memo_save()
-        call memo_reset()              ! drop in-memory state; force reload
+        call memo_reset() ! drop in-memory state; force reload
         call memo_hash_file(trim(f), h2, ierr)
         call sha256_file(trim(f), direct, ierr)
         call assert(trim(h2) == trim(direct), 'hash correct after reload')
