@@ -1,8 +1,24 @@
 program test_compdb
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_gfortran_build, only: gfortran_build
     use fo_process, only: process_getpid
     implicit none
+
+    interface
+        function setenv(name, value, overwrite) bind(C, name='setenv') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: name(*), value(*)
+            integer(c_int), value :: overwrite
+            integer(c_int) :: ierr
+        end function setenv
+
+        function unsetenv(name) bind(C, name='unsetenv') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: name(*)
+            integer(c_int) :: ierr
+        end function unsetenv
+    end interface
 
     integer :: n_pass, n_fail
 
@@ -27,12 +43,15 @@ contains
     end subroutine assert
 
     subroutine test_gfortran_build_writes_compile_commands()
-        character(len=512) :: project_dir, log_file, compdb
-        integer :: exitcode, n_first, n_second
+        character(len=512) :: project_dir, log_file, compdb, cache_dir
+        integer :: exitcode, n_first, n_second, ierr
         logical :: exists
 
         call make_tmp_path('fo_compdb_project', project_dir)
         call make_tmp_path('fo_compdb_log', log_file)
+        call make_tmp_path('fo_compdb_cache', cache_dir)
+        call execute_command_line('mkdir -p '//trim(cache_dir))
+        ierr = setenv('FO_CACHE_DIR'//c_null_char, trim(cache_dir)//c_null_char, 1_c_int)
         call make_compdb_project(project_dir)
         compdb = trim(project_dir)//'/build/compile_commands.json'
 
@@ -53,6 +72,8 @@ contains
 
         call execute_command_line('rm -rf '//trim(project_dir))
         call execute_command_line('rm -f '//trim(log_file))
+        ierr = unsetenv('FO_CACHE_DIR'//c_null_char)
+        call execute_command_line('rm -rf '//trim(cache_dir))
     end subroutine test_gfortran_build_writes_compile_commands
 
     logical function valid_compdb(project_dir, compdb)
