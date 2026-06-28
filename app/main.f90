@@ -16,7 +16,9 @@ program fo_main
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
     use fo_fmt, only: fo_fmt_run, fo_fmt_files, fo_fmt_changed_run, &
-        fo_fmt_check_run, fo_fmt_check_files, fo_fmt_check_changed_run
+        fo_fmt_check_run, fo_fmt_check_files, fo_fmt_check_changed_run, &
+        fo_fmt_deep_run, fo_fmt_deep_files, fo_fmt_deep_changed_run, &
+        fo_fmt_deep_check_run, fo_fmt_deep_check_files
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_exec_target, only: resolve_exec_target
     use fo_cover, only: fo_cover_run
@@ -954,15 +956,16 @@ contains
         character(len=MAX_PATH) :: arg, project_dir
         character(len=MAX_PATH) :: fmt_files(MAX_NODES)
         character(len=8192) :: fmt_output
-        logical :: check_mode, changed_mode
+        logical :: check_mode, changed_mode, deep_mode
 
         if (has_arg('--help') .or. has_arg('-h')) then
-            write (output_unit, '(a)') 'usage: fo fmt [--check] [--changed] [path ...]'
+            write (output_unit, '(a)') 'usage: fo fmt [--check] [--changed] [--deep] [path ...]'
             write (output_unit, '(a)') ''
             write (output_unit, '(a)') 'Formats project Fortran sources.'
             write (output_unit, '(a)') 'With paths, formats only the listed Fortran sources.'
             write (output_unit, '(a)') 'With --changed, formats Git-dirty Fortran sources only.'
             write (output_unit, '(a)') 'With --check, checks formatting without modifying files.'
+            write (output_unit, '(a)') 'With --deep, uses fluff AST formatter (requires fluff on PATH).'
             write (output_unit, '(a)') 'Reads compatible .fprettify settings with fo native formatting.'
             write (output_unit, '(a)') 'Falls back to fo native formatting when no fprettify config exists.'
             return
@@ -970,11 +973,12 @@ contains
 
         check_mode = has_arg('--check')
         changed_mode = has_arg('--changed')
+        deep_mode = has_arg('--deep')
         n_fmt_files = 0
         do i = 2, command_argument_count()
             call get_command_argument(i, arg)
             select case (trim(arg))
-            case ('--check', '--changed')
+            case ('--check', '--changed', '--deep')
                 cycle
             case default
                 if (len_trim(arg) > 0) then
@@ -1001,6 +1005,50 @@ contains
                 write (error_unit, '(a)') 'fo fmt: --changed does not accept paths'
                 stop 1, quiet = .true.
             end if
+        end if
+
+        if (deep_mode) then
+            if (check_mode) then
+                if (n_fmt_files > 0) then
+                    b = detect_backend('.')
+                    project_dir = '.'
+                    if (b%kind /= BACKEND_NONE) project_dir = b%project_dir
+                    call fo_fmt_deep_check_files(trim(project_dir), fmt_files, &
+                        n_fmt_files, fmt_output, exitcode)
+                else
+                    call fo_fmt_deep_check_run('.', fmt_output, exitcode)
+                end if
+                if (len_trim(fmt_output) > 0) &
+                    write (error_unit, '(a)') trim(fmt_output)
+                if (exitcode /= 0) stop 1, quiet = .true.
+                return
+            end if
+
+            if (changed_mode) then
+                call fo_fmt_deep_changed_run('.', exitcode)
+                if (exitcode /= 0) then
+                    write (error_unit, '(a)') 'fo fmt --deep --changed: no Git worktree'
+                    stop 1, quiet = .true.
+                end if
+                write (output_unit, '(a)') 'formatted changed sources (deep)'
+                return
+            end if
+
+            if (n_fmt_files > 0) then
+                call fo_fmt_deep_files('.', fmt_files, n_fmt_files, exitcode)
+            else
+                call fo_fmt_deep_run('.', exitcode)
+            end if
+            if (exitcode /= 0) then
+                write (error_unit, '(a)') 'fo fmt --deep: formatting failed'
+                stop 1, quiet = .true.
+            end if
+            if (n_fmt_files > 0) then
+                write (output_unit, '(a)') 'formatted selected sources (deep)'
+            else
+                write (output_unit, '(a)') 'formatted (deep)'
+            end if
+            return
         end if
 
         if (check_mode) then

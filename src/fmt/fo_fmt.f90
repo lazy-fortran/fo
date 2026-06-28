@@ -11,6 +11,8 @@ module fo_fmt
     public :: fo_fmt_run, fo_fmt_files, fo_fmt_changed_run
     public :: fo_fmt_check_run, fo_fmt_check_files
     public :: fo_fmt_check_changed_run
+    public :: fo_fmt_deep_run, fo_fmt_deep_files, fo_fmt_deep_changed_run
+    public :: fo_fmt_deep_check_run, fo_fmt_deep_check_files
 
 contains
 
@@ -630,5 +632,168 @@ contains
             dir = '.'
         end if
     end function dirname
+
+    subroutine fo_fmt_deep_run(dir, exitcode)
+        character(len=*), intent(in) :: dir
+        integer, intent(out) :: exitcode
+
+        type(backend_t) :: b
+        character(len=512) :: scan_root, list_file
+
+        b = detect_backend(trim(dir))
+        scan_root = trim(dir)
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+
+        exitcode = 0
+        call make_tmpfile('fo_fmt_deep_files', list_file)
+        call write_source_list(scan_root, list_file)
+        call fo_fmt_deep_list(list_file, exitcode)
+        call delete_tmpfile(list_file)
+    end subroutine fo_fmt_deep_run
+
+    subroutine fo_fmt_deep_files(dir, files, n_files, exitcode)
+        character(len=*), intent(in) :: dir
+        character(len=*), intent(in) :: files(:)
+        integer, intent(in) :: n_files
+        integer, intent(out) :: exitcode
+
+        character(len=512) :: list_file
+
+        call make_tmpfile('fo_fmt_deep_files', list_file)
+        call write_explicit_source_list(dir, files, n_files, list_file)
+        call fo_fmt_deep_list(list_file, exitcode)
+        call delete_tmpfile(list_file)
+    end subroutine fo_fmt_deep_files
+
+    subroutine fo_fmt_deep_changed_run(dir, exitcode)
+        character(len=*), intent(in) :: dir
+        integer, intent(out) :: exitcode
+
+        type(backend_t) :: b
+        character(len=512) :: scan_root, list_file
+        integer :: n_git
+        logical :: git_ok
+
+        b = detect_backend(trim(dir))
+        scan_root = trim(dir)
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+
+        call make_tmpfile('fo_fmt_deep_files', list_file)
+        call write_git_changed_source_list(scan_root, list_file, git_ok, n_git)
+        if (.not. git_ok) then
+            exitcode = 1
+            call delete_tmpfile(list_file)
+            return
+        end if
+
+        call fo_fmt_deep_list(list_file, exitcode)
+        call delete_tmpfile(list_file)
+    end subroutine fo_fmt_deep_changed_run
+
+    subroutine fo_fmt_deep_list(list_file, exitcode)
+        character(len=*), intent(in) :: list_file
+        integer, intent(out) :: exitcode
+
+        character(len=512) :: fpath
+        character(len=:), allocatable :: packed
+        integer :: u, ios, fmt_exit, n_args
+
+        exitcode = 0
+
+        open (newunit=u, file=trim(list_file), status='old', iostat=ios)
+        if (ios /= 0) return
+
+        do
+            read (u, '(a)', iostat=ios) fpath
+            if (ios /= 0) exit
+            if (len_trim(fpath) == 0) cycle
+
+            n_args = 0
+            packed = ''
+            call argv_push(packed, n_args, 'fluff')
+            call argv_push(packed, n_args, 'format')
+            call argv_push(packed, n_args, trim(fpath))
+            call process_run_argv_logged('', packed, n_args, '/dev/null', &
+                .false., 120, fmt_exit)
+
+            if (fmt_exit /= 0) exitcode = 1
+        end do
+        close (u)
+    end subroutine fo_fmt_deep_list
+
+    subroutine fo_fmt_deep_check_run(dir, output, exitcode)
+        character(len=*), intent(in) :: dir
+        character(len=*), intent(out) :: output
+        integer, intent(out) :: exitcode
+
+        type(backend_t) :: b
+        character(len=512) :: scan_root, list_file
+
+        b = detect_backend(trim(dir))
+        scan_root = trim(dir)
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+
+        call make_tmpfile('fo_fmt_deep_files', list_file)
+        call write_source_list(scan_root, list_file)
+        call fo_fmt_deep_check_list(list_file, output, exitcode)
+        call delete_tmpfile(list_file)
+    end subroutine fo_fmt_deep_check_run
+
+    subroutine fo_fmt_deep_check_files(project_dir, files, n_files, output, exitcode)
+        character(len=*), intent(in) :: project_dir
+        character(len=*), intent(in) :: files(:)
+        integer, intent(in) :: n_files
+        character(len=*), intent(out) :: output
+        integer, intent(out) :: exitcode
+
+        character(len=512) :: list_file
+
+        call make_tmpfile('fo_fmt_deep_files', list_file)
+        call write_explicit_source_list(project_dir, files, n_files, list_file)
+        call fo_fmt_deep_check_list(list_file, output, exitcode)
+        call delete_tmpfile(list_file)
+    end subroutine fo_fmt_deep_check_files
+
+    subroutine fo_fmt_deep_check_list(list_file, output, exitcode)
+        character(len=*), intent(in) :: list_file
+        character(len=*), intent(out) :: output
+        integer, intent(out) :: exitcode
+
+        character(len=512) :: fpath, errfile
+        character(len=:), allocatable :: packed
+        integer :: u, ios, fmt_exit, n_args, n_bad
+
+        exitcode = 0
+        output = ''
+        n_bad = 0
+
+        open (newunit=u, file=trim(list_file), status='old', iostat=ios)
+        if (ios /= 0) return
+
+        do
+            read (u, '(a)', iostat=ios) fpath
+            if (ios /= 0) exit
+            if (len_trim(fpath) == 0) cycle
+
+            call make_tmpfile('fo_fmt_deep_check', errfile)
+            n_args = 0
+            packed = ''
+            call argv_push(packed, n_args, 'fluff')
+            call argv_push(packed, n_args, 'format')
+            call argv_push(packed, n_args, '--check')
+            call argv_push(packed, n_args, trim(fpath))
+            call process_run_argv_logged('', packed, n_args, trim(errfile), &
+                .false., 120, fmt_exit)
+
+            if (fmt_exit /= 0) then
+                n_bad = n_bad + 1
+                output = trim(output)//trim(fpath)//': needs formatting'//achar(10)
+            end if
+            call delete_tmpfile(errfile)
+        end do
+        close (u)
+
+        if (n_bad > 0) exitcode = 1
+    end subroutine fo_fmt_deep_check_list
 
 end module fo_fmt
