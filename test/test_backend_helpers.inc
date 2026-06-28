@@ -662,6 +662,54 @@
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_bootstraps_git_dependency
 
+    subroutine test_gfortran_test_builds_dev_dependency()
+        !! A project whose only dependency is a dev-dependency (test-drive style)
+        !! must compile the dev-dep's module through fo's own DAG so `fo test`
+        !! can build and link the test program. Before the fix, fo test never
+        !! scanned dev-dep sources, so the dev-dep's .mod was missing and the
+        !! test program failed to compile.
+        type(backend_t) :: b
+        integer :: exitcode, u
+        character(len=512) :: base, libdir, appdir, log_file
+
+        call make_tmp_path('fo_test_devdep', base)
+        libdir = trim(base)//'/lib'
+        appdir = trim(base)//'/app'
+        call make_tmp_path('fo_backend_devdep', log_file)
+
+        call execute_command_line('mkdir -p '//trim(libdir)//'/src '// &
+            trim(appdir)//'/test')
+        open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "devhelper"'
+        close (u)
+        open (newunit=u, file=trim(libdir)//'/src/devhelper.f90', &
+            status='replace')
+        write (u, '(a)') 'module devhelper'
+        write (u, '(a)') '  implicit none'
+        write (u, '(a)') '  integer, parameter :: dev_value = 21'
+        write (u, '(a)') 'end module devhelper'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "devapp"'
+        write (u, '(a)') '[dev-dependencies]'
+        write (u, '(a)') 'devhelper = { path = "../lib" }'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/test/check.f90', status='replace')
+        write (u, '(a)') 'program check'
+        write (u, '(a)') '  use devhelper, only: dev_value'
+        write (u, '(a)') '  if (dev_value /= 21) stop 1'
+        write (u, '(a)') 'end program check'
+        close (u)
+
+        b = detect_backend(appdir)
+        call backend_test(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, &
+            'fo test compiles+links a dev-dependency module')
+
+        call remove_tree(base)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_test_builds_dev_dependency
+
     subroutine first_match(dir, infix, path)
         !! Return the first file under dir whose name contains infix. Shell-based
         !! to match the other build-test helpers and avoid extra module imports.
