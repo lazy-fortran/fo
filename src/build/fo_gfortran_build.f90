@@ -1118,6 +1118,7 @@ contains
         character(len=512), allocatable :: helper_objs(:)
         character(len=512), allocatable :: all_lib_objs(:)
         integer :: n_helper_objs, n_all_lib
+        logical :: in_lib
         type(resolved_src_t) :: devsrcs(MAX_RESOLVED)
         integer :: n_dev, d, k, nud
         type(scan_unit_t), allocatable :: udev(:)
@@ -1208,6 +1209,14 @@ contains
         end do
         do i = 1, n_helper_objs
             if (n_all_lib >= MAX_SRC_OBJS) exit
+            in_lib = .false.
+            do d = 1, n_lib_objs
+                if (trim(helper_objs(i)) == trim(lib_objs(d))) then
+                    in_lib = .true.
+                    exit
+                end if
+            end do
+            if (in_lib) cycle
             n_all_lib = n_all_lib + 1
             all_lib_objs(n_all_lib) = helper_objs(i)
         end do
