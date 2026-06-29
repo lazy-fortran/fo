@@ -432,9 +432,14 @@ contains
     end function has_index_use
 
     logical function subscript_open(expr, idx)
+        !! A subscript opens with 'array(idx'. The identifier before the '(' must
+        !! be an array name, not a value/array intrinsic: real(n,dp), all(a==0),
+        !! any(a<0) pass the value through, they do not index by it, so the guard
+        !! `n < 0` / `a < 0` next to them is not a real index hazard.
         character(len=*), intent(in) :: expr, idx
         integer :: p, base, after
         logical :: ok_after, ok_before
+        character(len=128) :: head
 
         subscript_open = .false.
         base = 0
@@ -447,6 +452,10 @@ contains
             if (.not. ok_after) ok_after = .not. is_ident_char(expr(after:after))
             ok_before = .false.
             if (p > 1) ok_before = is_ident_char(expr(p - 1:p - 1))
+            if (ok_before) then
+                call head_ident(expr, p - 1, head)
+                if (is_value_intrinsic(head)) ok_before = .false.
+            end if
             if (ok_after .and. ok_before) then
                 subscript_open = .true.
                 return
@@ -454,6 +463,36 @@ contains
             base = p
         end do
     end function subscript_open
+
+    subroutine head_ident(expr, endp, head)
+        !! Read the identifier ending at endp (the char before a '(').
+        character(len=*), intent(in) :: expr
+        integer, intent(in) :: endp
+        character(len=*), intent(out) :: head
+        integer :: j
+
+        head = ''
+        j = endp
+        do
+            if (j < 1) exit
+            if (.not. is_ident_char(expr(j:j))) exit
+            j = j - 1
+        end do
+        if (endp > j) head = expr(j + 1:endp)
+    end subroutine head_ident
+
+    logical function is_value_intrinsic(name)
+        !! Common intrinsics that take a value or array argument rather than
+        !! indexing it; an array shadowing one of these names is itself flagged
+        !! by -Wintrinsic-shadow, so excluding them here is safe.
+        character(len=*), intent(in) :: name
+        character(len=*), parameter :: list = &
+            ' real dble dfloat int nint cmplx aimag conjg abs sign mod modulo '// &
+            'sqrt exp log log10 sin cos tan all any sum product count merge '// &
+            'maxval minval dot_product max min huge tiny epsilon '
+        is_value_intrinsic = len_trim(name) > 0 .and. &
+            index(list, ' '//trim(name)//' ') > 0
+    end function is_value_intrinsic
 
     logical function bounded_after(expr, pat)
         character(len=*), intent(in) :: expr, pat

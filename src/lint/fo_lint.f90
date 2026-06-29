@@ -775,9 +775,18 @@ contains
         n_args = 0
         call argv_push(packed, n_args, 'gfortran')
         call argv_push(packed, n_args, '-fsyntax-only')
+        ! Preprocess like the real build: source files carry #ifdef guards
+        ! (optional backends), which a non-preprocessed pass misreads as illegal
+        ! directives.
+        call argv_push(packed, n_args, '-cpp')
         call argv_push(packed, n_args, '-Wall')
         call argv_push(packed, n_args, '-Wextra')
         call argv_push(packed, n_args, '-Wno-unused')
+        ! -Wcompare-reals (from -Wextra) fires on deliberate exact float idioms
+        ! that have no safe rewrite: NaN tests (x /= x), exact-zero guards
+        ! (x == 0.0), endpoint/step matches (t == tout, t + h /= t), and
+        ! serial-vs-parallel determinism checks. It carries no signal here.
+        call argv_push(packed, n_args, '-Wno-compare-reals')
         call argv_push(packed, n_args, '-Wimplicit-interface')
         call argv_push(packed, n_args, '-Wimplicit-procedure')
         call argv_push_split(packed, n_args, trim(mod_flags))
