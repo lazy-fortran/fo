@@ -24,6 +24,7 @@ program fo_main
     use fo_cover, only: fo_cover_run
     use fo_lock, only: lock_write
     use fo_scaffold, only: scaffold_project
+    use fo_bench, only: bench_result_t, fo_bench_run
     implicit none
 
     character(len=256) :: action
@@ -48,6 +49,8 @@ program fo_main
         call cmd_build()
     case ('test')
         call cmd_test()
+    case ('bench')
+        call cmd_bench()
     case ('cover')
         call fo_cover_run()
     case ('exec', 'run')
@@ -854,6 +857,40 @@ contains
         write (error_unit, '(a,a)') 'fo: log: ', trim(test_log)
         stop 1, quiet = .true.
     end subroutine report_test_result
+
+    subroutine cmd_bench()
+        type(bench_result_t), allocatable :: results(:)
+        logical :: use_json
+        integer :: n_runs, n_results, exitcode, i
+        character(len=256) :: arg
+
+        n_runs = 5
+        use_json = .false.
+
+        do i = 2, command_argument_count()
+            call get_command_argument(i, arg)
+            if (trim(arg) == '--json') then
+                use_json = .true.
+            else if (trim(arg) == '--runs' .and. i < command_argument_count()) then
+                call get_command_argument(i + 1, arg)
+                read (arg, *, iostat=exitcode) n_runs
+                if (exitcode /= 0 .or. n_runs < 1 .or. n_runs > 1000) then
+                    write (error_unit, '(a)') 'fo bench: invalid --runs value'
+                    stop 1
+                end if
+            else if (index(trim(arg), '--runs=') == 1) then
+                read (arg(8:), *, iostat=exitcode) n_runs
+                if (exitcode /= 0 .or. n_runs < 1 .or. n_runs > 1000) then
+                    write (error_unit, '(a)') 'fo bench: invalid --runs value'
+                    stop 1
+                end if
+            end if
+        end do
+
+        allocate (results(128))
+        call fo_bench_run('.', results, n_results, use_json, n_runs, exitcode)
+        if (exitcode /= 0) stop 1, quiet=.true.
+    end subroutine cmd_bench
 
     subroutine cmd_graph()
         type(scan_unit_t), allocatable :: units(:)
