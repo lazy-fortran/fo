@@ -25,6 +25,7 @@ program fo_main
     use fo_lock, only: lock_write
     use fo_scaffold, only: scaffold_project
     use fo_bench, only: bench_result_t, fo_bench_run
+    use fo_doc, only: fo_doc_run
     implicit none
 
     character(len=256) :: action
@@ -45,6 +46,8 @@ program fo_main
         call cmd_changed()
     case ('graph')
         call cmd_graph()
+    case ('doc')
+        call cmd_doc()
     case ('build')
         call cmd_build()
     case ('test')
@@ -933,6 +936,19 @@ contains
             end do
         end if
     end subroutine cmd_graph
+
+    subroutine cmd_doc()
+        type(backend_t) :: b
+        character(len=512) :: scan_root
+        integer :: exitcode
+
+        b = detect_backend('.')
+        scan_root = '.'
+        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+
+        call fo_doc_run(trim(scan_root), has_arg('--json'), exitcode)
+        if (exitcode /= 0) stop 1
+    end subroutine cmd_doc
 
     subroutine cmd_lint()
         use fo_lint, only: lint_finding_t, lint_warning_t, &
