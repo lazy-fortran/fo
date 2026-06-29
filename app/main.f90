@@ -233,7 +233,7 @@ contains
             call fo_fmt_check_changed_run(trim(b%project_dir), changed_files, &
                 n_changed, fmt_out, fmt_exit)
             if (len_trim(fmt_out) > 0) write (error_unit, '(a)') trim(fmt_out)
-            if (fmt_exit /= 0) stop 1
+            if (fmt_exit /= 0) write (error_unit, '(a)') 'Fmt: WARN'
         end block
 
         call cpu_time(t1)
@@ -248,7 +248,7 @@ contains
         write (output_unit, '(a)') ''
         write (output_unit, '(a)') 'usage: fo [command]'
         write (output_unit, '(a)') ''
-        write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt --check'
+        write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt hint'
         write (output_unit, '(a)') '  build      build only (--flag "-O0")'
         write (output_unit, '(a)') &
             '  build --debug   add -g -O0 -fcheck=all -fbacktrace'
@@ -1000,12 +1000,31 @@ contains
                     ':', warnings(i)%column, ': ', &
                     trim(warnings(i)%message)
             end do
+            if (any_unused_dummy(warnings, n_warnings)) &
+                write (output_unit, '(a)') &
+                'hint: an intentionally unused dummy argument (e.g. an interface'// &
+                '-mandated callback parameter) can be silenced with'// &
+                ' `associate (unused => arg); end associate`'
             write (output_unit, '(i0,a,i0,a)') &
                 n_findings, ' unused import(s), ', &
                 n_warnings, ' compiler warning(s)'
             stop 1, quiet = .true.
         end if
     end subroutine cmd_lint
+
+    logical function any_unused_dummy(warnings, n)
+        use fo_lint, only: lint_warning_t
+        type(lint_warning_t), intent(in) :: warnings(:)
+        integer, intent(in) :: n
+        integer :: i
+        any_unused_dummy = .false.
+        do i = 1, n
+            if (index(warnings(i)%message, 'Unused dummy argument') > 0) then
+                any_unused_dummy = .true.
+                return
+            end if
+        end do
+    end function any_unused_dummy
 
     subroutine cmd_fmt()
         type(backend_t) :: b

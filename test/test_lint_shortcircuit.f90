@@ -27,6 +27,8 @@ program test_lint_shortcircuit
     call test_ignores_function_call_of_component()
     call test_ignores_alloc_guard_other_component()
     call test_flags_alloc_guard_same_component()
+    call test_ignores_array_reduction_bound()
+    call test_ignores_value_intrinsic_conversion()
 
     write (output_unit, '(a,i0,a,i0,a)') 'lint_shortcircuit: ', n_pass, &
         ' pass, ', n_fail, ' fail'
@@ -209,6 +211,26 @@ contains
         call scan_lines(lines, 1, flagged, n)
         call assert(n == 0, 'function call of an unrelated component not flagged')
     end subroutine test_ignores_function_call_of_component
+
+    subroutine test_ignores_array_reduction_bound()
+        integer :: flagged(64), n
+        character(len=200) :: lines(1)
+
+        lines(1) = '        if (relerr < 0.0_dp .or. any(a < 0.0_dp) '// &
+            '.or. all(a == 0.0_dp)) then'
+        call scan_lines(lines, 1, flagged, n)
+        call assert(n == 0, 'array reduction any/all(a ...) is not an a-subscript')
+    end subroutine test_ignores_array_reduction_bound
+
+    subroutine test_ignores_value_intrinsic_conversion()
+        integer :: flagged(64), n
+        character(len=200) :: lines(1)
+
+        lines(1) = '        if (ntot < 0 .or. abs(re - real(ntot, dp)) '// &
+            '> 0.25_dp) then'
+        call scan_lines(lines, 1, flagged, n)
+        call assert(n == 0, 'real(ntot, dp) conversion is not an ntot-subscript')
+    end subroutine test_ignores_value_intrinsic_conversion
 
     subroutine scan_lines(lines, n_lines, flagged, n_flag)
         character(len=200), intent(in) :: lines(:)
