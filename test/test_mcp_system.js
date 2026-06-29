@@ -29,6 +29,24 @@ function assert(cond, msg) {
   else { failed++; process.stdout.write('  FAIL: ' + msg + '\n'); }
 }
 
+function assertAgentJsonShape(text, prefix) {
+  let obj = null;
+  try {
+    obj = JSON.parse(text);
+  } catch (e) {
+    assert(false, prefix + ' parses as JSON');
+    return;
+  }
+  assert(Object.prototype.hasOwnProperty.call(obj, 'ok'), prefix + ' has ok');
+  assert(Object.prototype.hasOwnProperty.call(obj, 'stage'), prefix + ' has stage');
+  assert(Object.prototype.hasOwnProperty.call(obj, 'target'), prefix + ' has target');
+  assert(Object.prototype.hasOwnProperty.call(obj, 'summary'), prefix + ' has summary');
+  assert(Object.prototype.hasOwnProperty.call(obj, 'hint'), prefix + ' has hint');
+  assert(Object.prototype.hasOwnProperty.call(obj, 'rerun'), prefix + ' has rerun');
+  assert(Object.prototype.hasOwnProperty.call(obj, 'log_path'), prefix + ' has log_path');
+  assert(typeof obj.elapsed_s === 'number', prefix + ' has numeric elapsed_s');
+}
+
 function startServer(cwd) {
   const proc = spawn(FO, ['mcp-server'], {
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -164,6 +182,16 @@ async function runSuite(label, send, readResponse) {
     assert(lint.result.content[0].text.includes('unused_imports'), 'lint has json output');
     assert(fo.inputSchema.properties.action.enum.includes('lint'), 'has lint action');
 
+    process.stdout.write('tools/call check:\n');
+    send(srv.proc, {
+      jsonrpc: '2.0', id: 9, method: 'tools/call',
+      params: { name: 'fo', arguments: { action: 'check' } }
+    });
+    const check = await readResponse(srv.proc, 120000);
+    assert(check.result !== undefined && check.result.content !== undefined, 'check returns content');
+    assert(check.result.isError === false, 'check not error');
+    assertAgentJsonShape(check.result.content[0].text, 'check compact json');
+
     process.stdout.write('unknown method:\n');
     send(srv.proc, { jsonrpc: '2.0', id: 5, method: 'bogus/method', params: {} });
     const unk = await readResponse(srv.proc);
@@ -179,18 +207,21 @@ async function runSuite(label, send, readResponse) {
     assert(unkAct.error !== undefined, 'unknown action returns error');
 
     process.stdout.write('stderr:\n');
-    assert(srv.getStderr() === '', 'no stderr output');
+    const stderr = srv.getStderr();
+    assert(stderr === '', 'no stderr output');
 
     process.stdout.write('shutdown:\n');
     send(srv.proc, { jsonrpc: '2.0', id: 7, method: 'shutdown', params: {} });
     const shut = await readResponse(srv.proc);
     assert(shut.result === null, 'shutdown returns null');
     await new Promise((resolve) => {
+      let exitTimer = null;
       srv.proc.on('exit', (code) => {
+        clearTimeout(exitTimer);
         assert(code === 0, 'clean exit after shutdown');
         resolve();
       });
-      setTimeout(() => {
+      exitTimer = setTimeout(() => {
         assert(false, 'server exited within timeout');
         srv.proc.kill();
         resolve();

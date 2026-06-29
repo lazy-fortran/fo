@@ -153,9 +153,19 @@ contains
         call assert(index(line, '"ok":true') > 0, &
             'compact success includes ok')
         call assert(index(line, '"stage":"done"') > 0, &
-            'compact success includes done stage')
-        call assert(index(line, '"summary":"build and tests passed"') > 0, &
+            'compact success includes stage')
+        call assert(index(line, '"target"') > 6, &
+            'compact success includes target')
+        call assert(index(line, '"summary":"build and tests passed"') > 5, &
             'compact success includes summary')
+        call assert(index(line, '"hint"') > 1, &
+            'compact success includes hint key')
+        call assert(index(line, '"rerun"') > 7, &
+            'compact success includes rerun')
+        call assert(index(line, '"log_path"') > 6, &
+            'compact success includes log_path')
+        call assert(index(line, '"elapsed_s":0.125') > 0, &
+            'compact success includes numeric elapsed_s')
         call assert(len_trim(line) < 8192, 'compact success stays bounded')
     end subroutine test_check_result_compact_json_success
 
@@ -181,10 +191,16 @@ contains
             'compact failure includes stage')
         call assert(index(line, '"target":"test_x"') > 0, &
             'compact failure includes target')
+        call assert(index(line, '"summary":"test_x returned exit code 1"') > 0, &
+            'compact failure includes summary')
+        call assert(index(line, '"hint":"make this test faster or mark it slow"') > 0, &
+            'compact failure includes hint')
         call assert(index(line, '"rerun":"fo test test_x"') > 0, &
             'compact failure includes rerun')
-        call assert(index(line, 'make this test faster or mark it slow') > 0, &
-            'compact failure includes slow hint')
+        call assert(index(line, '"log_path":"/tmp/fo-test.log"') > 0, &
+            'compact failure includes log path')
+        call assert(index(line, '"elapsed_s":0.500') > 0, &
+            'compact failure includes numeric elapsed_s')
         call assert(len_trim(line) < 8192, 'compact failure stays bounded')
     end subroutine test_check_result_compact_json_failure
 

@@ -17,7 +17,7 @@ module fo_progress
     use fo_process, only: process_stderr_is_tty, process_write_stderr
     implicit none
     private
-    public :: progress_begin, progress_step, progress_end
+    public :: progress_begin, progress_step, progress_end, progress_suppress
 
     integer :: g_total = 0
     integer :: g_done = 0
@@ -27,6 +27,7 @@ module fo_progress
     integer :: g_shown = -1
     logical :: g_active = .false.
     logical :: g_tty = .false.
+    logical :: g_suppressed = .false.
     character(len=16) :: g_label = ''
 
 contains
@@ -40,6 +41,7 @@ contains
         integer :: ln, st
 
         g_active = .false.
+        if (g_suppressed) return
         if (total <= 0) return
         call get_environment_variable('FO_NO_PROGRESS', off, ln, st)
         if (st == 0 .and. ln > 0) return
@@ -87,6 +89,13 @@ contains
         if (g_tty) call process_write_stderr(new_line('a'))
         g_active = .false.
     end subroutine progress_end
+
+    subroutine progress_suppress(disabled)
+        logical, intent(in) :: disabled
+
+        g_suppressed = disabled
+        if (disabled) g_active = .false.
+    end subroutine progress_suppress
 
     subroutine render(done)
         integer, intent(in) :: done

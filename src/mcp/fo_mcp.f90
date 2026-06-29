@@ -13,6 +13,7 @@ module fo_mcp
         capabilities_json
     use fo_process, only: process_start_fo_check, process_poll_pid, &
         process_cancel_pid
+    use fo_progress, only: progress_suppress
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
         RUN_RERUN_PENDING
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
@@ -173,7 +174,9 @@ contains
             call detect_capabilities(cap)
             call capabilities_json(cap, cap_json)
         end if
+        call progress_suppress(.true.)
         call fo_check_run(trim(dir), check_res)
+        call progress_suppress(.false.)
         if (want_full) then
             output_text = check_result_full_json(check_res, cap_json)
         else
