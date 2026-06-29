@@ -23,6 +23,7 @@ program fo_main
     use fo_exec_target, only: resolve_exec_target
     use fo_cover, only: fo_cover_run
     use fo_lock, only: lock_write
+    use fo_scaffold, only: scaffold_project
     implicit none
 
     character(len=256) :: action
@@ -69,6 +70,10 @@ program fo_main
         call cmd_mcp_server()
     case ('lsp')
         call cmd_lsp()
+    case ('new')
+        call cmd_new()
+    case ('init')
+        call cmd_init()
     case ('version', '--version')
         write (output_unit, '(a)') 'fo 0.1.0'
     case ('help', '--help', '-h')
@@ -1244,5 +1249,60 @@ contains
         use fo_lsp, only: lsp_serve
         call lsp_serve()
     end subroutine cmd_lsp
+
+    subroutine cmd_new()
+        character(len=256) :: target, proj
+        logical :: is_library
+        integer :: nargs, i, ierr, pos
+        character(len=256) :: arg
+
+        nargs = command_argument_count()
+        if (nargs < 2) then
+            write (error_unit, '(a)') 'usage: fo new [--lib] <name>'
+            stop 1
+        end if
+
+        is_library = .false.
+        target = ''
+        do i = 2, nargs
+            call get_command_argument(i, arg)
+            if (trim(arg) == '--lib') then
+                is_library = .true.
+            else if (len_trim(target) == 0) then
+                target = arg
+            end if
+        end do
+
+        if (len_trim(target) == 0) then
+            write (error_unit, '(a)') 'fo: project name required'
+            stop 1
+        end if
+
+        proj = target
+        pos = index(trim(target), '/', back=.true.)
+        if (pos > 0) proj = target(pos + 1:)
+
+        call scaffold_project(trim(target), trim(proj), is_library, ierr)
+        if (ierr /= 0) stop 1
+    end subroutine cmd_new
+
+    subroutine cmd_init()
+        character(len=256) :: cwd, name
+        integer :: ierr, status, pos
+
+        call get_environment_variable('PWD', cwd, status=status)
+        if (status /= 0 .or. len_trim(cwd) == 0) then
+            cwd = '.'
+        end if
+
+        name = cwd
+        pos = index(trim(cwd), '/', back=.true.)
+        if (pos > 0) then
+            name = cwd(pos + 1:)
+        end if
+
+        call scaffold_project('.', trim(name), .false., ierr)
+        if (ierr /= 0) stop 1
+    end subroutine cmd_init
 
 end program fo_main
