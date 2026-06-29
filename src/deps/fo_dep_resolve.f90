@@ -174,7 +174,7 @@ contains
 
         character(len=256) :: segs(128)
         integer :: nseg, i, start, n
-        logical :: absolute
+        logical :: absolute, at_sep
         character(len=:), allocatable :: p
 
         p = trim(adjustl(path))
@@ -183,7 +183,9 @@ contains
         nseg = 0
         start = 1
         do i = 1, n + 1
-            if (i > n .or. p(i:i) == '/') then
+            at_sep = i > n
+            if (.not. at_sep) at_sep = p(i:i) == '/'
+            if (at_sep) then
                 if (i > start) then
                     call push_seg(p(start:i - 1), segs, nseg)
                 end if

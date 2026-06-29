@@ -187,7 +187,7 @@ contains
         call delete_tmpfile(tmpfile)
         if (ios /= 0) return
 
-        version = adjustl(line)
+        version = adjustl(line(:len(version)))
         dot = index(version, '.')
         if (dot > 1) then
             major = version(1:dot - 1)

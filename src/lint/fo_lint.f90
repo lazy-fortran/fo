@@ -517,7 +517,9 @@ contains
         skip_generated_source = .true.
         if (index(trim(first), 'build') == 1) return
         if (trim(first) == 'SRC') return
-        if (len_trim(first) > 0 .and. first(1:1) == '.') return
+        if (len_trim(first) > 0) then
+            if (first(1:1) == '.') return
+        end if
 
         padded = '/'//trim(rel)//'/'
         if (index(padded, '/build/') > 0) return
