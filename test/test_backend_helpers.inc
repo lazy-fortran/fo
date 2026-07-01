@@ -642,6 +642,166 @@
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_names_binary_from_manifest_executable
 
+    subroutine test_gfortran_path_dep_ignores_coexisting_fpm_tree()
+        !! fo compiles a path dependency natively into build/fo/obj. When a
+        !! sibling fpm build/gfortran_* tree holds the same module object,
+        !! harvesting it too would link both copies (multiple definition).
+        !! Regression: path-dep objects from a coexisting fpm tree must not be
+        !! collected, so the link stays single-copy.
+        type(backend_t) :: b
+        integer :: exitcode, u, ios
+        character(len=512) :: base, libdir, appdir, log_file, outfile
+        character(len=512) :: depobj, fakedir
+        character(len=64) :: line
+
+        ! The scratch prefix must not contain '_test_' or '_app_': dep-object
+        ! harvesting filters those markers against the full path.
+        call make_tmp_path('fo_coexist_dep', base)
+        libdir = trim(base)//'/mylib'
+        appdir = trim(base)//'/app'
+        call make_tmp_path('fo_backend_coexist', log_file)
+
+        call make_dir(trim(libdir)//'/src')
+        call make_dir(trim(appdir)//'/app')
+        open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "mylib"'
+        close (u)
+        ! A procedure (not a parameter) defines a real linker symbol, so two
+        ! linked copies of this object collide; a parameter would inline away.
+        open (newunit=u, file=trim(libdir)//'/src/foo.f90', status='replace')
+        write (u, '(a)') 'module foo'
+        write (u, '(a)') '  implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer function foo_value()'
+        write (u, '(a)') '    foo_value = 11'
+        write (u, '(a)') '  end function foo_value'
+        write (u, '(a)') 'end module foo'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "coexapp"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'mylib = { path = "../mylib" }'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/app/main.f90', status='replace')
+        write (u, '(a)') 'program main'
+        write (u, '(a)') '  use foo, only: foo_value'
+        write (u, '(a)') '  print "(i0)", foo_value()'
+        write (u, '(a)') 'end program main'
+        close (u)
+
+        b = detect_backend(appdir)
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'native path-dep build succeeds')
+
+        ! Fabricate a coexisting fpm tree: an fpm-named duplicate of the dep
+        ! object under a build/gfortran_* dir, exactly what find_dep_artifacts
+        ! harvests. Copying fo's own object guarantees identical symbols.
+        depobj = ''
+        call first_match(trim(appdir)//'/build/fo/obj', 'mylib', depobj)
+        call assert(len_trim(depobj) > 0, 'native dep object present in build/fo/obj')
+        fakedir = trim(appdir)//'/build/gfortran_FADE/coexapp'
+        call make_dir(fakedir)
+        call execute_command_line('cp "'//trim(depobj)//'" "'//trim(fakedir)// &
+            '/.._mylib_src_foo.f90.o"')
+        ! Drop the linked binary so the rebuild must relink from the object set
+        ! (which now includes the harvested duplicate) rather than cache-hit.
+        call execute_command_line('rm -f "'//trim(appdir)// &
+            '/build/fo/bin/coexapp"')
+        block
+            logical :: fake_exists
+            inquire (file=trim(fakedir)//'/.._mylib_src_foo.f90.o', &
+                exist=fake_exists)
+            call assert(fake_exists, 'fabricated fpm-tree object exists')
+        end block
+
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, &
+            'harvested duplicate of a native dep object is not double-linked')
+
+        outfile = trim(base)//'/out.txt'
+        call execute_command_line(trim(appdir)//'/build/fo/bin/coexapp > '// &
+            trim(outfile))
+        line = ''
+        open (newunit=u, file=trim(outfile), status='old', iostat=ios)
+        if (ios == 0) then
+            read (u, '(a)', iostat=ios) line
+            close (u)
+        end if
+        call assert(trim(adjustl(line)) == '11', &
+            'coexist-tree binary links dep once and prints the dep value')
+
+        call remove_tree(base)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_path_dep_ignores_coexisting_fpm_tree
+
+    subroutine test_gfortran_test_link_ignores_coexisting_fpm_tree()
+        !! The test-link path must also skip a path dep's objects from a
+        !! coexisting fpm build/gfortran_* tree. Otherwise `fo test` links the
+        !! native and harvested copies of every dep module twice.
+        type(backend_t) :: b
+        integer :: exitcode, u
+        character(len=512) :: base, libdir, appdir, log_file, depobj, fakedir
+
+        call make_tmp_path('fo_coexist_dep_t', base)
+        libdir = trim(base)//'/mylib'
+        appdir = trim(base)//'/app'
+        call make_tmp_path('fo_backend_coexist_t', log_file)
+
+        call make_dir(trim(libdir)//'/src')
+        call make_dir(trim(appdir)//'/app')
+        call make_dir(trim(appdir)//'/test')
+        open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "mylib"'
+        close (u)
+        open (newunit=u, file=trim(libdir)//'/src/foo.f90', status='replace')
+        write (u, '(a)') 'module foo'
+        write (u, '(a)') '  implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer function foo_value()'
+        write (u, '(a)') '    foo_value = 11'
+        write (u, '(a)') '  end function foo_value'
+        write (u, '(a)') 'end module foo'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "coexapp"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'mylib = { path = "../mylib" }'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/app/main.f90', status='replace')
+        write (u, '(a)') 'program main'
+        write (u, '(a)') '  print "(a)", "ok"'
+        write (u, '(a)') 'end program main'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/test/check.f90', status='replace')
+        write (u, '(a)') 'program check'
+        write (u, '(a)') '  use foo, only: foo_value'
+        write (u, '(a)') '  if (foo_value() /= 11) stop 1'
+        write (u, '(a)') 'end program check'
+        close (u)
+
+        b = detect_backend(appdir)
+        call backend_test(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'path-dep project with a test builds+tests')
+
+        ! The test build compiled the dep natively; fabricate an fpm-tree
+        ! duplicate of that object next to it.
+        depobj = ''
+        call first_match(trim(appdir)//'/build/fo/obj', 'mylib', depobj)
+        call assert(len_trim(depobj) > 0, 'native dep object present after test build')
+        fakedir = trim(appdir)//'/build/gfortran_FADE/coexapp'
+        call make_dir(fakedir)
+        call execute_command_line('cp "'//trim(depobj)//'" "'//trim(fakedir)// &
+            '/.._mylib_src_foo.f90.o"')
+        ! use_cache=.false. forces a real link (a cache hit would otherwise skip
+        ! relinking the test binary and hide the duplicate-object regression).
+        call backend_test(b, exitcode, log_file=log_file, use_cache=.false.)
+        call assert(exitcode == 0, &
+            'test links dep once despite coexisting fpm tree')
+
+        call remove_tree(base)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_test_link_ignores_coexisting_fpm_tree
+
     subroutine test_gfortran_bootstraps_git_dependency()
         type(backend_t) :: b
         integer :: exitcode, u, ios

@@ -25,6 +25,8 @@ program test_backend_gfortran
     call test_gfortran_named_test_links_helper_modules()
     call test_gfortran_builds_path_dependency()
     call test_gfortran_names_binary_from_manifest_executable()
+    call test_gfortran_path_dep_ignores_coexisting_fpm_tree()
+    call test_gfortran_test_link_ignores_coexisting_fpm_tree()
     call test_gfortran_bootstraps_git_dependency()
     call test_gfortran_test_builds_dev_dependency()
     call test_fpm_path_with_spaces()
