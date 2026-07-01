@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -257,7 +259,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
             if (dup2(fd, STDERR_FILENO) < 0) _exit(126);
             close(fd);
         }
-        if (child_env) execve(argv[0], argv, child_env);
+        if (child_env) execvpe(argv[0], argv, child_env);
         else execvp(argv[0], argv);
         _exit(errno == ENOENT ? 127 : 126);
     }

@@ -11,6 +11,7 @@ program test_fmt_deep
 
     call test_fmt_deep_check_detects_fluff()
     call test_fmt_deep_check_misformatted()
+    call test_process_run_argv_logged_passes_env()
 
     write (output_unit, '(a,i0,a,i0,a)') 'fmt_deep: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -102,5 +103,34 @@ contains
         call delete_tmpfile(tmpfile)
         call delete_tmpfile(log_file)
     end subroutine test_fmt_deep_check_misformatted
+
+    subroutine test_process_run_argv_logged_passes_env()
+        character(len=512) :: log_file, line
+        character(len=:), allocatable :: packed
+        integer :: n_args, exitcode, u, ios
+        logical :: found
+
+        call make_tmpfile('test_process_env_log', log_file)
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, 'env')
+        call process_run_argv_logged('', packed, n_args, trim(log_file), &
+            .false., 5, exitcode, env_extra='FO_PROCESS_TEST_VALUE=sentinel')
+
+        found = .false.
+        open (newunit=u, file=trim(log_file), status='old', iostat=ios)
+        if (ios == 0) then
+            do
+                read (u, '(a)', iostat=ios) line
+                if (ios /= 0) exit
+                if (trim(line) == 'FO_PROCESS_TEST_VALUE=sentinel') found = .true.
+            end do
+            close (u)
+        end if
+
+        call assert(exitcode == 0, 'argv env: env command exits zero')
+        call assert(found, 'argv env: child receives env_extra')
+        call delete_tmpfile(log_file)
+    end subroutine test_process_run_argv_logged_passes_env
 
 end program test_fmt_deep

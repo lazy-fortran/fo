@@ -127,7 +127,7 @@ contains
     end subroutine process_write_stderr
 
     subroutine process_run_argv_logged(cwd, packed, n_args, log_file, append, &
-            timeout_s, exitcode)
+            timeout_s, exitcode, env_extra)
         !! Run a command given as an argv vector with no shell. packed holds
         !! n_args NUL-terminated tokens back-to-back (built by argv_begin/
         !! argv_push). This is the quote-proof, async-signal-safe path for
@@ -137,14 +137,24 @@ contains
         logical, intent(in) :: append
         integer, intent(in) :: timeout_s
         integer, intent(out) :: exitcode
+        character(len=*), intent(in), optional :: env_extra
         integer(c_int) :: ec, ap
+        character(kind=c_char) :: c_env(C_PATH_LEN)
+        logical :: has_env
 
         ap = 0
         if (append) ap = 1
+        has_env = present(env_extra)
+        if (has_env) has_env = len_trim(env_extra) > 0
+        if (has_env) then
+            call to_c_string(env_extra, c_env)
+        else
+            c_env(1) = c_null_char
+        end if
         call fo_c_run_argv_logged(trim(cwd)//c_null_char, packed, &
             int(len(packed), c_int), int(n_args, c_int), &
             trim(log_file)//c_null_char, ap, &
-            int(timeout_s, c_int), c_null_char, ec)
+            int(timeout_s, c_int), c_env, ec)
         exitcode = int(ec)
     end subroutine process_run_argv_logged
 

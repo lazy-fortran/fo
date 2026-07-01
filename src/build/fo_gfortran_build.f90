@@ -154,7 +154,8 @@ contains
         call argv_push(packed, n_args, 'fpm')
         call argv_push(packed, n_args, 'build')
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
-            .true., build_timeout_seconds(), exitcode)
+            .true., build_timeout_seconds(), exitcode, &
+            env_extra='OMP_NUM_THREADS=1')
         if (exitcode == 0) return
 
         write (error_unit, '(a)') 'fo: fpm bootstrap failed for git/registry dependencies'
