@@ -1,5 +1,6 @@
 module fo_gfortran_build
-    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, manifest_exe_name
+    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, manifest_exe_name, &
+        dep_kind, DEP_PATH
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
@@ -342,6 +343,12 @@ contains
         suffixes(1) = '.f90.o'
         suffixes(2) = '.c.o'
         do i = 1, config%n_deps
+            ! A path dependency is compiled natively (Fortran and C) into
+            ! build/fo/obj, so its objects are already linked from src_objs.
+            ! Harvesting the same modules from a coexisting fpm build/gfortran_*
+            ! tree would link every dependency symbol twice. Only git/registry
+            ! deps, bootstrapped through fpm, are collected from that tree.
+            if (dep_kind(config%deps(i)) == DEP_PATH) cycle
             ! fpm names a dependency's compiled objects from the relative path to
             ! its source: git deps under build/dependencies become
             ! build_dependencies_<dep>_src_*, path deps (path = "../dep") become
