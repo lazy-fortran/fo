@@ -602,6 +602,46 @@
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_builds_path_dependency
 
+    subroutine test_gfortran_names_binary_from_manifest_executable()
+        !! An explicit [[executable]] entry names the linked binary, so
+        !! `main = "main.f90"` under `name = "demo"` links to bin/demo, not to
+        !! the package name. Regression for `fo exec demo` failing to resolve.
+        type(backend_t) :: b
+        integer :: exitcode, u
+        character(len=512) :: base, log_file, demo_bin, pkg_bin
+        logical :: demo_exists, pkg_exists
+
+        call make_tmp_path('fo_test_exename', base)
+        call make_tmp_path('fo_backend_exename', log_file)
+        call make_dir(trim(base)//'/app')
+        open (newunit=u, file=trim(base)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "pkg_name"'
+        write (u, '(a)') '[[executable]]'
+        write (u, '(a)') 'name = "demo"'
+        write (u, '(a)') 'source-dir = "app"'
+        write (u, '(a)') 'main = "main.f90"'
+        close (u)
+        open (newunit=u, file=trim(base)//'/app/main.f90', status='replace')
+        write (u, '(a)') 'program main'
+        write (u, '(a)') '  print "(a)", "ok"'
+        write (u, '(a)') 'end program main'
+        close (u)
+
+        b = detect_backend(base)
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'project with [[executable]] name builds')
+
+        demo_bin = trim(base)//'/build/fo/bin/demo'
+        pkg_bin = trim(base)//'/build/fo/bin/pkg_name'
+        inquire (file=trim(demo_bin), exist=demo_exists)
+        inquire (file=trim(pkg_bin), exist=pkg_exists)
+        call assert(demo_exists, 'binary named from [[executable]].name (demo)')
+        call assert(.not. pkg_exists, 'no package-named binary when name is set')
+
+        call remove_tree(base)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_names_binary_from_manifest_executable
+
     subroutine test_gfortran_bootstraps_git_dependency()
         type(backend_t) :: b
         integer :: exitcode, u, ios

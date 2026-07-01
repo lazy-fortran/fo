@@ -1,5 +1,5 @@
 module fo_gfortran_build
-    use fo_fpm_config, only: fpm_config_t, fpm_config_parse
+    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, manifest_exe_name
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
@@ -941,7 +941,7 @@ contains
         integer :: i, n_lib
         character(len=512) :: lib_objs(MAX_SRC_OBJS)
         character(len=512) :: prog_obj, bin_path
-        character(len=128) :: prog_name
+        character(len=128) :: prog_name, manifest_name
         character(len=512) :: link_flags
         type(cache_t) :: c
         integer :: cache_ierr
@@ -977,8 +977,12 @@ contains
             ! order) keeps `main` mapped to the package binary even when another
             ! app source sorts ahead of it.
             call app_prog_stem(prog_obj, config%app_dir, prog_name)
-            if (prog_name == 'main' .and. len_trim(config%name) > 0) &
+            manifest_name = manifest_exe_name(config, config%app_dir, prog_name)
+            if (len_trim(manifest_name) > 0) then
+                prog_name = trim(manifest_name)
+            else if (prog_name == 'main' .and. len_trim(config%name) > 0) then
                 prog_name = trim(config%name)
+            end if
             bin_path = trim(bin_dir)//'/'//trim(prog_name)
             call link_binary(prog_obj, lib_objs, n_lib, dep_objs, n_dep_objs, &
                 config%link_libs, config%n_link_libs, bin_path, &

@@ -1,9 +1,10 @@
 module fo_fpm_config
     implicit none
     private
-    public :: fpm_dep_t, fpm_config_t
+    public :: fpm_dep_t, fpm_exe_t, fpm_config_t
     public :: fpm_config_init, fpm_config_parse
     public :: dep_kind, DEP_PATH, DEP_GIT, DEP_REGISTRY
+    public :: manifest_exe_name
 
     ! How a dependency is acquired, derived from which fields the manifest set.
     ! path = local dir (mutable, may be edited); git = cloned at a ref (pinned,
@@ -17,6 +18,7 @@ module fo_fpm_config
     integer, parameter :: MAX_DEV_DEPS = 32
     integer, parameter :: MAX_LINK_LIBS = 32
     integer, parameter :: MAX_FLAGS = 16
+    integer, parameter :: MAX_EXES = 64
 
     type :: fpm_dep_t
         character(len=256) :: name = ''
@@ -26,6 +28,15 @@ module fo_fpm_config
         character(len=512) :: path = ''
         character(len=32)  :: version = '*'
     end type fpm_dep_t
+
+    ! An explicit [[executable]] entry. fpm names the built binary after `name`,
+    ! not after the source stem, so `main = "main.f90"` under `name = "demo"`
+    ! links to `demo`, not the package name.
+    type :: fpm_exe_t
+        character(len=128) :: name = ''
+        character(len=256) :: main = 'main.f90'
+        character(len=256) :: source_dir = 'app'
+    end type fpm_exe_t
 
     type :: fpm_config_t
         character(len=128) :: name = ''
@@ -44,6 +55,8 @@ module fo_fpm_config
         character(len=128) :: link_libs(MAX_LINK_LIBS)
         integer :: n_flags = 0
         character(len=128) :: flags(MAX_FLAGS)
+        integer :: n_exes = 0
+        type(fpm_exe_t) :: exes(MAX_EXES)
         ! fpm "openmp" metapackage (openmp = "*" under [dependencies]). When set,
         ! the backend compiles and links with -fopenmp so the project's `!$omp`
         ! regions run in parallel. Without it gfortran ignores the directives.
@@ -84,6 +97,7 @@ contains
         c%n_dev_deps = 0
         c%n_link_libs = 0
         c%n_flags = 0
+        c%n_exes = 0
     end subroutine fpm_config_init
 
     subroutine fpm_config_parse(project_dir, config, ierr)
@@ -136,6 +150,11 @@ contains
 
             if (line(1:1) == '[') then
                 call get_section(line, section)
+                if (trim(section) == 'executable' .and. &
+                    config%n_exes < MAX_EXES) then
+                    config%n_exes = config%n_exes + 1
+                    config%exes(config%n_exes) = fpm_exe_t()
+                end if
                 cycle
             end if
 
@@ -168,6 +187,9 @@ contains
                     config%n_dev_deps = config%n_dev_deps + 1
                     call parse_dep(key, val, config%dev_deps(config%n_dev_deps))
                 end if
+            case ('executable')
+                if (config%n_exes > 0) &
+                    call parse_exe(key, val, config%exes(config%n_exes))
             end select
         end do
 
@@ -216,6 +238,47 @@ contains
             call parse_flags(val, config)
         end select
     end subroutine parse_build
+
+    subroutine parse_exe(key, val, exe)
+        character(len=*), intent(in) :: key, val
+        type(fpm_exe_t), intent(inout) :: exe
+
+        character(len=256) :: str_val
+
+        call extract_string(val, str_val)
+        if (len_trim(str_val) == 0) return
+        select case (trim(key))
+        case ('name')
+            exe%name = trim(str_val)
+        case ('main')
+            exe%main = trim(str_val)
+        case ('source-dir')
+            exe%source_dir = trim(str_val)
+        end select
+    end subroutine parse_exe
+
+    function manifest_exe_name(config, app_dir, stem) result(name)
+        !! Binary name for an app program from an explicit [[executable]] entry
+        !! whose main-source stem and source-dir match, or '' when none applies.
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: app_dir, stem
+        character(len=128) :: name
+        character(len=256) :: main_stem
+        integer :: i, dot
+
+        name = ''
+        do i = 1, config%n_exes
+            if (trim(config%exes(i)%source_dir) /= trim(app_dir)) cycle
+            main_stem = trim(config%exes(i)%main)
+            dot = index(trim(main_stem), '.', back=.true.)
+            if (dot > 1) main_stem = main_stem(1:dot - 1)
+            if (trim(main_stem) == trim(stem) .and. &
+                len_trim(config%exes(i)%name) > 0) then
+                name = trim(config%exes(i)%name)
+                return
+            end if
+        end do
+    end function manifest_exe_name
 
     subroutine parse_dep(name_key, val, dep)
         character(len=*), intent(in) :: name_key, val
