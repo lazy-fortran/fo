@@ -367,25 +367,27 @@ contains
 
     subroutine add_dep_objs(found, n_found, dep_objs, n_dep_objs, &
             obj_basenames, n_obj_seen)
-        !! Filter collected dependency object paths (drop app/test objects) and
-        !! append the rest to dep_objs, deduplicating by module identity so the
-        !! same module built under different prefixes or profiles links once.
+        !! Append collected dependency library objects to dep_objs,
+        !! deduplicating by module identity so the same module built under
+        !! different prefixes or profiles links once. find_dep_artifacts only
+        !! collects objects carrying the dependency's '_<dep>_src_' library
+        !! marker, so fpm's app/test objects (named '_<dep>_app_' / '_<dep>_test_')
+        !! never reach here and need no filtering.
         character(len=512), intent(in) :: found(:)
         integer, intent(in) :: n_found
         character(len=512), intent(inout) :: dep_objs(MAX_DEP_OBJS)
         integer, intent(inout) :: n_dep_objs
         character(len=512), intent(inout) :: obj_basenames(MAX_DEP_OBJS)
         integer, intent(inout) :: n_obj_seen
-        character(len=512) :: line, obj_key
+        character(len=512) :: line, obj_key, base
         integer :: k, slash
 
         do k = 1, n_found
             line = found(k)
             if (len_trim(line) == 0) cycle
-            if (index(line, '_app_') > 0) cycle
-            if (index(line, '_test_') > 0) cycle
             slash = index(trim(line), '/', back=.true.)
-            obj_key = dep_object_module_key(line(slash + 1:))
+            base = line(slash + 1:)
+            obj_key = dep_object_module_key(base)
             if (any(obj_basenames(1:n_obj_seen) == obj_key)) cycle
             if (n_dep_objs < MAX_DEP_OBJS) then
                 n_dep_objs = n_dep_objs + 1

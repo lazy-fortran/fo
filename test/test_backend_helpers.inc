@@ -862,6 +862,88 @@
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_bootstraps_git_dependency
 
+    subroutine test_gfortran_dep_library_object_marker_not_dropped()
+        !! Dependency library objects must link even when their fpm object
+        !! basename carries an '_app_' or '_test_' substring - from the
+        !! dependency's own name or from a library source file. Such objects
+        !! (git dep 'grid_test_kit', file src/app_ops.f90) are real library
+        !! objects, not fpm app/test objects, and must not be filtered out.
+        type(backend_t) :: b
+        integer :: exitcode, u, ios
+        character(len=512) :: base, libdir, appdir, log_file, outfile
+        character(len=64) :: line
+
+        call make_tmp_path('fo_depmarker', base)
+        libdir = trim(base)//'/lib'
+        appdir = trim(base)//'/app'
+        call make_tmp_path('fo_backend_depmarker', log_file)
+
+        call execute_command_line('mkdir -p '//trim(libdir)//'/src '// &
+            trim(appdir)//'/app')
+        open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "grid_test_kit"'
+        close (u)
+        ! Real procedures -> real link symbols; a dropped object is an
+        ! undefined reference. core_mod exercises the '_test_' dep-name marker,
+        ! app_ops the '_app_' source-file marker.
+        open (newunit=u, file=trim(libdir)//'/src/core_mod.f90', status='replace')
+        write (u, '(a)') 'module core_mod'
+        write (u, '(a)') '  implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer function core_value()'
+        write (u, '(a)') '    core_value = 13'
+        write (u, '(a)') '  end function core_value'
+        write (u, '(a)') 'end module core_mod'
+        close (u)
+        open (newunit=u, file=trim(libdir)//'/src/app_ops.f90', status='replace')
+        write (u, '(a)') 'module app_ops'
+        write (u, '(a)') '  implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer function app_value()'
+        write (u, '(a)') '    app_value = 29'
+        write (u, '(a)') '  end function app_value'
+        write (u, '(a)') 'end module app_ops'
+        close (u)
+        call execute_command_line('git -C '//trim(libdir)//' init -q')
+        call execute_command_line('git -C '//trim(libdir)// &
+            ' -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src')
+        call execute_command_line('git -C '//trim(libdir)// &
+            ' -c user.email=fo@example.invalid -c user.name=fo commit -q -m init')
+
+        open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "depapp"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a,a,a)') 'grid_test_kit = { git = "file://', trim(libdir), '" }'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/app/main.f90', status='replace')
+        write (u, '(a)') 'program main'
+        write (u, '(a)') '  use core_mod, only: core_value'
+        write (u, '(a)') '  use app_ops, only: app_value'
+        write (u, '(a)') '  print "(i0)", core_value() + app_value()'
+        write (u, '(a)') 'end program main'
+        close (u)
+
+        b = detect_backend(appdir)
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, &
+            'git-dep library objects with _app_/_test_ basenames link')
+
+        outfile = trim(base)//'/out.txt'
+        call execute_command_line(trim(appdir)//'/build/fo/bin/depapp > '// &
+            trim(outfile))
+        line = ''
+        open (newunit=u, file=trim(outfile), status='old', iostat=ios)
+        if (ios == 0) then
+            read (u, '(a)', iostat=ios) line
+            close (u)
+        end if
+        call assert(trim(adjustl(line)) == '42', &
+            'binary links marker-named dep objects and runs')
+
+        call remove_tree(base)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_dep_library_object_marker_not_dropped
+
     subroutine test_gfortran_test_builds_dev_dependency()
         !! A project whose only dependency is a dev-dependency (test-drive style)
         !! must compile the dev-dep's module through fo's own DAG so `fo test`
