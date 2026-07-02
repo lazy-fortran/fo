@@ -232,8 +232,9 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
     char **child_env = NULL;
 
     /* Built before fork: setenv in the child is not async-signal-safe and
-     * corrupts libgomp when forked from an OpenMP thread. execve with this env
-     * keeps the spawn safe inside the parallel build/test loops. */
+     * corrupts libgomp when forked from an OpenMP thread. Pointing environ at
+     * this env before execvp keeps the spawn safe inside the parallel
+     * build/test loops. */
     if (has_text(env_extra)) {
         child_env = env_with_extra(env_extra);
         if (!child_env) return 1;
@@ -259,8 +260,8 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
             if (dup2(fd, STDERR_FILENO) < 0) _exit(126);
             close(fd);
         }
-        if (child_env) execvpe(argv[0], argv, child_env);
-        else execvp(argv[0], argv);
+        if (child_env) environ = child_env;
+        execvp(argv[0], argv);
         _exit(errno == ENOENT ? 127 : 126);
     }
     free(child_env);
