@@ -757,7 +757,7 @@ contains
             '"result":{"protocolVersion":"'//trim(proto_ver)//'",'// &
             '"capabilities":{"tools":{"listChanged":false},'// &
             '"resources":{"listChanged":false}},'// &
-            '"serverInfo":{"name":"fo","version":"0.1.0"}}}'
+            '"serverInfo":{"name":"fo","version":"0.2.0"}}}'
     end subroutine make_initialize_response
 
     subroutine make_tools_list_response(id_str, response)

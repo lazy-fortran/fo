@@ -81,7 +81,7 @@ program fo_main
     case ('init')
         call cmd_init()
     case ('version', '--version')
-        write (output_unit, '(a)') 'fo 0.1.0'
+        write (output_unit, '(a)') 'fo 0.2.0'
     case ('help', '--help', '-h')
         call print_usage()
     case default
