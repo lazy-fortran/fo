@@ -3,7 +3,6 @@ module fo_process
     implicit none
     private
     public :: process_detect_nproc
-    public :: process_cmake_build, process_ctest
     public :: process_scan_sources
     public :: process_start_fo_check, process_poll_pid, process_cancel_pid
     public :: process_run_logged
@@ -43,24 +42,6 @@ module fo_process
             character(kind=c_char), intent(in) :: root(*), output_file(*)
             integer(c_int), intent(out) :: exitcode
         end subroutine fo_c_scan_sources
-
-        subroutine fo_c_cmake_build(project_dir, flags, jobs, log_file, &
-                exitcode) bind(C, name='fo_c_cmake_build')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: project_dir(*), flags(*)
-            character(kind=c_char), intent(in) :: log_file(*)
-            integer(c_int), value :: jobs
-            integer(c_int), intent(out) :: exitcode
-        end subroutine fo_c_cmake_build
-
-        subroutine fo_c_ctest(project_dir, jobs, regex, include_slow, &
-                log_file, exitcode) bind(C, name='fo_c_ctest')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: project_dir(*), regex(*)
-            character(kind=c_char), intent(in) :: log_file(*)
-            integer(c_int), value :: jobs, include_slow
-            integer(c_int), intent(out) :: exitcode
-        end subroutine fo_c_ctest
 
         subroutine fo_c_start_fo_check(project_dir, mode, output_file, pid, &
                 exitcode) bind(C, name='fo_c_start_fo_check')
@@ -240,43 +221,6 @@ contains
         call fo_c_scan_sources(c_root, c_output, c_exit)
         exitcode = int(c_exit)
     end subroutine process_scan_sources
-
-    subroutine process_cmake_build(project_dir, flags, jobs, log_file, exitcode)
-        character(len=*), intent(in) :: project_dir, flags, log_file
-        integer, intent(in) :: jobs
-        integer, intent(out) :: exitcode
-
-        character(kind=c_char) :: c_project(C_PATH_LEN), c_flags(C_ARG_LEN)
-        character(kind=c_char) :: c_log(C_PATH_LEN)
-        integer(c_int) :: c_exit
-
-        call to_c_string(project_dir, c_project)
-        call to_c_string(flags, c_flags)
-        call to_c_string(log_file, c_log)
-        call fo_c_cmake_build(c_project, c_flags, int(jobs, c_int), c_log, c_exit)
-        exitcode = int(c_exit)
-    end subroutine process_cmake_build
-
-    subroutine process_ctest(project_dir, jobs, regex, include_slow, log_file, &
-            exitcode)
-        character(len=*), intent(in) :: project_dir, regex, log_file
-        integer, intent(in) :: jobs
-        logical, intent(in) :: include_slow
-        integer, intent(out) :: exitcode
-
-        character(kind=c_char) :: c_project(C_PATH_LEN), c_regex(C_ARG_LEN)
-        character(kind=c_char) :: c_log(C_PATH_LEN)
-        integer(c_int) :: c_exit, c_slow
-
-        call to_c_string(project_dir, c_project)
-        call to_c_string(regex, c_regex)
-        call to_c_string(log_file, c_log)
-        c_slow = 0
-        if (include_slow) c_slow = 1
-        call fo_c_ctest(c_project, int(jobs, c_int), c_regex, c_slow, c_log, &
-            c_exit)
-        exitcode = int(c_exit)
-    end subroutine process_ctest
 
     subroutine process_start_fo_check(project_dir, mode, output_file, pid, &
             exitcode)

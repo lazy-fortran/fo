@@ -1,7 +1,7 @@
 module fo_cover
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, backend_build, &
-        backend_test, BACKEND_NONE, BACKEND_GFORTRAN
+        backend_test, BACKEND_NONE
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
     use fo_fs, only: fs_make_dir
     use fo_process, only: process_run_argv_logged, argv_push
@@ -36,11 +36,6 @@ contains
             write (error_unit, '(a)') 'fo cover: no fpm.toml found'
             stop 1, quiet=.true.
         end if
-        if (b%kind /= BACKEND_GFORTRAN) then
-            write (error_unit, '(a)') 'fo cover: only fpm/gfortran backend supported'
-            stop 1, quiet=.true.
-        end if
-
         call fs_make_dir('build/coverage')
         call fs_make_dir('build/gcov')
         report_path = 'build/coverage/coverage.md'

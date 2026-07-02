@@ -1,11 +1,9 @@
 program test_backend_gfortran
-    !! Gfortran cache/identity/rebuild tests (second half). Runs in parallel
-    !! with test_backend and test_backend_cmake.
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
         detect_jobs, backend_build, backend_test, &
         backend_test_names, &
-        BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
+        BACKEND_NATIVE, BACKEND_NONE
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names, config_flags_str
     use fo_fpm_config, only: fpm_config_t

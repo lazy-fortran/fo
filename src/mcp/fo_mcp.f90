@@ -242,7 +242,7 @@ contains
 
         b = detect_backend(trim(dir))
         if (b%kind == BACKEND_NONE) then
-            output_text = 'fo: no fpm.toml or CMakeLists.txt found'
+            output_text = 'fo: no fpm.toml found'
             exitcode = 1
         else
             call backend_build(b, exitcode, log_file=tmpfile)
@@ -264,7 +264,7 @@ contains
 
         b = detect_backend(trim(dir))
         if (b%kind == BACKEND_NONE) then
-            output_text = 'fo: no fpm.toml or CMakeLists.txt found'
+            output_text = 'fo: no fpm.toml found'
             exitcode = 1
         else
             call backend_test(b, exitcode, log_file=tmpfile)
@@ -329,7 +329,7 @@ contains
         use fx_dag, only: dag_t
         use fo_dag_bridge, only: build_dag_from_units
         use fo_build_backend, only: backend_t, detect_backend, &
-            BACKEND_NONE, BACKEND_GFORTRAN, BACKEND_CMAKE
+            BACKEND_NONE, BACKEND_NATIVE
         use fo_cache, only: cache_schema, cache_store_root
         character(len=*), intent(in) :: id_str, dir
         character(len=*), intent(out) :: output_text
@@ -347,10 +347,8 @@ contains
         scan_root = trim(dir)
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
         select case (b%kind)
-        case (BACKEND_GFORTRAN)
-            output_text = 'backend: gfortran'//achar(10)
-        case (BACKEND_CMAKE)
-            output_text = 'backend: cmake'//achar(10)
+        case (BACKEND_NATIVE)
+            output_text = 'backend: native'//achar(10)
         case default
             output_text = 'backend: none'//achar(10)
         end select

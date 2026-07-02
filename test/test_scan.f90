@@ -372,8 +372,8 @@ contains
         call make_dir(trim(dir)//'/build-mgd/deps-src/hdf5/src')
         if (.not. ci_fs) call make_dir(trim(dir)//'/SRC/libneo/src')
 
-        open (newunit=u, file=trim(dir)//'/CMakeLists.txt', status='replace')
-        write (u, '(a)') 'project(root Fortran)'
+        open (newunit=u, file=trim(dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "root"'
         close (u)
 
         root_lines(1) = 'module root_mod'

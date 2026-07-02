@@ -51,7 +51,6 @@ fi
 # --- many_tests ---
 if [ -d "$WORKLOADS/many_tests" ]; then
     cd "$WORKLOADS/many_tests"
-    fpm build >/dev/null 2>&1 || true
     fo build >/dev/null 2>&1 || true
 
     bench_one many_tests fo check_json fo check --json | emit
@@ -63,7 +62,6 @@ fi
 # --- bigmod ---
 if [ -d "$WORKLOADS/bigmod" ]; then
     cd "$WORKLOADS/bigmod"
-    fpm build >/dev/null 2>&1 || true
     fo build >/dev/null 2>&1 || true
 
     bench_one bigmod fo check_json fo check --json | emit

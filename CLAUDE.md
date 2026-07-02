@@ -4,9 +4,8 @@ Fortran build cache, incremental rebuild, affected-test selection, MCP server.
 
 ## Build and Test
 
-Use `fo` for every edit/build/test loop. Never call `fpm`, `cmake`, `make`,
-or compiler commands directly except to diagnose a `fo` failure or confirm
-backend parity after a `fo` fix.
+Use `fo` for every edit/build/test loop. Never call `fpm`, `make`,
+or compiler commands directly except to diagnose a `fo` failure.
 
 ```bash
 fo                # staged pipeline: static -> build -> test -> lint -> fmt --check
@@ -23,8 +22,7 @@ fo install        # fpm install --prefix ~/.local
 fo install --prefix /path  # install to custom prefix
 ```
 
-If `fo` is slower than the backend or cannot handle the project, fix
-`fo` first. Do not route around it.
+If `fo` cannot handle the project, fix `fo` first. Do not route around it.
 
 ## Structure
 
@@ -32,7 +30,7 @@ If `fo` is slower than the backend or cannot handle the project, fix
 - `src/scan/`: module dependency scanner. Parses `use` and `module` statements.
 - `src/dag/`: directed acyclic graph. Topological sort, reverse-dependency closure.
 - `src/check/`: build + test runner (`fo_check`) and output formatters (`fo_check_output`).
-- `src/build/`: backend detection and dispatch (native gfortran, CMake). Argv execution via C shim.
+- `src/build/`: native build and test dispatch from `fpm.toml`. Argv execution via C shim.
 - `src/cache/`: content-addressed module cache. FNV-1a hashing of source + compiler + flags + deps.
 - `src/lint/`: linter. Unused-import detection + gfortran compiler warnings (stack-size filtered, deduplicated).
 - `src/diag/`: log parser. Extracts file, line, column, target, hint from compiler and test output.
@@ -43,7 +41,7 @@ If `fo` is slower than the backend or cannot handle the project, fix
 - `src/proc/`: C shim for fork/execvp process execution and source scanning.
 - `src/watch/`: inotify-based file watcher.
 - `doc/FO.md`: specification.
-- `test/`: fpm tests.
+- `test/`: project tests.
 
 ## MCP Server
 
@@ -62,7 +60,7 @@ Key source files:
 ## Rules
 
 - Pure Fortran + C shim. No Python, no shell scripts in the build path.
-- fpm project. No cmake for fo itself.
+- fpm project.
 - `use ..., only:` before `implicit none`.
 - `real(dp)` with `use, intrinsic :: iso_fortran_env, only: dp => real64`.
 - All args have `intent`.

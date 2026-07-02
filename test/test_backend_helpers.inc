@@ -31,7 +31,7 @@
         close (u)
 
         b = detect_backend(project_dir)
-        call assert(b%kind == BACKEND_GFORTRAN, 'detect fpm.toml -> gfortran backend')
+        call assert(b%kind == BACKEND_NATIVE, 'detect fpm.toml -> native project')
 
         call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_detect_fpm
@@ -48,51 +48,12 @@
         close (u)
 
         b = detect_backend(trim(project_dir)//'/src/nested')
-        call assert(b%kind == BACKEND_GFORTRAN, 'detect fpm.toml from child -> gfortran backend')
+        call assert(b%kind == BACKEND_NATIVE, 'detect fpm.toml from child')
         call assert(trim(b%project_dir) == trim(project_dir), &
             'detected project root')
 
         call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_detect_fpm_from_child
-
-    subroutine test_detect_cmake()
-        type(backend_t) :: b
-        integer :: u
-        character(len=512) :: project_dir
-
-        call make_tmp_path('fo_test_cmake', project_dir)
-        call execute_command_line('mkdir -p '//trim(project_dir))
-        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
-            status='replace')
-        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
-        close (u)
-
-        b = detect_backend(project_dir)
-        call assert(b%kind == BACKEND_CMAKE, 'detect cmake')
-
-        call execute_command_line('rm -rf '//trim(project_dir))
-    end subroutine test_detect_cmake
-
-    subroutine test_detect_cmake_over_fpm()
-        type(backend_t) :: b
-        integer :: u
-        character(len=512) :: project_dir
-
-        call make_tmp_path('fo_test_cmake_over_fpm', project_dir)
-        call execute_command_line('mkdir -p '//trim(project_dir))
-        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
-        write (u, '(a)') 'name = "test"'
-        close (u)
-        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
-            status='replace')
-        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
-        close (u)
-
-        b = detect_backend(project_dir)
-        call assert(b%kind == BACKEND_CMAKE, 'detect cmake over fpm')
-
-        call execute_command_line('rm -rf '//trim(project_dir))
-    end subroutine test_detect_cmake_over_fpm
 
     subroutine test_detect_none()
         type(backend_t) :: b
@@ -103,6 +64,7 @@
 
         b = detect_backend(project_dir)
         call assert(b%kind == BACKEND_NONE, 'detect none')
+        call assert(len_trim(b%project_dir) == 0, 'detect none has no project root')
 
         call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_detect_none
@@ -1141,51 +1103,6 @@
         close (u)
     end subroutine write_lib_interface
 
-    subroutine test_cmake_skips_slow_by_default()
-        type(backend_t) :: b
-        integer :: exitcode
-        character(len=512) :: project_dir, fast_log, slow_log
-
-        call make_tmp_path('fo_test_slow_cmake', project_dir)
-        call make_tmp_path('fo_backend_cmake_fast', fast_log)
-        call make_tmp_path('fo_backend_cmake_slow', slow_log)
-        call make_cmake_tests_project(project_dir, .false.)
-
-        b = detect_backend(project_dir)
-        call backend_test(b, exitcode, log_file=fast_log)
-        call assert(exitcode == 0, 'cmake test skips excluded labels by default')
-
-        call backend_test(b, exitcode, include_slow=.true., log_file=slow_log)
-        call assert(exitcode /= 0, 'cmake test --all includes slow')
-
-        call execute_command_line('rm -rf '//trim(project_dir))
-        call execute_command_line('rm -f '//trim(fast_log)//' '//trim(slow_log))
-    end subroutine test_cmake_skips_slow_by_default
-
-    subroutine test_cmake_named_tests_select_regex()
-        type(backend_t) :: b
-        integer :: exitcode
-        character(len=512) :: project_dir, log_file
-        character(len=128) :: names(2)
-
-        call make_tmp_path('fo_test_named_cmake', project_dir)
-        call make_tmp_path('fo_backend_cmake_named', log_file)
-        call make_cmake_tests_project(project_dir, .true.)
-
-        b = detect_backend(project_dir)
-        names(1) = 'test_a'
-        names(2) = 'test_b'
-        call backend_test_names(b, names, 2, exitcode, log_file=log_file)
-        call assert(exitcode == 0, 'cmake named tests select requested tests')
-        call assert(file_contains(log_file, 'Test #1: test_a') .or. &
-            file_contains(log_file, 'Test #2: test_a') .or. &
-            file_contains(log_file, 'test_a'), &
-            'cmake named log includes selected test')
-
-        call execute_command_line('rm -rf '//trim(project_dir))
-        call execute_command_line('rm -f '//trim(log_file))
-    end subroutine test_cmake_named_tests_select_regex
-
     subroutine test_fpm_path_with_spaces()
         type(backend_t) :: b
         integer :: exitcode
@@ -1198,57 +1115,13 @@
 
         b = detect_backend(project_dir)
         call backend_build(b, exitcode, log_file=log_file)
-        call assert(exitcode == 0, 'fpm build handles project path with spaces')
+        call assert(exitcode == 0, 'native build handles project path with spaces')
         call backend_test(b, exitcode, log_file=log_file)
-        call assert(exitcode == 0, 'fpm test handles project path with spaces')
+        call assert(exitcode == 0, 'native test handles project path with spaces')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_fpm_path_with_spaces
-
-    subroutine test_cmake_path_with_spaces()
-        type(backend_t) :: b
-        integer :: exitcode
-        character(len=512) :: base_dir, project_dir, log_file
-
-        call make_tmp_path('fo_test_cmake_spaces', base_dir)
-        project_dir = trim(base_dir)//' path with spaces'
-        call make_tmp_path('fo_backend_cmake_spaces', log_file)
-        call make_cmake_space_project(project_dir)
-
-        b = detect_backend(project_dir)
-        call backend_build(b, exitcode, log_file=log_file)
-        call assert(exitcode == 0, 'cmake build handles project path with spaces')
-        call backend_test(b, exitcode, log_file=log_file)
-        call assert(exitcode == 0, 'ctest handles project path with spaces')
-
-        call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
-    end subroutine test_cmake_path_with_spaces
-
-    subroutine test_cmake_regex_metachar_name()
-        type(backend_t) :: b
-        integer :: exitcode
-        character(len=512) :: project_dir, log_file
-        character(len=128) :: names(1)
-
-        call make_tmp_path('fo_test_cmake_regex', project_dir)
-        call make_tmp_path('fo_backend_cmake_regex', log_file)
-        call make_cmake_regex_project(project_dir)
-
-        b = detect_backend(project_dir)
-        call backend_build(b, exitcode, log_file=log_file)
-        call assert(exitcode == 0, 'cmake regex fixture configures')
-
-        names(1) = 'test.dot'
-        call backend_test_names(b, names, 1, exitcode, log_file=log_file)
-        call assert(exitcode == 0, 'ctest selected names escape regex metacharacters')
-        call assert(file_contains(log_file, 'test.dot'), &
-            'ctest regex fixture runs selected dotted name')
-
-        call execute_command_line('rm -rf '//trim(project_dir))
-        call execute_command_line('rm -f '//trim(log_file))
-    end subroutine test_cmake_regex_metachar_name
 
     subroutine make_slow_fpm_project(project_dir)
         character(len=*), intent(in) :: project_dir
@@ -1400,84 +1273,6 @@
             close (u)
         end do
     end subroutine make_many_test_fpm_project
-
-    subroutine make_cmake_tests_project(project_dir, unselected_fails)
-        character(len=*), intent(in) :: project_dir
-        logical, intent(in) :: unselected_fails
-        integer :: u, exitcode
-
-        call execute_command_line('rm -rf '//trim(project_dir))
-        call execute_command_line('mkdir -p '//trim(project_dir))
-
-        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
-            status='replace')
-        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
-        write (u, '(a)') 'project(fo_backend_cmake_tests NONE)'
-        write (u, '(a)') 'enable_testing()'
-        write (u, '(a)') 'add_test(NAME test_a COMMAND ${CMAKE_COMMAND} -E true)'
-        write (u, '(a)') 'add_test(NAME test_b COMMAND ${CMAKE_COMMAND} -E true)'
-        if (unselected_fails) then
-            write (u, '(a)') &
-                'add_test(NAME test_unselected COMMAND ${CMAKE_COMMAND} -E false)'
-        else
-            write (u, '(a)') &
-                'add_test(NAME test_unselected COMMAND ${CMAKE_COMMAND} -E true)'
-        end if
-        write (u, '(a)') &
-            'add_test(NAME test_kernel_slow COMMAND ${CMAKE_COMMAND} -E false)'
-        write (u, '(a)') &
-            'set_tests_properties(test_kernel_slow PROPERTIES LABELS slow)'
-        write (u, '(a)') &
-            'add_test(NAME test_regression COMMAND ${CMAKE_COMMAND} -E false)'
-        write (u, '(a)') &
-            'set_tests_properties(test_regression PROPERTIES LABELS regression)'
-        write (u, '(a)') &
-            'add_test(NAME test_performance COMMAND ${CMAKE_COMMAND} -E false)'
-        write (u, '(a)') &
-            'set_tests_properties(test_performance PROPERTIES LABELS performance)'
-        write (u, '(a)') &
-            'add_test(NAME test_scalability COMMAND ${CMAKE_COMMAND} -E false)'
-        write (u, '(a)') &
-            'set_tests_properties(test_scalability PROPERTIES LABELS scalability)'
-        close (u)
-
-        call execute_command_line('cd '//trim(project_dir)// &
-            ' && cmake -S . -B build >/dev/null 2>&1', &
-            exitstat=exitcode, wait=.true.)
-    end subroutine make_cmake_tests_project
-
-    subroutine make_cmake_space_project(project_dir)
-        character(len=*), intent(in) :: project_dir
-        integer :: u
-
-        call remove_tree(project_dir)
-        call make_dir(project_dir)
-
-        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
-            status='replace')
-        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
-        write (u, '(a)') 'project(fo_backend_cmake_spaces NONE)'
-        write (u, '(a)') 'enable_testing()'
-        write (u, '(a)') 'add_test(NAME test_space COMMAND ${CMAKE_COMMAND} -E true)'
-        close (u)
-    end subroutine make_cmake_space_project
-
-    subroutine make_cmake_regex_project(project_dir)
-        character(len=*), intent(in) :: project_dir
-        integer :: u
-
-        call execute_command_line('rm -rf '//trim(project_dir))
-        call execute_command_line('mkdir -p '//trim(project_dir))
-
-        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
-            status='replace')
-        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
-        write (u, '(a)') 'project(fo_backend_cmake_regex NONE)'
-        write (u, '(a)') 'enable_testing()'
-        write (u, '(a)') 'add_test(NAME test.dot COMMAND ${CMAKE_COMMAND} -E true)'
-        write (u, '(a)') 'add_test(NAME testXdot COMMAND ${CMAKE_COMMAND} -E false)'
-        close (u)
-    end subroutine make_cmake_regex_project
 
     logical function file_contains(path, needle)
         character(len=*), intent(in) :: path, needle
