@@ -107,8 +107,6 @@ static int is_project_root(const char *dir) {
     struct stat st;
     snprintf(path, sizeof(path), "%s/fpm.toml", dir);
     if (stat(path, &st) == 0) return 1;
-    snprintf(path, sizeof(path), "%s/CMakeLists.txt", dir);
-    if (stat(path, &st) == 0) return 1;
     return 0;
 }
 
@@ -124,10 +122,7 @@ static int skip_dir_name(const char *name, int is_proj_root, int depth) {
     if (strcmp(name, "venv") == 0) return 1;
     if (strcmp(name, "__pycache__") == 0) return 1;
     if (strcmp(name, "site-packages") == 0) return 1;
-    /* Build/output trees are never source roots for the current project.
-       SIMPLE and CMake branches leave build_axisheal, build_verify*, and
-       SRC/libneo work trees next to the real sources; counting those copies
-       trips MAX_UNITS and builds stale generated files. */
+    /* Build/output trees are never source roots for the current project. */
     if (strcmp(name, "_deps") == 0) return 1;
     if (strcmp(name, "dependencies") == 0) return 1;
     if (strcmp(name, "deps-src") == 0) return 1;
@@ -393,84 +388,6 @@ void fo_c_run_argv_logged(const char *cwd, const char *args, int args_len,
     *exitcode = run_argv(has_text(cwd) ? cwd : NULL, argv, log_file, append, 0,
                          timeout_s, has_text(env_extra) ? env_extra : NULL);
     free(argv);
-}
-
-void fo_c_cmake_build(const char *project_dir, const char *flags, int jobs,
-                      const char *log_file, int *exitcode) {
-    char jobs_text[32];
-    char flag_arg[2048];
-    char compiler_arg[2048];
-    char extra_copy[4096];
-    char *configure_argv[128];
-    char *tok;
-    char *saveptr;
-    const char *fc;
-    const char *extra_args;
-    char *build_argv[] = {"cmake", "--build", "build", "-j", jobs_text, NULL};
-    int n;
-
-    snprintf(jobs_text, sizeof(jobs_text), "%d", jobs > 0 ? jobs : 1);
-    fc = getenv("FC");
-    if (!has_text(fc)) fc = "gfortran";
-    snprintf(compiler_arg, sizeof(compiler_arg), "-DCMAKE_Fortran_COMPILER=%s", fc);
-    extra_args = getenv("FO_CMAKE_ARGS");
-
-    n = 0;
-    configure_argv[n++] = "cmake";
-    configure_argv[n++] = "-S";
-    configure_argv[n++] = ".";
-    configure_argv[n++] = "-B";
-    configure_argv[n++] = "build";
-    configure_argv[n++] = "-G";
-    configure_argv[n++] = "Ninja";
-    configure_argv[n++] = compiler_arg;
-    if (has_text(flags)) {
-        snprintf(flag_arg, sizeof(flag_arg), "-DCMAKE_Fortran_FLAGS=%s", flags);
-        configure_argv[n++] = flag_arg;
-    }
-    if (has_text(extra_args)) {
-        snprintf(extra_copy, sizeof(extra_copy), "%s", extra_args);
-        tok = strtok_r(extra_copy, " \t\r\n", &saveptr);
-        while (tok != NULL && n < (int)(sizeof(configure_argv) / sizeof(configure_argv[0])) - 1) {
-            configure_argv[n++] = tok;
-            tok = strtok_r(NULL, " \t\r\n", &saveptr);
-        }
-    }
-    configure_argv[n] = NULL;
-
-    int build_timeout = env_timeout("FO_BUILD_TIMEOUT", 300);
-    *exitcode = run_argv(project_dir, configure_argv, log_file, 0, 0,
-                         build_timeout, NULL);
-    if (*exitcode != 0) return;
-    *exitcode = run_argv(project_dir, build_argv, log_file, 1, 0, build_timeout, NULL);
-}
-
-void fo_c_ctest(const char *project_dir, int jobs, const char *regex,
-                int include_slow, const char *log_file, int *exitcode) {
-    char build_dir[4096];
-    char jobs_text[32];
-    char *argv[12];
-    int n = 0;
-
-    snprintf(build_dir, sizeof(build_dir), "%s/build", project_dir);
-    snprintf(jobs_text, sizeof(jobs_text), "%d", jobs > 0 ? jobs : 1);
-
-    argv[n++] = "ctest";
-    argv[n++] = "--output-on-failure";
-    argv[n++] = "-j";
-    argv[n++] = jobs_text;
-    if (has_text(regex)) {
-        argv[n++] = "-R";
-        argv[n++] = (char *)regex;
-    }
-    if (!include_slow) {
-        argv[n++] = "-LE";
-        argv[n++] = "slow|regression|performance|scalability";
-    }
-    argv[n] = NULL;
-
-    *exitcode = run_argv(build_dir, argv, log_file, 0, 0,
-                         env_timeout("FO_TEST_TIMEOUT", 120), NULL);
 }
 
 void fo_c_start_fo_check(const char *project_dir, const char *mode,

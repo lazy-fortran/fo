@@ -1,13 +1,12 @@
 # fo
 
-`fo` is the one command for logos. It is the Fortran equivalent of `go`, grown into
-the umbrella binary that builds, runs, tests, stores, checkpoints, and drives the
-system. One binary, many subcommands, one content-addressed store underneath. The
-shell is `fo shell` (alias `fsh`).
+`fo` is the one command for logos. It is the Fortran equivalent of `go`: one
+binary for builds, runs, and tests. The same binary manages checkpoints and the
+content-addressed store. The shell is `fo shell` (alias `fsh`).
 
 `fo` is not a second compiler. The split mirrors Go: the compiler compiles one
-module; `fo` decides what to compile, reuses cached results, links, runs, and owns
-everything around the build. It arrives with F3 (`bootstrap/f3/SPEC.md`) and is
+module; `fo` decides what to compile, reuses cached results, links the program,
+and runs it. It arrives with F3 (`bootstrap/f3/SPEC.md`) and is
 specified Fortran-native; it is implemented when the F5 hosted target lands
 (`--std=f2003`), since the store, network, and process control need that
 surface (`bootstrap/POLICY.md`, `bootstrap/FPM_SUPPORT.md`).
@@ -73,7 +72,8 @@ fo compare runA runB                     what inputs, flags, or hashes differ
 fo submit --slurm case.toml              run on an existing cluster
 ```
 
-A capsule records inputs, code, toolchain, environment, params, outputs, and lineage.
+A capsule records the code, the toolchain, the run environment, inputs, outputs,
+and lineage.
 It is the unit the compute-vs-store decision works on: logos keeps an output or drops
 it and regenerates it from the capsule (`bootstrap/ECONOMICS.md`).
 
@@ -193,8 +193,8 @@ conforms to the `fpm.toml` manifest standard (`bootstrap/FPM_SUPPORT.md`): it
 consumes `fpm.toml` as the project descriptor (sources, targets, tests, path
 dependencies) and writes `fo.lock`. It does not invoke the `fpm` tool to build or
 test; it compiles the module DAG natively through its own content-addressed cache,
-and also drives cmake + ninja for CMake projects. The manifest format is the shared
-contract; the cache, store, capsules, and surfaces are `fo`'s own.
+using `fpm.toml` as the native project configuration. The manifest format is the
+shared contract; the cache store and command surfaces are `fo`'s own.
 
 ## Relationship to fortrun
 

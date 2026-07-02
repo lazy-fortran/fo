@@ -42,7 +42,7 @@ contains
 
         b = detect_backend(project_dir)
         if (b%kind == BACKEND_NONE) then
-            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            write (error_unit, '(a)') 'fo: no fpm.toml found'
             exitcode = 1
             return
         end if

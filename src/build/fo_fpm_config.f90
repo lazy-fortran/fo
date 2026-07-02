@@ -58,8 +58,8 @@ module fo_fpm_config
         integer :: n_exes = 0
         type(fpm_exe_t) :: exes(MAX_EXES)
         ! fpm "openmp" metapackage (openmp = "*" under [dependencies]). When set,
-        ! the backend compiles and links with -fopenmp so the project's `!$omp`
-        ! regions run in parallel. Without it gfortran ignores the directives.
+        ! fo compiles and links with -fopenmp so the project's `!$omp` regions
+        ! run in parallel. Without it gfortran ignores the directives.
         logical :: openmp = .false.
     end type fpm_config_t
 

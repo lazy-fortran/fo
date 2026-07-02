@@ -778,7 +778,7 @@ contains
         call argv_push(packed, n_args, 'gfortran')
         call argv_push(packed, n_args, '-fsyntax-only')
         ! Preprocess like the real build: source files carry #ifdef guards
-        ! (optional backends), which a non-preprocessed pass misreads as illegal
+        ! (optional features), which a non-preprocessed pass misreads as illegal
         ! directives.
         call argv_push(packed, n_args, '-cpp')
         call argv_push(packed, n_args, '-Wall')

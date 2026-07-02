@@ -4,10 +4,8 @@ module fo_check
         is_slow_test
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_affected_set, MAX_NODES
     use fo_dag_bridge, only: build_dag_from_units
-    use fo_process, only: process_detect_nproc, process_cmake_build, &
-        process_ctest, process_run_argv_logged, argv_push
-    use fo_gfortran_build, only: gfortran_build, gfortran_test, &
-        gfortran_test_names
+    use fo_process, only: process_run_argv_logged, argv_push
+    use fo_gfortran_build, only: gfortran_build, gfortran_test_names
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
         cache_action_mod_key, hash_mod_file, HASH_LEN
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, is_runner_crash
@@ -19,10 +17,6 @@ module fo_check
 
     integer, parameter :: MAX_EXT_DEPS = 256
     integer, parameter :: MAX_TEST_RESULTS = 64
-    integer, parameter :: MAX_TEST_TARGETS = 512
-    integer, parameter :: BACKEND_NONE = 0
-    integer, parameter :: BACKEND_CMAKE = 2
-    integer, parameter :: BACKEND_GFORTRAN = 3
 
     type :: test_result_t
         character(len=128) :: name = ''
@@ -91,7 +85,6 @@ contains
         type(scan_unit_t), allocatable :: units(:)
         type(cache_t) :: c
         integer :: n_units
-        integer :: backend_kind
         character(len=512) :: project_dir
         integer, allocatable :: order(:)
         integer :: n_order
@@ -116,8 +109,8 @@ contains
         n_affected = 0
         n_cached = 0
         n_ext = 0
-        backend_kind = detect_backend_kind(dir, project_dir)
-        if (backend_kind == BACKEND_NONE) then
+        call find_project_dir(dir, project_dir)
+        if (len_trim(project_dir) == 0) then
             ierr = 1
             return
         end if
@@ -413,7 +406,6 @@ contains
         integer :: changed_ids(MAX_NODES), n_changed
         integer :: affected_ids(MAX_NODES), n_affected
         integer :: n_cached, ierr, exitcode
-        integer :: backend_kind
         real :: t0, t1
         character(len=512) :: build_log, test_log
         character(len=512) :: no_project
@@ -424,11 +416,11 @@ contains
 
         call cpu_time(t0)
 
-        backend_kind = detect_backend_kind(dir, project_dir)
-        if (backend_kind == BACKEND_NONE) then
-            no_project = 'no fpm.toml or CMakeLists.txt found'
+        call find_project_dir(dir, project_dir)
+        if (len_trim(project_dir) == 0) then
+            no_project = 'no fpm.toml found'
             no_project = trim(no_project)//' in directory or parents: '//trim(dir)
-            call set_failure(res, 'backend', '', no_project, &
+            call set_failure(res, 'project', '', no_project, &
                 'run fo from a project directory', &
                 'fo check', '')
             call cpu_time(t1)
@@ -456,7 +448,7 @@ contains
 
         if (n_changed == 0) then
             call make_tmpfile('fo-build', build_log)
-            call run_backend_build(backend_kind, project_dir, build_log, exitcode)
+            call gfortran_build(project_dir, build_log, exitcode)
             if (exitcode /= 0) then
                 call summarize_backend_failure('build', build_log, 'fo build', res)
                 call cpu_time(t1)
@@ -472,7 +464,7 @@ contains
         end if
 
         call make_tmpfile('fo-build', build_log)
-        call run_backend_build(backend_kind, project_dir, build_log, exitcode)
+        call gfortran_build(project_dir, build_log, exitcode)
         if (exitcode /= 0) then
             call summarize_backend_failure('build', build_log, 'fo build', res)
             call cpu_time(t1)
@@ -500,7 +492,7 @@ contains
         end if
 
         call make_tmpfile('fo-test', test_log)
-        call run_backend_tests(backend_kind, project_dir, test_names, n_test_names, &
+        call gfortran_test_names(project_dir, test_names, n_test_names, &
             test_log, exitcode)
         res%tests_ok = (exitcode == 0)
         call parse_test_log(test_log, res%test_results, res%n_test_results)
@@ -671,27 +663,20 @@ contains
         call delete_tmpfile(tmpfile)
     end subroutine detect_compiler
 
-    integer function detect_backend_kind(dir, project_dir) result(kind)
+    subroutine find_project_dir(dir, project_dir)
         character(len=*), intent(in) :: dir
         character(len=*), intent(out) :: project_dir
 
         character(len=512) :: current, parent
-        logical :: has_fpm, has_cmake
+        logical :: has_manifest
         integer :: depth
 
-        kind = BACKEND_NONE
         project_dir = ''
         current = absolute_dir(dir)
 
         do depth = 1, 64
-            inquire (file=trim(current)//'/fpm.toml', exist=has_fpm)
-            inquire (file=trim(current)//'/CMakeLists.txt', exist=has_cmake)
-            if (has_cmake) then
-                kind = BACKEND_CMAKE
-                project_dir = current
-                return
-            else if (has_fpm) then
-                kind = BACKEND_GFORTRAN
+            inquire (file=trim(current)//'/fpm.toml', exist=has_manifest)
+            if (has_manifest) then
                 project_dir = current
                 return
             end if
@@ -700,7 +685,7 @@ contains
             if (trim(parent) == trim(current)) exit
             current = parent
         end do
-    end function detect_backend_kind
+    end subroutine find_project_dir
 
     function absolute_dir(dir) result(absdir)
         character(len=*), intent(in) :: dir
@@ -753,104 +738,5 @@ contains
             parent = clean(1:last - 1)
         end if
     end subroutine parent_dir
-
-    integer function detect_jobs() result(jobs)
-        character(len=32) :: buf
-        integer :: status, iostat
-
-        jobs = process_detect_nproc()
-        call get_environment_variable('FO_JOBS', buf, status=status)
-        if (status /= 0 .or. len_trim(buf) == 0) return
-
-        read (buf, *, iostat=iostat) jobs
-        if (iostat /= 0 .or. jobs < 1) jobs = process_detect_nproc()
-    end function detect_jobs
-
-    subroutine run_backend_build(kind, project_dir, log_file, exitcode)
-        integer, intent(in) :: kind
-        character(len=*), intent(in) :: project_dir, log_file
-        integer, intent(out) :: exitcode
-
-        integer :: jobs
-
-        select case (kind)
-        case (BACKEND_GFORTRAN)
-            call gfortran_build(project_dir, log_file, exitcode)
-        case (BACKEND_CMAKE)
-            jobs = detect_jobs()
-            call process_cmake_build(project_dir, '', jobs, log_file, exitcode)
-        case default
-            exitcode = 1
-        end select
-    end subroutine run_backend_build
-
-    subroutine run_backend_tests(kind, project_dir, names, n_names, log_file, &
-            exitcode)
-        integer, intent(in) :: kind
-        character(len=*), intent(in) :: project_dir, log_file
-        character(len=128), intent(in) :: names(:)
-        integer, intent(in) :: n_names
-        integer, intent(out) :: exitcode
-
-        integer :: jobs
-        character(len=1024) :: regex
-
-        select case (kind)
-        case (BACKEND_GFORTRAN)
-            if (n_names > 0) then
-                call gfortran_test_names(project_dir, names, n_names, log_file, &
-                    exitcode)
-            else
-                call gfortran_test(project_dir, log_file, exitcode)
-            end if
-        case (BACKEND_CMAKE)
-            jobs = detect_jobs()
-            if (n_names > 0) then
-                call names_to_ctest_regex(names, n_names, regex)
-                call process_ctest(project_dir, jobs, regex, .false., log_file, &
-                    exitcode)
-            else
-                call process_ctest(project_dir, jobs, '', .false., log_file, &
-                    exitcode)
-            end if
-        case default
-            exitcode = 1
-        end select
-    end subroutine run_backend_tests
-
-    subroutine names_to_ctest_regex(names, n_names, regex)
-        character(len=128), intent(in) :: names(MAX_TEST_TARGETS)
-        integer, intent(in) :: n_names
-        character(len=*), intent(out) :: regex
-
-        integer :: i
-
-        regex = '^('
-        do i = 1, n_names
-            if (i > 1) regex = trim(regex)//'|'
-            call append_ctest_regex_name(regex, names(i))
-        end do
-        regex = trim(regex)//')$'
-    end subroutine names_to_ctest_regex
-
-    subroutine append_ctest_regex_name(regex, name)
-        character(len=*), intent(inout) :: regex
-        character(len=*), intent(in) :: name
-
-        integer :: i
-        character(len=1) :: ch
-
-        do i = 1, len_trim(name)
-            ch = name(i:i)
-            select case (ch)
-            case ('.', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|')
-                regex = trim(regex)//achar(92)//ch
-            case (achar(92))
-                regex = trim(regex)//achar(92)//achar(92)
-            case default
-                regex = trim(regex)//ch
-            end select
-        end do
-    end subroutine append_ctest_regex_name
 
 end module fo_check

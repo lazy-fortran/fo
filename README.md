@@ -4,8 +4,7 @@ Fortran build driver with module DAG, content-addressed cache, and
 affected-test selection. `fo` is a self-contained, standalone build and test
 tool: a drop-in replacement for `fpm` that reads the same `fpm.toml` manifest
 but builds and tests your project natively through its own cache rather than
-invoking `fpm` to build or test. It also drives cmake + ninja for CMake
-projects.
+invoking `fpm` to build or test.
 
 ## Install
 
@@ -15,7 +14,7 @@ fpm install --prefix ~/.local
 
 ## Usage
 
-Run `fo` in a directory with `fpm.toml` or `CMakeLists.txt`.
+Run `fo` in a directory with `fpm.toml`.
 
 ```
 fo                  static -> build -> test (the default)
@@ -67,26 +66,25 @@ only when the caller needs diagnostic arrays or log paths.
 6. Compute reverse-dependency closure of changed modules.
 7. Run only affected tests; unchanged tests are cached.
 
-## Backend detection
+## Project detection
 
-`fpm.toml` -> native gfortran build. `CMakeLists.txt` -> cmake + ninja.
-CMake takes precedence when both exist. Non-Fortran directories exit silently.
+`fo` searches the current directory and parents for `fpm.toml`. Non-Fortran
+projects exit silently.
 
-The `fpm.toml` manifest is consumed as the project descriptor (sources, targets,
-tests, path dependencies); the `fpm` tool is not invoked to build or test.
+The `fpm.toml` manifest configures source directories, build targets, tests,
+and path dependencies. The `fpm` tool is not invoked to build or test.
 
 ## Slow test exclusion
 
 Tests named `*_slow` or `*_slow_*` are excluded by default.
 Use `fo test --all` to include them. The native build enumerates test targets
-and runs the non-slow subset; cmake passes `-LE slow`.
+and runs the non-slow subset.
 
 ## Test parallelism
 
 `FO_JOBS=N` caps build and test fanout. Missing or invalid `FO_JOBS` falls
 back to `nproc`. The native build parallelizes the module DAG through
-`OMP_NUM_THREADS`; CMake and CTest receive `-j N`. CMake selected tests run
-through one `ctest -R` expression instead of one process per test.
+`OMP_NUM_THREADS`; selected tests run by target name.
 
 ## Go parity
 
@@ -95,15 +93,16 @@ through one `ctest -R` expression instead of one process per test.
 | Global content-addressed cache | `~/.cache/fo/store/v1`, SHA-256 |
 | Cache key = hash(source + compiler + flags + `.mod` payload hashes) | yes |
 | Affected-test selection | `fo changed`, `fo test --only-changed` |
-| Parallel builds | `FO_JOBS` or nproc for native build, cmake, ctest |
+| Parallel builds | `FO_JOBS` or nproc |
 | Flag passthrough | `fo build --flag` |
 | Cache clear | `fo clean` |
-| Backend autodetection | fpm.toml or CMakeLists.txt |
+| Project detection | `fpm.toml` |
 | Watch mode | `fo watch` (inotify) |
 
 ## Tests
 
-181 tests: scanner (33), DAG (15), cache (12), backend (27), check (98).
+Run `fo` for the full pipeline: static checks, build, tests, lint, and
+format check.
 
 ## Benchmarks
 

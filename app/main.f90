@@ -6,7 +6,7 @@ program fo_main
     use fo_dag_bridge, only: build_dag_from_units
     use fo_build_backend, only: backend_t, detect_backend, backend_build, &
         backend_test, backend_test_names, BACKEND_NONE, &
-        BACKEND_GFORTRAN, BACKEND_CMAKE, profile_flags
+        BACKEND_NATIVE, profile_flags
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
         collect_failed_test_names, MAX_TEST_RESULTS
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
@@ -81,7 +81,7 @@ program fo_main
     case ('init')
         call cmd_init()
     case ('version', '--version')
-        write (output_unit, '(a)') 'fo 0.1.0'
+        write (output_unit, '(a)') 'fo 0.2.0'
     case ('help', '--help', '-h')
         call print_usage()
     case default
@@ -115,7 +115,6 @@ contains
 
         call cpu_time(t0)
 
-        ! 0. detect backend
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
             write (output_unit, '(a)') 'fo: no Fortran project detected'
@@ -243,7 +242,7 @@ contains
     subroutine print_usage()
         write (output_unit, '(a)') 'fo - Fortran build driver'
         write (output_unit, '(a)') ''
-        write (output_unit, '(a)') 'Run in or below fpm.toml or CMakeLists.txt.'
+        write (output_unit, '(a)') 'Run in or below fpm.toml.'
         write (output_unit, '(a)') 'Scans modules, builds the DAG, caches by hash.'
         write (output_unit, '(a)') ''
         write (output_unit, '(a)') 'usage: fo [command]'
@@ -295,7 +294,7 @@ contains
         if (present(unit)) out = unit
         write (out, '(a)') 'usage: fo test [--only-changed] [--all] [name ...]'
         write (out, '(a)') ''
-        write (out, '(a)') 'Run project tests through the detected backend.'
+        write (out, '(a)') 'Run project tests from fpm.toml.'
         write (out, '(a)') ''
         write (out, '(a)') 'options:'
         write (out, '(a)') '  --only-changed  run tests affected by changed modules'
@@ -472,7 +471,7 @@ contains
         end if
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
-            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            write (error_unit, '(a)') 'fo: no fpm.toml found'
             stop 1
         end if
 
@@ -611,7 +610,7 @@ contains
 
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
-            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            write (error_unit, '(a)') 'fo: no fpm.toml found'
             stop 1
         end if
 
@@ -651,7 +650,7 @@ contains
 
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
-            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            write (error_unit, '(a)') 'fo: no fpm.toml found'
             stop 1
         end if
 
@@ -771,7 +770,7 @@ contains
         end if
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
-            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            write (error_unit, '(a)') 'fo: no fpm.toml found'
             stop 1
         end if
 
@@ -1192,7 +1191,7 @@ contains
 
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
-            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            write (error_unit, '(a)') 'fo: no fpm.toml found'
             stop 1, quiet=.true.
         end if
 
@@ -1277,10 +1276,8 @@ contains
         end if
 
         select case (b%kind)
-        case (BACKEND_GFORTRAN)
-            write (output_unit, '(a)') 'backend: gfortran'
-        case (BACKEND_CMAKE)
-            write (output_unit, '(a)') 'backend: cmake'
+        case (BACKEND_NATIVE)
+            write (output_unit, '(a)') 'backend: native'
         case default
             write (output_unit, '(a)') 'backend: none'
         end select

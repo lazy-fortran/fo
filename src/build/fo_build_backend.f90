@@ -2,8 +2,7 @@ module fo_build_backend
     use, intrinsic :: iso_fortran_env, only: error_unit
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_mkdir_excl, fs_sleep_ms, &
         fs_pid_alive
-    use fo_process, only: process_detect_nproc, process_cmake_build, &
-        process_ctest, process_getpid
+    use fo_process, only: process_detect_nproc, process_getpid
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names
     implicit none
@@ -11,11 +10,10 @@ module fo_build_backend
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
     public :: backend_build, backend_test, backend_test_names, backend_clean
     public :: profile_flags
-    public :: BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
+    public :: BACKEND_NONE, BACKEND_NATIVE
 
     integer, parameter :: BACKEND_NONE = 0
-    integer, parameter :: BACKEND_CMAKE = 2
-    integer, parameter :: BACKEND_GFORTRAN = 3
+    integer, parameter :: BACKEND_NATIVE = 1
     integer, parameter :: MAX_TEST_TARGETS = 512
 
     type :: backend_t
@@ -28,7 +26,7 @@ contains
     function detect_backend(dir) result(b)
         character(len=*), intent(in) :: dir
         type(backend_t) :: b
-        logical :: has_fpm, has_cmake
+        logical :: has_manifest
         character(len=512) :: current, parent
         integer :: depth
 
@@ -36,15 +34,9 @@ contains
 
         do depth = 1, 64
             b%project_dir = current
-
-            inquire (file=trim(current)//'/fpm.toml', exist=has_fpm)
-            inquire (file=trim(current)//'/CMakeLists.txt', exist=has_cmake)
-
-            if (has_cmake) then
-                b%kind = BACKEND_CMAKE
-                return
-            else if (has_fpm) then
-                b%kind = BACKEND_GFORTRAN
+            inquire (file=trim(current)//'/fpm.toml', exist=has_manifest)
+            if (has_manifest) then
+                b%kind = BACKEND_NATIVE
                 return
             end if
 
@@ -54,6 +46,7 @@ contains
         end do
 
         b%kind = BACKEND_NONE
+        b%project_dir = ''
     end function detect_backend
 
     function absolute_dir(dir) result(absdir)
@@ -133,62 +126,38 @@ contains
         integer, intent(out) :: exitcode
         character(len=*), intent(in), optional :: flags
         character(len=*), intent(in), optional :: log_file
-        ! with_tests: also compile and link the test binaries (gfortran backend)
-        ! so build/fo/bin/test_* stay current after a plain `fo build` instead of
-        ! going stale until the next `fo test`. fpm/cmake build tests anyway.
         logical, intent(in), optional :: with_tests
         logical, intent(in), optional :: use_cache
 
-        integer :: np, lock_ierr
         character(len=512) :: log_path, flag_text, lock_dir
+        integer :: lock_ierr
         logical :: want_tests
 
-        np = detect_jobs()
         log_path = ''
         if (present(log_file)) log_path = log_file
         flag_text = ''
         if (present(flags)) flag_text = flags
         want_tests = .false.
         if (present(with_tests)) want_tests = with_tests
+
+        if (self%kind == BACKEND_NONE) then
+            write (error_unit, '(a)') 'fo: no fpm.toml found'
+            exitcode = 1
+            return
+        end if
+
         call acquire_project_lock(self%project_dir, lock_dir, lock_ierr)
         if (lock_ierr /= 0) then
             exitcode = 1
             return
         end if
 
-        select case (self%kind)
-        case (BACKEND_GFORTRAN)
-            call gfortran_build(self%project_dir, log_path, exitcode, &
-                flags=flag_text, use_cache=use_cache)
-            if (exitcode == 0 .and. want_tests) &
-                call gfortran_test(self%project_dir, log_path, exitcode, &
-                flags=flag_text, build_only=.true., use_cache=use_cache)
-        case (BACKEND_CMAKE)
-            call process_cmake_build(self%project_dir, flag_text, np, log_path, &
-                exitcode)
-            if (exitcode /= 0 .and. exitcode /= 124 .and. len_trim(log_path) > 0) then
-                if (log_has_vtable_mismatch(log_path)) then
-                    write (error_unit, '(a)') &
-                        'fo: WARNING: stale CMake module interfaces detected;' // &
-                        ' clearing build tree and retrying'
-                    call clear_cmake_build_tree(self%project_dir)
-                    call process_cmake_build(self%project_dir, flag_text, np, log_path, &
-                        exitcode)
-                else if (log_has_cmake_fetchcontent_unstash(log_path)) then
-                    write (error_unit, '(a)') &
-                        'fo: WARNING: dirty CMake FetchContent checkout detected;' // &
-                        ' clearing build tree and retrying'
-                    call clear_cmake_build_tree(self%project_dir)
-                    call process_cmake_build(self%project_dir, flag_text, np, log_path, &
-                        exitcode)
-                end if
-            end if
-        case default
-            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
-            exitcode = 1
-            call release_project_lock(lock_dir)
-            return
-        end select
+        call gfortran_build(self%project_dir, log_path, exitcode, &
+            flags=flag_text, use_cache=use_cache)
+        if (exitcode == 0 .and. want_tests) &
+            call gfortran_test(self%project_dir, log_path, exitcode, &
+            flags=flag_text, build_only=.true., use_cache=use_cache)
+
         call release_project_lock(lock_dir)
         if (exitcode == 124) then
             write (error_unit, '(a)') &
@@ -219,42 +188,32 @@ contains
         character(len=*), intent(in), optional :: flags
         logical, intent(in), optional :: use_cache
 
-        integer :: jobs, lock_ierr
         character(len=512) :: log_path, lock_dir, flag_text
-        logical :: has_tests, slow
+        integer :: lock_ierr
+        logical :: slow
 
         slow = .false.
         if (present(include_slow)) slow = include_slow
-        jobs = detect_jobs()
         log_path = ''
         if (present(log_file)) log_path = log_file
         flag_text = ''
         if (present(flags)) flag_text = flags
+
+        if (self%kind == BACKEND_NONE) then
+            write (error_unit, '(a)') 'fo: no fpm.toml found'
+            exitcode = 1
+            return
+        end if
+
         call acquire_project_lock(self%project_dir, lock_dir, lock_ierr)
         if (lock_ierr /= 0) then
             exitcode = 1
             return
         end if
 
-        select case (self%kind)
-        case (BACKEND_GFORTRAN)
-            call gfortran_test(self%project_dir, log_path, exitcode, &
-                include_slow=slow, flags=flag_text, use_cache=use_cache)
-        case (BACKEND_CMAKE)
-            inquire (file=trim(self%project_dir)//'/build/CTestTestfile.cmake', &
-                exist=has_tests)
-            if (.not. has_tests) then
-                exitcode = 0
-                call release_project_lock(lock_dir)
-                return
-            end if
-            call process_ctest(self%project_dir, jobs, '', slow, log_path, exitcode)
-        case default
-            write (error_unit, '(a)') 'fo: no build backend detected'
-            exitcode = 1
-            call release_project_lock(lock_dir)
-            return
-        end select
+        call gfortran_test(self%project_dir, log_path, exitcode, &
+            include_slow=slow, flags=flag_text, use_cache=use_cache)
+
         call release_project_lock(lock_dir)
         if (exitcode == 124) then
             write (error_unit, '(a)') &
@@ -278,14 +237,12 @@ contains
         integer :: i, lock_ierr
         character(len=128) :: fast_names(MAX_TEST_TARGETS)
         logical :: slow
-        integer :: n_fast, jobs
-        character(len=1024) :: regex
+        integer :: n_fast
         character(len=512) :: log_path, lock_dir, flag_text
 
         slow = .false.
         if (present(include_slow)) slow = include_slow
         exitcode = 0
-        jobs = detect_jobs()
         log_path = ''
         if (present(log_file)) log_path = log_file
         flag_text = ''
@@ -300,29 +257,21 @@ contains
             end if
         end do
         if (n_fast == 0) return
+
+        if (self%kind == BACKEND_NONE) then
+            exitcode = 1
+            return
+        end if
+
         call acquire_project_lock(self%project_dir, lock_dir, lock_ierr)
         if (lock_ierr /= 0) then
             exitcode = 1
             return
         end if
 
-        if (self%kind == BACKEND_GFORTRAN) then
-            call gfortran_test_names(self%project_dir, fast_names, n_fast, &
-                log_path, exitcode, include_slow=slow, flags=flag_text, &
-                use_cache=use_cache)
-            call release_project_lock(lock_dir)
-            return
-        end if
-
-        if (self%kind == BACKEND_CMAKE) then
-            call names_to_ctest_regex(fast_names, n_fast, regex)
-            call process_ctest(self%project_dir, jobs, regex, slow, log_path, &
-                exitcode)
-            call release_project_lock(lock_dir)
-            return
-        end if
-
-        exitcode = 1
+        call gfortran_test_names(self%project_dir, fast_names, n_fast, &
+            log_path, exitcode, include_slow=slow, flags=flag_text, &
+            use_cache=use_cache)
         call release_project_lock(lock_dir)
     end subroutine backend_test_names
 
@@ -340,8 +289,6 @@ contains
         call fs_make_dir(base)
         ierr = 0
 
-        ! Spin on an atomic exclusive mkdir of the lock directory. When the
-        ! lock is held, reclaim it only if the recorded owner pid is gone.
         do
             state = fs_mkdir_excl(lock_dir)
             if (state == 0) exit
@@ -378,105 +325,8 @@ contains
         call fs_remove_tree(trim(lock_dir))
     end subroutine release_project_lock
 
-    pure function sq(s) result(r)
-        character(len=*), intent(in) :: s
-        character(len=len_trim(s) + 2) :: r
-        r = "'"//trim(s)//"'"
-    end function sq
-
-    subroutine names_to_ctest_regex(names, n_names, regex)
-        character(len=128), intent(in) :: names(MAX_TEST_TARGETS)
-        integer, intent(in) :: n_names
-        character(len=*), intent(out) :: regex
-
-        integer :: i
-
-        regex = '^('
-        do i = 1, n_names
-            if (i > 1) regex = trim(regex)//'|'
-            call append_ctest_regex_name(regex, names(i))
-        end do
-        regex = trim(regex)//')$'
-    end subroutine names_to_ctest_regex
-
-    subroutine append_ctest_regex_name(regex, name)
-        character(len=*), intent(inout) :: regex
-        character(len=*), intent(in) :: name
-
-        integer :: i
-        character(len=1) :: ch
-
-        do i = 1, len_trim(name)
-            ch = name(i:i)
-            select case (ch)
-            case ('.', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|')
-                regex = trim(regex)//achar(92)//ch
-            case (achar(92))
-                regex = trim(regex)//achar(92)//achar(92)
-            case default
-                regex = trim(regex)//ch
-            end select
-        end do
-    end subroutine append_ctest_regex_name
-
-    ! Returns true if the build log contains a gfortran vtable mismatch error.
-    ! These occur when .mod files compiled under different dependency sets are mixed.
-    logical function log_has_vtable_mismatch(log_file)
-        character(len=*), intent(in) :: log_file
-
-        integer :: u, iostat
-        character(len=512) :: line
-
-        log_has_vtable_mismatch = .false.
-        open (newunit=u, file=trim(log_file), status='old', iostat=iostat)
-        if (iostat /= 0) return
-
-        do
-            read (u, '(a)', iostat=iostat) line
-            if (iostat /= 0) exit
-            if (index(line, 'Mismatch in components of derived type') > 0 .or. &
-                index(line, '__vtype_') > 0) then
-                log_has_vtable_mismatch = .true.
-                exit
-            end if
-        end do
-        close (u)
-    end function log_has_vtable_mismatch
-
-    logical function log_has_cmake_fetchcontent_unstash(log_file)
-        character(len=*), intent(in) :: log_file
-
-        integer :: u, iostat
-        character(len=512) :: line
-
-        log_has_cmake_fetchcontent_unstash = .false.
-        open (newunit=u, file=trim(log_file), status='old', iostat=iostat)
-        if (iostat /= 0) return
-
-        do
-            read (u, '(a)', iostat=iostat) line
-            if (iostat /= 0) exit
-            if (index(line, 'Failed to unstash changes in:') > 0) then
-                log_has_cmake_fetchcontent_unstash = .true.
-                exit
-            end if
-        end do
-        close (u)
-    end function log_has_cmake_fetchcontent_unstash
-
-    subroutine clear_cmake_build_tree(project_dir)
-        character(len=*), intent(in) :: project_dir
-
-        call fs_remove_tree(trim(project_dir)//'/build')
-    end subroutine clear_cmake_build_tree
-
     subroutine backend_clean(project_dir, purge_store, build_removed, &
             store_removed)
-        !! Project-scoped clean. Always drops the project's build/ tree (a
-        !! disposable view fo regenerates from the cache). The shared
-        !! content-addressed store under cache_root is removed only when
-        !! purge_store is set: it is the cross-project source of truth, so a
-        !! per-project clean must not cold-start every other project.
         use fo_cache, only: cache_root
         use fo_util, only: clean_root_build_artifacts
         character(len=*), intent(in) :: project_dir

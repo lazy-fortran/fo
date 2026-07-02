@@ -1,13 +1,9 @@
 program test_backend
-    !! Backend detection + first half of the gfortran build/cache tests. Heavy
-    !! build tests are split across test_backend_gfortran and test_backend_cmake
-    !! so fo's process-parallel runner runs them at once. Shared helpers are in
-    !! test_backend_helpers.inc.
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
         detect_jobs, backend_build, backend_test, &
         backend_test_names, backend_clean, &
-        BACKEND_CMAKE, BACKEND_NONE, BACKEND_GFORTRAN
+        BACKEND_NATIVE, BACKEND_NONE
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names, config_flags_str
     use fo_fpm_config, only: fpm_config_t
@@ -20,8 +16,6 @@ program test_backend
 
     call test_detect_fpm()
     call test_detect_fpm_from_child()
-    call test_detect_cmake()
-    call test_detect_cmake_over_fpm()
     call test_detect_none()
     call test_nproc()
     call test_detect_jobs()

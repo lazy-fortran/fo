@@ -63,11 +63,6 @@ contains
                 project_dir = trim(dir)
                 return
             end if
-            inquire (file=trim(dir)//'/CMakeLists.txt', exist=exists)
-            if (exists) then
-                project_dir = trim(dir)
-                return
-            end if
         end do
         project_dir = '.'
     end subroutine find_project_dir
