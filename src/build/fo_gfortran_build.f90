@@ -549,7 +549,8 @@ contains
                         dep_keys, n_dep)
 
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
-                    if (cache_lookup(c, source_key)) then
+                    if (.not. source_may_emit_smod(filenames(node_id)) .and. &
+                        cache_lookup(c, source_key)) then
                         call cache_restore_action(c, source_key, obj_path, mod_dir, &
                             restored)
                         if (restored) then
@@ -587,6 +588,8 @@ contains
                 end do
                 do ii = 1, n_compile
                     if (compile_exits(ii) /= 0) then
+                        call append_compile_failure_source(log_file, filenames( &
+                            compile_nodes(ii)))
                         call progress_end()
                         exitcode = compile_exits(ii)
                         return
@@ -661,6 +664,68 @@ contains
         call compile_dep_c_sources(deps, n_deps_resolved, project_dir, obj_dir, &
             log_file, src_objs, n_src_objs, is_prog_arr, exitcode)
     end subroutine compile_sources
+
+    logical function source_may_emit_smod(path) result(may_emit)
+        character(len=*), intent(in) :: path
+
+        character(len=512) :: line, lower
+        integer :: u, ios
+
+        may_emit = .false.
+        open (newunit=u, file=trim(path), status='old', iostat=ios)
+        if (ios /= 0) return
+        do
+            read (u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            lower = adjustl(line)
+            call lowercase_inplace(lower)
+            if (starts_with_submodule(lower) .or. &
+                index(lower, 'module subroutine') == 1 .or. &
+                index(lower, 'module function') == 1) then
+                may_emit = .true.
+                exit
+            end if
+        end do
+        close (u)
+    end function source_may_emit_smod
+
+    subroutine lowercase_inplace(text)
+        character(len=*), intent(inout) :: text
+
+        integer :: i
+
+        do i = 1, len_trim(text)
+            if (text(i:i) >= 'A' .and. text(i:i) <= 'Z') then
+                text(i:i) = achar(iachar(text(i:i)) + 32)
+            end if
+        end do
+    end subroutine lowercase_inplace
+
+    logical function starts_with_submodule(text) result(matches)
+        character(len=*), intent(in) :: text
+
+        integer :: open_pos
+
+        matches = .false.
+        if (index(text, 'submodule') /= 1) return
+        open_pos = index(text, '(')
+        if (open_pos == 0) return
+        if (open_pos > 10) then
+            if (len_trim(text(10:open_pos - 1)) > 0) return
+        end if
+        matches = .true.
+    end function starts_with_submodule
+
+    subroutine append_compile_failure_source(log_file, source_file)
+        character(len=*), intent(in) :: log_file, source_file
+
+        integer :: u, ios
+
+        open (newunit=u, file=trim(log_file), position='append', iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a)') 'fo: failed source: '//trim(source_file)
+        close (u)
+    end subroutine append_compile_failure_source
 
     subroutine add_dep_sources(project_dir, all_units, n_all, deps, n_deps)
         !! Scan every transitive path-dependency's library source dir and append

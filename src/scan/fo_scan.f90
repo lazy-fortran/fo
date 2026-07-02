@@ -279,11 +279,14 @@ contains
         call to_lower(lower_line)
 
         if (len_trim(lower_line) < 11) return
-        if (lower_line(1:10) /= 'submodule(') return
+        if (index(lower_line, 'submodule') /= 1) return
 
         open_pos = index(lower_line, '(')
         close_pos = index(lower_line, ')')
         if (open_pos == 0 .or. close_pos <= open_pos + 1) return
+        if (open_pos > 10) then
+            if (len_trim(lower_line(10:open_pos - 1)) > 0) return
+        end if
 
         parent_text = adjustl(lower_line(open_pos + 1:close_pos - 1))
         if (index(parent_text, ':') > 0) then

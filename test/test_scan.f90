@@ -134,7 +134,7 @@ contains
         character(len=512) :: path
         character(len=80) :: lines(3)
 
-        lines(1) = 'submodule(semantic_analyzer) semantic_analyzer_context_impl'
+        lines(1) = 'submodule (semantic_analyzer) semantic_analyzer_context_impl'
         lines(2) = '    implicit none'
         lines(3) = 'end submodule semantic_analyzer_context_impl'
         call make_tmp_path('fo_test_submodule', path, '.f90')
