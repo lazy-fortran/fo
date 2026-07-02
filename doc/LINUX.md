@@ -33,7 +33,7 @@ Reuse:
   process trees and feeds page images into the store for incremental dedup.
 - **git**: source history. fo reads the working tree that git manages.
 - **fpm**: Fortran package manifest standard. fo reads `fpm.toml` and builds
-  natively; it does not invoke the `fpm` tool.
+  natively; it does not invoke the `fpm` tool to build or test.
 - **Slurm/HTCondor**: cluster job scheduling. fo submits capsules as jobs.
   (Their "checkpoint" support is a trigger for CRIU, not a store-integrated
   incremental mechanism. The store integration is fo's work.)

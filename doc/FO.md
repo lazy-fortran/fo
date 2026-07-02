@@ -188,7 +188,8 @@ does not duplicate it.
 
 ## Relationship to fpm
 
-`fo` conforms to the `fpm.toml` manifest standard (`bootstrap/FPM_SUPPORT.md`): it
+`fo` is a standalone build and test tool, not a wrapper around `fpm`. It
+conforms to the `fpm.toml` manifest standard (`bootstrap/FPM_SUPPORT.md`): it
 consumes `fpm.toml` as the project descriptor (sources, targets, tests, path
 dependencies) and writes `fo.lock`. It does not invoke the `fpm` tool to build or
 test; it compiles the module DAG natively through its own content-addressed cache,
@@ -199,7 +200,7 @@ contract; the cache, store, capsules, and surfaces are `fo`'s own.
 
 `fo` supersedes the earlier fortrun project as the runner and orchestrator for Fortran builds.
 Fortrun was experimental and on hold; `fo` implements the intended role of a build driver with
-dependency resolution, caching, and FPM integration, but does so more comprehensively and is
+dependency resolution, caching, and `fpm.toml` manifest support, but does so more comprehensively and is
 the active path for the lazy-fortran compiler bootstrap. Nothing from fortrun merits porting:
 `fo`'s module scanner is more complete (handles submodules and external procedures), its
 dependency resolver is more efficient (transitive closure with deduplication), and its caching

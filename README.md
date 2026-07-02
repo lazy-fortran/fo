@@ -1,8 +1,11 @@
 # fo
 
 Fortran build driver with module DAG, content-addressed cache, and
-affected-test selection. Reads the `fpm.toml` manifest and builds natively
-through its own cache; drives cmake + ninja for CMake projects.
+affected-test selection. `fo` is a self-contained, standalone build and test
+tool: a drop-in replacement for `fpm` that reads the same `fpm.toml` manifest
+but builds and tests your project natively through its own cache rather than
+invoking `fpm` to build or test. It also drives cmake + ninja for CMake
+projects.
 
 ## Install
 
