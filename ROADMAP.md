@@ -51,3 +51,14 @@ The capsule is the cluster scheduling unit. fo wraps Slurm and MPI and records t
 Commands: `fo submit --slurm/queue/attach/collect/repro`.
 
 Parallelism maps to structures: arrays to data parallel, tree/graph to task/async, hash/content-addressed to conflict-free. In-node coarray/do-concurrent and async parallelism tracked separately.
+
+## Issue #3 — fpm/Nix/Spack interop
+
+Bridge to existing Fortran and HPC tooling. An fpm project keeps working as plain fpm; fo adds lock, store, and export on top.
+
+Inputs: `fpm.toml`, `fo.lock`, optional `flake.nix`, optional `spack.yaml` / `spack.lock`.
+Outputs: fpm-compatible build/run/test, Nix flake export, Spack environment export, capsule metadata.
+
+Commands: `fo init --from-fpm ; fo lock ; fo build ; fo test ; fo nix export ; fo spack export`.
+
+Non-goals: replacing fpm or its registry; requiring Nix/Spack; a new manifest format; supporting cmake.
