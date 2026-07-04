@@ -68,3 +68,15 @@ Non-goals: replacing fpm or its registry; requiring Nix/Spack; a new manifest fo
 Agent-level instance of summarization for tools, skills, resources, and caps. Balanced 5-9 fanout, summaries first, schema on demand, search over enumerate.
 
 Meta-tools `fo_list` / `fo_describe` / `fo_search` / `fo_call` / `fo_use_skill` as the only entry points. On-demand tool loading cuts tool-definition context by roughly 85% while improving selection accuracy. `fo mcp-server` exposes the same tree externally.
+
+## Issue #5 — Snapshot, replication, backup, remote cache transport
+
+Transport layer over the store and capsules. Push a run to a remote, delete locally, pull back, verify, reproduce.
+
+Concepts: snapshot (named set of roots and refs), backup (remote copy of a closure), replication (push/pull/mirror of objects by hash), restore (activate old profile, snapshot, or capsule closure).
+
+Dedup at the warm repo. Cold tier is write-only: object-skip plus immutable/WORM, append-only. Verification rehashes every object against its key. Discipline: 3-2-1-1-0.
+
+Remotes: local directory, SSH, S3-compatible object storage.
+
+Commands: `fo snapshot create/diff`, `fo backup create/verify/restore`, `fo remote add`, `fo push`, `fo pull`, `fo mirror`.
