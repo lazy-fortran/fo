@@ -467,6 +467,7 @@ contains
         integer :: n_compdb
         type(resolved_src_t) :: deps(MAX_RESOLVED)
         integer :: n_deps_resolved
+        integer :: ii_failed
 
         type(cache_t) :: c
         integer :: cache_ierr
@@ -476,6 +477,7 @@ contains
         integer, allocatable :: compile_nodes(:)
         character(len=HASH_LEN), allocatable :: compile_keys(:)
         integer, allocatable :: compile_exits(:)
+        logical, allocatable :: compile_flaky(:)
         character(len=512), allocatable :: per_logs(:)
         integer :: n_compile
         character(len=MAX_PATH) :: fname_local
@@ -492,6 +494,7 @@ contains
         allocate (old_mod_keys(MAX_NODES), new_mod_keys(MAX_NODES))
         allocate (compile_nodes(MAX_NODES), compile_keys(MAX_NODES))
         allocate (compile_exits(MAX_NODES), per_logs(MAX_NODES))
+        allocate (compile_flaky(MAX_NODES))
         allocate (compdb_sources(MAX_NODES), compdb_objects(MAX_NODES))
 
         call scan_dir(trim(project_dir)//'/'//trim(src_dir), units_a, na, ierr)
@@ -547,6 +550,7 @@ contains
             do lvl = 0, n_levels - 1
                 n_compile = 0
                 compile_exits = 0
+                compile_flaky = .false.
 
                 do i = 1, n_order
                     if (node_levels(i) /= lvl) cycle
@@ -605,13 +609,28 @@ contains
                 do ii = 1, n_compile
                     call append_log_file(trim(per_logs(ii)), log_file)
                 end do
+                ii_failed = 0
                 do ii = 1, n_compile
                     if (compile_exits(ii) /= 0) then
-                        call append_compile_failure_source(log_file, filenames( &
+                        node_id = compile_nodes(ii)
+                        fname_local = filenames(node_id)
+                        call make_obj_path(fname_local, project_dir, obj_dir, &
+                            obj_path)
+                        call compile_f90(project_dir, fname_local, obj_path, &
+                            with_user_flags(includes_flag, flags), per_logs(ii), &
+                            compile_exits(ii))
+                        if (compile_exits(ii) == 0) then
+                            compile_flaky(ii) = .true.
+                        else
+                            call append_compile_failure_source(log_file, filenames( &
+                                compile_nodes(ii)))
+                            ii_failed = ii
+                            exit
+                        end if
+                    end if
+                    if (compile_flaky(ii)) then
+                        call append_compile_flaky_status(log_file, filenames( &
                             compile_nodes(ii)))
-                        call progress_end()
-                        exitcode = compile_exits(ii)
-                        return
                     end if
                     node_id = compile_nodes(ii)
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, &
@@ -622,6 +641,14 @@ contains
                         dag%nodes(node_id)%label, source_key, &
                         cache_ierr)
                 end do
+                do ii = 1, n_compile
+                    call delete_tmpfile(per_logs(ii))
+                end do
+                if (ii_failed > 0) then
+                    call progress_end()
+                    exitcode = compile_exits(ii_failed)
+                    return
+                end if
                 n_compiled = n_compiled + n_compile
             end do
             call save_mod_keys(mod_dir, dag, n_order, topo_order, new_mod_keys)
@@ -745,6 +772,24 @@ contains
         write (u, '(a)') 'fo: failed source: '//trim(source_file)
         close (u)
     end subroutine append_compile_failure_source
+
+    subroutine append_compile_flaky_status(log_file, source_file)
+        !! Report a compile that failed in parallel but passed when rerun
+        !! serially. This keeps a flaky parallel schedule from producing
+        !! false-negative builds and leaves a precise action item for scheduler
+        !! hardening.
+        character(len=*), intent(in) :: log_file, source_file
+
+        integer :: u, ios
+
+        open (newunit=u, file=trim(log_file), position='append', status='old', &
+            iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a)') 'fo: FLAKY compile '//trim(source_file)// &
+            ': failed in parallel, passed on isolated rerun -- a compile-parallelism '//&
+            'race that MUST be fixed in code (shared /tmp paths or global state).'
+        close (u)
+    end subroutine append_compile_flaky_status
 
     subroutine add_dep_sources(project_dir, all_units, n_all, deps, n_deps)
         !! Scan every transitive path-dependency's library source dir and append
