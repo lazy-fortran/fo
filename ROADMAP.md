@@ -43,3 +43,11 @@ fo targets Linux as its production platform. Every pillar maps onto Linux kernel
 ### Research basis
 
 FastCDC 3-12x over Rabin (Xia et al., IEEE TPDS 2020). VectorCDC 6.5-29.9 GB/s AVX-512 (USENIX FAST 2025). io_uring 2x with architectural redesign (Jasny et al., 2024). Reproducible builds: 95% of Debian (Lamb/Zacchiroli, IEEE Software 2022).
+
+## Issue #2 — Slurm/MPI adapters for fo capsules
+
+The capsule is the cluster scheduling unit. fo wraps Slurm and MPI and records the run into the capsule: generated Slurm script, module environment, MPI launcher, rank topology, per-rank logs, input and output hashes.
+
+Commands: `fo submit --slurm/queue/attach/collect/repro`.
+
+Parallelism maps to structures: arrays to data parallel, tree/graph to task/async, hash/content-addressed to conflict-free. In-node coarray/do-concurrent and async parallelism tracked separately.
