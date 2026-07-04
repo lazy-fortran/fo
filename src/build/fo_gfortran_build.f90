@@ -1455,6 +1455,32 @@ contains
             end if
         end do
 
+        ! Structured TEST_RESULT lines for downstream consumers (CLI, MCP, agents)
+        if (.not. bonly) then
+            do i = 1, n_run
+                call file_basename(filenames(run_nodes(i)), tname)
+                if (flaky(i)) then
+                    call write_test_result_line(log_file, tname, 'FLAKY', '-', &
+                        run_secs(i))
+                else if (ran(i) .and. run_exits(i) == 124) then
+                    call write_test_result_line(log_file, tname, 'TIMEOUT', '124', &
+                        run_secs(i))
+                else if (ran(i) .and. run_exits(i) == 0) then
+                    call write_test_result_line(log_file, tname, 'PASS', '-', &
+                        run_secs(i))
+                else if (ran(i)) then
+                    block
+                        character(len=8) :: exit_str
+                        write (exit_str, '(i0)') run_exits(i)
+                        call write_test_result_line(log_file, tname, 'FAIL', &
+                            trim(exit_str), run_secs(i))
+                    end block
+                else if (run_compiled(i)) then
+                    call write_test_result_line(log_file, tname, 'SKIP', '-', 0.0)
+                end if
+            end do
+        end if
+
         if (.not. bonly) &
             call warn_slow_tests(filenames, run_nodes, run_exits, run_secs, n_run, &
             test_warn, log_file)
@@ -1541,6 +1567,22 @@ contains
             'creates process-unique. Tests always run on all cores in parallel.'
         close (u)
     end subroutine append_flaky_status
+
+    subroutine write_test_result_line(log_file, name, status, exit_str, secs)
+        character(len=*), intent(in) :: log_file, name, status, exit_str
+        real, intent(in) :: secs
+
+        integer :: u, ios
+        character(len=16) :: secs_str
+
+        write (secs_str, '(F8.2)') secs
+        open (newunit=u, file=trim(log_file), position='append', &
+            status='old', iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a,a,a,a,a,a,a)') 'TEST_RESULT ', trim(name), ' ', &
+            trim(status), ' ', trim(exit_str), ' ', trim(secs_str)
+        close (u)
+    end subroutine write_test_result_line
 
     integer function test_timeout_seconds() result(t)
         character(len=32) :: buf

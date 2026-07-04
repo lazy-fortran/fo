@@ -138,7 +138,7 @@ contains
             call handle_backend_build(id_str, dir, tmpfile, response)
             return
         case ('test')
-            call handle_backend_test(id_str, dir, tmpfile, response)
+            call handle_backend_test_named(line, id_str, dir, tmpfile, response)
             return
         case ('graph')
             call handle_graph(line, id_str, dir, output_text, exitcode, response)
@@ -252,27 +252,70 @@ contains
         call make_tool_text_response(id_str, output_text, exitcode, response)
     end subroutine handle_backend_build
 
-    subroutine handle_backend_test(id_str, dir, tmpfile, response)
+    subroutine handle_backend_test_named(line, id_str, dir, tmpfile, response)
         use fo_build_backend, only: backend_t, detect_backend, backend_test, &
-            BACKEND_NONE
-        character(len=*), intent(in) :: id_str, dir, tmpfile
+            backend_test_names, BACKEND_NONE
+        use fx_dag, only: MAX_NODES
+        character(len=*), intent(in) :: line, id_str, dir, tmpfile
         character(len=*), intent(out) :: response
 
         type(backend_t) :: b
         character(len=8192) :: output_text
         integer :: exitcode
+        character(len=128) :: test_names(MAX_NODES)
+        integer :: n_names
 
         b = detect_backend(trim(dir))
         if (b%kind == BACKEND_NONE) then
             output_text = 'fo: no fpm.toml found'
             exitcode = 1
+            call make_tool_text_response(id_str, output_text, exitcode, response)
+            return
+        end if
+
+        n_names = 0
+        call extract_test_names_from_params(line, test_names, n_names)
+
+        if (n_names > 0) then
+            call backend_test_names(b, test_names, n_names, exitcode, &
+                log_file=tmpfile)
         else
             call backend_test(b, exitcode, log_file=tmpfile)
-            call read_text_file(tmpfile, output_text)
         end if
+
+        call read_text_file(tmpfile, output_text)
         call delete_tmpfile(tmpfile)
         call make_tool_text_response(id_str, output_text, exitcode, response)
-    end subroutine handle_backend_test
+    end subroutine handle_backend_test_named
+
+    subroutine extract_test_names_from_params(line, names, n_names)
+        character(len=*), intent(in) :: line
+        character(len=128), intent(out) :: names(:)
+        integer, intent(out) :: n_names
+
+        integer :: p, q, len_line
+
+        n_names = 0
+        len_line = len(line)
+        p = index(line, '"args"')
+        if (p == 0) return
+        q = index(line(p:len_line), '[')
+        if (q == 0) return
+        p = p + q - 1
+
+        do while (p <= len_line)
+            q = index(line(p:len_line), '"')
+            if (q == 0) exit
+            p = p + q
+            q = index(line(p:len_line), '"')
+            if (q == 0) exit
+            if (n_names < size(names)) then
+                n_names = n_names + 1
+                names(n_names) = line(p:p + q - 2)
+            end if
+            p = p + q
+        end do
+    end subroutine extract_test_names_from_params
 
     subroutine handle_graph(line, id_str, dir, output_text, exitcode, response)
         use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS

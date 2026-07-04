@@ -13,6 +13,8 @@ program fo_main
     use fo_util, only: make_tmpfile, delete_tmpfile
     use fo_check_output, only: check_result_json, check_result_compact_json, &
         check_result_full_json
+    use fo_test_results, only: test_result_entry_t, MAX_TEST_RESULTS_ENTRIES, &
+        parse_test_results, format_test_results_human, format_test_results_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
     use fo_fmt, only: fo_fmt_run, fo_fmt_files, fo_fmt_changed_run, &
@@ -292,13 +294,15 @@ contains
 
         out = output_unit
         if (present(unit)) out = unit
-        write (out, '(a)') 'usage: fo test [--only-changed] [--all] [name ...]'
+        write (out, '(a)') 'usage: fo test [--only-changed] [--all] [--verbose] [--json] [name ...]'
         write (out, '(a)') ''
         write (out, '(a)') 'Run project tests from fpm.toml.'
         write (out, '(a)') ''
         write (out, '(a)') 'options:'
         write (out, '(a)') '  --only-changed  run tests affected by changed modules'
         write (out, '(a)') '  --all           include slow tests'
+        write (out, '(a)') '  --verbose       show all tests (default for named runs)'
+        write (out, '(a)') '  --json          output results as JSON'
         write (out, '(a)') '  -h, --help      show this help'
         write (out, '(a)') ''
         write (out, '(a)') 'examples:'
@@ -758,7 +762,7 @@ contains
         integer :: changed_ids(MAX_NODES), n_changed
         integer :: affected_ids(MAX_NODES), n_affected
         integer :: n_cached, ierr, i, n_test_names, n_arg_names
-        logical :: only_changed, include_all
+        logical :: only_changed, include_all, verbose, use_json
         character(len=256) :: arg
         character(len=128) :: test_names(MAX_NODES)
         character(len=512) :: test_log
@@ -776,11 +780,15 @@ contains
 
         only_changed = .false.
         include_all = .false.
+        verbose = .false.
+        use_json = .false.
         n_arg_names = 0
         do i = 2, command_argument_count()
             call get_command_argument(i, arg)
             if (trim(arg) == '--only-changed') only_changed = .true.
             if (trim(arg) == '--all') include_all = .true.
+            if (trim(arg) == '--verbose') verbose = .true.
+            if (trim(arg) == '--json') use_json = .true.
             if (arg(1:1) /= '-') then
                 n_arg_names = n_arg_names + 1
                 test_names(n_arg_names) = arg(1:128)
@@ -791,7 +799,7 @@ contains
             call make_tmpfile('fo-test', test_log)
             call backend_test_names(b, test_names, n_arg_names, exitcode, &
                 include_all, test_log)
-            call report_test_result(exitcode, test_log)
+            call report_test_result(exitcode, test_log, .false., use_json)
             call delete_tmpfile(test_log)
         else if (only_changed) then
             call fo_changed_modules('.', dag, changed_ids, n_changed, &
@@ -824,40 +832,65 @@ contains
             call make_tmpfile('fo-test', test_log)
             call backend_test_names(b, test_names, n_test_names, exitcode, &
                 include_all, test_log)
-            call report_test_result(exitcode, test_log)
+            call report_test_result(exitcode, test_log, .false., use_json)
             call delete_tmpfile(test_log)
         else
             call make_tmpfile('fo-test', test_log)
             call backend_test(b, exitcode, include_all, test_log)
-            call report_test_result(exitcode, test_log)
+            call report_test_result(exitcode, test_log, &
+                (n_arg_names == 0 .and. .not. verbose), use_json)
             call delete_tmpfile(test_log)
         end if
     end subroutine cmd_test
 
-    subroutine report_test_result(exitcode, test_log)
+    subroutine report_test_result(exitcode, test_log, summary_mode, use_json)
         integer, intent(in) :: exitcode
         character(len=*), intent(in) :: test_log
+        logical, intent(in) :: summary_mode
+        logical, intent(in) :: use_json
 
+        type(test_result_entry_t) :: entries(MAX_TEST_RESULTS_ENTRIES)
+        integer :: n_entries, parse_ierr
+        character(len=16384) :: json_output, human_output
         type(diagnostic_t) :: diag
         character(len=128) :: failed_tests(MAX_TEST_RESULTS)
         integer :: n_failed_tests
 
-        if (exitcode == 0) return
-        call diagnostic_from_log('test', test_log, 'fo test', diag)
-        write (error_unit, '(a,a)') 'fo: test failed: ', trim(diag%message)
-        call collect_failed_test_names(test_log, failed_tests, n_failed_tests)
-        if (n_failed_tests > 1) call report_failed_tests(failed_tests, n_failed_tests)
-        if (len_trim(diag%target) > 0) then
-            write (error_unit, '(a,a)') 'fo: target: ', trim(diag%target)
+        call parse_test_results(test_log, entries, n_entries, parse_ierr)
+
+        if (n_entries > 0) then
+            if (use_json) then
+                call format_test_results_json(entries, n_entries, exitcode, json_output)
+                write (output_unit, '(a)') trim(json_output)
+            else
+                call format_test_results_human(entries, n_entries, test_log, &
+                    summary_mode, human_output)
+                if (len_trim(human_output) > 0) then
+                    write (output_unit, '(a)') trim(human_output)
+                end if
+            end if
+        else if (exitcode == 0) then
+            if (.not. summary_mode) return
+            write (output_unit, '(a)') 'Tests: 0 passed (0.00s)'
+            return
+        else
+            call diagnostic_from_log('test', test_log, 'fo test', diag)
+            write (error_unit, '(a,a)') 'fo: test failed: ', trim(diag%message)
+            call collect_failed_test_names(test_log, failed_tests, n_failed_tests)
+            if (n_failed_tests > 1) call report_failed_tests(failed_tests, n_failed_tests)
+            if (len_trim(diag%target) > 0) then
+                write (error_unit, '(a,a)') 'fo: target: ', trim(diag%target)
+            end if
+            if (len_trim(diag%hint) > 0) then
+                write (error_unit, '(a,a)') 'fo: hint: ', trim(diag%hint)
+            end if
+            if (len_trim(diag%rerun) > 0) then
+                write (error_unit, '(a,a)') 'fo: rerun: ', trim(diag%rerun)
+            end if
+            write (error_unit, '(a,a)') 'fo: log: ', trim(test_log)
         end if
-        if (len_trim(diag%hint) > 0) then
-            write (error_unit, '(a,a)') 'fo: hint: ', trim(diag%hint)
-        end if
-        if (len_trim(diag%rerun) > 0) then
-            write (error_unit, '(a,a)') 'fo: rerun: ', trim(diag%rerun)
-        end if
-        write (error_unit, '(a,a)') 'fo: log: ', trim(test_log)
-        stop 1, quiet = .true.
+
+        if (exitcode /= 0) stop 1, quiet = .true.
     end subroutine report_test_result
 
     subroutine cmd_bench()
