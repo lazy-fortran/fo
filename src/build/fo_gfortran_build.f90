@@ -149,14 +149,33 @@ contains
         integer, intent(out) :: exitcode
 
         character(len=:), allocatable :: packed
+        character(len=4096) :: bootstrap_env, lib_dir, lib_path, prior_paths
         integer :: n_args
+        integer :: stat, cut
+        logical :: has_local_liric
+
+        bootstrap_env = ''
+        call local_library_candidate(project_dir, 'liric', lib_path, has_local_liric)
+        if (has_local_liric) then
+            cut = index(trim(lib_path), '/', back=.true.)
+            if (cut > 0) lib_dir = trim(lib_path(1:cut - 1))
+
+            if (len_trim(lib_dir) > 0) then
+                call get_environment_variable('LIBRARY_PATH', prior_paths, status=stat)
+                if (stat == 0 .and. len_trim(prior_paths) > 0) then
+                    bootstrap_env = 'LIBRARY_PATH='//trim(lib_dir)//':'//trim(prior_paths)
+                else
+                    bootstrap_env = 'LIBRARY_PATH='//trim(lib_dir)
+                end if
+            end if
+        end if
 
         n_args = 0
         call argv_push(packed, n_args, 'fpm')
         call argv_push(packed, n_args, 'build')
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
             .true., build_timeout_seconds(), exitcode, &
-            env_extra='OMP_NUM_THREADS=1')
+            env_extra=trim(bootstrap_env))
         if (exitcode == 0) return
 
         write (error_unit, '(a)') 'fo: fpm bootstrap failed for git/registry dependencies'
@@ -1040,7 +1059,7 @@ contains
         if (present(use_cache)) allow_cache = use_cache
         if (.not. allow_cache) cache_ierr = 1
         base_digest = ''
-        if (cache_ierr == 0) call link_base_digest(lib_objs, n_lib, dep_objs, &
+        if (cache_ierr == 0) call link_base_digest(project_dir, lib_objs, n_lib, dep_objs, &
             n_dep_objs, config%link_libs, config%n_link_libs, base_digest)
 
         do i = 1, n_src_objs
@@ -1058,20 +1077,21 @@ contains
                 prog_name = trim(config%name)
             end if
             bin_path = trim(bin_dir)//'/'//trim(prog_name)
-            call link_binary(prog_obj, lib_objs, n_lib, dep_objs, n_dep_objs, &
+            call link_binary(project_dir, prog_obj, lib_objs, n_lib, dep_objs, n_dep_objs, &
                 config%link_libs, config%n_link_libs, bin_path, &
                 log_file, exitcode, link_flags, c, base_digest)
             if (exitcode /= 0) return
         end do
     end subroutine link_app_binaries
 
-    subroutine link_base_digest(lib_objs, n_lib, dep_objs, n_dep, link_libs, &
+    subroutine link_base_digest(project_dir, lib_objs, n_lib, dep_objs, n_dep, link_libs, &
             n_link, digest)
         !! One digest standing for every shared link input: the library objects,
         !! the dependency objects, and the resolved external archives (hashed by
         !! content so a rebuilt liric.a relinks). Computed once per build; each
         !! per-program link folds in only its own object, so the link key is
         !! cheap and correct.
+        character(len=*), intent(in) :: project_dir
         character(len=512), intent(in) :: lib_objs(MAX_SRC_OBJS)
         integer, intent(in) :: n_lib
         character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
@@ -1098,7 +1118,7 @@ contains
         end do
         call build_lib_search_dirs(dirs, n_dirs, n_env)
         do i = 1, n_link
-            call resolve_link_token(trim(link_libs(i)), dirs, n_dirs, n_env, &
+            call resolve_link_token(project_dir, trim(link_libs(i)), dirs, n_dirs, n_env, &
                 token)
             inquire (file=trim(token), exist=exists)
             if (exists) then
@@ -1315,7 +1335,7 @@ contains
         ! change invalidates the cached result.
         call hash_lib_objs(all_lib_objs, n_all_lib, lib_hash)
         link_base = ''
-        if (cache_ierr == 0) call link_base_digest(all_lib_objs, n_all_lib, &
+        if (cache_ierr == 0) call link_base_digest(project_dir, all_lib_objs, n_all_lib, &
             dep_objs, n_dep_objs, link_libs, n_link_libs, link_base)
 
         do i = 1, n_run
@@ -1360,7 +1380,7 @@ contains
             if (run_exits(i) == 0) then
                 call file_basename(fname_local, tname)
                 bin_path = trim(bin_dir)//'/'//trim(tname)
-                call link_binary(obj_path, all_lib_objs, n_all_lib, dep_objs, &
+                call link_binary(project_dir, obj_path, all_lib_objs, n_all_lib, dep_objs, &
                     n_dep_objs, link_libs, n_link_libs, bin_path, log_local, &
                     run_exits(i), test_flags, c, link_base)
             end if
@@ -1958,9 +1978,10 @@ contains
             build_timeout_seconds(), exitcode)
     end subroutine compile_c
 
-    subroutine link_binary(prog_obj, lib_objs, n_lib_objs, dep_objs, n_dep_objs, &
+    subroutine link_binary(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, n_dep_objs, &
             link_libs, n_link_libs, output, log_file, exitcode, flags, &
             cache, base_digest)
+        character(len=*), intent(in) :: project_dir
         character(len=*), intent(in) :: prog_obj, output, log_file
         character(len=512), intent(in) :: lib_objs(MAX_SRC_OBJS)
         integer, intent(in) :: n_lib_objs
@@ -2000,7 +2021,7 @@ contains
             key_parts(1) = 'fo-link-1'
             key_parts(2) = trim(fc_command())
             key_parts(3) = flags_str
-            key_parts(4) = trim(link_lib_flags(link_libs, n_link_libs))
+            key_parts(4) = trim(link_lib_flags(project_dir, link_libs, n_link_libs))
             key_parts(5) = trim(base_digest)
             key_parts(6) = trim(prog_key)
             action_id = cache_digest(key_parts, 6)
@@ -2039,7 +2060,7 @@ contains
         do i = 1, n_dep_objs
             call argv_push(packed, n_args, dep_objs(i))
         end do
-        call argv_push_split_nl(packed, n_args, link_lib_flags(link_libs, n_link_libs))
+        call argv_push_split_nl(packed, n_args, link_lib_flags(project_dir, link_libs, n_link_libs))
         ! flang's driver does not add Homebrew's libomp to the link search, so
         ! -fopenmp links fail with "library 'omp' not found". Add it (harmless
         ! when the build does not use OpenMP) plus an rpath for runtime.
@@ -2080,7 +2101,7 @@ contains
         text = trim(text)
     end function argv_display
 
-    function link_lib_flags(link_libs, n_link_libs) result(flags)
+    function link_lib_flags(project_dir, link_libs, n_link_libs) result(flags)
         !! Resolve each `link` lib to a concrete archive on a search path and
         !! link it by absolute path, preferring a static .a so the binary does
         !! not depend on LIBRARY_PATH at link or run time. Libs found only via
@@ -2088,6 +2109,7 @@ contains
         !! the space-prefixed flag string so the caller mutates its own cmd
         !! buffer (passing the deferred-length cmd through an assumed-length
         !! intent(inout) dummy dropped the appended tokens via copy-out).
+        character(len=*), intent(in) :: project_dir
         character(len=128), intent(in) :: link_libs(*)
         integer, intent(in) :: n_link_libs
         character(len=:), allocatable :: flags
@@ -2099,7 +2121,8 @@ contains
         flags = ''
         call build_lib_search_dirs(dirs, n_dirs, n_env)
         do i = 1, n_link_libs
-            call resolve_link_token(trim(link_libs(i)), dirs, n_dirs, n_env, token)
+            call resolve_link_token(project_dir, trim(link_libs(i)), dirs, n_dirs, n_env, &
+                token)
             ! Newline-join so the caller can split with argv_push_split_nl,
             ! which preserves spaces in resolved library paths. Tokens are
             ! passed straight to the linker via argv (shell-free build), so
@@ -2108,7 +2131,11 @@ contains
         end do
     end function link_lib_flags
 
-    subroutine resolve_link_token(name, dirs, n_dirs, n_env, token)
+    subroutine resolve_link_token(project_dir, name, dirs, n_dirs, n_env, token)
+        !! Resolve a linker token directly to a file when we can find it in the
+        !! build-tree graph around the current project. This keeps local sibling
+        !! dependencies resolvable even when callers do not configure LIBRARY_PATH.
+        character(len=*), intent(in) :: project_dir
         character(len=*), intent(in) :: name
         character(len=512), intent(in) :: dirs(:)
         integer, intent(in) :: n_dirs, n_env
@@ -2116,8 +2143,15 @@ contains
 
         character(len=1024) :: cand
         character(len=8) :: ext1, ext2
-        integer :: i
+        character(len=8) :: debug_links
+        integer :: i, debug_status
         logical :: ex
+        logical :: dbg
+        logical :: use_local
+
+        dbg = .false.
+        call get_environment_variable('FO_DEBUG_LINKS', debug_links, status=debug_status)
+        if (debug_status == 0 .and. len_trim(debug_links) > 0) dbg = .true.
 
         ! On macOS prefer the shared .dylib: its absolute install name pulls in
         ! transitive deps (CoreText, CoreGraphics, bz2, ...) that a static .a
@@ -2131,6 +2165,7 @@ contains
         ! default runtime search path, and a system static .a often needs a long
         ! chain of transitive deps (glib -> pcre2, ffi, sysprof, ...) that the
         ! project's `link` list does not enumerate, which would break the link.
+        ! 1) Existing environment/system search: /path/lib{name}{.so|.a}
         do i = 1, n_dirs
             if (is_macos()) then
                 ext1 = '.dylib'
@@ -2146,17 +2181,105 @@ contains
             inquire (file=trim(cand), exist=ex)
             if (ex) then
                 token = trim(cand)
+                if (dbg) write (error_unit, '(a,a)') 'fo link token found: ', trim(token)
                 return
             end if
             cand = trim(dirs(i))//'/lib'//trim(name)//trim(ext2)
             inquire (file=trim(cand), exist=ex)
             if (ex) then
                 token = trim(cand)
+                if (dbg) write (error_unit, '(a,a)') 'fo link token found: ', trim(token)
                 return
             end if
         end do
+
+        ! 2) Local sibling projects (e.g. ../liric/build). This is common in
+        ! lazy-fortran workspaces where LIRIC is built side-by-side, not in
+        ! LIBRARY_PATH.
+        call local_library_candidate(project_dir, trim(name), cand, use_local)
+        if (use_local) then
+            token = trim(cand)
+            if (dbg) write (error_unit, '(a,a)') 'fo link token found: ', trim(token)
+            return
+        end if
+
+        if (dbg) write (error_unit, '(a,a)') 'fo link token unresolved: ', trim(name)
         token = '-l'//trim(name)
     end subroutine resolve_link_token
+
+    subroutine local_library_candidate(project_dir, name, candidate, found)
+        !! Resolve a direct library artifact path from sibling checkout/build
+        !! trees so local dependency builds do not require LIBRARY_PATH.
+        character(len=*), intent(in) :: project_dir
+        character(len=*), intent(in) :: name
+        character(len=1024), intent(out) :: candidate
+        logical, intent(out) :: found
+
+        character(len=1024) :: root_dir
+        character(len=1024) :: local_root
+        character(len=8) :: ext1, ext2
+        integer :: slash, j
+        logical :: exists
+
+        found = .false.
+        candidate = ''
+        if (len_trim(project_dir) == 0) return
+
+        root_dir = trim(project_dir)
+        if (root_dir(1:1) /= '/') then
+            call get_environment_variable('PWD', root_dir)
+            if (len_trim(root_dir) == 0) return
+        end if
+
+        if (len_trim(root_dir) > 1 .and. root_dir(len_trim(root_dir):len_trim(root_dir)) == '/') &
+            root_dir = root_dir(1:len_trim(root_dir) - 1)
+        slash = index(trim(root_dir), '/', back=.true.)
+        if (slash > 0) root_dir = root_dir(1:slash - 1)
+
+        if (is_macos()) then
+            ext1 = '.dylib'
+            ext2 = '.a'
+        else
+            ext1 = '.a'
+            ext2 = '.so'
+        end if
+
+        do j = 1, 2
+            if (j == 1) then
+                local_root = trim(root_dir)//'/'//trim(name)//'/build'
+            else
+                local_root = trim(root_dir)//'/../'//trim(name)//'/build'
+            end if
+
+            candidate = trim(local_root)//'/lib'//trim(name)//trim(ext1)
+            inquire (file=trim(candidate), exist=exists)
+            if (exists) then
+                found = .true.
+                return
+            end if
+
+            candidate = trim(local_root)//'/'//trim(name)//trim(ext1)
+            inquire (file=trim(candidate), exist=exists)
+            if (exists) then
+                found = .true.
+                return
+            end if
+
+            candidate = trim(local_root)//'/lib'//trim(name)//trim(ext2)
+            inquire (file=trim(candidate), exist=exists)
+            if (exists) then
+                found = .true.
+                return
+            end if
+
+            candidate = trim(local_root)//'/'//trim(name)//trim(ext2)
+            inquire (file=trim(candidate), exist=exists)
+            if (exists) then
+                found = .true.
+                return
+            end if
+        end do
+    end subroutine local_library_candidate
 
     logical function is_macos()
         !! True on macOS, detected by the always-present dynamic linker. Cached:
