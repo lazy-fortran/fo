@@ -62,3 +62,9 @@ Outputs: fpm-compatible build/run/test, Nix flake export, Spack environment expo
 Commands: `fo init --from-fpm ; fo lock ; fo build ; fo test ; fo nix export ; fo spack export`.
 
 Non-goals: replacing fpm or its registry; requiring Nix/Spack; a new manifest format; supporting cmake.
+
+## Issue #4 — Hierarchical balanced discovery tree
+
+Agent-level instance of summarization for tools, skills, resources, and caps. Balanced 5-9 fanout, summaries first, schema on demand, search over enumerate.
+
+Meta-tools `fo_list` / `fo_describe` / `fo_search` / `fo_call` / `fo_use_skill` as the only entry points. On-demand tool loading cuts tool-definition context by roughly 85% while improving selection accuracy. `fo mcp-server` exposes the same tree externally.
