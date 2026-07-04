@@ -183,7 +183,7 @@ contains
                 trim(entries(i)%status) == 'FLAKY') then
                 n_pass = n_pass + 1
             else if (trim(entries(i)%status) == 'FAIL' .or. &
-                     trim(entries(i)%status) == 'TIMEOUT') then
+                    trim(entries(i)%status) == 'TIMEOUT') then
                 n_fail = n_fail + 1
             else
                 n_skip = n_skip + 1
@@ -346,7 +346,7 @@ contains
                 trim(entries(i)%status) == 'FLAKY') then
                 n_pass = n_pass + 1
             else if (trim(entries(i)%status) == 'FAIL' .or. &
-                     trim(entries(i)%status) == 'TIMEOUT') then
+                    trim(entries(i)%status) == 'TIMEOUT') then
                 n_fail = n_fail + 1
             else
                 n_skip = n_skip + 1

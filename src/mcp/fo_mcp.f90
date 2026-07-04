@@ -12,7 +12,7 @@ module fo_mcp
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
     use fo_process, only: process_start_fo_check, process_poll_pid, &
-        process_cancel_pid
+        process_cancel_pid, process_run_argv_logged, argv_push
     use fo_progress, only: progress_suppress
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
         RUN_RERUN_PENDING
@@ -148,6 +148,8 @@ contains
             call handle_changed(id_str, dir, output_text, exitcode, response)
         case ('clean')
             call handle_clean(id_str, dir, output_text, exitcode, response)
+        case ('install')
+            call handle_install(id_str, dir, output_text, exitcode, response)
         case default
             call jsonrpc_error(id_str, -32602, &
                 'unknown action: '//trim(action), response)
@@ -503,6 +505,48 @@ contains
         call make_tool_text_response(id_str, output_text, exitcode, response)
     end subroutine handle_clean
 
+    subroutine handle_install(id_str, dir, output_text, exitcode, response)
+        use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
+        character(len=*), intent(in) :: id_str, dir
+        character(len=*), intent(out) :: output_text
+        integer, intent(out) :: exitcode
+        character(len=*), intent(out) :: response
+
+        type(backend_t) :: b
+        character(len=256) :: prefix
+        character(len=512) :: home, install_log
+        character(len=:), allocatable :: packed
+        integer :: status, n_args
+
+        call get_environment_variable('HOME', home, status=status)
+        if (status /= 0 .or. len_trim(home) == 0) home = '/usr/local'
+        prefix = trim(home)//'/.local'
+
+        b = detect_backend(trim(dir))
+        if (b%kind == BACKEND_NONE) then
+            output_text = 'fo: no fpm.toml found'
+            exitcode = 1
+            call make_tool_text_response(id_str, output_text, exitcode, response)
+            return
+        end if
+
+        call make_tmpfile('fo-install', install_log)
+        n_args = 0
+        call argv_push(packed, n_args, 'fpm')
+        call argv_push(packed, n_args, 'install')
+        call argv_push(packed, n_args, '--prefix')
+        call argv_push(packed, n_args, trim(prefix))
+        call process_run_argv_logged('.', packed, n_args, install_log, &
+            .false., 0, exitcode)
+        if (exitcode /= 0) then
+            call read_text_file(install_log, output_text)
+        else
+            output_text = 'installed: '//trim(prefix)//'/bin/'
+        end if
+        call delete_tmpfile(install_log)
+        call make_tool_text_response(id_str, output_text, exitcode, response)
+    end subroutine handle_install
+
     subroutine handle_resources_read(line, id_str, response, async_state)
         character(len=*), intent(in) :: line, id_str
         character(len=*), intent(out) :: response
@@ -814,7 +858,7 @@ contains
             '"action":{"type":"string",'// &
             '"enum":["check","status","diagnostics","cancel",'// &
             '"build","test","graph","info","changed","clean",'// &
-            '"lint","fmt"],'// &
+            '"lint","fmt","install"],'// &
             '"description":"Action to run"},'// &
             '"dir":{"type":"string",'// &
             '"description":"Project directory (default: cwd)"},'// &

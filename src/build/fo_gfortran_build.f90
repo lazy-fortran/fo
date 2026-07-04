@@ -1579,7 +1579,7 @@ contains
         open (newunit=u, file=trim(log_file), position='append', &
             status='old', iostat=ios)
         if (ios /= 0) return
-        write (u, '(a,a,a,a,a,a,a)') 'TEST_RESULT ', trim(name), ' ', &
+        write (u, '(a,a,a,a,a,a,a,a)') 'TEST_RESULT ', trim(name), ' ', &
             trim(status), ' ', trim(exit_str), ' ', trim(secs_str)
         close (u)
     end subroutine write_test_result_line
