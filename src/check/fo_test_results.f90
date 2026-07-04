@@ -233,15 +233,19 @@ contains
     function format_name_field(name) result(field)
         character(len=*), intent(in) :: name
         character(len=42) :: field
+        integer :: nlen
 
-        field = trim(name)//repeat(' ', 42 - len_trim(name))
+        nlen = min(len_trim(name), 42)
+        field = trim(name(1:nlen))//repeat(' ', 42 - nlen)
     end function format_name_field
 
     function format_status_field(status) result(field)
         character(len=*), intent(in) :: status
         character(len=8) :: field
+        integer :: nlen
 
-        field = trim(status)//repeat(' ', 8 - len_trim(status))
+        nlen = min(len_trim(status), 8)
+        field = trim(status(1:nlen))//repeat(' ', 8 - nlen)
     end function format_status_field
 
     subroutine format_summary_line(output, n_pass, n_fail, n_skip, total_secs)
