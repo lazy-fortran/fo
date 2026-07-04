@@ -29,6 +29,7 @@ program test_backend_gfortran
     call test_gfortran_dep_library_object_marker_not_dropped()
     call test_gfortran_test_builds_dev_dependency()
     call test_fpm_path_with_spaces()
+    call test_gfortran_rejects_compile_errors()
 
     call report('backend_gfortran')
 

@@ -1123,6 +1123,30 @@
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_fpm_path_with_spaces
 
+    subroutine test_gfortran_rejects_compile_errors()
+        integer :: exitcode, n_first, u
+        character(len=512) :: project_dir, log_file
+
+        call make_tmp_path('fo_test_compile_error', project_dir)
+        call make_tmp_path('fo_backend_compile_error', log_file)
+        call execute_command_line('mkdir -p '//trim(project_dir)//'/src')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "fo_compile_error"'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/src/bad.f90', status='replace')
+        write (u, '(a)') 'program bad'
+        write (u, '(a)') '  print *, "hello"'
+        write (u, '(a)') 'end subroutine bad'
+        close (u)
+
+        call gfortran_build(project_dir, log_file, exitcode, n_first)
+        call assert(exitcode /= 0, 'gfortran build fails on bad source')
+        call assert(file_contains(log_file, 'failed source'), 'compile failure is reported')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_rejects_compile_errors
+
     subroutine make_slow_fpm_project(project_dir)
         character(len=*), intent(in) :: project_dir
         integer :: u
