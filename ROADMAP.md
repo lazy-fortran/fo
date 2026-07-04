@@ -92,3 +92,13 @@ Capsule = source/toolchain/flags/inputs/command/env/resources/outputs/lineage, a
 Rails: drop only verified-reproducible outputs. Never inputs, code, or capsule. Never non-deterministic or externally-sourced data. Pin overrides.
 
 Commands: `fo capsule init/build/run/repro`, `fo sweep`, `fo compare`.
+
+## Issue #7 — Nix-like portable store, lockfile, profiles, generations
+
+RAM-first content-addressed object store. One store backs build, capsules, snapshots, checkpoints, and scientific data; the cache key is the store key.
+
+Object kinds: blob/tree/ref/capsule/checkpoint/snapshot/profile. FastCDC chunking, BLAKE3/SHA-256 blob ids, warm in-RAM dedup index.
+
+Block, file, and object are lenses over one chunk store, not stacked tiers. Dedup is the hash operation: identical content has one identity, stored once, writes idempotent. Sync is a Merkle diff, conflict-free, pull-based. Content index is a hash, listing index is a tree, payloads are arrays.
+
+RAM-first, spilling NVMe -> SSD -> HDD -> tape/S3.
