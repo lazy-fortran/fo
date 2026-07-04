@@ -80,3 +80,15 @@ Dedup at the warm repo. Cold tier is write-only: object-skip plus immutable/WORM
 Remotes: local directory, SSH, S3-compatible object storage.
 
 Commands: `fo snapshot create/diff`, `fo backup create/verify/restore`, `fo remote add`, `fo push`, `fo pull`, `fo mirror`.
+
+## Issue #6 — Computation capsules
+
+Compute-store duality: a value held as bytes in the store or as a recipe (a capsule) in the lineage graph. The hash names both, so a stored output is a cached evaluation of its lineage.
+
+Decision rule: store iff storage_cost_lifetime < recompute_cost x expected_reuse.
+
+Capsule = source/toolchain/flags/inputs/command/env/resources/outputs/lineage, always kept small.
+
+Rails: drop only verified-reproducible outputs. Never inputs, code, or capsule. Never non-deterministic or externally-sourced data. Pin overrides.
+
+Commands: `fo capsule init/build/run/repro`, `fo sweep`, `fo compare`.
