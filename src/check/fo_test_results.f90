@@ -262,68 +262,40 @@ contains
     end subroutine format_summary_line
 
     subroutine extract_captured_stdout(log_file, test_name, captured)
+        !! Return the stdout the build side wrote for test_name, wrapped in
+        !! name-keyed delimiters. The block may appear anywhere in the master
+        !! log (TEST_RESULT summary lines are emitted separately, at the end),
+        !! so scan the whole file rather than reading forward from a marker.
         character(len=*), intent(in) :: log_file, test_name
         character(len=*), intent(out) :: captured
 
         character(len=1024) :: line
+        character(len=160) :: start_marker, end_marker
         integer :: u, ios
-        logical :: in_test, in_output
+        logical :: in_block
 
         captured = ''
-        in_test = .false.
-        in_output = .false.
+        start_marker = '--- stdout '//trim(test_name)//' ---'
+        end_marker = '--- end stdout '//trim(test_name)//' ---'
+        in_block = .false.
 
         open (newunit=u, file=trim(log_file), status='old', iostat=ios)
         if (ios /= 0) return
         do
             read (u, '(a)', iostat=ios) line
             if (ios /= 0) exit
-            if (.not. in_test) then
-                if (index(line, 'TEST_RESULT ') == 1) then
-                    if (test_name_matches(line, test_name)) then
-                        in_test = .true.
-                    end if
-                end if
+            if (.not. in_block) then
+                if (trim(line) == trim(start_marker)) in_block = .true.
+            else if (trim(line) == trim(end_marker)) then
+                exit
+            else if (len_trim(captured) > 0) then
+                captured = trim(captured)//achar(10)//'  '//trim(line)
             else
-                if (index(line, 'TEST_RESULT ') == 1) exit
-                if (index(line, '--- stdout ---') > 0) then
-                    in_output = .true.
-                    cycle
-                end if
-                if (in_output) then
-                    if (index(line, '--- end stdout ---') > 0) then
-                        exit
-                    end if
-                    if (len_trim(captured) > 0) then
-                        captured = trim(captured)//achar(10)//trim(line)
-                    else
-                        captured = trim(line)
-                    end if
-                end if
+                captured = '  '//trim(line)
             end if
         end do
         close (u)
     end subroutine extract_captured_stdout
-
-    logical function test_name_matches(line, name) result(match)
-        character(len=*), intent(in) :: line, name
-        integer :: p, q, len_name
-
-        match = .false.
-        len_name = len_trim(name)
-        if (len_name == 0) return
-
-        p = index(line, 'TEST_RESULT ')
-        if (p == 0) return
-        p = p + 12
-
-        q = index(line(p:), ' ')
-        if (q <= 1) return
-
-        if (q - 1 == len_name .and. line(p:p + len_name - 1) == name) then
-            match = .true.
-        end if
-    end function test_name_matches
 
     subroutine format_test_results_json(entries, n_entries, exit_code, output)
         type(test_result_entry_t), intent(in) :: entries(:)

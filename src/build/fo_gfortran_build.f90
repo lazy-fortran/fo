@@ -1030,6 +1030,26 @@ contains
         call fs_remove_file(trim(src))
     end subroutine append_log_file
 
+    subroutine append_test_stdout_block(src, dst, name)
+        !! Append a failing test's captured output to the master log wrapped in
+        !! name-keyed delimiters, so downstream formatting can attribute stdout
+        !! to a test regardless of where the TEST_RESULT summary lines land.
+        character(len=*), intent(in) :: src, dst, name
+        integer :: u, ios
+
+        open (newunit=u, file=trim(dst), position='append', status='unknown', &
+            iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a)') '--- stdout '//trim(name)//' ---'
+        close (u)
+        call fs_append_file(trim(src), trim(dst))
+        open (newunit=u, file=trim(dst), position='append', status='old', &
+            iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a)') '--- end stdout '//trim(name)//' ---'
+        close (u)
+    end subroutine append_test_stdout_block
+
     subroutine link_app_binaries(project_dir, config, bin_dir, src_objs, n_src_objs, &
             is_prog_arr, dep_objs, n_dep_objs, log_file, exitcode, &
             flags, use_cache)
@@ -1218,7 +1238,7 @@ contains
         character(len=4096) :: incl_flag
         character(len=128) :: tname
         character(len=MAX_PATH) :: fname_local
-        character(len=512) :: log_local
+        character(len=512) :: log_local, rerun_log
         type(cache_t) :: c
         integer :: cache_ierr
         character(len=256) :: compiler
@@ -1422,28 +1442,33 @@ contains
                 if (run_exits(i) == 0 .or. run_exits(i) == 124) cycle
                 call file_basename(filenames(run_nodes(i)), tname)
                 bin_path = trim(bin_dir)//'/'//trim(tname)
-                call process_run_logged('', bin_path, run_logs(i), .true., &
+                call make_tmpfile('fo_test_rerun', rerun_log)
+                call process_run_logged('', bin_path, rerun_log, .true., &
                     test_timeout, run_exits(i))
+                call delete_tmpfile(rerun_log)
                 if (run_exits(i) == 0) flaky(i) = .true.
             end do
         end if
 
         do i = 1, n_run
-            call append_log_file(trim(run_logs(i)), log_file)
+            call file_basename(filenames(run_nodes(i)), tname)
             if (run_exits(i) /= 0) then
-                call file_basename(filenames(run_nodes(i)), tname)
+                call append_test_stdout_block(run_logs(i), log_file, tname)
                 if (run_exits(i) == 124) then
                     call append_timeout_status(log_file, tname, test_timeout)
                 else
                     call append_test_status(log_file, tname, run_exits(i))
                 end if
                 if (exitcode == 0) exitcode = run_exits(i)
-            else if (cache_ierr == 0 .and. run_compiled(i)) then
-                call make_obj_path(filenames(run_nodes(i)), project_dir, obj_dir, &
-                    obj_path)
-                call cache_store_action(c, run_keys(i), obj_path, mod_dir, '', &
-                    output_key, cache_ierr)
-                if (present(n_compiled)) n_compiled = n_compiled + 1
+            else
+                call append_log_file(trim(run_logs(i)), log_file)
+                if (cache_ierr == 0 .and. run_compiled(i)) then
+                    call make_obj_path(filenames(run_nodes(i)), project_dir, &
+                        obj_dir, obj_path)
+                    call cache_store_action(c, run_keys(i), obj_path, mod_dir, &
+                        '', output_key, cache_ierr)
+                    if (present(n_compiled)) n_compiled = n_compiled + 1
+                end if
             end if
             call delete_tmpfile(run_logs(i))
         end do

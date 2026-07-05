@@ -11,6 +11,8 @@ program test_check
     use fo_fmt, only: fo_fmt_files, fo_fmt_check_run, fo_fmt_check_files, &
         fo_fmt_check_changed_run
     use fo_cache, only: cache_store_root
+    use fo_test_results, only: test_result_entry_t, parse_test_results, &
+        format_test_results_human, MAX_TEST_RESULTS_ENTRIES
     implicit none
 
     integer :: n_pass, n_fail
@@ -45,6 +47,7 @@ program test_check
     call test_compact_json_includes_test_results()
     call test_full_json_includes_test_results()
     call test_test_results_parse()
+    call test_failure_stdout_shown()
 
     write (output_unit, '(a,i0,a,i0,a)') 'check: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -991,6 +994,34 @@ contains
         call assert(res%build_ok, 'parse test project builds')
         call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
     end subroutine test_test_results_parse
+
+    subroutine test_failure_stdout_shown()
+        type(test_result_entry_t) :: entries(MAX_TEST_RESULTS_ENTRIES)
+        character(len=512) :: log_file
+        character(len=16384) :: output
+        integer :: u, n, ierr
+
+        call make_tmp_path('fo_failure_stdout', log_file)
+        open (newunit=u, file=log_file, status='replace')
+        write (u, '(a)') '--- stdout test_boom ---'
+        write (u, '(a)') 'FAIL: boom happened'
+        write (u, '(a)') '--- end stdout test_boom ---'
+        write (u, '(a)') 'fo: test target test_boom returned exit code 1'
+        write (u, '(a)') 'TEST_RESULT test_ok PASS -     0.00'
+        write (u, '(a)') 'TEST_RESULT test_boom FAIL 1     0.01'
+        close (u)
+
+        call parse_test_results(log_file, entries, n, ierr)
+        call assert(ierr == 0 .and. n == 2, 'failure log parses two results')
+        call format_test_results_human(entries, n, log_file, .true., output)
+        call assert(index(output, '--- captured stdout ---') > 0, &
+            'failure output includes captured-stdout markers')
+        call assert(index(output, 'FAIL: boom happened') > 0, &
+            'failure output includes the test stdout')
+        call assert(index(output, 'test_ok') == 0, &
+            'summary mode hides passing tests')
+        call execute_command_line('rm -f '//trim(log_file), wait=.true.)
+    end subroutine test_failure_stdout_shown
 
     integer function count_fmt_markers() result(n)
         character(len=512) :: root, tmpfile, line
