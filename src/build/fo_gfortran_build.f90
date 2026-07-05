@@ -5,7 +5,8 @@ module fo_gfortran_build
     use fo_dag_bridge, only: build_dag_from_units
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
         resolve_dev_dep_srcs, MAX_RESOLVED, join_path
-    use fo_stat_memo, only: memo_save
+    use fo_stat_memo, only: memo_save, memo_hash_file
+    use fx_action_cache, only: cache_set_file_hash_hook
     use fo_compdb, only: compdb_write
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
@@ -57,6 +58,7 @@ contains
 
         lf = log_file
         if (len_trim(lf) == 0) lf = '/dev/null'
+        call cache_set_file_hash_hook(memo_hash_file)
         flag_text = ''
         if (present(flags)) flag_text = flags
         if (present(compiler_id)) then
