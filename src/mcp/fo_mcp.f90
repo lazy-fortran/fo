@@ -258,14 +258,18 @@ contains
         use fo_build_backend, only: backend_t, detect_backend, backend_test, &
             backend_test_names, BACKEND_NONE
         use fx_dag, only: MAX_NODES
+        use fo_test_results, only: test_result_entry_t, parse_test_results, &
+            format_test_results_human, MAX_TEST_RESULTS_ENTRIES
         character(len=*), intent(in) :: line, id_str, dir, tmpfile
         character(len=*), intent(out) :: response
 
         type(backend_t) :: b
-        character(len=8192) :: output_text
+        character(len=16384) :: output_text
         integer :: exitcode
         character(len=128) :: test_names(MAX_NODES)
         integer :: n_names
+        type(test_result_entry_t) :: entries(MAX_TEST_RESULTS_ENTRIES)
+        integer :: n_entries, ierr
 
         b = detect_backend(trim(dir))
         if (b%kind == BACKEND_NONE) then
@@ -285,7 +289,13 @@ contains
             call backend_test(b, exitcode, log_file=tmpfile)
         end if
 
-        call read_text_file(tmpfile, output_text)
+        call parse_test_results(tmpfile, entries, n_entries, ierr)
+        if (ierr == 0 .and. n_entries > 0) then
+            call format_test_results_human(entries, n_entries, tmpfile, &
+                n_names == 0, output_text)
+        else
+            call read_text_file(tmpfile, output_text)
+        end if
         call delete_tmpfile(tmpfile)
         call make_tool_text_response(id_str, output_text, exitcode, response)
     end subroutine handle_backend_test_named
