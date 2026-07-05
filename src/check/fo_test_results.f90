@@ -358,10 +358,10 @@ contains
             if (i > 1) output = trim(output)//','
             output = trim(output)//'{"name":"'// &
                 trim(json_escape_string(entries(i)%name))//'"'
-            output = trim(output)//',"status":"'//trim(entries(i)%status)//'"'
+            output = trim(output)//',"status":"'//lower_status(entries(i)%status)//'"'
             output = trim(output)//',"seconds":'
             write (secs_str, '(f8.2)') entries(i)%seconds
-            output = trim(output)//trim(secs_str)
+            output = trim(output)//trim(adjustl(secs_str))
             output = trim(output)//'}'
         end do
         output = trim(output)//'],'
@@ -370,9 +370,21 @@ contains
         output = trim(output)//',"failed":'//trim(json_int(n_fail))
         output = trim(output)//',"skipped":'//trim(json_int(n_skip))
         write (total_str, '(f8.2)') total_secs
-        output = trim(output)//',"total_seconds":'//trim(total_str)
+        output = trim(output)//',"total_seconds":'//trim(adjustl(total_str))
         output = trim(output)//'}'
         output = trim(output)//',"exit_code":'//trim(json_int(exit_code))//'}'
     end subroutine format_test_results_json
+
+    pure function lower_status(status) result(out)
+        character(len=*), intent(in) :: status
+        character(len=len_trim(status)) :: out
+        integer :: i, c
+
+        out = trim(status)
+        do i = 1, len(out)
+            c = iachar(out(i:i))
+            if (c >= iachar('A') .and. c <= iachar('Z')) out(i:i) = achar(c + 32)
+        end do
+    end function lower_status
 
 end module fo_test_results

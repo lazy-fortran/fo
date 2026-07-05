@@ -4,7 +4,7 @@ module fo_gfortran_build
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
-        resolve_dev_dep_srcs, MAX_RESOLVED
+        resolve_dev_dep_srcs, MAX_RESOLVED, join_path
     use fo_stat_memo, only: memo_save
     use fo_compdb, only: compdb_write
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
@@ -2280,6 +2280,9 @@ contains
         candidate = ''
         if (len_trim(project_dir) == 0) return
 
+        call manifest_library_candidate(project_dir, name, candidate, found)
+        if (found) return
+
         root_dir = trim(project_dir)
         if (root_dir(1:1) /= '/') then
             call get_environment_variable('PWD', root_dir)
@@ -2335,6 +2338,62 @@ contains
             end if
         end do
     end subroutine local_library_candidate
+
+    subroutine manifest_library_candidate(project_dir, name, candidate, found)
+        !! Resolve a link library from an explicit path dependency in the
+        !! project's fpm.toml rather than guessing sibling directories. When a
+        !! [dependencies] entry named `name` has a local path, its build tree is
+        !! the authoritative artifact location.
+        character(len=*), intent(in) :: project_dir
+        character(len=*), intent(in) :: name
+        character(len=1024), intent(out) :: candidate
+        logical, intent(out) :: found
+
+        type(fpm_config_t) :: config
+        character(len=512) :: dep_root
+        character(len=8) :: ext1, ext2
+        integer :: ierr, i
+
+        found = .false.
+        candidate = ''
+        dep_root = ''
+
+        call fpm_config_parse(project_dir, config, ierr)
+        if (ierr /= 0) return
+
+        do i = 1, config%n_deps
+            if (dep_kind(config%deps(i)) /= DEP_PATH) cycle
+            if (trim(config%deps(i)%name) /= trim(name)) cycle
+            call join_path(project_dir, trim(config%deps(i)%path), dep_root)
+            exit
+        end do
+        if (len_trim(dep_root) == 0) return
+
+        if (is_macos()) then
+            ext1 = '.dylib'
+            ext2 = '.a'
+        else
+            ext1 = '.a'
+            ext2 = '.so'
+        end if
+
+        call probe_dep_artifact(dep_root, name, ext1, candidate, found)
+        if (found) return
+        call probe_dep_artifact(dep_root, name, ext2, candidate, found)
+    end subroutine manifest_library_candidate
+
+    subroutine probe_dep_artifact(dep_root, name, ext, candidate, found)
+        character(len=*), intent(in) :: dep_root, name, ext
+        character(len=1024), intent(out) :: candidate
+        logical, intent(out) :: found
+
+        found = .false.
+        candidate = trim(dep_root)//'/build/lib'//trim(name)//trim(ext)
+        inquire (file=trim(candidate), exist=found)
+        if (found) return
+        candidate = trim(dep_root)//'/build/'//trim(name)//trim(ext)
+        inquire (file=trim(candidate), exist=found)
+    end subroutine probe_dep_artifact
 
     logical function is_macos()
         !! True on macOS, detected by the always-present dynamic linker. Cached:
