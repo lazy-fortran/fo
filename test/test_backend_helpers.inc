@@ -978,6 +978,113 @@
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_bootstraps_git_dependency
 
+    subroutine test_gfortran_worktree_path_dep_bootstraps_git_dependency()
+        type(backend_t) :: b
+        integer :: exitcode, ios, u
+        character(len=512) :: base, primary, pathdep, gitdep, worktree
+        character(len=512) :: log_file, outfile
+        character(len=64) :: line
+
+        call make_tmp_path('fo_test_worktree_bootstrap', base)
+        primary = trim(base)//'/main/app'
+        pathdep = trim(base)//'/main/lib'
+        gitdep = trim(base)//'/external'
+        worktree = trim(base)//'/worktrees/x'
+        call make_tmp_path('fo_backend_worktree_bootstrap', log_file)
+        call make_external_git_dependency(gitdep)
+        call make_transitive_path_dependency(pathdep, gitdep)
+        call make_linked_worktree_app(primary, worktree)
+
+        b = detect_backend(worktree)
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, &
+            'worktree path dependency bootstraps transitive git dependency')
+        outfile = trim(base)//'/out.txt'
+        call execute_command_line(trim(worktree)// &
+            '/build/fo/bin/worktree_app > '//trim(outfile))
+        line = ''
+        open (newunit=u, file=trim(outfile), status='old', iostat=ios)
+        if (ios == 0) then
+            read (u, '(a)', iostat=ios) line
+            close (u)
+        end if
+        call assert(trim(adjustl(line)) == '21', &
+            'worktree binary links and runs transitive git dependency')
+        call remove_tree(base)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_worktree_path_dep_bootstraps_git_dependency
+
+    subroutine make_external_git_dependency(gitdep)
+        character(len=*), intent(in) :: gitdep
+        integer :: u
+
+        call make_dir(trim(gitdep)//'/src')
+        open (newunit=u, file=trim(gitdep)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "external"'
+        close (u)
+        open (newunit=u, file=trim(gitdep)//'/src/external_mod.f90', &
+            status='replace')
+        write (u, '(a)') 'module external_mod'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'integer function external_value()'
+        write (u, '(a)') 'external_value = 13'
+        write (u, '(a)') 'end function external_value'
+        write (u, '(a)') 'end module external_mod'
+        close (u)
+        call execute_command_line('git -C '//trim(gitdep)//' init -q')
+        call execute_command_line('git -C '//trim(gitdep)// &
+            ' -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src')
+        call execute_command_line('git -C '//trim(gitdep)// &
+            ' -c user.email=fo@example.invalid -c user.name=fo commit -q -m init')
+    end subroutine make_external_git_dependency
+
+    subroutine make_transitive_path_dependency(pathdep, gitdep)
+        character(len=*), intent(in) :: pathdep, gitdep
+        integer :: u
+
+        call make_dir(trim(pathdep)//'/src')
+        open (newunit=u, file=trim(pathdep)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "pathdep"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a,a,a)') 'external = { git = "file://', trim(gitdep), '" }'
+        close (u)
+        open (newunit=u, file=trim(pathdep)//'/src/pathdep_mod.f90', &
+            status='replace')
+        write (u, '(a)') 'module pathdep_mod'
+        write (u, '(a)') 'use external_mod, only: external_value'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'integer function pathdep_value()'
+        write (u, '(a)') 'pathdep_value = external_value() + 8'
+        write (u, '(a)') 'end function pathdep_value'
+        write (u, '(a)') 'end module pathdep_mod'
+        close (u)
+    end subroutine make_transitive_path_dependency
+
+    subroutine make_linked_worktree_app(primary, worktree)
+        character(len=*), intent(in) :: primary, worktree
+        integer :: u
+
+        call make_dir(trim(primary)//'/.git/worktrees/x')
+        call make_dir(trim(worktree)//'/app')
+        open (newunit=u, file=trim(primary)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "primary"'
+        close (u)
+        open (newunit=u, file=trim(worktree)//'/.git', status='replace')
+        write (u, '(a)') 'gitdir: '//trim(primary)//'/.git/worktrees/x'
+        close (u)
+        open (newunit=u, file=trim(worktree)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "worktree_app"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'pathdep = { path = "../lib" }'
+        close (u)
+        open (newunit=u, file=trim(worktree)//'/app/main.f90', status='replace')
+        write (u, '(a)') 'program main'
+        write (u, '(a)') 'use pathdep_mod, only: pathdep_value'
+        write (u, '(a)') 'print "(i0)", pathdep_value()'
+        write (u, '(a)') 'end program main'
+        close (u)
+    end subroutine make_linked_worktree_app
+
     subroutine test_gfortran_dep_library_object_marker_not_dropped()
         !! Dependency library objects must link even when their fpm object
         !! basename carries an '_app_' or '_test_' substring - from the

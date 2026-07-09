@@ -68,7 +68,7 @@ contains
         do i = 1, cfg%n_dev_deps
             kind = dep_kind(cfg%dev_deps(i))
             if (kind == DEP_PATH) then
-                call join_path(root, trim(cfg%dev_deps(i)%path), dep_dir)
+                call resolve_path_dep(root, trim(cfg%dev_deps(i)%path), dep_dir)
             else
                 dep_dir = trim(root)//'/build/dependencies/'// &
                     trim(cfg%dev_deps(i)%name)
@@ -109,7 +109,7 @@ contains
                 n_unresolved = n_unresolved + 1
                 cycle
             end if
-            call join_path(dir, trim(cfg%deps(i)%path), dep_dir)
+            call resolve_path_dep(dir, trim(cfg%deps(i)%path), dep_dir)
             seen = .false.
             do k = 1, n_out
                 if (trim(out(k)%dir) == trim(dep_dir)) then
@@ -150,6 +150,60 @@ contains
         out(n_out)%src_dir = trim(src)
         out(n_out)%kind = DEP_PATH
     end subroutine record_dep_src
+
+    subroutine resolve_path_dep(base, rel, out)
+        character(len=*), intent(in) :: base, rel
+        character(len=*), intent(out) :: out
+        character(len=512) :: primary_root, candidate
+        logical :: found
+
+        call join_path(base, rel, out)
+        if (has_manifest(out)) return
+        call linked_worktree_primary_root(base, primary_root, found)
+        if (.not. found) return
+        call join_path(primary_root, rel, candidate)
+        if (has_manifest(candidate)) out = candidate
+    end subroutine resolve_path_dep
+
+    logical function has_manifest(dir)
+        character(len=*), intent(in) :: dir
+
+        inquire (file=trim(dir)//'/fpm.toml', exist=has_manifest)
+    end function has_manifest
+
+    subroutine linked_worktree_primary_root(project_dir, primary_root, found)
+        character(len=*), intent(in) :: project_dir
+        character(len=*), intent(out) :: primary_root
+        logical, intent(out) :: found
+        character(len=1024) :: line
+        character(len=512) :: git_dir, normalized_git_dir
+        integer :: unit, ios, marker
+        logical :: git_dir_exists
+
+        primary_root = ''
+        found = .false.
+        open (newunit=unit, file=trim(project_dir)//'/.git', status='old', &
+            action='read', iostat=ios)
+        if (ios /= 0) return
+        read (unit, '(a)', iostat=ios) line
+        close (unit)
+        if (ios /= 0) return
+        if (index(line, 'gitdir: ') /= 1) return
+
+        git_dir = adjustl(line(9:))
+        if (git_dir(1:1) /= '/') then
+            call join_path(project_dir, trim(git_dir), normalized_git_dir)
+        else
+            call normalize_path(git_dir, normalized_git_dir)
+        end if
+        marker = index(trim(normalized_git_dir), '/.git/worktrees/')
+        if (marker <= 1) return
+        if (len_trim(normalized_git_dir) < marker + 16) return
+        inquire (file=trim(normalized_git_dir), exist=git_dir_exists)
+        if (.not. git_dir_exists) return
+        primary_root = normalized_git_dir(:marker - 1)
+        found = .true.
+    end subroutine linked_worktree_primary_root
 
     subroutine join_path(base, rel, out)
         !! Resolve rel against base (absolute base assumed) and normalize.
