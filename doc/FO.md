@@ -19,13 +19,21 @@ rebuild latency dominates, and most of the win is build-driver work, not backend
 
 ```text
 fo build        build to objects and an executable, via the cache and module DAG
-fo run f.f90    build and run in one step; interactive in-memory lane on the host
+fo build --native [-o app] dep.lf main.lf
+                compile in dependency order and link the final source with ffc
+fo run --native f.lf [args]
+                compile one source with ffc, run it, and return its exit status
 fo test         build and run tests, caching binaries and results
 fo bench        build and benchmark
 fo fmt          format
 fo doc          documentation
 fo repl         a REPL with a persistent symbol table across lines
 ```
+
+Native mode requires `ffc 0.1.0` or newer. Without `--native`, `fo run` keeps
+its current target-based `fo exec` semantics. Native build inputs are ordered:
+each source except the last is compiled separately, and the last source is the
+link unit. The output defaults to `a.out` and can be changed with `-o`.
 
 One content-addressed cache keys every artifact by
 `hash(source + flags + compiler version + dependency .mod hashes)`. An unchanged

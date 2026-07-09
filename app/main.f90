@@ -22,6 +22,7 @@ program fo_main
         fo_fmt_deep_run, fo_fmt_deep_files, fo_fmt_deep_changed_run, &
         fo_fmt_deep_check_run, fo_fmt_deep_check_files
     use fo_process, only: process_run_argv_logged, argv_push
+    use fo_ffc_cli, only: ffc_cmd_build, ffc_cmd_run, ffc_native_requested
     use fo_exec_target, only: resolve_exec_target
     use fo_cover, only: fo_cover_run
     use fo_lock, only: lock_write
@@ -51,15 +52,25 @@ program fo_main
     case ('doc')
         call cmd_doc()
     case ('build')
-        call cmd_build()
+        if (ffc_native_requested()) then
+            call ffc_cmd_build()
+        else
+            call cmd_build()
+        end if
     case ('test')
         call cmd_test()
     case ('bench')
         call cmd_bench()
     case ('cover')
         call fo_cover_run()
-    case ('exec', 'run')
+    case ('exec')
         call cmd_exec()
+    case ('run')
+        if (ffc_native_requested()) then
+            call ffc_cmd_run()
+        else
+            call cmd_exec()
+        end if
     case ('info')
         call cmd_info()
     case ('lint')
@@ -259,6 +270,10 @@ contains
         write (output_unit, '(a)') '  cover      run tests with coverage, then fortcov'
         write (output_unit, '(a)') &
             '  exec [--cwd <dir>] [--no-build] <t> [args]  build then run target'
+        write (output_unit, '(a)') &
+            '  run --native <source> [args]  compile with ffc, then run'
+        write (output_unit, '(a)') &
+            '  build --native [-o <exe>] <source>...  compile and link with ffc'
         write (output_unit, '(a)') '  check      build + test, one-line status'
         write (output_unit, '(a)') '  check --json  build + test, JSON status'
         write (output_unit, '(a)') '  check --json=compact  bounded agent JSON'

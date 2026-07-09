@@ -19,11 +19,13 @@ Run `fo` in a directory with `fpm.toml`.
 ```
 fo                  static -> build -> test (the default)
 fo build            build only
+fo build --native [-o app] dep.lf main.lf  compile in order and link with ffc
 fo build --flag -O0 fast debug build
 fo test             run tests
 fo test --only-changed  run only tests affected by changes
 fo test <name>      rebuild and run one test (never run build/fo/bin/* by hand)
 fo exec <target> [args]  build, then run build/fo/bin/<target> with a fresh binary
+fo run --native main.lf [args]  compile one source with ffc, then run it
 fo check            build + test, one-line status
 fo check --json     build + test, JSON status for agents
 fo check --json=compact  bounded JSON status for small local agents
@@ -35,6 +37,12 @@ fo watch            rebuild on file change (inotify)
 fo clean            clear global cache (~/.cache/fo)
 fo info             backend, files, modules
 ```
+
+Native mode requires `ffc 0.1.0` or newer. `fo build --native` accepts source
+files in dependency order; the final source is the link unit. Earlier sources
+are compiled separately and linked into the output. The default output is
+`a.out`; use `-o <path>` to choose another path. `fo run <target> [args]`
+remains an alias for `fo exec`; only `fo run --native` selects ffc.
 
 Integration (AI agents, editors):
 
