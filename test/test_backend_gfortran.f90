@@ -29,6 +29,7 @@ program test_backend_gfortran
     call test_gfortran_test_drops_stale_path_dep_objects()
     call test_gfortran_link_failure_reports_fail()
     call test_gfortran_bootstraps_git_dependency()
+    call test_gfortran_worktree_path_dep_bootstraps_git_dependency()
     call test_gfortran_dep_library_object_marker_not_dropped()
     call test_gfortran_test_builds_dev_dependency()
     call test_fpm_path_with_spaces()

@@ -15,6 +15,11 @@ program test_dep_resolve
     call test_join()
     call test_transitive_and_dedup()
     call test_registry_counted_unresolved()
+    call test_linked_worktree_fallback()
+    call test_direct_path_wins_in_worktree()
+    call test_malformed_git_pointer_keeps_direct_path()
+    call test_missing_gitdir_keeps_direct_path()
+    call test_directory_git_keeps_direct_path()
 
     write (output_unit, '(a,i0,a,i0,a)') 'dep_resolve: ', n_pass, ' pass, ', &
         n_fail, ' fail'
@@ -95,6 +100,123 @@ contains
         call assert(n_out == 0, 'registry dep yields no path source dir')
         call assert(n_unres == 1, 'registry dep counted as unresolved')
     end subroutine test_registry_counted_unresolved
+
+    subroutine test_linked_worktree_fallback()
+        character(len=512) :: base, primary, sibling, worktree
+        type(resolved_src_t) :: out(MAX_RESOLVED)
+        integer :: n_out, n_unres, ierr
+
+        call make_tmp('fo_test_worktree_dep', base)
+        primary = trim(base)//'/main/app'
+        sibling = trim(base)//'/main/lib'
+        worktree = trim(base)//'/worktrees/x'
+        call mkproj(primary, '')
+        call mkproj(sibling, '')
+        call mkproj(worktree, '[dependencies]'//new_line('a')// &
+            'lib = { path = "../lib" }')
+        call write_git_pointer(worktree, primary)
+
+        call resolve_dep_srcs(worktree, out, n_out, n_unres, ierr)
+        call assert(ierr == 0, 'linked worktree dependency resolves')
+        call assert(n_out == 1, 'linked worktree finds one dependency')
+        call assert(trim(out(1)%dir) == trim(sibling), &
+            'missing direct sibling falls back to primary checkout sibling')
+    end subroutine test_linked_worktree_fallback
+
+    subroutine test_direct_path_wins_in_worktree()
+        character(len=512) :: base, primary, primary_dep, direct_dep, worktree
+        type(resolved_src_t) :: out(MAX_RESOLVED)
+        integer :: n_out, n_unres, ierr
+
+        call make_tmp('fo_test_worktree_direct', base)
+        primary = trim(base)//'/main/app'
+        primary_dep = trim(base)//'/main/lib'
+        worktree = trim(base)//'/worktrees/app-wt'
+        direct_dep = trim(base)//'/worktrees/lib'
+        call mkproj(primary, '')
+        call mkproj(primary_dep, '')
+        call mkproj(direct_dep, '')
+        call mkproj(worktree, '[dependencies]'//new_line('a')// &
+            'lib = { path = "../lib" }')
+        call write_git_pointer(worktree, primary)
+
+        call resolve_dep_srcs(worktree, out, n_out, n_unres, ierr)
+        call assert(ierr == 0, 'direct worktree dependency resolves')
+        call assert(trim(out(1)%dir) == trim(direct_dep), &
+            'existing manifest-relative dependency remains authoritative')
+    end subroutine test_direct_path_wins_in_worktree
+
+    subroutine test_malformed_git_pointer_keeps_direct_path()
+        character(len=512) :: base, worktree, expected
+        type(resolved_src_t) :: out(MAX_RESOLVED)
+        integer :: n_out, n_unres, ierr, unit
+
+        call make_tmp('fo_test_worktree_bad_git', base)
+        worktree = trim(base)//'/worktrees/app-wt'
+        expected = trim(base)//'/worktrees/lib'
+        call mkproj(worktree, '[dependencies]'//new_line('a')// &
+            'lib = { path = "../lib" }')
+        open (newunit=unit, file=trim(worktree)//'/.git', status='replace')
+        write (unit, '(a)') 'not a gitdir pointer'
+        close (unit)
+
+        call resolve_dep_srcs(worktree, out, n_out, n_unres, ierr)
+        call assert(ierr == 0, 'malformed git pointer does not fail resolution')
+        call assert(trim(out(1)%dir) == trim(expected), &
+            'malformed git pointer keeps direct missing path behavior')
+    end subroutine test_malformed_git_pointer_keeps_direct_path
+
+    subroutine test_missing_gitdir_keeps_direct_path()
+        character(len=512) :: base, worktree, expected
+        type(resolved_src_t) :: out(MAX_RESOLVED)
+        integer :: n_out, n_unres, ierr, unit
+
+        call make_tmp('fo_test_worktree_missing_gitdir', base)
+        worktree = trim(base)//'/worktrees/app-wt'
+        expected = trim(base)//'/worktrees/lib'
+        call mkproj(worktree, '[dependencies]'//new_line('a')// &
+            'lib = { path = "../lib" }')
+        open (newunit=unit, file=trim(worktree)//'/.git', status='replace')
+        write (unit, '(a)') 'gitdir: '//trim(base)// &
+            '/main/app/.git/worktrees/missing'
+        close (unit)
+
+        call resolve_dep_srcs(worktree, out, n_out, n_unres, ierr)
+        call assert(trim(out(1)%dir) == trim(expected), &
+            'nonexistent gitdir target keeps direct missing path behavior')
+    end subroutine test_missing_gitdir_keeps_direct_path
+
+    subroutine test_directory_git_keeps_direct_path()
+        character(len=512) :: base, worktree, expected
+        type(resolved_src_t) :: out(MAX_RESOLVED)
+        integer :: n_out, n_unres, ierr
+
+        call make_tmp('fo_test_worktree_git_dir', base)
+        worktree = trim(base)//'/worktrees/app-wt'
+        expected = trim(base)//'/worktrees/lib'
+        call mkproj(worktree, '[dependencies]'//new_line('a')// &
+            'lib = { path = "../lib" }')
+        call execute_command_line('mkdir -p '//trim(worktree)//'/.git')
+
+        call resolve_dep_srcs(worktree, out, n_out, n_unres, ierr)
+        call assert(trim(out(1)%dir) == trim(expected), &
+            'directory-style git metadata keeps direct missing path behavior')
+    end subroutine test_directory_git_keeps_direct_path
+
+    subroutine write_git_pointer(worktree, primary)
+        character(len=*), intent(in) :: worktree, primary
+        character(len=128) :: worktree_name
+        integer :: unit, slash
+
+        slash = index(trim(worktree), '/', back=.true.)
+        worktree_name = worktree(slash + 1:)
+        call execute_command_line('mkdir -p '//trim(primary)// &
+            '/.git/worktrees/'//trim(worktree_name))
+        open (newunit=unit, file=trim(worktree)//'/.git', status='replace')
+        write (unit, '(a)') 'gitdir: '//trim(primary)//'/.'// &
+            'git/worktrees/'//trim(worktree_name)
+        close (unit)
+    end subroutine write_git_pointer
 
     subroutine mkproj(dir, deps_block)
         character(len=*), intent(in) :: dir, deps_block

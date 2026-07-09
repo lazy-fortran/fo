@@ -122,29 +122,58 @@ contains
         type(fpm_config_t), intent(in) :: config
         integer, intent(out) :: exitcode
 
-        character(len=512) :: dep_includes(MAX_DEP_DIRS)
-        character(len=512) :: dep_objs(MAX_DEP_OBJS)
-        integer :: n_dep_includes, n_dep_objs
+        type(resolved_src_t) :: deps(MAX_RESOLVED)
+        type(fpm_config_t) :: dep_config
+        integer :: n_deps, n_unresolved, ierr, i
 
         exitcode = 0
-        if (.not. has_external_dep_closure(project_dir)) return
-
-        call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
-            dep_objs, n_dep_objs)
-        if (n_dep_objs > 0) return
-
-        call run_fpm_bootstrap(project_dir, log_file, exitcode)
+        if (config_has_external_deps(config)) then
+            call bootstrap_config_deps(project_dir, config, log_file, exitcode)
+            if (exitcode /= 0) return
+        end if
+        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
+        if (ierr /= 0) return
+        do i = 1, n_deps
+            call fpm_config_parse(deps(i)%dir, dep_config, ierr)
+            if (ierr /= 0) cycle
+            if (.not. config_has_external_deps(dep_config)) cycle
+            call bootstrap_config_deps(deps(i)%dir, dep_config, log_file, exitcode)
+            if (exitcode /= 0) return
+        end do
     end subroutine bootstrap_external_deps
 
-    logical function has_external_dep_closure(project_dir) result(found)
-        character(len=*), intent(in) :: project_dir
-        type(resolved_src_t) :: deps(MAX_RESOLVED)
-        integer :: n_deps, n_unres, ierr
+    logical function config_has_external_deps(config) result(found)
+        type(fpm_config_t), intent(in) :: config
+        integer :: i
 
         found = .false.
-        call resolve_dep_srcs(project_dir, deps, n_deps, n_unres, ierr)
-        if (ierr == 0 .and. n_unres > 0) found = .true.
-    end function has_external_dep_closure
+        do i = 1, config%n_deps
+            if (dep_kind(config%deps(i)) /= DEP_PATH) then
+                found = .true.
+                return
+            end if
+        end do
+    end function config_has_external_deps
+
+    subroutine bootstrap_config_deps(project_dir, config, log_file, exitcode)
+        character(len=*), intent(in) :: project_dir, log_file
+        type(fpm_config_t), intent(in) :: config
+        integer, intent(out) :: exitcode
+        character(len=512) :: includes(MAX_DEP_DIRS), objects(MAX_DEP_OBJS)
+        character(len=512) :: object_keys(MAX_DEP_OBJS)
+        integer :: n_includes, n_objects, n_object_keys
+
+        n_includes = 0
+        n_objects = 0
+        n_object_keys = 0
+        call collect_dep_artifacts(project_dir, config, includes, n_includes, &
+            objects, n_objects, object_keys, n_object_keys)
+        if (n_objects > 0) then
+            exitcode = 0
+            return
+        end if
+        call run_fpm_bootstrap(project_dir, log_file, exitcode)
+    end subroutine bootstrap_config_deps
 
     subroutine run_fpm_bootstrap(project_dir, log_file, exitcode)
         character(len=*), intent(in) :: project_dir, log_file
@@ -342,20 +371,40 @@ contains
         character(len=512), intent(out) :: dep_objs(MAX_DEP_OBJS)
         integer, intent(out) :: n_dep_objs
 
-        character(len=512) :: line
-        integer :: i, j
+        type(resolved_src_t) :: deps(MAX_RESOLVED)
+        type(fpm_config_t) :: dep_config
+        integer :: i, n_deps, n_unresolved, ierr
         integer :: n_obj_seen
         character(len=512) :: obj_basenames(MAX_DEP_OBJS)
-        character(len=512) :: obj_key
-        character(len=512) :: found(MAX_DEP_OBJS)
-        integer :: n_found
-        integer :: slash
-        character(len=8) :: suffixes(2)
 
         n_dep_includes = 0
         n_dep_objs = 0
         n_obj_seen = 0
-        if (config%n_deps == 0 .and. config%n_dev_deps == 0) return
+        call collect_dep_artifacts(project_dir, config, dep_includes, &
+            n_dep_includes, dep_objs, n_dep_objs, obj_basenames, n_obj_seen)
+        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
+        if (ierr /= 0) return
+        do i = 1, n_deps
+            call fpm_config_parse(deps(i)%dir, dep_config, ierr)
+            if (ierr /= 0) cycle
+            call collect_dep_artifacts(deps(i)%dir, dep_config, dep_includes, &
+                n_dep_includes, dep_objs, n_dep_objs, obj_basenames, n_obj_seen)
+        end do
+    end subroutine find_dep_artifacts
+
+    subroutine collect_dep_artifacts(project_dir, config, dep_includes, &
+            n_dep_includes, dep_objs, n_dep_objs, obj_basenames, n_obj_seen)
+        character(len=*), intent(in) :: project_dir
+        type(fpm_config_t), intent(in) :: config
+        character(len=512), intent(inout) :: dep_includes(MAX_DEP_DIRS)
+        integer, intent(inout) :: n_dep_includes
+        character(len=512), intent(inout) :: dep_objs(MAX_DEP_OBJS)
+        integer, intent(inout) :: n_dep_objs
+        character(len=512), intent(inout) :: obj_basenames(MAX_DEP_OBJS)
+        integer, intent(inout) :: n_obj_seen
+        character(len=512) :: found(MAX_DEP_OBJS)
+        character(len=8) :: suffixes(2)
+        integer :: i, j, n_found
 
         ! Every directory holding a .mod under build/ is an include candidate:
         ! the project's own gfortran_* profile dir and each dependency's mod
@@ -386,7 +435,7 @@ contains
                     obj_basenames, n_obj_seen)
             end do
         end do
-    end subroutine find_dep_artifacts
+    end subroutine collect_dep_artifacts
 
     subroutine add_dep_objs(found, n_found, dep_objs, n_dep_objs, &
             obj_basenames, n_obj_seen)
