@@ -3,7 +3,7 @@ program test_backend_gfortran
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
         detect_jobs, backend_build, backend_test, &
         backend_test_names, &
-        BACKEND_NATIVE, BACKEND_NONE
+        BACKEND_NATIVE, BACKEND_CMAKE, BACKEND_NONE
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names, config_flags_str
     use fo_fpm_config, only: fpm_config_t

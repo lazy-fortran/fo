@@ -244,7 +244,7 @@ contains
 
         b = detect_backend(trim(dir))
         if (b%kind == BACKEND_NONE) then
-            output_text = 'fo: no fpm.toml found'
+            output_text = 'fo: no fpm.toml or CMakeLists.txt found'
             exitcode = 1
         else
             call backend_build(b, exitcode, log_file=tmpfile)
@@ -273,7 +273,7 @@ contains
 
         b = detect_backend(trim(dir))
         if (b%kind == BACKEND_NONE) then
-            output_text = 'fo: no fpm.toml found'
+            output_text = 'fo: no fpm.toml or CMakeLists.txt found'
             exitcode = 1
             call make_tool_text_response(id_str, output_text, exitcode, response)
             return
@@ -384,7 +384,7 @@ contains
         use fx_dag, only: dag_t
         use fo_dag_bridge, only: build_dag_from_units
         use fo_build_backend, only: backend_t, detect_backend, &
-            BACKEND_NONE, BACKEND_NATIVE
+            BACKEND_NONE, BACKEND_NATIVE, BACKEND_CMAKE
         use fo_cache, only: cache_schema, cache_store_root
         character(len=*), intent(in) :: id_str, dir
         character(len=*), intent(out) :: output_text
@@ -404,6 +404,8 @@ contains
         select case (b%kind)
         case (BACKEND_NATIVE)
             output_text = 'backend: native'//achar(10)
+        case (BACKEND_CMAKE)
+            output_text = 'backend: cmake'//achar(10)
         case default
             output_text = 'backend: none'//achar(10)
         end select
@@ -534,7 +536,7 @@ contains
 
         b = detect_backend(trim(dir))
         if (b%kind == BACKEND_NONE) then
-            output_text = 'fo: no fpm.toml found'
+            output_text = 'fo: no fpm.toml or CMakeLists.txt found'
             exitcode = 1
             call make_tool_text_response(id_str, output_text, exitcode, response)
             return

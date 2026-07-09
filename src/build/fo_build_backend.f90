@@ -2,7 +2,8 @@ module fo_build_backend
     use, intrinsic :: iso_fortran_env, only: error_unit
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_mkdir_excl, fs_sleep_ms, &
         fs_pid_alive
-    use fo_process, only: process_detect_nproc, process_getpid
+    use fo_process, only: process_detect_nproc, process_getpid, &
+        process_run_argv_logged, argv_push, argv_push_split
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names
     implicit none
@@ -10,10 +11,11 @@ module fo_build_backend
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
     public :: backend_build, backend_test, backend_test_names, backend_clean
     public :: profile_flags
-    public :: BACKEND_NONE, BACKEND_NATIVE
+    public :: BACKEND_NONE, BACKEND_NATIVE, BACKEND_CMAKE
 
     integer, parameter :: BACKEND_NONE = 0
     integer, parameter :: BACKEND_NATIVE = 1
+    integer, parameter :: BACKEND_CMAKE = 2
     integer, parameter :: MAX_TEST_TARGETS = 512
 
     type :: backend_t
@@ -26,7 +28,7 @@ contains
     function detect_backend(dir) result(b)
         character(len=*), intent(in) :: dir
         type(backend_t) :: b
-        logical :: has_manifest
+        logical :: has_fpm, has_cmake
         character(len=512) :: current, parent
         integer :: depth
 
@@ -34,8 +36,12 @@ contains
 
         do depth = 1, 64
             b%project_dir = current
-            inquire (file=trim(current)//'/fpm.toml', exist=has_manifest)
-            if (has_manifest) then
+            inquire (file=trim(current)//'/fpm.toml', exist=has_fpm)
+            inquire (file=trim(current)//'/CMakeLists.txt', exist=has_cmake)
+            if (has_cmake) then
+                b%kind = BACKEND_CMAKE
+                return
+            else if (has_fpm) then
                 b%kind = BACKEND_NATIVE
                 return
             end if
@@ -141,7 +147,7 @@ contains
         if (present(with_tests)) want_tests = with_tests
 
         if (self%kind == BACKEND_NONE) then
-            write (error_unit, '(a)') 'fo: no fpm.toml found'
+            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             exitcode = 1
             return
         end if
@@ -152,11 +158,16 @@ contains
             return
         end if
 
-        call gfortran_build(self%project_dir, log_path, exitcode, &
-            flags=flag_text, use_cache=use_cache)
-        if (exitcode == 0 .and. want_tests) &
-            call gfortran_test(self%project_dir, log_path, exitcode, &
-            flags=flag_text, build_only=.true., use_cache=use_cache)
+        select case (self%kind)
+        case (BACKEND_NATIVE)
+            call gfortran_build(self%project_dir, log_path, exitcode, &
+                flags=flag_text, use_cache=use_cache)
+            if (exitcode == 0 .and. want_tests) &
+                call gfortran_test(self%project_dir, log_path, exitcode, &
+                flags=flag_text, build_only=.true., use_cache=use_cache)
+        case (BACKEND_CMAKE)
+            call cmake_build(self%project_dir, flag_text, log_path, exitcode)
+        end select
 
         call release_project_lock(lock_dir)
         if (exitcode == 124) then
@@ -200,7 +211,7 @@ contains
         if (present(flags)) flag_text = flags
 
         if (self%kind == BACKEND_NONE) then
-            write (error_unit, '(a)') 'fo: no fpm.toml found'
+            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             exitcode = 1
             return
         end if
@@ -211,8 +222,13 @@ contains
             return
         end if
 
-        call gfortran_test(self%project_dir, log_path, exitcode, &
-            include_slow=slow, flags=flag_text, use_cache=use_cache)
+        select case (self%kind)
+        case (BACKEND_NATIVE)
+            call gfortran_test(self%project_dir, log_path, exitcode, &
+                include_slow=slow, flags=flag_text, use_cache=use_cache)
+        case (BACKEND_CMAKE)
+            call cmake_test(self%project_dir, '', slow, log_path, exitcode)
+        end select
 
         call release_project_lock(lock_dir)
         if (exitcode == 124) then
@@ -269,11 +285,150 @@ contains
             return
         end if
 
-        call gfortran_test_names(self%project_dir, fast_names, n_fast, &
-            log_path, exitcode, include_slow=slow, flags=flag_text, &
-            use_cache=use_cache)
+        select case (self%kind)
+        case (BACKEND_NATIVE)
+            call gfortran_test_names(self%project_dir, fast_names, n_fast, &
+                log_path, exitcode, include_slow=slow, flags=flag_text, &
+                use_cache=use_cache)
+        case (BACKEND_CMAKE)
+            block
+                character(len=1024) :: regex
+                call names_to_ctest_regex(fast_names, n_fast, regex)
+                call cmake_test(self%project_dir, regex, slow, log_path, exitcode)
+            end block
+        end select
         call release_project_lock(lock_dir)
     end subroutine backend_test_names
+
+    subroutine cmake_build(project_dir, flags, log_file, exitcode)
+        character(len=*), intent(in) :: project_dir, flags, log_file
+        integer, intent(out) :: exitcode
+
+        character(len=:), allocatable :: packed
+        character(len=32) :: jobs_text
+        character(len=512) :: compiler, extra_args
+        integer :: n_args
+
+        write (jobs_text, '(i0)') detect_jobs()
+        compiler = ''
+        call get_environment_variable('FC', compiler)
+        if (len_trim(compiler) == 0) compiler = 'gfortran'
+
+        n_args = 0
+        call argv_push(packed, n_args, 'cmake')
+        call argv_push(packed, n_args, '-S')
+        call argv_push(packed, n_args, '.')
+        call argv_push(packed, n_args, '-B')
+        call argv_push(packed, n_args, 'build')
+        call argv_push(packed, n_args, '-G')
+        call argv_push(packed, n_args, 'Ninja')
+        call argv_push(packed, n_args, '-DCMAKE_Fortran_COMPILER='//trim(compiler))
+        if (len_trim(flags) > 0) &
+            call argv_push(packed, n_args, '-DCMAKE_Fortran_FLAGS='//trim(flags))
+        extra_args = ''
+        call get_environment_variable('FO_CMAKE_ARGS', extra_args)
+        call argv_push_split(packed, n_args, extra_args)
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+            .false., environment_timeout('FO_BUILD_TIMEOUT', 300), exitcode)
+        if (exitcode /= 0) return
+
+        deallocate (packed)
+        n_args = 0
+        call argv_push(packed, n_args, 'cmake')
+        call argv_push(packed, n_args, '--build')
+        call argv_push(packed, n_args, 'build')
+        call argv_push(packed, n_args, '-j')
+        call argv_push(packed, n_args, jobs_text)
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+            .true., environment_timeout('FO_BUILD_TIMEOUT', 300), exitcode)
+    end subroutine cmake_build
+
+    subroutine cmake_test(project_dir, regex, include_slow, log_file, exitcode)
+        character(len=*), intent(in) :: project_dir, regex, log_file
+        logical, intent(in) :: include_slow
+        integer, intent(out) :: exitcode
+
+        character(len=:), allocatable :: packed
+        character(len=32) :: jobs_text
+        logical :: has_tests
+        integer :: n_args
+
+        inquire (file=trim(project_dir)//'/build/CTestTestfile.cmake', &
+            exist=has_tests)
+        if (.not. has_tests) then
+            exitcode = 0
+            return
+        end if
+
+        write (jobs_text, '(i0)') detect_jobs()
+        n_args = 0
+        call argv_push(packed, n_args, 'ctest')
+        call argv_push(packed, n_args, '--test-dir')
+        call argv_push(packed, n_args, 'build')
+        call argv_push(packed, n_args, '--output-on-failure')
+        call argv_push(packed, n_args, '-j')
+        call argv_push(packed, n_args, jobs_text)
+        if (len_trim(regex) > 0) then
+            call argv_push(packed, n_args, '-R')
+            call argv_push(packed, n_args, regex)
+        end if
+        if (.not. include_slow) then
+            call argv_push(packed, n_args, '-LE')
+            call argv_push(packed, n_args, &
+                'slow|regression|performance|scalability')
+        end if
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+            .false., environment_timeout('FO_TEST_TIMEOUT', 120), exitcode)
+    end subroutine cmake_test
+
+    integer function environment_timeout(name, fallback) result(timeout)
+        character(len=*), intent(in) :: name
+        integer, intent(in) :: fallback
+
+        character(len=32) :: value
+        integer :: iostat, status
+
+        timeout = fallback
+        call get_environment_variable(name, value, status=status)
+        if (status /= 0 .or. len_trim(value) == 0) return
+        read (value, *, iostat=iostat) timeout
+        if (iostat /= 0 .or. timeout < 1) timeout = fallback
+    end function environment_timeout
+
+    subroutine names_to_ctest_regex(names, n_names, regex)
+        character(len=128), intent(in) :: names(MAX_TEST_TARGETS)
+        integer, intent(in) :: n_names
+        character(len=*), intent(out) :: regex
+
+        integer :: i
+
+        regex = '^('
+        do i = 1, n_names
+            if (i > 1) regex = trim(regex)//'|'
+            call append_ctest_regex_name(regex, names(i))
+        end do
+        regex = trim(regex)//')$'
+    end subroutine names_to_ctest_regex
+
+    subroutine append_ctest_regex_name(regex, name)
+        character(len=*), intent(inout) :: regex
+        character(len=*), intent(in) :: name
+
+        character(len=1) :: ch
+        integer :: i
+
+        do i = 1, len_trim(name)
+            ch = name(i:i)
+            select case (ch)
+            case ('.', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|')
+                regex = trim(regex)//achar(92)//ch
+            case (achar(92))
+                regex = trim(regex)//achar(92)//achar(92)
+            case default
+                regex = trim(regex)//ch
+            end select
+        end do
+    end subroutine append_ctest_regex_name
 
     subroutine acquire_project_lock(project_dir, lock_dir, ierr)
         character(len=*), intent(in) :: project_dir

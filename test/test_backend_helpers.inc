@@ -99,6 +99,26 @@
         call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_detect_fpm_from_child
 
+    subroutine test_detect_cmake_from_child()
+        type(backend_t) :: b
+        integer :: u
+        character(len=512) :: project_dir
+
+        call make_tmp_path('fo_test_cmake_parent', project_dir)
+        call execute_command_line('mkdir -p '//trim(project_dir)//'/src/nested')
+        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
+            status='replace')
+        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
+        close (u)
+
+        b = detect_backend(trim(project_dir)//'/src/nested')
+        call assert(b%kind == BACKEND_CMAKE, 'detect CMakeLists.txt from child')
+        call assert(trim(b%project_dir) == trim(project_dir), &
+            'detected CMake project root')
+
+        call execute_command_line('rm -rf '//trim(project_dir))
+    end subroutine test_detect_cmake_from_child
+
     subroutine test_detect_none()
         type(backend_t) :: b
         character(len=512) :: project_dir
@@ -147,6 +167,38 @@
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_fpm_skips_slow_by_default
+
+    subroutine test_cmake_build_and_test()
+        type(backend_t) :: b
+        integer :: exitcode, u
+        character(len=512) :: project_dir, log_file
+
+        call make_tmp_path('fo_test_cmake_build', project_dir)
+        call make_tmp_path('fo_backend_cmake_build', log_file)
+        call execute_command_line('mkdir -p '//trim(project_dir))
+        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
+            status='replace')
+        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
+        write (u, '(a)') 'project(fo_cmake_fixture LANGUAGES Fortran)'
+        write (u, '(a)') 'enable_testing()'
+        write (u, '(a)') 'add_executable(test_fixture test_fixture.f90)'
+        write (u, '(a)') 'add_test(NAME test_fixture COMMAND test_fixture)'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/test_fixture.f90', &
+            status='replace')
+        write (u, '(a)') 'program test_fixture'
+        write (u, '(a)') 'end program test_fixture'
+        close (u)
+
+        b = detect_backend(project_dir)
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'CMake project builds')
+        call backend_test(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'CMake project tests pass')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_cmake_build_and_test
 
     subroutine test_gfortran_named_tests_select_requested()
         type(backend_t) :: b

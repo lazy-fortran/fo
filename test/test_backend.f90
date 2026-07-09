@@ -3,7 +3,7 @@ program test_backend
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
         detect_jobs, backend_build, backend_test, &
         backend_test_names, backend_clean, &
-        BACKEND_NATIVE, BACKEND_NONE
+        BACKEND_NATIVE, BACKEND_CMAKE, BACKEND_NONE
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names, config_flags_str
     use fo_fpm_config, only: fpm_config_t
@@ -17,11 +17,13 @@ program test_backend
     call isolate_backend_cache()
     call test_detect_fpm()
     call test_detect_fpm_from_child()
+    call test_detect_cmake_from_child()
     call test_detect_none()
     call test_nproc()
     call test_detect_jobs()
     call test_config_flags_str_joins_with_spaces()
     call test_fpm_skips_slow_by_default()
+    call test_cmake_build_and_test()
     call test_gfortran_named_tests_select_requested()
     call test_gfortran_named_test_restores_cached_object()
     call test_gfortran_recovers_from_root_mod_shadow()

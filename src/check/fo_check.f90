@@ -5,7 +5,8 @@ module fo_check
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_affected_set, MAX_NODES
     use fo_dag_bridge, only: build_dag_from_units
     use fo_process, only: process_run_argv_logged, argv_push
-    use fo_gfortran_build, only: gfortran_build, gfortran_test_names
+    use fo_build_backend, only: backend_t, detect_backend, backend_build, &
+        backend_test, backend_test_names, BACKEND_NONE, BACKEND_CMAKE
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
         cache_action_mod_key, hash_mod_file, HASH_LEN
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, is_runner_crash
@@ -413,12 +414,14 @@ contains
         character(len=128) :: test_names(MAX_NODES)
         integer :: i, n_test_names
         logical :: is_test_arr(MAX_NODES)
+        type(backend_t) :: b
 
         call cpu_time(t0)
 
-        call find_project_dir(dir, project_dir)
-        if (len_trim(project_dir) == 0) then
-            no_project = 'no fpm.toml found'
+        b = detect_backend(dir)
+        project_dir = b%project_dir
+        if (b%kind == BACKEND_NONE) then
+            no_project = 'no fpm.toml or CMakeLists.txt found'
             no_project = trim(no_project)//' in directory or parents: '//trim(dir)
             call set_failure(res, 'project', '', no_project, &
                 'run fo from a project directory', &
@@ -448,7 +451,7 @@ contains
 
         if (n_changed == 0) then
             call make_tmpfile('fo-build', build_log)
-            call gfortran_build(project_dir, build_log, exitcode)
+            call backend_build(b, exitcode, log_file=build_log)
             if (exitcode /= 0) then
                 call summarize_backend_failure('build', build_log, 'fo build', res)
                 call cpu_time(t1)
@@ -464,7 +467,7 @@ contains
         end if
 
         call make_tmpfile('fo-build', build_log)
-        call gfortran_build(project_dir, build_log, exitcode)
+        call backend_build(b, exitcode, log_file=build_log)
         if (exitcode /= 0) then
             call summarize_backend_failure('build', build_log, 'fo build', res)
             call cpu_time(t1)
@@ -492,8 +495,12 @@ contains
         end if
 
         call make_tmpfile('fo-test', test_log)
-        call gfortran_test_names(project_dir, test_names, n_test_names, &
-            test_log, exitcode)
+        if (b%kind == BACKEND_CMAKE) then
+            call backend_test(b, exitcode, log_file=test_log)
+        else
+            call backend_test_names(b, test_names, n_test_names, exitcode, &
+                log_file=test_log)
+        end if
         res%tests_ok = (exitcode == 0)
         call parse_test_log(test_log, res%test_results, res%n_test_results)
         if (.not. res%tests_ok) then
@@ -667,76 +674,10 @@ contains
         character(len=*), intent(in) :: dir
         character(len=*), intent(out) :: project_dir
 
-        character(len=512) :: current, parent
-        logical :: has_manifest
-        integer :: depth
+        type(backend_t) :: b
 
-        project_dir = ''
-        current = absolute_dir(dir)
-
-        do depth = 1, 64
-            inquire (file=trim(current)//'/fpm.toml', exist=has_manifest)
-            if (has_manifest) then
-                project_dir = current
-                return
-            end if
-
-            call parent_dir(current, parent)
-            if (trim(parent) == trim(current)) exit
-            current = parent
-        end do
+        b = detect_backend(dir)
+        project_dir = b%project_dir
     end subroutine find_project_dir
-
-    function absolute_dir(dir) result(absdir)
-        character(len=*), intent(in) :: dir
-        character(len=512) :: absdir
-
-        character(len=512) :: pwd
-
-        if (len_trim(dir) == 0) then
-            absdir = '.'
-        else if (dir(1:1) == '/') then
-            absdir = trim(dir)
-        else
-            call get_environment_variable('PWD', pwd)
-            if (len_trim(pwd) > 0) then
-                if (trim(dir) == '.') then
-                    absdir = trim(pwd)
-                else
-                    absdir = trim(pwd)//'/'//trim(dir)
-                end if
-            else
-                absdir = trim(dir)
-            end if
-        end if
-    end function absolute_dir
-
-    subroutine parent_dir(path, parent)
-        character(len=*), intent(in) :: path
-        character(len=*), intent(out) :: parent
-
-        character(len=512) :: clean
-        integer :: n, last
-
-        clean = trim(path)
-        n = len_trim(clean)
-        do while (n > 1)
-            if (.not. (clean(n:n) == '/')) exit
-            clean(n:n) = ' '
-            n = n - 1
-        end do
-
-        if (trim(clean) == '/') then
-            parent = '/'
-            return
-        end if
-
-        last = index(trim(clean), '/', back=.true.)
-        if (last <= 1) then
-            parent = '/'
-        else
-            parent = clean(1:last - 1)
-        end if
-    end subroutine parent_dir
 
 end module fo_check
