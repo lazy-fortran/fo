@@ -163,9 +163,9 @@ contains
         character(len=256), intent(inout) :: seen(:)
         integer, intent(inout) :: n_seen
 
-        character(len=1024) :: line, incpath, dir
+        character(len=1024) :: line, incpath, dir, search_dir
         character(len=:), allocatable :: incname
-        integer :: i, slash, u, iostat, k
+        integer :: i, slash, parent_slash, u, iostat, k
         logical :: dup
 
         slash = index(filename, '/', back=.true.)
@@ -199,8 +199,20 @@ contains
                 seen(n_seen) = incname
             end if
 
-            incpath = trim(dir)//trim(incname)
-            open (newunit=u, file=trim(incpath), status='old', iostat=iostat)
+            search_dir = dir
+            iostat = 1
+            do while (len_trim(search_dir) > 0)
+                incpath = trim(search_dir)//trim(incname)
+                open (newunit=u, file=trim(incpath), status='old', iostat=iostat)
+                if (iostat == 0) exit
+                parent_slash = 0
+                if (len_trim(search_dir) > 1) then
+                    parent_slash = index( &
+                        search_dir(1:len_trim(search_dir) - 1), '/', back=.true.)
+                end if
+                if (parent_slash == 0) exit
+                search_dir = search_dir(1:parent_slash)
+            end do
             if (iostat /= 0) then
                 open (newunit=u, file=trim(incname), status='old', iostat=iostat)
                 if (iostat /= 0) then
@@ -261,7 +273,7 @@ contains
     end function module_reexports_imports
 
     subroutine include_target(line, incname)
-        !! Extract frag from `include 'frag'` / `include "frag"`; else unset.
+        !! Extract frag from Fortran or C-preprocessor include; else unset.
         character(len=*), intent(in) :: line
         character(len=:), allocatable, intent(out) :: incname
 
@@ -269,7 +281,8 @@ contains
         integer :: lo, hi
 
         if (allocated(incname)) deallocate (incname)
-        if (.not. starts_with(to_lower(line), 'include ')) return
+        if (.not. starts_with(to_lower(line), 'include ') .and. &
+            .not. starts_with(to_lower(line), '#include ')) return
         lo = index(line, "'")
         if (lo == 0) lo = index(line, '"')
         if (lo == 0) return
@@ -523,6 +536,7 @@ contains
 
         padded = '/'//trim(rel)//'/'
         if (index(padded, '/build/') > 0) return
+        if (index(padded, '/CMakeFiles/') > 0) return
         if (index(padded, '/_deps/') > 0) return
         if (index(padded, '/dependencies/') > 0) return
         if (index(padded, '/deps-src/') > 0) return

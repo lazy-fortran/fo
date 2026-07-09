@@ -15,8 +15,10 @@ program test_lint
     call test_use_prefixed_symbol_assignment_counts_as_use()
     call test_unused_import_still_reported()
     call test_symbol_used_only_in_include()
+    call test_symbol_used_only_in_cpp_include_macro()
     call test_symbol_used_only_in_nested_include()
     call test_lint_dir_skips_nested_build_tree()
+    call test_lint_dir_skips_cmake_generated_sources()
 
     write (output_unit, '(a,i0,a,i0,a)') 'lint: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -149,6 +151,40 @@ contains
             'import used only inside an included file is not flagged unused')
     end subroutine test_symbol_used_only_in_include
 
+    subroutine test_symbol_used_only_in_cpp_include_macro()
+        type(lint_finding_t) :: findings(MAX_FINDINGS)
+        integer :: n_findings, u
+        character(len=512) :: root, main_path, inc_path
+
+        call make_tmpfile('fo_lint_cpp_include', root)
+        main_path = trim(root)//'/src/base/m.F90'
+        inc_path = trim(root)//'/src/defines.FPP'
+        call fs_make_dir(trim(root)//'/src/base')
+
+        open (newunit=u, file=trim(inc_path), status='replace')
+        write (u, '(a)') '#define SWRITE IF(MPIRoot) WRITE'
+        close (u)
+
+        open (newunit=u, file=trim(main_path), status='replace')
+        write (u, '(a)') 'module m'
+        write (u, '(a)') '    use globals, only: MPIRoot'
+        write (u, '(a)') '    private'
+        write (u, '(a)') '#include "defines.FPP"'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '    subroutine s()'
+        write (u, '(a)') '        SWRITE(*, *) "hello"'
+        write (u, '(a)') '    end subroutine s'
+        write (u, '(a)') 'end module m'
+        close (u)
+
+        n_findings = 0
+        call lint_file(trim(main_path), findings, n_findings)
+        call fs_remove_tree(root)
+
+        call assert(n_findings == 0, &
+            'import used by a macro in a C-preprocessor include is not flagged')
+    end subroutine test_symbol_used_only_in_cpp_include_macro
+
     subroutine test_symbol_used_only_in_nested_include()
         !! main includes frag1, frag1 includes frag2, and the import is used only
         !! in frag2. Include expansion must be transitive to see it.
@@ -228,6 +264,41 @@ contains
         call assert(n_findings == 0, &
             'lint_dir skips nested build trees')
     end subroutine test_lint_dir_skips_nested_build_tree
+
+    subroutine test_lint_dir_skips_cmake_generated_sources()
+        type(lint_finding_t) :: findings(MAX_FINDINGS)
+        integer :: n_findings, u
+        character(len=512) :: root, src_dir, cmake_dir
+
+        call make_tmpfile('fo_lint_cmake_generated', root)
+        src_dir = trim(root)//'/src'
+        cmake_dir = trim(root)//'/pybuild/CMakeFiles/target.dir/src'
+        call fs_make_dir(src_dir)
+        call fs_make_dir(cmake_dir)
+
+        open (newunit=u, file=trim(src_dir)//'/m.f90', status='replace')
+        write (u, '(a)') 'module m'
+        write (u, '(a)') '    use constants, only: dp'
+        write (u, '(a)') '    private'
+        write (u, '(a)') '    real(dp) :: x'
+        write (u, '(a)') 'end module m'
+        close (u)
+
+        open (newunit=u, file=trim(cmake_dir)//'/m.F90-pp.f90', &
+            status='replace')
+        write (u, '(a)') 'module generated'
+        write (u, '(a)') '    use constants, only: unused'
+        write (u, '(a)') '    private'
+        write (u, '(a)') 'end module generated'
+        close (u)
+
+        n_findings = 0
+        call lint_dir(trim(root), findings, n_findings)
+        call fs_remove_tree(root)
+
+        call assert(n_findings == 0, &
+            'lint_dir skips CMake generated sources')
+    end subroutine test_lint_dir_skips_cmake_generated_sources
 
     subroutine lint_lines(prefix, lines, n_lines, findings, n_findings)
         character(len=*), intent(in) :: prefix
