@@ -781,8 +781,7 @@ contains
             n_args = 0
             packed = ''
             call argv_push(packed, n_args, 'fluff')
-            call argv_push(packed, n_args, 'format')
-            call argv_push(packed, n_args, '--check')
+            call argv_push(packed, n_args, 'check')
             call argv_push(packed, n_args, trim(fpath))
             call process_run_argv_logged('', packed, n_args, trim(errfile), &
                 .false., 120, fmt_exit)

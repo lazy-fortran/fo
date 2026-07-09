@@ -4,8 +4,52 @@
         character(len=*), intent(in) :: name
         write (output_unit, '(a,a,i0,a,i0,a)') trim(name), ': ', &
             n_pass, ' pass, ', n_fail, ' fail'
+        call cleanup_backend_cache()
         if (n_fail > 0) stop 1
     end subroutine report
+
+    subroutine isolate_backend_cache()
+        use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+        interface
+            function setenv(name, value, overwrite) bind(C, name='setenv') &
+                    result(ierr)
+                import :: c_char, c_int
+                character(kind=c_char), intent(in) :: name(*), value(*)
+                integer(c_int), value :: overwrite
+                integer(c_int) :: ierr
+            end function setenv
+        end interface
+        character(len=512) :: cache_dir
+        integer(c_int) :: ierr
+
+        call make_tmp_path('fo_backend_cache', cache_dir)
+        call execute_command_line('mkdir -p '//trim(cache_dir))
+        ierr = setenv('FO_CACHE_DIR'//c_null_char, &
+                      trim(cache_dir)//c_null_char, 1_c_int)
+    end subroutine isolate_backend_cache
+
+    subroutine cleanup_backend_cache()
+        use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+        interface
+            function unsetenv(name) bind(C, name='unsetenv') result(ierr)
+                import :: c_char, c_int
+                character(kind=c_char), intent(in) :: name(*)
+                integer(c_int) :: ierr
+            end function unsetenv
+        end interface
+        character(len=512) :: cache_dir
+        integer :: status
+        integer(c_int) :: ierr
+
+        cache_dir = ''
+        call get_environment_variable('FO_CACHE_DIR', cache_dir, status=status)
+        if (status == 0) then
+            if (index(trim(cache_dir), '/tmp/fo_backend_cache-') == 1) then
+                call remove_tree(cache_dir)
+                ierr = unsetenv('FO_CACHE_DIR'//c_null_char)
+            end if
+        end if
+    end subroutine cleanup_backend_cache
 
     subroutine assert(cond, msg)
         logical, intent(in) :: cond

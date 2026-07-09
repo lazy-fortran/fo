@@ -14,6 +14,7 @@ program test_backend_gfortran
     n_pass = 0
     n_fail = 0
 
+    call isolate_backend_cache()
     call test_gfortran_flags_change_action_id()
     call test_gfortran_compiler_identity_changes_action_id()
     call test_gfortran_private_change_keeps_dependent_cached()

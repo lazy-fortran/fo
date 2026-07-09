@@ -14,6 +14,7 @@ program test_backend
     n_pass = 0
     n_fail = 0
 
+    call isolate_backend_cache()
     call test_detect_fpm()
     call test_detect_fpm_from_child()
     call test_detect_none()

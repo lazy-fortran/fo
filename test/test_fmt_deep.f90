@@ -12,6 +12,7 @@ program test_fmt_deep
     call test_fmt_deep_check_detects_fluff()
     call test_fmt_deep_check_misformatted()
     call test_process_run_argv_logged_passes_env()
+    call test_process_argv_many_tokens()
 
     write (output_unit, '(a,i0,a,i0,a)') 'fmt_deep: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -85,18 +86,17 @@ contains
             close (u)
         end if
 
-        ! Run fluff format --check on it
+        ! Run fluff's check command on it
         call make_tmpfile('test_fmt_deep_log', log_file)
         n_args = 0
         packed = ''
         call argv_push(packed, n_args, 'fluff')
-        call argv_push(packed, n_args, 'format')
-        call argv_push(packed, n_args, '--check')
+        call argv_push(packed, n_args, 'check')
         call argv_push(packed, n_args, trim(tmpfile))
         call process_run_argv_logged('', packed, n_args, trim(log_file), &
             .false., 30, exitcode)
 
-        ! fluff format --check exits non-zero if reformatting is needed
+        ! fluff check exits non-zero when formatting diagnostics are present
         call assert(exitcode /= 0, &
             'fluff check: detects misformatted file (exitcode /= 0)')
 
@@ -132,5 +132,30 @@ contains
         call assert(found, 'argv env: child receives env_extra')
         call delete_tmpfile(log_file)
     end subroutine test_process_run_argv_logged_passes_env
+
+    subroutine test_process_argv_many_tokens()
+        character(len=512) :: log_file
+        character(len=:), allocatable :: packed
+        character(len=32) :: arg
+        integer :: n_args, exitcode, i
+
+        call make_tmpfile('test_process_many_argv_log', log_file)
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, 'sh')
+        call argv_push(packed, n_args, '-c')
+        call argv_push(packed, n_args, 'test "${250}" = arg250')
+        call argv_push(packed, n_args, 'argv-test')
+        do i = 1, 250
+            write (arg, '("arg",i0)') i
+            call argv_push(packed, n_args, trim(arg))
+        end do
+
+        call process_run_argv_logged('', packed, n_args, trim(log_file), &
+            .false., 5, exitcode)
+
+        call assert(exitcode == 0, 'argv growth: many tokens execute correctly')
+        call delete_tmpfile(log_file)
+    end subroutine test_process_argv_many_tokens
 
 end program test_fmt_deep

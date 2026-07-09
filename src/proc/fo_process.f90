@@ -122,9 +122,11 @@ contains
         integer(c_int) :: ec, ap
         character(kind=c_char) :: c_env(C_PATH_LEN)
         logical :: has_env
+        integer :: args_len
 
         ap = 0
         if (append) ap = 1
+        args_len = len_trim(packed)
         has_env = present(env_extra)
         if (has_env) has_env = len_trim(env_extra) > 0
         if (has_env) then
@@ -133,7 +135,7 @@ contains
             c_env(1) = c_null_char
         end if
         call fo_c_run_argv_logged(trim(cwd)//c_null_char, packed, &
-            int(len(packed), c_int), int(n_args, c_int), &
+            int(args_len, c_int), int(n_args, c_int), &
             trim(log_file)//c_null_char, ap, &
             int(timeout_s, c_int), c_env, ec)
         exitcode = int(ec)
@@ -145,12 +147,44 @@ contains
         character(len=:), allocatable, intent(inout) :: packed
         integer, intent(inout) :: n_args
         character(len=*), intent(in) :: token
+        integer :: token_len
+        integer :: used
 
         if (len_trim(token) == 0) return
-        if (.not. allocated(packed)) packed = ''
-        packed = packed//trim(token)//c_null_char
+        token_len = len_trim(token)
+        used = 0
+        if (allocated(packed)) used = len_trim(packed)
+        call argv_reserve(packed, used + token_len + 1)
+        packed(used + 1:used + token_len) = token(1:token_len)
+        packed(used + token_len + 1:used + token_len + 1) = c_null_char
         n_args = n_args + 1
     end subroutine argv_push
+
+    subroutine argv_reserve(packed, required)
+        character(len=:), allocatable, intent(inout) :: packed
+        integer, intent(in) :: required
+        character(len=:), allocatable :: grown
+        integer :: old_len
+        integer :: used
+        integer :: new_len
+
+        if (allocated(packed)) then
+            old_len = len(packed)
+            used = len_trim(packed)
+        else
+            old_len = 0
+            used = 0
+        end if
+        if (old_len >= required) return
+        new_len = max(64, old_len)
+        do while (new_len < required)
+            new_len = new_len * 2
+        end do
+        allocate (character(len=new_len) :: grown)
+        grown(:) = ' '
+        if (used > 0) grown(1:used) = packed(1:used)
+        call move_alloc(grown, packed)
+    end subroutine argv_reserve
 
     subroutine argv_push_split(packed, n_args, words)
         !! Split words on spaces and append each non-empty field as its own
