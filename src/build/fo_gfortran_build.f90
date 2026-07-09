@@ -264,7 +264,8 @@ contains
 
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
-        call collect_lib_objs(obj_dir, lib_objs, n_lib_objs)
+        call collect_current_lib_objs(project_dir, config, obj_dir, lib_objs, &
+            n_lib_objs)
 
         call compile_and_run_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
             bin_dir, dep_includes, n_dep_includes, &
@@ -321,7 +322,8 @@ contains
 
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
-        call collect_lib_objs(obj_dir, lib_objs, n_lib_objs)
+        call collect_current_lib_objs(project_dir, config, obj_dir, lib_objs, &
+            n_lib_objs)
 
         call compile_and_run_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
             bin_dir, dep_includes, n_dep_includes, &
@@ -1502,6 +1504,13 @@ contains
                         call write_test_result_line(log_file, tname, 'FAIL', &
                             trim(exit_str), run_secs(i))
                     end block
+                else if (run_exits(i) /= 0) then
+                    block
+                        character(len=8) :: exit_str
+                        write (exit_str, '(i0)') run_exits(i)
+                        call write_test_result_line(log_file, tname, 'FAIL', &
+                            trim(exit_str), 0.0)
+                    end block
                 else if (run_compiled(i)) then
                     call write_test_result_line(log_file, tname, 'SKIP', '-', 0.0)
                 end if
@@ -1779,37 +1788,98 @@ contains
         if (.not. slow) slow = index(trim(lower_name), '_slow_') > 0
     end function is_slow_name
 
-    subroutine collect_lib_objs(obj_dir, lib_objs, n_lib_objs)
-        character(len=*), intent(in) :: obj_dir
+    subroutine collect_current_lib_objs(project_dir, config, obj_dir, lib_objs, &
+            n_lib_objs)
+        character(len=*), intent(in) :: project_dir, obj_dir
+        type(fpm_config_t), intent(in) :: config
         character(len=512), intent(out) :: lib_objs(MAX_SRC_OBJS)
         integer, intent(out) :: n_lib_objs
 
-        character(len=512) :: line, bname
-        character(len=512), allocatable :: objs(:)
-        integer :: n_objs, k, slash, n
+        type(scan_unit_t), allocatable :: units(:), all_units(:)
+        type(resolved_src_t) :: deps(MAX_RESOLVED)
+        type(dag_t) :: dag
+        character(len=MAX_PATH), allocatable :: filenames(:)
+        logical, allocatable :: is_prog(:), is_test_arr(:)
+        integer, allocatable :: topo_order(:)
+        character(len=512), allocatable :: cfiles(:)
+        integer :: n_units, n_all, ierr, i, node_id, n_order, n_deps
+        integer :: ic, n_cfiles, d
+        logical :: has_cycle
+        character(len=512) :: obj_path, c_line
 
         n_lib_objs = 0
-        allocate (objs(MAX_SRC_OBJS))
-        call fs_collect_files(trim(obj_dir), '', '.o', '', objs, n_objs)
-        do k = 1, n_objs
-            line = objs(k)
-            if (len_trim(line) == 0) cycle
-            n = len_trim(line)
-            slash = index(line(1:n), '/', back=.true.)
-            if (slash > 0) then
-                bname = line(slash + 1:n)
-            else
-                bname = trim(line)
-            end if
-            if (bname(1:4) == 'app_') cycle
-            if (bname(1:5) == 'test_') cycle
-            if (n_lib_objs < MAX_SRC_OBJS) then
-                n_lib_objs = n_lib_objs + 1
-                lib_objs(n_lib_objs) = trim(line)
-            end if
+        lib_objs = ''
+        n_deps = 0
+        allocate (units(MAX_UNITS), all_units(MAX_UNITS))
+        call scan_dir(trim(project_dir)//'/'//trim(config%source_dir), units, &
+            n_units, ierr)
+        n_all = 0
+        if (ierr == 0) then
+            do i = 1, n_units
+                if (n_all >= MAX_UNITS) exit
+                n_all = n_all + 1
+                all_units(n_all) = units(i)
+            end do
+        end if
+        call add_dep_sources(project_dir, all_units, n_all, deps, n_deps)
+
+        if (n_all > 0) then
+            allocate (filenames(MAX_NODES), is_prog(MAX_NODES), &
+                is_test_arr(MAX_NODES))
+            allocate (topo_order(MAX_NODES))
+            call build_dag_from_units(all_units, n_all, dag, filenames, &
+                is_test_arr, is_prog)
+            call dag_topo_sort(dag, topo_order, n_order, has_cycle)
+            do i = 1, n_order
+                node_id = topo_order(i)
+                if (len_trim(filenames(node_id)) == 0) cycle
+                if (is_test_arr(node_id)) cycle
+                if (is_prog(node_id)) cycle
+                call make_obj_path(filenames(node_id), project_dir, obj_dir, &
+                    obj_path)
+                call append_current_lib_obj(obj_path, lib_objs, n_lib_objs)
+            end do
+            deallocate (filenames, is_prog, is_test_arr, topo_order)
+        end if
+
+        allocate (cfiles(MAX_SRC_OBJS))
+        call fs_collect_files(trim(project_dir)//'/'//trim(config%source_dir), &
+            '', '.c', '', cfiles, n_cfiles)
+        do ic = 1, n_cfiles
+            c_line = cfiles(ic)
+            if (len_trim(c_line) == 0) cycle
+            call make_obj_path(trim(c_line), project_dir, obj_dir, obj_path)
+            call append_current_lib_obj(obj_path, lib_objs, n_lib_objs)
         end do
-        deallocate (objs)
-    end subroutine collect_lib_objs
+        do d = 1, n_deps
+            call fs_collect_files(trim(deps(d)%src_dir), '', '.c', '', cfiles, &
+                n_cfiles)
+            do ic = 1, n_cfiles
+                c_line = cfiles(ic)
+                if (len_trim(c_line) == 0) cycle
+                call make_obj_path(trim(c_line), project_dir, obj_dir, obj_path)
+                call append_current_lib_obj(obj_path, lib_objs, n_lib_objs)
+            end do
+        end do
+        deallocate (cfiles, units, all_units)
+    end subroutine collect_current_lib_objs
+
+    subroutine append_current_lib_obj(obj_path, lib_objs, n_lib_objs)
+        character(len=*), intent(in) :: obj_path
+        character(len=512), intent(inout) :: lib_objs(MAX_SRC_OBJS)
+        integer, intent(inout) :: n_lib_objs
+
+        integer :: i
+
+        if (len_trim(obj_path) == 0) return
+        do i = 1, n_lib_objs
+            if (trim(lib_objs(i)) == trim(obj_path)) return
+        end do
+        if (n_lib_objs < MAX_SRC_OBJS) then
+            n_lib_objs = n_lib_objs + 1
+            lib_objs(n_lib_objs) = trim(obj_path)
+        end if
+    end subroutine append_current_lib_obj
 
     subroutine hash_lib_objs(lib_objs, n_lib_objs, combined)
         !! Combine per-object content hashes into one key that represents the

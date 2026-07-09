@@ -808,6 +808,116 @@
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_test_link_ignores_coexisting_fpm_tree
 
+    subroutine test_gfortran_test_drops_stale_path_dep_objects()
+        type(backend_t) :: b
+        integer :: exitcode
+        character(len=512) :: base, dep_a, dep_b, appdir, log_file
+
+        call make_tmp_path('fo_dep_switch', base)
+        dep_a = trim(base)//'/dep_a'
+        dep_b = trim(base)//'/dep_b'
+        appdir = trim(base)//'/app'
+        call make_tmp_path('fo_backend_dep_switch', log_file)
+
+        call write_switch_dep(dep_a, 11)
+        call write_switch_dep(dep_b, 22)
+        call write_switch_app(appdir, '../dep_a', 11)
+
+        b = detect_backend(appdir)
+        call backend_test(b, exitcode, log_file=log_file, use_cache=.false.)
+        call assert(exitcode == 0, 'path-dep switch fixture first test passes')
+
+        call write_switch_app(appdir, '../dep_b', 22)
+        call backend_test(b, exitcode, log_file=log_file, use_cache=.false.)
+        call assert(exitcode == 0, &
+            'test link drops stale object from old path dependency')
+
+        call remove_tree(base)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_test_drops_stale_path_dep_objects
+
+    subroutine write_switch_dep(depdir, value)
+        character(len=*), intent(in) :: depdir
+        integer, intent(in) :: value
+
+        integer :: u
+        character(len=32) :: value_text
+
+        write (value_text, '(i0)') value
+        call make_dir(trim(depdir)//'/src')
+        open (newunit=u, file=trim(depdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "mylib"'
+        close (u)
+        open (newunit=u, file=trim(depdir)//'/src/foo.f90', status='replace')
+        write (u, '(a)') 'module foo'
+        write (u, '(a)') '  implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer function foo_value()'
+        write (u, '(a)') '    foo_value = '//trim(value_text)
+        write (u, '(a)') '  end function foo_value'
+        write (u, '(a)') 'end module foo'
+        close (u)
+    end subroutine write_switch_dep
+
+    subroutine write_switch_app(appdir, dep_path, expected)
+        character(len=*), intent(in) :: appdir, dep_path
+        integer, intent(in) :: expected
+
+        integer :: u
+        character(len=32) :: expected_text
+
+        write (expected_text, '(i0)') expected
+        call make_dir(trim(appdir)//'/test')
+        open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "switchapp"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'mylib = { path = "'//trim(dep_path)//'" }'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/test/check.f90', status='replace')
+        write (u, '(a)') 'program check'
+        write (u, '(a)') '  use foo, only: foo_value'
+        write (u, '(a)') '  if (foo_value() /= '//trim(expected_text)//') stop 1'
+        write (u, '(a)') 'end program check'
+        close (u)
+    end subroutine write_switch_app
+
+    subroutine test_gfortran_link_failure_reports_fail()
+        integer :: exitcode, u
+        character(len=512) :: project_dir, log_file
+
+        call make_tmp_path('fo_test_link_fail', project_dir)
+        call make_tmp_path('fo_backend_link_fail', log_file)
+        call make_dir(trim(project_dir)//'/src')
+        call make_dir(trim(project_dir)//'/test')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "linkfail"'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/src/lib.f90', status='replace')
+        write (u, '(a)') 'module lib'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'end module lib'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/test/check.f90', &
+            status='replace')
+        write (u, '(a)') 'program check'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'interface'
+        write (u, '(a)') '  subroutine missing_symbol() bind(C, name="missing_symbol")'
+        write (u, '(a)') '  end subroutine missing_symbol'
+        write (u, '(a)') 'end interface'
+        write (u, '(a)') 'call missing_symbol()'
+        write (u, '(a)') 'end program check'
+        close (u)
+
+        call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
+        call assert(exitcode /= 0, 'link-failure fixture fails')
+        call assert(file_contains(log_file, 'TEST_RESULT check FAIL'), &
+            'link failure reports TEST_RESULT FAIL')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_link_failure_reports_fail
+
     subroutine test_gfortran_bootstraps_git_dependency()
         type(backend_t) :: b
         integer :: exitcode, u, ios
