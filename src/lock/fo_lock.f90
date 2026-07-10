@@ -55,11 +55,12 @@ contains
         character(len=*), intent(out) :: text
         integer, intent(out) :: ierr
 
-        type(fpm_config_t) :: cfg
+        type(fpm_config_t), allocatable :: cfg
         character(len=512) :: compiler
         integer :: i
 
         text = ''
+        allocate (cfg)
         call fpm_config_parse(project_dir, cfg, ierr)
         if (ierr /= 0) return
 
@@ -124,6 +125,12 @@ contains
 
         rev = ''
         ierr = 0
+        if (allocated(dep%rev)) then
+            if (len_trim(dep%rev) > 0) then
+                rev = trim(dep%rev)
+                return
+            end if
+        end if
         ref = 'HEAD'
         if (len_trim(dep%branch) > 0) ref = trim(dep%branch)
         if (len_trim(dep%tag) > 0) ref = trim(dep%tag)

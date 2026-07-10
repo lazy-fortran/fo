@@ -25,6 +25,7 @@ module fo_fpm_config
         character(len=512) :: git = ''
         character(len=128) :: branch = ''
         character(len=128) :: tag = ''
+        character(len=:), allocatable :: rev
         character(len=512) :: path = ''
         character(len=32)  :: version = '*'
     end type fpm_dep_t
@@ -178,15 +179,11 @@ contains
                 if (trim(key) == 'openmp') then
                     ! fpm metapackage, not a real dependency: maps to -fopenmp.
                     config%openmp = .true.
-                else if (config%n_deps < MAX_DEPS) then
-                    config%n_deps = config%n_deps + 1
-                    call parse_dep(key, val, config%deps(config%n_deps))
+                else
+                    call parse_dep_entry(key, val, config%deps, config%n_deps)
                 end if
             case ('dev-dependencies')
-                if (config%n_dev_deps < MAX_DEV_DEPS) then
-                    config%n_dev_deps = config%n_dev_deps + 1
-                    call parse_dep(key, val, config%dev_deps(config%n_dev_deps))
-                end if
+                call parse_dep_entry(key, val, config%dev_deps, config%n_dev_deps)
             case ('executable')
                 if (config%n_exes > 0) &
                     call parse_exe(key, val, config%exes(config%n_exes))
@@ -280,6 +277,53 @@ contains
         end do
     end function manifest_exe_name
 
+    subroutine parse_dep_entry(name_key, val, deps, n_deps)
+        character(len=*), intent(in) :: name_key, val
+        type(fpm_dep_t), intent(inout) :: deps(:)
+        integer, intent(inout) :: n_deps
+
+        character(len=256) :: name, field
+        character(len=512) :: str_val
+        integer :: dot, i, found
+
+        dot = index(trim(name_key), '.')
+        if (dot <= 1) then
+            if (n_deps >= size(deps)) return
+            n_deps = n_deps + 1
+            call parse_dep(name_key, val, deps(n_deps))
+            return
+        end if
+
+        name = trim(name_key(:dot - 1))
+        field = trim(name_key(dot + 1:))
+        found = 0
+        do i = 1, n_deps
+            if (trim(deps(i)%name) == trim(name)) found = i
+        end do
+        if (found == 0) then
+            if (n_deps >= size(deps)) return
+            n_deps = n_deps + 1
+            found = n_deps
+            call parse_dep(name, '', deps(found))
+        end if
+
+        call extract_string(val, str_val)
+        select case (trim(field))
+        case ('git')
+            deps(found)%git = trim(str_val)
+        case ('branch')
+            deps(found)%branch = trim(str_val)
+        case ('tag')
+            deps(found)%tag = trim(str_val)
+        case ('rev')
+            deps(found)%rev = trim(str_val)
+        case ('path')
+            deps(found)%path = trim(str_val)
+        case ('version')
+            deps(found)%version = trim(str_val)
+        end select
+    end subroutine parse_dep_entry
+
     subroutine parse_dep(name_key, val, dep)
         character(len=*), intent(in) :: name_key, val
         type(fpm_dep_t), intent(out) :: dep
@@ -293,6 +337,7 @@ contains
         dep%git = ''
         dep%branch = ''
         dep%tag = ''
+        dep%rev = ''
         dep%path = ''
         dep%version = '*'
 
@@ -309,6 +354,8 @@ contains
                     dep%branch = trim(str_val)
                 case ('tag')
                     dep%tag = trim(str_val)
+                case ('rev')
+                    dep%rev = trim(str_val)
                 case ('path')
                     dep%path = trim(str_val)
                 end select

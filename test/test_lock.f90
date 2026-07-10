@@ -11,6 +11,7 @@ program test_lock
 
     call test_lock_write_stable()
     call test_lock_detects_git_drift()
+    call test_lock_honors_explicit_rev()
 
     write (output_unit, '(a,i0,a,i0,a)') 'lock: ', n_pass, ' pass, ', n_fail, &
         ' fail'
@@ -80,6 +81,46 @@ contains
 
         call execute_command_line('rm -rf '//trim(base))
     end subroutine test_lock_detects_git_drift
+
+    subroutine test_lock_honors_explicit_rev()
+        character(len=512) :: base, libdir, appdir, rev_path
+        character(len=32768) :: rev, text
+        character(len=256) :: message
+        integer :: ierr, u, nl
+        logical :: ok
+
+        call make_git_project(base, libdir, appdir)
+        call make_tmp_path('fo_lock_rev', rev_path)
+        call execute_command_line('git -C '//trim(libdir)//' rev-parse HEAD > '// &
+            trim(rev_path))
+        call read_text_file(rev_path, rev)
+        nl = index(rev, new_line('a'))
+        if (nl > 0) rev = rev(:nl - 1)
+        open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "depapp"'
+        write (u, '(a)') 'version = "0.1.0"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'deplib.git = "file://'//trim(libdir)//'"'
+        write (u, '(a)') 'deplib.rev = "'//trim(rev)//'"'
+        close (u)
+
+        call lock_write(appdir, '', ierr)
+        call read_text_file(trim(appdir)//'/fo.lock', text)
+        call assert(ierr == 0, 'lock with explicit rev succeeds')
+        call assert(index(text, 'rev = "'//trim(rev)//'"') > 0, &
+            'lock preserves explicit revision')
+
+        open (newunit=u, file=trim(libdir)//'/src/depmod.f90', position='append')
+        write (u, '(a)') '! drift after pin'
+        close (u)
+        call execute_command_line('git -C '//trim(libdir)//' add src/depmod.f90')
+        call execute_command_line('git -C '//trim(libdir)// &
+            ' -c user.email=fo@example.invalid -c user.name=fo commit -q -m drift')
+        call lock_check(appdir, '', ok, message)
+        call assert(ok, 'explicit revision is stable when remote HEAD moves')
+
+        call execute_command_line('rm -rf '//trim(base)//' '//trim(rev_path))
+    end subroutine test_lock_honors_explicit_rev
 
     subroutine make_git_project(base, libdir, appdir)
         character(len=*), intent(out) :: base, libdir, appdir

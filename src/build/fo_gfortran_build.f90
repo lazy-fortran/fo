@@ -44,7 +44,7 @@ contains
         character(len=*), intent(in), optional :: compiler_id
         logical, intent(in), optional :: use_cache
 
-        type(fpm_config_t) :: config
+        type(fpm_config_t), allocatable :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_src_objs, nc
         character(len=512) :: mod_dir, obj_dir, bin_dir
         character(len=512) :: dep_includes(MAX_DEP_DIRS)
@@ -67,6 +67,7 @@ contains
             call detect_compiler(compiler)
         end if
 
+        allocate (config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) then
             write (error_unit, '(a)') 'fo: no fpm.toml found in '//trim(project_dir)
@@ -123,10 +124,11 @@ contains
         integer, intent(out) :: exitcode
 
         type(resolved_src_t) :: deps(MAX_RESOLVED)
-        type(fpm_config_t) :: dep_config
+        type(fpm_config_t), allocatable :: dep_config
         integer :: n_deps, n_unresolved, ierr, i
 
         exitcode = 0
+        allocate (dep_config)
         if (config_has_external_deps(config)) then
             call bootstrap_config_deps(project_dir, config, log_file, exitcode)
             if (exitcode /= 0) return
@@ -256,7 +258,7 @@ contains
         logical, intent(in), optional :: build_only
         logical, intent(in), optional :: use_cache
 
-        type(fpm_config_t) :: config
+        type(fpm_config_t), allocatable :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_lib_objs
         character(len=512) :: mod_dir, obj_dir, bin_dir
         character(len=512) :: dep_includes(MAX_DEP_DIRS)
@@ -280,6 +282,7 @@ contains
             use_cache=use_cache)
         if (exitcode /= 0) return
 
+        allocate (config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) then
             exitcode = 1
@@ -317,7 +320,7 @@ contains
         character(len=*), intent(in), optional :: flags
         logical, intent(in), optional :: use_cache
 
-        type(fpm_config_t) :: config
+        type(fpm_config_t), allocatable :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_lib_objs
         character(len=512) :: mod_dir, obj_dir, bin_dir
         character(len=512) :: dep_includes(MAX_DEP_DIRS)
@@ -338,6 +341,7 @@ contains
             use_cache=use_cache)
         if (exitcode /= 0) return
 
+        allocate (config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) then
             exitcode = 1
@@ -372,7 +376,7 @@ contains
         integer, intent(out) :: n_dep_objs
 
         type(resolved_src_t) :: deps(MAX_RESOLVED)
-        type(fpm_config_t) :: dep_config
+        type(fpm_config_t), allocatable :: dep_config
         integer :: i, n_deps, n_unresolved, ierr
         integer :: n_obj_seen
         character(len=512) :: obj_basenames(MAX_DEP_OBJS)
@@ -380,6 +384,7 @@ contains
         n_dep_includes = 0
         n_dep_objs = 0
         n_obj_seen = 0
+        allocate (dep_config)
         call collect_dep_artifacts(project_dir, config, dep_includes, &
             n_dep_includes, dep_objs, n_dep_objs, obj_basenames, n_obj_seen)
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
@@ -403,7 +408,7 @@ contains
         character(len=512), intent(inout) :: obj_basenames(MAX_DEP_OBJS)
         integer, intent(inout) :: n_obj_seen
         character(len=512) :: found(MAX_DEP_OBJS)
-        character(len=8) :: suffixes(2)
+        character(len=8) :: suffixes(3)
         integer :: i, j, n_found
 
         ! Every directory holding a .mod under build/ is an include candidate:
@@ -413,7 +418,8 @@ contains
             n_dep_includes)
 
         suffixes(1) = '.f90.o'
-        suffixes(2) = '.c.o'
+        suffixes(2) = '.F90.o'
+        suffixes(3) = '.c.o'
         do i = 1, config%n_deps
             ! A path dependency is compiled natively (Fortran and C) into
             ! build/fo/obj, so its objects are already linked from src_objs.
@@ -426,7 +432,7 @@ contains
             ! build_dependencies_<dep>_src_*, path deps (path = "../dep") become
             ! .._<dep>_src_*. Both share the _<dep>_src_ infix. Scan every
             ! gfortran_* profile dir directly and dedup by module identity.
-            do j = 1, 2
+            do j = 1, size(suffixes)
                 call fs_collect_files(trim(project_dir)//'/build', &
                     '_'//trim(config%deps(i)%name)//'_src_', &
                     trim(suffixes(j)), '/gfortran_', found, &
@@ -1117,9 +1123,9 @@ contains
         character(len=*), intent(in), optional :: flags
         logical, intent(in), optional :: use_cache
 
-        integer :: i, n_lib
+        integer :: i, n_lib, copy_rc
         character(len=512) :: lib_objs(MAX_SRC_OBJS)
-        character(len=512) :: prog_obj, bin_path
+        character(len=512) :: prog_obj, bin_path, app_bin_dir, app_bin_path
         character(len=128) :: prog_name, manifest_name
         character(len=512) :: link_flags
         type(cache_t) :: c
@@ -1147,6 +1153,8 @@ contains
         base_digest = ''
         if (cache_ierr == 0) call link_base_digest(project_dir, lib_objs, n_lib, dep_objs, &
             n_dep_objs, config%link_libs, config%n_link_libs, base_digest)
+        app_bin_dir = trim(project_dir)//'/build/fo/app'
+        call fs_make_dir(app_bin_dir)
 
         do i = 1, n_src_objs
             if (.not. is_prog_arr(i)) cycle
@@ -1167,6 +1175,13 @@ contains
                 config%link_libs, config%n_link_libs, bin_path, &
                 log_file, exitcode, link_flags, c, base_digest)
             if (exitcode /= 0) return
+            app_bin_path = trim(app_bin_dir)//'/'//trim(prog_name)
+            copy_rc = fs_copy_exec(bin_path, app_bin_path)
+            if (copy_rc /= 0) then
+                write (error_unit, '(a)') 'fo: failed to create '//trim(app_bin_path)
+                exitcode = 1
+                return
+            end if
         end do
     end subroutine link_app_binaries
 
@@ -2495,7 +2510,7 @@ contains
         character(len=1024), intent(out) :: candidate
         logical, intent(out) :: found
 
-        type(fpm_config_t) :: config
+        type(fpm_config_t), allocatable :: config
         character(len=512) :: dep_root
         character(len=8) :: ext1, ext2
         integer :: ierr, i
@@ -2504,6 +2519,7 @@ contains
         candidate = ''
         dep_root = ''
 
+        allocate (config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) return
 

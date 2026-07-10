@@ -14,6 +14,7 @@ program test_lint
     call test_kind_suffix_counts_as_use()
     call test_use_prefixed_symbol_assignment_counts_as_use()
     call test_unused_import_still_reported()
+    call test_operator_import_usage()
     call test_symbol_used_only_in_include()
     call test_symbol_used_only_in_cpp_include_macro()
     call test_symbol_used_only_in_nested_include()
@@ -114,6 +115,30 @@ contains
                 'unused import finding names the imported symbol')
         end if
     end subroutine test_unused_import_still_reported
+
+    subroutine test_operator_import_usage()
+        type(lint_finding_t) :: findings(MAX_FINDINGS)
+        integer :: n_findings
+        character(len=1024) :: lines(10)
+
+        lines(1) = 'module m'
+        lines(2) = 'use ops, only: operator(.in.), operator(==), operator(.unused.)'
+        lines(3) = 'implicit none'
+        lines(4) = 'private'
+        lines(5) = 'contains'
+        lines(6) = 'logical function matches(x, y, values)'
+        lines(7) = 'integer :: x, y, values(:)'
+        lines(8) = 'matches = x .in. values .and. x == y'
+        lines(9) = 'end function matches'
+        lines(10) = 'end module m'
+
+        call lint_lines('fo_lint_operator_import', lines, 10, findings, n_findings)
+
+        call assert(n_findings == 1, 'lint recognizes used imported operators')
+        if (n_findings == 1) call assert( &
+            trim(findings(1)%symbol) == 'operator(.unused.)', &
+            'lint reports only the unused imported operator')
+    end subroutine test_operator_import_usage
 
     subroutine test_symbol_used_only_in_include()
         type(lint_finding_t) :: findings(MAX_FINDINGS)

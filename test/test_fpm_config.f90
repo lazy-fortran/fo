@@ -11,6 +11,7 @@ program test_fpm_config
     call test_parse_fo_own_toml()
     call test_init_defaults()
     call test_parse_missing_file()
+    call test_dotted_dependency_keys()
     call test_flags_with_equals_inline()
     call test_flags_multiline_array()
 
@@ -82,6 +83,51 @@ contains
             call assert(found_fx, 'dep fx present')
         end block
     end subroutine test_parse_fo_own_toml
+
+    subroutine test_dotted_dependency_keys()
+        type(fpm_config_t) :: c
+        integer :: ierr, u, ios
+        character(len=*), parameter :: dir = '/tmp/fo_test_dotted_deps'
+
+        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        open (newunit=u, file=dir//'/fpm.toml', status='replace', iostat=ios)
+        if (ios /= 0) then
+            call assert(.false., 'dotted_dependency_keys: cannot write fpm.toml')
+            return
+        end if
+        write (u, '(a)') 'name = "dotted-dependencies"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'toml-f.git = "https://example.invalid/toml-f"'
+        write (u, '(a)') 'toml-f.rev = "0123456789abcdef"'
+        write (u, '(a)') 'fortran-shlex.git = "https://example.invalid/shlex"'
+        write (u, '(a)') 'fortran-shlex.tag = "2.0.1"'
+        write (u, '(a)') 'inline = { git = "https://example.invalid/inline", '// &
+            'rev = "fedcba9876543210" }'
+        close (u)
+
+        call fpm_config_parse(dir, c, ierr)
+        call assert(ierr == 0, 'dotted_dependency_keys: parse succeeds')
+        call assert(c%n_deps == 3, 'dotted_dependency_keys: three dependencies')
+        if (c%n_deps >= 3) then
+            call assert(trim(c%deps(1)%name) == 'toml-f', &
+                'dotted_dependency_keys: first name')
+            call assert(len_trim(c%deps(1)%git) > 0, &
+                'dotted_dependency_keys: first git source')
+            call assert(allocated(c%deps(1)%rev), &
+                'dotted_dependency_keys: revision allocated')
+            call assert(trim(c%deps(1)%rev) == '0123456789abcdef', &
+                'dotted_dependency_keys: exact revision')
+            call assert(trim(c%deps(2)%name) == 'fortran-shlex', &
+                'dotted_dependency_keys: second name')
+            call assert(trim(c%deps(2)%tag) == '2.0.1', &
+                'dotted_dependency_keys: second tag')
+            call assert(allocated(c%deps(3)%rev), &
+                'dotted_dependency_keys: inline revision allocated')
+            call assert(trim(c%deps(3)%rev) == 'fedcba9876543210', &
+                'dotted_dependency_keys: inline revision')
+        end if
+        call execute_command_line('rm -rf '//dir, wait=.true.)
+    end subroutine test_dotted_dependency_keys
 
     subroutine test_flags_with_equals_inline()
         !! Flags with '=' (e.g. -fsanitize=address) must be preserved verbatim
