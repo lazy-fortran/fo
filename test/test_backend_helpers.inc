@@ -666,8 +666,8 @@
         !! the package name. Regression for `fo exec demo` failing to resolve.
         type(backend_t) :: b
         integer :: exitcode, u
-        character(len=512) :: base, log_file, demo_bin, pkg_bin
-        logical :: demo_exists, pkg_exists
+        character(len=512) :: base, log_file, demo_bin, app_bin, pkg_bin
+        logical :: demo_exists, app_exists, pkg_exists
 
         call make_tmp_path('fo_test_exename', base)
         call make_tmp_path('fo_backend_exename', log_file)
@@ -690,10 +690,13 @@
         call assert(exitcode == 0, 'project with [[executable]] name builds')
 
         demo_bin = trim(base)//'/build/fo/bin/demo'
+        app_bin = trim(base)//'/build/fo/app/demo'
         pkg_bin = trim(base)//'/build/fo/bin/pkg_name'
         inquire (file=trim(demo_bin), exist=demo_exists)
+        inquire (file=trim(app_bin), exist=app_exists)
         inquire (file=trim(pkg_bin), exist=pkg_exists)
         call assert(demo_exists, 'binary named from [[executable]].name (demo)')
+        call assert(app_exists, 'app binary available at fpm-compatible path')
         call assert(.not. pkg_exists, 'no package-named binary when name is set')
 
         call remove_tree(base)
@@ -986,15 +989,18 @@
         open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "deplib"'
         close (u)
-        open (newunit=u, file=trim(libdir)//'/src/depmod.f90', status='replace')
+        open (newunit=u, file=trim(libdir)//'/src/depmod.F90', status='replace')
         write (u, '(a)') 'module depmod'
         write (u, '(a)') '  implicit none'
-        write (u, '(a)') '  integer, parameter :: dep_value = 13'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer function dep_value()'
+        write (u, '(a)') '    dep_value = 13'
+        write (u, '(a)') '  end function dep_value'
         write (u, '(a)') 'end module depmod'
         close (u)
         call execute_command_line('git -C '//trim(libdir)//' init -q')
         call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src/depmod.f90')
+            ' -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src/depmod.F90')
         call execute_command_line('git -C '//trim(libdir)// &
             ' -c user.email=fo@example.invalid -c user.name=fo commit -q -m init')
 
@@ -1006,7 +1012,7 @@
         open (newunit=u, file=trim(appdir)//'/app/main.f90', status='replace')
         write (u, '(a)') 'program main'
         write (u, '(a)') '  use depmod, only: dep_value'
-        write (u, '(a)') '  print "(i0)", dep_value'
+        write (u, '(a)') '  print "(i0)", dep_value()'
         write (u, '(a)') 'end program main'
         close (u)
 

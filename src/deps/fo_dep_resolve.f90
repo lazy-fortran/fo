@@ -54,13 +54,14 @@ contains
         type(resolved_src_t), intent(out) :: out(MAX_RESOLVED)
         integer, intent(out) :: n_out, ierr
 
-        type(fpm_config_t) :: cfg
+        type(fpm_config_t), allocatable :: cfg
         character(len=512) :: root, dep_dir
         integer :: i, k, kind
         logical :: seen
 
         n_out = 0
         ierr = 0
+        allocate (cfg)
         call normalize_path(project_dir, root)
         call fpm_config_parse(root, cfg, ierr)
         if (ierr /= 0) return
@@ -93,13 +94,14 @@ contains
         integer, intent(out) :: ierr
         integer, intent(in) :: depth
 
-        type(fpm_config_t) :: cfg
+        type(fpm_config_t), allocatable :: cfg
         integer :: i, k, kind
         character(len=512) :: dep_dir, dep_src
         logical :: seen
 
         ierr = 0
         if (depth > 64) return
+        allocate (cfg)
         call fpm_config_parse(dir, cfg, ierr)
         if (ierr /= 0) return
 
@@ -133,11 +135,12 @@ contains
         type(resolved_src_t), intent(inout) :: out(MAX_RESOLVED)
         integer, intent(inout) :: n_out
 
-        type(fpm_config_t) :: dcfg
+        type(fpm_config_t), allocatable :: dcfg
         integer :: derr
         character(len=512) :: src
 
         if (n_out >= MAX_RESOLVED) return
+        allocate (dcfg)
         call fpm_config_parse(dep_dir, dcfg, derr)
         if (derr == 0 .and. len_trim(dcfg%source_dir) > 0) then
             src = trim(dep_dir)//'/'//trim(dcfg%source_dir)

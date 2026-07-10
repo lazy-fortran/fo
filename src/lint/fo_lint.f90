@@ -429,6 +429,13 @@ contains
         call strip_leading(search_sym)
         call strip_trailing(search_sym)
         sym_len = len_trim(search_sym)
+        if (sym_len > 10) then
+            if (search_sym(1:9) == 'operator(' .and. &
+                search_sym(sym_len:sym_len) == ')') then
+                search_sym = search_sym(10:sym_len - 1)
+                sym_len = len_trim(search_sym)
+            end if
+        end if
         if (sym_len == 0) then
             used = .true.
             return
