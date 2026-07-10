@@ -59,6 +59,25 @@ contains
                         if (iostat /= 0) entries(n_entries)%exit_code = 1
                     end if
                 end if
+            else
+                call parse_ctest_result_line(line, name, status, secs, iostat)
+                if (iostat == 0) then
+                    if (n_entries >= size(entries)) then
+                        write (error_unit, '(a,i0)') &
+                            'fo: test output truncated at ', n_entries, &
+                            ' entries (limit reached)'
+                        exit
+                    end if
+                    n_entries = n_entries + 1
+                    entries(n_entries)%name = name
+                    entries(n_entries)%status = status
+                    entries(n_entries)%seconds = secs
+                    entries(n_entries)%exit_code = 0
+                    if (trim(status) == 'FAIL' .or. &
+                        trim(status) == 'TIMEOUT') then
+                        entries(n_entries)%exit_code = 1
+                    end if
+                end if
             end if
         end do
         close (u)
@@ -88,6 +107,91 @@ contains
         read (secs_str, *, iostat=iostat) secs
         if (iostat /= 0) secs = 0.0
     end subroutine parse_test_result_line
+
+    subroutine parse_ctest_result_line(line, name, status, secs, iostat)
+        character(len=*), intent(in) :: line
+        character(len=*), intent(out) :: name, status
+        real, intent(out) :: secs
+        integer, intent(out) :: iostat
+
+        character(len=1024) :: tail, timing
+        integer :: test_pos, colon_offset, colon_pos, status_pos, status_width
+        integer :: time_iostat
+
+        name = ''
+        status = ''
+        secs = 0.0
+        iostat = 1
+        test_pos = index(line, ' Test #')
+        if (test_pos == 0) return
+        colon_offset = index(line(test_pos:), ':')
+        if (colon_offset == 0) return
+        colon_pos = test_pos + colon_offset - 1
+        tail = line(colon_pos + 1:)
+        call find_ctest_status(tail, status, status_pos, status_width)
+        if (status_pos == 0) return
+        call extract_ctest_name(tail(:status_pos - 1), name)
+        if (len_trim(name) == 0) return
+        timing = adjustl(tail(status_pos + status_width:))
+        if (timing(1:1) == ':') timing = adjustl(timing(2:))
+        read (timing, *, iostat=time_iostat) secs
+        if (time_iostat /= 0) secs = 0.0
+        iostat = 0
+    end subroutine parse_ctest_result_line
+
+    subroutine find_ctest_status(text, status, pos, width)
+        character(len=*), intent(in) :: text
+        character(len=*), intent(out) :: status
+        integer, intent(out) :: pos, width
+
+        status = ''
+        pos = index(text, '***Failed')
+        width = len('***Failed')
+        if (pos > 0) then
+            status = 'FAIL'
+            return
+        end if
+        pos = index(text, '***Exception')
+        width = len('***Exception')
+        if (pos > 0) then
+            status = 'FAIL'
+            return
+        end if
+        pos = index(text, '***Timeout')
+        width = len('***Timeout')
+        if (pos > 0) then
+            status = 'TIMEOUT'
+            return
+        end if
+        pos = index(text, 'Passed')
+        width = len('Passed')
+        if (pos > 0) then
+            status = 'PASS'
+            return
+        end if
+        pos = index(text, 'Not Run')
+        width = len('Not Run')
+        if (pos > 0) then
+            status = 'SKIP'
+            return
+        end if
+        pos = index(text, 'Skipped')
+        width = len('Skipped')
+        if (pos > 0) status = 'SKIP'
+    end subroutine find_ctest_status
+
+    subroutine extract_ctest_name(text, name)
+        character(len=*), intent(in) :: text
+        character(len=*), intent(out) :: name
+
+        character(len=1024) :: local
+        integer :: padding
+
+        local = adjustl(text)
+        padding = index(local, '...')
+        if (padding > 0) local = local(:padding - 1)
+        name = trim(local)
+    end subroutine extract_ctest_name
 
     subroutine parse_test_result_fields(line, name, status, exit_str, &
             secs_str, iostat)

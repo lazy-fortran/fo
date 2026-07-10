@@ -169,8 +169,12 @@
     end subroutine test_fpm_skips_slow_by_default
 
     subroutine test_cmake_build_and_test()
+        use fo_test_results, only: MAX_TEST_RESULTS_ENTRIES, &
+            parse_test_results, test_result_entry_t
         type(backend_t) :: b
+        type(test_result_entry_t) :: entries(MAX_TEST_RESULTS_ENTRIES)
         integer :: exitcode, u
+        integer :: n_entries, parse_ierr
         character(len=512) :: project_dir, log_file
 
         call make_tmp_path('fo_test_cmake_build', project_dir)
@@ -195,6 +199,12 @@
         call assert(exitcode == 0, 'CMake project builds')
         call backend_test(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'CMake project tests pass')
+        call parse_test_results(log_file, entries, n_entries, parse_ierr)
+        call assert(parse_ierr == 0 .and. n_entries == 1, &
+            'CMake test result is reported')
+        call assert(trim(entries(1)%name) == 'test_fixture' .and. &
+            trim(entries(1)%status) == 'PASS', &
+            'CMake passing test has its name and status')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
