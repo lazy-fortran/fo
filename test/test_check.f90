@@ -40,6 +40,7 @@ program test_check
     call test_capabilities_unknown_compiler()
     call test_full_json_includes_capabilities()
     call test_fmt_check_caches_success()
+    call test_fmt_check_skips_skbuild_tree()
     call test_fmt_check_uses_fprettify_config()
     call test_fmt_check_files_limits_scope()
     call test_fmt_files_limits_scope()
@@ -562,6 +563,34 @@ contains
 
         call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
     end subroutine test_fmt_check_caches_success
+
+    subroutine test_fmt_check_skips_skbuild_tree()
+        character(len=512) :: project_dir, generated_dir, output
+        integer :: u, exitcode
+
+        call make_tmp_path('fo_fmt_skbuild_project', project_dir)
+        generated_dir = trim(project_dir)//'/_skbuild/linux/src'
+        call execute_command_line('mkdir -p '//trim(generated_dir), wait=.true.)
+
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "fmt_skbuild_project"'
+        close (u)
+
+        open (newunit=u, file=trim(generated_dir)//'/generated.f90', &
+            status='replace')
+        write (u, '(a)') 'module generated'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'end module generated'
+        close (u)
+
+        call fo_fmt_check_run(project_dir, output, exitcode)
+
+        call assert(exitcode == 0, 'format check skips _skbuild trees')
+        call assert(len_trim(output) == 0, &
+            'format check ignores unformatted _skbuild sources')
+
+        call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
+    end subroutine test_fmt_check_skips_skbuild_tree
 
     subroutine test_fmt_check_uses_fprettify_config()
         character(len=512) :: project_dir, src_dir, output

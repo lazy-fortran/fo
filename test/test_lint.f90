@@ -19,6 +19,7 @@ program test_lint
     call test_symbol_used_only_in_cpp_include_macro()
     call test_symbol_used_only_in_nested_include()
     call test_lint_dir_skips_nested_build_tree()
+    call test_lint_dir_skips_skbuild_tree()
     call test_lint_dir_skips_cmake_generated_sources()
 
     write (output_unit, '(a,i0,a,i0,a)') 'lint: ', n_pass, ' pass, ', n_fail, ' fail'
@@ -289,6 +290,30 @@ contains
         call assert(n_findings == 0, &
             'lint_dir skips nested build trees')
     end subroutine test_lint_dir_skips_nested_build_tree
+
+    subroutine test_lint_dir_skips_skbuild_tree()
+        type(lint_finding_t) :: findings(MAX_FINDINGS)
+        integer :: n_findings, u
+        character(len=512) :: root, generated_dir
+
+        call make_tmpfile('fo_lint_skbuild', root)
+        generated_dir = trim(root)//'/_skbuild/linux/src'
+        call fs_make_dir(generated_dir)
+
+        open (newunit=u, file=trim(generated_dir)//'/generated.f90', &
+            status='replace')
+        write (u, '(a)') 'module generated'
+        write (u, '(a)') '    use constants, only: unused'
+        write (u, '(a)') '    private'
+        write (u, '(a)') 'end module generated'
+        close (u)
+
+        n_findings = 0
+        call lint_dir(trim(root), findings, n_findings)
+        call fs_remove_tree(root)
+
+        call assert(n_findings == 0, 'lint_dir skips _skbuild trees')
+    end subroutine test_lint_dir_skips_skbuild_tree
 
     subroutine test_lint_dir_skips_cmake_generated_sources()
         type(lint_finding_t) :: findings(MAX_FINDINGS)

@@ -543,6 +543,7 @@ contains
 
         padded = '/'//trim(rel)//'/'
         if (index(padded, '/build/') > 0) return
+        if (index(padded, '/_skbuild/') > 0) return
         if (index(padded, '/CMakeFiles/') > 0) return
         if (index(padded, '/_deps/') > 0) return
         if (index(padded, '/dependencies/') > 0) return

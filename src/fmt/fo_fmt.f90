@@ -90,6 +90,7 @@ contains
         end if
 
         padded = '/'//trim(rel)//'/'
+        if (index(padded, '/_skbuild/') > 0) return
         if (index(padded, '/_deps/') > 0) return
         if (index(padded, '/dependencies/') > 0) return
         if (index(padded, '/deps-src/') > 0) return
