@@ -25,6 +25,7 @@ program test_backend
     call test_config_flags_str_joins_with_spaces()
     call test_fpm_skips_slow_by_default()
     call test_cmake_build_and_test()
+    call test_cmake_named_test_rebuilds_changed_source()
     call test_cmake_exec_target_resolution()
     call test_cmake_affected_tests_use_registered_names()
     call test_gfortran_named_tests_select_requested()
