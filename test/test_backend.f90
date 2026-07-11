@@ -8,6 +8,7 @@ program test_backend
         gfortran_test_names, config_flags_str
     use fo_fpm_config, only: fpm_config_t
     use fo_process, only: process_getpid
+    use fo_exec_target, only: resolve_exec_target
     implicit none
     integer :: n_pass, n_fail
 
@@ -24,6 +25,7 @@ program test_backend
     call test_config_flags_str_joins_with_spaces()
     call test_fpm_skips_slow_by_default()
     call test_cmake_build_and_test()
+    call test_cmake_exec_target_resolution()
     call test_cmake_affected_tests_use_registered_names()
     call test_gfortran_named_tests_select_requested()
     call test_gfortran_named_test_restores_cached_object()
@@ -36,6 +38,36 @@ program test_backend
     call report('backend')
 
 contains
+
+    subroutine test_cmake_exec_target_resolution()
+        type(backend_t) :: b
+        character(len=512) :: base, bin_path
+        integer :: u
+        logical :: found
+
+        call make_tmp_path('fo_test_cmake_exec', base)
+        call make_dir(trim(base)//'/build/subdir')
+        open (newunit=u, file=trim(base)//'/CMakeLists.txt', status='replace')
+        close (u)
+        open (newunit=u, file=trim(base)//'/build/subdir/demo.x', status='replace')
+        close (u)
+
+        b = detect_backend(base)
+        call resolve_exec_target(b, 'demo.x', bin_path, found)
+        call assert(found, 'CMake executable resolves by unique basename')
+        call assert(trim(bin_path) == trim(base)//'/build/subdir/demo.x', &
+            'CMake executable resolves to its nested build path')
+        call resolve_exec_target(b, 'subdir/demo.x', bin_path, found)
+        call assert(found, 'CMake executable resolves by build-relative path')
+
+        call make_dir(trim(base)//'/build/other')
+        open (newunit=u, file=trim(base)//'/build/other/demo.x', status='replace')
+        close (u)
+        call resolve_exec_target(b, 'demo.x', bin_path, found)
+        call assert(.not. found, 'ambiguous CMake executable name is rejected')
+
+        call remove_tree(base)
+    end subroutine test_cmake_exec_target_resolution
 
     subroutine test_backend_clean_keeps_shared_store()
         use fo_cache, only: cache_root
