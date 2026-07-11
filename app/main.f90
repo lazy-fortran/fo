@@ -5,7 +5,7 @@ program fo_main
     use fx_dag, only: dag_t, dag_topo_sort, dag_to_dot, MAX_NODES
     use fo_dag_bridge, only: build_dag_from_units
     use fo_build_backend, only: backend_t, detect_backend, backend_build, &
-        backend_test, backend_test_names, BACKEND_NONE, &
+        backend_test, backend_test_names, backend_test_affected, BACKEND_NONE, &
         BACKEND_NATIVE, BACKEND_CMAKE, profile_flags
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
         collect_failed_test_names, MAX_TEST_RESULTS
@@ -198,7 +198,7 @@ contains
                 write (output_unit, '(a)') 'Tests: skipped, no affected tests'
             else
                 call make_tmpfile('fo-test', test_log)
-                call backend_test_names(b, test_names, n_test_names, exitcode, &
+                call backend_test_affected(b, test_names, n_test_names, exitcode, &
                     log_file=test_log)
                 if (exitcode /= 0) then
                     call collect_failed_test_names(test_log, failed_tests, &

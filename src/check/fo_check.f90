@@ -6,7 +6,7 @@ module fo_check
     use fo_dag_bridge, only: build_dag_from_units
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_build_backend, only: backend_t, detect_backend, backend_build, &
-        backend_test, backend_test_names, BACKEND_NONE, BACKEND_CMAKE
+        backend_test_affected, BACKEND_NONE
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
         cache_action_mod_key, hash_mod_file, HASH_LEN
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, is_runner_crash
@@ -495,12 +495,8 @@ contains
         end if
 
         call make_tmpfile('fo-test', test_log)
-        if (b%kind == BACKEND_CMAKE) then
-            call backend_test(b, exitcode, log_file=test_log)
-        else
-            call backend_test_names(b, test_names, n_test_names, exitcode, &
-                log_file=test_log)
-        end if
+        call backend_test_affected(b, test_names, n_test_names, exitcode, &
+            log_file=test_log)
         res%tests_ok = (exitcode == 0)
         call parse_test_log(test_log, res%test_results, res%n_test_results)
         if (.not. res%tests_ok) then
