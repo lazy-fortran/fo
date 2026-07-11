@@ -4,7 +4,8 @@ module fo_cache
     !! the action/keying API that lives in fx_action_cache.
     use fx_action_cache, only: cache_t, HASH_LEN, &
         action_cache_root, action_cache_store_root, action_cache_schema, &
-        action_cache_init, cache_key_for, cache_lookup, cache_restore_action, &
+        action_cache_init, cache_key_for, cache_lookup, &
+        fx_cache_restore_action => cache_restore_action, &
         cache_store_action, cache_action_mod_key, cache_store_binary, &
         cache_restore_binary, cache_binary_matches, cache_digest, &
         cache_file_digest, hash_mod_file, cache_debug_write_action_record, &
@@ -24,6 +25,28 @@ module fo_cache
     public :: cache_debug_write_action_record, cache_debug_corrupt_object_payload
 
 contains
+
+    subroutine cache_restore_action(c, action_id, obj_path, mod_dir, restored, &
+            output_id, required_mod_name)
+        type(cache_t), intent(in) :: c
+        character(len=*), intent(in) :: action_id, obj_path, mod_dir
+        logical, intent(out) :: restored
+        character(len=HASH_LEN), intent(out), optional :: output_id
+        character(len=*), intent(in), optional :: required_mod_name
+
+        logical :: mod_exists
+
+        if (present(output_id)) then
+            call fx_cache_restore_action(c, action_id, obj_path, mod_dir, restored, &
+                output_id)
+        else
+            call fx_cache_restore_action(c, action_id, obj_path, mod_dir, restored)
+        end if
+        if (.not. restored .or. .not. present(required_mod_name)) return
+        inquire (file=trim(mod_dir)//'/'//trim(required_mod_name)//'.mod', &
+            exist=mod_exists)
+        restored = mod_exists
+    end subroutine cache_restore_action
 
     subroutine cache_root(root)
         !! FO_CACHE_DIR overrides the location; the parallel test runner sets it

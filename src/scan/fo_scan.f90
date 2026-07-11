@@ -13,7 +13,7 @@ module fo_scan
     integer, parameter, public :: MAX_UNITS = 2048
     integer, parameter :: MAX_DEPS = 64
 
-    public :: scan_unit_t, scan_file, scan_dir, is_slow_test
+    public :: scan_unit_t, scan_file, scan_dir, is_slow_test, source_defines_module
 
     type :: scan_unit_t
         character(len=MAX_PATH) :: filename = ''
@@ -39,6 +39,28 @@ module fo_scan
         ]
 
 contains
+
+    logical function source_defines_module(filename) result(defines_module)
+        character(len=*), intent(in) :: filename
+
+        character(len=512) :: line
+        character(len=MAX_NAME) :: name
+        integer :: funit, iostat
+
+        defines_module = .false.
+        open (newunit=funit, file=filename, status='old', iostat=iostat)
+        if (iostat /= 0) return
+        do
+            read (funit, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            call extract_module_def(adjustl(line), name)
+            if (len_trim(name) > 0) then
+                defines_module = .true.
+                exit
+            end if
+        end do
+        close (funit)
+    end function source_defines_module
 
     subroutine scan_file(filename, unit_info, ierr)
         character(len=*), intent(in) :: filename

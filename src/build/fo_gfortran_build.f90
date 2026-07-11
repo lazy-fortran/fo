@@ -1,7 +1,8 @@
 module fo_gfortran_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, manifest_exe_name, &
         dep_kind, DEP_PATH
-    use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME, MAX_PATH
+    use fo_scan, only: scan_unit_t, scan_dir, source_defines_module, &
+        MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
         resolve_dev_dep_srcs, MAX_RESOLVED, join_path
@@ -632,8 +633,14 @@ contains
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
                     if (.not. source_may_emit_smod(filenames(node_id)) .and. &
                         cache_lookup(c, source_key)) then
-                        call cache_restore_action(c, source_key, obj_path, mod_dir, &
-                            restored)
+                        if (source_defines_module(filenames(node_id))) then
+                            call cache_restore_action(c, source_key, obj_path, &
+                                mod_dir, restored, required_mod_name= &
+                                dag%nodes(node_id)%label)
+                        else
+                            call cache_restore_action(c, source_key, obj_path, &
+                                mod_dir, restored)
+                        end if
                         if (restored) then
                             call get_mod_key(dag%nodes(node_id)%label, mod_dir, &
                                 new_mod_keys(node_id))

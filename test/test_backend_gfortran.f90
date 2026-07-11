@@ -7,6 +7,8 @@ program test_backend_gfortran
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names, config_flags_str
     use fo_fpm_config, only: fpm_config_t
+    use fo_cache, only: cache_t, cache_init, cache_key_for, cache_store_action, &
+        HASH_LEN
     use fo_process, only: process_getpid
     implicit none
     integer :: n_pass, n_fail
@@ -34,10 +36,56 @@ program test_backend_gfortran
     call test_gfortran_test_builds_dev_dependency()
     call test_fpm_path_with_spaces()
     call test_gfortran_rejects_compile_errors()
+    call test_gfortran_rebuilds_cached_module_without_mod()
 
     call report('backend_gfortran')
 
 contains
+
+    subroutine test_gfortran_rebuilds_cached_module_without_mod()
+        type(cache_t) :: cache
+        character(len=512) :: project_dir, log_file, source, object, mod_dir
+        character(len=HASH_LEN) :: action_id, output_id, dep_keys(1)
+        integer :: u, ierr, exitcode, n_compiled
+        logical :: mod_exists
+
+        call make_tmp_path('fo_test_missing_cached_mod', project_dir)
+        call make_tmp_path('fo_backend_missing_cached_mod', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "missing_cached_mod"'
+        close (u)
+        source = trim(project_dir)//'/src/provider.f90'
+        open (newunit=u, file=trim(source), status='replace')
+        write (u, '(a)') 'module provider'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'end module provider'
+        close (u)
+
+        call make_dir(trim(project_dir)//'/seed')
+        object = trim(project_dir)//'/seed/provider.o'
+        mod_dir = trim(project_dir)//'/seed/mod'
+        call make_dir(mod_dir)
+        open (newunit=u, file=trim(object), status='replace')
+        write (u, '(a)') 'cached object without module output'
+        close (u)
+        dep_keys = ''
+        action_id = cache_key_for(source, 'fixture-compiler', '', dep_keys, 0)
+        call cache_init(cache, ierr)
+        call cache_store_action(cache, action_id, object, mod_dir, 'provider', &
+            output_id, ierr)
+
+        call gfortran_build(project_dir, log_file, exitcode, n_compiled, &
+            compiler_id='fixture-compiler')
+        inquire (file=trim(project_dir)//'/build/fo/mod/provider.mod', &
+            exist=mod_exists)
+        call assert(exitcode == 0 .and. n_compiled == 1 .and. mod_exists, &
+            'module cache hit without .mod recompiles provider')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_rebuilds_cached_module_without_mod
 
     include 'test_backend_helpers.inc'
 
