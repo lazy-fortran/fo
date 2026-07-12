@@ -8,7 +8,7 @@ module fo_lint
     use fx_json_build, only: json_escape_string
     implicit none
     private
-    public :: lint_finding_t, lint_file, lint_dir, lint_findings_json
+    public :: lint_finding_t, lint_file, lint_files, lint_dir, lint_findings_json
     public :: lint_warning_t, lint_compiler, lint_warnings_json, lint_all_json
     public :: lint_dedup_warnings
     public :: lint_fix_dir
@@ -562,6 +562,20 @@ contains
         type(lint_finding_t), intent(out) :: findings(MAX_FINDINGS)
         integer, intent(out) :: n_findings
 
+        character(len=512), allocatable :: files(:)
+        integer :: n_files
+
+        call collect_fortran_sources(dir, files, n_files)
+        call lint_files(dir, files, n_files, findings, n_findings)
+    end subroutine lint_dir
+
+    subroutine lint_files(dir, selected, n_selected, findings, n_findings)
+        character(len=*), intent(in) :: dir
+        character(len=*), intent(in) :: selected(:)
+        integer, intent(in) :: n_selected
+        type(lint_finding_t), intent(out) :: findings(MAX_FINDINGS)
+        integer, intent(out) :: n_findings
+
         character(len=512), allocatable :: files(:), extra(:)
         character(len=128), allocatable :: roots(:)
         integer :: n_files, i, j, n_extra
@@ -580,6 +594,7 @@ contains
 
         do i = 1, n_files
             if (len_trim(files(i)) == 0) cycle
+            if (.not. path_is_selected(files(i), selected, n_selected)) cycle
             n_extra = 0
             if (len_trim(roots(i)) > 0) then
                 do j = 1, n_files
@@ -594,7 +609,23 @@ contains
             call lint_file_ex(trim(files(i)), extra, n_extra, findings, n_findings)
         end do
         deallocate (roots, extra)
-    end subroutine lint_dir
+    end subroutine lint_files
+
+    logical function path_is_selected(path, selected, n_selected)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(in) :: selected(:)
+        integer, intent(in) :: n_selected
+
+        integer :: i
+
+        path_is_selected = .false.
+        do i = 1, min(n_selected, size(selected))
+            if (trim(path) == trim(selected(i))) then
+                path_is_selected = .true.
+                return
+            end if
+        end do
+    end function path_is_selected
 
     subroutine file_root_module(filename, root)
         !! Root module identity (lowercased): the name of the module the file

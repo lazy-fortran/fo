@@ -20,7 +20,8 @@ program fo_main
     use fo_fmt, only: fo_fmt_run, fo_fmt_files, fo_fmt_changed_run, &
         fo_fmt_check_run, fo_fmt_check_files, fo_fmt_check_changed_run, &
         fo_fmt_deep_run, fo_fmt_deep_files, fo_fmt_deep_changed_run, &
-        fo_fmt_deep_check_run, fo_fmt_deep_check_files
+        fo_fmt_deep_check_run, fo_fmt_deep_check_files, &
+        write_git_changed_source_list
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_ffc_cli, only: ffc_cmd_build, ffc_cmd_run, ffc_native_requested
     use fo_exec_target, only: resolve_exec_target
@@ -214,13 +215,43 @@ contains
 
         ! 4. lint: unused imports (skip compiler warnings in pipeline)
         block
-            use fo_lint, only: lint_finding_t, lint_dir, MAX_FINDINGS
+            use fo_lint, only: lint_finding_t, lint_files, MAX_FINDINGS
             type(lint_finding_t), allocatable :: findings(:)
-            integer :: n_findings, li
+            character(len=MAX_PATH) :: lint_files_list(MAX_NODES), lint_line
+            character(len=512) :: lint_list_file
+            integer :: n_findings, li, lint_unit, lint_ios, n_lint_files
+            logical :: git_ok
 
             allocate (findings(MAX_FINDINGS))
 
-            call lint_dir(trim(b%project_dir), findings, n_findings)
+            call make_tmpfile('fo-lint-files', lint_list_file)
+            call write_git_changed_source_list(trim(b%project_dir), &
+                lint_list_file, git_ok, &
+                n_lint_files)
+            if (git_ok) then
+                n_lint_files = 0
+                open (newunit=lint_unit, file=trim(lint_list_file), &
+                    status='old', iostat=lint_ios)
+                if (lint_ios == 0) then
+                    do
+                        read (lint_unit, '(a)', iostat=lint_ios) lint_line
+                        if (lint_ios /= 0) exit
+                        if (n_lint_files == MAX_NODES) exit
+                        n_lint_files = n_lint_files + 1
+                        lint_files_list(n_lint_files) = trim(lint_line)
+                    end do
+                    close (lint_unit)
+                end if
+            else
+                n_lint_files = n_changed
+                do i = 1, n_changed
+                    lint_files_list(i) = filenames(changed_ids(i))
+                end do
+            end if
+            call delete_tmpfile(lint_list_file)
+
+            call lint_files(trim(b%project_dir), lint_files_list, &
+                n_lint_files, findings, n_findings)
             if (n_findings > 0) then
                 do li = 1, n_findings
                     write (error_unit, '(a,a,i0,a,a,a,a)') &

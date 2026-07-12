@@ -1,6 +1,6 @@
 program test_lint
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_lint, only: lint_finding_t, lint_file, lint_dir, MAX_FINDINGS
+    use fo_lint, only: lint_finding_t, lint_file, lint_files, lint_dir, MAX_FINDINGS
     use fo_util, only: make_tmpfile, delete_tmpfile
     use fo_fs, only: fs_make_dir, fs_remove_tree
     implicit none
@@ -21,11 +21,48 @@ program test_lint
     call test_lint_dir_skips_nested_build_tree()
     call test_lint_dir_skips_skbuild_tree()
     call test_lint_dir_skips_cmake_generated_sources()
+    call test_lint_files_checks_only_selected_sources()
 
     write (output_unit, '(a,i0,a,i0,a)') 'lint: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
 
 contains
+
+    subroutine test_lint_files_checks_only_selected_sources()
+        type(lint_finding_t) :: findings(MAX_FINDINGS)
+        character(len=512) :: selected(1), dir, clean_file, legacy_file
+        integer :: n_findings, u
+
+        dir = '/tmp/fo_lint_selected_sources'
+        clean_file = trim(dir)//'/clean.f90'
+        legacy_file = trim(dir)//'/legacy.f90'
+        call fs_remove_tree(dir)
+        call fs_make_dir(dir)
+        open (newunit=u, file=clean_file, status='replace')
+        write (u, '(a)') 'module clean'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'end module clean'
+        close (u)
+        open (newunit=u, file=legacy_file, status='replace')
+        write (u, '(a)') 'module legacy'
+        write (u, '(a)') 'use constants, only: unused_name'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'private'
+        write (u, '(a)') 'integer :: i'
+        write (u, '(a)') 'end module legacy'
+        close (u)
+
+        selected(1) = clean_file
+        call lint_files(dir, selected, 1, findings, n_findings)
+        call assert(n_findings == 0, &
+            'selected lint ignores unused imports in unchanged sources')
+
+        selected(1) = legacy_file
+        call lint_files(dir, selected, 1, findings, n_findings)
+        call assert(n_findings == 1, &
+            'selected lint still reports unused imports in changed sources')
+        call fs_remove_tree(dir)
+    end subroutine test_lint_files_checks_only_selected_sources
 
     subroutine assert(cond, msg)
         logical, intent(in) :: cond

@@ -11,6 +11,7 @@ module fo_fmt
     public :: fo_fmt_run, fo_fmt_files, fo_fmt_changed_run
     public :: fo_fmt_check_run, fo_fmt_check_files
     public :: fo_fmt_check_changed_run
+    public :: write_git_changed_source_list
     public :: fo_fmt_deep_run, fo_fmt_deep_files, fo_fmt_deep_changed_run
     public :: fo_fmt_deep_check_run, fo_fmt_deep_check_files
 
