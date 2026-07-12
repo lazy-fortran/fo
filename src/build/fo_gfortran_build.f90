@@ -2169,7 +2169,8 @@ contains
         if (ios /= 0) return
         write (u, '(a)') 'fo: possible stale root build artifacts detected.'
         write (u, '(a)') 'fo: .mod/.smod/.o files in the project root can shadow build/fo/mod.'
-        write (u, '(a)') 'fo: VS Code Modern Fortran linting can create these files; set fortran.linter.modOutput outside the project root.'
+        write (u, '(a)') 'fo: VS Code Modern Fortran linting can create these files; set ' // &
+            'fortran.linter.modOutput outside the project root.'
         if (n_removed > 0) then
             write (u, '(a,i0,a)') 'fo: removed ', n_removed, &
                 ' root build artifacts and retried once.'

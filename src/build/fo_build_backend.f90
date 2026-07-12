@@ -9,7 +9,8 @@ module fo_build_backend
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
-    public :: backend_build, backend_test, backend_test_names, backend_clean
+    public :: backend_build, backend_test, backend_test_names
+    public :: backend_test_affected, backend_clean
     public :: profile_flags
     public :: BACKEND_NONE, BACKEND_NATIVE, BACKEND_CMAKE
 
@@ -300,6 +301,26 @@ contains
         call release_project_lock(lock_dir)
     end subroutine backend_test_names
 
+    subroutine backend_test_affected(self, names, n_names, exitcode, &
+            include_slow, log_file, flags, use_cache)
+        type(backend_t), intent(in) :: self
+        character(len=128), intent(in) :: names(:)
+        integer, intent(in) :: n_names
+        integer, intent(out) :: exitcode
+        logical, intent(in), optional :: include_slow
+        character(len=*), intent(in), optional :: log_file
+        character(len=*), intent(in), optional :: flags
+        logical, intent(in), optional :: use_cache
+
+        if (self%kind == BACKEND_CMAKE) then
+            call backend_test(self, exitcode, include_slow, log_file, flags, &
+                use_cache)
+        else
+            call backend_test_names(self, names, n_names, exitcode, &
+                include_slow, log_file, flags, use_cache)
+        end if
+    end subroutine backend_test_affected
+
     subroutine cmake_build(project_dir, flags, log_file, exitcode)
         character(len=*), intent(in) :: project_dir, flags, log_file
         integer, intent(out) :: exitcode
@@ -366,6 +387,7 @@ contains
         call argv_push(packed, n_args, '--test-dir')
         call argv_push(packed, n_args, 'build')
         call argv_push(packed, n_args, '--output-on-failure')
+        call argv_push(packed, n_args, '--no-tests=error')
         call argv_push(packed, n_args, '-j')
         call argv_push(packed, n_args, jobs_text)
         if (len_trim(regex) > 0) then

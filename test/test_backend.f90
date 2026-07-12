@@ -2,7 +2,7 @@ program test_backend
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
         detect_jobs, backend_build, backend_test, &
-        backend_test_names, backend_clean, &
+        backend_test_names, backend_test_affected, backend_clean, &
         BACKEND_NATIVE, BACKEND_CMAKE, BACKEND_NONE
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names, config_flags_str
@@ -24,6 +24,7 @@ program test_backend
     call test_config_flags_str_joins_with_spaces()
     call test_fpm_skips_slow_by_default()
     call test_cmake_build_and_test()
+    call test_cmake_affected_tests_use_registered_names()
     call test_gfortran_named_tests_select_requested()
     call test_gfortran_named_test_restores_cached_object()
     call test_gfortran_recovers_from_root_mod_shadow()
