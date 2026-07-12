@@ -210,6 +210,47 @@
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_cmake_build_and_test
 
+    subroutine test_cmake_named_test_rebuilds_changed_source()
+        type(backend_t) :: b
+        integer :: exitcode, u
+        character(len=512) :: project_dir, log_file
+        character(len=128) :: names(1)
+
+        call make_tmp_path('fo_test_cmake_named_rebuild', project_dir)
+        call make_tmp_path('fo_backend_cmake_named_rebuild', log_file)
+        call execute_command_line('mkdir -p '//trim(project_dir))
+        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
+            status='replace')
+        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
+        write (u, '(a)') 'project(fo_cmake_named_rebuild LANGUAGES Fortran)'
+        write (u, '(a)') 'enable_testing()'
+        write (u, '(a)') 'add_executable(test_fixture test_fixture.f90)'
+        write (u, '(a)') 'add_test(NAME test_fixture COMMAND test_fixture)'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/test_fixture.f90', &
+            status='replace')
+        write (u, '(a)') 'program test_fixture'
+        write (u, '(a)') 'end program test_fixture'
+        close (u)
+
+        b = detect_backend(project_dir)
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'CMake named-rebuild fixture builds')
+        open (newunit=u, file=trim(project_dir)//'/test_fixture.f90', &
+            status='replace')
+        write (u, '(a)') 'program test_fixture'
+        write (u, '(a)') 'this is not valid Fortran'
+        write (u, '(a)') 'end program test_fixture'
+        close (u)
+        names(1) = 'test_fixture'
+        call backend_test_names(b, names, 1, exitcode, log_file=log_file)
+        call assert(exitcode /= 0, &
+            'CMake named test rejects a changed source that does not compile')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_cmake_named_test_rebuilds_changed_source
+
     subroutine test_cmake_affected_tests_use_registered_names()
         use fo_test_results, only: MAX_TEST_RESULTS_ENTRIES, &
             parse_test_results, test_result_entry_t

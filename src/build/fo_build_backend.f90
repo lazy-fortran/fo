@@ -228,7 +228,9 @@ contains
             call gfortran_test(self%project_dir, log_path, exitcode, &
                 include_slow=slow, flags=flag_text, use_cache=use_cache)
         case (BACKEND_CMAKE)
-            call cmake_test(self%project_dir, '', slow, log_path, exitcode)
+            call cmake_build(self%project_dir, flag_text, log_path, exitcode)
+            if (exitcode == 0) &
+                call cmake_test(self%project_dir, '', slow, log_path, exitcode)
         end select
 
         call release_project_lock(lock_dir)
@@ -294,8 +296,12 @@ contains
         case (BACKEND_CMAKE)
             block
                 character(len=1024) :: regex
-                call names_to_ctest_regex(fast_names, n_fast, regex)
-                call cmake_test(self%project_dir, regex, slow, log_path, exitcode)
+                call cmake_build(self%project_dir, flag_text, log_path, exitcode)
+                if (exitcode == 0) then
+                    call names_to_ctest_regex(fast_names, n_fast, regex)
+                    call cmake_test(self%project_dir, regex, slow, log_path, &
+                        exitcode)
+                end if
             end block
         end select
         call release_project_lock(lock_dir)
