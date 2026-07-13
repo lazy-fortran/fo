@@ -406,7 +406,7 @@ contains
                 'slow|regression|performance|scalability')
         end if
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
-            .false., environment_timeout('FO_TEST_TIMEOUT', 120), exitcode)
+            .false., environment_timeout('FO_TEST_TIMEOUT', 600), exitcode)
     end subroutine cmake_test
 
     integer function environment_timeout(name, fallback) result(timeout)
