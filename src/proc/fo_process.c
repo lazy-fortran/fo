@@ -21,9 +21,30 @@ struct watchdog_state {
     pthread_cond_t cv;
     pid_t pgid;
     int timeout_s;
+    int heartbeat_s;
+    const char *log_file;
     int done;
     int fired;
 };
+
+static int timespec_at_or_after(const struct timespec *lhs,
+                                const struct timespec *rhs) {
+    return lhs->tv_sec > rhs->tv_sec ||
+           (lhs->tv_sec == rhs->tv_sec && lhs->tv_nsec >= rhs->tv_nsec);
+}
+
+static void emit_heartbeat(const char *log_file) {
+    static const char message[] =
+        "fo: command still running; output is captured\n";
+    int fd;
+
+    write(STDERR_FILENO, message, sizeof(message) - 1);
+    if (!has_text(log_file) || strcmp(log_file, "/dev/null") == 0) return;
+    fd = open(log_file, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd < 0) return;
+    write(fd, message, sizeof(message) - 1);
+    close(fd);
+}
 
 static void add_seconds(struct timespec *ts, int seconds) {
     ts->tv_sec += seconds;
@@ -39,16 +60,34 @@ static void sleep_ms(int ms) {
 
 static void *timeout_watchdog(void *arg) {
     struct watchdog_state *wd = (struct watchdog_state *)arg;
-    struct timespec deadline;
+    struct timespec deadline, next_heartbeat, wait_until, now;
     int rc;
 
     clock_gettime(CLOCK_REALTIME, &deadline);
     add_seconds(&deadline, wd->timeout_s);
+    next_heartbeat = deadline;
+    if (wd->heartbeat_s > 0) {
+        clock_gettime(CLOCK_REALTIME, &next_heartbeat);
+        add_seconds(&next_heartbeat, wd->heartbeat_s);
+    }
 
     pthread_mutex_lock(&wd->mu);
     while (!wd->done) {
-        rc = pthread_cond_timedwait(&wd->cv, &wd->mu, &deadline);
+        wait_until = deadline;
+        if (wd->heartbeat_s > 0 &&
+            !timespec_at_or_after(&next_heartbeat, &deadline)) {
+            wait_until = next_heartbeat;
+        }
+        rc = pthread_cond_timedwait(&wd->cv, &wd->mu, &wait_until);
         if (rc == ETIMEDOUT && !wd->done) {
+            clock_gettime(CLOCK_REALTIME, &now);
+            if (!timespec_at_or_after(&now, &deadline)) {
+                emit_heartbeat(wd->log_file);
+                do {
+                    add_seconds(&next_heartbeat, wd->heartbeat_s);
+                } while (timespec_at_or_after(&now, &next_heartbeat));
+                continue;
+            }
             wd->fired = 1;
             pthread_mutex_unlock(&wd->mu);
             kill(-wd->pgid, SIGTERM);
@@ -221,7 +260,8 @@ static char **env_with_extra(const char *extra) {
 }
 
 static int run_argv(const char *cwd, char *const argv[], const char *log_file,
-                    int append, int jobs, int timeout_s, const char *env_extra) {
+                    int append, int jobs, int timeout_s, int heartbeat_s,
+                    const char *env_extra) {
     pid_t pid;
     int status;
     char **child_env = NULL;
@@ -271,6 +311,8 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
 
         wd.pgid = pid;
         wd.timeout_s = timeout_s;
+        wd.heartbeat_s = heartbeat_s;
+        wd.log_file = log_file;
         wd.done = 0;
         wd.fired = 0;
         pthread_mutex_init(&wd.mu, NULL);
@@ -326,6 +368,15 @@ static int env_timeout(const char *var, int default_s) {
     return v > 0 ? v : default_s;
 }
 
+static int heartbeat_seconds(void) {
+    const char *value = getenv("FO_HEARTBEAT_SECONDS");
+    int seconds;
+
+    if (!value || !value[0]) return 10;
+    seconds = atoi(value);
+    return seconds >= 0 ? seconds : 10;
+}
+
 void fo_c_detect_nproc(int *nproc) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     if (n < 1) n = 1;
@@ -352,7 +403,8 @@ void fo_c_run_logged(const char *cwd, const char *exe_path, const char *log_file
     argv[0] = (char *)exe_path;
     argv[1] = NULL;
     *exitcode = run_argv(has_text(cwd) ? cwd : NULL, argv, log_file, append, 0,
-                         timeout_s, has_text(env_extra) ? env_extra : NULL);
+                         timeout_s, heartbeat_seconds(),
+                         has_text(env_extra) ? env_extra : NULL);
 }
 
 /* Run an arbitrary command given as an argv vector, with no shell. args is a
@@ -362,7 +414,8 @@ void fo_c_run_logged(const char *cwd, const char *exe_path, const char *log_file
    with no /bin/sh, so quoting never breaks and libgomp is never corrupted. */
 void fo_c_run_argv_logged(const char *cwd, const char *args, int args_len,
                           int n_args, const char *log_file, int append,
-                          int timeout_s, const char *env_extra, int *exitcode) {
+                          int timeout_s, int heartbeat_s,
+                          const char *env_extra, int *exitcode) {
     char **argv;
     const char *p;
     const char *end;
@@ -386,7 +439,8 @@ void fo_c_run_argv_logged(const char *cwd, const char *args, int args_len,
     }
     argv[idx] = NULL;
     *exitcode = run_argv(has_text(cwd) ? cwd : NULL, argv, log_file, append, 0,
-                         timeout_s, has_text(env_extra) ? env_extra : NULL);
+                         timeout_s, heartbeat_s < 0 ? heartbeat_seconds() : heartbeat_s,
+                         has_text(env_extra) ? env_extra : NULL);
     free(argv);
 }
 

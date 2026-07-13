@@ -61,12 +61,13 @@ module fo_process
         end subroutine fo_c_run_logged
 
         subroutine fo_c_run_argv_logged(cwd, args, args_len, n_args, log_file, &
-                append, timeout_s, env_extra, exitcode) &
+                append, timeout_s, heartbeat_s, env_extra, exitcode) &
                 bind(C, name='fo_c_run_argv_logged')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: cwd(*), args(*), log_file(*)
             character(kind=c_char), intent(in) :: env_extra(*)
             integer(c_int), value :: args_len, n_args, append, timeout_s
+            integer(c_int), value :: heartbeat_s
             integer(c_int), intent(out) :: exitcode
         end subroutine fo_c_run_argv_logged
 
@@ -108,7 +109,7 @@ contains
     end subroutine process_write_stderr
 
     subroutine process_run_argv_logged(cwd, packed, n_args, log_file, append, &
-            timeout_s, exitcode, env_extra)
+            timeout_s, exitcode, env_extra, heartbeat_s)
         !! Run a command given as an argv vector with no shell. packed holds
         !! n_args NUL-terminated tokens back-to-back (built by argv_begin/
         !! argv_push). This is the quote-proof, async-signal-safe path for
@@ -119,13 +120,16 @@ contains
         integer, intent(in) :: timeout_s
         integer, intent(out) :: exitcode
         character(len=*), intent(in), optional :: env_extra
-        integer(c_int) :: ec, ap
+        integer, intent(in), optional :: heartbeat_s
+        integer(c_int) :: ec, ap, heartbeat
         character(kind=c_char) :: c_env(C_PATH_LEN)
         logical :: has_env
         integer :: args_len
 
         ap = 0
         if (append) ap = 1
+        heartbeat = -1_c_int
+        if (present(heartbeat_s)) heartbeat = int(heartbeat_s, c_int)
         args_len = len_trim(packed)
         has_env = present(env_extra)
         if (has_env) has_env = len_trim(env_extra) > 0
@@ -137,7 +141,7 @@ contains
         call fo_c_run_argv_logged(trim(cwd)//c_null_char, packed, &
             int(args_len, c_int), int(n_args, c_int), &
             trim(log_file)//c_null_char, ap, &
-            int(timeout_s, c_int), c_env, ec)
+            int(timeout_s, c_int), heartbeat, c_env, ec)
         exitcode = int(ec)
     end subroutine process_run_argv_logged
 

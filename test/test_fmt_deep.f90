@@ -12,6 +12,7 @@ program test_fmt_deep
     call test_fmt_deep_check_detects_fluff()
     call test_fmt_deep_check_misformatted()
     call test_process_run_argv_logged_passes_env()
+    call test_process_run_argv_logged_reports_heartbeat()
     call test_process_argv_many_tokens()
 
     write (output_unit, '(a,i0,a,i0,a)') 'fmt_deep: ', n_pass, ' pass, ', n_fail, ' fail'
@@ -132,6 +133,36 @@ contains
         call assert(found, 'argv env: child receives env_extra')
         call delete_tmpfile(log_file)
     end subroutine test_process_run_argv_logged_passes_env
+
+    subroutine test_process_run_argv_logged_reports_heartbeat()
+        character(len=512) :: log_file, line
+        character(len=:), allocatable :: packed
+        integer :: n_args, exitcode, u, ios
+        logical :: found
+
+        call make_tmpfile('test_process_heartbeat_log', log_file)
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, 'sleep')
+        call argv_push(packed, n_args, '2')
+        call process_run_argv_logged('', packed, n_args, trim(log_file), &
+            .false., 5, exitcode, heartbeat_s=1)
+
+        found = .false.
+        open (newunit=u, file=trim(log_file), status='old', iostat=ios)
+        if (ios == 0) then
+            do
+                read (u, '(a)', iostat=ios) line
+                if (ios /= 0) exit
+                if (index(line, 'command still running') > 0) found = .true.
+            end do
+            close (u)
+        end if
+
+        call assert(exitcode == 0, 'heartbeat: child exits zero')
+        call assert(found, 'heartbeat: long logged command reports progress')
+        call delete_tmpfile(log_file)
+    end subroutine test_process_run_argv_logged_reports_heartbeat
 
     subroutine test_process_argv_many_tokens()
         character(len=512) :: log_file
