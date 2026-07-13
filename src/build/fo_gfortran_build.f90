@@ -124,11 +124,12 @@ contains
         type(fpm_config_t), intent(in) :: config
         integer, intent(out) :: exitcode
 
-        type(resolved_src_t) :: deps(MAX_RESOLVED)
+        type(resolved_src_t), allocatable :: deps(:)
         type(fpm_config_t), allocatable :: dep_config
         integer :: n_deps, n_unresolved, ierr, i
 
         exitcode = 0
+        allocate (deps(MAX_RESOLVED))
         allocate (dep_config)
         if (config_has_external_deps(config)) then
             call bootstrap_config_deps(project_dir, config, log_file, exitcode)
@@ -162,13 +163,14 @@ contains
         character(len=*), intent(in) :: project_dir, log_file
         type(fpm_config_t), intent(in) :: config
         integer, intent(out) :: exitcode
-        character(len=512) :: includes(MAX_DEP_DIRS), objects(MAX_DEP_OBJS)
-        character(len=512) :: object_keys(MAX_DEP_OBJS)
+        character(len=512), allocatable :: includes(:), objects(:), object_keys(:)
         integer :: n_includes, n_objects, n_object_keys
 
         n_includes = 0
         n_objects = 0
         n_object_keys = 0
+        allocate (includes(MAX_DEP_DIRS), objects(MAX_DEP_OBJS), &
+            object_keys(MAX_DEP_OBJS))
         call collect_dep_artifacts(project_dir, config, includes, n_includes, &
             objects, n_objects, object_keys, n_object_keys)
         if (n_objects > 0) then
@@ -376,15 +378,16 @@ contains
         character(len=512), intent(out) :: dep_objs(MAX_DEP_OBJS)
         integer, intent(out) :: n_dep_objs
 
-        type(resolved_src_t) :: deps(MAX_RESOLVED)
+        type(resolved_src_t), allocatable :: deps(:)
         type(fpm_config_t), allocatable :: dep_config
         integer :: i, n_deps, n_unresolved, ierr
         integer :: n_obj_seen
-        character(len=512) :: obj_basenames(MAX_DEP_OBJS)
+        character(len=512), allocatable :: obj_basenames(:)
 
         n_dep_includes = 0
         n_dep_objs = 0
         n_obj_seen = 0
+        allocate (deps(MAX_RESOLVED), obj_basenames(MAX_DEP_OBJS))
         allocate (dep_config)
         call collect_dep_artifacts(project_dir, config, dep_includes, &
             n_dep_includes, dep_objs, n_dep_objs, obj_basenames, n_obj_seen)
@@ -408,9 +411,11 @@ contains
         integer, intent(inout) :: n_dep_objs
         character(len=512), intent(inout) :: obj_basenames(MAX_DEP_OBJS)
         integer, intent(inout) :: n_obj_seen
-        character(len=512) :: found(MAX_DEP_OBJS)
+        character(len=512), allocatable :: found(:)
         character(len=8) :: suffixes(3)
         integer :: i, j, n_found
+
+        allocate (found(MAX_DEP_OBJS))
 
         ! Every directory holding a .mod under build/ is an include candidate:
         ! the project's own gfortran_* profile dir and each dependency's mod
