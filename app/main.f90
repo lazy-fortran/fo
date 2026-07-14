@@ -1,5 +1,5 @@
 program fo_main
-    use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
+    use, intrinsic :: iso_fortran_env, only: output_unit, error_unit, real64
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_PATH, &
         is_slow_test
     use fx_dag, only: dag_t, dag_topo_sort, dag_to_dot, MAX_NODES
@@ -10,7 +10,7 @@ program fo_main
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
         collect_failed_test_names, MAX_TEST_RESULTS
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
-    use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds
     use fo_check_output, only: check_result_json, check_result_compact_json, &
         check_result_full_json
     use fo_test_results, only: test_result_entry_t, MAX_TEST_RESULTS_ENTRIES, &
@@ -116,7 +116,7 @@ contains
         integer :: changed_ids(MAX_NODES), n_changed
         integer :: affected_ids(MAX_NODES), n_affected
         integer :: n_cached, i, n_test_names
-        real :: t0, t1
+        real(real64) :: t0, t1
         character(len=128) :: test_names(MAX_NODES)
         character(len=MAX_PATH) :: filenames(MAX_NODES)
         character(len=MAX_PATH) :: changed_files(MAX_NODES)
@@ -127,7 +127,7 @@ contains
 
         allocate (units(MAX_UNITS))
 
-        call cpu_time(t0)
+        t0 = wall_time_seconds()
 
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
@@ -179,7 +179,7 @@ contains
 
         ! 3. test: skip if nothing changed, otherwise run affected tests only
         if (n_changed == 0) then
-            call cpu_time(t1)
+            t1 = wall_time_seconds()
             write (output_unit, '(a,f0.1,a)') &
                 'Tests: skipped, all cached (', t1 - t0, 's)'
         else
@@ -279,7 +279,7 @@ contains
             if (fmt_exit /= 0) write (error_unit, '(a)') 'Fmt: WARN'
         end block
 
-        call cpu_time(t1)
+        t1 = wall_time_seconds()
         write (output_unit, '(a,f0.1,a)') 'All stages passed (', t1 - t0, 's)'
     end subroutine cmd_run
 

@@ -1,6 +1,6 @@
 program test_fmt_deep
-    use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_util, only: make_tmpfile, delete_tmpfile
+    use, intrinsic :: iso_fortran_env, only: output_unit, error_unit, real64
+    use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds
     use fo_process, only: process_run_argv_logged, argv_push
     implicit none
 
@@ -139,14 +139,17 @@ contains
         character(len=:), allocatable :: packed
         integer :: n_args, exitcode, u, ios
         logical :: found
+        real(real64) :: t0, t1
 
         call make_tmpfile('test_process_heartbeat_log', log_file)
         n_args = 0
         packed = ''
         call argv_push(packed, n_args, 'sleep')
         call argv_push(packed, n_args, '2')
+        t0 = wall_time_seconds()
         call process_run_argv_logged('', packed, n_args, trim(log_file), &
             .false., 5, exitcode, heartbeat_s=1)
+        t1 = wall_time_seconds()
 
         found = .false.
         open (newunit=u, file=trim(log_file), status='old', iostat=ios)
@@ -161,6 +164,8 @@ contains
 
         call assert(exitcode == 0, 'heartbeat: child exits zero')
         call assert(found, 'heartbeat: long logged command reports progress')
+        call assert(t1 - t0 >= 1.5_real64, &
+            'wall time includes time waiting for a child process')
         call delete_tmpfile(log_file)
     end subroutine test_process_run_argv_logged_reports_heartbeat
 

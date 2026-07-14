@@ -1,5 +1,6 @@
 module fo_check
-    use fo_util, only: make_tmpfile, delete_tmpfile
+    use, intrinsic :: iso_fortran_env, only: real64
+    use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds
     use fo_scan, only: scan_unit_t, scan_dir, MAX_NAME, MAX_PATH, MAX_UNITS, &
         is_slow_test
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_affected_set, MAX_NODES
@@ -407,7 +408,7 @@ contains
         integer :: changed_ids(MAX_NODES), n_changed
         integer :: affected_ids(MAX_NODES), n_affected
         integer :: n_cached, ierr, exitcode
-        real :: t0, t1
+        real(real64) :: t0, t1
         character(len=512) :: build_log, test_log
         character(len=512) :: no_project
         character(len=512) :: project_dir
@@ -416,7 +417,7 @@ contains
         logical :: is_test_arr(MAX_NODES)
         type(backend_t) :: b
 
-        call cpu_time(t0)
+        t0 = wall_time_seconds()
 
         b = detect_backend(dir)
         project_dir = b%project_dir
@@ -426,8 +427,8 @@ contains
             call set_failure(res, 'project', '', no_project, &
                 'run fo from a project directory', &
                 'fo check', '')
-            call cpu_time(t1)
-            res%elapsed = t1 - t0
+            t1 = wall_time_seconds()
+            res%elapsed = real(t1 - t0)
             return
         end if
 
@@ -439,8 +440,8 @@ contains
             call set_failure(res, 'scan', '', 'scan or dag failed', &
                 'check source parsing and module cycles', &
                 'fo changed', '')
-            call cpu_time(t1)
-            res%elapsed = t1 - t0
+            t1 = wall_time_seconds()
+            res%elapsed = real(t1 - t0)
             return
         end if
 
@@ -454,15 +455,15 @@ contains
             call backend_build(b, exitcode, log_file=build_log)
             if (exitcode /= 0) then
                 call summarize_backend_failure('build', build_log, 'fo build', res)
-                call cpu_time(t1)
-                res%elapsed = t1 - t0
+                t1 = wall_time_seconds()
+                res%elapsed = real(t1 - t0)
                 return
             end if
             call delete_tmpfile(build_log)
             res%build_ok = .true.
             res%tests_ok = .true.
-            call cpu_time(t1)
-            res%elapsed = t1 - t0
+            t1 = wall_time_seconds()
+            res%elapsed = real(t1 - t0)
             return
         end if
 
@@ -470,8 +471,8 @@ contains
         call backend_build(b, exitcode, log_file=build_log)
         if (exitcode /= 0) then
             call summarize_backend_failure('build', build_log, 'fo build', res)
-            call cpu_time(t1)
-            res%elapsed = t1 - t0
+            t1 = wall_time_seconds()
+            res%elapsed = real(t1 - t0)
             return
         end if
         call delete_tmpfile(build_log)
@@ -489,8 +490,8 @@ contains
 
         if (n_test_names == 0) then
             res%tests_ok = .true.
-            call cpu_time(t1)
-            res%elapsed = t1 - t0
+            t1 = wall_time_seconds()
+            res%elapsed = real(t1 - t0)
             return
         end if
 
@@ -505,8 +506,8 @@ contains
             call delete_tmpfile(test_log)
         end if
 
-        call cpu_time(t1)
-        res%elapsed = t1 - t0
+        t1 = wall_time_seconds()
+        res%elapsed = real(t1 - t0)
     end subroutine fo_check_run
 
     subroutine summarize_backend_failure(stage, log_file, rerun, res)

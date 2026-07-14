@@ -1,4 +1,5 @@
 module fo_util
+    use, intrinsic :: iso_fortran_env, only: int64, real64
     use, intrinsic :: iso_c_binding, only: c_int
     use fo_fs, only: fs_collect_files, fs_remove_file
     use fx_mcp, only: mcp_send_response, MCP_FRAME_UNKNOWN
@@ -10,6 +11,7 @@ module fo_util
     public :: send_jsonrpc, jsonrpc_error, jsonrpc_null
     public :: json_bool, json_int
     public :: extract_json_field
+    public :: wall_time_seconds
 
     interface
         subroutine fo_c_getpid(pid_out) bind(C, name='fo_c_getpid')
@@ -19,6 +21,18 @@ module fo_util
     end interface
 
 contains
+
+    function wall_time_seconds() result(seconds)
+        real(real64) :: seconds
+        integer(int64) :: count, rate
+
+        call system_clock(count=count, count_rate=rate)
+        if (rate > 0_int64) then
+            seconds = real(count, real64)/real(rate, real64)
+        else
+            seconds = 0.0_real64
+        end if
+    end function wall_time_seconds
 
     subroutine make_tmpfile(prefix, path)
         character(len=*), intent(in) :: prefix
