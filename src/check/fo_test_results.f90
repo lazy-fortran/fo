@@ -115,18 +115,24 @@ contains
         integer, intent(out) :: iostat
 
         character(len=1024) :: tail, timing
-        integer :: test_pos, colon_offset, colon_pos, status_pos, status_width
+        integer :: test_pos, hash_offset, hash_pos
+        integer :: colon_offset, colon_pos, status_pos, status_width
         integer :: time_iostat
 
         name = ''
         status = ''
         secs = 0.0
         iostat = 1
-        test_pos = index(line, ' Test #')
+        test_pos = index(line, ' Test')
         if (test_pos == 0) return
-        colon_offset = index(line(test_pos:), ':')
+        ! CTest right-aligns the numeric test id to the largest id in the run:
+        ! "Test  #1" and "Test #100" can therefore occur in the same log.
+        hash_offset = index(line(test_pos:), '#')
+        if (hash_offset == 0) return
+        hash_pos = test_pos + hash_offset - 1
+        colon_offset = index(line(hash_pos:), ':')
         if (colon_offset == 0) return
-        colon_pos = test_pos + colon_offset - 1
+        colon_pos = hash_pos + colon_offset - 1
         tail = line(colon_pos + 1:)
         call find_ctest_status(tail, status, status_pos, status_width)
         if (status_pos == 0) return

@@ -50,6 +50,7 @@ program test_check
     call test_compact_json_includes_test_results()
     call test_full_json_includes_test_results()
     call test_test_results_parse()
+    call test_padded_ctest_results_parse()
     call test_failure_stdout_shown()
 
     write (output_unit, '(a,i0,a,i0,a)') 'check: ', n_pass, ' pass, ', n_fail, ' fail'
@@ -1054,6 +1055,34 @@ contains
         call assert(res%build_ok, 'parse test project builds')
         call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
     end subroutine test_test_results_parse
+
+    subroutine test_padded_ctest_results_parse()
+        type(test_result_entry_t) :: entries(MAX_TEST_RESULTS_ENTRIES)
+        character(len=512) :: log_file
+        integer :: u, n, ierr
+
+        call make_tmp_path('fo_padded_ctest_results', log_file)
+        open (newunit=u, file=log_file, status='replace')
+        write (u, '(a)') '  1/116 Test   #1: first ............   Passed  0.01 sec'
+        write (u, '(a)') ' 99/116 Test  #99: ninety_nine ......   Passed  0.02 sec'
+        write (u, '(a)') '100/116 Test #100: one_hundred ......   Passed  0.03 sec'
+        write (u, '(a)') '116/116 Test #116: last ..............***Failed  0.04 sec'
+        close (u)
+
+        call parse_test_results(log_file, entries, n, ierr)
+        call assert(ierr == 0 .and. n == 4, &
+            'CTest parser retains every right-aligned test id')
+        call assert(trim(entries(1)%name) == 'first' &
+            .and. trim(entries(2)%name) == 'ninety_nine' &
+            .and. trim(entries(3)%name) == 'one_hundred' &
+            .and. trim(entries(4)%name) == 'last', &
+            'CTest parser preserves names across id widths')
+        call assert(trim(entries(1)%status) == 'PASS' &
+            .and. trim(entries(3)%status) == 'PASS' &
+            .and. trim(entries(4)%status) == 'FAIL', &
+            'CTest parser preserves statuses across id widths')
+        call execute_command_line('rm -f '//trim(log_file), wait=.true.)
+    end subroutine test_padded_ctest_results_parse
 
     subroutine test_failure_stdout_shown()
         type(test_result_entry_t) :: entries(MAX_TEST_RESULTS_ENTRIES)
