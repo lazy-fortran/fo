@@ -23,6 +23,7 @@ module fo_gfortran_build
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_append_file, &
         fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec
     use fo_progress, only: progress_begin, progress_step, progress_end
+    use fo_compiler_flags, only: append_array_temporary_warning_flag
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
     private
@@ -84,6 +85,7 @@ contains
             exitcode = 1
             return
         end if
+        call append_array_temporary_warning_flag(fc_command(), flag_text)
 
         mod_dir = trim(project_dir)//'/build/fo/mod'
         obj_dir = trim(project_dir)//'/build/fo/obj'
@@ -1339,6 +1341,7 @@ contains
         if (present(build_only)) bonly = build_only
         test_flags = ''
         if (present(flags)) test_flags = flags
+        call append_array_temporary_warning_flag(fc_command(), test_flags)
         exitcode = 0
         if (present(n_compiled)) n_compiled = 0
         allocate (tunits(MAX_UNITS))
@@ -1375,8 +1378,8 @@ contains
         call build_dag_from_units(tunits, n_tests, dag, filenames, is_test_arr, is_prog)
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
         call make_includes_flag(mod_dir, dep_includes, n_dep_includes, incl_flag)
-        if (present(flags) .and. len_trim(flags) > 0) then
-            incl_flag = with_user_flags(incl_flag, flags)
+        if (len_trim(test_flags) > 0) then
+            incl_flag = with_user_flags(incl_flag, test_flags)
         end if
         call cache_init(c, cache_ierr)
         allow_cache = .true.

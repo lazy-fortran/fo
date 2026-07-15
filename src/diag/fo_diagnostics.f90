@@ -2,6 +2,7 @@ module fo_diagnostics
     implicit none
     private
     public :: diagnostic_t, diagnostic_from_log, is_runner_crash
+    public :: array_temporary_warnings_from_log
 
     type :: diagnostic_t
         character(len=32) :: kind = 'backend'
@@ -16,6 +17,48 @@ module fo_diagnostics
     end type diagnostic_t
 
 contains
+
+    subroutine array_temporary_warnings_from_log(log_file, warnings, n_warnings)
+        character(len=*), intent(in) :: log_file
+        type(diagnostic_t), intent(out) :: warnings(:)
+        integer, intent(out) :: n_warnings
+
+        character(len=512) :: line
+        character(len=256) :: current_file, parsed_file
+        integer :: current_line, current_column, parsed_line, parsed_column
+        integer :: u, iostat
+        logical :: has_location
+
+        n_warnings = 0
+        current_file = ''
+        current_line = 0
+        current_column = 0
+        open (newunit=u, file=log_file, status='old', iostat=iostat)
+        if (iostat /= 0) return
+        do
+            read (u, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            call parse_location_line(line, parsed_file, parsed_line, &
+                parsed_column, has_location)
+            if (has_location) then
+                current_file = parsed_file
+                current_line = parsed_line
+                current_column = parsed_column
+            end if
+            if (index(line, 'Warning:') == 0) cycle
+            if (index(line, 'array temporary') == 0 .and. &
+                index(line, 'array temporaries') == 0) cycle
+            if (n_warnings >= size(warnings)) exit
+            n_warnings = n_warnings + 1
+            warnings(n_warnings)%kind = 'array-temporary'
+            warnings(n_warnings)%file = current_file
+            warnings(n_warnings)%line = current_line
+            warnings(n_warnings)%column = current_column
+            warnings(n_warnings)%message = trim(adjustl(line))
+            warnings(n_warnings)%log_path = log_file
+        end do
+        close (u)
+    end subroutine array_temporary_warnings_from_log
 
     subroutine diagnostic_from_log(kind, log_file, rerun, diag)
         character(len=*), intent(in) :: kind, log_file, rerun

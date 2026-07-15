@@ -9,7 +9,8 @@ program fo_main
         BACKEND_NATIVE, BACKEND_CMAKE, profile_flags
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
         collect_failed_test_names, MAX_TEST_RESULTS
-    use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
+    use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, &
+        array_temporary_warnings_from_log
     use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds
     use fo_check_output, only: check_result_json, check_result_compact_json, &
         check_result_full_json
@@ -174,6 +175,7 @@ contains
             call report_build_result(build_log)
             stop 1, quiet=.true.
         end if
+        call report_array_temporary_warnings(build_log)
         call delete_tmpfile(build_log)
         write (output_unit, '(a)') 'Build: OK'
 
@@ -533,6 +535,7 @@ contains
                 call report_build_result(build_log)
                 stop 1, quiet=.true.
             end if
+            call report_array_temporary_warnings(build_log)
             call delete_tmpfile(build_log)
         end if
 
@@ -688,8 +691,31 @@ contains
             call report_build_result(build_log)
             stop 1, quiet=.true.
         end if
+        call report_array_temporary_warnings(build_log)
         call delete_tmpfile(build_log)
     end subroutine cmd_build
+
+    subroutine report_array_temporary_warnings(build_log)
+        character(len=*), intent(in) :: build_log
+        type(diagnostic_t), allocatable :: warnings(:)
+        integer, parameter :: MAX_BUILD_WARNINGS = 4096
+        integer :: i, n_warnings
+
+        allocate (warnings(MAX_BUILD_WARNINGS))
+        call array_temporary_warnings_from_log(build_log, warnings, n_warnings)
+        do i = 1, n_warnings
+            if (len_trim(warnings(i)%file) > 0) then
+                write (error_unit, '(a,a,a,i0,a,i0,a,a)') 'fo: warning: ', &
+                    trim(warnings(i)%file), ':', warnings(i)%line, ':', &
+                    warnings(i)%column, ': ', trim(warnings(i)%message)
+            else
+                write (error_unit, '(a,a)') 'fo: warning: ', &
+                    trim(warnings(i)%message)
+            end if
+        end do
+        if (n_warnings == MAX_BUILD_WARNINGS) write (error_unit, '(a)') &
+            'fo: warning: additional array-temporary diagnostics were truncated'
+    end subroutine report_array_temporary_warnings
 
     subroutine cmd_lock()
         type(backend_t) :: b

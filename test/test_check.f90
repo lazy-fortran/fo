@@ -3,7 +3,8 @@ program test_check
     use fo_check, only: check_result_t, fo_check_run
     use fo_check_output, only: check_result_json, check_result_compact_json, &
         check_result_full_json, fo_check_write
-    use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
+    use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, &
+        array_temporary_warnings_from_log
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
         RUN_RERUN_PENDING, RUN_FINISHED
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
@@ -30,6 +31,7 @@ program test_check
     call test_diagnostic_timeout_hint()
     call test_diagnostic_crash_hint()
     call test_diagnostic_unknown_line()
+    call test_array_temporary_warning_log()
     call test_run_queue_coalesces_requests()
     call test_run_queue_single_returns_idle()
     call test_run_queue_failed_then_pending()
@@ -54,6 +56,35 @@ program test_check
     if (n_fail > 0) stop 1
 
 contains
+
+    subroutine test_array_temporary_warning_log()
+        type(diagnostic_t) :: warnings(4)
+        character(len=512) :: log_path
+        integer :: n_warnings, u
+
+        call make_tmp_path('fo_array_temporary_warning_log', log_path)
+        open (newunit=u, file=trim(log_path), status='replace')
+        write (u, '(a)') '/work/a.f90:12:9:'
+        write (u, '(a)') 'Warning: Creating array temporary at (1) '// &
+            '[-Warray-temporaries]'
+        write (u, '(a)') '/work/b.f90:20:3:'
+        write (u, '(a)') 'Warning: Unused variable x [-Wunused-variable]'
+        write (u, '(a)') '/work/c.F90:31:7:'
+        write (u, '(a)') 'Warning: Creating array temporary at (1) '// &
+            '[-Warray-temporaries]'
+        close (u)
+
+        call array_temporary_warnings_from_log(log_path, warnings, n_warnings)
+        call assert(n_warnings == 2, &
+            'array-temporary parser ignores unrelated warnings')
+        call assert(trim(warnings(1)%file) == '/work/a.f90' &
+            .and. warnings(1)%line == 12 .and. warnings(1)%column == 9, &
+            'array-temporary parser preserves first source location')
+        call assert(trim(warnings(2)%file) == '/work/c.F90' &
+            .and. warnings(2)%line == 31 .and. warnings(2)%column == 7, &
+            'array-temporary parser preserves later source location')
+        call execute_command_line('rm -f '//trim(log_path))
+    end subroutine test_array_temporary_warning_log
 
     subroutine assert(cond, msg)
         logical, intent(in) :: cond

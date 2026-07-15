@@ -191,12 +191,22 @@
         open (newunit=u, file=trim(project_dir)//'/test_fixture.f90', &
             status='replace')
         write (u, '(a)') 'program test_fixture'
+        write (u, '(a)') 'real :: matrix(2, 2)'
+        write (u, '(a)') 'matrix = 0.0'
+        write (u, '(a)') 'call consume(matrix(1, :))'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine consume(vector)'
+        write (u, '(a)') 'real, contiguous, intent(in) :: vector(:)'
+        write (u, '(a)') 'if (size(vector) /= 2) error stop 1'
+        write (u, '(a)') 'end subroutine consume'
         write (u, '(a)') 'end program test_fixture'
         close (u)
 
         b = detect_backend(project_dir)
         call backend_build(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'CMake project builds')
+        call assert(file_contains(log_file, 'array temporary'), &
+            'CMake build emits array-temporary warnings by default')
         call backend_test(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'CMake project tests pass')
         call parse_test_results(log_file, entries, n_entries, parse_ierr)

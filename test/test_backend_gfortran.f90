@@ -10,6 +10,7 @@ program test_backend_gfortran
     use fo_cache, only: cache_t, cache_init, cache_key_for, cache_store_action, &
         HASH_LEN
     use fo_process, only: process_getpid
+    use fo_compiler_flags, only: append_array_temporary_warning_flag
     implicit none
     integer :: n_pass, n_fail
 
@@ -37,10 +38,69 @@ program test_backend_gfortran
     call test_fpm_path_with_spaces()
     call test_gfortran_rejects_compile_errors()
     call test_gfortran_rebuilds_cached_module_without_mod()
+    call test_array_temporary_warning_flag_policy()
+    call test_gfortran_warns_about_array_temporaries()
 
     call report('backend_gfortran')
 
 contains
+
+    subroutine test_array_temporary_warning_flag_policy()
+        character(len=128) :: flags
+
+        flags = ''
+        call append_array_temporary_warning_flag('GNU Fortran 15.1', flags)
+        call assert(trim(flags) == '-Warray-temporaries', &
+            'GNU Fortran receives the default array-temporary warning flag')
+        call append_array_temporary_warning_flag('gfortran', flags)
+        call assert(trim(flags) == '-Warray-temporaries', &
+            'default array-temporary warning flag is not duplicated')
+        flags = '-O3 -Wno-array-temporaries'
+        call append_array_temporary_warning_flag('gfortran', flags)
+        call assert(trim(flags) == '-O3 -Wno-array-temporaries', &
+            'explicit array-temporary warning opt-out is preserved')
+        flags = ''
+        call append_array_temporary_warning_flag('flang-new', flags)
+        call assert(len_trim(flags) == 0, &
+            'non-GNU compiler does not receive a GNU-only warning flag')
+    end subroutine test_array_temporary_warning_flag_policy
+
+    subroutine test_gfortran_warns_about_array_temporaries()
+        type(backend_t) :: backend
+        character(len=512) :: project_dir, log_file, source
+        integer :: exitcode, u
+
+        call make_tmp_path('fo_array_temporary_project', project_dir)
+        call make_tmp_path('fo_array_temporary_build', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "array_temporary_fixture"'
+        close (u)
+        source = trim(project_dir)//'/src/fixture.f90'
+        open (newunit=u, file=trim(source), status='replace')
+        write (u, '(a)') 'module array_temporary_fixture'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine trigger(matrix)'
+        write (u, '(a)') 'real, intent(in) :: matrix(2, 2)'
+        write (u, '(a)') 'call consume(matrix(1, :))'
+        write (u, '(a)') 'end subroutine trigger'
+        write (u, '(a)') 'subroutine consume(vector)'
+        write (u, '(a)') 'real, contiguous, intent(in) :: vector(:)'
+        write (u, '(a)') 'end subroutine consume'
+        write (u, '(a)') 'end module array_temporary_fixture'
+        close (u)
+
+        backend = detect_backend(project_dir)
+        call backend_build(backend, exitcode, log_file=log_file, &
+            with_tests=.true., use_cache=.false.)
+        call assert(exitcode == 0, 'array-temporary warning fixture builds')
+        call assert(file_contains(log_file, 'array temporary'), &
+            'gfortran build emits array-temporary warnings by default')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_warns_about_array_temporaries
 
     subroutine test_gfortran_rebuilds_cached_module_without_mod()
         type(cache_t) :: cache

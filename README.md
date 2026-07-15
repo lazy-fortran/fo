@@ -38,6 +38,12 @@ fo clean            clear global cache (~/.cache/fo)
 fo info             backend, files, modules
 ```
 
+GNU Fortran builds enable `-Warray-temporaries` by default for both native
+`fpm.toml` and CMake projects.  Successful `fo`, `fo build`, and `fo exec`
+commands report every detected hidden array copy with its source location.
+Use `fo build --flag "-Wno-array-temporaries"` only when a project has made an
+explicit decision to suppress this diagnostic.
+
 Native mode requires `ffc 0.1.0` or newer. `fo build --native` accepts source
 files in dependency order; the final source is the link unit. Earlier sources
 are compiled separately and linked into the output. The default output is

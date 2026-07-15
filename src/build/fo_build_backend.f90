@@ -6,6 +6,7 @@ module fo_build_backend
         process_run_argv_logged, argv_push, argv_push_split
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names
+    use fo_compiler_flags, only: append_array_temporary_warning_flag
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
@@ -161,11 +162,13 @@ contains
 
         select case (self%kind)
         case (BACKEND_NATIVE)
-            call gfortran_build(self%project_dir, log_path, exitcode, &
-                flags=flag_text, use_cache=use_cache)
-            if (exitcode == 0 .and. want_tests) &
+            if (want_tests) then
                 call gfortran_test(self%project_dir, log_path, exitcode, &
-                flags=flag_text, build_only=.true., use_cache=use_cache)
+                    flags=flag_text, build_only=.true., use_cache=use_cache)
+            else
+                call gfortran_build(self%project_dir, log_path, exitcode, &
+                    flags=flag_text, use_cache=use_cache)
+            end if
         case (BACKEND_CMAKE)
             call cmake_build(self%project_dir, flag_text, log_path, exitcode)
         end select
@@ -334,12 +337,15 @@ contains
         character(len=:), allocatable :: packed
         character(len=32) :: jobs_text
         character(len=512) :: compiler, extra_args
+        character(len=1024) :: effective_flags
         integer :: n_args
 
         write (jobs_text, '(i0)') detect_jobs()
         compiler = ''
         call get_environment_variable('FC', compiler)
         if (len_trim(compiler) == 0) compiler = 'gfortran'
+        effective_flags = flags
+        call append_array_temporary_warning_flag(compiler, effective_flags)
 
         n_args = 0
         call argv_push(packed, n_args, 'cmake')
@@ -350,8 +356,8 @@ contains
         call argv_push(packed, n_args, '-G')
         call argv_push(packed, n_args, 'Ninja')
         call argv_push(packed, n_args, '-DCMAKE_Fortran_COMPILER='//trim(compiler))
-        if (len_trim(flags) > 0) &
-            call argv_push(packed, n_args, '-DCMAKE_Fortran_FLAGS='//trim(flags))
+        if (len_trim(effective_flags) > 0) call argv_push(packed, n_args, &
+            '-DCMAKE_Fortran_FLAGS='//trim(effective_flags))
         extra_args = ''
         call get_environment_variable('FO_CMAKE_ARGS', extra_args)
         call argv_push_split(packed, n_args, extra_args)

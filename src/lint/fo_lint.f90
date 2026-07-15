@@ -5,6 +5,7 @@ module fo_lint
         fs_collect_mod_dirs
     use fo_process, only: process_run_argv_logged, argv_push, argv_push_split
     use fo_lint_shortcircuit, only: shortcircuit_scan_file
+    use fo_compiler_flags, only: ARRAY_TEMPORARY_WARNING_FLAG
     use fx_json_build, only: json_escape_string
     implicit none
     private
@@ -836,6 +837,7 @@ contains
         call argv_push(packed, n_args, '-cpp')
         call argv_push(packed, n_args, '-Wall')
         call argv_push(packed, n_args, '-Wextra')
+        call argv_push(packed, n_args, ARRAY_TEMPORARY_WARNING_FLAG)
         call argv_push(packed, n_args, '-Wno-unused')
         ! -Wcompare-reals (from -Wextra) fires on deliberate exact float idioms
         ! that have no safe rewrite: NaN tests (x /= x), exact-zero guards
@@ -1192,17 +1194,15 @@ contains
                 if (trim(findings(j + 1)%file) /= trim(findings(i)%file)) exit
                 j = j + 1
             end do
-            call fix_one_file(trim(findings(i)%file), findings(i:j), j - i + 1, &
-                removed_file)
+            call fix_one_file(trim(findings(i)%file), findings(i:j), removed_file)
             n_removed = n_removed + removed_file
             i = j + 1
         end do
     end subroutine apply_findings
 
-    subroutine fix_one_file(filename, ff, nf, n_removed)
+    subroutine fix_one_file(filename, ff, n_removed)
         character(len=*), intent(in) :: filename
-        type(lint_finding_t), intent(in) :: ff(nf)
-        integer, intent(in) :: nf
+        type(lint_finding_t), intent(in) :: ff(:)
         integer, intent(out) :: n_removed
 
         character(len=1024), allocatable :: lines(:)
@@ -1231,7 +1231,7 @@ contains
         close (u)
 
         changed = .false.
-        do i = 1, nf
+        do i = 1, size(ff)
             target_line = ff(i)%line
             if (target_line < 1 .or. target_line > n_lines) cycle
             if (handled(target_line)) cycle
@@ -1240,7 +1240,7 @@ contains
             ! A use line may carry several unused symbols; gather them all and
             ! rewrite the line once.
             nflag = 0
-            do k = 1, nf
+            do k = 1, size(ff)
                 if (ff(k)%line /= target_line) cycle
                 if (nflag >= MAX_SYMS) exit
                 nflag = nflag + 1
