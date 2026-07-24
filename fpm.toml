@@ -16,7 +16,7 @@ module-naming = false
 library = false
 
 [dependencies]
-fx = { git = "git@github.com:lazy-fortran/fx.git", branch = "main" }
+fx = { git = "https://github.com/lazy-fortran/fx.git", branch = "main" }
 openmp = "*"
 
 [fortran]
