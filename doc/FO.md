@@ -223,10 +223,22 @@ always-available checker inside the build driver, and a heavy analyzer beside
 it. Go splits `go vet` from staticcheck this way; Rust splits cargo from
 clippy; C and C++ split the compiler's warnings from clang-tidy.
 
-`fo` owns the cheap tier. Unused imports, short-circuit reliance, and
-gfortran's own warnings are text-level checks that need no parse tree, run on
-every invocation, and work with nothing else installed. That tier is
-deliberately small; a rule belongs in it only if it needs no frontend.
+`fo` owns the cheap tier. Unused imports, short-circuit reliance, test programs
+that cannot fail the build, and gfortran's own warnings are text-level checks
+that need no parse tree, run on every invocation, and work with nothing else
+installed. That tier is deliberately small; a rule belongs in it only if it
+needs no frontend.
+
+The test-failure-path rule reports a program under the project's test directory
+that contains no `error stop`, no `stop` with a nonzero or non-constant code, no
+nonzero `call exit`, and no `call abort` - a test that tallies its results,
+prints them, and exits 0 whatever it found. The search covers the file's own
+contained procedures and the bodies of anything it `include`s; it does not
+follow calls into modules, so a test whose only exit lives in a shared helper
+module is reported and wants an inline `error stop`. `bench_` targets are
+exempt. All of these rules match on masked code - comments and string literals
+blanked - because test sources carry fixture programs inside literals, and that
+fixture text contains the very tokens the rules look for.
 
 `fluff` owns everything that needs an abstract syntax tree, because it is built
 on FortFront and `fo` is not. Type-aware rules, dead-code analysis, and
