@@ -58,7 +58,9 @@ contains
         integer :: ierr
         character(len=256) :: fo_dir
 
-        ! fo's own fpm.toml is in the parent of the test executable's cwd
+        ! fo runs every test binary with the project root as its working
+        ! directory, so fo's own fpm.toml is always at './fpm.toml' here
+        ! regardless of where fo itself was invoked from.
         fo_dir = '.'
         call fpm_config_parse(fo_dir, c, ierr)
 

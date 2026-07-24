@@ -1509,7 +1509,13 @@ contains
             if (run_exits(i) == 0 .and. .not. bonly) then
                 ran(i) = .true.
                 call system_clock(clk0, clk_rate)
-                call process_run_logged('', bin_path, log_local, .true., &
+                ! Run from the project root, not from whatever directory fo was
+                ! invoked from, so a test that opens a project-relative path
+                ! behaves the same under the CLI and under the MCP server.
+                ! Run from the project root, not from whatever directory fo was
+                ! invoked from, so a test that opens a project-relative path
+                ! behaves the same under the CLI and under the MCP server.
+                call process_run_logged(project_dir, bin_path, log_local, .true., &
                     test_timeout, run_exits(i))
                 call system_clock(clk1)
                 if (clk_rate > 0) run_secs(i) = real(clk1 - clk0) / real(clk_rate)
@@ -1532,7 +1538,7 @@ contains
                 call file_basename(filenames(run_nodes(i)), tname)
                 bin_path = trim(bin_dir)//'/'//trim(tname)
                 call make_tmpfile('fo_test_rerun', rerun_log)
-                call process_run_logged('', bin_path, rerun_log, .true., &
+                call process_run_logged(project_dir, bin_path, rerun_log, .true., &
                     test_timeout, run_exits(i))
                 call delete_tmpfile(rerun_log)
                 if (run_exits(i) == 0) flaky(i) = .true.
