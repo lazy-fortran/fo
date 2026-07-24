@@ -215,6 +215,30 @@ dependency resolver is more efficient (transitive closure with deduplication), a
 is stronger (content-addressed by source, compiler, flags, and `.mod` payloads vs. fortrun's
 file-based locking). The fortrun repository is superseded and no longer the active path.
 
+## Relationship to fluff
+
+`fo` and `fluff` divide source analysis rather than competing over it. The
+division follows the shape every modern toolchain converged on: a small
+always-available checker inside the build driver, and a heavy analyzer beside
+it. Go splits `go vet` from staticcheck this way; Rust splits cargo from
+clippy; C and C++ split the compiler's warnings from clang-tidy.
+
+`fo` owns the cheap tier. Unused imports, short-circuit reliance, and
+gfortran's own warnings are text-level checks that need no parse tree, run on
+every invocation, and work with nothing else installed. That tier is
+deliberately small; a rule belongs in it only if it needs no frontend.
+
+`fluff` owns everything that needs an abstract syntax tree, because it is built
+on FortFront and `fo` is not. Type-aware rules, dead-code analysis, and
+column-major access patterns are all fluff's. `fo lint --deep` reaches them by
+running `fluff check --output-format json` as a subprocess and merging the
+findings into `fo` diagnostics.
+
+The subprocess boundary is the point, not an implementation detail. It keeps
+`fo`'s dependency closure at `fx` plus OpenMP, so `fo build` and `fo test`
+never require FortFront. Only the quality commands do. `fo fmt` already works
+this way, wrapping fprettify rather than implementing formatting.
+
 ## Status and interim loop
 
 The `fo` build core landed (#904: content-addressed cache, incremental rebuild,
