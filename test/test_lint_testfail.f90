@@ -223,7 +223,11 @@ contains
         lines(3) = '    integer :: n_fail'
         lines(4) = '    n_fail = 0'
         lines(5) = '    if (n_fail > 0) error &'
-        call scan_lines_plus(lines, 5, '        stop 1', flagged, n)
+        ! The continuation must NOT be a failure path on its own, or this
+        ! assertion passes whether or not continuation joining works. A bare
+        ! `stop` exits zero; only the joined `error stop` is a failure path,
+        ! so reaching n == 0 here proves the lines were joined.
+        call scan_lines_plus(lines, 5, '        stop', flagged, n)
         call assert(n == 0, 'error stop split across a continuation is a failure path')
     end subroutine test_accepts_continuation_error_stop
 

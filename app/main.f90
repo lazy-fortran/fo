@@ -265,6 +265,32 @@ contains
                     'Lint: FAIL (', n_findings, ' unused imports)'
                 stop 1
             end if
+
+            ! Test programs that cannot fail the build. Text-only, so it runs
+            ! here rather than in lint_compiler: a rule reachable only through
+            ! the compile-based deep lint would never run in this pipeline,
+            ! which is the path the project mandates before every commit.
+            block
+                use fo_lint, only: lint_warning_t, lint_testfail_files, &
+                    MAX_WARNINGS
+                type(lint_warning_t), allocatable :: tf(:)
+                integer :: n_tf, ti
+
+                allocate (tf(MAX_WARNINGS))
+                call lint_testfail_files(trim(b%project_dir), lint_files_list, &
+                    n_lint_files, tf, n_tf)
+                if (n_tf > 0) then
+                    do ti = 1, n_tf
+                        write (error_unit, '(a,a,i0,a,a)') &
+                            trim(tf(ti)%file), ':', tf(ti)%line, ': ', &
+                            trim(tf(ti)%message)
+                    end do
+                    write (error_unit, '(a,i0,a)') &
+                        'Lint: FAIL (', n_tf, ' test programs cannot fail)'
+                    stop 1
+                end if
+                deallocate (tf)
+            end block
         end block
         write (output_unit, '(a)') 'Lint: OK'
 

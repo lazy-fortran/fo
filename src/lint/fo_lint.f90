@@ -13,6 +13,7 @@ module fo_lint
     private
     public :: lint_finding_t, lint_file, lint_files, lint_dir, lint_findings_json
     public :: lint_warning_t, lint_compiler, lint_warnings_json, lint_all_json
+    public :: lint_testfail_files
     public :: lint_dedup_warnings
     public :: lint_fix_dir
     public :: MAX_FINDINGS, MAX_WARNINGS
@@ -950,6 +951,47 @@ contains
             warnings(n_warnings)%message = trim(hit_msg(k))
         end do
     end subroutine lint_file_testfail
+
+    subroutine lint_testfail_files(dir, selected, n_selected, warnings, n_warnings)
+        !! Scan a caller-supplied file list for test programs that cannot fail.
+        !!
+        !! This is text-only: no compile, no -fsyntax-only pass, no build
+        !! artifacts. It exists separately from lint_compiler so the staged
+        !! pipeline can run the rule on every invocation without paying for the
+        !! per-file compile that lint_compiler does. A cheap-tier rule that can
+        !! only be reached through the expensive path is a rule that never runs.
+        character(len=*), intent(in) :: dir
+        character(len=*), intent(in) :: selected(:)
+        integer, intent(in) :: n_selected
+        type(lint_warning_t), intent(inout) :: warnings(:)
+        integer, intent(out) :: n_warnings
+
+        character(len=64) :: test_dir
+        integer :: i, j
+        logical :: already
+
+        n_warnings = 0
+        call project_test_dir(dir, test_dir)
+        do i = 1, n_selected
+            if (len_trim(selected(i)) == 0) cycle
+            if (.not. is_test_source(dir, selected(i), test_dir)) cycle
+
+            ! The caller's list can name the same path more than once: the
+            ! staged pipeline unions `git diff`, `git diff --cached` and the
+            ! untracked set, and a file can appear in two of those at once.
+            ! Reporting it twice would inflate the count in the failure line.
+            already = .false.
+            do j = 1, i - 1
+                if (trim(selected(j)) == trim(selected(i))) then
+                    already = .true.
+                    exit
+                end if
+            end do
+            if (already) cycle
+
+            call lint_file_testfail(trim(selected(i)), warnings, n_warnings)
+        end do
+    end subroutine lint_testfail_files
 
     subroutine project_test_dir(dir, test_dir)
         !! Name of the project's test source directory, from fpm.toml when the
