@@ -34,22 +34,6 @@ jobs:
           sudo chmod +x /usr/local/bin/fpm
           fpm --version
 
-      - name: Resolve the fx git dependency over https
-        env:
-          FX_TOKEN: ${{ secrets.FX_TOKEN }}
-        run: |
-          # fpm.toml pins fx at git@github.com:lazy-fortran/fx.git. A runner has
-          # no ssh key, so rewrite the ssh form to https. fx is private today,
-          # which means the rewrite has to carry a token; GITHUB_TOKEN is scoped
-          # to this repository only and cannot read it.
-          if [ -n "$FX_TOKEN" ]; then
-            git config --global \
-              url."https://x-access-token:$FX_TOKEN@github.com/".insteadOf "git@github.com:"
-          else
-            echo "::warning::secrets.FX_TOKEN is not set; falling back to anonymous https. This only resolves if lazy-fortran/fx is public."
-            git config --global url."https://github.com/".insteadOf "git@github.com:"
-          fi
-
       - name: Build
         run: fpm build
 
