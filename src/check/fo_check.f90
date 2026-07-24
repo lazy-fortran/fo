@@ -503,12 +503,52 @@ contains
         if (.not. res%tests_ok) then
             call summarize_backend_failure('test', test_log, 'fo test', res)
         else
-            call delete_tmpfile(test_log)
+            call reconcile_test_outcome(res, test_log)
+            if (res%tests_ok) call delete_tmpfile(test_log)
         end if
 
         t1 = wall_time_seconds()
         res%elapsed = real(t1 - t0)
     end subroutine fo_check_run
+
+    subroutine reconcile_test_outcome(res, log_file)
+        !! The runner exit code and the summary lines the suites print are two
+        !! derivations of the same fact, and fo reports both. When they
+        !! disagree neither is trustworthy: a suite that swallows its own
+        !! failures exits zero exactly like a suite that passed. Report the
+        !! disagreement as a test failure instead of letting the optimistic
+        !! source decide, so tests_ok, the per-suite status and the exit status
+        !! fo derives from them can never contradict one another.
+        !! Only called on a zero exit; a nonzero exit already reports failure,
+        !! which is the safe direction whatever the printed summary says.
+        type(check_result_t), intent(inout) :: res
+        character(len=*), intent(in) :: log_file
+
+        integer :: i, n_suites, n_assertions
+        character(len=32) :: suites_str, assertions_str
+
+        n_suites = 0
+        n_assertions = 0
+        res%n_failed_tests = 0
+        do i = 1, res%n_test_results
+            if (trim(res%test_results(i)%status) /= 'fail') cycle
+            n_suites = n_suites + 1
+            n_assertions = n_assertions + res%test_results(i)%n_fail
+            res%n_failed_tests = res%n_failed_tests + 1
+            res%failed_tests(res%n_failed_tests) = res%test_results(i)%name
+        end do
+        if (n_suites == 0) return
+
+        res%tests_ok = .false.
+        write (suites_str, '(i0)') n_suites
+        write (assertions_str, '(i0)') n_assertions
+        call set_failure(res, 'test', trim(res%failed_tests(1)), &
+            'test runner exited 0 but '//trim(suites_str)// &
+            ' suite(s) reported '//trim(assertions_str)//' failing tests', &
+            'a suite reports failures without failing: make it exit nonzero, '// &
+            'or stop printing failures it does not count', &
+            'fo test', log_file)
+    end subroutine reconcile_test_outcome
 
     subroutine summarize_backend_failure(stage, log_file, rerun, res)
         character(len=*), intent(in) :: stage, log_file, rerun

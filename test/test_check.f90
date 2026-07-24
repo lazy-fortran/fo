@@ -23,6 +23,7 @@ program test_check
 
     call test_check_from_child_reports_backend_error()
     call test_check_reports_test_failure_advice()
+    call test_check_rejects_zero_exit_with_failing_summary()
     call test_check_result_json()
     call test_check_result_compact_json_success()
     call test_check_result_compact_json_failure()
@@ -142,6 +143,79 @@ contains
 
         call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_check_reports_test_failure_advice
+
+    subroutine test_check_rejects_zero_exit_with_failing_summary()
+        !! A suite that exits 0 while printing a nonzero fail count leaves fo's
+        !! two sources of truth disagreeing. The reported result must never be
+        !! self-contradictory: tests_ok, the per-suite status, and the exit
+        !! status fo derives from them all have to say the same thing.
+        type(check_result_t) :: res
+        character(len=512) :: project_dir
+        character(len=8192) :: line
+        integer :: i, n_failing_suites
+
+        call make_tmp_path('fo_lying_test_project', project_dir)
+        call make_lying_test_project(project_dir)
+        call fo_check_run(trim(project_dir)//'/test', res)
+
+        call assert(res%build_ok, 'lying-test project builds')
+        n_failing_suites = 0
+        do i = 1, res%n_test_results
+            if (trim(res%test_results(i)%status) == 'fail') then
+                n_failing_suites = n_failing_suites + 1
+            end if
+        end do
+        call assert(n_failing_suites > 0, &
+            'parsed summary reports a failing suite')
+        call assert(.not. res%tests_ok, &
+            'zero exit with a failing parsed summary is not a pass')
+        call assert(index(res%error_msg, 'exit') > 0, &
+            'contradiction is explained in the error summary')
+
+        line = check_result_json(res)
+        call assert(index(line, '"tests_ok":false') > 0, &
+            'json tests_ok agrees with the failing suite status')
+        call assert(index(line, '"status":"fail"') > 0, &
+            'json keeps the failing suite status')
+        line = check_result_compact_json(res)
+        call assert(index(line, '"ok":false') > 0, &
+            'agent json ok agrees with the failing suite status')
+
+        call execute_command_line('rm -rf '//trim(project_dir))
+    end subroutine test_check_rejects_zero_exit_with_failing_summary
+
+    subroutine make_lying_test_project(project_dir)
+        character(len=*), intent(in) :: project_dir
+        integer :: u
+
+        call execute_command_line('rm -rf '//trim(project_dir))
+        call execute_command_line('mkdir -p '//trim(project_dir)//'/src')
+        call execute_command_line('mkdir -p '//trim(project_dir)//'/test')
+
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "fo_lying_test_project"'
+        close (u)
+
+        open (newunit=u, file=trim(project_dir)//'/src/ok.f90', &
+            status='replace')
+        write (u, '(a)') 'module ok'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine noop()'
+        write (u, '(a)') 'end subroutine noop'
+        write (u, '(a)') 'end module ok'
+        close (u)
+
+        open (newunit=u, file=trim(project_dir)//'/test/test_lying.f90', &
+            status='replace')
+        write (u, '(a)') 'program test_lying'
+        write (u, '(a)') 'use ok, only: noop'
+        write (u, '(a)') 'call noop()'
+        write (u, '(a)') "print '(a)', 'lying: 3 pass, 2 fail'"
+        write (u, '(a)') 'if (command_argument_count() < 0) stop 1'
+        write (u, '(a)') 'end program test_lying'
+        close (u)
+    end subroutine make_lying_test_project
 
     subroutine test_check_result_json()
         type(check_result_t) :: res
