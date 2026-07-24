@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build + fpm test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Never let a missing credential turn into a hung git prompt.
+      GIT_TERMINAL_PROMPT: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install gfortran
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gfortran
+          gfortran --version | head -1
+
+      - name: Install fpm
+        run: |
+          sudo curl -L -o /usr/local/bin/fpm \
+            https://github.com/fortran-lang/fpm/releases/download/v0.13.0/fpm-0.13.0-linux-x86_64-gcc-12
+          sudo chmod +x /usr/local/bin/fpm
+          fpm --version
+
+      - name: Resolve the fx git dependency over https
+        env:
+          FX_TOKEN: ${{ secrets.FX_TOKEN }}
+        run: |
+          # fpm.toml pins fx at git@github.com:lazy-fortran/fx.git. A runner has
+          # no ssh key, so rewrite the ssh form to https. fx is private today,
+          # which means the rewrite has to carry a token; GITHUB_TOKEN is scoped
+          # to this repository only and cannot read it.
+          if [ -n "$FX_TOKEN" ]; then
+            git config --global \
+              url."https://x-access-token:$FX_TOKEN@github.com/".insteadOf "git@github.com:"
+          else
+            echo "::warning::secrets.FX_TOKEN is not set; falling back to anonymous https. This only resolves if lazy-fortran/fx is public."
+            git config --global url."https://github.com/".insteadOf "git@github.com:"
+          fi
+
+      - name: Build
+        run: fpm build
+
+      - name: Test
+        run: fpm test
