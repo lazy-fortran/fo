@@ -49,10 +49,10 @@ contains
         type(fpm_config_t), allocatable :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_src_objs, nc
         character(len=512) :: mod_dir, obj_dir, bin_dir
-        character(len=512) :: dep_includes(MAX_DEP_DIRS)
-        character(len=512) :: dep_objs(MAX_DEP_OBJS)
-        character(len=512) :: src_objs(MAX_SRC_OBJS)
-        logical :: is_prog_arr(MAX_SRC_OBJS)
+        character(len=512), allocatable :: dep_includes(:)
+        character(len=512), allocatable :: dep_objs(:)
+        character(len=512), allocatable :: src_objs(:)
+        logical, allocatable :: is_prog_arr(:)
         character(len=512) :: lf
         character(len=512) :: flag_text, compiler
         character(len=256) :: lock_message
@@ -69,7 +69,8 @@ contains
             call detect_compiler(compiler)
         end if
 
-        allocate (config)
+        allocate (config, dep_includes(MAX_DEP_DIRS), dep_objs(MAX_DEP_OBJS), &
+            src_objs(MAX_SRC_OBJS), is_prog_arr(MAX_SRC_OBJS))
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) then
             write (error_unit, '(a)') 'fo: no fpm.toml found in '//trim(project_dir)
@@ -266,9 +267,9 @@ contains
         type(fpm_config_t), allocatable :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_lib_objs
         character(len=512) :: mod_dir, obj_dir, bin_dir
-        character(len=512) :: dep_includes(MAX_DEP_DIRS)
-        character(len=512) :: dep_objs(MAX_DEP_OBJS)
-        character(len=512) :: lib_objs(MAX_SRC_OBJS)
+        character(len=512), allocatable :: dep_includes(:)
+        character(len=512), allocatable :: dep_objs(:)
+        character(len=512), allocatable :: lib_objs(:)
         character(len=512) :: lf, flag_text
         character(len=128) :: no_names(1)
         logical :: slow, bonly
@@ -282,6 +283,8 @@ contains
         bonly = .false.
         if (present(build_only)) bonly = build_only
         if (present(n_compiled)) n_compiled = 0
+        allocate (dep_includes(MAX_DEP_DIRS), dep_objs(MAX_DEP_OBJS), &
+            lib_objs(MAX_SRC_OBJS))
 
         call gfortran_build(project_dir, lf, exitcode, flags=flag_text, &
             use_cache=use_cache)
@@ -328,9 +331,9 @@ contains
         type(fpm_config_t), allocatable :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_lib_objs
         character(len=512) :: mod_dir, obj_dir, bin_dir
-        character(len=512) :: dep_includes(MAX_DEP_DIRS)
-        character(len=512) :: dep_objs(MAX_DEP_OBJS)
-        character(len=512) :: lib_objs(MAX_SRC_OBJS)
+        character(len=512), allocatable :: dep_includes(:)
+        character(len=512), allocatable :: dep_objs(:)
+        character(len=512), allocatable :: lib_objs(:)
         character(len=512) :: lf, flag_text
         logical :: slow
 
@@ -341,6 +344,8 @@ contains
         flag_text = ''
         if (present(flags)) flag_text = flags
         if (present(n_compiled)) n_compiled = 0
+        allocate (dep_includes(MAX_DEP_DIRS), dep_objs(MAX_DEP_OBJS), &
+            lib_objs(MAX_SRC_OBJS))
 
         call gfortran_build(project_dir, lf, exitcode, flags=flag_text, &
             use_cache=use_cache)
@@ -1138,7 +1143,7 @@ contains
         logical, intent(in), optional :: use_cache
 
         integer :: i, n_lib, copy_rc
-        character(len=512) :: lib_objs(MAX_SRC_OBJS)
+        character(len=512), allocatable :: lib_objs(:)
         character(len=512) :: prog_obj, bin_path, app_bin_dir, app_bin_path
         character(len=128) :: prog_name, manifest_name
         character(len=512) :: link_flags
@@ -1151,6 +1156,7 @@ contains
         if (present(flags)) link_flags = flags
         exitcode = 0
         n_lib = 0
+        allocate (lib_objs(MAX_SRC_OBJS))
         do i = 1, n_src_objs
             if (.not. is_prog_arr(i)) then
                 n_lib = n_lib + 1

@@ -11,6 +11,7 @@ program test_backend_gfortran
         HASH_LEN
     use fo_process, only: process_getpid
     use fo_compiler_flags, only: append_array_temporary_warning_flag
+    use fx_dag, only: MAX_NODES
     implicit none
     integer :: n_pass, n_fail
 
@@ -40,6 +41,7 @@ program test_backend_gfortran
     call test_gfortran_rebuilds_cached_module_without_mod()
     call test_array_temporary_warning_flag_policy()
     call test_gfortran_warns_about_array_temporaries()
+    call test_gfortran_named_tests_fit_default_stack()
 
     call report('backend_gfortran')
 
@@ -101,6 +103,68 @@ contains
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_warns_about_array_temporaries
+    subroutine test_gfortran_named_tests_fit_default_stack()
+        character(len=512), volatile :: filenames(MAX_NODES)
+        character(len=512), volatile :: changed_files(MAX_NODES)
+        character(len=512), volatile :: lint_files(MAX_NODES)
+        character(len=128), volatile :: test_names(MAX_NODES)
+        character(len=512) :: project_dir, dependency_dir, log_file
+        character(len=128) :: selected(1)
+        integer :: exitcode
+
+        call make_tmp_path('fo_stack_project', project_dir)
+        call make_tmp_path('fo_stack_dependency', dependency_dir)
+        call make_tmp_path('fo_stack_backend', log_file)
+        call make_linked_named_project(project_dir, dependency_dir)
+        filenames = project_dir
+        changed_files = dependency_dir
+        lint_files = log_file
+        test_names = 'test_a'
+        selected(1) = 'test_a'
+
+        call gfortran_test_names(project_dir, selected, 1, log_file, exitcode)
+
+        call assert(exitcode == 0 .and. &
+            filenames(MAX_NODES) == project_dir .and. &
+            changed_files(MAX_NODES) == dependency_dir .and. &
+            lint_files(MAX_NODES) == log_file .and. &
+            test_names(MAX_NODES) == 'test_a', &
+            'named test with pipeline state fits the default stack')
+        call remove_tree(project_dir)
+        call remove_tree(dependency_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_named_tests_fit_default_stack
+
+    subroutine make_linked_named_project(project_dir, dependency_dir)
+        character(len=*), intent(in) :: project_dir, dependency_dir
+        character(len=1024) :: command
+        integer :: u
+
+        call make_named_fpm_project(project_dir)
+        call make_dir(trim(dependency_dir)//'/src')
+        call make_dir(trim(dependency_dir)//'/build')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "fo_stack_project"'
+        write (u, '(a)') '[build]'
+        write (u, '(a)') 'link = ["stack_dependency"]'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'stack_dependency = { path = "'// &
+            trim(dependency_dir)//'" }'
+        close (u)
+        open (newunit=u, file=trim(dependency_dir)//'/fpm.toml', &
+            status='replace')
+        write (u, '(a)') 'name = "stack_dependency"'
+        close (u)
+        open (newunit=u, file=trim(dependency_dir)//'/src/marker.f90', &
+            status='replace')
+        write (u, '(a)') 'module stack_dependency_marker'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'end module stack_dependency_marker'
+        close (u)
+        command = 'ar rcs "'//trim(dependency_dir)// &
+            '/build/libstack_dependency.a"'
+        call execute_command_line(trim(command))
+    end subroutine make_linked_named_project
 
     subroutine test_gfortran_rebuilds_cached_module_without_mod()
         type(cache_t) :: cache

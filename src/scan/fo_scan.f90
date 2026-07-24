@@ -10,7 +10,7 @@ module fo_scan
     ! truncating it (e.g. ".f90" -> ".f9") breaks compile and link. Store paths
     ! in their own wider buffer.
     integer, parameter, public :: MAX_PATH = 512
-    integer, parameter, public :: MAX_UNITS = 2048
+    integer, parameter, public :: MAX_UNITS = 8192
     integer, parameter :: MAX_DEPS = 64
 
     public :: scan_unit_t, scan_file, scan_dir, is_slow_test, source_defines_module
