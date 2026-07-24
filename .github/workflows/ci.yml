@@ -37,5 +37,20 @@ jobs:
       - name: Build
         run: fpm build
 
+      - name: Install fo onto PATH
+        run: |
+          # test_scaffold verifies that a freshly scaffolded project builds by
+          # running `fo check` inside it, so `fo` has to be resolvable. Install
+          # the binary just built rather than skipping the assertion: a test
+          # that silently does nothing when a tool is absent is worse than one
+          # that fails.
+          fpm install --prefix "$HOME/.local"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify fo is the binary just built
+        run: |
+          command -v fo
+          fo --version || true
+
       - name: Test
         run: fpm test
