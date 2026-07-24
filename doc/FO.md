@@ -223,10 +223,32 @@ always-available checker inside the build driver, and a heavy analyzer beside
 it. Go splits `go vet` from staticcheck this way; Rust splits cargo from
 clippy; C and C++ split the compiler's warnings from clang-tidy.
 
-`fo` owns the cheap tier. Unused imports, short-circuit reliance, and
-gfortran's own warnings are text-level checks that need no parse tree, run on
-every invocation, and work with nothing else installed. That tier is
-deliberately small; a rule belongs in it only if it needs no frontend.
+`fo` owns the cheap tier: text-level checks that need no parse tree and work
+with nothing else installed. That tier is deliberately small; a rule belongs in
+it only if it needs no frontend.
+
+Two of those rules run in the staged `fo` pipeline on every invocation, over the
+files git reports as changed: unused imports and the test-failure-path rule
+below. Short-circuit reliance and gfortran's own warnings need a compile pass,
+so they run under `fo lint` rather than in the pipeline. A rule reachable only
+through the compile-based path gates nothing on the loop the project mandates
+before every commit, which is why the failure-path rule is wired into the
+pipeline directly.
+
+The test-failure-path rule reports a program under the project's test directory
+that contains no `error stop`, no `stop` with a nonzero or non-constant code, no
+nonzero `call exit`, and no `call abort` - a test that tallies its results,
+prints them, and exits 0 whatever it found. The search covers the file's own
+contained procedures and the bodies of anything it `include`s; it does not
+follow calls into modules, so a test whose only exit lives in a shared helper
+module is reported even though it can in fact fail. That is a genuine false
+positive, and it is why the rule is not yet adopted outside fo: 12 of fx's 15
+test programs exit through `test_suite_exit` in a shared module and would all be
+flagged. #114 tracks resolving helper procedures across module boundaries.
+`bench_` targets are
+exempt. All of these rules match on masked code - comments and string literals
+blanked - because test sources carry fixture programs inside literals, and that
+fixture text contains the very tokens the rules look for.
 
 `fluff` owns everything that needs an abstract syntax tree, because it is built
 on FortFront and `fo` is not. Type-aware rules, dead-code analysis, and

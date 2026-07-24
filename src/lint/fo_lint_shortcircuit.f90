@@ -7,6 +7,7 @@ module fo_lint_shortcircuit
     !! depending on the compiler. The detector is deliberately scoped: it fires
     !! only when the guard and the protected access name the SAME variable, so
     !! `len(a) > 0 .and. n < size(b)` (independent operands) is left alone.
+    use fo_lint_lex, only: lex_read_logical_line, is_ident_char
     implicit none
     private
     public :: shortcircuit_scan_file
@@ -23,97 +24,20 @@ contains
         integer, intent(inout) :: n
         integer, intent(in) :: cap
 
-        character(len=MAXLEN) :: phys, code, logical_buf
+        character(len=MAXLEN) :: logical_buf
         integer :: u, iostat, phys_no, start_line
-        logical :: cont, continuing
 
         open (newunit=u, file=filepath, status='old', iostat=iostat)
         if (iostat /= 0) return
 
-        logical_buf = ''
-        continuing = .false.
-        start_line = 0
         phys_no = 0
         do
-            read (u, '(a)', iostat=iostat) phys
+            call lex_read_logical_line(u, logical_buf, start_line, phys_no, iostat)
             if (iostat /= 0) exit
-            phys_no = phys_no + 1
-            call mask_code(phys, code)
-            call rstrip(code)
-            cont = ends_with_amp(code)
-            if (cont) call drop_trailing_amp(code)
-            if (continuing) then
-                call drop_leading_amp(code)
-            else
-                start_line = phys_no
-            end if
-            call append_joined(logical_buf, code)
-            if (cont) then
-                continuing = .true.
-            else
-                call scan_logical(logical_buf, start_line, lines_no, msgs, n, cap)
-                logical_buf = ''
-                continuing = .false.
-            end if
+            call scan_logical(logical_buf, start_line, lines_no, msgs, n, cap)
         end do
         close (u)
     end subroutine shortcircuit_scan_file
-
-    subroutine append_joined(buf, code)
-        character(len=*), intent(inout) :: buf
-        character(len=*), intent(in) :: code
-        if (len_trim(buf) == 0) then
-            buf = adjustl(code)
-        else if (len_trim(buf) + len_trim(code) + 1 <= len(buf)) then
-            buf = trim(buf)//' '//trim(adjustl(code))
-        end if
-    end subroutine append_joined
-
-    subroutine mask_code(line, code)
-        !! Copy line into code with comments and string literals blanked and the
-        !! rest lowercased, so tokens inside strings never match. Doubled quotes
-        !! inside a literal are the Fortran escape and stay inside the string.
-        character(len=*), intent(in) :: line
-        character(len=*), intent(out) :: code
-        integer :: i, L
-        character(len=1) :: c, q
-        logical :: in_str
-
-        code = ''
-        L = len(line)
-        in_str = .false.
-        q = ' '
-        i = 1
-        do
-            if (i > L) exit
-            c = line(i:i)
-            if (.not. in_str) then
-                if (c == '!') exit
-                if (c == '''' .or. c == '"') then
-                    in_str = .true.
-                    q = c
-                    code(i:i) = ' '
-                else
-                    code(i:i) = lower_ch(c)
-                end if
-            else
-                if (c == q) then
-                    if (i < L) then
-                        if (line(i + 1:i + 1) == q) then
-                            code(i + 1:i + 1) = ' '
-                            i = i + 1
-                        else
-                            in_str = .false.
-                        end if
-                    else
-                        in_str = .false.
-                    end if
-                end if
-                code(i:i) = ' '
-            end if
-            i = i + 1
-        end do
-    end subroutine mask_code
 
     subroutine scan_logical(code, start_line, lines_no, msgs, n, cap)
         !! Walk a joined logical line; for every .and./.or. pair the operand to
@@ -609,54 +533,6 @@ contains
         boundary_before = .not. is_ident_char(expr(pos - 1:pos - 1))
     end function boundary_before
 
-    logical function ends_with_amp(code)
-        character(len=*), intent(in) :: code
-        integer :: e
-
-        ends_with_amp = .false.
-        e = len_trim(code)
-        if (e >= 1) ends_with_amp = code(e:e) == '&'
-    end function ends_with_amp
-
-    subroutine drop_trailing_amp(code)
-        character(len=*), intent(inout) :: code
-        integer :: e
-
-        e = len_trim(code)
-        if (e >= 1) code(e:e) = ' '
-    end subroutine drop_trailing_amp
-
-    subroutine drop_leading_amp(code)
-        character(len=*), intent(inout) :: code
-        integer :: i
-
-        i = 1
-        do
-            if (i > len_trim(code)) return
-            if (code(i:i) /= ' ') exit
-            i = i + 1
-        end do
-        if (code(i:i) == '&') code(i:i) = ' '
-    end subroutine drop_leading_amp
-
-    subroutine rstrip(s)
-        character(len=*), intent(inout) :: s
-        integer :: e
-
-        e = len_trim(s)
-        if (e < len(s)) s(e + 1:) = ''
-    end subroutine rstrip
-
-    pure logical function is_ident_char(c)
-        character(len=1), intent(in) :: c
-        integer :: ic
-
-        ic = iachar(c)
-        is_ident_char = (ic >= iachar('a') .and. ic <= iachar('z')) .or. &
-            (ic >= iachar('A') .and. ic <= iachar('Z')) .or. &
-            (ic >= iachar('0') .and. ic <= iachar('9')) .or. c == '_'
-    end function is_ident_char
-
     pure logical function is_expr_char(c)
         !! Identifier char or '%', so a derived-type index like p%pos is read as
         !! one subscript expression rather than the bare component name.
@@ -664,17 +540,5 @@ contains
 
         is_expr_char = is_ident_char(c) .or. c == '%'
     end function is_expr_char
-
-    pure character(len=1) function lower_ch(c)
-        character(len=1), intent(in) :: c
-        integer :: ic
-
-        ic = iachar(c)
-        if (ic >= iachar('A') .and. ic <= iachar('Z')) then
-            lower_ch = achar(ic + 32)
-        else
-            lower_ch = c
-        end if
-    end function lower_ch
 
 end module fo_lint_shortcircuit

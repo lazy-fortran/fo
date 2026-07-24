@@ -33,9 +33,11 @@ If `fo` cannot handle the project, fix `fo` first. Do not route around it.
 - `src/build/`: native build and test dispatch from `fpm.toml`. Argv execution via C shim.
 - `src/cache/`: content-addressed module cache. FNV-1a hashing of source + compiler + flags + deps.
 - `src/lint/`: native linter. Unused-import detection (`fo_lint`), short-circuit
-  reliance detection (`fo_lint_shortcircuit`), and gfortran compiler warnings
-  (stack-size filtered, deduplicated). See "Lint scope" below for what does
-  *not* belong here.
+  reliance detection (`fo_lint_shortcircuit`), test programs with no failure
+  path (`fo_lint_testfail`), and gfortran compiler warnings (stack-size
+  filtered, deduplicated). Text-level rules match on masked code from
+  `fo_lint_lex` (comments and string literals blanked), never on raw file text.
+  See "Lint scope" below for what does *not* belong here.
 - `src/diag/`: log parser. Extracts file, line, column, target, hint from compiler and test output.
 - `src/compiler/`: compiler capability detection (identity, OpenMP, module-output-dir, depfile).
 - `src/mcp/`: MCP JSON-RPC server (`fo_mcp`), including response building.
@@ -66,8 +68,8 @@ from staticcheck, or Rust splits cargo from clippy.
 
 **fo owns the cheap always-on tier.** Text-level checks that need no frontend,
 run on every `fo` invocation, and must work when nothing else is installed:
-unused imports, short-circuit reliance, and gfortran's own warnings. This tier
-stays small deliberately. Adding a rule here is only correct if it needs no
+unused imports, short-circuit reliance, test programs that cannot fail the
+build, and gfortran's own warnings. This tier stays small deliberately. Adding a rule here is only correct if it needs no
 parse tree.
 
 **fluff owns everything that needs an AST.** Type-aware rules, dead-code
