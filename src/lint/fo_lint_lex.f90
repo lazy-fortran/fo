@@ -9,6 +9,7 @@ module fo_lint_lex
     implicit none
     private
     public :: lex_read_logical_line, mask_code, is_ident_char, lower_ch
+    public :: word_pos, next_token, prev_token, skip_blanks
 
     integer, parameter :: MAXLEN = 4096
 
@@ -44,7 +45,10 @@ contains
                 return
             end if
             phys_no = phys_no + 1
-            call mask_code(phys, masked)
+            ! Mask only as far as the line's last non-blank: phys is a 4 KB
+            ! buffer, and masking its padding cost more than every rule that
+            ! consumes the result put together.
+            call mask_code(phys(1:max(len_trim(phys), 1)), masked)
             call rstrip(masked)
             cont = ends_with_amp(masked)
             if (cont) call drop_trailing_amp(masked)
@@ -153,6 +157,115 @@ contains
         e = len_trim(s)
         if (e < len(s)) s(e + 1:) = ''
     end subroutine rstrip
+
+    subroutine word_pos(code, word, from, pos)
+        !! Position of word as a whole word at or after from; 0 if absent. The
+        !! match must not be part of a longer identifier on either side, so
+        !! `stop` never matches inside `stopwatch`.
+        character(len=*), intent(in) :: code, word
+        integer, intent(in) :: from
+        integer, intent(out) :: pos
+
+        integer :: base, p, after, L
+
+        pos = 0
+        L = len_trim(code)
+        base = max(from, 1) - 1
+        do
+            if (base >= L) return
+            p = index(code(base + 1:L), word)
+            if (p == 0) return
+            p = base + p
+            after = p + len(word)
+            if (boundary_before(code, p)) then
+                if (after > L) then
+                    pos = p
+                    return
+                else if (.not. is_ident_char(code(after:after))) then
+                    pos = p
+                    return
+                end if
+            end if
+            base = p
+        end do
+    end subroutine word_pos
+
+    subroutine next_token(code, from, tok, after)
+        !! First identifier-like token at or after from. tok is empty when the
+        !! next non-blank character cannot start one (or input ends); after is
+        !! the position just past the token.
+        character(len=*), intent(in) :: code
+        integer, intent(in) :: from
+        character(len=*), intent(out) :: tok
+        integer, intent(out) :: after
+
+        integer :: p, s, L
+
+        tok = ''
+        L = len_trim(code)
+        p = skip_blanks(code, from)
+        after = p
+        if (p > L) return
+        if (.not. is_ident_char(code(p:p))) return
+        s = p
+        do
+            if (p > L) exit
+            if (.not. is_ident_char(code(p:p))) exit
+            p = p + 1
+        end do
+        tok = code(s:p - 1)
+        after = p
+    end subroutine next_token
+
+    subroutine prev_token(code, before, tok)
+        !! Identifier-like token ending at or before position before; empty when
+        !! the preceding non-blank character cannot end one.
+        character(len=*), intent(in) :: code
+        integer, intent(in) :: before
+        character(len=*), intent(out) :: tok
+
+        integer :: p, e
+
+        tok = ''
+        p = before
+        do
+            if (p < 1) return
+            if (code(p:p) /= ' ') exit
+            p = p - 1
+        end do
+        if (.not. is_ident_char(code(p:p))) return
+        e = p
+        do
+            if (p < 1) exit
+            if (.not. is_ident_char(code(p:p))) exit
+            p = p - 1
+        end do
+        tok = code(p + 1:e)
+    end subroutine prev_token
+
+    integer function skip_blanks(code, from)
+        character(len=*), intent(in) :: code
+        integer, intent(in) :: from
+
+        integer :: L
+
+        L = len_trim(code)
+        skip_blanks = max(from, 1)
+        do
+            if (skip_blanks > L) return
+            if (code(skip_blanks:skip_blanks) /= ' ') return
+            skip_blanks = skip_blanks + 1
+        end do
+    end function skip_blanks
+
+    logical function boundary_before(code, pos)
+        character(len=*), intent(in) :: code
+        integer, intent(in) :: pos
+
+        boundary_before = .true.
+        if (pos <= 1) return
+        boundary_before = .not. is_ident_char(code(pos - 1:pos - 1))
+    end function boundary_before
 
     pure logical function is_ident_char(c)
         character(len=1), intent(in) :: c

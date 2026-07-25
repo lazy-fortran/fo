@@ -92,6 +92,13 @@ clean, lint, format, and release installation. MCP clean preserves the shared
 CAS unless `cache=true`. MCP installation accepts a prefix and always requests
 the release profile.
 
+The test-failure-path lint rule follows failure exits through project module
+helpers. It scans module procedures in `src/`, `app/`, and `test/`, repeats the
+collection until transitive helper calls converge, and distinguishes calls from
+ordinary variables or array references with the same name. A helper that cannot
+exit nonzero does not suppress the finding. Procedure pointers, generic-only
+resolution, and separate submodule bodies remain documented unsupported cases.
+
 The LSP surface reports compiler-backed diagnostics on save. It does not claim
 to replace a full semantic Fortran language server.
 

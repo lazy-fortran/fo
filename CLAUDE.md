@@ -34,7 +34,8 @@ If `fo` cannot handle the project, fix `fo` first. Do not route around it.
 - `src/cache/`: SHA-256 content-addressed action and binary cache.
 - `src/lint/`: native linter. Unused-import detection (`fo_lint`), short-circuit
   reliance detection (`fo_lint_shortcircuit`), test programs with no failure
-  path (`fo_lint_testfail`), and gfortran compiler warnings (stack-size
+  path (`fo_lint_testfail`, over the project's failing helper procedures
+  collected by `fo_lint_failpath`), and gfortran compiler warnings (stack-size
   filtered, deduplicated). Text-level rules match on masked code from
   `fo_lint_lex` (comments and string literals blanked), never on raw file text.
   See "Lint scope" below for what does *not* belong here.
