@@ -1,6 +1,6 @@
 module fo_doc
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_NAME
+    use fo_scan, only: scan_unit_t, scan_dir, MAX_NAME
     implicit none
     private
 
@@ -20,7 +20,6 @@ contains
         logical :: first
 
         exitcode = 0
-        allocate (units(MAX_UNITS))
         call scan_dir(project_dir, units, n_units, ierr)
         if (ierr /= 0) then
             write (error_unit, '(a)') 'fo doc: scan failed'

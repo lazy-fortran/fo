@@ -1,7 +1,7 @@
 module fo_check
     use, intrinsic :: iso_fortran_env, only: real64
     use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds
-    use fo_scan, only: scan_unit_t, scan_dir, MAX_NAME, MAX_PATH, MAX_UNITS, &
+    use fo_scan, only: scan_unit_t, scan_dir, MAX_NAME, MAX_PATH, &
         is_slow_test
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_affected_set, MAX_NODES
     use fo_dag_bridge, only: build_dag_from_units
@@ -102,7 +102,7 @@ contains
         logical, allocatable :: local_is_test_arr(:)
         logical :: has_cycle, found_mod_key
 
-        allocate (units(MAX_UNITS), order(MAX_NODES))
+        allocate (order(MAX_NODES))
         allocate (keys(MAX_NODES), mod_keys(MAX_NODES), local_filenames(MAX_NODES))
         allocate (local_is_test_arr(MAX_NODES))
 

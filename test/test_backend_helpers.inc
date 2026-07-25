@@ -80,6 +80,25 @@
         call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_detect_fpm
 
+    subroutine test_detect_fpm_preferred_over_cmake()
+        type(backend_t) :: b
+        character(len=512) :: tmpdir
+        integer :: u
+
+        call make_tmp_path('fo_test_both_manifests', tmpdir)
+        call make_dir(tmpdir)
+        open (newunit=u, file=trim(tmpdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "both_manifests"'
+        close (u)
+        open (newunit=u, file=trim(tmpdir)//'/CMakeLists.txt', status='replace')
+        close (u)
+
+        b = detect_backend(tmpdir)
+        call assert(b%kind == BACKEND_NATIVE, &
+            'native backend wins when fpm and CMake manifests coexist')
+        call remove_tree(tmpdir)
+    end subroutine test_detect_fpm_preferred_over_cmake
+
     subroutine test_detect_fpm_from_child()
         type(backend_t) :: b
         integer :: u

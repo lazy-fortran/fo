@@ -5,7 +5,7 @@ module fo_util
     use fx_mcp, only: mcp_send_response, MCP_FRAME_UNKNOWN
     implicit none
     private
-    public :: make_tmpfile, delete_tmpfile, read_text_file
+    public :: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, read_text_file
     public :: clean_root_build_artifacts
     public :: strip_path_prefix_in_str
     public :: send_jsonrpc, jsonrpc_error, jsonrpc_null
@@ -52,6 +52,25 @@ contains
         write (path, '(a,a,a,i0,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
             int(pid), '-', count, '-', serial_local, '.tmp'
     end subroutine make_tmpfile
+
+    subroutine make_sibling_tmpfile(target, path)
+        character(len=*), intent(in) :: target
+        character(len=*), intent(out) :: path
+
+        integer :: count
+        integer(c_int) :: pid
+        integer, save :: serial = 0
+        integer :: serial_local
+
+        !$omp critical (fo_sibling_tmpfile_serial)
+        serial = serial + 1
+        serial_local = serial
+        !$omp end critical (fo_sibling_tmpfile_serial)
+        call fo_c_getpid(pid)
+        call system_clock(count)
+        write (path, '(a,a,i0,a,i0,a,i0)') trim(target), '.tmp-', int(pid), '-', &
+            count, '-', serial_local
+    end subroutine make_sibling_tmpfile
 
     subroutine delete_tmpfile(path)
         character(len=*), intent(in) :: path

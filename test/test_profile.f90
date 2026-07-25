@@ -8,6 +8,7 @@ program test_profile
     n_fail = 0
 
     call test_debug_has_fcheck()
+    call test_release_optimized()
     call test_asan_has_sanitizer()
     call test_unknown_is_empty()
     call report()
@@ -31,6 +32,11 @@ contains
         call check(index(profile_flags('debug'), '-g') > 0, &
             'debug includes -g')
     end subroutine test_debug_has_fcheck
+
+    subroutine test_release_optimized()
+        call check(trim(profile_flags('release')) == '-O3 -funroll-loops', &
+            'release matches fpm gfortran optimization flags')
+    end subroutine test_release_optimized
 
     subroutine test_asan_has_sanitizer()
         call check(index(profile_flags('asan'), &

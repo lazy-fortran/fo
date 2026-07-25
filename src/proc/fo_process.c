@@ -3,8 +3,8 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
-#include <pthread.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,17 +15,6 @@
 #include <unistd.h>
 
 static int has_text(const char *text) { return text != NULL && text[0] != '\0'; }
-
-struct watchdog_state {
-    pthread_mutex_t mu;
-    pthread_cond_t cv;
-    pid_t pgid;
-    int timeout_s;
-    int heartbeat_s;
-    const char *log_file;
-    int done;
-    int fired;
-};
 
 static int timespec_at_or_after(const struct timespec *lhs,
                                 const struct timespec *rhs) {
@@ -46,6 +35,24 @@ static void emit_heartbeat(const char *log_file) {
     close(fd);
 }
 
+static void emit_spawn_error(const char *log_file, const char *operation,
+                             int error_number) {
+    char message[256];
+    int fd, n;
+
+    n = snprintf(message, sizeof(message), "fo: %s failed: %s\n", operation,
+                 strerror(error_number));
+    if (n <= 0) return;
+    if (n >= (int)sizeof(message)) n = (int)sizeof(message) - 1;
+    if (has_text(log_file) && strcmp(log_file, "/dev/null") != 0) {
+        fd = open(log_file, O_WRONLY | O_CREAT | O_APPEND, 0666);
+        if (fd >= 0) {
+            write(fd, message, (size_t)n);
+            close(fd);
+        }
+    }
+}
+
 static void add_seconds(struct timespec *ts, int seconds) {
     ts->tv_sec += seconds;
 }
@@ -56,51 +63,6 @@ static void sleep_ms(int ms) {
     ts.tv_nsec = (long)(ms % 1000) * 1000000L;
     while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
     }
-}
-
-static void *timeout_watchdog(void *arg) {
-    struct watchdog_state *wd = (struct watchdog_state *)arg;
-    struct timespec deadline, next_heartbeat, wait_until, now;
-    int rc;
-
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    add_seconds(&deadline, wd->timeout_s);
-    next_heartbeat = deadline;
-    if (wd->heartbeat_s > 0) {
-        clock_gettime(CLOCK_REALTIME, &next_heartbeat);
-        add_seconds(&next_heartbeat, wd->heartbeat_s);
-    }
-
-    pthread_mutex_lock(&wd->mu);
-    while (!wd->done) {
-        wait_until = deadline;
-        if (wd->heartbeat_s > 0 &&
-            !timespec_at_or_after(&next_heartbeat, &deadline)) {
-            wait_until = next_heartbeat;
-        }
-        rc = pthread_cond_timedwait(&wd->cv, &wd->mu, &wait_until);
-        if (rc == ETIMEDOUT && !wd->done) {
-            clock_gettime(CLOCK_REALTIME, &now);
-            if (!timespec_at_or_after(&now, &deadline)) {
-                emit_heartbeat(wd->log_file);
-                do {
-                    add_seconds(&next_heartbeat, wd->heartbeat_s);
-                } while (timespec_at_or_after(&now, &next_heartbeat));
-                continue;
-            }
-            wd->fired = 1;
-            pthread_mutex_unlock(&wd->mu);
-            kill(-wd->pgid, SIGTERM);
-            for (int k = 0; k < 15; k++) {
-                if (kill(-wd->pgid, 0) != 0 && errno == ESRCH) return NULL;
-                sleep_ms(200);
-            }
-            kill(-wd->pgid, SIGKILL);
-            return NULL;
-        }
-    }
-    pthread_mutex_unlock(&wd->mu);
-    return NULL;
 }
 
 struct path_list {
@@ -264,91 +226,114 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                     const char *env_extra) {
     pid_t pid;
     int status;
+    int spawn_error;
+    int attrs_ready = 0;
     char **child_env = NULL;
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attrs;
+    short attr_flags = POSIX_SPAWN_SETPGROUP;
 
-    /* Built before fork: setenv in the child is not async-signal-safe and
-     * corrupts libgomp when forked from an OpenMP thread. Pointing environ at
-     * this env before execvp keeps the spawn safe inside the parallel
-     * build/test loops. */
+    (void)jobs;
     if (has_text(env_extra)) {
         child_env = env_with_extra(env_extra);
         if (!child_env) return 1;
     }
 
-    pid = fork();
-    if (pid < 0) { free(child_env); return 1; }
-
-    if (pid == 0) {
-        /* own process group so a timeout can kill the whole subtree */
-        setpgid(0, 0);
-        if (has_text(cwd) && chdir(cwd) != 0) _exit(127);
-        if (jobs > 0) {
-            char jobs_text[32];
-            snprintf(jobs_text, sizeof(jobs_text), "%d", jobs);
-            setenv("OMP_NUM_THREADS", jobs_text, 1);
-        }
-        if (has_text(log_file)) {
-            int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
-            int fd = open(log_file, flags, 0666);
-            if (fd < 0) _exit(126);
-            if (dup2(fd, STDOUT_FILENO) < 0) _exit(126);
-            if (dup2(fd, STDERR_FILENO) < 0) _exit(126);
-            close(fd);
-        }
-        if (child_env) environ = child_env;
-        execvp(argv[0], argv);
-        _exit(errno == ENOENT ? 127 : 126);
+    spawn_error = posix_spawn_file_actions_init(&actions);
+    if (spawn_error != 0) {
+        free(child_env);
+        emit_spawn_error(log_file, "posix_spawn file-actions setup", spawn_error);
+        return 1;
     }
-    free(child_env);
+    if (has_text(cwd)) {
+        spawn_error = posix_spawn_file_actions_addchdir_np(&actions, cwd);
+    }
+    if (spawn_error == 0 && has_text(log_file)) {
+        int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+        spawn_error = posix_spawn_file_actions_addopen(
+            &actions, STDOUT_FILENO, log_file, flags, 0666);
+        if (spawn_error == 0) {
+            spawn_error = posix_spawn_file_actions_adddup2(
+                &actions, STDOUT_FILENO, STDERR_FILENO);
+        }
+    }
+    if (spawn_error != 0) {
+        posix_spawn_file_actions_destroy(&actions);
+        free(child_env);
+        emit_spawn_error(log_file, "posix_spawn file-action", spawn_error);
+        return 1;
+    }
 
-    /* race-free: also set the group from the parent side */
-    setpgid(pid, pid);
+    spawn_error = posix_spawnattr_init(&attrs);
+    if (spawn_error == 0) attrs_ready = 1;
+    if (spawn_error == 0) {
+        spawn_error = posix_spawnattr_setflags(&attrs, attr_flags);
+    }
+    if (spawn_error == 0) {
+        spawn_error = posix_spawnattr_setpgroup(&attrs, 0);
+    }
+    if (spawn_error == 0) {
+        spawn_error = posix_spawnp(&pid, argv[0], &actions, &attrs, argv,
+                                   child_env ? child_env : environ);
+    }
+    posix_spawn_file_actions_destroy(&actions);
+    if (attrs_ready) posix_spawnattr_destroy(&attrs);
+    free(child_env);
+    if (spawn_error != 0) {
+        char operation[192];
+        snprintf(operation, sizeof(operation), "posix_spawn of %.80s in %.80s",
+                 argv[0] ? argv[0] : "(null)",
+                 has_text(cwd) ? cwd : "(current directory)");
+        emit_spawn_error(log_file, operation, spawn_error);
+        return spawn_error == ENOENT ? 127 : 126;
+    }
 
     if (timeout_s > 0) {
-        pthread_t watchdog;
-        struct watchdog_state wd;
-        int thread_ok;
+        struct timespec deadline, next_heartbeat, now;
 
-        wd.pgid = pid;
-        wd.timeout_s = timeout_s;
-        wd.heartbeat_s = heartbeat_s;
-        wd.log_file = log_file;
-        wd.done = 0;
-        wd.fired = 0;
-        pthread_mutex_init(&wd.mu, NULL);
-        pthread_cond_init(&wd.cv, NULL);
-        thread_ok = pthread_create(&watchdog, NULL, timeout_watchdog, &wd) == 0;
-        if (!thread_ok) {
-            pthread_cond_destroy(&wd.cv);
-            pthread_mutex_destroy(&wd.mu);
-            kill(-pid, SIGKILL);
-            waitpid(pid, NULL, 0);
-            return 1;
+        clock_gettime(CLOCK_MONOTONIC, &deadline);
+        add_seconds(&deadline, timeout_s);
+        next_heartbeat = deadline;
+        if (heartbeat_s > 0) {
+            clock_gettime(CLOCK_MONOTONIC, &next_heartbeat);
+            add_seconds(&next_heartbeat, heartbeat_s);
         }
 
-        while (waitpid(pid, &status, 0) < 0) {
-            if (errno == EINTR) continue;
-            pthread_mutex_lock(&wd.mu);
-            wd.done = 1;
-            pthread_cond_signal(&wd.cv);
-            pthread_mutex_unlock(&wd.mu);
-            pthread_join(watchdog, NULL);
-            pthread_cond_destroy(&wd.cv);
-            pthread_mutex_destroy(&wd.mu);
-            return 1;
-        }
+        for (;;) {
+            pid_t waited = waitpid(pid, &status, WNOHANG);
+            if (waited == pid) break;
+            if (waited < 0 && errno != EINTR) return 1;
 
-        pthread_mutex_lock(&wd.mu);
-        wd.done = 1;
-        pthread_cond_signal(&wd.cv);
-        pthread_mutex_unlock(&wd.mu);
-        pthread_join(watchdog, NULL);
-        pthread_mutex_lock(&wd.mu);
-        thread_ok = !wd.fired;
-        pthread_mutex_unlock(&wd.mu);
-        pthread_cond_destroy(&wd.cv);
-        pthread_mutex_destroy(&wd.mu);
-        if (!thread_ok) return 124;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if (timespec_at_or_after(&now, &deadline)) {
+                int reaped = 0;
+
+                kill(-pid, SIGTERM);
+                for (int k = 0; k < 15; k++) {
+                    waited = waitpid(pid, &status, WNOHANG);
+                    if (waited == pid) {
+                        reaped = 1;
+                        break;
+                    }
+                    if (waited < 0 && errno != EINTR) break;
+                    sleep_ms(200);
+                }
+                kill(-pid, SIGKILL);
+                if (!reaped) {
+                    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+                    }
+                }
+                return 124;
+            }
+            if (heartbeat_s > 0 &&
+                timespec_at_or_after(&now, &next_heartbeat)) {
+                emit_heartbeat(log_file);
+                do {
+                    add_seconds(&next_heartbeat, heartbeat_s);
+                } while (timespec_at_or_after(&now, &next_heartbeat));
+            }
+            sleep_ms(1);
+        }
     } else {
         while (waitpid(pid, &status, 0) < 0) {
             if (errno == EINTR) continue;

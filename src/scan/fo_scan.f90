@@ -2,28 +2,13 @@ module fo_scan
     use, intrinsic :: iso_fortran_env, only: error_unit
     use fo_util, only: make_tmpfile, delete_tmpfile
     use fo_process, only: process_scan_sources
+    use fo_scan_types, only: scan_unit_t, MAX_NAME, MAX_PATH, MAX_UNITS, MAX_DEPS
+    use fo_scan_cache, only: scan_cache_load, scan_cache_save
     implicit none
     private
-    integer, parameter, public :: MAX_NAME = 128
-    ! Module and program identifiers fit MAX_NAME, but source paths do not: an
-    ! absolute project path plus a nested test path easily exceeds 128 chars and
-    ! truncating it (e.g. ".f90" -> ".f9") breaks compile and link. Store paths
-    ! in their own wider buffer.
-    integer, parameter, public :: MAX_PATH = 512
-    integer, parameter, public :: MAX_UNITS = 8192
-    integer, parameter :: MAX_DEPS = 64
 
     public :: scan_unit_t, scan_file, scan_dir, is_slow_test, source_defines_module
-
-    type :: scan_unit_t
-        character(len=MAX_PATH) :: filename = ''
-        character(len=MAX_NAME) :: module_name = ''
-        character(len=MAX_NAME) :: program_name = ''
-        logical :: is_program = .false.
-        logical :: is_test = .false.
-        integer :: n_deps = 0
-        character(len=MAX_NAME) :: deps(MAX_DEPS)
-    end type scan_unit_t
+    public :: MAX_NAME, MAX_PATH, MAX_UNITS
 
     character(len=32), dimension(10), parameter :: INTRINSIC_MODULES = [ &
         'iso_fortran_env  ', &
@@ -99,25 +84,32 @@ contains
 
     subroutine scan_dir(dirname, units, n_units, ierr)
         character(len=*), intent(in) :: dirname
-        type(scan_unit_t), intent(out) :: units(MAX_UNITS)
+        type(scan_unit_t), allocatable, intent(out) :: units(:)
         integer, intent(out) :: n_units, ierr
 
+        character(len=512), allocatable :: paths(:)
         character(len=512) :: tmpfile, line
-        integer :: funit, iostat, sub_ierr
+        integer :: funit, iostat, sub_ierr, n_files, i
+        logical :: cache_hit
 
         ierr = 0
         n_units = 0
+        n_files = 0
         call make_tmpfile('fo_scan_files', tmpfile)
 
         call process_scan_sources(dirname, tmpfile, sub_ierr)
         if (sub_ierr /= 0) then
             ierr = 1
+            allocate (units(0))
+            call delete_tmpfile(tmpfile)
             return
         end if
 
         open (newunit=funit, file=tmpfile, status='old', iostat=iostat)
         if (iostat /= 0) then
             ierr = 1
+            allocate (units(0))
+            call delete_tmpfile(tmpfile)
             return
         end if
 
@@ -125,21 +117,40 @@ contains
             read (funit, '(a)', iostat=iostat) line
             if (iostat /= 0) exit
             if (len_trim(line) == 0) cycle
-            n_units = n_units + 1
-            if (n_units > MAX_UNITS) then
+            n_files = n_files + 1
+            if (n_files > MAX_UNITS) then
                 write (error_unit, '(a,i0)') &
                     'fo: too many source files, max ', MAX_UNITS
-                n_units = MAX_UNITS
+                n_files = MAX_UNITS
                 exit
             end if
-            call scan_file(trim(line), units(n_units), sub_ierr)
+        end do
+
+        allocate (units(n_files), paths(n_files))
+        rewind (funit)
+        do i = 1, n_files
+            read (funit, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            paths(i) = trim(line)
+        end do
+        close (funit)
+        call delete_tmpfile(tmpfile)
+
+        call scan_cache_load(dirname, paths, units, cache_hit)
+        if (cache_hit) then
+            n_units = n_files
+            return
+        end if
+
+        do i = 1, n_files
+            n_units = n_units + 1
+            call scan_file(trim(paths(i)), units(n_units), sub_ierr)
             if (sub_ierr /= 0) then
                 n_units = n_units - 1
             end if
         end do
 
-        close (funit)
-        call delete_tmpfile(tmpfile)
+        if (n_units == n_files) call scan_cache_save(dirname, paths, units)
     end subroutine scan_dir
 
     logical function is_test_path(path)

@@ -231,6 +231,132 @@ int fo_c_stat_fingerprint(const char *path, long long *mtime_ns,
     return 0;
 }
 
+static unsigned long long fo_fnv1a_bytes(unsigned long long hash,
+                                         const void *data, size_t len) {
+    const unsigned char *bytes = data;
+    size_t i;
+    for (i = 0; i < len; i++) {
+        hash ^= (unsigned long long)bytes[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static int fo_tree_fingerprint_rec(const char *root, int input_mode, int depth,
+                                   unsigned long long *sum,
+                                   unsigned long long *mixed,
+                                   long long *count) {
+    DIR *dir;
+    struct dirent *ent;
+    char child[PATH_MAX];
+    struct stat st;
+
+    dir = opendir(root);
+    if (dir == NULL) return -1;
+    while ((ent = readdir(dir)) != NULL) {
+        unsigned long long item = 1469598103934665603ULL;
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+            continue;
+        if (ent->d_name[0] == '.') continue;
+        if (input_mode) {
+            if (strcmp(ent->d_name, "node_modules") == 0 ||
+                strcmp(ent->d_name, "venv") == 0 ||
+                strcmp(ent->d_name, "__pycache__") == 0 ||
+                strcmp(ent->d_name, "site-packages") == 0)
+                continue;
+            if (depth == 0 &&
+                (strcmp(ent->d_name, "build") == 0 ||
+                 strncmp(ent->d_name, "build", 5) == 0))
+                continue;
+        }
+        if (snprintf(child, sizeof(child), "%s/%s", root, ent->d_name) >=
+            (int)sizeof(child))
+            continue;
+        if (lstat(child, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (fo_tree_fingerprint_rec(child, input_mode, depth + 1, sum,
+                                        mixed, count) != 0) {
+                closedir(dir);
+                return -1;
+            }
+            continue;
+        }
+        if (!S_ISREG(st.st_mode)) continue;
+        item = fo_fnv1a_bytes(item, child, strlen(child));
+#if defined(__APPLE__)
+        item = fo_fnv1a_bytes(item, &st.st_mtimespec,
+                              sizeof(st.st_mtimespec));
+#else
+        item = fo_fnv1a_bytes(item, &st.st_mtim, sizeof(st.st_mtim));
+#endif
+        item = fo_fnv1a_bytes(item, &st.st_size, sizeof(st.st_size));
+        *sum += item;
+        *mixed ^= (item << (item & 31)) |
+                  (item >> ((64 - (item & 31)) & 63));
+        (*count)++;
+    }
+    closedir(dir);
+    return 0;
+}
+
+/* Order-independent fingerprint of every regular file below root. Input mode
+   ignores hidden/generated trees; output mode includes generated files but
+   still ignores transient hidden directories such as build/fo/.lock. */
+int fo_c_tree_fingerprint(const char *root, int input_mode,
+                          long long *sum, long long *mixed, long long *count) {
+    unsigned long long usum = 0, umixed = 0;
+    long long n = 0;
+    int rc;
+    if (!fo_has(root)) return -1;
+    rc = fo_tree_fingerprint_rec(root, input_mode, 0, &usum, &umixed, &n);
+    *sum = (long long)usum;
+    *mixed = (long long)umixed;
+    *count = n;
+    return rc;
+}
+
+int fo_c_find_executable(const char *command, char *out, int cap) {
+    const char *path_env, *start, *end;
+    char candidate[PATH_MAX];
+    size_t dir_len;
+
+    if (!fo_has(command) || out == NULL || cap <= 0) return -1;
+    if (strpbrk(command, " \t\r\n") != NULL) return -1;
+    if (strchr(command, '/') != NULL) {
+        if (access(command, X_OK) != 0) return -1;
+        if (realpath(command, candidate) == NULL) return -1;
+        if ((int)strlen(candidate) + 1 > cap) return -1;
+        strcpy(out, candidate);
+        return 0;
+    }
+    path_env = getenv("PATH");
+    if (path_env == NULL) return -1;
+    start = path_env;
+    while (1) {
+        end = strchr(start, ':');
+        dir_len = (end != NULL) ? (size_t)(end - start) : strlen(start);
+        if (dir_len == 0) {
+            if (snprintf(candidate, sizeof(candidate), "./%s", command) >=
+                (int)sizeof(candidate))
+                return -1;
+        } else {
+            if (snprintf(candidate, sizeof(candidate), "%.*s/%s", (int)dir_len,
+                         start, command) >= (int)sizeof(candidate))
+                return -1;
+        }
+        if (access(candidate, X_OK) == 0) {
+            char resolved[PATH_MAX];
+            if (realpath(candidate, resolved) == NULL) return -1;
+            if ((int)strlen(resolved) + 1 > cap) return -1;
+            strcpy(out, resolved);
+            return 0;
+        }
+        if (end == NULL) break;
+        start = end + 1;
+    }
+    return -1;
+}
+
 #include <time.h>
 /* Sleep for the given milliseconds (no shell `sleep`). */
 void fo_c_sleep_ms(int ms) {

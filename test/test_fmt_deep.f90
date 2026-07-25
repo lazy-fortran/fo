@@ -13,6 +13,7 @@ program test_fmt_deep
     call test_fmt_deep_check_misformatted()
     call test_process_run_argv_logged_passes_env()
     call test_process_run_argv_logged_reports_heartbeat()
+    call test_process_run_argv_logged_times_out()
     call test_process_argv_many_tokens()
 
     write (output_unit, '(a,i0,a,i0,a)') 'fmt_deep: ', n_pass, ' pass, ', n_fail, ' fail'
@@ -168,6 +169,28 @@ contains
             'wall time includes time waiting for a child process')
         call delete_tmpfile(log_file)
     end subroutine test_process_run_argv_logged_reports_heartbeat
+
+    subroutine test_process_run_argv_logged_times_out()
+        character(len=512) :: log_file
+        character(len=:), allocatable :: packed
+        integer :: n_args, exitcode
+        real(real64) :: t0, t1
+
+        call make_tmpfile('test_process_timeout_log', log_file)
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, 'sleep')
+        call argv_push(packed, n_args, '10')
+        t0 = wall_time_seconds()
+        call process_run_argv_logged('', packed, n_args, trim(log_file), &
+            .false., 1, exitcode, heartbeat_s=0)
+        t1 = wall_time_seconds()
+
+        call assert(exitcode == 124, 'timeout: returns the standard timeout status')
+        call assert(t1 - t0 >= 0.8_real64 .and. t1 - t0 < 5.0_real64, &
+            'timeout: stops a long-running child near the deadline')
+        call delete_tmpfile(log_file)
+    end subroutine test_process_run_argv_logged_times_out
 
     subroutine test_process_argv_many_tokens()
         character(len=512) :: log_file

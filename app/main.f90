@@ -368,7 +368,8 @@ contains
 
         out = output_unit
         if (present(unit)) out = unit
-        write (out, '(a)') 'usage: fo test [--only-changed] [--all] [--verbose] [--json] [name ...]'
+        write (out, '(a)') &
+            'usage: fo test [--profile NAME] [--flag FLAGS] [options] [name ...]'
         write (out, '(a)') ''
         write (out, '(a)') 'Run project tests from fpm.toml.'
         write (out, '(a)') ''
@@ -377,6 +378,8 @@ contains
         write (out, '(a)') '  --all           include slow tests'
         write (out, '(a)') '  --verbose       show all tests (default for named runs)'
         write (out, '(a)') '  --json          output results as JSON'
+        write (out, '(a)') '  --profile NAME  use release, debug, or asan flags'
+        write (out, '(a)') '  --flag FLAGS    append compiler flags'
         write (out, '(a)') '  -h, --help      show this help'
         write (out, '(a)') ''
         write (out, '(a)') 'examples:'
@@ -709,9 +712,9 @@ contains
         end if
         call make_tmpfile('fo-build', build_log)
         if (len_trim(all_flags) > 0) then
-            call backend_build(b, exitcode, all_flags, build_log, with_tests=.true.)
+            call backend_build(b, exitcode, all_flags, build_log)
         else
-            call backend_build(b, exitcode, log_file=build_log, with_tests=.true.)
+            call backend_build(b, exitcode, log_file=build_log)
         end if
         if (exitcode /= 0) then
             call report_build_result(build_log)
@@ -726,7 +729,10 @@ contains
         type(diagnostic_t), allocatable :: warnings(:)
         integer, parameter :: MAX_BUILD_WARNINGS = 4096
         integer :: i, n_warnings
+        logical :: exists
 
+        inquire (file=trim(build_log), exist=exists)
+        if (.not. exists) return
         allocate (warnings(MAX_BUILD_WARNINGS))
         call array_temporary_warnings_from_log(build_log, warnings, n_warnings)
         do i = 1, n_warnings
@@ -860,10 +866,12 @@ contains
         integer :: changed_ids(MAX_NODES), n_changed
         integer :: affected_ids(MAX_NODES), n_affected
         integer :: n_cached, ierr, i, n_test_names, n_arg_names
-        logical :: only_changed, include_all, verbose, use_json
+        logical :: only_changed, include_all, verbose, use_json, skip_next
         character(len=256) :: arg
         character(len=128) :: test_names(MAX_NODES)
-        character(len=512) :: test_log
+        character(len=512) :: test_log, flags
+        character(len=64) :: profile
+        character(len=1024) :: all_flags
         logical :: is_test_arr(MAX_NODES)
 
         if (has_arg('--help') .or. has_arg('-h')) then
@@ -881,8 +889,17 @@ contains
         verbose = .false.
         use_json = .false.
         n_arg_names = 0
+        skip_next = .false.
         do i = 2, command_argument_count()
             call get_command_argument(i, arg)
+            if (skip_next) then
+                skip_next = .false.
+                cycle
+            end if
+            if (trim(arg) == '--flag' .or. trim(arg) == '--profile') then
+                skip_next = .true.
+                cycle
+            end if
             if (trim(arg) == '--only-changed') only_changed = .true.
             if (trim(arg) == '--all') include_all = .true.
             if (trim(arg) == '--verbose') verbose = .true.
@@ -892,11 +909,25 @@ contains
                 test_names(n_arg_names) = arg(1:128)
             end if
         end do
+        call get_flags_arg(flags)
+        call get_profile_arg(profile)
+        if (len_trim(profile) > 0 .and. len_trim(profile_flags(profile)) == 0) then
+            write (error_unit, '(a)') 'fo: unknown test profile: '//trim(profile)
+            stop 1
+        end if
+        all_flags = trim(profile_flags(profile))
+        if (len_trim(flags) > 0) then
+            if (len_trim(all_flags) > 0) then
+                all_flags = trim(all_flags)//' '//trim(flags)
+            else
+                all_flags = trim(flags)
+            end if
+        end if
 
         if (n_arg_names > 0) then
             call make_tmpfile('fo-test', test_log)
             call backend_test_names(b, test_names, n_arg_names, exitcode, &
-                include_all, test_log)
+                include_all, test_log, flags=all_flags)
             call report_test_result(exitcode, test_log, .false., use_json)
             call delete_tmpfile(test_log)
         else if (only_changed) then
@@ -929,12 +960,12 @@ contains
 
             call make_tmpfile('fo-test', test_log)
             call backend_test_names(b, test_names, n_test_names, exitcode, &
-                include_all, test_log)
+                include_all, test_log, flags=all_flags)
             call report_test_result(exitcode, test_log, .false., use_json)
             call delete_tmpfile(test_log)
         else
             call make_tmpfile('fo-test', test_log)
-            call backend_test(b, exitcode, include_all, test_log)
+            call backend_test(b, exitcode, include_all, test_log, flags=all_flags)
             call report_test_result(exitcode, test_log, &
                 (n_arg_names == 0 .and. .not. verbose), use_json)
             call delete_tmpfile(test_log)

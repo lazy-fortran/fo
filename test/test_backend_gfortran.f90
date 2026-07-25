@@ -24,6 +24,7 @@ program test_backend_gfortran
     call test_gfortran_private_change_keeps_dependent_cached()
     call test_gfortran_interface_change_rebuilds_dependent()
     call test_gfortran_parallel_test_loop_restores_cached_objects()
+    call test_gfortran_test_skips_app_but_build_restores_it()
     call test_gfortran_test_links_helper_modules_and_lib()
     call test_gfortran_named_test_links_helper_modules()
     call test_gfortran_builds_path_dependency()
@@ -46,6 +47,39 @@ program test_backend_gfortran
     call report('backend_gfortran')
 
 contains
+
+    subroutine test_gfortran_test_skips_app_but_build_restores_it()
+        character(len=512) :: project_dir, log_file, app_path
+        integer :: u, exitcode, run_exit
+        logical :: app_exists
+
+        call make_tmp_path('fo_test_without_app', project_dir)
+        call make_tmp_path('fo_test_without_app_log', log_file)
+        call make_simple_fpm_project(project_dir)
+        call make_dir(trim(project_dir)//'/app')
+        open (newunit=u, file=trim(project_dir)//'/app/main.f90', status='replace')
+        write (u, '(a)') 'program main'
+        write (u, '(a)') 'print "(a)", "APP_OK"'
+        write (u, '(a)') 'end program main'
+        close (u)
+        app_path = trim(project_dir)//'/build/fo/bin/fo_test_spaces'
+
+        call gfortran_test(project_dir, log_file, exitcode)
+        inquire (file=trim(app_path), exist=app_exists)
+        call assert(exitcode == 0 .and. .not. app_exists, &
+            'test-only build does not link an unrelated application')
+
+        call gfortran_build(project_dir, log_file, exitcode)
+        inquire (file=trim(app_path), exist=app_exists)
+        run_exit = 1
+        if (app_exists) call execute_command_line('"'//trim(app_path)//'"', &
+            exitstat=run_exit)
+        call assert(exitcode == 0 .and. app_exists .and. run_exit == 0, &
+            'normal build after tests creates a runnable application')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_test_skips_app_but_build_restores_it
 
     subroutine test_array_temporary_warning_flag_policy()
         character(len=128) :: flags

@@ -40,11 +40,11 @@ contains
             b%project_dir = current
             inquire (file=trim(current)//'/fpm.toml', exist=has_fpm)
             inquire (file=trim(current)//'/CMakeLists.txt', exist=has_cmake)
-            if (has_cmake) then
-                b%kind = BACKEND_CMAKE
-                return
-            else if (has_fpm) then
+            if (has_fpm) then
                 b%kind = BACKEND_NATIVE
+                return
+            else if (has_cmake) then
+                b%kind = BACKEND_CMAKE
                 return
             end if
 
@@ -187,6 +187,8 @@ contains
         select case (trim(name))
         case ('debug')
             flags = '-g -O0 -fcheck=all -fbacktrace'
+        case ('release')
+            flags = '-O3 -funroll-loops'
         case ('asan')
             flags = '-g -O0 -fcheck=all -fbacktrace '// &
                 '-fsanitize=address,undefined'

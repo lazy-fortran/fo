@@ -108,7 +108,7 @@ contains
         if (len(s) > 0) call fo_c_write_stderr(s, int(len(s), c_int))
     end subroutine process_write_stderr
 
-    subroutine process_run_argv_logged(cwd, packed, n_args, log_file, append, &
+    recursive subroutine process_run_argv_logged(cwd, packed, n_args, log_file, append, &
             timeout_s, exitcode, env_extra, heartbeat_s)
         !! Run a command given as an argv vector with no shell. packed holds
         !! n_args NUL-terminated tokens back-to-back (built by argv_begin/
@@ -145,7 +145,7 @@ contains
         exitcode = int(ec)
     end subroutine process_run_argv_logged
 
-    subroutine argv_push(packed, n_args, token)
+    recursive subroutine argv_push(packed, n_args, token)
         !! Append one argv token (a whole word) to the packed NUL-separated
         !! buffer and bump the count. Empty tokens are skipped.
         character(len=:), allocatable, intent(inout) :: packed
@@ -164,7 +164,7 @@ contains
         n_args = n_args + 1
     end subroutine argv_push
 
-    subroutine argv_reserve(packed, required)
+    recursive subroutine argv_reserve(packed, required)
         character(len=:), allocatable, intent(inout) :: packed
         integer, intent(in) :: required
         character(len=:), allocatable :: grown
@@ -190,7 +190,7 @@ contains
         call move_alloc(grown, packed)
     end subroutine argv_reserve
 
-    subroutine argv_push_split(packed, n_args, words)
+    recursive subroutine argv_push_split(packed, n_args, words)
         !! Split words on spaces and append each non-empty field as its own
         !! argv token. Use for flag strings that hold several flags at once.
         character(len=:), allocatable, intent(inout) :: packed
@@ -213,7 +213,7 @@ contains
         if (start > 0) call argv_push(packed, n_args, words(start:n))
     end subroutine argv_push_split
 
-    subroutine argv_push_split_nl(packed, n_args, words)
+    recursive subroutine argv_push_split_nl(packed, n_args, words)
         !! Split words on newlines and append each non-empty line as one argv
         !! token, internal spaces preserved. Use for paths that may contain
         !! spaces (compiler -I/-J dirs, resolved library paths).

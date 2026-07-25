@@ -1,6 +1,6 @@
 program test_scan
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_scan, only: scan_unit_t, scan_file, scan_dir, MAX_UNITS, is_slow_test
+    use fo_scan, only: scan_unit_t, scan_file, scan_dir, is_slow_test
     implicit none
 
     integer :: n_pass, n_fail
@@ -22,6 +22,7 @@ program test_scan
     call test_scan_dir_skips_nested_projects()
     call test_scan_dir_skips_build_outputs()
     call test_scan_dir_skips_agent_worktrees()
+    call test_scan_cache_invalidates()
     call test_scan_classifies_test_by_directory()
 
     write (output_unit, '(a,i0,a,i0,a)') 'scan: ', n_pass, ' pass, ', n_fail, ' fail'
@@ -265,7 +266,6 @@ contains
         integer :: n_units, ierr
         character(len=512) :: dir
 
-        allocate (units(MAX_UNITS))
         call make_tmp_path('fo_test_empty_dir', dir, '')
         call execute_command_line('rm -rf '//trim(dir))
         call execute_command_line('mkdir -p '//trim(dir))
@@ -283,7 +283,6 @@ contains
         character(len=512) :: base_dir, dir
         character(len=80) :: lib_lines(3), test_lines(3)
 
-        allocate (units(MAX_UNITS))
         call make_tmp_path('fo_test_scan_spaces', base_dir, '')
         dir = trim(base_dir)//' path with spaces'
         call remove_tree(dir)
@@ -315,7 +314,6 @@ contains
         character(len=512) :: dir
         character(len=80) :: root_lines(3), nested_lines(3)
 
-        allocate (units(MAX_UNITS))
         call make_tmp_path('fo_test_nested_project', dir, '')
         call remove_tree(dir)
         call make_dir(trim(dir)//'/src')
@@ -356,7 +354,6 @@ contains
         character(len=80) :: root_lines(3), generated_lines(3)
         logical :: ci_fs
 
-        allocate (units(MAX_UNITS))
         call make_tmp_path('fo_test_build_outputs', dir, '')
         call remove_tree(dir)
         call make_dir(trim(dir)//'/src')
@@ -408,7 +405,6 @@ contains
         character(len=512) :: dir
         character(len=80) :: root_lines(3), nested_lines(3)
 
-        allocate (units(MAX_UNITS))
         call make_tmp_path('fo_test_agent_worktree', dir, '')
         call remove_tree(dir)
         call make_dir(trim(dir)//'/src')
@@ -433,6 +429,37 @@ contains
 
         call remove_tree(dir)
     end subroutine test_scan_dir_skips_agent_worktrees
+
+    subroutine test_scan_cache_invalidates()
+        type(scan_unit_t), allocatable :: units(:)
+        integer :: n_units, ierr
+        character(len=512) :: dir
+        character(len=80) :: lines(3)
+
+        call make_tmp_path('fo_test_scan_cache', dir, '')
+        call remove_tree(dir)
+        call make_dir(trim(dir)//'/src')
+        lines = [character(len=80) :: 'module first_mod', 'implicit none', &
+            'end module first_mod']
+        call write_file(trim(dir)//'/src/unit.f90', lines, 3)
+        call scan_dir(dir, units, n_units, ierr)
+        call assert(ierr == 0 .and. n_units == 1, &
+            'scan cache: initial scan succeeds')
+        call assert(trim(units(1)%module_name) == 'first_mod', &
+            'scan cache: initial metadata')
+
+        lines = [character(len=80) :: 'module replacement_mod', 'implicit none', &
+            'end module replacement_mod']
+        call write_file(trim(dir)//'/src/unit.f90', lines, 3)
+        call scan_dir(dir, units, n_units, ierr)
+        call assert(trim(units(1)%module_name) == 'replacement_mod', &
+            'scan cache: changed source invalidates metadata')
+
+        call write_file(trim(dir)//'/src/second.f90', lines, 3)
+        call scan_dir(dir, units, n_units, ierr)
+        call assert(n_units == 2, 'scan cache: added source invalidates file list')
+        call remove_tree(dir)
+    end subroutine test_scan_cache_invalidates
 
     subroutine test_scan_classifies_test_by_directory()
         ! Classification follows fpm: a unit is a test iff it lives under a test

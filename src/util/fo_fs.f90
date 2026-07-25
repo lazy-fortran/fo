@@ -12,6 +12,8 @@ module fo_fs
     public :: fs_collect_files, fs_collect_mod_dirs
     public :: fs_mkdir_excl, fs_sleep_ms, fs_pid_alive
     public :: fs_copy_exec, fs_rename, fs_stat
+    public :: fs_tree_fingerprint
+    public :: fs_find_executable
 
     interface
         integer(c_int) function fo_c_rm_rf(path) bind(C, name='fo_c_rm_rf')
@@ -88,6 +90,22 @@ module fo_fs
             character(kind=c_char), intent(in) :: path(*)
             integer(c_long_long), intent(out) :: mtime_ns, size
         end function fo_c_stat_fingerprint
+
+        integer(c_int) function fo_c_tree_fingerprint(path, input_mode, sum, &
+                mixed, count) bind(C, name='fo_c_tree_fingerprint')
+            import :: c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: input_mode
+            integer(c_long_long), intent(out) :: sum, mixed, count
+        end function fo_c_tree_fingerprint
+
+        integer(c_int) function fo_c_find_executable(command, path, cap) &
+                bind(C, name='fo_c_find_executable')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: command(*)
+            character(kind=c_char), intent(out) :: path(*)
+            integer(c_int), value :: cap
+        end function fo_c_find_executable
 
         integer(c_int) function fo_c_collect_mod_dirs(root, out, cap) &
                 bind(C, name='fo_c_collect_mod_dirs')
@@ -228,6 +246,47 @@ contains
         rc = fo_c_stat_fingerprint(trim(path)//c_null_char, mtime_ns, size)
         ok = (rc == 0)
     end subroutine fs_stat
+
+    subroutine fs_tree_fingerprint(path, input_mode, sum, mixed, count, ok)
+        character(len=*), intent(in) :: path
+        logical, intent(in) :: input_mode
+        integer(c_long_long), intent(out) :: sum, mixed, count
+        logical, intent(out) :: ok
+
+        integer(c_int) :: mode, rc
+
+        mode = 0
+        if (input_mode) mode = 1
+        sum = 0_c_long_long
+        mixed = 0_c_long_long
+        count = 0_c_long_long
+        rc = fo_c_tree_fingerprint(trim(path)//c_null_char, mode, sum, mixed, count)
+        ok = (rc == 0)
+    end subroutine fs_tree_fingerprint
+
+    subroutine fs_find_executable(command, path, ok)
+        character(len=*), intent(in) :: command
+        character(len=*), intent(out) :: path
+        logical, intent(out) :: ok
+
+        character(kind=c_char), allocatable :: buf(:)
+        integer(c_int) :: rc
+        integer :: i
+
+        path = ''
+        allocate (buf(len(path) + 1))
+        rc = fo_c_find_executable(trim(command)//c_null_char, buf, &
+            int(size(buf), c_int))
+        ok = rc == 0
+        if (.not. ok) return
+        do i = 1, size(buf)
+            if (buf(i) == c_null_char) then
+                call chars_to_str(buf, 1, i - 1, path)
+                return
+            end if
+        end do
+        ok = .false.
+    end subroutine fs_find_executable
 
     subroutine fs_collect_mod_dirs(root, items, n_items)
         !! Recursively collect unique parent directories of *.mod files under

@@ -330,7 +330,7 @@ contains
     end subroutine extract_test_names_from_params
 
     subroutine handle_graph(line, id_str, dir, output_text, exitcode, response)
-        use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS
+        use fo_scan, only: scan_unit_t, scan_dir
         use fx_dag, only: dag_t, dag_to_dot
         use fo_dag_bridge, only: build_dag_from_units
         use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
@@ -346,7 +346,6 @@ contains
         integer :: n_units, ierr, i, j
         character(len=:), allocatable :: dot_out
 
-        allocate (units(MAX_UNITS))
         b = detect_backend(trim(dir))
         scan_root = trim(dir)
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
@@ -380,7 +379,7 @@ contains
     end subroutine handle_graph
 
     subroutine handle_info(id_str, dir, output_text, exitcode, response)
-        use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS
+        use fo_scan, only: scan_unit_t, scan_dir
         use fx_dag, only: dag_t
         use fo_dag_bridge, only: build_dag_from_units
         use fo_build_backend, only: backend_t, detect_backend, &
@@ -397,7 +396,6 @@ contains
         character(len=512) :: scan_root, cache_text
         integer :: n_units, ierr
 
-        allocate (units(MAX_UNITS))
         b = detect_backend(trim(dir))
         scan_root = trim(dir)
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir

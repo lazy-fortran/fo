@@ -17,6 +17,7 @@ program test_backend
 
     call isolate_backend_cache()
     call test_detect_fpm()
+    call test_detect_fpm_preferred_over_cmake()
     call test_detect_fpm_from_child()
     call test_detect_cmake_from_child()
     call test_detect_none()

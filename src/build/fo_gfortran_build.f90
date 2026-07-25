@@ -21,9 +21,13 @@ module fo_gfortran_build
         argv_push_split_nl
     use fo_lock, only: lock_check
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_append_file, &
-        fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec
+        fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec, &
+        fs_find_executable
     use fo_progress, only: progress_begin, progress_step, progress_end
     use fo_compiler_flags, only: append_array_temporary_warning_flag
+    use fo_build_stamp, only: build_stamp_matches, build_stamp_quick_matches, &
+        build_stamp_save
+    use fo_compiler_memo, only: compiler_memo_load, compiler_memo_save
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
     private
@@ -31,6 +35,9 @@ module fo_gfortran_build
     integer, parameter :: MAX_DEP_DIRS = 64
     integer, parameter :: MAX_DEP_OBJS = 1024
     integer, parameter :: MAX_SRC_OBJS = 2048
+    character(len=512), save :: detected_fc = ''
+    character(len=512), save :: detected_fc_path = ''
+    character(len=512), save :: detected_compiler = ''
 
     public :: gfortran_build, gfortran_test, gfortran_test_names
     public :: config_flags_str
@@ -38,13 +45,16 @@ module fo_gfortran_build
 contains
 
     subroutine gfortran_build(project_dir, log_file, exitcode, n_compiled, flags, &
-            compiler_id, use_cache)
+            compiler_id, use_cache, up_to_date, tests_ready, build_apps, apps_ready)
         character(len=*), intent(in) :: project_dir, log_file
         integer, intent(out) :: exitcode
         integer, intent(out), optional :: n_compiled
         character(len=*), intent(in), optional :: flags
         character(len=*), intent(in), optional :: compiler_id
         logical, intent(in), optional :: use_cache
+        logical, intent(out), optional :: up_to_date, tests_ready
+        logical, intent(in), optional :: build_apps
+        logical, intent(out), optional :: apps_ready
 
         type(fpm_config_t), allocatable :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_src_objs, nc
@@ -54,19 +64,45 @@ contains
         character(len=512), allocatable :: src_objs(:)
         logical, allocatable :: is_prog_arr(:)
         character(len=512) :: lf
-        character(len=512) :: flag_text, compiler
+        character(len=512) :: flag_text, compiler, request_flags
+        character(len=512), allocatable :: stamp_roots(:)
         character(len=256) :: lock_message
-        logical :: lock_ok
+        logical :: lock_ok, stamp_ok, stamp_hit, allow_cache, stamp_tests_ready
+        logical :: want_apps, stamp_apps_ready
+        integer :: n_stamp_roots
 
         lf = log_file
+        if (present(up_to_date)) up_to_date = .false.
+        if (present(tests_ready)) tests_ready = .false.
+        if (present(apps_ready)) apps_ready = .false.
         if (len_trim(lf) == 0) lf = '/dev/null'
         call cache_set_file_hash_hook(memo_hash_file)
         flag_text = ''
         if (present(flags)) flag_text = flags
+        request_flags = flag_text
         if (present(compiler_id)) then
             compiler = compiler_id
         else
             call detect_compiler(compiler)
+        end if
+        allow_cache = .true.
+        if (present(use_cache)) allow_cache = use_cache
+        want_apps = .true.
+        if (present(build_apps)) want_apps = build_apps
+        stamp_hit = .false.
+        if (allow_cache) then
+            call build_stamp_quick_matches(project_dir, compiler, request_flags, &
+                stamp_hit, stamp_tests_ready, stamp_apps_ready)
+        end if
+        if (stamp_hit .and. want_apps .and. .not. stamp_apps_ready) &
+            stamp_hit = .false.
+        if (stamp_hit) then
+            if (present(n_compiled)) n_compiled = 0
+            if (present(up_to_date)) up_to_date = .true.
+            if (present(tests_ready)) tests_ready = stamp_tests_ready
+            if (present(apps_ready)) apps_ready = stamp_apps_ready
+            exitcode = 0
+            return
         end if
 
         allocate (config, dep_includes(MAX_DEP_DIRS), dep_objs(MAX_DEP_OBJS), &
@@ -106,19 +142,43 @@ contains
 
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
+        allocate (stamp_roots(MAX_RESOLVED))
+        call collect_stamp_roots(project_dir, stamp_roots, n_stamp_roots, stamp_ok)
+        stamp_hit = .false.
+        if (allow_cache .and. stamp_ok) then
+            call build_stamp_matches(project_dir, compiler, flag_text, stamp_roots, &
+                n_stamp_roots, stamp_hit, stamp_tests_ready, stamp_apps_ready)
+        end if
+        if (stamp_hit .and. want_apps .and. .not. stamp_apps_ready) &
+            stamp_hit = .false.
+        if (stamp_hit) then
+            if (present(n_compiled)) n_compiled = 0
+            if (present(up_to_date)) up_to_date = .true.
+            if (present(tests_ready)) tests_ready = stamp_tests_ready
+            if (present(apps_ready)) apps_ready = stamp_apps_ready
+            exitcode = 0
+            return
+        end if
 
         nc = 0
         call compile_sources(project_dir, config%source_dir, config%app_dir, &
             mod_dir, obj_dir, dep_includes, n_dep_includes, lf, &
             src_objs, n_src_objs, is_prog_arr, exitcode, nc, &
-            flag_text, compiler, use_cache)
+            flag_text, compiler, want_apps, use_cache)
         if (exitcode /= 0) return
 
         if (present(n_compiled)) n_compiled = nc
 
-        call link_app_binaries(project_dir, config, bin_dir, src_objs, n_src_objs, &
-            is_prog_arr, dep_objs, n_dep_objs, lf, exitcode, &
-            flags=flag_text, use_cache=use_cache)
+        if (want_apps) then
+            call link_app_binaries(project_dir, config, bin_dir, src_objs, n_src_objs, &
+                is_prog_arr, dep_objs, n_dep_objs, lf, exitcode, &
+                flags=flag_text, use_cache=use_cache)
+        end if
+        if (exitcode == 0 .and. allow_cache .and. stamp_ok) then
+            call build_stamp_save(project_dir, compiler, flag_text, request_flags, &
+                stamp_roots, n_stamp_roots, .false., want_apps)
+        end if
+        if (present(apps_ready)) apps_ready = want_apps
         call memo_save()
     end subroutine gfortran_build
 
@@ -270,9 +330,9 @@ contains
         character(len=512), allocatable :: dep_includes(:)
         character(len=512), allocatable :: dep_objs(:)
         character(len=512), allocatable :: lib_objs(:)
-        character(len=512) :: lf, flag_text
+        character(len=512) :: lf, flag_text, request_flags
         character(len=128) :: no_names(1)
-        logical :: slow, bonly
+        logical :: slow, bonly, build_current, tests_current, apps_current
 
         lf = log_file
         if (len_trim(lf) == 0) lf = '/dev/null'
@@ -280,14 +340,15 @@ contains
         if (present(include_slow)) slow = include_slow
         flag_text = ''
         if (present(flags)) flag_text = flags
+        request_flags = flag_text
         bonly = .false.
         if (present(build_only)) bonly = build_only
         if (present(n_compiled)) n_compiled = 0
-        allocate (dep_includes(MAX_DEP_DIRS), dep_objs(MAX_DEP_OBJS), &
-            lib_objs(MAX_SRC_OBJS))
 
         call gfortran_build(project_dir, lf, exitcode, flags=flag_text, &
-            use_cache=use_cache)
+            use_cache=use_cache, up_to_date=build_current, &
+            tests_ready=tests_current, build_apps=.false., &
+            apps_ready=apps_current)
         if (exitcode /= 0) return
 
         allocate (config)
@@ -301,7 +362,14 @@ contains
         mod_dir = trim(project_dir)//'/build/fo/mod'
         obj_dir = trim(project_dir)//'/build/fo/obj'
         bin_dir = trim(project_dir)//'/build/fo/bin'
+        if (build_current .and. tests_current .and. .not. bonly) then
+            call run_current_tests(project_dir, config%test_dir, bin_dir, no_names, &
+                0, slow, lf, exitcode)
+            return
+        end if
 
+        allocate (dep_includes(MAX_DEP_DIRS), dep_objs(MAX_DEP_OBJS), &
+            lib_objs(MAX_SRC_OBJS))
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
         call collect_current_lib_objs(project_dir, config, obj_dir, lib_objs, &
@@ -314,6 +382,8 @@ contains
             no_names, 0, slow, exitcode, n_compiled, &
             flags=flag_text, &
             build_only=bonly, use_cache=use_cache)
+        if (exitcode == 0) call refresh_build_stamp(project_dir, flag_text, &
+            request_flags, apps_current, use_cache)
         call memo_save()
     end subroutine gfortran_test
 
@@ -334,8 +404,8 @@ contains
         character(len=512), allocatable :: dep_includes(:)
         character(len=512), allocatable :: dep_objs(:)
         character(len=512), allocatable :: lib_objs(:)
-        character(len=512) :: lf, flag_text
-        logical :: slow
+        character(len=512) :: lf, flag_text, request_flags
+        logical :: slow, build_current, tests_current, apps_current
 
         lf = log_file
         if (len_trim(lf) == 0) lf = '/dev/null'
@@ -343,12 +413,13 @@ contains
         if (present(include_slow)) slow = include_slow
         flag_text = ''
         if (present(flags)) flag_text = flags
+        request_flags = flag_text
         if (present(n_compiled)) n_compiled = 0
-        allocate (dep_includes(MAX_DEP_DIRS), dep_objs(MAX_DEP_OBJS), &
-            lib_objs(MAX_SRC_OBJS))
 
         call gfortran_build(project_dir, lf, exitcode, flags=flag_text, &
-            use_cache=use_cache)
+            use_cache=use_cache, up_to_date=build_current, &
+            tests_ready=tests_current, build_apps=.false., &
+            apps_ready=apps_current)
         if (exitcode /= 0) return
 
         allocate (config)
@@ -362,7 +433,14 @@ contains
         mod_dir = trim(project_dir)//'/build/fo/mod'
         obj_dir = trim(project_dir)//'/build/fo/obj'
         bin_dir = trim(project_dir)//'/build/fo/bin'
+        if (build_current .and. tests_current) then
+            call run_current_tests(project_dir, config%test_dir, bin_dir, names, &
+                n_names, slow, lf, exitcode)
+            return
+        end if
 
+        allocate (dep_includes(MAX_DEP_DIRS), dep_objs(MAX_DEP_OBJS), &
+            lib_objs(MAX_SRC_OBJS))
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
         call collect_current_lib_objs(project_dir, config, obj_dir, lib_objs, &
@@ -374,7 +452,152 @@ contains
             config%link_libs, config%n_link_libs, lf, &
             names, n_names, slow, exitcode, n_compiled, &
             flags=flag_text, use_cache=use_cache)
+        if (exitcode == 0) call refresh_build_stamp(project_dir, flag_text, &
+            request_flags, apps_current, use_cache)
     end subroutine gfortran_test_names
+
+    subroutine collect_stamp_roots(project_dir, roots, n_roots, ok)
+        character(len=*), intent(in) :: project_dir
+        character(len=*), intent(out) :: roots(:)
+        integer, intent(out) :: n_roots
+        logical, intent(out) :: ok
+
+        type(resolved_src_t) :: deps(MAX_RESOLVED)
+        integer :: n_deps, n_unresolved, ierr, i
+
+        roots = ''
+        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
+        ok = ierr == 0 .and. n_unresolved == 0
+        n_roots = 0
+        if (.not. ok) return
+        do i = 1, n_deps
+            if (n_roots >= size(roots)) then
+                ok = .false.
+                return
+            end if
+            n_roots = n_roots + 1
+            roots(n_roots) = deps(i)%src_dir
+        end do
+    end subroutine collect_stamp_roots
+
+    subroutine refresh_build_stamp(project_dir, flags, request_flags, apps_ready, &
+            use_cache)
+        character(len=*), intent(in) :: project_dir, flags, request_flags
+        logical, intent(in) :: apps_ready
+        logical, intent(in), optional :: use_cache
+
+        character(len=512) :: compiler, stamp_flags
+        character(len=512), allocatable :: roots(:)
+        integer :: n_roots
+        logical :: ok, allow_cache
+
+        allow_cache = .true.
+        if (present(use_cache)) allow_cache = use_cache
+        if (.not. allow_cache) return
+        allocate (roots(MAX_RESOLVED))
+        call collect_stamp_roots(project_dir, roots, n_roots, ok)
+        if (.not. ok) return
+        stamp_flags = flags
+        call append_array_temporary_warning_flag(fc_command(), stamp_flags)
+        call detect_compiler(compiler)
+        call build_stamp_save(project_dir, compiler, stamp_flags, request_flags, &
+            roots, n_roots, .true., apps_ready)
+    end subroutine refresh_build_stamp
+
+    subroutine run_current_tests(project_dir, test_dir, bin_dir, selected_names, &
+            n_selected, include_slow, log_file, exitcode)
+        character(len=*), intent(in) :: project_dir, test_dir, bin_dir, log_file
+        character(len=*), intent(in) :: selected_names(:)
+        integer, intent(in) :: n_selected
+        logical, intent(in) :: include_slow
+        integer, intent(out) :: exitcode
+
+        type(scan_unit_t), allocatable :: units(:)
+        character(len=MAX_PATH) :: bin_path
+        character(len=512) :: case_log, rerun_log
+        character(len=128) :: name
+        character(len=8) :: exit_str
+        integer :: n_units, ierr, i, run_exit, timeout_s, warn_s
+        integer(8) :: clk0, clk1, clk_rate
+        real :: secs
+        logical :: flaky
+
+        exitcode = 0
+        timeout_s = test_timeout_seconds()
+        warn_s = test_warn_seconds(timeout_s)
+        call scan_dir(trim(project_dir)//'/'//trim(test_dir), units, n_units, ierr)
+        if (ierr /= 0) then
+            exitcode = 1
+            return
+        end if
+        do i = 1, n_units
+            if (.not. units(i)%is_program) cycle
+            call file_basename(units(i)%filename, name)
+            if (.not. include_slow .and. is_slow_name(name)) cycle
+            if (n_selected > 0) then
+                if (.not. selected_test(name, selected_names, n_selected)) cycle
+            end if
+            bin_path = trim(bin_dir)//'/'//trim(name)
+            call make_tmpfile('fo_test_case', case_log)
+            call system_clock(clk0, clk_rate)
+            call process_run_logged(project_dir, bin_path, case_log, .true., &
+                timeout_s, run_exit)
+            call system_clock(clk1)
+            secs = 0.0
+            if (clk_rate > 0) secs = real(clk1 - clk0) / real(clk_rate)
+            flaky = .false.
+            if (run_exit /= 0 .and. run_exit /= 124) then
+                call make_tmpfile('fo_test_rerun', rerun_log)
+                call process_run_logged(project_dir, bin_path, rerun_log, .true., &
+                    timeout_s, run_exit)
+                call delete_tmpfile(rerun_log)
+                flaky = run_exit == 0
+            end if
+            if (run_exit == 0) then
+                call append_log_file(case_log, log_file)
+            else
+                call append_test_stdout_block(case_log, log_file, name)
+                if (run_exit == 124) then
+                    call append_timeout_status(log_file, name, timeout_s)
+                else
+                    call append_test_status(log_file, name, run_exit)
+                end if
+                if (exitcode == 0) exitcode = run_exit
+                call delete_tmpfile(case_log)
+            end if
+            if (flaky) then
+                call append_flaky_status(log_file, name)
+                call write_test_result_line(log_file, name, 'FLAKY', '-', secs)
+            else if (run_exit == 124) then
+                call write_test_result_line(log_file, name, 'TIMEOUT', '124', secs)
+            else if (run_exit == 0) then
+                call write_test_result_line(log_file, name, 'PASS', '-', secs)
+            else
+                write (exit_str, '(i0)') run_exit
+                call write_test_result_line(log_file, name, 'FAIL', trim(exit_str), &
+                    secs)
+            end if
+            if (run_exit == 0 .and. secs >= real(warn_s)) &
+                call warn_current_slow_test(name, secs, log_file)
+        end do
+    end subroutine run_current_tests
+
+    subroutine warn_current_slow_test(name, secs, log_file)
+        character(len=*), intent(in) :: name, log_file
+        real, intent(in) :: secs
+
+        integer :: u, ios
+
+        if (is_slow_name(name)) return
+        write (error_unit, '(a,f0.1,a)') 'fo: slow test '//trim(name)//' took ', &
+            secs, 's; name it *_slow or speed it up'
+        open (newunit=u, file=trim(log_file), position='append', status='old', &
+            iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a,f0.1,a)') 'fo: warning: slow test '//trim(name)//' took ', &
+            secs, 's (threshold above is advisory)'
+        close (u)
+    end subroutine warn_current_slow_test
 
     subroutine find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
@@ -508,7 +731,7 @@ contains
     subroutine compile_sources(project_dir, src_dir, app_dir, mod_dir, obj_dir, &
             dep_includes, n_dep_includes, log_file, &
             src_objs, n_src_objs, is_prog_arr, exitcode, &
-            n_compiled, flags, compiler, use_cache)
+            n_compiled, flags, compiler, include_apps, use_cache)
         character(len=*), intent(in) :: project_dir, src_dir, app_dir
         character(len=*), intent(in) :: mod_dir, obj_dir, log_file
         character(len=*), intent(in) :: flags, compiler
@@ -518,6 +741,7 @@ contains
         integer, intent(out) :: n_src_objs
         logical, intent(out) :: is_prog_arr(MAX_SRC_OBJS)
         integer, intent(out) :: exitcode, n_compiled
+        logical, intent(in) :: include_apps
         logical, intent(in), optional :: use_cache
 
         type(scan_unit_t), allocatable :: units_a(:), units_b(:), all_units(:)
@@ -530,7 +754,7 @@ contains
         logical :: has_cycle, restored
         logical :: allow_cache
         character(len=512) :: obj_path
-        character(len=4096) :: includes_flag
+        character(len=4096) :: includes_flag, effective_flags
         character(len=512) :: c_line
         character(len=512), allocatable :: cfiles(:)
         character(len=MAX_PATH), allocatable :: compdb_sources(:)
@@ -560,7 +784,6 @@ contains
         exitcode = 0
         n_compiled = 0
 
-        allocate (units_a(MAX_UNITS), units_b(MAX_UNITS), all_units(MAX_UNITS))
         allocate (filenames(MAX_NODES), is_prog(MAX_NODES), is_test_arr(MAX_NODES))
         allocate (topo_order(MAX_NODES), node_levels(MAX_NODES))
         allocate (old_mod_keys(MAX_NODES), new_mod_keys(MAX_NODES))
@@ -572,11 +795,10 @@ contains
         call scan_dir(trim(project_dir)//'/'//trim(app_dir), units_b, nb, ierr)
 
         n_all = na
+        allocate (all_units(na + nb))
         do i = 1, nb
-            if (n_all < MAX_UNITS) then
-                n_all = n_all + 1
-                all_units(n_all) = units_b(i)
-            end if
+            n_all = n_all + 1
+            all_units(n_all) = units_b(i)
         end do
         do i = 1, na
             all_units(i) = units_a(i)
@@ -594,6 +816,7 @@ contains
         call dag_levels(dag, topo_order, n_order, node_levels, n_levels)
         call remove_shadow_mods(project_dir, dag)
         call make_includes_flag(mod_dir, dep_includes, n_dep_includes, includes_flag)
+        effective_flags = with_user_flags(includes_flag, flags)
 
         old_mod_keys = ''
         new_mod_keys = ''
@@ -609,6 +832,8 @@ contains
             node_id = topo_order(i)
             if (is_test_arr(node_id)) cycle
             if (len_trim(filenames(node_id)) == 0) cycle
+            if (.not. include_apps .and. source_is_in_dir(filenames(node_id), &
+                project_dir, app_dir)) cycle
             total_source = total_source + 1
             n_compdb = n_compdb + 1
             compdb_sources(n_compdb) = filenames(node_id)
@@ -624,10 +849,12 @@ contains
                 ii_failed = 0
 
                 do i = 1, n_order
-                    if (node_levels(i) /= lvl) cycle
                     node_id = topo_order(i)
+                    if (node_levels(i) /= lvl) cycle
                     if (is_test_arr(node_id)) cycle
                     if (len_trim(filenames(node_id)) == 0) cycle
+                    if (.not. include_apps .and. source_is_in_dir( &
+                        filenames(node_id), project_dir, app_dir)) cycle
 
                     call collect_dep_keys_source_order(all_units, n_all, dag, node_id, &
                         new_mod_keys, dep_includes, &
@@ -669,7 +896,7 @@ contains
                     call make_tmpfile('fo_compile', per_logs(ii))
                 end do
 
-                !$omp parallel do schedule(dynamic) &
+                !$omp parallel do if(n_compile > 1) schedule(static) &
                 !$omp private(node_id, obj_path, fname_local, per_log_local)
                 do ii = 1, n_compile
                     node_id = compile_nodes(ii)
@@ -677,11 +904,26 @@ contains
                     per_log_local = per_logs(ii)
                     call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
                     call compile_f90(project_dir, fname_local, obj_path, &
-                        with_user_flags(includes_flag, flags), &
+                        effective_flags, &
                         per_log_local, compile_exits(ii))
                     call progress_step()
                 end do
                 !$omp end parallel do
+
+                ! A compiler launch from a crowded OpenMP region can fail
+                ! transiently (for example, exec returning ENOENT despite the
+                ! compiler being present). Retry only failed actions once after
+                ! the workers have joined. A genuine compiler diagnostic fails
+                ! again and is reported normally.
+                do ii = 1, n_compile
+                    if (compile_exits(ii) == 0) cycle
+                    call truncate_file(trim(per_logs(ii)))
+                    node_id = compile_nodes(ii)
+                    call make_obj_path(filenames(node_id), project_dir, obj_dir, &
+                        obj_path)
+                    call compile_f90(project_dir, filenames(node_id), obj_path, &
+                        effective_flags, per_logs(ii), compile_exits(ii))
+                end do
 
                 do ii = 1, n_compile
                     call append_log_file(trim(per_logs(ii)), log_file)
@@ -720,9 +962,11 @@ contains
                 node_id = topo_order(i)
                 if (len_trim(filenames(node_id)) == 0) cycle
                 if (is_test_arr(node_id)) cycle
+                if (.not. include_apps .and. source_is_in_dir(filenames(node_id), &
+                    project_dir, app_dir)) cycle
                 call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
                 call compile_f90(project_dir, filenames(node_id), obj_path, &
-                    with_user_flags(includes_flag, flags), log_file, &
+                    effective_flags, log_file, &
                     exitcode)
                 if (exitcode /= 0) then
                     call progress_end()
@@ -742,6 +986,8 @@ contains
             node_id = topo_order(i)
             if (len_trim(filenames(node_id)) == 0) cycle
             if (is_test_arr(node_id)) cycle
+            if (.not. include_apps .and. source_is_in_dir(filenames(node_id), &
+                project_dir, app_dir)) cycle
             call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
             if (n_src_objs < MAX_SRC_OBJS) then
                 n_src_objs = n_src_objs + 1
@@ -844,32 +1090,52 @@ contains
         !! resolved dep list is returned so the caller can also compile each
         !! dep's C sources for linking.
         character(len=*), intent(in) :: project_dir
-        type(scan_unit_t), intent(inout) :: all_units(MAX_UNITS)
+        type(scan_unit_t), allocatable, intent(inout) :: all_units(:)
         integer, intent(inout) :: n_all
         type(resolved_src_t), intent(out) :: deps(MAX_RESOLVED)
         integer, intent(out) :: n_deps
 
-        type(scan_unit_t), allocatable :: ud(:)
-        integer :: n_unres, ierr, d, j, nu
+        type(scan_unit_t), allocatable :: ud(:), grown(:)
+        integer :: n_unres, ierr, d, j, nu, old_n
 
         n_deps = 0
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unres, ierr)
         if (ierr /= 0 .or. n_deps == 0) return
 
-        allocate (ud(MAX_UNITS))
         do d = 1, n_deps
             call scan_dir(trim(deps(d)%src_dir), ud, nu, ierr)
             if (ierr /= 0) cycle
+            old_n = n_all
+            allocate (grown(old_n + nu))
+            if (old_n > 0) grown(1:old_n) = all_units(1:old_n)
             do j = 1, nu
                 if (ud(j)%is_program) cycle
-                if (n_all < MAX_UNITS) then
-                    n_all = n_all + 1
-                    all_units(n_all) = ud(j)
-                end if
+                n_all = n_all + 1
+                grown(n_all) = ud(j)
             end do
+            call move_alloc(grown, all_units)
         end do
-        deallocate (ud)
     end subroutine add_dep_sources
+
+    subroutine append_module_units(units, n_units, candidates, n_candidates)
+        type(scan_unit_t), allocatable, intent(inout) :: units(:)
+        integer, intent(inout) :: n_units
+        type(scan_unit_t), intent(in) :: candidates(:)
+        integer, intent(in) :: n_candidates
+
+        type(scan_unit_t), allocatable :: grown(:)
+        integer :: i, old_n
+
+        old_n = n_units
+        allocate (grown(old_n + n_candidates))
+        if (old_n > 0) grown(1:old_n) = units(1:old_n)
+        do i = 1, n_candidates
+            if (candidates(i)%is_program) cycle
+            n_units = n_units + 1
+            grown(n_units) = candidates(i)
+        end do
+        call move_alloc(grown, units)
+    end subroutine append_module_units
 
     subroutine compile_dep_c_sources(deps, n_deps, project_dir, obj_dir, &
             log_file, src_objs, n_src_objs, is_prog_arr, exitcode)
@@ -1300,8 +1566,6 @@ contains
         integer, intent(out), optional :: n_compiled
         character(len=*), intent(in), optional :: flags
         ! build_only: compile and link the test binaries but do not run them.
-        ! Used by `fo build` so build/fo/bin/test_* stay current with the
-        ! sources, instead of going stale until the next `fo test`.
         logical, intent(in), optional :: build_only
         logical, intent(in), optional :: use_cache
 
@@ -1340,7 +1604,7 @@ contains
         integer :: n_helper_objs, n_all_lib
         logical :: in_lib
         type(resolved_src_t) :: devsrcs(MAX_RESOLVED)
-        integer :: n_dev, d, k, nud
+        integer :: n_dev, d, nud
         type(scan_unit_t), allocatable :: udev(:)
 
         bonly = .false.
@@ -1350,7 +1614,6 @@ contains
         call append_array_temporary_warning_flag(fc_command(), test_flags)
         exitcode = 0
         if (present(n_compiled)) n_compiled = 0
-        allocate (tunits(MAX_UNITS))
         allocate (filenames(MAX_NODES), is_prog(MAX_NODES), is_test_arr(MAX_NODES))
         allocate (topo_order(MAX_NODES))
         allocate (run_nodes(MAX_NODES), run_exits(MAX_NODES), run_logs(MAX_NODES))
@@ -1367,18 +1630,11 @@ contains
 
         call resolve_dev_dep_srcs(project_dir, devsrcs, n_dev, ierr)
         if (ierr == 0 .and. n_dev > 0) then
-            allocate (udev(MAX_UNITS))
             do d = 1, n_dev
                 call scan_dir(trim(devsrcs(d)%src_dir), udev, nud, ierr)
                 if (ierr /= 0) cycle
-                do k = 1, nud
-                    if (udev(k)%is_program) cycle
-                    if (n_tests >= MAX_UNITS) exit
-                    n_tests = n_tests + 1
-                    tunits(n_tests) = udev(k)
-                end do
+                call append_module_units(tunits, n_tests, udev, nud)
             end do
-            deallocate (udev)
         end if
 
         call build_dag_from_units(tunits, n_tests, dag, filenames, is_test_arr, is_prog)
@@ -1481,7 +1737,7 @@ contains
         else
             call progress_begin('test', n_run)
         end if
-        !$omp parallel do schedule(dynamic) private(node_id, fname_local, &
+        !$omp parallel do if(n_run > 1) schedule(dynamic) private(node_id, fname_local, &
         !$omp& obj_path, bin_path, tname, log_local, restored, clk0, clk1, &
         !$omp& clk_rate)
         do i = 1, n_run
@@ -1901,10 +2157,10 @@ contains
         n_lib_objs = 0
         lib_objs = ''
         n_deps = 0
-        allocate (units(MAX_UNITS), all_units(MAX_UNITS))
         call scan_dir(trim(project_dir)//'/'//trim(config%source_dir), units, &
             n_units, ierr)
         n_all = 0
+        allocate (all_units(n_units))
         if (ierr == 0) then
             do i = 1, n_units
                 if (n_all >= MAX_UNITS) exit
@@ -1972,6 +2228,17 @@ contains
         end if
     end subroutine append_current_lib_obj
 
+    logical function source_is_in_dir(source_path, project_dir, relative_dir)
+        character(len=*), intent(in) :: source_path, project_dir, relative_dir
+        character(len=MAX_PATH) :: prefix
+        integer :: n
+
+        prefix = trim(project_dir)//'/'//trim(relative_dir)//'/'
+        n = len_trim(prefix)
+        source_is_in_dir = len_trim(source_path) >= n .and. &
+            source_path(1:n) == prefix(1:n)
+    end function source_is_in_dir
+
     subroutine hash_lib_objs(lib_objs, n_lib_objs, combined)
         !! Combine per-object content hashes into one key that represents the
         !! linked library implementation a test binary depends on, so a cached
@@ -1997,7 +2264,7 @@ contains
         call delete_tmpfile(tmpfile)
     end subroutine hash_lib_objs
 
-    subroutine make_obj_path(source_path, project_dir, obj_dir, obj_path)
+    recursive subroutine make_obj_path(source_path, project_dir, obj_dir, obj_path)
         character(len=*), intent(in) :: source_path, project_dir, obj_dir
         character(len=*), intent(out) :: obj_path
 
@@ -2017,7 +2284,7 @@ contains
         obj_path = trim(obj_dir)//'/'//trim(rel)//'.o'
     end subroutine make_obj_path
 
-    function fc_command() result(cmd)
+    recursive function fc_command() result(cmd)
         !! Fortran compiler: $FO_FC if set, else gfortran. Lets a host opt into
         !! a different compiler (e.g. flang to dodge a gfortran codegen bug)
         !! without editing the project.
@@ -2033,14 +2300,34 @@ contains
         end if
     end function fc_command
 
-    logical function fc_is_flang()
+    function fc_executable_command() result(cmd)
+        character(len=:), allocatable :: cmd
+
+        cmd = fc_command()
+        if (len_trim(detected_fc_path) > 0) cmd = trim(detected_fc_path)
+    end function fc_executable_command
+
+    subroutine resolve_fc_executable(command)
+        character(len=*), intent(in) :: command
+        logical :: found
+
+        detected_fc_path = ''
+        if (index(trim(command), ' ') > 0) then
+            detected_fc_path = command
+            return
+        end if
+        call fs_find_executable(command, detected_fc_path, found)
+        if (.not. found) detected_fc_path = command
+    end subroutine resolve_fc_executable
+
+    recursive logical function fc_is_flang()
         !! True when the selected compiler is LLVM flang. Drives flag dialect:
         !! flang rejects gfortran-only flags and spells the module-output dir
         !! differently.
         fc_is_flang = index(fc_command(), 'flang') > 0
     end function fc_is_flang
 
-    function fc_base_flags() result(flags)
+    recursive function fc_base_flags() result(flags)
         !! Compiler-appropriate baseline compile flags. gfortran needs the long
         !! free-form line length; flang has no line limit and rejects that flag.
         !! -fopenmp is added per project via the fpm openmp metapackage (see
@@ -2079,7 +2366,7 @@ contains
         end do
     end subroutine make_includes_flag
 
-    function with_user_flags(includes_nl, flags) result(combined)
+    recursive function with_user_flags(includes_nl, flags) result(combined)
         !! Append space-separated user flags onto the newline-separated include
         !! token list as their own newline tokens, so the whole string stays
         !! newline-delimited and -I/-J paths containing spaces survive the split
@@ -2108,14 +2395,28 @@ contains
         character(len=*), intent(out) :: compiler
 
         character(len=256) :: line
-        character(len=512) :: tmpfile
+        character(len=512) :: tmpfile, command
         character(len=:), allocatable :: packed
         integer :: u, iostat, n_args, exitcode
+        logical :: memo_hit
 
-        compiler = fc_command()
+        command = fc_command()
+        call resolve_fc_executable(command)
+        if (trim(command) == trim(detected_fc) .and. &
+            len_trim(detected_compiler) > 0) then
+            compiler = detected_compiler
+            return
+        end if
+        compiler = command
+        call compiler_memo_load(command, compiler, memo_hit)
+        if (memo_hit) then
+            detected_fc = command
+            detected_compiler = compiler
+            return
+        end if
         call make_tmpfile('fo_compiler_version', tmpfile)
         n_args = 0
-        call argv_push_split(packed, n_args, fc_command())
+        call argv_push_split(packed, n_args, fc_executable_command())
         call argv_push(packed, n_args, '--version')
         call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
             .false., 30, exitcode)
@@ -2127,9 +2428,12 @@ contains
             close (u)
         end if
         call delete_tmpfile(tmpfile)
+        detected_fc = command
+        detected_compiler = compiler
+        call compiler_memo_save(command, compiler)
     end subroutine detect_compiler
 
-    subroutine compile_f90(project_dir, source, objfile, includes_flag, log_file, &
+    recursive subroutine compile_f90(project_dir, source, objfile, includes_flag, log_file, &
             exitcode)
         character(len=*), intent(in) :: project_dir, source, objfile, includes_flag
         character(len=*), intent(in) :: log_file
@@ -2141,14 +2445,16 @@ contains
         ! (fork+execve, no /bin/sh): it is safe inside the OpenMP parallel
         ! compile/test loops, where system()/fork from a multithreaded process
         ! corrupts libgomp, and it is quote-proof, unlike a shell command line.
+        !$omp critical (fo_compile_command)
         n_args = 0
-        call argv_push_split(packed, n_args, fc_command())
+        call argv_push_split(packed, n_args, fc_executable_command())
         call argv_push(packed, n_args, '-c')
         call argv_push_split_nl(packed, n_args, includes_flag)
         call argv_push_split(packed, n_args, fc_base_flags())
         call argv_push(packed, n_args, '-o')
         call argv_push(packed, n_args, objfile)
         call argv_push(packed, n_args, source)
+        !$omp end critical (fo_compile_command)
 
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
             .true., build_timeout_seconds(), exitcode)
@@ -2296,7 +2602,7 @@ contains
         ! since link_binary runs inside the parallel test loop where a shell
         ! fork would corrupt libgomp.
         n_args = 0
-        call argv_push_split(packed, n_args, fc_command())
+        call argv_push_split(packed, n_args, fc_executable_command())
         call argv_push(packed, n_args, prog_obj)
         do i = 1, n_lib_objs
             call argv_push(packed, n_args, lib_objs(i))
