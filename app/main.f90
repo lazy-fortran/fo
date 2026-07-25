@@ -350,7 +350,8 @@ contains
         write (output_unit, '(a)') '  lint --json  lint results as JSON'
         write (output_unit, '(a)') '  lint --fix   remove unused imports in place'
         write (output_unit, '(a)') '  clean      drop project build tree (--cache also purges shared store)'
-        write (output_unit, '(a)') '  install    install binary (fpm install --prefix ~/.local)'
+        write (output_unit, '(a)') &
+            '  install    install release binary (fpm install --profile release)'
         write (output_unit, '(a)') '  lock       write fo.lock for current compiler, flags, and deps'
         write (output_unit, '(a)') '  info       backend, file count, module count'
         write (output_unit, '(a)') '  info --capabilities  compiler and tooling limits'
@@ -1361,6 +1362,8 @@ contains
         n_args = 0
         call argv_push(packed, n_args, 'fpm')
         call argv_push(packed, n_args, 'install')
+        call argv_push(packed, n_args, '--profile')
+        call argv_push(packed, n_args, 'release')
         call argv_push(packed, n_args, '--prefix')
         call argv_push(packed, n_args, trim(prefix))
         call process_run_argv_logged('.', packed, n_args, install_log, &

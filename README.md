@@ -9,7 +9,7 @@ invoking `fpm` to build or test.
 ## Install
 
 ```bash
-fpm install --prefix ~/.local
+fpm install --profile release --prefix ~/.local
 ```
 
 ## Usage
