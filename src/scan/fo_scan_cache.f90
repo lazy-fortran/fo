@@ -1,5 +1,5 @@
 module fo_scan_cache
-    use fo_scan_types, only: scan_unit_t, MAX_PATH
+    use fo_scan_types, only: scan_unit_t, MAX_PATH, MAX_UNITS
     use fo_fs, only: fs_make_dir, fs_rename, fs_stat
     use fo_util, only: make_sibling_tmpfile, delete_tmpfile
     use fx_hash, only: fnv1a_string
@@ -9,7 +9,7 @@ module fo_scan_cache
 
     character(len=16), parameter :: CACHE_MAGIC = 'fo-scan-v1'
 
-    public :: scan_cache_load, scan_cache_save
+    public :: scan_cache_load, scan_cache_load_trusted, scan_cache_save
 
 contains
 
@@ -56,6 +56,48 @@ contains
         close (u)
         hit = .true.
     end subroutine scan_cache_load
+
+    subroutine scan_cache_load_trusted(root, units, hit)
+        !! Load a scan after a caller has independently validated the complete
+        !! source tree (the warm build stamp does this). This avoids enumerating
+        !! the directory a second time on the warm test path.
+        character(len=*), intent(in) :: root
+        type(scan_unit_t), allocatable, intent(out) :: units(:)
+        logical, intent(out) :: hit
+
+        character(len=MAX_PATH) :: file, stored_root, stored_path
+        character(len=16) :: magic
+        integer(c_long_long) :: stored_mtime, stored_size
+        integer :: u, ios, i, n_stored
+
+        hit = .false.
+        allocate (units(0))
+        call cache_file(root, file)
+        if (len_trim(file) == 0) return
+        open (newunit=u, file=trim(file), access='stream', form='unformatted', &
+            status='old', action='read', iostat=ios)
+        if (ios /= 0) return
+        read (u, iostat=ios) magic, stored_root, n_stored
+        if (ios /= 0 .or. magic /= CACHE_MAGIC .or. &
+            trim(stored_root) /= trim(root) .or. n_stored < 0 .or. &
+            n_stored > MAX_UNITS) then
+            close (u)
+            return
+        end if
+        deallocate (units)
+        allocate (units(n_stored))
+        do i = 1, n_stored
+            read (u, iostat=ios) stored_path, stored_mtime, stored_size, units(i)
+            if (ios /= 0) then
+                close (u)
+                deallocate (units)
+                allocate (units(0))
+                return
+            end if
+        end do
+        close (u)
+        hit = .true.
+    end subroutine scan_cache_load_trusted
 
     subroutine scan_cache_save(root, paths, units)
         character(len=*), intent(in) :: root

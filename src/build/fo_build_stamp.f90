@@ -7,13 +7,14 @@ module fo_build_stamp
     private
 
     integer, parameter :: TEXT_LEN = 4096
-    character(len=16), parameter :: STAMP_MAGIC = 'fo-build-v4'
+    character(len=16), parameter :: STAMP_MAGIC = 'fo-build-v5'
 
     type :: stamp_t
         character(len=512) :: project = ''
         character(len=TEXT_LEN) :: compiler = ''
         character(len=TEXT_LEN) :: flags = ''
         character(len=TEXT_LEN) :: request_flags = ''
+        character(len=512) :: test_dir = ''
         character(len=512), allocatable :: roots(:)
         logical :: tests_ready = .false.
         logical :: apps_ready = .false.
@@ -30,13 +31,14 @@ module fo_build_stamp
 contains
 
     subroutine build_stamp_matches(project_dir, compiler, flags, dep_roots, &
-            n_dep_roots, matches, tests_ready, apps_ready)
+            n_dep_roots, matches, tests_ready, apps_ready, test_dir)
         character(len=*), intent(in) :: project_dir, compiler, flags
         character(len=*), intent(in) :: dep_roots(:)
         integer, intent(in) :: n_dep_roots
         logical, intent(out) :: matches
         logical, intent(out), optional :: tests_ready
         logical, intent(out), optional :: apps_ready
+        character(len=*), intent(out), optional :: test_dir
 
         type(stamp_t) :: stamp
         integer(c_long_long) :: in_sum, in_mixed, in_count
@@ -47,6 +49,7 @@ contains
         matches = .false.
         if (present(tests_ready)) tests_ready = .false.
         if (present(apps_ready)) apps_ready = .false.
+        if (present(test_dir)) test_dir = ''
         call read_stamp(project_dir, stamp, ok)
         if (.not. ok) return
         if (trim(stamp%compiler) /= trim(compiler)) return
@@ -66,14 +69,16 @@ contains
             out_mixed, out_count, matches)
         if (matches .and. present(tests_ready)) tests_ready = stamp%tests_ready
         if (matches .and. present(apps_ready)) apps_ready = stamp%apps_ready
+        if (matches .and. present(test_dir)) test_dir = stamp%test_dir
     end subroutine build_stamp_matches
 
     subroutine build_stamp_quick_matches(project_dir, compiler, request_flags, &
-            matches, tests_ready, apps_ready)
+            matches, tests_ready, apps_ready, test_dir)
         character(len=*), intent(in) :: project_dir, compiler, request_flags
         logical, intent(out) :: matches
         logical, intent(out), optional :: tests_ready
         logical, intent(out), optional :: apps_ready
+        character(len=*), intent(out), optional :: test_dir
 
         type(stamp_t) :: stamp
         integer(c_long_long) :: in_sum, in_mixed, in_count
@@ -83,6 +88,7 @@ contains
         matches = .false.
         if (present(tests_ready)) tests_ready = .false.
         if (present(apps_ready)) apps_ready = .false.
+        if (present(test_dir)) test_dir = ''
         call read_stamp(project_dir, stamp, ok)
         if (.not. ok) return
         if (trim(stamp%compiler) /= trim(compiler)) return
@@ -97,14 +103,16 @@ contains
             out_mixed, out_count, matches)
         if (matches .and. present(tests_ready)) tests_ready = stamp%tests_ready
         if (matches .and. present(apps_ready)) apps_ready = stamp%apps_ready
+        if (matches .and. present(test_dir)) test_dir = stamp%test_dir
     end subroutine build_stamp_quick_matches
 
     subroutine build_stamp_save(project_dir, compiler, flags, request_flags, &
-            dep_roots, n_dep_roots, tests_ready, apps_ready)
+            dep_roots, n_dep_roots, tests_ready, apps_ready, test_dir)
         character(len=*), intent(in) :: project_dir, compiler, flags, request_flags
         character(len=*), intent(in) :: dep_roots(:)
         integer, intent(in) :: n_dep_roots
         logical, intent(in) :: tests_ready, apps_ready
+        character(len=*), intent(in) :: test_dir
 
         type(stamp_t) :: stamp
         character(len=512) :: file, tmpfile
@@ -131,6 +139,7 @@ contains
         stamp%request_flags = request_flags
         stamp%tests_ready = tests_ready
         stamp%apps_ready = apps_ready
+        stamp%test_dir = test_dir
         allocate (stamp%roots(n_dep_roots))
         if (n_dep_roots > 0) stamp%roots = dep_roots(1:n_dep_roots)
         stamp%in_sum = in_sum
@@ -141,7 +150,7 @@ contains
         stamp%out_count = out_count
         write (u, iostat=ios) STAMP_MAGIC, stamp%project, stamp%compiler, &
             stamp%flags, stamp%request_flags, stamp%tests_ready, &
-            stamp%apps_ready, n_dep_roots
+            stamp%apps_ready, stamp%test_dir, n_dep_roots
         if (ios == 0 .and. n_dep_roots > 0) write (u, iostat=ios) stamp%roots
         if (ios == 0) write (u, iostat=ios) in_sum, in_mixed, in_count, &
             out_sum, out_mixed, out_count
@@ -170,7 +179,8 @@ contains
             status='old', action='read', iostat=ios)
         if (ios /= 0) return
         read (u, iostat=ios) magic, stamp%project, stamp%compiler, stamp%flags, &
-            stamp%request_flags, stamp%tests_ready, stamp%apps_ready, n_roots
+            stamp%request_flags, stamp%tests_ready, stamp%apps_ready, &
+            stamp%test_dir, n_roots
         if (ios /= 0) then
             close (u)
             return

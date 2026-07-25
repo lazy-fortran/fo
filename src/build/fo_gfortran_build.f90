@@ -1,7 +1,7 @@
 module fo_gfortran_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, manifest_exe_name, &
         dep_kind, DEP_PATH
-    use fo_scan, only: scan_unit_t, scan_dir, source_defines_module, &
+    use fo_scan, only: scan_unit_t, scan_dir, scan_dir_cached, source_defines_module, &
         MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
@@ -45,7 +45,8 @@ module fo_gfortran_build
 contains
 
     subroutine gfortran_build(project_dir, log_file, exitcode, n_compiled, flags, &
-            compiler_id, use_cache, up_to_date, tests_ready, build_apps, apps_ready)
+            compiler_id, use_cache, up_to_date, tests_ready, build_apps, apps_ready, &
+            cached_test_dir)
         character(len=*), intent(in) :: project_dir, log_file
         integer, intent(out) :: exitcode
         integer, intent(out), optional :: n_compiled
@@ -55,6 +56,7 @@ contains
         logical, intent(out), optional :: up_to_date, tests_ready
         logical, intent(in), optional :: build_apps
         logical, intent(out), optional :: apps_ready
+        character(len=*), intent(out), optional :: cached_test_dir
 
         type(fpm_config_t), allocatable :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_src_objs, nc
@@ -64,7 +66,7 @@ contains
         character(len=512), allocatable :: src_objs(:)
         logical, allocatable :: is_prog_arr(:)
         character(len=512) :: lf
-        character(len=512) :: flag_text, compiler, request_flags
+        character(len=512) :: flag_text, compiler, request_flags, stamp_test_dir
         character(len=512), allocatable :: stamp_roots(:)
         character(len=256) :: lock_message
         logical :: lock_ok, stamp_ok, stamp_hit, allow_cache, stamp_tests_ready
@@ -75,6 +77,7 @@ contains
         if (present(up_to_date)) up_to_date = .false.
         if (present(tests_ready)) tests_ready = .false.
         if (present(apps_ready)) apps_ready = .false.
+        if (present(cached_test_dir)) cached_test_dir = ''
         if (len_trim(lf) == 0) lf = '/dev/null'
         call cache_set_file_hash_hook(memo_hash_file)
         flag_text = ''
@@ -92,7 +95,7 @@ contains
         stamp_hit = .false.
         if (allow_cache) then
             call build_stamp_quick_matches(project_dir, compiler, request_flags, &
-                stamp_hit, stamp_tests_ready, stamp_apps_ready)
+                stamp_hit, stamp_tests_ready, stamp_apps_ready, stamp_test_dir)
         end if
         if (stamp_hit .and. want_apps .and. .not. stamp_apps_ready) &
             stamp_hit = .false.
@@ -101,6 +104,7 @@ contains
             if (present(up_to_date)) up_to_date = .true.
             if (present(tests_ready)) tests_ready = stamp_tests_ready
             if (present(apps_ready)) apps_ready = stamp_apps_ready
+            if (present(cached_test_dir)) cached_test_dir = stamp_test_dir
             exitcode = 0
             return
         end if
@@ -147,7 +151,8 @@ contains
         stamp_hit = .false.
         if (allow_cache .and. stamp_ok) then
             call build_stamp_matches(project_dir, compiler, flag_text, stamp_roots, &
-                n_stamp_roots, stamp_hit, stamp_tests_ready, stamp_apps_ready)
+                n_stamp_roots, stamp_hit, stamp_tests_ready, stamp_apps_ready, &
+                stamp_test_dir)
         end if
         if (stamp_hit .and. want_apps .and. .not. stamp_apps_ready) &
             stamp_hit = .false.
@@ -156,6 +161,7 @@ contains
             if (present(up_to_date)) up_to_date = .true.
             if (present(tests_ready)) tests_ready = stamp_tests_ready
             if (present(apps_ready)) apps_ready = stamp_apps_ready
+            if (present(cached_test_dir)) cached_test_dir = stamp_test_dir
             exitcode = 0
             return
         end if
@@ -176,9 +182,10 @@ contains
         end if
         if (exitcode == 0 .and. allow_cache .and. stamp_ok) then
             call build_stamp_save(project_dir, compiler, flag_text, request_flags, &
-                stamp_roots, n_stamp_roots, .false., want_apps)
+                stamp_roots, n_stamp_roots, .false., want_apps, config%test_dir)
         end if
         if (present(apps_ready)) apps_ready = want_apps
+        if (present(cached_test_dir)) cached_test_dir = config%test_dir
         call memo_save()
     end subroutine gfortran_build
 
@@ -330,7 +337,7 @@ contains
         character(len=512), allocatable :: dep_includes(:)
         character(len=512), allocatable :: dep_objs(:)
         character(len=512), allocatable :: lib_objs(:)
-        character(len=512) :: lf, flag_text, request_flags
+        character(len=512) :: lf, flag_text, request_flags, test_dir
         character(len=128) :: no_names(1)
         logical :: slow, bonly, build_current, tests_current, apps_current
 
@@ -348,8 +355,16 @@ contains
         call gfortran_build(project_dir, lf, exitcode, flags=flag_text, &
             use_cache=use_cache, up_to_date=build_current, &
             tests_ready=tests_current, build_apps=.false., &
-            apps_ready=apps_current)
+            apps_ready=apps_current, cached_test_dir=test_dir)
         if (exitcode /= 0) return
+
+        bin_dir = trim(project_dir)//'/build/fo/bin'
+        if (build_current .and. tests_current .and. .not. bonly .and. &
+            len_trim(test_dir) > 0) then
+            call run_current_tests(project_dir, test_dir, bin_dir, no_names, &
+                0, slow, lf, exitcode)
+            return
+        end if
 
         allocate (config)
         call fpm_config_parse(project_dir, config, ierr)
@@ -383,7 +398,7 @@ contains
             flags=flag_text, &
             build_only=bonly, use_cache=use_cache)
         if (exitcode == 0) call refresh_build_stamp(project_dir, flag_text, &
-            request_flags, apps_current, use_cache)
+            request_flags, apps_current, config%test_dir, use_cache)
         call memo_save()
     end subroutine gfortran_test
 
@@ -404,7 +419,7 @@ contains
         character(len=512), allocatable :: dep_includes(:)
         character(len=512), allocatable :: dep_objs(:)
         character(len=512), allocatable :: lib_objs(:)
-        character(len=512) :: lf, flag_text, request_flags
+        character(len=512) :: lf, flag_text, request_flags, test_dir
         logical :: slow, build_current, tests_current, apps_current
 
         lf = log_file
@@ -419,8 +434,15 @@ contains
         call gfortran_build(project_dir, lf, exitcode, flags=flag_text, &
             use_cache=use_cache, up_to_date=build_current, &
             tests_ready=tests_current, build_apps=.false., &
-            apps_ready=apps_current)
+            apps_ready=apps_current, cached_test_dir=test_dir)
         if (exitcode /= 0) return
+
+        bin_dir = trim(project_dir)//'/build/fo/bin'
+        if (build_current .and. tests_current .and. len_trim(test_dir) > 0) then
+            call run_current_tests(project_dir, test_dir, bin_dir, names, &
+                n_names, slow, lf, exitcode)
+            return
+        end if
 
         allocate (config)
         call fpm_config_parse(project_dir, config, ierr)
@@ -453,7 +475,7 @@ contains
             names, n_names, slow, exitcode, n_compiled, &
             flags=flag_text, use_cache=use_cache)
         if (exitcode == 0) call refresh_build_stamp(project_dir, flag_text, &
-            request_flags, apps_current, use_cache)
+            request_flags, apps_current, config%test_dir, use_cache)
     end subroutine gfortran_test_names
 
     subroutine collect_stamp_roots(project_dir, roots, n_roots, ok)
@@ -481,9 +503,10 @@ contains
     end subroutine collect_stamp_roots
 
     subroutine refresh_build_stamp(project_dir, flags, request_flags, apps_ready, &
-            use_cache)
+            test_dir, use_cache)
         character(len=*), intent(in) :: project_dir, flags, request_flags
         logical, intent(in) :: apps_ready
+        character(len=*), intent(in) :: test_dir
         logical, intent(in), optional :: use_cache
 
         character(len=512) :: compiler, stamp_flags
@@ -501,7 +524,7 @@ contains
         call append_array_temporary_warning_flag(fc_command(), stamp_flags)
         call detect_compiler(compiler)
         call build_stamp_save(project_dir, compiler, stamp_flags, request_flags, &
-            roots, n_roots, .true., apps_ready)
+            roots, n_roots, .true., apps_ready, test_dir)
     end subroutine refresh_build_stamp
 
     subroutine run_current_tests(project_dir, test_dir, bin_dir, selected_names, &
@@ -525,7 +548,8 @@ contains
         exitcode = 0
         timeout_s = test_timeout_seconds()
         warn_s = test_warn_seconds(timeout_s)
-        call scan_dir(trim(project_dir)//'/'//trim(test_dir), units, n_units, ierr)
+        call scan_dir_cached(trim(project_dir)//'/'//trim(test_dir), units, &
+            n_units, ierr)
         if (ierr /= 0) then
             exitcode = 1
             return

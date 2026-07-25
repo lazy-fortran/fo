@@ -3,11 +3,13 @@ module fo_scan
     use fo_util, only: make_tmpfile, delete_tmpfile
     use fo_process, only: process_scan_sources
     use fo_scan_types, only: scan_unit_t, MAX_NAME, MAX_PATH, MAX_UNITS, MAX_DEPS
-    use fo_scan_cache, only: scan_cache_load, scan_cache_save
+    use fo_scan_cache, only: scan_cache_load, scan_cache_load_trusted, &
+        scan_cache_save
     implicit none
     private
 
-    public :: scan_unit_t, scan_file, scan_dir, is_slow_test, source_defines_module
+    public :: scan_unit_t, scan_file, scan_dir, scan_dir_cached
+    public :: is_slow_test, source_defines_module
     public :: MAX_NAME, MAX_PATH, MAX_UNITS
 
     character(len=32), dimension(10), parameter :: INTRINSIC_MODULES = [ &
@@ -24,6 +26,21 @@ module fo_scan
         ]
 
 contains
+
+    subroutine scan_dir_cached(dirname, units, n_units, ierr)
+        character(len=*), intent(in) :: dirname
+        type(scan_unit_t), allocatable, intent(out) :: units(:)
+        integer, intent(out) :: n_units, ierr
+        logical :: hit
+
+        call scan_cache_load_trusted(dirname, units, hit)
+        if (hit) then
+            n_units = size(units)
+            ierr = 0
+            return
+        end if
+        call scan_dir(dirname, units, n_units, ierr)
+    end subroutine scan_dir_cached
 
     logical function source_defines_module(filename) result(defines_module)
         character(len=*), intent(in) :: filename
