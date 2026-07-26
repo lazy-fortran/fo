@@ -31,7 +31,7 @@ If `fo` cannot handle the project, fix `fo` first. Do not route around it.
 - `src/dag/`: directed acyclic graph. Topological sort, reverse-dependency closure.
 - `src/check/`: build + test runner (`fo_check`) and output formatters (`fo_check_output`).
 - `src/build/`: native build and test dispatch from `fpm.toml`. Argv execution via C shim.
-- `src/cache/`: content-addressed module cache. FNV-1a hashing of source + compiler + flags + deps.
+- `src/cache/`: SHA-256 content-addressed action and binary cache.
 - `src/lint/`: native linter. Unused-import detection (`fo_lint`), short-circuit
   reliance detection (`fo_lint_shortcircuit`), test programs with no failure
   path (`fo_lint_testfail`), and gfortran compiler warnings (stack-size
@@ -44,7 +44,7 @@ If `fo` cannot handle the project, fix `fo` first. Do not route around it.
 - `src/lsp/`: LSP server. Diagnostics on save.
 - `src/run/`: coalescing run queue for save-triggered checks.
 - `src/proc/`: C shim for fork/execvp process execution and source scanning.
-- `src/watch/`: inotify-based file watcher.
+- `src/watch/`: native file watcher (inotify on Linux, kqueue on macOS).
 - `doc/FO.md`: specification.
 - `test/`: project tests.
 
@@ -98,5 +98,5 @@ formatting, exactly as it would wrap fluff for deep lint.
 - `real(dp)` with `use, intrinsic :: iso_fortran_env, only: dp => real64`.
 - All args have `intent`.
 - Derived types end in `_t`.
-- Modules under 500 lines, functions under 50 lines.
+- Keep new routines focused and split new subsystems into cohesive modules.
 - Stage paths explicitly. Never `git add .`.

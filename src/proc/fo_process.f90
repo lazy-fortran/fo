@@ -2,12 +2,12 @@ module fo_process
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     implicit none
     private
-    public :: process_detect_nproc
+    public :: process_detect_nproc, process_configure_openmp
     public :: process_scan_sources
     public :: process_start_fo_check, process_poll_pid, process_cancel_pid
     public :: process_run_logged
     public :: process_stderr_is_tty, process_write_stderr
-    public :: process_getpid
+    public :: process_getpid, process_getcwd
     public :: process_run_argv_logged, argv_push, argv_push_split
     public :: argv_push_split_nl
     integer, parameter :: C_PATH_LEN = 4096
@@ -19,6 +19,9 @@ module fo_process
             integer(c_int), intent(out) :: nproc
         end subroutine fo_c_detect_nproc
 
+        subroutine fo_c_configure_openmp() bind(C, name='fo_c_configure_openmp')
+        end subroutine fo_c_configure_openmp
+
         function fo_c_isatty(fd) bind(C, name='fo_c_isatty') result(r)
             import :: c_int
             integer(c_int), value :: fd
@@ -29,6 +32,13 @@ module fo_process
             import :: c_int
             integer(c_int), intent(out) :: pid_out
         end subroutine fo_c_getpid
+
+        subroutine fo_c_getcwd(path, path_len, exitcode) bind(C, name='fo_c_getcwd')
+            import :: c_char, c_int
+            character(kind=c_char), intent(out) :: path(*)
+            integer(c_int), value :: path_len
+            integer(c_int), intent(out) :: exitcode
+        end subroutine fo_c_getcwd
 
         subroutine fo_c_write_stderr(buf, n) bind(C, name='fo_c_write_stderr')
             import :: c_char, c_int
@@ -88,6 +98,10 @@ module fo_process
 
 contains
 
+    subroutine process_configure_openmp()
+        call fo_c_configure_openmp()
+    end subroutine process_configure_openmp
+
     integer function process_getpid()
         !! Current process id. Used to make per-process unique paths so parallel
         !! test processes do not collide on shared /tmp names.
@@ -95,6 +109,25 @@ contains
         call fo_c_getpid(pid)
         process_getpid = int(pid)
     end function process_getpid
+
+    subroutine process_getcwd(path, exitcode)
+        character(len=*), intent(out) :: path
+        integer, intent(out) :: exitcode
+
+        character(kind=c_char) :: c_path(C_PATH_LEN)
+        integer(c_int) :: c_exit
+        integer :: i
+
+        c_path = c_null_char
+        call fo_c_getcwd(c_path, int(C_PATH_LEN, c_int), c_exit)
+        path = ''
+        exitcode = int(c_exit)
+        if (exitcode /= 0) return
+        do i = 1, min(len(path), C_PATH_LEN)
+            if (c_path(i) == c_null_char) exit
+            path(i:i) = char(iachar(c_path(i)))
+        end do
+    end subroutine process_getcwd
 
     logical function process_stderr_is_tty()
         !! True when stderr (fd 2) is a terminal, so progress can use an

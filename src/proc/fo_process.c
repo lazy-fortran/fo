@@ -3,12 +3,17 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <poll.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -55,6 +60,18 @@ static void emit_spawn_error(const char *log_file, const char *operation,
 
 static void add_seconds(struct timespec *ts, int seconds) {
     ts->tv_sec += seconds;
+}
+
+static int milliseconds_until(const struct timespec *now,
+                              const struct timespec *target) {
+    long long nanoseconds =
+        (long long)(target->tv_sec - now->tv_sec) * 1000000000LL +
+        (long long)(target->tv_nsec - now->tv_nsec);
+    long long milliseconds;
+
+    if (nanoseconds <= 0) return 0;
+    milliseconds = (nanoseconds + 999999LL) / 1000000LL;
+    return milliseconds > INT_MAX ? INT_MAX : (int)milliseconds;
 }
 
 static void sleep_ms(int ms) {
@@ -226,6 +243,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                     const char *env_extra) {
     pid_t pid;
     int status;
+    int pid_fd = -1;
     int spawn_error;
     int attrs_ready = 0;
     char **child_env = NULL;
@@ -288,6 +306,10 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
         return spawn_error == ENOENT ? 127 : 126;
     }
 
+#if defined(__linux__) && defined(SYS_pidfd_open)
+    pid_fd = (int)syscall(SYS_pidfd_open, pid, 0);
+#endif
+
     if (timeout_s > 0) {
         struct timespec deadline, next_heartbeat, now;
 
@@ -302,7 +324,10 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
         for (;;) {
             pid_t waited = waitpid(pid, &status, WNOHANG);
             if (waited == pid) break;
-            if (waited < 0 && errno != EINTR) return 1;
+            if (waited < 0 && errno != EINTR) {
+                if (pid_fd >= 0) close(pid_fd);
+                return 1;
+            }
 
             clock_gettime(CLOCK_MONOTONIC, &now);
             if (timespec_at_or_after(&now, &deadline)) {
@@ -323,6 +348,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                     while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
                     }
                 }
+                if (pid_fd >= 0) close(pid_fd);
                 return 124;
             }
             if (heartbeat_s > 0 &&
@@ -332,7 +358,29 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                     add_seconds(&next_heartbeat, heartbeat_s);
                 } while (timespec_at_or_after(&now, &next_heartbeat));
             }
-            sleep_ms(1);
+            if (pid_fd >= 0) {
+                struct pollfd child = {
+                    .fd = pid_fd,
+                    .events = POLLIN,
+                    .revents = 0
+                };
+                int wait_ms = milliseconds_until(&now, &deadline);
+                int poll_result;
+
+                if (heartbeat_s > 0) {
+                    int heartbeat_ms =
+                        milliseconds_until(&now, &next_heartbeat);
+                    if (heartbeat_ms < wait_ms) wait_ms = heartbeat_ms;
+                }
+                poll_result = poll(&child, 1, wait_ms);
+                if (poll_result < 0 && errno == EINTR) continue;
+                if (poll_result < 0) {
+                    close(pid_fd);
+                    return 1;
+                }
+            } else {
+                sleep_ms(1);
+            }
         }
     } else {
         while (waitpid(pid, &status, 0) < 0) {
@@ -340,6 +388,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
             return 1;
         }
     }
+    if (pid_fd >= 0) close(pid_fd);
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
     return 1;
@@ -368,8 +417,30 @@ void fo_c_detect_nproc(int *nproc) {
     *nproc = (int)n;
 }
 
+void fo_c_configure_openmp(void) {
+    /* libgomp's default active wait burns a full worker team while fo waits
+     * for compiler children.  Preserve an explicit user choice, but default
+     * the build driver to sleeping workers before its first parallel region. */
+    if (getenv("OMP_WAIT_POLICY") == NULL) {
+        setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
+    }
+}
+
 void fo_c_getpid(int *pid_out) {
     *pid_out = (int)getpid();
+}
+
+void fo_c_getcwd(char *path, int path_len, int *exitcode) {
+    if (path == NULL || path_len < 2) {
+        *exitcode = EINVAL;
+        return;
+    }
+    if (getcwd(path, (size_t)path_len) == NULL) {
+        path[0] = '\0';
+        *exitcode = errno;
+        return;
+    }
+    *exitcode = 0;
 }
 
 /* Run a single executable with stdout/stderr redirected to log_file, enforcing

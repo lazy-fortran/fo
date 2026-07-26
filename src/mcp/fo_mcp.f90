@@ -4,7 +4,6 @@ module fo_mcp
         jsonrpc_error, jsonrpc_null, strip_path_prefix_in_str
     use fx_json_build, only: json_escape_string
     use fx_mcp, only: mcp_read_message, mcp_send_response, MCP_FRAME_UNKNOWN
-    use fo_fs, only: fs_remove_tree
     use fo_check, only: check_result_t, fo_check_run
     use fo_check_output, only: check_result_compact_json, &
         check_result_full_json
@@ -14,6 +13,7 @@ module fo_mcp
     use fo_process, only: process_start_fo_check, process_poll_pid, &
         process_cancel_pid, process_run_argv_logged, argv_push
     use fo_progress, only: progress_suppress
+    use fo_version_info, only: FO_VERSION
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
         RUN_RERUN_PENDING
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
@@ -147,9 +147,9 @@ contains
         case ('changed')
             call handle_changed(id_str, dir, output_text, exitcode, response)
         case ('clean')
-            call handle_clean(id_str, dir, output_text, exitcode, response)
+            call handle_clean(line, id_str, dir, output_text, exitcode, response)
         case ('install')
-            call handle_install(id_str, dir, output_text, exitcode, response)
+            call handle_install(line, id_str, dir, output_text, exitcode, response)
         case default
             call jsonrpc_error(id_str, -32602, &
                 'unknown action: '//trim(action), response)
@@ -489,41 +489,46 @@ contains
         call make_tool_text_response(id_str, output_text, exitcode, response)
     end subroutine handle_changed
 
-    subroutine handle_clean(id_str, dir, output_text, exitcode, response)
-        use fo_cache, only: cache_root, cache_store_root
-        character(len=*), intent(in) :: id_str, dir
+    subroutine handle_clean(line, id_str, dir, output_text, exitcode, response)
+        use fo_cache, only: cache_store_root
+        use fo_build_backend, only: backend_clean
+        character(len=*), intent(in) :: line, id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
         character(len=*), intent(out) :: response
 
-        character(len=512) :: root, store_root
+        character(len=512) :: store_root
         type(backend_t) :: b
-        integer :: n_removed
+        logical :: purge_store, build_removed, store_removed
 
-        call cache_root(root)
+        purge_store = index(line, '"cache":true') > 0
         call cache_store_root(store_root)
-        call fs_remove_tree(trim(root))
         b = detect_backend(trim(dir))
-        if (b%kind /= BACKEND_NONE) then
-            call fs_remove_tree(trim(b%project_dir)//'/build')
-            call clean_root_build_artifacts(trim(b%project_dir), n_removed)
+        call backend_clean(trim(b%project_dir), purge_store, build_removed, &
+            store_removed)
+        output_text = ''
+        if (build_removed) output_text = 'build tree cleared: '// &
+            trim(b%project_dir)//'/build'
+        if (store_removed) then
+            if (len_trim(output_text) > 0) output_text = trim(output_text)//achar(10)
+            output_text = trim(output_text)//'cache cleared: '//trim(store_root)
+        else
+            if (len_trim(output_text) > 0) output_text = trim(output_text)//achar(10)
+            output_text = trim(output_text)//'cache kept (shared store)'
         end if
-        output_text = 'cache cleared: '//trim(store_root)
-        if (b%kind /= BACKEND_NONE) output_text = trim(output_text)//achar(10)// &
-            'build tree cleared: '//trim(b%project_dir)//'/build'
         exitcode = 0
         call make_tool_text_response(id_str, output_text, exitcode, response)
     end subroutine handle_clean
 
-    subroutine handle_install(id_str, dir, output_text, exitcode, response)
+    subroutine handle_install(line, id_str, dir, output_text, exitcode, response)
         use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
-        character(len=*), intent(in) :: id_str, dir
+        character(len=*), intent(in) :: line, id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
         character(len=*), intent(out) :: response
 
         type(backend_t) :: b
-        character(len=256) :: prefix
+        character(len=256) :: prefix, requested_prefix
         character(len=512) :: home, install_log
         character(len=:), allocatable :: packed
         integer :: status, n_args
@@ -531,6 +536,8 @@ contains
         call get_environment_variable('HOME', home, status=status)
         if (status /= 0 .or. len_trim(home) == 0) home = '/usr/local'
         prefix = trim(home)//'/.local'
+        call extract_json_field(line, '"prefix"', requested_prefix)
+        if (len_trim(requested_prefix) > 0) prefix = trim(requested_prefix)
 
         b = detect_backend(trim(dir))
         if (b%kind == BACKEND_NONE) then
@@ -544,6 +551,8 @@ contains
         n_args = 0
         call argv_push(packed, n_args, 'fpm')
         call argv_push(packed, n_args, 'install')
+        call argv_push(packed, n_args, '--profile')
+        call argv_push(packed, n_args, 'release')
         call argv_push(packed, n_args, '--prefix')
         call argv_push(packed, n_args, trim(prefix))
         call process_run_argv_logged('.', packed, n_args, install_log, &
@@ -854,7 +863,7 @@ contains
             '"result":{"protocolVersion":"'//trim(proto_ver)//'",'// &
             '"capabilities":{"tools":{"listChanged":false},'// &
             '"resources":{"listChanged":false}},'// &
-            '"serverInfo":{"name":"fo","version":"0.2.0"}}}'
+            '"serverInfo":{"name":"fo","version":"'//FO_VERSION//'"}}}'
     end subroutine make_initialize_response
 
     subroutine make_tools_list_response(id_str, response)
@@ -872,6 +881,10 @@ contains
             '"description":"Action to run"},'// &
             '"dir":{"type":"string",'// &
             '"description":"Project directory (default: cwd)"},'// &
+            '"cache":{"type":"boolean",'// &
+            '"description":"clean: also purge the shared content store"},'// &
+            '"prefix":{"type":"string",'// &
+            '"description":"install: destination prefix"},'// &
             '"fix":{"type":"boolean",'// &
             '"description":"lint: remove unused imports in place"}},'// &
             '"required":["action"]}}]}}'

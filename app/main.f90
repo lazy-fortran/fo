@@ -23,7 +23,8 @@ program fo_main
         fo_fmt_deep_run, fo_fmt_deep_files, fo_fmt_deep_changed_run, &
         fo_fmt_deep_check_run, fo_fmt_deep_check_files, &
         write_git_changed_source_list
-    use fo_process, only: process_run_argv_logged, argv_push
+    use fo_process, only: process_run_argv_logged, argv_push, &
+        process_configure_openmp
     use fo_ffc_cli, only: ffc_cmd_build, ffc_cmd_run, ffc_native_requested
     use fo_exec_target, only: resolve_exec_target
     use fo_cover, only: fo_cover_run
@@ -31,11 +32,13 @@ program fo_main
     use fo_scaffold, only: scaffold_project
     use fo_bench, only: bench_result_t, fo_bench_run
     use fo_doc, only: fo_doc_run
+    use fo_version_info, only: FO_VERSION
     implicit none
 
     character(len=256) :: action
     integer :: nargs
 
+    call process_configure_openmp()
     nargs = command_argument_count()
     if (nargs == 0) then
         call cmd_run()
@@ -96,7 +99,7 @@ program fo_main
     case ('init')
         call cmd_init()
     case ('version', '--version')
-        write (output_unit, '(a)') 'fo 0.2.0'
+        write (output_unit, '(a)') 'fo '//FO_VERSION
     case ('help', '--help', '-h')
         call print_usage()
     case default
@@ -417,10 +420,15 @@ contains
         character(len=2048) :: cap_json
         integer :: output_mode, mode_ierr
 
+        if (has_arg('--help') .or. has_arg('-h')) then
+            write (output_unit, '(a)') &
+                'usage: fo check [--json|--json=compact|--json=full|--agent]'
+            return
+        end if
         call check_output_mode(output_mode, mode_ierr)
         if (mode_ierr /= 0) then
             write (error_unit, '(a)') &
-                'fo: use --json, --json=compact, --json=full, or --agent'
+                'fo check: unknown option (use --help for supported options)'
             stop 1, quiet = .true.
         end if
 
@@ -510,9 +518,12 @@ contains
         integer :: exitcode, i, target_index
         character(len=256) :: target, arg
         character(len=512) :: build_log, bin_path, run_cwd
+        character(len=512) :: flags
+        character(len=64) :: profile
+        character(len=1024) :: all_flags
         character(len=:), allocatable :: packed
         integer :: n_args
-        logical :: exists, skip_build
+        logical :: exists, skip_build, pass_args
 
         if (has_arg('--help') .or. has_arg('-h')) then
             call print_exec_usage()
@@ -540,10 +551,33 @@ contains
                 run_cwd = trim(arg(7:))
             else if (trim(arg) == '--no-build') then
                 skip_build = .true.
-            else
-                target = arg
+            else if (trim(arg) == '--example') then
+                ! Examples share fo's executable namespace; this fpm-compatible
+                ! selector is therefore accepted without changing resolution.
+            else if (trim(arg) == '--profile' .or. trim(arg) == '--flag') then
+                if (i == command_argument_count()) then
+                    write (error_unit, '(a,a,a)') 'fo run: ', trim(arg), &
+                        ' requires a value'
+                    stop 1
+                end if
+                i = i + 1
+            else if (index(trim(arg), '--profile=') == 1) then
+                continue
+            else if (trim(arg) == '--target') then
+                if (i == command_argument_count()) then
+                    write (error_unit, '(a)') 'fo run: --target requires a name'
+                    stop 1
+                end if
+                i = i + 1
+                call get_command_argument(i, target)
                 target_index = i
-                exit
+            else if (trim(arg) == '--') then
+                continue
+            else
+                if (target_index == 0) then
+                    target = arg
+                    target_index = i
+                end if
             end if
             i = i + 1
         end do
@@ -558,8 +592,29 @@ contains
         end if
 
         if (.not. skip_build) then
+            call get_flags_arg(flags)
+            call get_profile_arg(profile)
+            if (len_trim(profile) > 0 .and. &
+                len_trim(profile_flags(profile)) == 0) then
+                write (error_unit, '(a)') &
+                    'fo: unknown run profile: '//trim(profile)
+                stop 1
+            end if
+            all_flags = trim(profile_flags(profile))
+            if (len_trim(flags) > 0) then
+                if (len_trim(all_flags) > 0) then
+                    all_flags = trim(all_flags)//' '//trim(flags)
+                else
+                    all_flags = trim(flags)
+                end if
+            end if
             call make_tmpfile('fo-exec-build', build_log)
-            call backend_build(b, exitcode, log_file=build_log, with_tests=.true.)
+            if (trim(action) == 'run') then
+                call backend_build(b, exitcode, flags=all_flags, log_file=build_log)
+            else
+                call backend_build(b, exitcode, flags=all_flags, log_file=build_log, &
+                    with_tests=.true.)
+            end if
             if (exitcode /= 0) then
                 write (error_unit, '(a)') 'fo exec: build failed'
                 call report_build_result(build_log)
@@ -577,10 +632,32 @@ contains
 
         n_args = 0
         call argv_push(packed, n_args, trim(bin_path))
-        do i = target_index + 1, command_argument_count()
-            call get_command_argument(i, arg)
-            call argv_push(packed, n_args, trim(arg))
-        end do
+        if (trim(action) == 'run') then
+            pass_args = .false.
+            i = target_index + 1
+            do while (i <= command_argument_count())
+                call get_command_argument(i, arg)
+                if (trim(arg) == '--') then
+                    pass_args = .true.
+                else if (.not. pass_args .and. &
+                        (trim(arg) == '--profile' .or. trim(arg) == '--flag')) then
+                    i = i + 1
+                else if (.not. pass_args .and. trim(arg) == '--example') then
+                    continue
+                else if (.not. pass_args .and. &
+                        index(trim(arg), '--profile=') == 1) then
+                    continue
+                else
+                    call argv_push(packed, n_args, trim(arg))
+                end if
+                i = i + 1
+            end do
+        else
+            do i = target_index + 1, command_argument_count()
+                call get_command_argument(i, arg)
+                call argv_push(packed, n_args, trim(arg))
+            end do
+        end if
         ! Empty log_file makes the child inherit this terminal's stdout/stderr;
         ! timeout 0 means no limit (an interactive app may run arbitrarily long).
         call process_run_argv_logged(trim(run_cwd), packed, n_args, '', .false., &
@@ -608,11 +685,8 @@ contains
             case ('--agent')
                 mode = 4
             case default
-                if (index(trim(arg), '--json=') == 1 .or. &
-                    index(trim(arg), '--agent=') == 1) then
-                    ierr = 1
-                    return
-                end if
+                ierr = 1
+                return
             end select
         end do
     end subroutine check_output_mode

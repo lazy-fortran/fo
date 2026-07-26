@@ -27,6 +27,9 @@ program test_backend_gfortran
     call test_gfortran_test_skips_app_but_build_restores_it()
     call test_gfortran_test_links_helper_modules_and_lib()
     call test_gfortran_named_test_links_helper_modules()
+    call test_gfortran_named_test_uses_manifest_name()
+    call test_gfortran_app_links_only_reachable_library_objects()
+    call test_gfortran_builds_manifest_example()
     call test_gfortran_builds_path_dependency()
     call test_gfortran_names_binary_from_manifest_executable()
     call test_gfortran_path_dep_ignores_coexisting_fpm_tree()
@@ -47,6 +50,120 @@ program test_backend_gfortran
     call report('backend_gfortran')
 
 contains
+
+    subroutine test_gfortran_builds_manifest_example()
+        character(len=512) :: project_dir, log_file, binary
+        integer :: u, exitcode
+        logical :: exists
+
+        call make_tmp_path('fo_manifest_example', project_dir)
+        call make_tmp_path('fo_manifest_example_log', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        call make_dir(trim(project_dir)//'/example')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "manifest-example"'
+        write (u, '(a)') '[[example]]'
+        write (u, '(a)') 'name = "public_demo"'
+        write (u, '(a)') 'source-dir = "example"'
+        write (u, '(a)') 'main = "internal_demo.f90"'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/example/internal_demo.f90', &
+            status='replace')
+        write (u, '(a)') 'program internal_demo'
+        write (u, '(a)') 'print "(a)", "EXAMPLE_OK"'
+        write (u, '(a)') 'end program internal_demo'
+        close (u)
+
+        call gfortran_build(project_dir, log_file, exitcode, use_cache=.false.)
+        binary = trim(project_dir)//'/build/fo/bin/public_demo'
+        inquire (file=trim(binary), exist=exists)
+        call assert(exitcode == 0 .and. exists, &
+            'manifest example builds under its public target name')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_builds_manifest_example
+
+    subroutine test_gfortran_named_test_uses_manifest_name()
+        character(len=512) :: project_dir, log_file
+        character(len=128) :: selected(1)
+        integer :: u, exitcode
+
+        call make_tmp_path('fo_manifest_test_name', project_dir)
+        call make_tmp_path('fo_manifest_test_name_log', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        call make_dir(trim(project_dir)//'/test/nested')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "manifest-test-name"'
+        write (u, '(a)') '[[test]]'
+        write (u, '(a)') 'name = "public_name"'
+        write (u, '(a)') 'main = "nested/test_internal_name.f90"'
+        close (u)
+        open (newunit=u, file=trim(project_dir)// &
+            '/test/nested/test_internal_name.f90', status='replace')
+        write (u, '(a)') 'program test_internal_name'
+        write (u, '(a)') 'print "(a)", "PASS"'
+        write (u, '(a)') 'end program test_internal_name'
+        close (u)
+
+        selected(1) = 'public_name'
+        call gfortran_test_names(project_dir, selected, 1, log_file, exitcode, &
+            use_cache=.false.)
+        call assert(exitcode == 0 .and. &
+            file_contains(log_file, 'TEST_RESULT public_name PASS'), &
+            'named test uses the public name from its manifest entry')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_named_test_uses_manifest_name
+
+    subroutine test_gfortran_app_links_only_reachable_library_objects()
+        character(len=512) :: project_dir, log_file, binary
+        integer :: u, exitcode
+        logical :: exists
+
+        call make_tmp_path('fo_app_reachable_objects', project_dir)
+        call make_tmp_path('fo_app_reachable_objects_log', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        call make_dir(trim(project_dir)//'/app')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "reachable_app"'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/src/used.f90', status='replace')
+        write (u, '(a)') 'module used'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine hello()'
+        write (u, '(a)') 'print "(a)", "OK"'
+        write (u, '(a)') 'end subroutine hello'
+        write (u, '(a)') 'end module used'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/src/unused.f90', status='replace')
+        write (u, '(a)') 'module unused'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine unavailable_path()'
+        write (u, '(a)') 'call deliberately_missing_external()'
+        write (u, '(a)') 'end subroutine unavailable_path'
+        write (u, '(a)') 'end module unused'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/app/main.f90', status='replace')
+        write (u, '(a)') 'program main'
+        write (u, '(a)') 'use used, only: hello'
+        write (u, '(a)') 'call hello()'
+        write (u, '(a)') 'end program main'
+        close (u)
+
+        call gfortran_build(project_dir, log_file, exitcode, use_cache=.false.)
+        binary = trim(project_dir)//'/build/fo/bin/reachable_app'
+        inquire (file=trim(binary), exist=exists)
+        call assert(exitcode == 0 .and. exists, &
+            'application excludes unreachable library objects from its link')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_app_links_only_reachable_library_objects
 
     subroutine test_gfortran_test_skips_app_but_build_restores_it()
         character(len=512) :: project_dir, log_file, app_path

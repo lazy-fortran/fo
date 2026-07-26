@@ -4,9 +4,11 @@
 // Run: node test/test_mcp_system.js [/path/to/fo]
 
 const { spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
-const FO = process.argv[2] || findLocalBuild();
+const FO = process.argv[2] ? path.resolve(process.argv[2]) : findLocalBuild();
 
 function findLocalBuild() {
   const fs = require('fs');
@@ -47,10 +49,13 @@ function assertAgentJsonShape(text, prefix) {
   assert(typeof obj.elapsed_s === 'number', prefix + ' has numeric elapsed_s');
 }
 
-function startServer(cwd) {
+function startServer(cwd, env) {
+  const childEnv = Object.assign({}, process.env, env || {});
+  if (cwd) childEnv.PWD = cwd;
   const proc = spawn(FO, ['mcp-server'], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    cwd: cwd || process.cwd()
+    cwd: cwd || process.cwd(),
+    env: childEnv
   });
   let stderr = '';
   proc.stderr.on('data', (d) => { stderr += d.toString(); });
@@ -121,6 +126,59 @@ function readBareResponse(proc, timeout) {
   });
 }
 
+async function callFramed(proc, id, args) {
+  sendFramed(proc, {
+    jsonrpc: '2.0', id, method: 'tools/call',
+    params: { name: 'fo', arguments: args }
+  });
+  return readFramedResponse(proc, 120000);
+}
+
+async function runMutationSuite() {
+  process.stdout.write('\n--- MCP clean/install semantics ---\n');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fo-mcp-system-'));
+  const project = path.join(root, 'project');
+  const cache = path.join(root, 'cache');
+  const build = path.join(project, 'build');
+  const storeMarker = path.join(cache, 'store', 'v1', 'marker');
+  fs.mkdirSync(build, { recursive: true });
+  fs.mkdirSync(path.dirname(storeMarker), { recursive: true });
+  fs.writeFileSync(path.join(project, 'fpm.toml'), 'name = "mcp_clean_fixture"\n');
+  fs.writeFileSync(storeMarker, 'keep');
+  const srv = startServer(project, { FO_CACHE_DIR: cache });
+
+  try {
+    sendFramed(srv.proc, {
+      jsonrpc: '2.0', id: 101, method: 'initialize',
+      params: { protocolVersion: '2025-11-25', capabilities: {} }
+    });
+    await readFramedResponse(srv.proc);
+
+    const clean = await callFramed(srv.proc, 102, { action: 'clean' });
+    assert(clean.result.isError === false, 'default MCP clean succeeds');
+    assert(!fs.existsSync(build), 'default MCP clean removes project build tree');
+    assert(fs.existsSync(storeMarker), 'default MCP clean preserves shared cache');
+    assert(clean.result.content[0].text.includes('cache kept'),
+      'default MCP clean reports preserved cache');
+
+    fs.mkdirSync(build, { recursive: true });
+    const purge = await callFramed(srv.proc, 103, { action: 'clean', cache: true });
+    assert(purge.result.isError === false, 'MCP clean cache purge succeeds');
+    assert(!fs.existsSync(storeMarker), 'MCP clean cache purge removes shared cache');
+    assert(purge.result.content[0].text.includes('cache cleared'),
+      'MCP clean cache purge reports cleared cache');
+
+    sendFramed(srv.proc, { jsonrpc: '2.0', id: 104, method: 'shutdown', params: {} });
+    await readFramedResponse(srv.proc);
+  } catch (e) {
+    failed++;
+    process.stdout.write('  FAIL: exception: ' + e.message + '\n');
+    srv.proc.kill();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 async function runSuite(label, send, readResponse) {
   process.stdout.write('\n--- ' + label + ' ---\n');
   const srv = startServer();
@@ -137,6 +195,7 @@ async function runSuite(label, send, readResponse) {
     assert(init.id === 1, 'id matches');
     assert(init.result.protocolVersion === '2025-11-25', 'echoes protocol version');
     assert(init.result.serverInfo.name === 'fo', 'server name');
+    assert(init.result.serverInfo.version === '0.3.0', 'server version');
     assert(init.result.capabilities.tools !== undefined, 'has tools capability');
     assert(init.result.capabilities.resources !== undefined, 'has resources capability');
 
@@ -240,6 +299,7 @@ async function run() {
 
   await runSuite('Content-Length framing', sendFramed, readFramedResponse);
   await runSuite('bare JSON line framing', sendBare, readBareResponse);
+  await runMutationSuite();
 
   process.stdout.write('\n' + passed + ' passed, ' + failed + ' failed\n');
   process.exit(failed > 0 ? 1 : 0);

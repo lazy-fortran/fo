@@ -4,7 +4,7 @@ module fo_fpm_config
     public :: fpm_dep_t, fpm_exe_t, fpm_config_t
     public :: fpm_config_init, fpm_config_parse
     public :: dep_kind, DEP_PATH, DEP_GIT, DEP_REGISTRY
-    public :: manifest_exe_name
+    public :: manifest_exe_name, manifest_test_name, manifest_example_name
 
     ! How a dependency is acquired, derived from which fields the manifest set.
     ! path = local dir (mutable, may be edited); git = cloned at a ref (pinned,
@@ -45,9 +45,11 @@ module fo_fpm_config
         character(len=256) :: source_dir = 'src'
         character(len=256) :: app_dir = 'app'
         character(len=256) :: test_dir = 'test'
+        character(len=256) :: example_dir = 'example'
         character(len=256) :: project_dir = '.'
         logical :: auto_executables = .true.
         logical :: auto_tests = .true.
+        logical :: auto_examples = .false.
         integer :: n_deps = 0
         type(fpm_dep_t) :: deps(MAX_DEPS)
         integer :: n_dev_deps = 0
@@ -58,6 +60,10 @@ module fo_fpm_config
         character(len=128) :: flags(MAX_FLAGS)
         integer :: n_exes = 0
         type(fpm_exe_t) :: exes(MAX_EXES)
+        integer :: n_tests = 0
+        type(fpm_exe_t) :: tests(MAX_EXES)
+        integer :: n_examples = 0
+        type(fpm_exe_t) :: examples(MAX_EXES)
         ! fpm "openmp" metapackage (openmp = "*" under [dependencies]). When set,
         ! fo compiles and links with -fopenmp so the project's `!$omp` regions
         ! run in parallel. Without it gfortran ignores the directives.
@@ -90,15 +96,19 @@ contains
         c%source_dir = 'src'
         c%app_dir = 'app'
         c%test_dir = 'test'
+        c%example_dir = 'example'
         c%project_dir = '.'
         c%auto_executables = .true.
         c%auto_tests = .true.
+        c%auto_examples = .false.
         c%openmp = .false.
         c%n_deps = 0
         c%n_dev_deps = 0
         c%n_link_libs = 0
         c%n_flags = 0
         c%n_exes = 0
+        c%n_tests = 0
+        c%n_examples = 0
     end subroutine fpm_config_init
 
     subroutine fpm_config_parse(project_dir, config, ierr)
@@ -144,6 +154,8 @@ contains
                     select case (trim(section))
                     case ('build')
                         call parse_build(pending_key, val, config)
+                    case ('preprocess', 'preprocess.cpp')
+                        call parse_preprocess(pending_key, val, config)
                     end select
                 end if
                 cycle
@@ -155,6 +167,15 @@ contains
                     config%n_exes < MAX_EXES) then
                     config%n_exes = config%n_exes + 1
                     config%exes(config%n_exes) = fpm_exe_t()
+                else if (trim(section) == 'test' .and. &
+                        config%n_tests < MAX_EXES) then
+                    config%n_tests = config%n_tests + 1
+                    config%tests(config%n_tests) = fpm_exe_t(source_dir='test')
+                else if (trim(section) == 'example' .and. &
+                        config%n_examples < MAX_EXES) then
+                    config%n_examples = config%n_examples + 1
+                    config%examples(config%n_examples) = &
+                        fpm_exe_t(source_dir='example')
                 end if
                 cycle
             end if
@@ -187,6 +208,18 @@ contains
             case ('executable')
                 if (config%n_exes > 0) &
                     call parse_exe(key, val, config%exes(config%n_exes))
+            case ('test')
+                if (config%n_tests > 0) &
+                    call parse_exe(key, val, config%tests(config%n_tests))
+            case ('example')
+                if (config%n_examples > 0) &
+                    call parse_exe(key, val, config%examples(config%n_examples))
+            case ('preprocess', 'preprocess.cpp')
+                call parse_preprocess(key, val, config)
+            case ('library')
+                call parse_library(key, val, config)
+            case ('fortran')
+                call parse_fortran(key, val, config)
             end select
         end do
 
@@ -229,12 +262,58 @@ contains
             config%auto_executables = (index(val, 'true') > 0)
         case ('auto-tests')
             config%auto_tests = (index(val, 'true') > 0)
+        case ('auto-examples')
+            config%auto_examples = (index(val, 'true') > 0)
         case ('link')
             call parse_link_libs(val, config)
         case ('flags')
             call parse_flags(val, config)
         end select
     end subroutine parse_build
+
+    subroutine parse_library(key, val, config)
+        character(len=*), intent(in) :: key, val
+        type(fpm_config_t), intent(inout) :: config
+        character(len=256) :: str_val
+
+        if (trim(key) /= 'source-dir') return
+        call extract_string(val, str_val)
+        if (len_trim(str_val) > 0) config%source_dir = trim(str_val)
+    end subroutine parse_library
+
+    subroutine parse_fortran(key, val, config)
+        character(len=*), intent(in) :: key, val
+        type(fpm_config_t), intent(inout) :: config
+        character(len=256) :: str_val
+
+        select case (trim(key))
+        case ('implicit-typing')
+            if (index(val, 'false') > 0) call append_config_flag( &
+                '-fimplicit-none', config)
+        case ('implicit-external')
+            if (index(val, 'false') > 0) call append_config_flag( &
+                '-Werror=implicit-interface', config)
+        case ('source-form')
+            call extract_string(val, str_val)
+            if (trim(str_val) == 'free') call append_config_flag( &
+                '-ffree-form', config)
+            if (trim(str_val) == 'fixed') call append_config_flag( &
+                '-ffixed-form', config)
+        end select
+    end subroutine parse_fortran
+
+    subroutine append_config_flag(flag, config)
+        character(len=*), intent(in) :: flag
+        type(fpm_config_t), intent(inout) :: config
+        integer :: i
+
+        do i = 1, config%n_flags
+            if (trim(config%flags(i)) == trim(flag)) return
+        end do
+        if (config%n_flags >= MAX_FLAGS) return
+        config%n_flags = config%n_flags + 1
+        config%flags(config%n_flags) = trim(flag)
+    end subroutine append_config_flag
 
     subroutine parse_exe(key, val, exe)
         character(len=*), intent(in) :: key, val
@@ -276,6 +355,52 @@ contains
             end if
         end do
     end function manifest_exe_name
+
+    function manifest_test_name(config, test_dir, stem) result(name)
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: test_dir, stem
+        character(len=128) :: name
+        character(len=256) :: main_stem
+        integer :: i, dot, slash
+
+        name = ''
+        do i = 1, config%n_tests
+            if (trim(config%tests(i)%source_dir) /= trim(test_dir)) cycle
+            main_stem = trim(config%tests(i)%main)
+            slash = index(trim(main_stem), '/', back=.true.)
+            if (slash > 0) main_stem = main_stem(slash + 1:)
+            dot = index(trim(main_stem), '.', back=.true.)
+            if (dot > 1) main_stem = main_stem(1:dot - 1)
+            if (trim(main_stem) == trim(stem) .and. &
+                len_trim(config%tests(i)%name) > 0) then
+                name = trim(config%tests(i)%name)
+                return
+            end if
+        end do
+    end function manifest_test_name
+
+    function manifest_example_name(config, example_dir, stem) result(name)
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: example_dir, stem
+        character(len=128) :: name
+        character(len=256) :: main_stem
+        integer :: i, dot, slash
+
+        name = ''
+        do i = 1, config%n_examples
+            if (trim(config%examples(i)%source_dir) /= trim(example_dir)) cycle
+            main_stem = trim(config%examples(i)%main)
+            slash = index(trim(main_stem), '/', back=.true.)
+            if (slash > 0) main_stem = main_stem(slash + 1:)
+            dot = index(trim(main_stem), '.', back=.true.)
+            if (dot > 1) main_stem = main_stem(1:dot - 1)
+            if (trim(main_stem) == trim(stem) .and. &
+                len_trim(config%examples(i)%name) > 0) then
+                name = trim(config%examples(i)%name)
+                return
+            end if
+        end do
+    end function manifest_example_name
 
     subroutine parse_dep_entry(name_key, val, deps, n_deps)
         character(len=*), intent(in) :: name_key, val
@@ -427,6 +552,50 @@ contains
             pos = pos + 1
         end do
     end subroutine parse_flags
+
+    subroutine parse_preprocess(key, val, config)
+        character(len=*), intent(in) :: key, val
+        type(fpm_config_t), intent(inout) :: config
+
+        character(len=1024) :: macros
+
+        if (trim(key) /= 'macros' .and. trim(key) /= 'cpp.macros') return
+        macros = val
+        call parse_macro_flags(macros, config)
+    end subroutine parse_preprocess
+
+    subroutine parse_macro_flags(val, config)
+        character(len=*), intent(in) :: val
+        type(fpm_config_t), intent(inout) :: config
+
+        integer :: pos, start, n
+        character(len=128) :: macro
+        logical :: in_str
+
+        pos = 1
+        n = len_trim(val)
+        in_str = .false.
+        if (index(val, '"') > 0 .and. config%n_flags < MAX_FLAGS) then
+            config%n_flags = config%n_flags + 1
+            config%flags(config%n_flags) = '-cpp'
+        end if
+        do while (pos <= n)
+            if (val(pos:pos) == '"') then
+                if (.not. in_str) then
+                    in_str = .true.
+                    start = pos + 1
+                else
+                    in_str = .false.
+                    macro = val(start:pos - 1)
+                    if (len_trim(macro) > 0 .and. config%n_flags < MAX_FLAGS) then
+                        config%n_flags = config%n_flags + 1
+                        config%flags(config%n_flags) = '-D'//trim(macro)
+                    end if
+                end if
+            end if
+            pos = pos + 1
+        end do
+    end subroutine parse_macro_flags
 
     subroutine strip_comment(line)
         character(len=*), intent(inout) :: line

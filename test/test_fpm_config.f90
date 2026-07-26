@@ -14,6 +14,7 @@ program test_fpm_config
     call test_dotted_dependency_keys()
     call test_flags_with_equals_inline()
     call test_flags_multiline_array()
+    call test_preprocess_macros()
 
     write (output_unit, '(a,i0,a,i0,a)') 'fpm_config: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -204,5 +205,31 @@ contains
             'flags_multiline_array: third flag = -fsanitize=address')
         call execute_command_line('rm -rf '//trim(dir), wait=.true.)
     end subroutine test_flags_multiline_array
+
+    subroutine test_preprocess_macros()
+        type(fpm_config_t) :: c
+        integer :: ierr, u
+        character(len=*), parameter :: dir = '/tmp/fo_test_preprocess_macros'
+
+        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        open (newunit=u, file=dir//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "preprocess-macros"'
+        write (u, '(a)') '[preprocess]'
+        write (u, '(a)') 'cpp.macros = ["ENABLE_TUI=1", "WITH_FEATURE"]'
+        close (u)
+
+        call fpm_config_parse(dir, c, ierr)
+        call assert(ierr == 0, 'preprocess_macros: parse succeeds')
+        call assert(c%n_flags == 3, 'preprocess_macros: preprocessor plus definitions')
+        if (c%n_flags >= 3) then
+            call assert(trim(c%flags(1)) == '-cpp', &
+                'preprocess_macros: preprocessing enabled for lowercase sources')
+            call assert(trim(c%flags(2)) == '-DENABLE_TUI=1', &
+                'preprocess_macros: value definition preserved')
+            call assert(trim(c%flags(3)) == '-DWITH_FEATURE', &
+                'preprocess_macros: flag definition preserved')
+        end if
+        call execute_command_line('rm -rf '//dir, wait=.true.)
+    end subroutine test_preprocess_macros
 
 end program test_fpm_config

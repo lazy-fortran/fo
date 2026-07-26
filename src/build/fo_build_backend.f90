@@ -3,7 +3,7 @@ module fo_build_backend
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_mkdir_excl, fs_sleep_ms, &
         fs_pid_alive
     use fo_process, only: process_detect_nproc, process_getpid, &
-        process_run_argv_logged, argv_push, argv_push_split
+        process_getcwd, process_run_argv_logged, argv_push, argv_push_split
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names
     use fo_compiler_flags, only: append_array_temporary_warning_flag
@@ -62,13 +62,15 @@ contains
         character(len=512) :: absdir
 
         character(len=512) :: pwd
+        integer :: cwd_ierr
 
         if (len_trim(dir) == 0) then
             absdir = '.'
         else if (dir(1:1) == '/') then
             absdir = trim(dir)
         else
-            call get_environment_variable('PWD', pwd)
+            call process_getcwd(pwd, cwd_ierr)
+            if (cwd_ierr /= 0) pwd = ''
             if (len_trim(pwd) > 0) then
                 if (trim(dir) == '.') then
                     absdir = trim(pwd)

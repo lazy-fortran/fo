@@ -1,6 +1,6 @@
 module fo_gfortran_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, manifest_exe_name, &
-        dep_kind, DEP_PATH
+        manifest_test_name, manifest_example_name, dep_kind, DEP_PATH
     use fo_scan, only: scan_unit_t, scan_dir, scan_dir_cached, source_defines_module, &
         MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
@@ -18,7 +18,7 @@ module fo_gfortran_build
         clean_root_build_artifacts
     use fo_process, only: process_run_logged, &
         process_run_argv_logged, argv_push, argv_push_split, &
-        argv_push_split_nl
+        argv_push_split_nl, process_detect_nproc
     use fo_lock, only: lock_check
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_append_file, &
         fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec, &
@@ -43,6 +43,19 @@ module fo_gfortran_build
     public :: config_flags_str
 
 contains
+
+    integer function native_jobs() result(jobs)
+        character(len=32) :: value
+        integer :: status, iostat
+
+        jobs = process_detect_nproc()
+        if (jobs < 1) jobs = 1
+        call get_environment_variable('FO_JOBS', value, status=status)
+        if (status /= 0 .or. len_trim(value) == 0) return
+        read (value, *, iostat=iostat) jobs
+        if (iostat /= 0 .or. jobs < 1) jobs = process_detect_nproc()
+        if (jobs < 1) jobs = 1
+    end function native_jobs
 
     subroutine gfortran_build(project_dir, log_file, exitcode, n_compiled, flags, &
             compiler_id, use_cache, up_to_date, tests_ready, build_apps, apps_ready, &
@@ -168,6 +181,7 @@ contains
 
         nc = 0
         call compile_sources(project_dir, config%source_dir, config%app_dir, &
+            config%example_dir, config%auto_examples .or. config%n_examples > 0, &
             mod_dir, obj_dir, dep_includes, n_dep_includes, lf, &
             src_objs, n_src_objs, is_prog_arr, exitcode, nc, &
             flag_text, compiler, want_apps, use_cache)
@@ -752,11 +766,13 @@ contains
         end if
     end function dep_object_module_key
 
-    subroutine compile_sources(project_dir, src_dir, app_dir, mod_dir, obj_dir, &
+    subroutine compile_sources(project_dir, src_dir, app_dir, example_dir, &
+            include_examples, mod_dir, obj_dir, &
             dep_includes, n_dep_includes, log_file, &
             src_objs, n_src_objs, is_prog_arr, exitcode, &
             n_compiled, flags, compiler, include_apps, use_cache)
-        character(len=*), intent(in) :: project_dir, src_dir, app_dir
+        character(len=*), intent(in) :: project_dir, src_dir, app_dir, example_dir
+        logical, intent(in) :: include_examples
         character(len=*), intent(in) :: mod_dir, obj_dir, log_file
         character(len=*), intent(in) :: flags, compiler
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
@@ -768,8 +784,9 @@ contains
         logical, intent(in) :: include_apps
         logical, intent(in), optional :: use_cache
 
-        type(scan_unit_t), allocatable :: units_a(:), units_b(:), all_units(:)
-        integer :: na, nb, n_all, i, ii, ierr, node_id
+        type(scan_unit_t), allocatable :: units_a(:), units_b(:), units_c(:)
+        type(scan_unit_t), allocatable :: all_units(:)
+        integer :: na, nb, nc, n_all, i, ii, ierr, node_id
         type(dag_t) :: dag
         character(len=MAX_PATH), allocatable :: filenames(:)
         logical, allocatable :: is_prog(:), is_test_arr(:)
@@ -799,7 +816,7 @@ contains
         character(len=HASH_LEN), allocatable :: compile_keys(:)
         integer, allocatable :: compile_exits(:)
         character(len=512), allocatable :: per_logs(:)
-        integer :: n_compile
+        integer :: n_compile, team_size
         character(len=MAX_PATH) :: fname_local
         character(len=512) :: per_log_local
 
@@ -817,15 +834,22 @@ contains
 
         call scan_dir(trim(project_dir)//'/'//trim(src_dir), units_a, na, ierr)
         call scan_dir(trim(project_dir)//'/'//trim(app_dir), units_b, nb, ierr)
+        nc = 0
+        if (include_examples) &
+            call scan_dir(trim(project_dir)//'/'//trim(example_dir), units_c, nc, ierr)
 
         n_all = na
-        allocate (all_units(na + nb))
+        allocate (all_units(na + nb + nc))
         do i = 1, nb
             n_all = n_all + 1
             all_units(n_all) = units_b(i)
         end do
         do i = 1, na
             all_units(i) = units_a(i)
+        end do
+        do i = 1, nc
+            n_all = n_all + 1
+            all_units(n_all) = units_c(i)
         end do
 
         ! Fold path-dependency library sources into the same unit set, so the
@@ -858,6 +882,8 @@ contains
             if (len_trim(filenames(node_id)) == 0) cycle
             if (.not. include_apps .and. source_is_in_dir(filenames(node_id), &
                 project_dir, app_dir)) cycle
+            if (.not. include_apps .and. source_is_in_dir(filenames(node_id), &
+                project_dir, example_dir)) cycle
             total_source = total_source + 1
             n_compdb = n_compdb + 1
             compdb_sources(n_compdb) = filenames(node_id)
@@ -879,6 +905,8 @@ contains
                     if (len_trim(filenames(node_id)) == 0) cycle
                     if (.not. include_apps .and. source_is_in_dir( &
                         filenames(node_id), project_dir, app_dir)) cycle
+                    if (.not. include_apps .and. source_is_in_dir( &
+                        filenames(node_id), project_dir, example_dir)) cycle
 
                     call collect_dep_keys_source_order(all_units, n_all, dag, node_id, &
                         new_mod_keys, dep_includes, &
@@ -920,7 +948,8 @@ contains
                     call make_tmpfile('fo_compile', per_logs(ii))
                 end do
 
-                !$omp parallel do if(n_compile > 1) schedule(static) &
+                team_size = max(1, min(n_compile, native_jobs()))
+                !$omp parallel do if(n_compile > 1) num_threads(team_size) schedule(static) &
                 !$omp private(node_id, obj_path, fname_local, per_log_local)
                 do ii = 1, n_compile
                     node_id = compile_nodes(ii)
@@ -988,6 +1017,8 @@ contains
                 if (is_test_arr(node_id)) cycle
                 if (.not. include_apps .and. source_is_in_dir(filenames(node_id), &
                     project_dir, app_dir)) cycle
+                if (.not. include_apps .and. source_is_in_dir(filenames(node_id), &
+                    project_dir, example_dir)) cycle
                 call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
                 call compile_f90(project_dir, filenames(node_id), obj_path, &
                     effective_flags, log_file, &
@@ -1012,6 +1043,8 @@ contains
             if (is_test_arr(node_id)) cycle
             if (.not. include_apps .and. source_is_in_dir(filenames(node_id), &
                 project_dir, app_dir)) cycle
+            if (.not. include_apps .and. source_is_in_dir(filenames(node_id), &
+                project_dir, example_dir)) cycle
             call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
             if (n_src_objs < MAX_SRC_OBJS) then
                 n_src_objs = n_src_objs + 1
@@ -1432,15 +1465,16 @@ contains
         character(len=*), intent(in), optional :: flags
         logical, intent(in), optional :: use_cache
 
-        integer :: i, n_lib, copy_rc
+        integer :: i, n_lib, n_link_inputs, copy_rc
         character(len=512), allocatable :: lib_objs(:)
         character(len=512) :: prog_obj, bin_path, app_bin_dir, app_bin_path
-        character(len=128) :: prog_name, manifest_name
+        character(len=512) :: archive_path, link_inputs(1)
+        character(len=128) :: prog_name, manifest_name, object_name
         character(len=512) :: link_flags
         type(cache_t) :: c
         integer :: cache_ierr
         character(len=HASH_LEN) :: base_digest
-        logical :: allow_cache
+        logical :: allow_cache, is_example
 
         link_flags = ''
         if (present(flags)) link_flags = flags
@@ -1465,6 +1499,15 @@ contains
             n_dep_objs, config%link_libs, config%n_link_libs, base_digest)
         app_bin_dir = trim(project_dir)//'/build/fo/app'
         call fs_make_dir(app_bin_dir)
+        n_link_inputs = 0
+        archive_path = ''
+        if (n_lib > 0) then
+            call archive_objects(project_dir, lib_objs, n_lib, archive_path, &
+                log_file, exitcode, base_digest)
+            if (exitcode /= 0) return
+            n_link_inputs = 1
+            link_inputs(1) = archive_path
+        end if
 
         do i = 1, n_src_objs
             if (.not. is_prog_arr(i)) cycle
@@ -1473,26 +1516,44 @@ contains
             ! program takes its own source stem. Selecting by stem (not source
             ! order) keeps `main` mapped to the package binary even when another
             ! app source sorts ahead of it.
-            call app_prog_stem(prog_obj, config%app_dir, prog_name)
-            manifest_name = manifest_exe_name(config, config%app_dir, prog_name)
-            if (len_trim(manifest_name) > 0) then
-                prog_name = trim(manifest_name)
-            else if (prog_name == 'main' .and. len_trim(config%name) > 0) then
-                prog_name = trim(config%name)
+            call file_basename(prog_obj, object_name)
+            is_example = index(trim(object_name), &
+                trim(config%example_dir)//'_') == 1
+            if (is_example) then
+                call app_prog_stem(prog_obj, config%example_dir, prog_name)
+                manifest_name = manifest_example_name(config, &
+                    config%example_dir, prog_name)
+                if (len_trim(manifest_name) > 0) prog_name = trim(manifest_name)
+            else
+                call app_prog_stem(prog_obj, config%app_dir, prog_name)
+                manifest_name = manifest_exe_name(config, config%app_dir, prog_name)
+                if (len_trim(manifest_name) > 0) then
+                    prog_name = trim(manifest_name)
+                else if (prog_name == 'main' .and. len_trim(config%name) > 0) then
+                    prog_name = trim(config%name)
+                end if
             end if
             bin_path = trim(bin_dir)//'/'//trim(prog_name)
-            call link_binary(project_dir, prog_obj, lib_objs, n_lib, dep_objs, n_dep_objs, &
-                config%link_libs, config%n_link_libs, bin_path, &
+            call link_binary(project_dir, prog_obj, link_inputs, n_link_inputs, &
+                dep_objs, n_dep_objs, config%link_libs, config%n_link_libs, bin_path, &
                 log_file, exitcode, link_flags, c, base_digest)
-            if (exitcode /= 0) return
+            if (exitcode /= 0) then
+                if (len_trim(base_digest) == 0 .and. len_trim(archive_path) > 0) &
+                    call fs_remove_file(archive_path)
+                return
+            end if
             app_bin_path = trim(app_bin_dir)//'/'//trim(prog_name)
             copy_rc = fs_copy_exec(bin_path, app_bin_path)
             if (copy_rc /= 0) then
                 write (error_unit, '(a)') 'fo: failed to create '//trim(app_bin_path)
                 exitcode = 1
+                if (len_trim(base_digest) == 0 .and. len_trim(archive_path) > 0) &
+                    call fs_remove_file(archive_path)
                 return
             end if
         end do
+        if (len_trim(base_digest) == 0 .and. len_trim(archive_path) > 0) &
+            call fs_remove_file(archive_path)
     end subroutine link_app_binaries
 
     subroutine link_base_digest(project_dir, lib_objs, n_lib, dep_objs, n_dep, link_libs, &
@@ -1503,7 +1564,7 @@ contains
         !! per-program link folds in only its own object, so the link key is
         !! cheap and correct.
         character(len=*), intent(in) :: project_dir
-        character(len=512), intent(in) :: lib_objs(MAX_SRC_OBJS)
+        character(len=512), intent(in) :: lib_objs(:)
         integer, intent(in) :: n_lib
         character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
         integer, intent(in) :: n_dep
@@ -1579,7 +1640,7 @@ contains
         integer, intent(in) :: n_dep_includes
         character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
         integer, intent(in) :: n_dep_objs
-        character(len=512), intent(in) :: lib_objs(MAX_SRC_OBJS)
+        character(len=512), intent(in) :: lib_objs(:)
         integer, intent(in) :: n_lib_objs
         character(len=128), intent(in) :: link_libs(*)
         integer, intent(in) :: n_link_libs
@@ -1594,7 +1655,7 @@ contains
         logical, intent(in), optional :: use_cache
 
         type(scan_unit_t), allocatable :: tunits(:)
-        integer :: n_tests, i, ierr, node_id, n_run
+        integer :: n_tests, i, ierr, node_id, n_run, team_size
         type(dag_t) :: dag
         character(len=MAX_PATH), allocatable :: filenames(:)
         logical, allocatable :: is_prog(:), is_test_arr(:)
@@ -1602,6 +1663,7 @@ contains
         integer, allocatable :: run_nodes(:), run_exits(:)
         character(len=512), allocatable :: run_logs(:)
         character(len=HASH_LEN), allocatable :: run_keys(:)
+        character(len=128), allocatable :: run_names(:)
         logical, allocatable :: run_compiled(:)
         logical, allocatable :: ran(:), flaky(:)
         real, allocatable :: run_secs(:)
@@ -1612,7 +1674,7 @@ contains
         logical :: allow_cache
         character(len=512) :: obj_path, bin_path
         character(len=4096) :: incl_flag
-        character(len=128) :: tname
+        character(len=128) :: tname, manifest_name
         character(len=MAX_PATH) :: fname_local
         character(len=512) :: log_local, rerun_log
         type(cache_t) :: c
@@ -1624,12 +1686,14 @@ contains
         character(len=512) :: test_includes(MAX_DEP_DIRS)
         character(len=1024) :: test_flags
         character(len=512), allocatable :: helper_objs(:)
-        character(len=512), allocatable :: all_lib_objs(:)
-        integer :: n_helper_objs, n_all_lib
+        character(len=512), allocatable :: all_lib_objs(:), link_inputs(:)
+        integer :: n_helper_objs, n_all_lib, n_link_inputs
+        character(len=512) :: archive_path
         logical :: in_lib
         type(resolved_src_t) :: devsrcs(MAX_RESOLVED)
         integer :: n_dev, d, nud
         type(scan_unit_t), allocatable :: udev(:)
+        type(fpm_config_t), allocatable :: manifest_config
 
         bonly = .false.
         if (present(build_only)) bonly = build_only
@@ -1642,6 +1706,7 @@ contains
         allocate (topo_order(MAX_NODES))
         allocate (run_nodes(MAX_NODES), run_exits(MAX_NODES), run_logs(MAX_NODES))
         allocate (run_keys(MAX_NODES))
+        allocate (run_names(MAX_NODES))
         allocate (run_compiled(MAX_NODES), run_secs(MAX_NODES))
         allocate (ran(MAX_NODES), flaky(MAX_NODES))
         ran = .false.
@@ -1651,6 +1716,9 @@ contains
         test_warn = test_warn_seconds(test_timeout)
         call scan_dir(trim(project_dir)//'/'//trim(test_dir), tunits, n_tests, ierr)
         if (n_tests == 0) return
+        allocate (manifest_config)
+        call fpm_config_parse(project_dir, manifest_config, ierr)
+        if (ierr /= 0) return
 
         call resolve_dev_dep_srcs(project_dir, devsrcs, n_dev, ierr)
         if (ierr == 0 .and. n_dev > 0) then
@@ -1682,11 +1750,14 @@ contains
             if (len_trim(filenames(node_id)) == 0) cycle
             if (.not. is_prog(node_id)) cycle
             call file_basename(filenames(node_id), tname)
+            manifest_name = manifest_test_name(manifest_config, test_dir, tname)
+            if (len_trim(manifest_name) > 0) tname = manifest_name
             if (.not. include_slow .and. is_slow_name(tname)) cycle
             if (n_selected > 0 .and. .not. selected_test(tname, selected_names, &
                 n_selected)) cycle
             n_run = n_run + 1
             run_nodes(n_run) = node_id
+            run_names(n_run) = tname
             call make_tmpfile('fo_test_case', run_logs(n_run))
         end do
 
@@ -1739,6 +1810,17 @@ contains
         link_base = ''
         if (cache_ierr == 0) call link_base_digest(project_dir, all_lib_objs, n_all_lib, &
             dep_objs, n_dep_objs, link_libs, n_link_libs, link_base)
+        allocate (link_inputs(MAX_SRC_OBJS))
+        link_inputs = ''
+        n_link_inputs = 0
+        archive_path = ''
+        if (n_all_lib > 0) then
+            call archive_objects(project_dir, all_lib_objs, n_all_lib, archive_path, &
+                log_file, exitcode, link_base)
+            if (exitcode /= 0) return
+            n_link_inputs = 1
+            link_inputs(1) = archive_path
+        end if
 
         do i = 1, n_run
             node_id = run_nodes(i)
@@ -1761,7 +1843,9 @@ contains
         else
             call progress_begin('test', n_run)
         end if
-        !$omp parallel do if(n_run > 1) schedule(dynamic) private(node_id, fname_local, &
+        team_size = max(1, min(n_run, native_jobs()))
+        !$omp parallel do if(n_run > 1) num_threads(team_size) schedule(dynamic) &
+        !$omp& private(node_id, fname_local, &
         !$omp& obj_path, bin_path, tname, log_local, restored, clk0, clk1, &
         !$omp& clk_rate)
         do i = 1, n_run
@@ -1780,10 +1864,10 @@ contains
                 run_compiled(i) = run_exits(i) == 0
             end if
             if (run_exits(i) == 0) then
-                call file_basename(fname_local, tname)
+                tname = run_names(i)
                 bin_path = trim(bin_dir)//'/'//trim(tname)
-                call link_binary(project_dir, obj_path, all_lib_objs, n_all_lib, dep_objs, &
-                    n_dep_objs, link_libs, n_link_libs, bin_path, log_local, &
+                call link_binary(project_dir, obj_path, link_inputs, n_link_inputs, &
+                    dep_objs, n_dep_objs, link_libs, n_link_libs, bin_path, log_local, &
                     run_exits(i), test_flags, c, link_base)
             end if
             if (run_exits(i) == 0 .and. .not. bonly) then
@@ -1804,6 +1888,8 @@ contains
         end do
         !$omp end parallel do
         call progress_end()
+        if (len_trim(link_base) == 0 .and. len_trim(archive_path) > 0) &
+            call fs_remove_file(archive_path)
 
         ! Flaky-test diagnosis: a test that compiled and ran but failed may have
         ! lost a race with a concurrently-running test (shared /tmp path, shared
@@ -1815,7 +1901,7 @@ contains
             do i = 1, n_run
                 if (.not. ran(i)) cycle
                 if (run_exits(i) == 0 .or. run_exits(i) == 124) cycle
-                call file_basename(filenames(run_nodes(i)), tname)
+                tname = run_names(i)
                 bin_path = trim(bin_dir)//'/'//trim(tname)
                 call make_tmpfile('fo_test_rerun', rerun_log)
                 call process_run_logged(project_dir, bin_path, rerun_log, .true., &
@@ -1826,7 +1912,7 @@ contains
         end if
 
         do i = 1, n_run
-            call file_basename(filenames(run_nodes(i)), tname)
+            tname = run_names(i)
             if (run_exits(i) /= 0) then
                 call append_test_stdout_block(run_logs(i), log_file, tname)
                 if (run_exits(i) == 124) then
@@ -1850,7 +1936,7 @@ contains
 
         do i = 1, n_run
             if (flaky(i)) then
-                call file_basename(filenames(run_nodes(i)), tname)
+                tname = run_names(i)
                 call append_flaky_status(log_file, tname)
             end if
         end do
@@ -1858,7 +1944,7 @@ contains
         ! Structured TEST_RESULT lines for downstream consumers (CLI, MCP, agents)
         if (.not. bonly) then
             do i = 1, n_run
-                call file_basename(filenames(run_nodes(i)), tname)
+                tname = run_names(i)
                 if (flaky(i)) then
                     call write_test_result_line(log_file, tname, 'FLAKY', '-', &
                         run_secs(i))
@@ -1892,6 +1978,53 @@ contains
             call warn_slow_tests(filenames, run_nodes, run_exits, run_secs, n_run, &
             test_warn, log_file)
     end subroutine compile_and_run_tests
+
+    subroutine archive_objects(project_dir, objects, n_objects, archive_path, &
+            log_file, exitcode, content_key)
+        character(len=*), intent(in) :: project_dir, log_file
+        character(len=512), intent(in) :: objects(:)
+        integer, intent(in) :: n_objects
+        character(len=*), intent(out) :: archive_path
+        integer, intent(out) :: exitcode
+        character(len=*), intent(in), optional :: content_key
+
+        character(len=:), allocatable :: packed
+        character(len=512) :: seed, archive_dir
+        integer :: i, n_args
+        logical :: exists
+
+        archive_path = ''
+        exitcode = 0
+        if (n_objects < 1) return
+        if (present(content_key)) then
+            if (len_trim(content_key) > 0) then
+                archive_dir = trim(project_dir)//'/build/fo/lib'
+                call fs_make_dir(archive_dir)
+                archive_path = trim(archive_dir)//'/objects_'// &
+                    content_key(1:min(32, len_trim(content_key)))//'.a'
+                inquire (file=trim(archive_path), exist=exists)
+                if (exists) return
+            end if
+        end if
+        if (len_trim(archive_path) == 0) then
+            call make_tmpfile('fo_archive', seed)
+            call fs_remove_file(seed)
+            archive_path = trim(seed)//'.a'
+        end if
+        n_args = 0
+        call argv_push(packed, n_args, 'ar')
+        call argv_push(packed, n_args, 'rcs')
+        call argv_push(packed, n_args, archive_path)
+        do i = 1, n_objects
+            call argv_push(packed, n_args, objects(i))
+        end do
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+            .true., build_timeout_seconds(), exitcode)
+        if (exitcode /= 0) then
+            call fs_remove_file(archive_path)
+            archive_path = ''
+        end if
+    end subroutine archive_objects
 
     subroutine compile_test_helpers(project_dir, obj_dir, dag, filenames, is_prog, &
             topo_order, n_order, run_nodes, n_run, incl_flag, log_file, &
@@ -2267,7 +2400,7 @@ contains
         !! Combine per-object content hashes into one key that represents the
         !! linked library implementation a test binary depends on, so a cached
         !! test result is invalidated when any library object changes.
-        character(len=512), intent(in) :: lib_objs(MAX_SRC_OBJS)
+        character(len=512), intent(in) :: lib_objs(:)
         integer, intent(in) :: n_lib_objs
         character(len=HASH_LEN), intent(out) :: combined
         character(len=512) :: tmpfile
@@ -2557,7 +2690,7 @@ contains
             cache, base_digest)
         character(len=*), intent(in) :: project_dir
         character(len=*), intent(in) :: prog_obj, output, log_file
-        character(len=512), intent(in) :: lib_objs(MAX_SRC_OBJS)
+        character(len=512), intent(in) :: lib_objs(:)
         integer, intent(in) :: n_lib_objs
         character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
         integer, intent(in) :: n_dep_objs
