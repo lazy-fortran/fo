@@ -8,6 +8,7 @@ module fo_process
     public :: process_run_logged
     public :: process_stderr_is_tty, process_write_stderr
     public :: process_getpid, process_getcwd
+    public :: process_suppress_heartbeats
     public :: process_run_argv_logged, argv_push, argv_push_split
     public :: argv_push_split_nl
     integer, parameter :: C_PATH_LEN = 4096
@@ -21,6 +22,12 @@ module fo_process
 
         subroutine fo_c_configure_openmp() bind(C, name='fo_c_configure_openmp')
         end subroutine fo_c_configure_openmp
+
+        subroutine fo_c_suppress_heartbeats(suppress) &
+                bind(C, name='fo_c_suppress_heartbeats')
+            import :: c_int
+            integer(c_int), value :: suppress
+        end subroutine fo_c_suppress_heartbeats
 
         function fo_c_isatty(fd) bind(C, name='fo_c_isatty') result(r)
             import :: c_int
@@ -101,6 +108,12 @@ contains
     subroutine process_configure_openmp()
         call fo_c_configure_openmp()
     end subroutine process_configure_openmp
+
+    subroutine process_suppress_heartbeats(suppress)
+        logical, intent(in) :: suppress
+
+        call fo_c_suppress_heartbeats(merge(1_c_int, 0_c_int, suppress))
+    end subroutine process_suppress_heartbeats
 
     integer function process_getpid()
         !! Current process id. Used to make per-process unique paths so parallel

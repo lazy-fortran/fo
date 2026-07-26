@@ -19,6 +19,8 @@
 #include <time.h>
 #include <unistd.h>
 
+static int heartbeats_suppressed = 0;
+
 static int has_text(const char *text) { return text != NULL && text[0] != '\0'; }
 
 static int timespec_at_or_after(const struct timespec *lhs,
@@ -406,9 +408,14 @@ static int heartbeat_seconds(void) {
     const char *value = getenv("FO_HEARTBEAT_SECONDS");
     int seconds;
 
+    if (heartbeats_suppressed) return 0;
     if (!value || !value[0]) return 10;
     seconds = atoi(value);
     return seconds >= 0 ? seconds : 10;
+}
+
+void fo_c_suppress_heartbeats(int suppress) {
+    heartbeats_suppressed = suppress != 0;
 }
 
 void fo_c_detect_nproc(int *nproc) {

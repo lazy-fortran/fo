@@ -11,7 +11,8 @@ module fo_mcp
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
     use fo_process, only: process_start_fo_check, process_poll_pid, &
-        process_cancel_pid, process_run_argv_logged, argv_push
+        process_cancel_pid, process_run_argv_logged, argv_push, &
+        process_suppress_heartbeats
     use fo_progress, only: progress_suppress
     use fo_version_info, only: FO_VERSION
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
@@ -44,6 +45,7 @@ contains
         logical :: eof_flag
         type(mcp_async_state_t) :: async_state
 
+        call process_suppress_heartbeats(.true.)
         framing = MCP_FRAME_UNKNOWN
         do
             call mcp_read_message(line, MAX_LINE, framing, eof_flag, read_status)
@@ -88,6 +90,7 @@ contains
             end select
         end do
         call async_cancel_all(async_state)
+        call process_suppress_heartbeats(.false.)
     end subroutine mcp_serve
 
     subroutine handle_tools_call(line, id_str, response, async_state)
