@@ -195,7 +195,7 @@ async function runSuite(label, send, readResponse) {
     assert(init.id === 1, 'id matches');
     assert(init.result.protocolVersion === '2025-11-25', 'echoes protocol version');
     assert(init.result.serverInfo.name === 'fo', 'server name');
-    assert(init.result.serverInfo.version === '0.3.0', 'server version');
+  assert(init.result.serverInfo.version === '0.3.1', 'server version');
     assert(init.result.capabilities.tools !== undefined, 'has tools capability');
     assert(init.result.capabilities.resources !== undefined, 'has resources capability');
 
