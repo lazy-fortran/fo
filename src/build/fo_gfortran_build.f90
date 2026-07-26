@@ -24,7 +24,8 @@ module fo_gfortran_build
         fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec, &
         fs_find_executable
     use fo_progress, only: progress_begin, progress_step, progress_end
-    use fo_compiler_flags, only: append_array_temporary_warning_flag
+    use fo_compiler_flags, only: append_array_temporary_warning_flag, append_pipe_flag
+    use fo_linker_policy, only: select_linker
     use fo_build_stamp, only: build_stamp_matches, build_stamp_quick_matches, &
         build_stamp_save
     use fo_compiler_memo, only: compiler_memo_load, compiler_memo_save
@@ -2496,6 +2497,7 @@ contains
         else
             flags = '-ffree-line-length-none -fimplicit-none'
         end if
+        call append_pipe_flag(fc_command(), flags)
     end function fc_base_flags
 
     subroutine make_includes_flag(mod_dir, dep_includes, n_dep_includes, flag)
@@ -2711,27 +2713,31 @@ contains
         character(len=:), allocatable :: packed
         character(len=8) :: debug_links
         integer :: debug_status
-        integer :: i, n_args
-        logical :: do_cache, restored
+        integer :: n_args
+        logical :: do_cache, restored, use_lld
         character(len=HASH_LEN) :: action_id, prog_key
-        character(len=512) :: tmp_bin, key_parts(6)
+        character(len=512) :: tmp_bin, key_parts(7), lld_log
         character(len=:), allocatable :: flags_str
         integer :: store_ierr
 
         flags_str = ''
         if (present(flags)) flags_str = trim(flags)
+        exitcode = 1
+        call select_linker(fc_command(), use_lld)
 
         do_cache = present(cache) .and. present(base_digest)
         if (do_cache) do_cache = len_trim(base_digest) > 0
         if (do_cache) then
             call cache_file_digest(prog_obj, prog_key)
-            key_parts(1) = 'fo-link-1'
+            key_parts(1) = 'fo-link-2'
             key_parts(2) = trim(fc_command())
-            key_parts(3) = flags_str
-            key_parts(4) = trim(link_lib_flags(project_dir, link_libs, n_link_libs))
-            key_parts(5) = trim(base_digest)
-            key_parts(6) = trim(prog_key)
-            action_id = cache_digest(key_parts, 6)
+            key_parts(3) = 'default'
+            if (use_lld) key_parts(3) = 'lld-with-default-fallback'
+            key_parts(4) = flags_str
+            key_parts(5) = trim(link_lib_flags(project_dir, link_libs, n_link_libs))
+            key_parts(6) = trim(base_digest)
+            key_parts(7) = trim(prog_key)
+            action_id = cache_digest(key_parts, 7)
             ! Fast path: the output is already the binary this action produces.
             ! Leave it untouched - no relink, no copy. This is what keeps warm
             ! builds cheap when outputs are large (2.4 GB of static binaries).
@@ -2758,8 +2764,54 @@ contains
         ! Build an argv vector (no /bin/sh): quote-proof and async-signal-safe,
         ! since link_binary runs inside the parallel test loop where a shell
         ! fork would corrupt libgomp.
+        call get_environment_variable('FO_DEBUG_LINKS', debug_links, &
+            status=debug_status)
+        call make_link_argv(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, &
+            n_dep_objs, link_libs, n_link_libs, output, flags_str, use_lld, packed, &
+            n_args)
+        if (debug_status == 0 .and. len_trim(debug_links) > 0) then
+            write (error_unit, '(a)') 'fo link: '//argv_display(packed)
+        end if
+        if (use_lld) then
+            call make_tmpfile('fo_lld_link', lld_log)
+            call process_run_argv_logged('', packed, n_args, lld_log, .true., &
+                build_timeout_seconds(), exitcode)
+            call delete_tmpfile(lld_log)
+        end if
+        if (.not. use_lld .or. exitcode /= 0) then
+            call make_link_argv(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, &
+                n_dep_objs, link_libs, n_link_libs, output, flags_str, .false., packed, &
+                n_args)
+            if (use_lld .and. debug_status == 0 .and. len_trim(debug_links) > 0) &
+                write (error_unit, '(a)') 'fo link fallback: '//argv_display(packed)
+            call process_run_argv_logged('', packed, n_args, log_file, .true., &
+                build_timeout_seconds(), exitcode)
+        end if
+        if (exitcode == 124) call append_build_hang_hint(log_file, &
+            'link of '//trim(output), build_timeout_seconds())
+
+        if (do_cache .and. exitcode == 0) &
+            call cache_store_binary(cache, action_id, output, store_ierr)
+    end subroutine link_binary
+
+    subroutine make_link_argv(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, &
+            n_dep_objs, link_libs, n_link_libs, output, flags, use_lld, packed, n_args)
+        character(len=*), intent(in) :: project_dir, prog_obj, output, flags
+        character(len=512), intent(in) :: lib_objs(:)
+        integer, intent(in) :: n_lib_objs
+        character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
+        integer, intent(in) :: n_dep_objs
+        character(len=128), intent(in) :: link_libs(*)
+        integer, intent(in) :: n_link_libs
+        logical, intent(in) :: use_lld
+        character(len=:), allocatable, intent(out) :: packed
+        integer, intent(out) :: n_args
+
+        integer :: i
+
         n_args = 0
         call argv_push_split(packed, n_args, fc_executable_command())
+        if (use_lld) call argv_push(packed, n_args, '-fuse-ld=lld')
         call argv_push(packed, n_args, prog_obj)
         do i = 1, n_lib_objs
             call argv_push(packed, n_args, lib_objs(i))
@@ -2767,7 +2819,8 @@ contains
         do i = 1, n_dep_objs
             call argv_push(packed, n_args, dep_objs(i))
         end do
-        call argv_push_split_nl(packed, n_args, link_lib_flags(project_dir, link_libs, n_link_libs))
+        call argv_push_split_nl(packed, n_args, &
+            link_lib_flags(project_dir, link_libs, n_link_libs))
         ! flang's driver does not add Homebrew's libomp to the link search, so
         ! -fopenmp links fail with "library 'omp' not found". Add it (harmless
         ! when the build does not use OpenMP) plus an rpath for runtime.
@@ -2775,24 +2828,10 @@ contains
             call argv_push(packed, n_args, '-L/opt/homebrew/opt/libomp/lib')
             call argv_push(packed, n_args, '-Wl,-rpath,/opt/homebrew/opt/libomp/lib')
         end if
-        if (present(flags) .and. len_trim(flags) > 0) then
-            call argv_push_split(packed, n_args, flags)
-        end if
+        if (len_trim(flags) > 0) call argv_push_split(packed, n_args, flags)
         call argv_push(packed, n_args, '-o')
         call argv_push(packed, n_args, output)
-        call get_environment_variable('FO_DEBUG_LINKS', debug_links, &
-            status=debug_status)
-        if (debug_status == 0 .and. len_trim(debug_links) > 0) then
-            write (error_unit, '(a)') 'fo link: '//argv_display(packed)
-        end if
-        call process_run_argv_logged('', packed, n_args, log_file, .true., &
-            build_timeout_seconds(), exitcode)
-        if (exitcode == 124) call append_build_hang_hint(log_file, &
-            'link of '//trim(output), build_timeout_seconds())
-
-        if (do_cache .and. exitcode == 0) &
-            call cache_store_binary(cache, action_id, output, store_ierr)
-    end subroutine link_binary
+    end subroutine make_link_argv
 
     function argv_display(packed) result(text)
         !! Render a packed NUL-separated argv buffer as a space-joined string

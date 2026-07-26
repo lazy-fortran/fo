@@ -3,5 +3,5 @@ module fo_version_info
     private
     public :: FO_VERSION
 
-    character(len=*), parameter :: FO_VERSION = '0.3.1'
+    character(len=*), parameter :: FO_VERSION = '0.3.2'
 end module fo_version_info

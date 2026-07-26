@@ -10,7 +10,8 @@ program test_backend_gfortran
     use fo_cache, only: cache_t, cache_init, cache_key_for, cache_store_action, &
         HASH_LEN
     use fo_process, only: process_getpid
-    use fo_compiler_flags, only: append_array_temporary_warning_flag
+    use fo_compiler_flags, only: append_array_temporary_warning_flag, append_pipe_flag
+    use fo_linker_policy, only: linker_should_try_lld
     use fx_dag, only: MAX_NODES
     implicit none
     integer :: n_pass, n_fail
@@ -44,6 +45,9 @@ program test_backend_gfortran
     call test_gfortran_rejects_compile_errors()
     call test_gfortran_rebuilds_cached_module_without_mod()
     call test_array_temporary_warning_flag_policy()
+    call test_pipe_flag_policy()
+    call test_linker_policy()
+    call test_lld_failure_falls_back_to_default_linker()
     call test_gfortran_warns_about_array_temporaries()
     call test_gfortran_named_tests_fit_default_stack()
 
@@ -217,6 +221,114 @@ contains
         call assert(len_trim(flags) == 0, &
             'non-GNU compiler does not receive a GNU-only warning flag')
     end subroutine test_array_temporary_warning_flag_policy
+
+    subroutine test_pipe_flag_policy()
+        character(len=128) :: flags
+
+        flags = '-fimplicit-none'
+        call append_pipe_flag('GNU Fortran 16.1', flags)
+        call assert(trim(flags) == '-fimplicit-none -pipe', &
+            'GNU Fortran uses pipes between compilation stages')
+        call append_pipe_flag('gfortran', flags)
+        call assert(trim(flags) == '-fimplicit-none -pipe', &
+            'pipe flag is not duplicated')
+        flags = '-fimplicit-none'
+        call append_pipe_flag('flang-new', flags)
+        call assert(trim(flags) == '-fimplicit-none', &
+            'non-GNU compiler does not receive the GCC-specific pipe flag')
+    end subroutine test_pipe_flag_policy
+
+    subroutine test_linker_policy()
+        call assert(linker_should_try_lld('gfortran', .true., 'auto'), &
+            'auto linker policy prefers available LLD for gfortran')
+        call assert(linker_should_try_lld('flang-new', .true., 'lld'), &
+            'explicit LLD policy supports the flang driver')
+        call assert(.not. linker_should_try_lld('lfortran', .true., 'auto'), &
+            'compiler without -fuse-ld support keeps its default linker')
+        call assert(.not. linker_should_try_lld('gfortran', .false., 'auto'), &
+            'missing LLD keeps the default linker')
+        call assert(.not. linker_should_try_lld('gfortran', .true., 'default'), &
+            'explicit default policy disables LLD')
+    end subroutine test_linker_policy
+
+    subroutine test_lld_failure_falls_back_to_default_linker()
+        use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+        use fo_fs, only: fs_find_executable
+        interface
+            function setenv(name, value, overwrite) bind(C, name='setenv') &
+                    result(ierr)
+                import :: c_char, c_int
+                character(kind=c_char), intent(in) :: name(*), value(*)
+                integer(c_int), value :: overwrite
+                integer(c_int) :: ierr
+            end function setenv
+            function unsetenv(name) bind(C, name='unsetenv') result(ierr)
+                import :: c_char, c_int
+                character(kind=c_char), intent(in) :: name(*)
+                integer(c_int) :: ierr
+            end function unsetenv
+        end interface
+
+        character(len=:), allocatable :: old_path
+        character(len=512) :: project_dir, log_file, fake_dir, marker
+        character(len=512) :: real_compiler, old_fc
+        integer :: u, exitcode, path_length, fc_status
+        integer(c_int) :: ierr
+        logical :: attempted, compiler_found
+
+        call make_tmp_path('fo_lld_fallback_project', project_dir)
+        call make_tmp_path('fo_lld_fallback_log', log_file)
+        call make_tmp_path('fo_lld_fallback_bin', fake_dir)
+        call make_simple_fpm_project(project_dir)
+        call make_dir(fake_dir)
+        call fs_find_executable('gfortran', real_compiler, compiler_found)
+        call assert(compiler_found, 'fallback fixture locates the real compiler')
+        marker = trim(fake_dir)//'/attempted'
+        open (newunit=u, file=trim(fake_dir)//'/ld.lld', status='replace')
+        write (u, '(a)') '#!/bin/sh'
+        write (u, '(a)') 'exit 1'
+        close (u)
+        call execute_command_line('chmod +x "'//trim(fake_dir)//'/ld.lld"')
+        open (newunit=u, file=trim(fake_dir)//'/gfortran', status='replace')
+        write (u, '(a)') '#!/bin/sh'
+        write (u, '(a)') 'for arg in "$@"; do'
+        write (u, '(a)') '  if [ "$arg" = "-fuse-ld=lld" ]; then'
+        write (u, '(a)') '    touch "'//trim(marker)//'"'
+        write (u, '(a)') '    exit 1'
+        write (u, '(a)') '  fi'
+        write (u, '(a)') 'done'
+        write (u, '(a)') 'exec "'//trim(real_compiler)//'" "$@"'
+        close (u)
+        call execute_command_line('chmod +x "'//trim(fake_dir)//'/gfortran"')
+
+        call get_environment_variable('PATH', length=path_length)
+        allocate (character(len=max(1, path_length)) :: old_path)
+        call get_environment_variable('PATH', old_path)
+        old_fc = ''
+        call get_environment_variable('FO_FC', old_fc, status=fc_status)
+        ierr = setenv('PATH'//c_null_char, &
+            trim(fake_dir)//':'//trim(old_path)//c_null_char, 1_c_int)
+        ierr = setenv('FO_LINKER'//c_null_char, 'lld'//c_null_char, 1_c_int)
+        ierr = setenv('FO_FC'//c_null_char, &
+            trim(fake_dir)//'/gfortran'//c_null_char, 1_c_int)
+        call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
+        ierr = setenv('PATH'//c_null_char, trim(old_path)//c_null_char, 1_c_int)
+        ierr = unsetenv('FO_LINKER'//c_null_char)
+        if (fc_status == 0 .and. len_trim(old_fc) > 0) then
+            ierr = setenv('FO_FC'//c_null_char, trim(old_fc)//c_null_char, 1_c_int)
+        else
+            ierr = unsetenv('FO_FC'//c_null_char)
+        end if
+
+        inquire (file=trim(marker), exist=attempted)
+        call assert(attempted, 'link invokes the selected LLD executable')
+        call assert(exitcode == 0, &
+            'failed LLD link retries successfully with the default linker')
+
+        call remove_tree(project_dir)
+        call remove_tree(fake_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_lld_failure_falls_back_to_default_linker
 
     subroutine test_gfortran_warns_about_array_temporaries()
         type(backend_t) :: backend

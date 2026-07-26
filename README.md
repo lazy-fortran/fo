@@ -99,6 +99,14 @@ with an explicit project decision:
 fo build --flag "-Wno-array-temporaries"
 ```
 
+GNU Fortran compilation also uses `-pipe`, avoiding intermediate compiler-stage
+files. On compatible compiler drivers, fo links with LLD when `ld.lld` is
+available; if that link fails, fo transparently retries the compiler driver's
+default system linker. Set `FO_LINKER=default` to disable LLD or
+`FO_LINKER=lld` to request it explicitly. Linking always goes through the
+Fortran compiler driver, so compiler runtime and OpenMP libraries remain
+correctly selected.
+
 ## Development
 
 Run `fo` with no arguments before each commit. This executes the full static,

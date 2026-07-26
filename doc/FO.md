@@ -23,6 +23,12 @@ Objects and module files are restored from the shared CAS. Module-interface
 hashes allow an implementation-only edit to avoid recompiling dependents.
 Binary links and successful tests have separate content keys.
 
+GNU Fortran uses `-pipe` to pass compiler stages without intermediate files.
+For compiler drivers supporting `-fuse-ld`, the link policy prefers an
+available `ld.lld`; a failed LLD invocation is discarded and retried through
+the driver's default linker. The selected policy is part of the binary action
+key. `FO_LINKER=default`, `auto`, or `lld` overrides automatic selection.
+
 ## Parallel safety
 
 OpenMP is the native scheduler. Compilation and test regions use worker-private
@@ -77,3 +83,9 @@ the release profile.
 
 The LSP surface reports compiler-backed diagnostics on save. It does not claim
 to replace a full semantic Fortran language server.
+
+`fo_compiler_service` defines a compiler-library request/result boundary and
+explicit LFortran and Fortfront adapters. Both adapters are unavailable stubs:
+the native build path does not instantiate or invoke them. Wiring either one
+requires independent module-file, diagnostic, runtime-library, and concurrency
+correctness tests first.

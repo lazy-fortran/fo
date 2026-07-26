@@ -5,7 +5,8 @@ module fo_compiler_flags
     character(len=*), parameter, public :: ARRAY_TEMPORARY_WARNING_FLAG = &
         '-Warray-temporaries'
 
-    public :: append_array_temporary_warning_flag, compiler_is_gfortran
+    public :: append_array_temporary_warning_flag, append_pipe_flag
+    public :: compiler_is_gfortran, compiler_supports_fuse_ld
 
 contains
 
@@ -23,6 +24,38 @@ contains
         compiler_is_gfortran = index(lowered, 'gfortran') > 0 .or. &
             index(lowered, 'gnu fortran') > 0
     end function compiler_is_gfortran
+
+    pure logical function compiler_supports_fuse_ld(compiler)
+        character(len=*), intent(in) :: compiler
+        character(len=len(compiler)) :: lowered
+        integer :: i, code
+
+        lowered = compiler
+        do i = 1, len_trim(lowered)
+            code = iachar(lowered(i:i))
+            if (code >= iachar('A') .and. code <= iachar('Z')) &
+                lowered(i:i) = achar(code + iachar('a') - iachar('A'))
+        end do
+        compiler_supports_fuse_ld = compiler_is_gfortran(lowered) .or. &
+            index(lowered, 'flang') > 0
+    end function compiler_supports_fuse_ld
+
+    pure subroutine append_pipe_flag(compiler, flags)
+        character(len=*), intent(in) :: compiler
+        character(len=*), intent(inout) :: flags
+        integer :: required
+
+        if (.not. compiler_is_gfortran(compiler)) return
+        if (index(' '//trim(flags)//' ', ' -pipe ') > 0) return
+        required = len_trim(flags) + len('-pipe')
+        if (len_trim(flags) > 0) required = required + 1
+        if (required > len(flags)) return
+        if (len_trim(flags) > 0) then
+            flags = trim(flags)//' -pipe'
+        else
+            flags = '-pipe'
+        end if
+    end subroutine append_pipe_flag
 
     pure subroutine append_array_temporary_warning_flag(compiler, flags)
         character(len=*), intent(in) :: compiler
