@@ -48,6 +48,17 @@ example, dependency, preprocessing-macro, link, and Fortran-language settings
 are mapped into the native model. Explicit target names remain the public names,
 including when the source is nested or has a different filename.
 
+Native tests may receive target-specific command-line arguments through the
+FPM-standard `extra` namespace:
+
+```toml
+[extra.fo.test-args]
+test_oracle = ["test/data/reference.csv", "--strict"]
+```
+
+The key is the public test name, and each quoted array element remains one
+argument. Test arguments participate in the cached test-result key.
+
 fo and fpm deliberately differ in private state:
 
 - fo stores disposable project views in `build/fo`

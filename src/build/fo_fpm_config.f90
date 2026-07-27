@@ -5,6 +5,7 @@ module fo_fpm_config
     public :: fpm_config_init, fpm_config_parse
     public :: dep_kind, DEP_PATH, DEP_GIT, DEP_REGISTRY
     public :: manifest_exe_name, manifest_test_name, manifest_example_name
+    public :: manifest_test_args
     public :: MAX_LINK_LIBS, add_link_lib
 
     ! How a dependency is acquired, derived from which fields the manifest set.
@@ -20,6 +21,7 @@ module fo_fpm_config
     integer, parameter :: MAX_LINK_LIBS = 32
     integer, parameter :: MAX_FLAGS = 16
     integer, parameter :: MAX_EXES = 64
+    integer, parameter :: MAX_TEST_ARG_SETS = 128
 
     type :: fpm_dep_t
         character(len=256) :: name = ''
@@ -39,6 +41,11 @@ module fo_fpm_config
         character(len=256) :: main = 'main.f90'
         character(len=256) :: source_dir = 'app'
     end type fpm_exe_t
+
+    type :: fpm_test_args_t
+        character(len=128) :: name = ''
+        character(len=:), allocatable :: args
+    end type fpm_test_args_t
 
     type :: fpm_config_t
         character(len=128) :: name = ''
@@ -65,6 +72,8 @@ module fo_fpm_config
         type(fpm_exe_t) :: tests(MAX_EXES)
         integer :: n_examples = 0
         type(fpm_exe_t) :: examples(MAX_EXES)
+        integer :: n_test_arg_sets = 0
+        type(fpm_test_args_t) :: test_arg_sets(MAX_TEST_ARG_SETS)
         ! fpm "openmp" metapackage (openmp = "*" under [dependencies]). When set,
         ! fo compiles and links with -fopenmp so the project's `!$omp` regions
         ! run in parallel. Without it gfortran ignores the directives.
@@ -110,6 +119,7 @@ contains
         c%n_exes = 0
         c%n_tests = 0
         c%n_examples = 0
+        c%n_test_arg_sets = 0
     end subroutine fpm_config_init
 
     subroutine fpm_config_parse(project_dir, config, ierr)
@@ -157,6 +167,8 @@ contains
                         call parse_build(pending_key, val, config)
                     case ('preprocess', 'preprocess.cpp')
                         call parse_preprocess(pending_key, val, config)
+                    case ('extra.fo.test-args')
+                        call parse_test_args(pending_key, val, config)
                     end select
                 end if
                 cycle
@@ -217,6 +229,8 @@ contains
                     call parse_exe(key, val, config%examples(config%n_examples))
             case ('preprocess', 'preprocess.cpp')
                 call parse_preprocess(key, val, config)
+            case ('extra.fo.test-args')
+                call parse_test_args(key, val, config)
             case ('library')
                 call parse_library(key, val, config)
             case ('fortran')
@@ -379,6 +393,22 @@ contains
             end if
         end do
     end function manifest_test_name
+
+    function manifest_test_args(config, name) result(args)
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: name
+        character(len=:), allocatable :: args
+        integer :: i
+
+        args = ''
+        do i = 1, config%n_test_arg_sets
+            if (trim(config%test_arg_sets(i)%name) /= trim(name)) cycle
+            if (allocated(config%test_arg_sets(i)%args)) then
+                args = config%test_arg_sets(i)%args
+            end if
+            return
+        end do
+    end function manifest_test_args
 
     function manifest_example_name(config, example_dir, stem) result(name)
         type(fpm_config_t), intent(in) :: config
@@ -571,6 +601,43 @@ contains
             pos = pos + 1
         end do
     end subroutine parse_flags
+
+    subroutine parse_test_args(name, val, config)
+        character(len=*), intent(in) :: name, val
+        type(fpm_config_t), intent(inout) :: config
+
+        integer :: pos, start, n, slot
+        character(len=512) :: arg
+        logical :: in_str
+
+        if (config%n_test_arg_sets >= MAX_TEST_ARG_SETS) return
+        config%n_test_arg_sets = config%n_test_arg_sets + 1
+        slot = config%n_test_arg_sets
+        config%test_arg_sets(slot)%name = trim(name)
+        config%test_arg_sets(slot)%args = ''
+        pos = 1
+        n = len_trim(val)
+        in_str = .false.
+
+        do while (pos <= n)
+            if (val(pos:pos) == '"') then
+                if (.not. in_str) then
+                    in_str = .true.
+                    start = pos + 1
+                else
+                    in_str = .false.
+                    arg = val(start:pos - 1)
+                    if (len_trim(config%test_arg_sets(slot)%args) > 0) then
+                        config%test_arg_sets(slot)%args = &
+                            trim(config%test_arg_sets(slot)%args)//new_line('a')
+                    end if
+                    config%test_arg_sets(slot)%args = &
+                        trim(config%test_arg_sets(slot)%args)//trim(arg)
+                end if
+            end if
+            pos = pos + 1
+        end do
+    end subroutine parse_test_args
 
     subroutine parse_preprocess(key, val, config)
         character(len=*), intent(in) :: key, val

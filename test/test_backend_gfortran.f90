@@ -50,10 +50,47 @@ program test_backend_gfortran
     call test_lld_failure_falls_back_to_default_linker()
     call test_gfortran_warns_about_array_temporaries()
     call test_gfortran_named_tests_fit_default_stack()
+    call test_gfortran_passes_manifest_test_arguments()
 
     call report('backend_gfortran')
 
 contains
+
+    subroutine test_gfortran_passes_manifest_test_arguments()
+        character(len=512) :: project_dir, log_file
+        integer :: u, exitcode
+
+        call make_tmp_path('fo_manifest_test_args', project_dir)
+        call make_tmp_path('fo_manifest_test_args_log', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        call make_dir(trim(project_dir)//'/test')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "manifest-test-args"'
+        write (u, '(a)') '[extra.fo.test-args]'
+        write (u, '(a)') 'test_arguments = ["first argument", "--second"]'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/test/test_arguments.f90', &
+            status='replace')
+        write (u, '(a)') 'program test_arguments'
+        write (u, '(a)') 'character(len=32) :: first, second'
+        write (u, '(a)') 'if (command_argument_count() /= 2) error stop 1'
+        write (u, '(a)') 'call get_command_argument(1, first)'
+        write (u, '(a)') 'call get_command_argument(2, second)'
+        write (u, '(a)') 'if (trim(first) /= "first argument") error stop 2'
+        write (u, '(a)') 'if (trim(second) /= "--second") error stop 3'
+        write (u, '(a)') 'end program test_arguments'
+        close (u)
+
+        call gfortran_test(project_dir, log_file, exitcode, include_slow=.true., &
+            use_cache=.false.)
+        call assert(exitcode == 0, 'native test with manifest arguments passes')
+        call assert(file_contains(log_file, 'TEST_RESULT test_arguments PASS'), &
+            'native test with manifest arguments reports its result')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_passes_manifest_test_arguments
 
     subroutine test_gfortran_builds_manifest_example()
         character(len=512) :: project_dir, log_file, binary

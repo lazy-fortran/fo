@@ -74,6 +74,17 @@ an installed fpm when their compiled artifacts are absent. `fo install` also
 uses fpm's installation model. Project compilation and testing then run through
 fo's native backend and cache.
 
+Tests that require different command-line arguments can declare fo-specific
+metadata without changing fpm's target model:
+
+```toml
+[extra.fo.test-args]
+test_oracle = ["test/data/reference.csv", "--strict"]
+```
+
+The key is the public test name. Each array element is passed as one argument,
+including values that contain spaces.
+
 ## CMake projects
 
 If no `fpm.toml` exists, fo searches parent directories for `CMakeLists.txt`.

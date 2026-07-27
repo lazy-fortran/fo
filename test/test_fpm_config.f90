@@ -1,6 +1,7 @@
 program test_fpm_config
     use, intrinsic :: iso_fortran_env, only: output_unit
-    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_config_init
+    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_config_init, &
+        manifest_test_args
     implicit none
 
     integer :: n_pass, n_fail
@@ -15,6 +16,7 @@ program test_fpm_config
     call test_flags_with_equals_inline()
     call test_flags_multiline_array()
     call test_preprocess_macros()
+    call test_per_test_arguments()
 
     write (output_unit, '(a,i0,a,i0,a)') 'fpm_config: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -231,5 +233,27 @@ contains
         end if
         call execute_command_line('rm -rf '//dir, wait=.true.)
     end subroutine test_preprocess_macros
+
+    subroutine test_per_test_arguments()
+        type(fpm_config_t) :: c
+        integer :: ierr, u
+        character(len=4096) :: args
+        character(len=*), parameter :: dir = '/tmp/fo_test_per_test_arguments'
+
+        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        open (newunit=u, file=dir//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "per-test-arguments"'
+        write (u, '(a)') '[extra.fo.test-args]'
+        write (u, '(a)') 'test_oracle = ["data/reference.csv", "two words"]'
+        close (u)
+
+        call fpm_config_parse(dir, c, ierr)
+        args = manifest_test_args(c, 'test_oracle')
+        call assert(ierr == 0, 'per_test_arguments: parse succeeds')
+        call assert(c%n_test_arg_sets == 1, 'per_test_arguments: one test mapping')
+        call assert(trim(args) == 'data/reference.csv'//new_line('a')//'two words', &
+            'per_test_arguments: argument boundaries are retained')
+        call execute_command_line('rm -rf '//dir, wait=.true.)
+    end subroutine test_per_test_arguments
 
 end program test_fpm_config

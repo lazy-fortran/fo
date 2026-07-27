@@ -1,6 +1,6 @@
 module fo_gfortran_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, manifest_exe_name, &
-        manifest_test_name, manifest_example_name, dep_kind, DEP_PATH
+        manifest_test_name, manifest_test_args, manifest_example_name, dep_kind, DEP_PATH
     use fo_scan, only: scan_unit_t, scan_dir, scan_dir_cached, source_defines_module, &
         MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
@@ -556,12 +556,14 @@ contains
         type(scan_unit_t), allocatable :: units(:)
         character(len=MAX_PATH) :: bin_path
         character(len=512) :: case_log, rerun_log
+        character(len=:), allocatable :: arg_lines
         character(len=128) :: name
         character(len=8) :: exit_str
         integer :: n_units, ierr, i, run_exit, timeout_s, warn_s
         integer(8) :: clk0, clk1, clk_rate
         real :: secs
         logical :: flaky
+        type(fpm_config_t), allocatable :: config
 
         exitcode = 0
         timeout_s = test_timeout_seconds()
@@ -572,17 +574,30 @@ contains
             exitcode = 1
             return
         end if
+        allocate (config)
+        call fpm_config_parse(project_dir, config, ierr)
+        if (ierr /= 0) then
+            exitcode = 1
+            return
+        end if
         do i = 1, n_units
             if (.not. units(i)%is_program) cycle
             call file_basename(units(i)%filename, name)
+            block
+                character(len=128) :: public_name
+
+                public_name = manifest_test_name(config, test_dir, name)
+                if (len_trim(public_name) > 0) name = public_name
+            end block
             if (.not. include_slow .and. is_slow_name(name)) cycle
             if (n_selected > 0) then
                 if (.not. selected_test(name, selected_names, n_selected)) cycle
             end if
             bin_path = trim(bin_dir)//'/'//trim(name)
+            arg_lines = manifest_test_args(config, name)
             call make_tmpfile('fo_test_case', case_log)
             call system_clock(clk0, clk_rate)
-            call process_run_logged(project_dir, bin_path, case_log, .true., &
+            call run_test_binary(project_dir, bin_path, arg_lines, case_log, &
                 timeout_s, run_exit)
             call system_clock(clk1)
             secs = 0.0
@@ -590,7 +605,7 @@ contains
             flaky = .false.
             if (run_exit /= 0 .and. run_exit /= 124) then
                 call make_tmpfile('fo_test_rerun', rerun_log)
-                call process_run_logged(project_dir, bin_path, rerun_log, .true., &
+                call run_test_binary(project_dir, bin_path, arg_lines, rerun_log, &
                     timeout_s, run_exit)
                 call delete_tmpfile(rerun_log)
                 flaky = run_exit == 0
@@ -1668,6 +1683,7 @@ contains
         character(len=512), allocatable :: run_logs(:)
         character(len=HASH_LEN), allocatable :: run_keys(:)
         character(len=128), allocatable :: run_names(:)
+        character(len=4096), allocatable :: run_args(:)
         logical, allocatable :: run_compiled(:)
         logical, allocatable :: ran(:), flaky(:)
         real, allocatable :: run_secs(:)
@@ -1689,6 +1705,7 @@ contains
         integer :: n_dep, n_test_includes
         character(len=512) :: test_includes(MAX_DEP_DIRS)
         character(len=1024) :: test_flags
+        character(len=:), allocatable :: test_key_flags
         character(len=512), allocatable :: helper_objs(:)
         character(len=512), allocatable :: all_lib_objs(:), link_inputs(:)
         integer :: n_helper_objs, n_all_lib, n_link_inputs
@@ -1710,7 +1727,7 @@ contains
         allocate (topo_order(MAX_NODES))
         allocate (run_nodes(MAX_NODES), run_exits(MAX_NODES), run_logs(MAX_NODES))
         allocate (run_keys(MAX_NODES))
-        allocate (run_names(MAX_NODES))
+        allocate (run_names(MAX_NODES), run_args(MAX_NODES))
         allocate (run_compiled(MAX_NODES), run_secs(MAX_NODES))
         allocate (ran(MAX_NODES), flaky(MAX_NODES))
         ran = .false.
@@ -1762,6 +1779,7 @@ contains
             n_run = n_run + 1
             run_nodes(n_run) = node_id
             run_names(n_run) = tname
+            run_args(n_run) = manifest_test_args(manifest_config, tname)
             call make_tmpfile('fo_test_case', run_logs(n_run))
         end do
 
@@ -1836,8 +1854,13 @@ contains
                 n_dep = n_dep + 1
                 dep_keys(n_dep) = lib_hash
             end if
+            test_key_flags = test_flags
+            if (len_trim(run_args(i)) > 0) then
+                test_key_flags = trim(test_flags)//new_line('a')//'test-args:'// &
+                    trim(run_args(i))
+            end if
             run_keys(i) = cache_key_for(filenames(node_id), compiler, &
-                test_flags, dep_keys, n_dep)
+                test_key_flags, dep_keys, n_dep)
         end do
 
         run_exits = 0
@@ -1880,10 +1903,7 @@ contains
                 ! Run from the project root, not from whatever directory fo was
                 ! invoked from, so a test that opens a project-relative path
                 ! behaves the same under the CLI and under the MCP server.
-                ! Run from the project root, not from whatever directory fo was
-                ! invoked from, so a test that opens a project-relative path
-                ! behaves the same under the CLI and under the MCP server.
-                call process_run_logged(project_dir, bin_path, log_local, .true., &
+                call run_test_binary(project_dir, bin_path, run_args(i), log_local, &
                     test_timeout, run_exits(i))
                 call system_clock(clk1)
                 if (clk_rate > 0) run_secs(i) = real(clk1 - clk0) / real(clk_rate)
@@ -1908,7 +1928,7 @@ contains
                 tname = run_names(i)
                 bin_path = trim(bin_dir)//'/'//trim(tname)
                 call make_tmpfile('fo_test_rerun', rerun_log)
-                call process_run_logged(project_dir, bin_path, rerun_log, .true., &
+                call run_test_binary(project_dir, bin_path, run_args(i), rerun_log, &
                     test_timeout, run_exits(i))
                 call delete_tmpfile(rerun_log)
                 if (run_exits(i) == 0) flaky(i) = .true.
@@ -1982,6 +2002,23 @@ contains
             call warn_slow_tests(filenames, run_nodes, run_exits, run_secs, n_run, &
             test_warn, log_file)
     end subroutine compile_and_run_tests
+
+    subroutine run_test_binary(project_dir, bin_path, arg_lines, log_file, &
+            timeout_seconds, exitcode)
+        character(len=*), intent(in) :: project_dir, bin_path, arg_lines, log_file
+        integer, intent(in) :: timeout_seconds
+        integer, intent(out) :: exitcode
+
+        character(len=:), allocatable :: packed
+        integer :: n_args
+
+        packed = ''
+        n_args = 0
+        call argv_push(packed, n_args, bin_path)
+        call argv_push_split_nl(packed, n_args, arg_lines)
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, .true., &
+            timeout_seconds, exitcode)
+    end subroutine run_test_binary
 
     subroutine archive_objects(project_dir, objects, n_objects, archive_path, &
             log_file, exitcode, content_key)
