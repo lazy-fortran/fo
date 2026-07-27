@@ -681,7 +681,7 @@ contains
         character(len=512), intent(inout) :: obj_basenames(MAX_DEP_OBJS)
         integer, intent(inout) :: n_obj_seen
         character(len=512), allocatable :: found(:)
-        character(len=8) :: suffixes(3)
+        character(len=8) :: suffixes(4)
         integer :: i, j, n_found
 
         allocate (found(MAX_DEP_OBJS))
@@ -695,6 +695,7 @@ contains
         suffixes(1) = '.f90.o'
         suffixes(2) = '.F90.o'
         suffixes(3) = '.c.o'
+        suffixes(4) = '.cpp.o'
         do i = 1, config%n_deps
             ! A path dependency is compiled natively (Fortran and C) into
             ! build/fo/obj, so its objects are already linked from src_objs.
@@ -1055,13 +1056,13 @@ contains
         end do
 
         allocate (cfiles(MAX_SRC_OBJS))
-        call fs_collect_files(trim(project_dir)//'/'//trim(src_dir), '', '.c', &
-            '', cfiles, n_cfiles)
+        call collect_c_family(trim(project_dir)//'/'//trim(src_dir), &
+            cfiles, n_cfiles)
         do ic = 1, n_cfiles
             c_line = cfiles(ic)
             if (len_trim(c_line) == 0) cycle
             call make_obj_path(trim(c_line), project_dir, obj_dir, obj_path)
-            call compile_c(trim(c_line), obj_path, log_file, exitcode)
+            call compile_c_family(trim(c_line), obj_path, log_file, exitcode)
             if (exitcode /= 0) then
                 deallocate (cfiles)
                 return
@@ -1214,13 +1215,12 @@ contains
 
         allocate (cfiles(MAX_SRC_OBJS))
         do d = 1, n_deps
-            call fs_collect_files(trim(deps(d)%src_dir), '', '.c', '', &
-                cfiles, n_cfiles)
+            call collect_c_family(trim(deps(d)%src_dir), cfiles, n_cfiles)
             do ic = 1, n_cfiles
                 c_line = cfiles(ic)
                 if (len_trim(c_line) == 0) cycle
                 call make_obj_path(trim(c_line), project_dir, obj_dir, obj_path)
-                call compile_c(trim(c_line), obj_path, log_file, exitcode)
+                call compile_c_family(trim(c_line), obj_path, log_file, exitcode)
                 if (exitcode /= 0) then
                     deallocate (cfiles)
                     return
@@ -2348,8 +2348,8 @@ contains
         end if
 
         allocate (cfiles(MAX_SRC_OBJS))
-        call fs_collect_files(trim(project_dir)//'/'//trim(config%source_dir), &
-            '', '.c', '', cfiles, n_cfiles)
+        call collect_c_family(trim(project_dir)//'/'//trim(config%source_dir), &
+            cfiles, n_cfiles)
         do ic = 1, n_cfiles
             c_line = cfiles(ic)
             if (len_trim(c_line) == 0) cycle
@@ -2357,8 +2357,7 @@ contains
             call append_current_lib_obj(obj_path, lib_objs, n_lib_objs)
         end do
         do d = 1, n_deps
-            call fs_collect_files(trim(deps(d)%src_dir), '', '.c', '', cfiles, &
-                n_cfiles)
+            call collect_c_family(trim(deps(d)%src_dir), cfiles, n_cfiles)
             do ic = 1, n_cfiles
                 c_line = cfiles(ic)
                 if (len_trim(c_line) == 0) cycle
@@ -2670,6 +2669,66 @@ contains
             'fo: VS Code Modern Fortran users: set fortran.linter.modOutput outside the project root'
         close (u)
     end subroutine append_stale_mod_hint
+
+    subroutine collect_c_family(root, items, n_items)
+        !! Collect C and C++ sources under root into one list. A project that
+        !! binds a C++ library needs a shim compiled by a C++ compiler; keeping
+        !! the two extensions in one list means every call site that already
+        !! handled .c handles .cpp without a second loop.
+        character(len=*), intent(in) :: root
+        character(len=512), intent(out) :: items(:)
+        integer, intent(out) :: n_items
+
+        integer :: n_cxx
+
+        call fs_collect_files(root, '', '.c', '', items, n_items)
+        if (n_items >= size(items)) return
+        call fs_collect_files(root, '', '.cpp', '', &
+            items(n_items + 1:), n_cxx)
+        n_items = n_items + n_cxx
+    end subroutine collect_c_family
+
+    logical function is_cxx_source(path) result(is_cxx)
+        !! True for a C++ source, which must go to the C++ driver: g++ finds the
+        !! C++ standard headers and links the C++ runtime, gcc does neither.
+        character(len=*), intent(in) :: path
+        integer :: n
+        n = len_trim(path)
+        is_cxx = .false.
+        if (n >= 4) is_cxx = path(n - 3:n) == '.cpp'
+    end function is_cxx_source
+
+    subroutine compile_c_family(source, objfile, log_file, exitcode)
+        !! Compile a C or C++ source, choosing the driver by extension.
+        character(len=*), intent(in) :: source, objfile, log_file
+        integer, intent(out) :: exitcode
+
+        if (is_cxx_source(source)) then
+            call compile_cxx(source, objfile, log_file, exitcode)
+        else
+            call compile_c(source, objfile, log_file, exitcode)
+        end if
+    end subroutine compile_c_family
+
+    subroutine compile_cxx(source, objfile, log_file, exitcode)
+        character(len=*), intent(in) :: source, objfile, log_file
+        integer, intent(out) :: exitcode
+        character(len=:), allocatable :: packed
+        integer :: n_args
+
+        n_args = 0
+        call argv_push(packed, n_args, 'g++')
+        call argv_push(packed, n_args, '-c')
+        ! C++17 is what current library headers expect; older standards fail to
+        ! compile common dependency headers rather than merely warning.
+        call argv_push(packed, n_args, '-std=c++17')
+        call argv_push(packed, n_args, '-fPIC')
+        call argv_push(packed, n_args, '-o')
+        call argv_push(packed, n_args, objfile)
+        call argv_push(packed, n_args, source)
+        call process_run_argv_logged('', packed, n_args, log_file, .true., &
+            build_timeout_seconds(), exitcode)
+    end subroutine compile_cxx
 
     subroutine compile_c(source, objfile, log_file, exitcode)
         character(len=*), intent(in) :: source, objfile, log_file
