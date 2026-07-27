@@ -5,7 +5,7 @@ module fo_gfortran_build
         MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
-        resolve_dev_dep_srcs, MAX_RESOLVED, join_path
+        resolve_dev_dep_srcs, MAX_RESOLVED, join_path, merge_dep_link_libs
     use fo_stat_memo, only: memo_save, memo_hash_file
     use fx_action_cache, only: cache_set_file_hash_hook
     use fo_compdb, only: compdb_write
@@ -131,6 +131,7 @@ contains
             exitcode = 1
             return
         end if
+        call merge_dep_link_libs(project_dir, config)
 
         ! Combine config flags with CLI flags
         call merge_flags(config, flag_text)
@@ -387,6 +388,7 @@ contains
             exitcode = 1
             return
         end if
+        call merge_dep_link_libs(project_dir, config)
         call merge_flags(config, flag_text)
 
         mod_dir = trim(project_dir)//'/build/fo/mod'
@@ -465,6 +467,7 @@ contains
             exitcode = 1
             return
         end if
+        call merge_dep_link_libs(project_dir, config)
         call merge_flags(config, flag_text)
 
         mod_dir = trim(project_dir)//'/build/fo/mod'

@@ -5,6 +5,7 @@ module fo_fpm_config
     public :: fpm_config_init, fpm_config_parse
     public :: dep_kind, DEP_PATH, DEP_GIT, DEP_REGISTRY
     public :: manifest_exe_name, manifest_test_name, manifest_example_name
+    public :: MAX_LINK_LIBS, add_link_lib
 
     ! How a dependency is acquired, derived from which fields the manifest set.
     ! path = local dir (mutable, may be edited); git = cloned at a ref (pinned,
@@ -490,6 +491,24 @@ contains
             dep%version = trim(str_val)
         end if
     end subroutine parse_dep
+
+    subroutine add_link_lib(config, lib)
+        !! Append a link library unless it is already listed. Order is kept, so
+        !! a library the root package named stays where the root put it and a
+        !! library inherited from a dependency lands after it.
+        type(fpm_config_t), intent(inout) :: config
+        character(len=*), intent(in) :: lib
+
+        integer :: i
+
+        if (len_trim(lib) == 0) return
+        do i = 1, config%n_link_libs
+            if (trim(config%link_libs(i)) == trim(lib)) return
+        end do
+        if (config%n_link_libs >= MAX_LINK_LIBS) return
+        config%n_link_libs = config%n_link_libs + 1
+        config%link_libs(config%n_link_libs) = trim(lib)
+    end subroutine add_link_lib
 
     subroutine parse_link_libs(val, config)
         character(len=*), intent(in) :: val

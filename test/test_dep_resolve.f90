@@ -3,7 +3,8 @@ program test_dep_resolve
     !! source-dir from the dep's own manifest, and path normalization.
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, MAX_RESOLVED, &
-        normalize_path, join_path
+        normalize_path, join_path, merge_dep_link_libs
+    use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_process, only: process_getpid
     implicit none
     integer :: n_pass, n_fail
@@ -20,6 +21,7 @@ program test_dep_resolve
     call test_malformed_git_pointer_keeps_direct_path()
     call test_missing_gitdir_keeps_direct_path()
     call test_directory_git_keeps_direct_path()
+    call test_dep_link_libs_propagate()
 
     write (output_unit, '(a,i0,a,i0,a)') 'dep_resolve: ', n_pass, ' pass, ', &
         n_fail, ' fail'
@@ -217,6 +219,62 @@ contains
             'git/worktrees/'//trim(worktree_name)
         close (unit)
     end subroutine write_git_pointer
+
+    subroutine test_dep_link_libs_propagate()
+        !! fo compiles a dependency's C and C++ sources into the same archive as
+        !! the project's, so the dependency's own `link` list has to reach the
+        !! final link line. Without this a package that pulls in a C++ shim fails
+        !! on __gxx_personality_v0 unless the consumer restates the whole list,
+        !! which makes the dependency's manifest decorative.
+        !!
+        !! root names "m" and depends on "a"; a names "stdc++" and depends on
+        !! transitive "b", which names "gmp" and "stdc++" again. The merged list
+        !! must hold m, stdc++, gmp exactly once each, with the root's own entry
+        !! still first. A dev-dep naming "dl" comes in too, because dev-dep
+        !! sources are compiled into the test build.
+        character(len=512) :: base, root, da, db, dv
+        type(fpm_config_t), allocatable :: cfg
+        integer :: ierr, i, n_stdcxx, n_gmp, n_dl
+        logical :: has_m
+
+        call make_tmp('fo_test_link_merge', base)
+        root = trim(base)//'/root'
+        da = trim(base)//'/a'
+        db = trim(base)//'/b'
+        dv = trim(base)//'/dev'
+        call mkproj(root, '[build]'//new_line('a')//'link = ["m"]'// &
+            new_line('a')//'[dependencies]'//new_line('a')// &
+            'a = { path = "../a" }'//new_line('a')// &
+            '[dev-dependencies]'//new_line('a')//'dev = { path = "../dev" }')
+        call mkproj(da, '[build]'//new_line('a')//'link = ["stdc++"]'// &
+            new_line('a')//'[dependencies]'//new_line('a')// &
+            'b = { path = "../b" }')
+        call mkproj(db, '[build]'//new_line('a')//'link = ["gmp", "stdc++"]')
+        call mkproj(dv, '[build]'//new_line('a')//'link = ["dl"]')
+        call execute_command_line('mkdir -p '//trim(da)//'/src '// &
+            trim(db)//'/src '//trim(dv)//'/src')
+
+        allocate (cfg)
+        call fpm_config_parse(trim(root), cfg, ierr)
+        call assert(ierr == 0, 'root manifest parses')
+        call assert(cfg%n_link_libs == 1, 'root alone lists only its own lib')
+        call merge_dep_link_libs(trim(root), cfg)
+
+        has_m = trim(cfg%link_libs(1)) == 'm'
+        n_stdcxx = 0
+        n_gmp = 0
+        n_dl = 0
+        do i = 1, cfg%n_link_libs
+            if (trim(cfg%link_libs(i)) == 'stdc++') n_stdcxx = n_stdcxx + 1
+            if (trim(cfg%link_libs(i)) == 'gmp') n_gmp = n_gmp + 1
+            if (trim(cfg%link_libs(i)) == 'dl') n_dl = n_dl + 1
+        end do
+        call assert(has_m, "root's own link entry stays first")
+        call assert(n_stdcxx == 1, 'direct dep lib arrives, listed once')
+        call assert(n_gmp == 1, 'transitive dep lib arrives')
+        call assert(n_dl == 1, 'dev-dep lib arrives')
+        call assert(cfg%n_link_libs == 4, 'no duplicates and nothing extra')
+    end subroutine test_dep_link_libs_propagate
 
     subroutine mkproj(dir, deps_block)
         character(len=*), intent(in) :: dir, deps_block

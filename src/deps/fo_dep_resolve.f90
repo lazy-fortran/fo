@@ -9,11 +9,12 @@ module fo_dep_resolve
     !! modules are never `use`d contributes no compiles because the module DAG
     !! only pulls in reachable units.
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, dep_kind, &
-        DEP_PATH, DEP_GIT, DEP_REGISTRY
+        DEP_PATH, DEP_GIT, DEP_REGISTRY, add_link_lib
     implicit none
     private
     public :: resolved_src_t, resolve_dep_srcs, resolve_dev_dep_srcs, MAX_RESOLVED
     public :: normalize_path, join_path
+    public :: merge_dep_link_libs
 
     integer, parameter :: MAX_RESOLVED = 256
 
@@ -86,6 +87,49 @@ contains
             end if
         end do
     end subroutine resolve_dev_dep_srcs
+
+    subroutine merge_dep_link_libs(project_dir, config)
+        !! Add every dependency's own `link` entries to the root config.
+        !!
+        !! fo compiles a dependency's C and C++ sources into the same archive as
+        !! the project's, so the final link line needs whatever those sources
+        !! need: for a C++ shim that is at least stdc++, without which the link
+        !! fails on __gxx_personality_v0 rather than on anything the caller
+        !! wrote. Requiring the consumer to restate the dependency's link list
+        !! makes the dependency's own manifest decorative and breaks as soon as
+        !! the dependency adds a library.
+        !!
+        !! Dev-dependencies are included because their sources are compiled into
+        !! the test build. Only path deps are walked; a git or registry dep that
+        !! has not been acquired has no manifest to read.
+        character(len=*), intent(in) :: project_dir
+        type(fpm_config_t), intent(inout) :: config
+
+        type(resolved_src_t) :: deps(MAX_RESOLVED), devs(MAX_RESOLVED)
+        type(fpm_config_t), allocatable :: dcfg
+        integer :: n_deps, n_devs, n_unresolved, ierr, i, j
+
+        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
+        if (ierr /= 0) n_deps = 0
+        call resolve_dev_dep_srcs(project_dir, devs, n_devs, ierr)
+        if (ierr /= 0) n_devs = 0
+
+        allocate (dcfg)
+        do i = 1, n_deps
+            call fpm_config_parse(trim(deps(i)%dir), dcfg, ierr)
+            if (ierr /= 0) cycle
+            do j = 1, dcfg%n_link_libs
+                call add_link_lib(config, trim(dcfg%link_libs(j)))
+            end do
+        end do
+        do i = 1, n_devs
+            call fpm_config_parse(trim(devs(i)%dir), dcfg, ierr)
+            if (ierr /= 0) cycle
+            do j = 1, dcfg%n_link_libs
+                call add_link_lib(config, trim(dcfg%link_libs(j)))
+            end do
+        end do
+    end subroutine merge_dep_link_libs
 
     recursive subroutine walk(dir, out, n_out, n_unresolved, ierr, depth)
         character(len=*), intent(in) :: dir
