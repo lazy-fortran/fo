@@ -610,6 +610,11 @@ contains
         has_function_opener = .false.
         pos = index(low, 'function ')
         if (pos > 0) then
+            ! The keyword has to start a word. Without this check a declaration
+            ! such as 'integer, parameter :: kernel_function = 1' matches at the
+            ! tail of the identifier and opens a block that is never closed, so
+            ! everything below it drifts one level deeper on every format.
+            if (.not. starts_word(low, pos)) return
             ! Exclude 'end function'
             if (pos >= 5) then
                 if (low(pos - 4:pos - 1) == 'end ') return
@@ -617,6 +622,24 @@ contains
             has_function_opener = .true.
         end if
     end function has_function_opener
+
+    ! True when position pos begins a word, i.e. the character before it cannot
+    ! be part of a Fortran identifier.
+    pure logical function starts_word(low, pos)
+        character(len=*), intent(in) :: low
+        integer, intent(in) :: pos
+        character :: prev
+        starts_word = .true.
+        if (pos <= 1) return
+        prev = low(pos - 1:pos - 1)
+        if (prev == '_') then
+            starts_word = .false.
+        else if (prev >= 'a' .and. prev <= 'z') then
+            starts_word = .false.
+        else if (prev >= '0' .and. prev <= '9') then
+            starts_word = .false.
+        end if
+    end function starts_word
 
     ! A subroutine definition, allowing a leading prefix such as
     ! 'pure', 'elemental', 'recursive', or 'module subroutine'.
@@ -626,6 +649,9 @@ contains
         has_subroutine_opener = .false.
         pos = index(low, 'subroutine ')
         if (pos > 0) then
+            ! Same word-boundary requirement as has_function_opener: a name
+            ! ending in _subroutine must not be read as the keyword.
+            if (.not. starts_word(low, pos)) return
             ! Exclude 'end subroutine'
             if (pos >= 5) then
                 if (low(pos - 4:pos - 1) == 'end ') return
