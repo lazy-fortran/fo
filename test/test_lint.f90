@@ -15,6 +15,7 @@ program test_lint
     call test_use_prefixed_symbol_assignment_counts_as_use()
     call test_unused_import_still_reported()
     call test_operator_import_usage()
+    call test_intrinsic_operator_between_operands()
     call test_symbol_used_only_in_include()
     call test_symbol_used_only_in_cpp_include_macro()
     call test_symbol_used_only_in_nested_include()
@@ -177,6 +178,26 @@ contains
             trim(findings(1)%symbol) == 'operator(.unused.)', &
             'lint reports only the unused imported operator')
     end subroutine test_operator_import_usage
+
+    subroutine test_intrinsic_operator_between_operands()
+        type(lint_finding_t) :: findings(MAX_FINDINGS)
+        integer :: n_findings
+        character(len=1024) :: lines(8)
+
+        lines(1) = 'module m'
+        lines(2) = 'use ops, only: operator(*)'
+        lines(3) = 'implicit none'
+        lines(4) = 'contains'
+        lines(5) = 'integer function product(x, y)'
+        lines(6) = 'integer :: x, y'
+        lines(7) = 'product = x*y'
+        lines(8) = 'end function product'
+
+        call lint_lines('fo_lint_intrinsic_operator', lines, 8, findings, n_findings)
+
+        call assert(n_findings == 0, &
+            'lint recognizes an imported intrinsic operator between operands')
+    end subroutine test_intrinsic_operator_between_operands
 
     subroutine test_symbol_used_only_in_include()
         type(lint_finding_t) :: findings(MAX_FINDINGS)

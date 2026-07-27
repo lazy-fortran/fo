@@ -427,15 +427,18 @@ contains
         integer :: i, pos, rel_pos, abs_pos, sym_len
         character(len=1) :: before_ch, after_ch
         character(len=MAX_SYM_LEN) :: search_sym
+        logical :: is_operator
 
         used = .false.
         search_sym = sym
         call strip_leading(search_sym)
         call strip_trailing(search_sym)
         sym_len = len_trim(search_sym)
+        is_operator = .false.
         if (sym_len > 10) then
             if (search_sym(1:9) == 'operator(' .and. &
                 search_sym(sym_len:sym_len) == ')') then
+                is_operator = .true.
                 search_sym = search_sym(10:sym_len - 1)
                 sym_len = len_trim(search_sym)
             end if
@@ -466,8 +469,9 @@ contains
                 after_ch = ' '
                 if (abs_pos + sym_len <= len_trim(lowered(i))) &
                     after_ch = lowered(i) (abs_pos + sym_len:abs_pos + sym_len)
-                if (is_symbol_boundary_before(lowered(i), abs_pos) .and. &
-                    .not. is_ident_char(after_ch)) then
+                if (is_operator .or. &
+                    (is_symbol_boundary_before(lowered(i), abs_pos) .and. &
+                    .not. is_ident_char(after_ch))) then
                     used = .true.
                     return
                 end if
