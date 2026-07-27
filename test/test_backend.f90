@@ -26,6 +26,7 @@ program test_backend
     call test_config_flags_str_joins_with_spaces()
     call test_fpm_skips_slow_by_default()
     call test_cmake_build_and_test()
+    call test_native_combined_build_keeps_apps()
     call test_cmake_named_test_rebuilds_changed_source()
     call test_cmake_exec_target_resolution()
     call test_cmake_affected_tests_use_registered_names()
@@ -40,6 +41,39 @@ program test_backend
     call report('backend')
 
 contains
+
+    subroutine test_native_combined_build_keeps_apps()
+        type(backend_t) :: b
+        character(len=512) :: project_dir, log_file
+        integer :: u, exitcode
+        logical :: app_exists
+
+        call make_tmp_path('fo_test_combined_apps', project_dir)
+        call make_tmp_path('fo_test_combined_apps_log', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/app')
+        call make_dir(trim(project_dir)//'/test')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "combined_apps"'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/app/tool.f90', status='replace')
+        write (u, '(a)') 'program tool'
+        write (u, '(a)') 'end program tool'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/test/check.f90', status='replace')
+        write (u, '(a)') 'program check'
+        write (u, '(a)') 'end program check'
+        close (u)
+
+        b = detect_backend(project_dir)
+        call backend_build(b, exitcode, log_file=log_file, with_tests=.true.)
+        inquire (file=trim(project_dir)//'/build/fo/bin/tool', exist=app_exists)
+        call assert(exitcode == 0 .and. app_exists, &
+            'combined native build keeps application targets')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_native_combined_build_keeps_apps
 
     subroutine test_cmake_exec_target_resolution()
         type(backend_t) :: b

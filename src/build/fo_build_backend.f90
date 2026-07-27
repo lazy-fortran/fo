@@ -165,6 +165,16 @@ contains
         select case (self%kind)
         case (BACKEND_NATIVE)
             if (want_tests) then
+                ! `fo exec` must be able to resolve either an application or a
+                ! test target from a clean tree. Build applications first;
+                ! gfortran_test then adds test binaries without discarding the
+                ! current application stamp.
+                call gfortran_build(self%project_dir, log_path, exitcode, &
+                    flags=flag_text, use_cache=use_cache)
+                if (exitcode /= 0) then
+                    call release_project_lock(lock_dir)
+                    return
+                end if
                 call gfortran_test(self%project_dir, log_path, exitcode, &
                     flags=flag_text, build_only=.true., use_cache=use_cache)
             else
