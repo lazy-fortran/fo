@@ -32,6 +32,7 @@ program test_backend_gfortran
     call test_gfortran_app_links_only_reachable_library_objects()
     call test_gfortran_builds_manifest_example()
     call test_gfortran_builds_nested_auto_example()
+    call test_gfortran_builds_c_source_with_public_header()
     call test_gfortran_builds_path_dependency()
     call test_gfortran_names_binary_from_manifest_executable()
     call test_gfortran_path_dep_ignores_coexisting_fpm_tree()
@@ -176,6 +177,55 @@ contains
         call execute_command_line( &
             'rm -f '//trim(log_file)//' '//trim(run_output))
     end subroutine test_gfortran_builds_nested_auto_example
+
+    subroutine test_gfortran_builds_c_source_with_public_header()
+        character(len=512) :: project_dir, log_file, binary
+        integer :: u, exitcode, run_status
+
+        call make_tmp_path('fo_c_public_header', project_dir)
+        call make_tmp_path('fo_c_public_header_log', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        call make_dir(trim(project_dir)//'/include')
+        call make_dir(trim(project_dir)//'/app')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "c-public-header"'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/include/answer.h', &
+            status='replace')
+        write (u, '(a)') '#define ANSWER 42'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/src/answer.c', &
+            status='replace')
+        write (u, '(a)') '#include "answer.h"'
+        write (u, '(a)') 'int answer(void) { return ANSWER; }'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/app/main.f90', &
+            status='replace')
+        write (u, '(a)') 'program main'
+        write (u, '(a)') 'use, intrinsic :: iso_c_binding, only: c_int'
+        write (u, '(a)') 'interface'
+        write (u, '(a)') 'function answer() bind(C) result(value)'
+        write (u, '(a)') 'import c_int'
+        write (u, '(a)') 'integer(c_int) :: value'
+        write (u, '(a)') 'end function answer'
+        write (u, '(a)') 'end interface'
+        write (u, '(a)') 'if (answer() /= 42_c_int) error stop 1'
+        write (u, '(a)') 'end program main'
+        close (u)
+
+        call gfortran_build(project_dir, log_file, exitcode, use_cache=.false.)
+        binary = trim(project_dir)//'/build/fo/bin/c-public-header'
+        run_status = 1
+        if (exitcode == 0) then
+            call execute_command_line(trim(binary), exitstat=run_status)
+        end if
+        call assert(exitcode == 0 .and. run_status == 0, &
+            'native build passes project include directory to C compiler')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_builds_c_source_with_public_header
 
     subroutine test_gfortran_named_test_uses_manifest_name()
         character(len=512) :: project_dir, log_file

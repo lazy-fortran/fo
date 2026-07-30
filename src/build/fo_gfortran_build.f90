@@ -1080,7 +1080,8 @@ contains
             c_line = cfiles(ic)
             if (len_trim(c_line) == 0) cycle
             call make_obj_path(trim(c_line), project_dir, obj_dir, obj_path)
-            call compile_c_family(trim(c_line), obj_path, log_file, exitcode)
+            call compile_c_family(trim(c_line), obj_path, &
+                trim(project_dir)//'/include', log_file, exitcode)
             if (exitcode /= 0) then
                 deallocate (cfiles)
                 return
@@ -1238,7 +1239,8 @@ contains
                 c_line = cfiles(ic)
                 if (len_trim(c_line) == 0) cycle
                 call make_obj_path(trim(c_line), project_dir, obj_dir, obj_path)
-                call compile_c_family(trim(c_line), obj_path, log_file, exitcode)
+                call compile_c_family(trim(c_line), obj_path, &
+                    trim(deps(d)%dir)//'/include', log_file, exitcode)
                 if (exitcode /= 0) then
                     deallocate (cfiles)
                     return
@@ -2752,20 +2754,20 @@ contains
         if (n >= 4) is_cxx = path(n - 3:n) == '.cpp'
     end function is_cxx_source
 
-    subroutine compile_c_family(source, objfile, log_file, exitcode)
+    subroutine compile_c_family(source, objfile, include_dir, log_file, exitcode)
         !! Compile a C or C++ source, choosing the driver by extension.
-        character(len=*), intent(in) :: source, objfile, log_file
+        character(len=*), intent(in) :: source, objfile, include_dir, log_file
         integer, intent(out) :: exitcode
 
         if (is_cxx_source(source)) then
-            call compile_cxx(source, objfile, log_file, exitcode)
+            call compile_cxx(source, objfile, include_dir, log_file, exitcode)
         else
-            call compile_c(source, objfile, log_file, exitcode)
+            call compile_c(source, objfile, include_dir, log_file, exitcode)
         end if
     end subroutine compile_c_family
 
-    subroutine compile_cxx(source, objfile, log_file, exitcode)
-        character(len=*), intent(in) :: source, objfile, log_file
+    subroutine compile_cxx(source, objfile, include_dir, log_file, exitcode)
+        character(len=*), intent(in) :: source, objfile, include_dir, log_file
         integer, intent(out) :: exitcode
         character(len=:), allocatable :: packed
         integer :: n_args
@@ -2777,6 +2779,8 @@ contains
         ! compile common dependency headers rather than merely warning.
         call argv_push(packed, n_args, '-std=c++17')
         call argv_push(packed, n_args, '-fPIC')
+        call argv_push(packed, n_args, '-I')
+        call argv_push(packed, n_args, include_dir)
         call argv_push(packed, n_args, '-o')
         call argv_push(packed, n_args, objfile)
         call argv_push(packed, n_args, source)
@@ -2784,8 +2788,8 @@ contains
             build_timeout_seconds(), exitcode)
     end subroutine compile_cxx
 
-    subroutine compile_c(source, objfile, log_file, exitcode)
-        character(len=*), intent(in) :: source, objfile, log_file
+    subroutine compile_c(source, objfile, include_dir, log_file, exitcode)
+        character(len=*), intent(in) :: source, objfile, include_dir, log_file
         integer, intent(out) :: exitcode
         character(len=:), allocatable :: packed
         integer :: n_args
@@ -2793,6 +2797,8 @@ contains
         n_args = 0
         call argv_push(packed, n_args, 'gcc')
         call argv_push(packed, n_args, '-c')
+        call argv_push(packed, n_args, '-I')
+        call argv_push(packed, n_args, include_dir)
         call argv_push(packed, n_args, '-o')
         call argv_push(packed, n_args, objfile)
         call argv_push(packed, n_args, source)
