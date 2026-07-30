@@ -18,6 +18,8 @@ fo                         static checks, build, tests, lint, format check
 fo build [--profile NAME]  build applications and examples
 fo test [NAME ...]         build and run tests
 fo test --only-changed     run tests affected by changed modules
+fo test --random 12        reproducible sample without replacement
+fo test --random 12 --seed 1729
 fo run [options] NAME      build and run an application or example
 fo exec NAME [ARGS...]     build and run any fo executable target
 fo check [--json...]       compact build and test status
@@ -32,6 +34,10 @@ fo info                    backend, source, compiler, and cache information
 fo mcp-server              MCP JSON-RPC server on standard input/output
 fo lsp                     diagnostics-on-save language server
 ```
+
+Tests have a 10-second hard timeout by default. Set `FO_TEST_TIMEOUT` for an
+intentional override; longer tests should normally use a `_slow` suffix and
+run through `fo test --all`.
 
 The default output is intentionally quieter than fpm. `fo check --agent` and
 MCP checks return one bounded JSON object with the failure, hint, rerun command,

@@ -2183,11 +2183,11 @@ contains
         character(len=32) :: buf
         integer :: status, iostat
 
-        t = 120
+        t = 10
         call get_environment_variable('FO_TEST_TIMEOUT', buf, status=status)
         if (status /= 0 .or. len_trim(buf) == 0) return
         read (buf, *, iostat=iostat) t
-        if (iostat /= 0 .or. t < 1) t = 120
+        if (iostat /= 0 .or. t < 1) t = 10
     end function test_timeout_seconds
 
     integer function build_timeout_seconds() result(t)

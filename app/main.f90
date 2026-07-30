@@ -16,6 +16,7 @@ program fo_main
         check_result_full_json
     use fo_test_results, only: test_result_entry_t, MAX_TEST_RESULTS_ENTRIES, &
         parse_test_results, format_test_results_human, format_test_results_json
+    use fo_test_random, only: select_random_tests
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
     use fo_fmt, only: fo_fmt_run, fo_fmt_files, fo_fmt_changed_run, &
@@ -380,6 +381,8 @@ contains
         write (out, '(a)') 'options:'
         write (out, '(a)') '  --only-changed  run tests affected by changed modules'
         write (out, '(a)') '  --all           include slow tests'
+        write (out, '(a)') '  --random N      sample N tests without replacement'
+        write (out, '(a)') '  --seed S        replay a random sample with seed S'
         write (out, '(a)') '  --verbose       show all tests (default for named runs)'
         write (out, '(a)') '  --json          output results as JSON'
         write (out, '(a)') '  --profile NAME  use release, debug, or asan flags'
@@ -390,6 +393,7 @@ contains
         write (out, '(a)') '  fo test'
         write (out, '(a)') '  fo test test_cpp6d_vs_gc'
         write (out, '(a)') '  fo test --only-changed'
+        write (out, '(a)') '  fo test --random 12 --seed 1729'
     end subroutine print_test_usage
 
     subroutine print_exec_usage(unit)
@@ -941,9 +945,11 @@ contains
         integer :: changed_ids(MAX_NODES), n_changed
         integer :: affected_ids(MAX_NODES), n_affected
         integer :: n_cached, ierr, i, n_test_names, n_arg_names
+        integer :: random_count, random_seed, clock_count
         logical :: only_changed, include_all, verbose, use_json, skip_next
         character(len=256) :: arg
         character(len=128) :: test_names(MAX_NODES)
+        character(len=128) :: random_candidates(MAX_NODES)
         character(len=512) :: test_log, flags
         character(len=64) :: profile
         character(len=1024) :: all_flags
@@ -964,6 +970,8 @@ contains
         verbose = .false.
         use_json = .false.
         n_arg_names = 0
+        random_count = 0
+        random_seed = 0
         skip_next = .false.
         do i = 2, command_argument_count()
             call get_command_argument(i, arg)
@@ -971,7 +979,31 @@ contains
                 skip_next = .false.
                 cycle
             end if
-            if (trim(arg) == '--flag' .or. trim(arg) == '--profile') then
+            if (trim(arg) == '--flag' .or. trim(arg) == '--profile' .or. &
+                trim(arg) == '--random' .or. trim(arg) == '--seed') then
+                if (trim(arg) == '--random') then
+                    if (i >= command_argument_count()) then
+                        write (error_unit, '(a)') 'fo test: --random needs N'
+                        stop 1
+                    end if
+                    call get_command_argument(i + 1, arg)
+                    read (arg, *, iostat=ierr) random_count
+                    if (ierr /= 0 .or. random_count < 1) then
+                        write (error_unit, '(a)') 'fo test: invalid --random N'
+                        stop 1
+                    end if
+                else if (trim(arg) == '--seed') then
+                    if (i >= command_argument_count()) then
+                        write (error_unit, '(a)') 'fo test: --seed needs S'
+                        stop 1
+                    end if
+                    call get_command_argument(i + 1, arg)
+                    read (arg, *, iostat=ierr) random_seed
+                    if (ierr /= 0) then
+                        write (error_unit, '(a)') 'fo test: invalid --seed S'
+                        stop 1
+                    end if
+                end if
                 skip_next = .true.
                 cycle
             end if
@@ -999,7 +1031,43 @@ contains
             end if
         end if
 
-        if (n_arg_names > 0) then
+        if (random_count > 0) then
+            if (n_arg_names > 0 .or. only_changed) then
+                write (error_unit, '(a)') &
+                    'fo test: --random conflicts with names or --only-changed'
+                stop 1
+            end if
+            call fo_changed_modules('.', dag, changed_ids, n_changed, &
+                affected_ids, n_affected, n_cached, ierr, &
+                is_test_arr=is_test_arr)
+            if (ierr /= 0) then
+                write (error_unit, '(a)') 'fo: scan or dag failed'
+                stop 1
+            end if
+            n_test_names = 0
+            do i = 1, dag%n_nodes
+                if (.not. is_test_arr(i)) cycle
+                if (.not. include_all .and. &
+                    is_slow_test(dag%nodes(i)%label)) cycle
+                n_test_names = n_test_names + 1
+                random_candidates(n_test_names) = dag%nodes(i)%label(1:128)
+            end do
+            if (random_seed == 0) then
+                call system_clock(clock_count)
+                random_seed = clock_count
+            end if
+            call select_random_tests( &
+                random_candidates, n_test_names, random_count, random_seed, &
+                test_names, n_arg_names)
+            write (error_unit, '(a,i0,a,i0,a)') &
+                'fo: random seed ', random_seed, ' selected ', n_arg_names, &
+                ' test(s)'
+            call make_tmpfile('fo-test', test_log)
+            call backend_test_names(b, test_names, n_arg_names, exitcode, &
+                include_all, test_log, flags=all_flags)
+            call report_test_result(exitcode, test_log, .false., use_json)
+            call delete_tmpfile(test_log)
+        else if (n_arg_names > 0) then
             call make_tmpfile('fo-test', test_log)
             call backend_test_names(b, test_names, n_arg_names, exitcode, &
                 include_all, test_log, flags=all_flags)
