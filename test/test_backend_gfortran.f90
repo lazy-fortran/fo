@@ -128,12 +128,13 @@ contains
     end subroutine test_gfortran_builds_manifest_example
 
     subroutine test_gfortran_builds_nested_auto_example()
-        character(len=512) :: project_dir, log_file, binary
-        integer :: u, exitcode
+        character(len=512) :: project_dir, log_file, binary, run_output
+        integer :: u, exitcode, run_status
         logical :: exists
 
         call make_tmp_path('fo_nested_auto_example', project_dir)
         call make_tmp_path('fo_nested_auto_example_log', log_file)
+        call make_tmp_path('fo_nested_auto_example_output', run_output)
         call remove_tree(project_dir)
         call make_dir(trim(project_dir)//'/src')
         call make_dir(trim(project_dir)//'/example/demo')
@@ -143,18 +144,37 @@ contains
         open (newunit=u, file=trim(project_dir)//'/example/demo/demo.f90', &
             status='replace')
         write (u, '(a)') 'program demo'
-        write (u, '(a)') 'print "(a)", "NESTED_EXAMPLE_OK"'
+        write (u, '(a)') 'print "(a)", "NESTED_EXAMPLE_OLD"'
         write (u, '(a)') 'end program demo'
         close (u)
 
-        call gfortran_build(project_dir, log_file, exitcode, use_cache=.false.)
+        call gfortran_build(project_dir, log_file, exitcode)
         binary = trim(project_dir)//'/build/fo/bin/demo'
         inquire (file=trim(binary), exist=exists)
         call assert(exitcode == 0 .and. exists, &
             'nested automatic example uses its source stem as target name')
+        call execute_command_line( &
+            trim(binary)//' > '//trim(run_output), exitstat=run_status)
+        call assert(run_status == 0 .and. &
+            file_contains(run_output, 'NESTED_EXAMPLE_OLD'), &
+            'nested automatic example runs its initial program body')
+
+        open (newunit=u, file=trim(project_dir)//'/example/demo/demo.f90', &
+            status='replace')
+        write (u, '(a)') 'program demo'
+        write (u, '(a)') 'print "(a)", "NESTED_EXAMPLE_NEW"'
+        write (u, '(a)') 'end program demo'
+        close (u)
+        call gfortran_build(project_dir, log_file, exitcode)
+        call execute_command_line( &
+            trim(binary)//' > '//trim(run_output), exitstat=run_status)
+        call assert(exitcode == 0 .and. run_status == 0 .and. &
+            file_contains(run_output, 'NESTED_EXAMPLE_NEW'), &
+            'changed nested example body replaces the cached executable')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call execute_command_line( &
+            'rm -f '//trim(log_file)//' '//trim(run_output))
     end subroutine test_gfortran_builds_nested_auto_example
 
     subroutine test_gfortran_named_test_uses_manifest_name()
