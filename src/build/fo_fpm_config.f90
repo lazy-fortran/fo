@@ -57,7 +57,7 @@ module fo_fpm_config
         character(len=256) :: project_dir = '.'
         logical :: auto_executables = .true.
         logical :: auto_tests = .true.
-        logical :: auto_examples = .false.
+        logical :: auto_examples = .true.
         integer :: n_deps = 0
         type(fpm_dep_t) :: deps(MAX_DEPS)
         integer :: n_dev_deps = 0
@@ -110,7 +110,7 @@ contains
         c%project_dir = '.'
         c%auto_executables = .true.
         c%auto_tests = .true.
-        c%auto_examples = .false.
+        c%auto_examples = .true.
         c%openmp = .false.
         c%n_deps = 0
         c%n_dev_deps = 0

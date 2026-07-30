@@ -44,6 +44,7 @@ contains
         call assert(trim(c%test_dir) == 'test', 'default test_dir = test')
         call assert(c%auto_executables, 'default auto_executables = true')
         call assert(c%auto_tests, 'default auto_tests = true')
+        call assert(c%auto_examples, 'default auto_examples = true')
         call assert(c%n_deps == 0, 'default n_deps = 0')
         call assert(c%n_dev_deps == 0, 'default n_dev_deps = 0')
     end subroutine test_init_defaults
