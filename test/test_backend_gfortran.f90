@@ -31,6 +31,7 @@ program test_backend_gfortran
     call test_gfortran_named_test_uses_manifest_name()
     call test_gfortran_app_links_only_reachable_library_objects()
     call test_gfortran_builds_manifest_example()
+    call test_gfortran_builds_nested_auto_example()
     call test_gfortran_builds_path_dependency()
     call test_gfortran_names_binary_from_manifest_executable()
     call test_gfortran_path_dep_ignores_coexisting_fpm_tree()
@@ -125,6 +126,36 @@ contains
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_builds_manifest_example
+
+    subroutine test_gfortran_builds_nested_auto_example()
+        character(len=512) :: project_dir, log_file, binary
+        integer :: u, exitcode
+        logical :: exists
+
+        call make_tmp_path('fo_nested_auto_example', project_dir)
+        call make_tmp_path('fo_nested_auto_example_log', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        call make_dir(trim(project_dir)//'/example/demo')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "nested-auto-example"'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/example/demo/demo.f90', &
+            status='replace')
+        write (u, '(a)') 'program demo'
+        write (u, '(a)') 'print "(a)", "NESTED_EXAMPLE_OK"'
+        write (u, '(a)') 'end program demo'
+        close (u)
+
+        call gfortran_build(project_dir, log_file, exitcode, use_cache=.false.)
+        binary = trim(project_dir)//'/build/fo/bin/demo'
+        inquire (file=trim(binary), exist=exists)
+        call assert(exitcode == 0 .and. exists, &
+            'nested automatic example uses its source stem as target name')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_builds_nested_auto_example
 
     subroutine test_gfortran_named_test_uses_manifest_name()
         character(len=512) :: project_dir, log_file

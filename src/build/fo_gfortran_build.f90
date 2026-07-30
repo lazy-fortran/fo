@@ -1635,7 +1635,7 @@ contains
         character(len=*), intent(out) :: stem
         character(len=512) :: base
         character(len=128) :: prefix
-        integer :: dot, plen
+        integer :: dot, middle, plen
 
         call file_basename(obj_path, base) ! drops dir and trailing '.o'
         dot = index(trim(base), '.', back=.true.)
@@ -1644,6 +1644,20 @@ contains
         plen = len_trim(prefix)
         if (len_trim(base) > plen .and. base(1:plen) == trim(prefix)) &
             base = base(plen + 1:)
+        ! FPM's conventional nested layout is example/name/name.f90. The
+        ! object-path encoding flattens both path components with underscores,
+        ! yielding name_name; recover the public source stem when the two
+        ! halves are exactly equal.
+        middle = (len_trim(base) + 1)/2
+        if (middle > 1) then
+            if (mod(len_trim(base), 2) == 1) then
+                if (base(middle:middle) == '_') then
+                    if (base(:middle - 1) == &
+                        base(middle + 1:len_trim(base))) &
+                        base = base(:middle - 1)
+                end if
+            end if
+        end if
         stem = trim(base)
     end subroutine app_prog_stem
 
