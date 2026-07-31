@@ -17,6 +17,7 @@ library = false
 
 [dependencies]
 fx = { git = "https://github.com/lazy-fortran/fx.git", branch = "main" }
+fortfront = { git = "https://github.com/lazy-fortran/fortfront.git", tag = "v0.1.1" }
 openmp = "*"
 
 [fortran]

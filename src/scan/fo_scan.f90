@@ -5,10 +5,14 @@ module fo_scan
     use fo_scan_types, only: scan_unit_t, MAX_NAME, MAX_PATH, MAX_UNITS, MAX_DEPS
     use fo_scan_cache, only: scan_cache_load, scan_cache_load_trusted, &
         scan_cache_save
+    use fortfront_compiler, only: compiler_frontend_options_t, &
+        compiler_frontend_result_t, compile_frontend_from_file, &
+        query_program_units, query_program_unit, query_use_statements, &
+        program_unit_query_t, use_statement_query_t, INPUT_MODE_STANDARD
     implicit none
     private
 
-    public :: scan_unit_t, scan_file, scan_dir, scan_dir_cached
+    public :: scan_unit_t, scan_file, scan_file_regex, scan_dir, scan_dir_cached
     public :: is_slow_test, source_defines_module
     public :: MAX_NAME, MAX_PATH, MAX_UNITS
 
@@ -27,10 +31,12 @@ module fo_scan
 
 contains
 
-    subroutine scan_dir_cached(dirname, units, n_units, ierr)
+    subroutine scan_dir_cached(dirname, units, n_units, ierr, &
+            allow_regex_fallback)
         character(len=*), intent(in) :: dirname
         type(scan_unit_t), allocatable, intent(out) :: units(:)
         integer, intent(out) :: n_units, ierr
+        logical, intent(in), optional :: allow_regex_fallback
         logical :: hit
 
         call scan_cache_load_trusted(dirname, units, hit)
@@ -39,7 +45,8 @@ contains
             ierr = 0
             return
         end if
-        call scan_dir(dirname, units, n_units, ierr)
+        call scan_dir(dirname, units, n_units, ierr, &
+            allow_regex_fallback=allow_regex_fallback)
     end subroutine scan_dir_cached
 
     logical function source_defines_module(filename) result(defines_module)
@@ -64,24 +71,171 @@ contains
         close (funit)
     end function source_defines_module
 
-    subroutine scan_file(filename, unit_info, ierr)
+    subroutine scan_file(filename, unit_info, ierr, allow_regex_fallback, &
+            diagnostic)
+        character(len=*), intent(in) :: filename
+        type(scan_unit_t), intent(out) :: unit_info
+        integer, intent(out) :: ierr
+        logical, intent(in), optional :: allow_regex_fallback
+        character(len=*), intent(out), optional :: diagnostic
+
+        character(len=1024) :: ast_diagnostic
+        logical :: use_fallback
+
+        ast_diagnostic = ''
+        if (present(diagnostic)) diagnostic = ''
+        call scan_file_ast(filename, unit_info, ierr, ast_diagnostic)
+        if (ierr == 0) then
+            if (present(diagnostic)) diagnostic = ast_diagnostic
+            return
+        end if
+
+        if (present(diagnostic)) diagnostic = ast_diagnostic
+        use_fallback = regex_fallback_policy(allow_regex_fallback)
+        if (.not. use_fallback) return
+
+        call scan_file_regex(filename, unit_info, ierr)
+        if (ierr /= 0 .and. present(diagnostic)) then
+            diagnostic = trim(ast_diagnostic)//'; regex fallback failed'
+        end if
+    end subroutine scan_file
+
+    subroutine scan_file_ast(filename, unit_info, ierr, diagnostic)
+        character(len=*), intent(in) :: filename
+        type(scan_unit_t), intent(out) :: unit_info
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: diagnostic
+
+        type(compiler_frontend_options_t) :: options
+        type(compiler_frontend_result_t) :: result
+        type(program_unit_query_t), allocatable :: program_units(:)
+        type(program_unit_query_t) :: selected_unit, candidate_unit
+        type(use_statement_query_t), allocatable :: use_statements(:)
+        integer :: i, j, primary
+        character(len=MAX_NAME) :: unit_kind, name, parent_name
+
+        call reset_scan_unit(filename, unit_info)
+        ierr = 1
+        diagnostic = ''
+        options = compiler_frontend_options_t()
+        options%input_mode = INPUT_MODE_STANDARD
+        options%run_semantics = .false.
+        call compile_frontend_from_file(filename, result, options)
+        if (.not. result%parse_ok) then
+            call compiler_diagnostic(result, diagnostic)
+            return
+        end if
+
+        program_units = query_program_units(result%arena, result%root_index)
+        primary = 0
+        do i = 1, size(program_units)
+            if (.not. program_units(i)%found) cycle
+            unit_kind = ''
+            if (allocated(program_units(i)%unit_kind)) then
+                unit_kind = program_units(i)%unit_kind
+            end if
+            call to_lower(unit_kind)
+            select case (trim(unit_kind))
+            case ('module', 'submodule', 'program', 'function', &
+                    'subroutine', 'block_data')
+                primary = i
+                exit
+            end select
+        end do
+        if (primary == 0) then
+            diagnostic = 'FortFront parsed no dependency-bearing program unit'
+            return
+        end if
+
+        selected_unit = program_units(primary)
+        unit_kind = ''
+        if (allocated(selected_unit%unit_kind)) then
+            unit_kind = selected_unit%unit_kind
+        end if
+        call to_lower(unit_kind)
+        name = ''
+        if (allocated(selected_unit%name)) then
+            name = selected_unit%name
+        end if
+        call to_lower(name)
+        if (trim(unit_kind) == 'program' .and. trim(name) == 'main') then
+            do j = 1, size(selected_unit%body_indices)
+                candidate_unit = query_program_unit(result%arena, &
+                    selected_unit%body_indices(j))
+                if (.not. candidate_unit%found) cycle
+                unit_kind = ''
+                if (allocated(candidate_unit%unit_kind)) then
+                    unit_kind = candidate_unit%unit_kind
+                end if
+                call to_lower(unit_kind)
+                if (trim(unit_kind) /= 'function' .and. &
+                    trim(unit_kind) /= 'subroutine') cycle
+                selected_unit = candidate_unit
+                exit
+            end do
+        end if
+        unit_kind = ''
+        if (allocated(selected_unit%unit_kind)) then
+            unit_kind = selected_unit%unit_kind
+        end if
+        call to_lower(unit_kind)
+        if (allocated(selected_unit%name)) then
+            name = selected_unit%name
+        else
+            name = ''
+        end if
+        call to_lower(name)
+        unit_info%source_line = selected_unit%line
+        unit_info%source_column = selected_unit%column
+        select case (trim(unit_kind))
+        case ('module', 'submodule', 'block_data')
+            unit_info%module_name = name
+        case ('program')
+            unit_info%program_name = name
+            unit_info%is_program = .true.
+        case ('function', 'subroutine')
+            unit_info%module_name = name
+        end select
+
+        if (trim(unit_kind) == 'submodule' .and. &
+            allocated(selected_unit%parent_identifier)) then
+            parent_name = selected_unit%parent_identifier
+            call to_lower(parent_name)
+            call first_parent_component(parent_name)
+            if (len_trim(parent_name) > 0) then
+                call add_dep(unit_info, parent_name, &
+                    selected_unit%line, selected_unit%column)
+            end if
+        end if
+
+        use_statements = query_use_statements(result%arena)
+        do i = 1, size(use_statements)
+            if (.not. use_statements(i)%found) cycle
+            if (use_statements(i)%is_intrinsic) cycle
+            name = ''
+            if (allocated(use_statements(i)%module_name)) then
+                name = use_statements(i)%module_name
+            end if
+            call to_lower(name)
+            if (len_trim(name) == 0) cycle
+            call add_dep(unit_info, name, use_statements(i)%line, &
+                use_statements(i)%column)
+        end do
+        ierr = 0
+    end subroutine scan_file_ast
+
+    subroutine scan_file_regex(filename, unit_info, ierr)
         character(len=*), intent(in) :: filename
         type(scan_unit_t), intent(out) :: unit_info
         integer, intent(out) :: ierr
 
         integer :: funit, iostat
         character(len=512) :: line
+        integer :: line_number
 
+        call reset_scan_unit(filename, unit_info)
         ierr = 0
-        unit_info%filename = ''
-        unit_info%module_name = ''
-        unit_info%program_name = ''
-        unit_info%is_program = .false.
-        unit_info%is_test = .false.
-        unit_info%n_deps = 0
-        unit_info%deps = ''
-        unit_info%filename = filename
-        unit_info%is_test = is_test_path(filename)
+        line_number = 0
 
         open (newunit=funit, file=filename, status='old', iostat=iostat)
         if (iostat /= 0) then
@@ -93,19 +247,21 @@ contains
         do
             read (funit, '(a)', iostat=iostat) line
             if (iostat /= 0) exit
-            call parse_line(line, unit_info)
+            line_number = line_number + 1
+            call parse_line(line, unit_info, line_number)
         end do
 
         close (funit)
-    end subroutine scan_file
+    end subroutine scan_file_regex
 
-    subroutine scan_dir(dirname, units, n_units, ierr)
+    subroutine scan_dir(dirname, units, n_units, ierr, allow_regex_fallback)
         character(len=*), intent(in) :: dirname
         type(scan_unit_t), allocatable, intent(out) :: units(:)
         integer, intent(out) :: n_units, ierr
+        logical, intent(in), optional :: allow_regex_fallback
 
         character(len=512), allocatable :: paths(:)
-        character(len=512) :: tmpfile, line
+        character(len=512) :: tmpfile, line, diagnostic
         integer :: funit, iostat, sub_ierr, n_files, i
         logical :: cache_hit
 
@@ -161,14 +317,87 @@ contains
 
         do i = 1, n_files
             n_units = n_units + 1
-            call scan_file(trim(paths(i)), units(n_units), sub_ierr)
+            call scan_file(trim(paths(i)), units(n_units), sub_ierr, &
+                allow_regex_fallback=allow_regex_fallback, diagnostic=diagnostic)
             if (sub_ierr /= 0) then
+                if (len_trim(diagnostic) > 0) then
+                    write (error_unit, '(a)') 'fo: '//trim(diagnostic)
+                end if
                 n_units = n_units - 1
             end if
         end do
 
         if (n_units == n_files) call scan_cache_save(dirname, paths, units)
     end subroutine scan_dir
+
+    subroutine reset_scan_unit(filename, unit_info)
+        character(len=*), intent(in) :: filename
+        type(scan_unit_t), intent(out) :: unit_info
+
+        unit_info%filename = ''
+        unit_info%module_name = ''
+        unit_info%program_name = ''
+        unit_info%is_program = .false.
+        unit_info%is_test = .false.
+        unit_info%source_line = 0
+        unit_info%source_column = 0
+        unit_info%n_deps = 0
+        unit_info%deps = ''
+        unit_info%dependency_lines = 0
+        unit_info%dependency_columns = 0
+        unit_info%filename = filename
+        unit_info%is_test = is_test_path(filename)
+    end subroutine reset_scan_unit
+
+    subroutine compiler_diagnostic(result, diagnostic)
+        type(compiler_frontend_result_t), intent(in) :: result
+        character(len=*), intent(out) :: diagnostic
+
+        diagnostic = ''
+        if (allocated(result%diagnostic_text)) then
+            if (len_trim(result%diagnostic_text) > 0) then
+                diagnostic = result%diagnostic_text
+                return
+            end if
+        end if
+        if (allocated(result%error_msg)) then
+            if (len_trim(result%error_msg) > 0) then
+                diagnostic = result%error_msg
+                return
+            end if
+        end if
+        diagnostic = 'FortFront could not parse '//trim(result%source_path)
+    end subroutine compiler_diagnostic
+
+    logical function regex_fallback_policy(requested) result(enabled)
+        logical, intent(in), optional :: requested
+        character(len=32) :: policy
+
+        if (present(requested)) then
+            enabled = requested
+            return
+        end if
+
+        ! The environment switch is deliberately opt-in. Callers that own a
+        ! bootstrap phase can pass allow_regex_fallback=.true. explicitly.
+        policy = ''
+        call get_environment_variable('FO_SCAN_FALLBACK', policy)
+        call to_lower(policy)
+        enabled = trim(policy) == 'regex' .or. trim(policy) == 'true' .or. &
+            trim(policy) == '1'
+    end function regex_fallback_policy
+
+    subroutine first_parent_component(value)
+        character(len=*), intent(inout) :: value
+        integer :: colon
+
+        colon = index(value, ':')
+        if (colon == 1) then
+            value = ''
+        else if (colon > 1) then
+            value = value(:colon - 1)
+        end if
+    end subroutine first_parent_component
 
     logical function is_test_path(path)
         !! A unit is a test iff it lives under a test directory, matching fpm's
@@ -185,12 +414,17 @@ contains
             index(clean, '/tests/') > 0
     end function is_test_path
 
-    subroutine parse_line(line, unit_info)
+    subroutine parse_line(line, unit_info, line_number)
         character(len=*), intent(in) :: line
         type(scan_unit_t), intent(inout) :: unit_info
+        integer, intent(in), optional :: line_number
 
         character(len=512) :: trimmed
         character(len=MAX_NAME) :: name, parent_name
+        integer :: current_line
+
+        current_line = 0
+        if (present(line_number)) current_line = line_number
 
         trimmed = adjustl(line)
         if (len_trim(trimmed) == 0) return
@@ -199,7 +433,7 @@ contains
         call extract_use(trimmed, name)
         if (len_trim(name) > 0) then
             if (.not. is_intrinsic(name)) then
-                call add_dep(unit_info, name)
+                call add_dep(unit_info, name, current_line, leading_column(line))
             end if
             return
         end if
@@ -207,13 +441,20 @@ contains
         call extract_module_def(trimmed, name)
         if (len_trim(name) > 0) then
             unit_info%module_name = name
+            unit_info%source_line = current_line
+            unit_info%source_column = leading_column(line)
             return
         end if
 
         call extract_submodule_def(trimmed, name, parent_name)
         if (len_trim(name) > 0) then
             unit_info%module_name = name
-            if (len_trim(parent_name) > 0) call add_dep(unit_info, parent_name)
+            unit_info%source_line = current_line
+            unit_info%source_column = leading_column(line)
+            if (len_trim(parent_name) > 0) then
+                call add_dep(unit_info, parent_name, current_line, &
+                    leading_column(line))
+            end if
             return
         end if
 
@@ -222,6 +463,8 @@ contains
             call extract_external_procedure_def(trimmed, name)
             if (len_trim(name) > 0) then
                 unit_info%module_name = name
+                unit_info%source_line = current_line
+                unit_info%source_column = leading_column(line)
                 return
             end if
         end if
@@ -230,6 +473,8 @@ contains
         if (len_trim(name) > 0) then
             unit_info%program_name = name
             unit_info%is_program = .true.
+            unit_info%source_line = current_line
+            unit_info%source_column = leading_column(line)
         end if
     end subroutine parse_line
 
@@ -431,9 +676,10 @@ contains
         end do
     end function is_intrinsic
 
-    subroutine add_dep(unit_info, name)
+    subroutine add_dep(unit_info, name, line, column)
         type(scan_unit_t), intent(inout) :: unit_info
         character(len=*), intent(in) :: name
+        integer, intent(in), optional :: line, column
 
         integer :: i
 
@@ -445,8 +691,25 @@ contains
         if (unit_info%n_deps < MAX_DEPS) then
             unit_info%n_deps = unit_info%n_deps + 1
             unit_info%deps(unit_info%n_deps) = name
+            if (present(line)) unit_info%dependency_lines(unit_info%n_deps) = line
+            if (present(column)) then
+                unit_info%dependency_columns(unit_info%n_deps) = column
+            end if
         end if
     end subroutine add_dep
+
+    integer function leading_column(line) result(column)
+        character(len=*), intent(in) :: line
+        integer :: i
+
+        column = 1
+        do i = 1, len(line)
+            if (line(i:i) /= ' ' .and. line(i:i) /= char(9)) then
+                column = i
+                return
+            end if
+        end do
+    end function leading_column
 
     subroutine to_lower(str)
         character(len=*), intent(inout) :: str

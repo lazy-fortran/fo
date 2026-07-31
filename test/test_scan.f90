@@ -1,6 +1,7 @@
 program test_scan
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_scan, only: scan_unit_t, scan_file, scan_dir, is_slow_test
+    use fo_scan, only: scan_unit_t, scan_file, scan_file_regex, scan_dir, &
+        is_slow_test
     implicit none
 
     integer :: n_pass, n_fail
@@ -9,6 +10,9 @@ program test_scan
     n_fail = 0
 
     call test_scan_use_statements()
+    call test_scan_ast_and_regex_dag()
+    call test_scan_ast_submodule_spans()
+    call test_scan_parse_diagnostic_and_fallback()
     call test_scan_module_def()
     call test_scan_module_name_containing_procedure()
     call test_scan_submodule_def()
@@ -77,6 +81,110 @@ contains
         call assert(trim(info%deps(2)) == 'baz', 'scan_use: dep 2 is baz')
         call execute_command_line('rm -f '//trim(path))
     end subroutine test_scan_use_statements
+
+    subroutine test_scan_ast_and_regex_dag()
+        type(scan_unit_t) :: ast_info, regex_info
+        integer :: ierr
+        character(len=512) :: path, diagnostic
+        character(len=80) :: lines(5)
+
+        lines(1) = 'module scan_ast_mod'
+        lines(2) = '    use dep_mod, only: local_name => imported_name'
+        lines(3) = '    use other_mod'
+        lines(4) = '    implicit none'
+        lines(5) = 'end module scan_ast_mod'
+        call make_tmp_path('fo_test_ast_scan', path, '.f90')
+        call write_file(path, lines, 5)
+
+        call scan_file(path, ast_info, ierr, diagnostic=diagnostic)
+        call assert(ierr == 0, 'scan_ast: compiler query path succeeds')
+        call assert(trim(ast_info%module_name) == 'scan_ast_mod', &
+            'scan_ast: module name')
+        call assert(ast_info%n_deps == 2, 'scan_ast: two dependencies')
+        call assert(trim(ast_info%deps(1)) == 'dep_mod', &
+            'scan_ast: only dependency')
+        call assert(trim(ast_info%deps(2)) == 'other_mod', &
+            'scan_ast: second dependency')
+        call assert(ast_info%source_line == 1 .and. ast_info%source_column > 0, &
+            'scan_ast: module source span')
+        call assert(ast_info%dependency_lines(1) == 2 .and. &
+            ast_info%dependency_columns(1) > 0, &
+            'scan_ast: first USE source span')
+
+        call scan_file_regex(path, regex_info, ierr)
+        call assert(ierr == 0, 'scan_regex: bootstrap path succeeds')
+        call assert(trim(regex_info%module_name) == trim(ast_info%module_name), &
+            'scan_compare: module names agree')
+        call assert(regex_info%n_deps == ast_info%n_deps, &
+            'scan_compare: dependency counts agree')
+        call assert(all(regex_info%deps(1:ast_info%n_deps) == &
+            ast_info%deps(1:ast_info%n_deps)), &
+            'scan_compare: dependency DAG agrees')
+        call execute_command_line('rm -f '//trim(path))
+    end subroutine test_scan_ast_and_regex_dag
+
+    subroutine test_scan_ast_submodule_spans()
+        type(scan_unit_t) :: ast_info, regex_info
+        integer :: ierr
+        character(len=512) :: path
+        character(len=80) :: lines(4)
+
+        lines(1) = 'submodule (parent_mod:parent_sub) child_sub'
+        lines(2) = '    use child_dep, only: value'
+        lines(3) = '    implicit none'
+        lines(4) = 'end submodule child_sub'
+        call make_tmp_path('fo_test_ast_submodule', path, '.f90')
+        call write_file(path, lines, 4)
+
+        call scan_file(path, ast_info, ierr)
+        call assert(ierr == 0, 'scan_submodule_ast: compiler query path succeeds')
+        call assert(trim(ast_info%module_name) == 'child_sub', &
+            'scan_submodule_ast: submodule name')
+        call assert(ast_info%n_deps == 2, &
+            'scan_submodule_ast: parent and USE dependencies')
+        call assert(trim(ast_info%deps(1)) == 'parent_mod', &
+            'scan_submodule_ast: parent dependency')
+        call assert(trim(ast_info%deps(2)) == 'child_dep', &
+            'scan_submodule_ast: USE dependency')
+        call assert(ast_info%source_line == 1 .and. &
+            ast_info%dependency_lines(1) == 1 .and. &
+            ast_info%dependency_lines(2) == 2, &
+            'scan_submodule_ast: source spans')
+
+        call scan_file_regex(path, regex_info, ierr)
+        call assert(ierr == 0, 'scan_submodule_regex: bootstrap path succeeds')
+        call assert(regex_info%n_deps == ast_info%n_deps .and. &
+            all(regex_info%deps(1:2) == ast_info%deps(1:2)), &
+            'scan_submodule_compare: dependency DAG agrees')
+        call execute_command_line('rm -f '//trim(path))
+    end subroutine test_scan_ast_submodule_spans
+
+    subroutine test_scan_parse_diagnostic_and_fallback()
+        type(scan_unit_t) :: info
+        integer :: ierr
+        character(len=512) :: path, diagnostic
+        character(len=80) :: lines(4)
+
+        lines(1) = 'module broken_scan'
+        lines(2) = '    use broken_dep, only: value'
+        lines(3) = '    integer :: value ='
+        lines(4) = 'end module broken_scan'
+        call make_tmp_path('fo_test_scan_failure', path, '.f90')
+        call write_file(path, lines, 4)
+
+        call scan_file(path, info, ierr, diagnostic=diagnostic)
+        call assert(ierr /= 0, 'scan_failure: compiler parse fails')
+        call assert(len_trim(diagnostic) > 0, &
+            'scan_failure: compiler diagnostic is returned')
+
+        call scan_file(path, info, ierr, allow_regex_fallback=.true., &
+            diagnostic=diagnostic)
+        call assert(ierr == 0, 'scan_failure: explicit regex fallback succeeds')
+        call assert(trim(info%module_name) == 'broken_scan' .and. &
+            trim(info%deps(1)) == 'broken_dep', &
+            'scan_failure: fallback preserves bootstrap DAG')
+        call execute_command_line('rm -f '//trim(path))
+    end subroutine test_scan_parse_diagnostic_and_fallback
 
     subroutine test_scan_module_def()
         type(scan_unit_t) :: info
