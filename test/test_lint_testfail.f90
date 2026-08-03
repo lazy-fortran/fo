@@ -26,6 +26,7 @@ program test_lint_testfail
     call test_accepts_abort_call()
     call test_accepts_continuation_error_stop()
     call test_accepts_failure_path_in_include()
+    call test_helper_module_exits()
     call test_ignores_module_without_program()
     call test_ignores_bench_program()
     call test_reports_program_line()
@@ -264,6 +265,165 @@ contains
         call fs_remove_tree(trim(root))
         call assert(n == 0, 'failure path inside an included fragment counts')
     end subroutine test_accepts_failure_path_in_include
+
+    subroutine test_helper_module_exits()
+        !! One fixture project with independent controls for subroutine calls,
+        !! function calls, and a data object that shadows a failing function.
+        !! The subroutine controls must not degrade into "calls something,
+        !! therefore can fail", while the function controls must retain exact
+        !! resolution of failing versus non-failing helpers.
+        character(len=512) :: root
+        integer :: n_exit, n_noop, n_deep, n_none
+        integer :: n_func_exit, n_func_noop, n_shadowed
+
+        call write_helper_project(root)
+
+        n_exit = scan_project_file(root, '/test/test_calls_exit.f90')
+        n_noop = scan_project_file(root, '/test/test_calls_noop.f90')
+        n_deep = scan_project_file(root, '/test/test_calls_wrapper.f90')
+        n_none = scan_project_file(root, '/test/test_calls_nothing.f90')
+        n_func_exit = scan_project_file(root, '/test/test_calls_function.f90')
+        n_func_noop = scan_project_file(root, '/test/test_calls_function_noop.f90')
+        n_shadowed = scan_project_file(root, '/test/test_shadowed_array.f90')
+        call fs_remove_tree(trim(root))
+
+        call assert(n_none == 1, &
+            'a test with no exit at all is flagged inside a project')
+        call assert(n_exit == 0, &
+            'a test whose only exit is a helper module stop 1 is not flagged')
+        call assert(n_noop == 1, &
+            'a test calling a helper with no failure path is still flagged')
+        call assert(n_deep == 0, &
+            'a helper that only calls a failing helper counts as a failure path')
+        call assert(n_func_exit == 0, &
+            'a function call to a failing helper counts as a failure path')
+        call assert(n_func_noop == 1, &
+            'a function call to a non-failing helper is still flagged')
+        call assert(n_shadowed == 1, &
+            'an array shadowing a failing function is still flagged')
+    end subroutine test_helper_module_exits
+
+    integer function scan_project_file(root, rel)
+        character(len=*), intent(in) :: root, rel
+        integer :: flagged(8)
+        character(len=512) :: msgs(8)
+
+        scan_project_file = 0
+        call testfail_scan_file(trim(root)//rel, flagged, msgs, &
+            scan_project_file, 8)
+    end function scan_project_file
+
+    subroutine write_helper_project(root)
+        !! An fpm project whose helper module holds the only failure path.
+        character(len=*), intent(out) :: root
+        integer :: u
+
+        call make_tmpfile('fo_testfail_proj_helpers', root)
+        call fs_make_dir(trim(root))
+        call fs_make_dir(trim(root)//'/src')
+        call fs_make_dir(trim(root)//'/test')
+
+        open (newunit=u, file=trim(root)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "demo"'
+        close (u)
+
+        open (newunit=u, file=trim(root)//'/src/demo_test.f90', status='replace')
+        write (u, '(a)') 'module demo_test'
+        write (u, '(a)') '    implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '    subroutine suite_exit(n_fail)'
+        write (u, '(a)') '        integer, intent(in) :: n_fail'
+        write (u, '(a)') '        if (n_fail > 0) stop 1'
+        write (u, '(a)') '    end subroutine suite_exit'
+        write (u, '(a)') '    subroutine suite_report(n_fail)'
+        write (u, '(a)') '        integer, intent(in) :: n_fail'
+        write (u, '(a)') '        print *, "failures:", n_fail'
+        write (u, '(a)') '    end subroutine suite_report'
+        write (u, '(a)') '    integer function must_pass(n_fail)'
+        write (u, '(a)') '        integer, intent(in) :: n_fail'
+        write (u, '(a)') '        if (n_fail > 0) stop 1'
+        write (u, '(a)') '        must_pass = 1'
+        write (u, '(a)') '    end function must_pass'
+        write (u, '(a)') '    integer function must_report(n_fail)'
+        write (u, '(a)') '        integer, intent(in) :: n_fail'
+        write (u, '(a)') '        must_report = n_fail'
+        write (u, '(a)') '    end function must_report'
+        write (u, '(a)') 'end module demo_test'
+        close (u)
+
+        ! The wrapper lives in the file scanned first (sources are collected in
+        ! sorted order), so recording it takes a second sweep. A single-sweep
+        ! collector flags test_calls_wrapper.
+        open (newunit=u, file=trim(root)//'/src/demo_finish.f90', status='replace')
+        write (u, '(a)') 'module demo_finish'
+        write (u, '(a)') '    use demo_test, only: suite_exit'
+        write (u, '(a)') '    implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '    subroutine suite_finish(n_fail)'
+        write (u, '(a)') '        integer, intent(in) :: n_fail'
+        write (u, '(a)') '        call suite_exit(n_fail)'
+        write (u, '(a)') '    end subroutine suite_finish'
+        write (u, '(a)') 'end module demo_finish'
+        close (u)
+
+        call write_helper_test(root, 'test_calls_exit', 'call suite_exit(n_fail)')
+        call write_helper_test(root, 'test_calls_noop', 'call suite_report(n_fail)')
+        call write_helper_test(root, 'test_calls_wrapper', &
+            'call suite_finish(n_fail)')
+        call write_helper_test(root, 'test_calls_nothing', 'print *, n_fail')
+        call write_function_test(root, 'test_calls_function', &
+            'use demo_test, only: must_pass', 'print *, must_pass(n_fail)')
+        call write_function_test(root, 'test_calls_function_noop', &
+            'use demo_test, only: must_report', 'print *, must_report(n_fail)')
+        call write_shadowed_array_test(root)
+    end subroutine write_helper_project
+
+    subroutine write_helper_test(root, name, last_stmt)
+        character(len=*), intent(in) :: root, name, last_stmt
+        integer :: u
+
+        open (newunit=u, file=trim(root)//'/test/'//trim(name)//'.f90', &
+            status='replace')
+        write (u, '(a)') 'program '//trim(name)
+        write (u, '(a)') '    use demo_test, only: suite_exit, suite_report'
+        write (u, '(a)') '    implicit none'
+        write (u, '(a)') '    integer :: n_fail'
+        write (u, '(a)') '    n_fail = 1'
+        write (u, '(a)') '    '//trim(last_stmt)
+        write (u, '(a)') 'end program '//trim(name)
+        close (u)
+    end subroutine write_helper_test
+
+    subroutine write_function_test(root, name, use_stmt, last_stmt)
+        character(len=*), intent(in) :: root, name, use_stmt, last_stmt
+        integer :: u
+
+        open (newunit=u, file=trim(root)//'/test/'//trim(name)//'.f90', &
+            status='replace')
+        write (u, '(a)') 'program '//trim(name)
+        write (u, '(a)') '    '//trim(use_stmt)
+        write (u, '(a)') '    implicit none'
+        write (u, '(a)') '    integer :: n_fail'
+        write (u, '(a)') '    n_fail = 1'
+        write (u, '(a)') '    '//trim(last_stmt)
+        write (u, '(a)') 'end program '//trim(name)
+        close (u)
+    end subroutine write_function_test
+
+    subroutine write_shadowed_array_test(root)
+        character(len=*), intent(in) :: root
+        integer :: u
+
+        open (newunit=u, file=trim(root)//'/test/test_shadowed_array.f90', &
+            status='replace')
+        write (u, '(a)') 'program test_shadowed_array'
+        write (u, '(a)') '    implicit none'
+        write (u, '(a)') '    integer :: must_pass(3)'
+        write (u, '(a)') '    must_pass(1) = 2'
+        write (u, '(a)') '    print *, must_pass(1)'
+        write (u, '(a)') 'end program test_shadowed_array'
+        close (u)
+    end subroutine write_shadowed_array_test
 
     subroutine test_ignores_module_without_program()
         integer :: flagged(8), n
