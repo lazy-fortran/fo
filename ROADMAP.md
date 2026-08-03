@@ -32,3 +32,27 @@ deliberately narrower than the early logos design.
 Capsules, CRIU checkpoints, Nix-like generations, web and voice surfaces, and
 an operating-system layer are not implemented by this repository. The retired
 design is identified as historical material in `doc/LINUX.md`.
+
+## Cross-repository handoff (2026-08-03)
+
+fo is the workflow owner for ffc's cheap build/test/lint and bounded
+conformance commands. Routine compiler progress uses deterministic random
+subsets, never a whole-corpus run; the sample count increases only after
+repeated 100%-clean subsets. The ffc XFAIL-first gate is documented in
+[ffc/ROADMAP.md](https://github.com/lazy-fortran/ffc/blob/main/ROADMAP.md).
+
+Relevant open contracts:
+
+- [#59](https://github.com/lazy-fortran/fo/issues/59) consumes fluff's stable
+  JSON output; fluff #262 / PR #269 must finish with honest failing-test
+  behavior before this integration is complete.
+- [#103](https://github.com/lazy-fortran/fo/issues/103) owns structured
+  FortFront diagnostic mapping, a prerequisite for [#56](https://github.com/lazy-fortran/fo/issues/56)
+  and the fx language-service path.
+- [#114](https://github.com/lazy-fortran/fo/issues/114) and [#119](https://github.com/lazy-fortran/fo/issues/119)
+  are correctness and observability work for failure-path analysis and
+  complete machine-readable test reporting.
+
+Every workflow change needs an independent behavioral oracle, focused tests,
+`FO_JOBS=1` verification on memory-constrained hosts, and a bounded sample
+when corpus behavior is involved.
