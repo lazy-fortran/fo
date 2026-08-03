@@ -361,12 +361,15 @@ contains
         end if
     end function is_helper
 
-    logical function failpath_line_calls_helper(code)
+    logical function failpath_line_calls_helper(code, shadowed_names, n_shadowed)
         !! True if the masked logical line calls a procedure from the loaded
         !! set. A subroutine has to be reached through `call`; a function has to
-        !! be followed by its argument list, so a variable of the same name is
-        !! not mistaken for it.
+        !! be followed by its argument list. Data objects declared in the
+        !! scanned file are passed separately so an array or substring reference
+        !! that shadows a collected function is not mistaken for a call.
         character(len=*), intent(in) :: code
+        character(len=*), intent(in), optional :: shadowed_names(:)
+        integer, intent(in), optional :: n_shadowed
 
         character(len=64) :: name
         integer :: p, hit, after
@@ -385,11 +388,14 @@ contains
             p = hit + 4
         end do
         if (n_func_helpers == 0) return
-        failpath_line_calls_helper = line_calls_helper_func(code)
+        failpath_line_calls_helper = line_calls_helper_func(code, shadowed_names, &
+            n_shadowed)
     end function failpath_line_calls_helper
 
-    logical function line_calls_helper_func(code)
+    logical function line_calls_helper_func(code, shadowed_names, n_shadowed)
         character(len=*), intent(in) :: code
+        character(len=*), intent(in), optional :: shadowed_names(:)
+        integer, intent(in), optional :: n_shadowed
 
         character(len=64) :: name
         integer :: p, after, L, q
@@ -408,6 +414,10 @@ contains
                 p = after
                 cycle
             end if
+            if (name_is_shadowed(name, shadowed_names, n_shadowed)) then
+                p = after
+                cycle
+            end if
             q = skip_blanks(code, after)
             if (q <= L) then
                 if (code(q:q) == '(') then
@@ -420,6 +430,25 @@ contains
             p = after
         end do
     end function line_calls_helper_func
+
+    logical function name_is_shadowed(name, shadowed_names, n_shadowed)
+        character(len=*), intent(in) :: name
+        character(len=*), intent(in), optional :: shadowed_names(:)
+        integer, intent(in), optional :: n_shadowed
+
+        integer :: i, limit
+
+        name_is_shadowed = .false.
+        if (.not. present(shadowed_names)) return
+        limit = size(shadowed_names)
+        if (present(n_shadowed)) limit = min(limit, n_shadowed)
+        do i = 1, limit
+            if (trim(shadowed_names(i)) == trim(name)) then
+                name_is_shadowed = .true.
+                return
+            end if
+        end do
+    end function name_is_shadowed
 
     logical function failpath_line_exits_nonzero(code)
         !! True if the masked logical line holds a statement that can terminate
