@@ -35,6 +35,9 @@ design is identified as historical material in `doc/LINUX.md`.
 
 ## Cross-repository handoff (2026-08-03)
 
+The current documentation commit is `989f16a`; the implementation baseline
+for the handoff is `af075f4`.
+
 fo is the workflow owner for ffc's cheap build/test/lint and bounded
 conformance commands. Routine compiler progress uses deterministic random
 subsets, never a whole-corpus run; the sample count increases only after
