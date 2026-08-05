@@ -30,7 +30,7 @@ confusing failures elsewhere. The full picture, by repository:
 | Repository | Open work |
 |---|---|
 | fo | Silent source drop, below. Cannot cold-build fortfront. `test_backend` and `test_backend_gfortran` fail from a cold cache. |
-| fortfront | 19 sources still unparseable; two lexer gaps (comment inside a continuation, character literal continued across lines); 25 failing tests. |
+| fortfront | 15 sources still unparseable; two lexer gaps (comment inside a continuation, character literal continued across lines); 25 failing tests. |
 | fortfem | PR #63 unmerged, CI red for reasons that do not reproduce under the runner's own gfortran; `main` red on a line-truncation error the branch fixes. |
 | fortnum | PR #63 merged, fortad is the default engine, Enzyme demoted to test oracle. Three vector-Newton routines still Enzyme-only, blocked in fortad. |
 | fortad | Forward-mode vectorisation gap; slice packing on wide operators; re-verify the vector-Newton routines now that hoisting terminates. |
