@@ -191,7 +191,7 @@
         use fo_test_results, only: MAX_TEST_RESULTS_ENTRIES, &
             parse_test_results, test_result_entry_t
         type(backend_t) :: b
-        type(test_result_entry_t) :: entries(MAX_TEST_RESULTS_ENTRIES)
+        type(test_result_entry_t), allocatable :: entries(:)
         integer :: exitcode, u
         integer :: n_entries, parse_ierr
         character(len=512) :: project_dir, log_file
@@ -284,7 +284,7 @@
         use fo_test_results, only: MAX_TEST_RESULTS_ENTRIES, &
             parse_test_results, test_result_entry_t
         type(backend_t) :: b
-        type(test_result_entry_t) :: entries(MAX_TEST_RESULTS_ENTRIES)
+        type(test_result_entry_t), allocatable :: entries(:)
         integer :: exitcode, n_entries, parse_ierr, u
         character(len=512) :: project_dir, log_file
         character(len=128) :: names(1)

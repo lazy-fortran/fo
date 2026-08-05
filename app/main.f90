@@ -14,7 +14,7 @@ program fo_main
     use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds
     use fo_check_output, only: check_result_json, check_result_compact_json, &
         check_result_full_json
-    use fo_test_results, only: test_result_entry_t, MAX_TEST_RESULTS_ENTRIES, &
+    use fo_test_results, only: test_result_entry_t, &
         parse_test_results, format_test_results_human, format_test_results_json
     use fo_test_random, only: select_random_tests
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
@@ -1121,7 +1121,7 @@ contains
         logical, intent(in) :: summary_mode
         logical, intent(in) :: use_json
 
-        type(test_result_entry_t) :: entries(MAX_TEST_RESULTS_ENTRIES)
+        type(test_result_entry_t), allocatable :: entries(:)
         integer :: n_entries, parse_ierr
         character(len=16384) :: json_output, human_output
         type(diagnostic_t) :: diag

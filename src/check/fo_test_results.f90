@@ -1,5 +1,4 @@
 module fo_test_results
-    use, intrinsic :: iso_fortran_env, only: error_unit
     use fo_util, only: json_int
     use fx_json_build, only: json_escape_string
     implicit none
@@ -7,6 +6,9 @@ module fo_test_results
     public :: test_result_entry_t, MAX_TEST_RESULTS_ENTRIES
     public :: parse_test_results, format_test_results_human, format_test_results_json
 
+    !! Initial capacity only. The entry buffer grows on demand, so a suite with
+    !! more tests than this still reports every result: truncating the list used
+    !! to hide failures behind a passing-looking count.
     integer, parameter :: MAX_TEST_RESULTS_ENTRIES = 256
 
     type :: test_result_entry_t
@@ -20,7 +22,7 @@ contains
 
     subroutine parse_test_results(log_file, entries, n_entries, ierr)
         character(len=*), intent(in) :: log_file
-        type(test_result_entry_t), intent(inout) :: entries(:)
+        type(test_result_entry_t), allocatable, intent(inout) :: entries(:)
         integer, intent(out) :: n_entries
         integer, intent(out) :: ierr
 
@@ -33,6 +35,7 @@ contains
 
         n_entries = 0
         ierr = 0
+        if (.not. allocated(entries)) allocate (entries(MAX_TEST_RESULTS_ENTRIES))
         open (newunit=u, file=trim(log_file), status='old', iostat=ios)
         if (ios /= 0) then
             ierr = 1
@@ -42,11 +45,7 @@ contains
             read (u, '(a)', iostat=ios) line
             if (ios /= 0) exit
             if (index(line, 'TEST_RESULT ') == 1) then
-                if (n_entries >= size(entries)) then
-                    write (error_unit, '(a,i0)') 'fo: test output truncated at ', &
-                        n_entries, ' entries (limit reached)'
-                    exit
-                end if
+                if (n_entries >= size(entries)) call grow_entries(entries)
                 n_entries = n_entries + 1
                 call parse_test_result_line(line, name, status, exit_str, secs, iostat)
                 if (iostat == 0) then
@@ -62,12 +61,7 @@ contains
             else
                 call parse_ctest_result_line(line, name, status, secs, iostat)
                 if (iostat == 0) then
-                    if (n_entries >= size(entries)) then
-                        write (error_unit, '(a,i0)') &
-                            'fo: test output truncated at ', n_entries, &
-                            ' entries (limit reached)'
-                        exit
-                    end if
+                    if (n_entries >= size(entries)) call grow_entries(entries)
                     n_entries = n_entries + 1
                     entries(n_entries)%name = name
                     entries(n_entries)%status = status
@@ -82,6 +76,17 @@ contains
         end do
         close (u)
     end subroutine parse_test_results
+
+    subroutine grow_entries(entries)
+        !! Double the entry buffer so no result is ever dropped.
+        type(test_result_entry_t), allocatable, intent(inout) :: entries(:)
+
+        type(test_result_entry_t), allocatable :: bigger(:)
+
+        allocate (bigger(max(2*size(entries), MAX_TEST_RESULTS_ENTRIES)))
+        bigger(1:size(entries)) = entries
+        call move_alloc(bigger, entries)
+    end subroutine grow_entries
 
     subroutine parse_test_result_line(line, name, status, exit_str, secs, iostat)
         character(len=*), intent(in) :: line

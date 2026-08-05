@@ -271,7 +271,7 @@ contains
         integer :: exitcode
         character(len=128) :: test_names(MAX_NODES)
         integer :: n_names
-        type(test_result_entry_t) :: entries(MAX_TEST_RESULTS_ENTRIES)
+        type(test_result_entry_t), allocatable :: entries(:)
         integer :: n_entries, ierr
 
         b = detect_backend(trim(dir))

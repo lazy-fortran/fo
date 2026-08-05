@@ -52,6 +52,7 @@ program test_check
     call test_full_json_includes_test_results()
     call test_test_results_parse()
     call test_padded_ctest_results_parse()
+    call test_results_beyond_initial_capacity()
     call test_failure_stdout_shown()
 
     write (output_unit, '(a,i0,a,i0,a)') 'check: ', n_pass, ' pass, ', n_fail, ' fail'
@@ -1131,7 +1132,7 @@ contains
     end subroutine test_test_results_parse
 
     subroutine test_padded_ctest_results_parse()
-        type(test_result_entry_t) :: entries(MAX_TEST_RESULTS_ENTRIES)
+        type(test_result_entry_t), allocatable :: entries(:)
         character(len=512) :: log_file
         integer :: u, n, ierr
 
@@ -1158,8 +1159,40 @@ contains
         call execute_command_line('rm -f '//trim(log_file), wait=.true.)
     end subroutine test_padded_ctest_results_parse
 
+    subroutine test_results_beyond_initial_capacity()
+        !! A failure past the initial buffer size must still be reported. The
+        !! parser used to stop at 256 entries, so a large suite printed a
+        !! passing-looking count while the actual failures were dropped.
+        integer, parameter :: n_pass = 400
+        type(test_result_entry_t), allocatable :: entries(:)
+        character(len=512) :: log_file
+        character(len=64) :: name
+        integer :: u, n, ierr, i, n_fail
+
+        call make_tmp_path('fo_many_results', log_file)
+        open (newunit=u, file=log_file, status='replace')
+        do i = 1, n_pass
+            write (name, '(a,i0)') 'test_pass_', i
+            write (u, '(a)') 'TEST_RESULT '//trim(name)//' PASS -     0.00'
+        end do
+        write (u, '(a)') 'TEST_RESULT test_late_boom FAIL 1     0.01'
+        close (u)
+
+        call parse_test_results(log_file, entries, n, ierr)
+        call assert(ierr == 0 .and. n == n_pass + 1, &
+            'parser keeps every result past the initial capacity')
+        n_fail = 0
+        do i = 1, n
+            if (trim(entries(i)%status) == 'FAIL') n_fail = n_fail + 1
+        end do
+        call assert(n_fail == 1, 'a failure past the initial capacity survives')
+        call assert(trim(entries(n)%name) == 'test_late_boom', &
+            'the late failing test keeps its name')
+        call execute_command_line('rm -f '//trim(log_file), wait=.true.)
+    end subroutine test_results_beyond_initial_capacity
+
     subroutine test_failure_stdout_shown()
-        type(test_result_entry_t) :: entries(MAX_TEST_RESULTS_ENTRIES)
+        type(test_result_entry_t), allocatable :: entries(:)
         character(len=512) :: log_file
         character(len=16384) :: output
         integer :: u, n, ierr
