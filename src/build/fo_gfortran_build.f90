@@ -621,6 +621,7 @@ contains
             arg_lines = manifest_test_args(config, name)
             call make_tmpfile('fo_test_case', case_log)
             call system_clock(clk0, clk_rate)
+            timeout_s = timeout_for_test(name)
             call run_test_binary(project_dir, bin_path, arg_lines, case_log, &
                 timeout_s, run_exit)
             call system_clock(clk1)
@@ -1980,7 +1981,7 @@ contains
                 ! invoked from, so a test that opens a project-relative path
                 ! behaves the same under the CLI and under the MCP server.
                 call run_test_binary(project_dir, bin_path, run_args(i), log_local, &
-                    test_timeout, run_exits(i))
+                    timeout_for_test(run_names(i)), run_exits(i))
                 call system_clock(clk1)
                 if (clk_rate > 0) run_secs(i) = real(clk1 - clk0) / real(clk_rate)
             end if
@@ -2005,7 +2006,7 @@ contains
                 bin_path = trim(bin_dir)//'/'//trim(tname)
                 call make_tmpfile('fo_test_rerun', rerun_log)
                 call run_test_binary(project_dir, bin_path, run_args(i), rerun_log, &
-                    test_timeout, run_exits(i))
+                    timeout_for_test(tname), run_exits(i))
                 call delete_tmpfile(rerun_log)
                 if (run_exits(i) == 0) flaky(i) = .true.
             end do
@@ -2016,7 +2017,8 @@ contains
             if (run_exits(i) /= 0) then
                 call append_test_stdout_block(run_logs(i), log_file, tname)
                 if (run_exits(i) == 124) then
-                    call append_timeout_status(log_file, tname, test_timeout)
+                    call append_timeout_status(log_file, tname, &
+                        timeout_for_test(tname))
                 else
                     call append_test_status(log_file, tname, run_exits(i))
                 end if
@@ -2251,6 +2253,32 @@ contains
         read (buf, *, iostat=iostat) t
         if (iostat /= 0 .or. t < 1) t = 10
     end function test_timeout_seconds
+
+    integer function slow_test_timeout_seconds() result(t)
+        !! Wall clock for a test marked slow. Naming a test `*_slow` only kept
+        !! it out of the default run; it still had to finish inside the fast
+        !! budget, so a corpus sweep that legitimately takes half a minute
+        !! could not pass under `fo test --all` at all. Tune with
+        !! FO_SLOW_TEST_TIMEOUT.
+        character(len=32) :: buf
+        integer :: status, iostat
+
+        t = 300
+        call get_environment_variable('FO_SLOW_TEST_TIMEOUT', buf, status=status)
+        if (status /= 0 .or. len_trim(buf) == 0) return
+        read (buf, *, iostat=iostat) t
+        if (iostat /= 0 .or. t < 1) t = 300
+    end function slow_test_timeout_seconds
+
+    integer function timeout_for_test(name) result(t)
+        character(len=*), intent(in) :: name
+
+        if (is_slow_name(name)) then
+            t = slow_test_timeout_seconds()
+        else
+            t = test_timeout_seconds()
+        end if
+    end function timeout_for_test
 
     integer function build_timeout_seconds() result(t)
         !! Per-invocation wall clock for a single compile or link. A hung

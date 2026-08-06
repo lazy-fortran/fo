@@ -30,6 +30,7 @@ program test_backend_gfortran
     call test_gfortran_named_test_links_helper_modules()
     call test_gfortran_named_test_uses_manifest_name()
     call test_gfortran_app_links_only_reachable_library_objects()
+    call test_slow_test_gets_its_own_timeout()
     call test_gfortran_builds_manifest_example()
     call test_gfortran_builds_nested_auto_example()
     call test_gfortran_builds_c_source_with_public_header()
@@ -93,6 +94,93 @@ contains
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_passes_manifest_test_arguments
+
+    subroutine test_slow_test_gets_its_own_timeout()
+        !! A test marked slow must be allowed to take longer than the fast
+        !! budget. Both tests here sleep for the same time; only the name
+        !! differs, so a shared budget makes the slow one time out too.
+        character(len=512) :: project_dir, log_file
+        integer :: u, exitcode
+
+        call make_tmp_path('fo_slow_timeout', project_dir)
+        call make_tmp_path('fo_slow_timeout_log', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/test')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "slow-timeout"'
+        close (u)
+        call write_sleeping_test(trim(project_dir)//'/test/test_patient_slow.f90', &
+            'test_patient_slow')
+
+        call set_env('FO_TEST_TIMEOUT', '1')
+        call set_env('FO_SLOW_TEST_TIMEOUT', '60')
+        call gfortran_test(project_dir, log_file, exitcode, include_slow=.true., &
+            use_cache=.false.)
+        call assert(exitcode == 0, 'a slow-marked test may exceed the fast budget')
+        call assert(file_contains(log_file, 'TEST_RESULT test_patient_slow PASS'), &
+            'the slow test reports a pass')
+
+        call remove_tree(project_dir)
+        call remove_tree(trim(project_dir)//'-fast')
+        call make_dir(trim(project_dir)//'-fast/test')
+        open (newunit=u, file=trim(project_dir)//'-fast/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "slow-timeout"'
+        close (u)
+        call write_sleeping_test(trim(project_dir)//'-fast/test/test_patient.f90', &
+            'test_patient')
+        call gfortran_test(trim(project_dir)//'-fast', log_file, exitcode, &
+            include_slow=.true., use_cache=.false.)
+        call assert(exitcode /= 0, 'an unmarked test still hits the fast budget')
+
+        call set_env('FO_TEST_TIMEOUT', '')
+        call set_env('FO_SLOW_TEST_TIMEOUT', '')
+        call remove_tree(trim(project_dir)//'-fast')
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_slow_test_gets_its_own_timeout
+
+    subroutine write_sleeping_test(path, name)
+        character(len=*), intent(in) :: path, name
+        integer :: u
+
+        open (newunit=u, file=trim(path), status='replace')
+        write (u, '(a)') 'program '//trim(name)
+        write (u, '(a)') 'integer(8) :: start, now, rate'
+        write (u, '(a)') 'call system_clock(start, rate)'
+        write (u, '(a)') 'do'
+        write (u, '(a)') '    call system_clock(now)'
+        write (u, '(a)') '    if (real(now - start)/real(rate) > 3.0) exit'
+        write (u, '(a)') 'end do'
+        write (u, '(a)') 'print *, "done"'
+        write (u, '(a)') 'end program '//trim(name)
+        close (u)
+    end subroutine write_sleeping_test
+
+    subroutine set_env(name, value)
+        !! Set or clear an environment variable for this process.
+        use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+        interface
+            function c_setenv(name, value, overwrite) bind(C, name='setenv') &
+                    result(ierr)
+                import :: c_char, c_int
+                character(kind=c_char), intent(in) :: name(*), value(*)
+                integer(c_int), value :: overwrite
+                integer(c_int) :: ierr
+            end function c_setenv
+            function c_unsetenv(name) bind(C, name='unsetenv') result(ierr)
+                import :: c_char, c_int
+                character(kind=c_char), intent(in) :: name(*)
+                integer(c_int) :: ierr
+            end function c_unsetenv
+        end interface
+        character(len=*), intent(in) :: name, value
+        integer(c_int) :: ierr
+
+        if (len_trim(value) == 0) then
+            ierr = c_unsetenv(trim(name)//c_null_char)
+        else
+            ierr = c_setenv(trim(name)//c_null_char, trim(value)//c_null_char, 1_c_int)
+        end if
+    end subroutine set_env
 
     subroutine test_gfortran_builds_manifest_example()
         character(len=512) :: project_dir, log_file, binary
