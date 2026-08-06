@@ -6,9 +6,8 @@ Speed never permits dropping a source, result, dependency edge, or diagnostic.
 
 ## Current truth
 
-The implementation baseline is `32ef96d` and the current roadmap tip is
-`c4102dd`; the implementation baseline has no completed remote check suite
-yet. It adds ancestor and immediate-parent edges for nested submodules and a
+The implementation baseline is `32ef96d`; it has no completed remote check
+suite yet. It adds ancestor and immediate-parent edges for nested submodules and a
 child-first gfortran compile/run oracle. The last checked ancestor was
 `e3cff007` in [run 31122586327](https://github.com/lazy-fortran/fo/actions/runs/31122586327),
 which failed/cancelled during dependency bootstrap. The cold-scan repair keeps
