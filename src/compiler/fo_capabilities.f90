@@ -3,6 +3,9 @@ module fo_capabilities
     use fo_util, only: make_tmpfile, delete_tmpfile, json_bool
     use fo_fs, only: fs_make_dir, fs_remove_tree
     use fo_process, only: process_run_argv_logged, argv_push, argv_push_split
+    use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
+        selected_compiler_command, COMPILER_GFORTRAN, COMPILER_NVFORTRAN, &
+        COMPILER_IFX, COMPILER_FLANG
     implicit none
     private
     public :: capabilities_t, detect_capabilities
@@ -43,15 +46,29 @@ contains
         type(capabilities_t), intent(inout) :: cap
 
         character(len=512) :: line, tmpfile
+        character(len=512) :: compiler
         character(len=:), allocatable :: packed
+        type(compiler_dialect_t) :: dialect
         integer :: u, iostat, n_args, exitcode
 
         cap%compiler_id = 'unknown'
         cap%compiler_version = ''
+        compiler = trim(selected_compiler_command())
+        dialect = compiler_dialect(compiler)
+        select case (dialect%kind)
+        case (COMPILER_GFORTRAN)
+            cap%compiler_id = 'gfortran'
+        case (COMPILER_NVFORTRAN)
+            cap%compiler_id = 'nvfortran'
+        case (COMPILER_IFX)
+            cap%compiler_id = 'ifx'
+        case (COMPILER_FLANG)
+            cap%compiler_id = 'flang'
+        end select
         call make_tmpfile('fo_cap_detect', tmpfile)
 
         n_args = 0
-        call argv_push(packed, n_args, 'gfortran')
+        call argv_push(packed, n_args, trim(compiler))
         call argv_push(packed, n_args, '--version')
         call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
             .false., 120, exitcode)
@@ -61,57 +78,50 @@ contains
             read (u, '(a)', iostat=iostat) line
             close (u)
             if (iostat == 0 .and. len_trim(line) > 0) then
-                if (index(line, 'GNU Fortran') > 0) then
+                if (index(line, 'LFortran') > 0 .or. index(line, 'lfortran') > 0) then
+                    cap%compiler_id = 'lfortran'
+                    call extract_version(line, cap%compiler_version)
+                else if (dialect%kind == COMPILER_GFORTRAN .or. &
+                        index(line, 'GNU Fortran') > 0) then
                     cap%compiler_id = 'gfortran'
                     call extract_version(line, cap%compiler_version)
-                else if (index(line, 'ifx') > 0 .or. &
-                        index(line, 'ifort') > 0) then
-                    cap%compiler_id = 'intel'
+                else if (dialect%kind == COMPILER_NVFORTRAN .or. &
+                        index(line, 'nvfortran') > 0 .or. index(line, 'PGI') > 0) then
+                    cap%compiler_id = 'nvfortran'
                     call extract_version(line, cap%compiler_version)
-                else if (index(line, 'flang') > 0) then
+                else if (dialect%kind == COMPILER_IFX .or. index(line, 'ifx') > 0) then
+                    cap%compiler_id = 'ifx'
+                    call extract_version(line, cap%compiler_version)
+                else if (dialect%kind == COMPILER_FLANG .or. index(line, 'flang') > 0) then
                     cap%compiler_id = 'flang'
-                    call extract_version(line, cap%compiler_version)
-                else if (index(line, 'lfortran') > 0 .or. &
-                        index(line, 'LFortran') > 0) then
-                    cap%compiler_id = 'lfortran'
                     call extract_version(line, cap%compiler_version)
                 end if
             end if
         end if
         call delete_tmpfile(tmpfile)
-
-        if (trim(cap%compiler_id) == 'unknown') then
-            n_args = 0
-            call argv_push(packed, n_args, 'ifx')
-            call argv_push(packed, n_args, '--version')
-            call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
-                .false., 120, exitcode)
-            open (newunit=u, file=tmpfile, status='old', iostat=iostat)
-            if (iostat == 0) then
-                read (u, '(a)', iostat=iostat) line
-                close (u)
-                if (iostat == 0 .and. len_trim(line) > 0) then
-                    cap%compiler_id = 'intel'
-                    call extract_version(line, cap%compiler_version)
-                end if
-            end if
-            call delete_tmpfile(tmpfile)
-        end if
     end subroutine detect_compiler_id
 
     subroutine detect_compiler_path(cap)
         type(capabilities_t), intent(inout) :: cap
 
-        character(len=512) :: found
+        character(len=512) :: found, compiler
+        logical :: exists
 
         cap%compiler_path = ''
+        compiler = trim(selected_compiler_command())
+        if (index(compiler, '/') > 0) then
+            inquire (file=trim(compiler), exist=exists)
+            if (exists) cap%compiler_path = trim(compiler)
+            return
+        end if
 
         select case (trim(cap%compiler_id))
         case ('gfortran')
             call which_in_path('gfortran', found)
-        case ('intel')
+        case ('ifx')
             call which_in_path('ifx', found)
-            if (len_trim(found) == 0) call which_in_path('ifort', found)
+        case ('nvfortran')
+            call which_in_path('nvfortran', found)
         case ('flang')
             call which_in_path('flang', found)
         case ('lfortran')
@@ -163,7 +173,9 @@ contains
         type(capabilities_t), intent(inout) :: cap
 
         character(len=512) :: tmpdir, srcfile, tmpfile
+        character(len=512) :: compiler
         character(len=:), allocatable :: packed
+        type(compiler_dialect_t) :: dialect
         integer :: u, exitcode, n_args
 
         cap%has_openmp = .false.
@@ -181,24 +193,18 @@ contains
         close (u)
 
         call make_tmpfile('fo_cap_omp_log', tmpfile)
-        select case (trim(cap%compiler_id))
-        case ('gfortran')
-            n_args = 0
-            call argv_push(packed, n_args, 'gfortran')
-            call argv_push_split(packed, n_args, '-fopenmp -o /dev/null')
-            call argv_push(packed, n_args, trim(srcfile))
-            call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
-                .false., 120, exitcode)
-        case ('intel')
-            n_args = 0
-            call argv_push(packed, n_args, 'ifx')
-            call argv_push_split(packed, n_args, '-qopenmp -o /dev/null')
-            call argv_push(packed, n_args, trim(srcfile))
-            call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
-                .false., 120, exitcode)
-        case default
+        compiler = trim(selected_compiler_command())
+        dialect = compiler_dialect(compiler)
+        if (len_trim(dialect%openmp_flag()) == 0) then
             exitcode = 1
-        end select
+        else
+            n_args = 0
+            call argv_push(packed, n_args, trim(compiler))
+            call argv_push_split(packed, n_args, trim(dialect%openmp_flag())//' -o /dev/null')
+            call argv_push(packed, n_args, trim(srcfile))
+            call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
+                .false., 120, exitcode)
+        end if
 
         cap%has_openmp = (exitcode == 0)
         call fs_remove_tree(trim(tmpdir))
@@ -212,9 +218,11 @@ contains
         select case (trim(cap%compiler_id))
         case ('gfortran')
             cap%has_module_output_dir = .true.
-        case ('intel')
+        case ('ifx')
             cap%has_module_output_dir = .true.
         case ('flang')
+            cap%has_module_output_dir = .true.
+        case ('nvfortran')
             cap%has_module_output_dir = .true.
         end select
     end subroutine probe_module_output_dir
@@ -226,7 +234,7 @@ contains
         select case (trim(cap%compiler_id))
         case ('gfortran')
             cap%has_depfile = .true.
-        case ('intel')
+        case ('ifx')
             cap%has_depfile = .true.
         end select
     end subroutine probe_depfile

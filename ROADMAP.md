@@ -21,6 +21,17 @@ deliberately narrower than the early logos design.
 - Complete native installation for libraries, modules, applications, and
   examples.
 - Extend differential coverage over real Fortran repositories.
+- [x] Centralize compiler dialect policy for the four supported native lanes:
+  GNU Fortran, NVIDIA `nvfortran`, Intel LLVM `ifx`, and LLVM Flang. Module
+  output, free-form, OpenMP, profile, linker, and fpm-flag translation now
+  live behind one policy object. Legacy `ifort` is intentionally unsupported.
+- [x] Verify the nvfortran lane on a real FortML build and all 13 FortML tests
+  with nvfortran 26.5. Keep the compiler selection in `FO_FC` (with `FC` as
+  the standard fallback) and pass the selected compiler to fpm bootstrap via
+  fpm's `FPM_FC` variable.
+- [ ] Add an executable ifx CI/cluster gate. The ifx dialect is implemented and
+  independently policy-tested, but no ifx executable is installed on the
+  current cluster.
 
 ## Cross-repository open work (2026-08-05)
 
@@ -43,6 +54,23 @@ silent drop below makes all of these fail loudly instead, which is why it
 should come first.
 
 ## Correctness debt (2026-08-05)
+
+### Compiler dialect provenance and portability boundary (2026-08-06)
+
+The compiler abstraction follows fpm's `compiler_t` separation of compiler
+identity from compiler-specific flags, using the pinned source snapshot
+`eaffbb36086abdb16c0d052961a3e7240cb22b0a` in `.provenance/upstream/fpm` as
+the provenance reference. fo keeps this smaller and explicit: one
+`compiler_dialect_t` owns module-directory, profile, OpenMP, linker, and
+manifest-flag translation, while the native scheduler and cache remain
+compiler-neutral. This prevents GNU flags such as `-J`, `-ffree-form`, and
+`-funroll-loops` from leaking into nvfortran, ifx, or Flang commands.
+
+The fo executable itself still cannot be declared a cold nvfortran build
+because nvfortran 26.5 crashes in the external FortFront dependency's
+`parser_expression_stacks.f90` during both debug and release fpm builds.
+That is recorded as an upstream compiler failure. The native compiler policy
+and the FortML path-only build/test gate pass independently.
 
 ### A source fo cannot scan is silently dropped from the build
 
@@ -120,19 +148,19 @@ design is identified as historical material in `doc/LINUX.md`.
 
 ## Cross-repository handoff (2026-08-03)
 
-The implementation baseline for the handoff is `af075f4`; the roadmap commits
+The implementation baseline for the handoff is `af075f4`. The roadmap commits
 are pushed on current `main`.
 
 fo is the workflow owner for ffc's cheap build/test/lint and bounded
 conformance commands. Routine compiler progress uses deterministic random
-subsets, never a whole-corpus run; the sample count increases only after
+subsets, never a whole-corpus run. The sample count increases only after
 repeated 100%-clean subsets. The ffc XFAIL-first gate is documented in
 [ffc/ROADMAP.md](https://github.com/lazy-fortran/ffc/blob/main/ROADMAP.md).
 
 Relevant open contracts:
 
 - [#59](https://github.com/lazy-fortran/fo/issues/59) consumes fluff's stable
-  JSON output; fluff #262 / PR #269 must finish with honest failing-test
+  JSON output. Fluff #262 / PR #269 must finish with honest failing-test
   behavior before this integration is complete.
 - [#103](https://github.com/lazy-fortran/fo/issues/103) owns structured
   FortFront diagnostic mapping, a prerequisite for [#56](https://github.com/lazy-fortran/fo/issues/56)

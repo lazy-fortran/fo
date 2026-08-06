@@ -13,7 +13,7 @@ module fo_lint_testfail
     !!   - `call exit(...)` with a nonzero or non-constant argument
     !!   - `call abort()`
     !! A bare `stop`, `stop 0`, and a character stop code (`stop 'failed'`,
-    !! which gfortran and ifort exit 0 on) are deliberately NOT failure paths:
+    !! which some legacy compilers exit 0 on) are deliberately NOT failure paths:
     !! they are exactly the vacuous endings this rule exists to catch.
     !!
     !! The search covers the file's own code, including its contained
@@ -137,7 +137,7 @@ contains
             call lex_read_logical_line(u, code, start_line, phys_no, iostat)
             if (iostat /= 0) exit
             if (line_is_failure_path(code(1:max(len_trim(code), 1)), &
-                    shadowed_names, n_shadowed)) then
+                shadowed_names, n_shadowed)) then
                 found = .true.
                 exit
             end if
@@ -156,7 +156,7 @@ contains
             call resolve_include(filepath, code, incpath, resolved)
             if (.not. resolved) cycle
             if (file_has_failure_path(trim(incpath), depth + 1, shadowed_names, &
-                    n_shadowed)) then
+                n_shadowed)) then
                 found = .true.
                 exit
             end if

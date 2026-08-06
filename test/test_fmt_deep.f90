@@ -110,28 +110,32 @@ contains
         character(len=512) :: log_file, line
         character(len=:), allocatable :: packed
         integer :: n_args, exitcode, u, ios
-        logical :: found
+        logical :: found, found_second
 
         call make_tmpfile('test_process_env_log', log_file)
         n_args = 0
         packed = ''
         call argv_push(packed, n_args, 'env')
         call process_run_argv_logged('', packed, n_args, trim(log_file), &
-            .false., 5, exitcode, env_extra='FO_PROCESS_TEST_VALUE=sentinel')
+            .false., 5, exitcode, env_extra= &
+            'FO_PROCESS_TEST_VALUE=sentinel;FO_PROCESS_TEST_SECOND=two')
 
         found = .false.
+        found_second = .false.
         open (newunit=u, file=trim(log_file), status='old', iostat=ios)
         if (ios == 0) then
             do
                 read (u, '(a)', iostat=ios) line
                 if (ios /= 0) exit
                 if (trim(line) == 'FO_PROCESS_TEST_VALUE=sentinel') found = .true.
+                if (trim(line) == 'FO_PROCESS_TEST_SECOND=two') found_second = .true.
             end do
             close (u)
         end if
 
         call assert(exitcode == 0, 'argv env: env command exits zero')
         call assert(found, 'argv env: child receives env_extra')
+        call assert(found_second, 'argv env: child receives multiple env entries')
         call delete_tmpfile(log_file)
     end subroutine test_process_run_argv_logged_passes_env
 

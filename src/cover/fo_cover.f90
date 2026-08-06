@@ -34,7 +34,7 @@ contains
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
             write (error_unit, '(a)') 'fo cover: no fpm.toml found'
-            stop 1, quiet=.true.
+            error stop 1
         end if
         call fs_make_dir('build/coverage')
         call fs_make_dir('build/gcov')
@@ -45,7 +45,7 @@ contains
             use_cache=.false.)
         if (exitcode /= 0) then
             call report_stage_failure('build', build_log, 'fo cover')
-            stop 1, quiet=.true.
+            error stop 1
         end if
         call delete_tmpfile(build_log)
 
@@ -54,7 +54,7 @@ contains
             use_cache=.false.)
         if (exitcode /= 0) then
             call report_stage_failure('test', test_log, 'fo cover')
-            stop 1, quiet=.true.
+            error stop 1
         end if
         call delete_tmpfile(test_log)
 
@@ -68,7 +68,7 @@ contains
         end if
         if (exitcode /= 0) then
             call report_stage_failure('cover', fortcov_log, 'fo cover')
-            stop exitcode, quiet=.true.
+            error stop exitcode
         end if
         call delete_tmpfile(fortcov_log)
     end subroutine fo_cover_run
@@ -89,7 +89,7 @@ contains
             else if (trim(arg) == '--fail-under') then
                 if (i == command_argument_count()) then
                     write (error_unit, '(a)') 'fo cover: --fail-under needs a value'
-                    stop 1, quiet=.true.
+                    error stop 1
                 end if
                 i = i + 1
                 call get_command_argument(i, fail_under)
@@ -99,7 +99,7 @@ contains
                     fail_under = arg(14:)
                 else
                     write (error_unit, '(a,a)') 'fo cover: unknown option: ', trim(arg)
-                    stop 1, quiet=.true.
+                    error stop 1
                 end if
             end if
             i = i + 1

@@ -7,6 +7,8 @@ module fo_build_backend
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names
     use fo_compiler_flags, only: append_array_temporary_warning_flag
+    use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
+        selected_compiler_command
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
@@ -196,17 +198,10 @@ contains
     function profile_flags(name) result(flags)
         character(len=*), intent(in) :: name
         character(len=:), allocatable :: flags
-        select case (trim(name))
-        case ('debug')
-            flags = '-g -O0 -fcheck=all -fbacktrace'
-        case ('release')
-            flags = '-O3 -funroll-loops'
-        case ('asan')
-            flags = '-g -O0 -fcheck=all -fbacktrace '// &
-                '-fsanitize=address,undefined'
-        case default
-            flags = ''
-        end select
+        type(compiler_dialect_t) :: dialect
+
+        dialect = compiler_dialect(selected_compiler_command())
+        flags = dialect%profile_flags(name)
     end function profile_flags
 
     subroutine backend_test(self, exitcode, include_slow, log_file, flags, use_cache)
@@ -355,9 +350,7 @@ contains
         integer :: n_args
 
         write (jobs_text, '(i0)') detect_jobs()
-        compiler = ''
-        call get_environment_variable('FC', compiler)
-        if (len_trim(compiler) == 0) compiler = 'gfortran'
+        compiler = trim(selected_compiler_command())
         effective_flags = flags
         call append_array_temporary_warning_flag(compiler, effective_flags)
 

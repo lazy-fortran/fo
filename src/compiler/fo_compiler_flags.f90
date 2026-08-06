@@ -1,4 +1,6 @@
 module fo_compiler_flags
+    use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
+        COMPILER_GFORTRAN
     implicit none
     private
 
@@ -6,38 +8,43 @@ module fo_compiler_flags
         '-Warray-temporaries'
 
     public :: append_array_temporary_warning_flag, append_pipe_flag
-    public :: compiler_is_gfortran, compiler_supports_fuse_ld
+    public :: compiler_is_gfortran, compiler_is_nvfortran, compiler_is_ifx, &
+        compiler_supports_fuse_ld
 
 contains
 
     pure logical function compiler_is_gfortran(compiler)
         character(len=*), intent(in) :: compiler
-        character(len=len(compiler)) :: lowered
-        integer :: i, code
+        type(compiler_dialect_t) :: dialect
 
-        lowered = compiler
-        do i = 1, len_trim(lowered)
-            code = iachar(lowered(i:i))
-            if (code >= iachar('A') .and. code <= iachar('Z')) &
-                lowered(i:i) = achar(code + iachar('a') - iachar('A'))
-        end do
-        compiler_is_gfortran = index(lowered, 'gfortran') > 0 .or. &
-            index(lowered, 'gnu fortran') > 0
+        dialect = compiler_dialect(compiler)
+        compiler_is_gfortran = dialect%kind == COMPILER_GFORTRAN
     end function compiler_is_gfortran
+
+    pure logical function compiler_is_nvfortran(compiler)
+        use fo_compiler_dialect, only: COMPILER_NVFORTRAN
+        character(len=*), intent(in) :: compiler
+        type(compiler_dialect_t) :: dialect
+
+        dialect = compiler_dialect(compiler)
+        compiler_is_nvfortran = dialect%kind == COMPILER_NVFORTRAN
+    end function compiler_is_nvfortran
+
+    pure logical function compiler_is_ifx(compiler)
+        use fo_compiler_dialect, only: COMPILER_IFX
+        character(len=*), intent(in) :: compiler
+        type(compiler_dialect_t) :: dialect
+
+        dialect = compiler_dialect(compiler)
+        compiler_is_ifx = dialect%kind == COMPILER_IFX
+    end function compiler_is_ifx
 
     pure logical function compiler_supports_fuse_ld(compiler)
         character(len=*), intent(in) :: compiler
-        character(len=len(compiler)) :: lowered
-        integer :: i, code
+        type(compiler_dialect_t) :: dialect
 
-        lowered = compiler
-        do i = 1, len_trim(lowered)
-            code = iachar(lowered(i:i))
-            if (code >= iachar('A') .and. code <= iachar('Z')) &
-                lowered(i:i) = achar(code + iachar('a') - iachar('A'))
-        end do
-        compiler_supports_fuse_ld = compiler_is_gfortran(lowered) .or. &
-            index(lowered, 'flang') > 0
+        dialect = compiler_dialect(compiler)
+        compiler_supports_fuse_ld = dialect%supports_fuse_ld()
     end function compiler_supports_fuse_ld
 
     pure subroutine append_pipe_flag(compiler, flags)

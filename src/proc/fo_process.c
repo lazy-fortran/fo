@@ -226,18 +226,47 @@ void fo_c_scan_sources(const char *root, const char *output_file, int *exitcode)
 
 extern char **environ;
 
-/* Build environ + one extra "KEY=VALUE" entry, in the PARENT so the child does
- * no malloc (async-signal-safe). Returns NULL on alloc failure. */
+/* Build environ plus semicolon-separated "KEY=VALUE" entries in the PARENT,
+ * so the child does no malloc (async-signal-safe). Returns NULL on alloc
+ * failure. */
 static char **env_with_extra(const char *extra) {
-    int n = 0, i;
+    int n = 0, i, extras = 1, slot;
+    const char *cursor;
     char **e;
     while (environ[n]) n++;
-    e = (char **)malloc((size_t)(n + 2) * sizeof(char *));
+    for (cursor = extra; *cursor; cursor++) {
+        if (*cursor == ';') extras++;
+    }
+    e = (char **)calloc((size_t)(n + extras + 1), sizeof(char *));
     if (!e) return NULL;
     for (i = 0; i < n; i++) e[i] = environ[i];
-    e[n] = (char *)extra;
-    e[n + 1] = NULL;
+    slot = n;
+    cursor = extra;
+    while (*cursor) {
+        const char *end = strchr(cursor, ';');
+        size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
+        if (length > 0) {
+            e[slot] = strndup(cursor, length);
+            if (!e[slot]) {
+                int j;
+                for (j = n; j < slot; j++) free(e[j]);
+                free(e);
+                return NULL;
+            }
+            slot++;
+        }
+        if (!end) break;
+        cursor = end + 1;
+    }
     return e;
+}
+
+static void free_env_with_extra(char **env) {
+    int n = 0, i;
+    if (!env) return;
+    while (environ[n]) n++;
+    for (i = n; env[i]; i++) free(env[i]);
+    free(env);
 }
 
 static int run_argv(const char *cwd, char *const argv[], const char *log_file,
@@ -261,7 +290,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
 
     spawn_error = posix_spawn_file_actions_init(&actions);
     if (spawn_error != 0) {
-        free(child_env);
+        free_env_with_extra(child_env);
         emit_spawn_error(log_file, "posix_spawn file-actions setup", spawn_error);
         return 1;
     }
@@ -279,7 +308,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
     }
     if (spawn_error != 0) {
         posix_spawn_file_actions_destroy(&actions);
-        free(child_env);
+        free_env_with_extra(child_env);
         emit_spawn_error(log_file, "posix_spawn file-action", spawn_error);
         return 1;
     }
@@ -298,7 +327,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
     }
     posix_spawn_file_actions_destroy(&actions);
     if (attrs_ready) posix_spawnattr_destroy(&attrs);
-    free(child_env);
+    free_env_with_extra(child_env);
     if (spawn_error != 0) {
         char operation[192];
         snprintf(operation, sizeof(operation), "posix_spawn of %.80s in %.80s",

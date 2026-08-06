@@ -177,7 +177,7 @@ contains
         if (exitcode /= 0) then
             write (error_unit, '(a)') 'Build: FAIL'
             call report_build_result(build_log)
-            stop 1, quiet=.true.
+            error stop 1
         end if
         call report_array_temporary_warnings(build_log)
         call delete_tmpfile(build_log)
@@ -212,7 +212,7 @@ contains
                         n_failed_tests)
                     write (error_unit, '(a)') 'Tests: FAIL'
                     call report_failed_tests(failed_tests, n_failed_tests)
-                    stop 1, quiet=.true.
+                    error stop 1
                 end if
                 call delete_tmpfile(test_log)
                 write (output_unit, '(a)') 'Tests: OK'
@@ -433,7 +433,7 @@ contains
         if (mode_ierr /= 0) then
             write (error_unit, '(a)') &
                 'fo check: unknown option (use --help for supported options)'
-            stop 1, quiet = .true.
+            error stop 1
         end if
 
         cap_json = ''
@@ -447,19 +447,19 @@ contains
         select case (output_mode)
         case (1)
             write (output_unit, '(a)') trim(check_result_json(res))
-            if (.not. (res%build_ok .and. res%tests_ok)) stop 1, quiet = .true.
+            if (.not. (res%build_ok .and. res%tests_ok)) error stop 1
             return
         case (2)
             write (output_unit, '(a)') trim(check_result_compact_json(res))
-            if (.not. (res%build_ok .and. res%tests_ok)) stop 1, quiet = .true.
+            if (.not. (res%build_ok .and. res%tests_ok)) error stop 1
             return
         case (3)
             write (output_unit, '(a)') trim(check_result_full_json(res, cap_json))
-            if (.not. (res%build_ok .and. res%tests_ok)) stop 1, quiet = .true.
+            if (.not. (res%build_ok .and. res%tests_ok)) error stop 1
             return
         case (4)
             write (output_unit, '(a)') trim(check_result_compact_json(res))
-            if (.not. (res%build_ok .and. res%tests_ok)) stop 1, quiet = .true.
+            if (.not. (res%build_ok .and. res%tests_ok)) error stop 1
             return
         end select
 
@@ -476,14 +476,14 @@ contains
             end if
         else if (.not. res%build_ok) then
             write (output_unit, '(a,a)') 'Build: FAIL ', trim(res%error_msg)
-            stop 1, quiet = .true.
+            error stop 1
         else
             write (output_unit, '(a,i0,a,i0,a,i0,a,a)') &
                 'Build: OK (', res%n_cached, ' cached, ', res%n_changed, &
                 ' changed, ', res%n_affected, &
                 ' affected) Tests: FAIL ', trim(res%error_msg)
             call report_failed_tests(res%failed_tests, res%n_failed_tests)
-            stop 1, quiet = .true.
+            error stop 1
         end if
     end subroutine cmd_check
 
@@ -622,7 +622,7 @@ contains
             if (exitcode /= 0) then
                 write (error_unit, '(a)') 'fo exec: build failed'
                 call report_build_result(build_log)
-                stop 1, quiet=.true.
+                error stop 1
             end if
             call report_array_temporary_warnings(build_log)
             call delete_tmpfile(build_log)
@@ -631,7 +631,7 @@ contains
         call resolve_exec_target(b, target, bin_path, exists)
         if (.not. exists) then
             write (error_unit, '(a)') 'fo exec: no such target: '//trim(target)
-            stop 1, quiet=.true.
+            error stop 1
         end if
 
         n_args = 0
@@ -666,7 +666,7 @@ contains
         ! timeout 0 means no limit (an interactive app may run arbitrarily long).
         call process_run_argv_logged(trim(run_cwd), packed, n_args, '', .false., &
             0, exitcode)
-        if (exitcode /= 0) stop 1, quiet=.true.
+        if (exitcode /= 0) error stop 1
     end subroutine cmd_exec
 
     subroutine check_output_mode(mode, ierr)
@@ -797,7 +797,7 @@ contains
         end if
         if (exitcode /= 0) then
             call report_build_result(build_log)
-            stop 1, quiet=.true.
+            error stop 1
         end if
         call report_array_temporary_warnings(build_log)
         call delete_tmpfile(build_log)
@@ -1162,7 +1162,7 @@ contains
             write (error_unit, '(a,a)') 'fo: log: ', trim(test_log)
         end if
 
-        if (exitcode /= 0) stop 1, quiet = .true.
+        if (exitcode /= 0) error stop 1
     end subroutine report_test_result
 
     subroutine cmd_bench()
@@ -1196,7 +1196,7 @@ contains
 
         allocate (results(128))
         call fo_bench_run('.', results, n_results, use_json, n_runs, exitcode)
-        if (exitcode /= 0) stop 1, quiet=.true.
+        if (exitcode /= 0) error stop 1
     end subroutine cmd_bench
 
     subroutine cmd_graph()
@@ -1277,7 +1277,7 @@ contains
             write (output_unit, '(i0,a)') n_removed, ' unused import(s) removed'
             if (n_remaining > 0) write (output_unit, '(i0,a)') &
                 n_remaining, ' unused import(s) remaining (not auto-removable)'
-            if (n_remaining > 0) stop 1, quiet=.true.
+            if (n_remaining > 0) error stop 1
             return
         end if
 
@@ -1312,7 +1312,7 @@ contains
             write (output_unit, '(i0,a,i0,a)') &
                 n_findings, ' unused import(s), ', &
                 n_warnings, ' compiler warning(s)'
-            stop 1, quiet = .true.
+            error stop 1
         end if
     end subroutine cmd_lint
 
@@ -1365,12 +1365,12 @@ contains
                 if (len_trim(arg) > 0) then
                     if (arg(1:1) == '-') then
                         write (error_unit, '(a)') 'fo fmt: unknown option: '//trim(arg)
-                        stop 1, quiet = .true.
+                        error stop 1
                     end if
                 end if
                 if (n_fmt_files >= size(fmt_files)) then
                     write (error_unit, '(a)') 'fo fmt: too many paths'
-                    stop 1, quiet = .true.
+                    error stop 1
                 end if
                 n_fmt_files = n_fmt_files + 1
                 fmt_files(n_fmt_files) = arg
@@ -1380,11 +1380,11 @@ contains
         if (changed_mode) then
             if (check_mode) then
                 write (error_unit, '(a)') 'fo fmt: --check and --changed cannot be combined'
-                stop 1, quiet = .true.
+                error stop 1
             end if
             if (n_fmt_files > 0) then
                 write (error_unit, '(a)') 'fo fmt: --changed does not accept paths'
-                stop 1, quiet = .true.
+                error stop 1
             end if
         end if
 
@@ -1401,7 +1401,7 @@ contains
                 end if
                 if (len_trim(fmt_output) > 0) &
                     write (error_unit, '(a)') trim(fmt_output)
-                if (exitcode /= 0) stop 1, quiet = .true.
+                if (exitcode /= 0) error stop 1
                 return
             end if
 
@@ -1409,7 +1409,7 @@ contains
                 call fo_fmt_deep_changed_run('.', exitcode)
                 if (exitcode /= 0) then
                     write (error_unit, '(a)') 'fo fmt --deep --changed: no Git worktree'
-                    stop 1, quiet = .true.
+                    error stop 1
                 end if
                 write (output_unit, '(a)') 'formatted changed sources (deep)'
                 return
@@ -1422,7 +1422,7 @@ contains
             end if
             if (exitcode /= 0) then
                 write (error_unit, '(a)') 'fo fmt --deep: formatting failed'
-                stop 1, quiet = .true.
+                error stop 1
             end if
             if (n_fmt_files > 0) then
                 write (output_unit, '(a)') 'formatted selected sources (deep)'
@@ -1444,7 +1444,7 @@ contains
             end if
             if (len_trim(fmt_output) > 0) &
                 write (error_unit, '(a)') trim(fmt_output)
-            if (exitcode /= 0) stop 1, quiet = .true.
+            if (exitcode /= 0) error stop 1
             return
         end if
 
@@ -1452,7 +1452,7 @@ contains
             call fo_fmt_changed_run('.', exitcode)
             if (exitcode /= 0) then
                 write (error_unit, '(a)') 'fo fmt --changed: no Git worktree'
-                stop 1, quiet = .true.
+                error stop 1
             end if
             write (output_unit, '(a)') 'formatted changed sources'
             return
@@ -1465,7 +1465,7 @@ contains
         end if
         if (exitcode /= 0) then
             write (error_unit, '(a)') 'fo fmt: formatting failed'
-            stop 1, quiet = .true.
+            error stop 1
         end if
         if (n_fmt_files > 0) then
             write (output_unit, '(a)') 'formatted selected sources'
@@ -1497,7 +1497,7 @@ contains
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
             write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
-            stop 1, quiet=.true.
+            error stop 1
         end if
 
         call make_tmpfile('fo-install', install_log)
@@ -1512,7 +1512,7 @@ contains
             .false., 0, exitcode)
         if (exitcode /= 0) then
             call report_install_result(install_log)
-            stop 1, quiet=.true.
+            error stop 1
         end if
         call delete_tmpfile(install_log)
         write (output_unit, '(a,a)') 'installed: ', trim(prefix)//'/bin/'

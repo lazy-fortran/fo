@@ -6,7 +6,7 @@ module fo_lint_failpath
     !! `error stop` (with or without a code), `stop` with a nonzero or
     !! non-constant code, `call abort()`, or `call exit(...)` with a nonzero or
     !! non-constant status. A bare `stop`, `stop 0`, and a character stop code
-    !! (`stop 'failed'`, which gfortran and ifort exit 0 on) are deliberately
+    !! (`stop 'failed'`, which some legacy compilers exit 0 on) are deliberately
     !! NOT failure paths.
     !!
     !! Test suites usually do not write those statements inline: they call a

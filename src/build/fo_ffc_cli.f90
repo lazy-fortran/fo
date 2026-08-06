@@ -19,7 +19,7 @@ contains
 
         if (command_argument_count() < 3) then
             call print_run_usage(error_unit)
-            stop 2, quiet=.true.
+            error stop 2
         end if
         if (arg_equals(3, '--help') .or. arg_equals(3, '-h')) then
             call print_run_usage(output_unit)
@@ -34,7 +34,7 @@ contains
         end do
         call ffc_native_run(source, args, n_run_args, exitcode, error_msg)
         if (len_trim(error_msg) > 0) write (error_unit, '(a)') trim(error_msg)
-        if (exitcode /= 0) stop exitcode, quiet=.true.
+        if (exitcode /= 0) error stop exitcode
     end subroutine ffc_cmd_run
 
     subroutine ffc_cmd_build()
@@ -56,14 +56,14 @@ contains
             if (trim(arg) == '-o') then
                 if (i == command_argument_count()) then
                     write (error_unit, '(a)') 'fo build --native: -o requires a path'
-                    stop 2, quiet=.true.
+                    error stop 2
                 end if
                 i = i + 1
                 call get_command_argument(i, output)
             else if (arg(1:1) == '-') then
                 write (error_unit, '(a)') &
                     'fo build --native: unknown option: '//trim(arg)
-                stop 2, quiet=.true.
+                error stop 2
             else
                 n_sources = n_sources + 1
                 sources(n_sources) = arg
@@ -72,11 +72,11 @@ contains
         end do
         if (n_sources == 0) then
             call print_build_usage(error_unit)
-            stop 2, quiet=.true.
+            error stop 2
         end if
         call ffc_native_build(sources, n_sources, output, exitcode, error_msg)
         if (len_trim(error_msg) > 0) write (error_unit, '(a)') trim(error_msg)
-        if (exitcode /= 0) stop exitcode, quiet=.true.
+        if (exitcode /= 0) error stop exitcode
     end subroutine ffc_cmd_build
 
     subroutine print_run_usage(unit)

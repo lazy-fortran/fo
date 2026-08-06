@@ -24,6 +24,9 @@ module fo_gfortran_build
         fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec, &
         fs_find_executable
     use fo_progress, only: progress_begin, progress_step, progress_end
+    use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
+        selected_compiler_command, COMPILER_NVFORTRAN, COMPILER_IFX, &
+        COMPILER_FLANG
     use fo_compiler_flags, only: append_array_temporary_warning_flag, append_pipe_flag
     use fo_linker_policy, only: select_linker
     use fo_build_stamp, only: build_stamp_matches, build_stamp_quick_matches, &
@@ -272,6 +275,7 @@ contains
 
         character(len=:), allocatable :: packed
         character(len=4096) :: bootstrap_env, lib_dir, lib_path, prior_paths
+        character(len=512) :: selected_fc
         integer :: n_args
         integer :: stat, cut
         logical :: has_local_liric
@@ -289,6 +293,15 @@ contains
                 else
                     bootstrap_env = 'LIBRARY_PATH='//trim(lib_dir)
                 end if
+            end if
+        end if
+
+        selected_fc = trim(fc_executable_command())
+        if (len_trim(selected_fc) > 0) then
+            if (len_trim(bootstrap_env) > 0) then
+                bootstrap_env = trim(bootstrap_env)//';FPM_FC='//trim(selected_fc)
+            else
+                bootstrap_env = 'FPM_FC='//trim(selected_fc)
             end if
         end if
 
@@ -709,6 +722,7 @@ contains
         ! dir. Replaces grep over compile_commands.json plus find -printf %h.
         call fs_collect_mod_dirs(trim(project_dir)//'/build', dep_includes, &
             n_dep_includes)
+        call filter_module_dirs_for_compiler(dep_includes, n_dep_includes)
 
         suffixes(1) = '.f90.o'
         suffixes(2) = '.F90.o'
@@ -725,17 +739,52 @@ contains
             ! its source: git deps under build/dependencies become
             ! build_dependencies_<dep>_src_*, path deps (path = "../dep") become
             ! .._<dep>_src_*. Both share the _<dep>_src_ infix. Scan every
-            ! gfortran_* profile dir directly and dedup by module identity.
+            ! compiler-specific profile dir directly and dedup by module identity.
             do j = 1, size(suffixes)
                 call fs_collect_files(trim(project_dir)//'/build', &
                     '_'//trim(config%deps(i)%name)//'_src_', &
-                    trim(suffixes(j)), '/gfortran_', found, &
+                    trim(suffixes(j)), '/'//trim(compiler_profile_prefix()), found, &
                     n_found)
                 call add_dep_objs(found, n_found, dep_objs, n_dep_objs, &
                     obj_basenames, n_obj_seen)
             end do
         end do
     end subroutine collect_dep_artifacts
+
+    subroutine filter_module_dirs_for_compiler(directories, n_directories)
+        character(len=512), intent(inout) :: directories(:)
+        integer, intent(inout) :: n_directories
+
+        character(len=64) :: compiler_marker
+        integer :: i, kept
+
+        compiler_marker = '/'//trim(compiler_profile_prefix())
+        kept = 0
+        do i = 1, n_directories
+            if (index(trim(directories(i)), trim(compiler_marker)) == 0 .and. &
+                index(trim(directories(i)), '/fo/mod') == 0) cycle
+            kept = kept + 1
+            directories(kept) = directories(i)
+        end do
+        n_directories = kept
+    end subroutine filter_module_dirs_for_compiler
+
+    function compiler_profile_prefix() result(prefix)
+        character(len=32) :: prefix
+        type(compiler_dialect_t) :: dialect
+
+        dialect = compiler_dialect(fc_command())
+        select case (dialect%kind)
+        case (COMPILER_NVFORTRAN)
+            prefix = 'nvfortran_'
+        case (COMPILER_IFX)
+            prefix = 'ifx_'
+        case (COMPILER_FLANG)
+            prefix = 'flang_'
+        case default
+            prefix = 'gfortran_'
+        end select
+    end function compiler_profile_prefix
 
     subroutine add_dep_objs(found, n_found, dep_objs, n_dep_objs, &
             obj_basenames, n_obj_seen)
@@ -2502,15 +2551,7 @@ contains
         !! a different compiler (e.g. flang to dodge a gfortran codegen bug)
         !! without editing the project.
         character(len=:), allocatable :: cmd
-        character(len=256) :: val
-        integer :: st
-
-        call get_environment_variable('FO_FC', val, status=st)
-        if (st == 0 .and. len_trim(val) > 0) then
-            cmd = trim(adjustl(val))
-        else
-            cmd = 'gfortran'
-        end if
+        cmd = trim(selected_compiler_command())
     end function fc_command
 
     function fc_executable_command() result(cmd)
@@ -2537,7 +2578,10 @@ contains
         !! True when the selected compiler is LLVM flang. Drives flag dialect:
         !! flang rejects gfortran-only flags and spells the module-output dir
         !! differently.
-        fc_is_flang = index(fc_command(), 'flang') > 0
+        type(compiler_dialect_t) :: dialect
+
+        dialect = compiler_dialect(fc_command())
+        fc_is_flang = dialect%is_flang()
     end function fc_is_flang
 
     recursive function fc_base_flags() result(flags)
@@ -2547,11 +2591,10 @@ contains
         !! config_flags_str), not here.
         character(len=:), allocatable :: flags
 
-        if (fc_is_flang()) then
-            flags = '-fimplicit-none'
-        else
-            flags = '-ffree-line-length-none -fimplicit-none'
-        end if
+        type(compiler_dialect_t) :: dialect
+
+        dialect = compiler_dialect(fc_command())
+        flags = dialect%base_flags()
         call append_pipe_flag(fc_command(), flags)
     end function fc_base_flags
 
@@ -2562,19 +2605,14 @@ contains
         character(len=*), intent(out) :: flag
 
         integer :: i
+        type(compiler_dialect_t) :: dialect
 
         ! Newline-separated argv tokens with raw, unquoted paths. compile_f90
         ! splits this on newlines so each -I/-J path stays one whole token even
         ! when it contains spaces; shell quoting must not be applied, or quotes
         ! would land literally in the path and the .mod would not be found.
-        ! flang spells the module-output dir -module-dir; gfortran uses -J.
-        if (fc_is_flang()) then
-            flag = '-module-dir'//char(10)//trim(mod_dir)//char(10)//'-I'// &
-                char(10)//trim(mod_dir)
-        else
-            flag = '-J'//char(10)//trim(mod_dir)//char(10)//'-I'//char(10)// &
-                trim(mod_dir)
-        end if
+        dialect = compiler_dialect(fc_command())
+        flag = dialect%module_flags(mod_dir)
         do i = 1, n_dep_includes
             flag = trim(flag)//char(10)//'-I'//char(10)//trim(dep_includes(i))
         end do
@@ -3313,15 +3351,20 @@ contains
         character(len=*), intent(inout) :: flag_text
         integer :: i
         character(len=1024) :: combined
+        character(len=:), allocatable :: mapped
+        type(compiler_dialect_t) :: dialect
 
         combined = ''
-        ! fpm openmp metapackage -> -fopenmp on compile and link.
-        if (config%openmp) combined = '-fopenmp'
+        dialect = compiler_dialect(fc_command())
+        ! fpm openmp metapackage -> the selected compiler's OpenMP flag.
+        if (config%openmp) combined = trim(dialect%openmp_flag())
         do i = 1, config%n_flags
+            mapped = dialect%translate_flag(config%flags(i))
+            if (len_trim(mapped) == 0) cycle
             if (len_trim(combined) > 0) then
-                combined = trim(combined)//' '//trim(config%flags(i))
+                combined = trim(combined)//' '//trim(mapped)
             else
-                combined = trim(config%flags(i))
+                combined = trim(mapped)
             end if
         end do
         if (len_trim(flag_text) > 0) then
@@ -3337,15 +3380,20 @@ contains
     function config_flags_str(config) result(s)
         type(fpm_config_t), intent(in) :: config
         character(len=1024) :: s
+        character(len=:), allocatable :: mapped
+        type(compiler_dialect_t) :: dialect
         integer :: i
 
         s = ''
-        if (config%openmp) s = '-fopenmp'
+        dialect = compiler_dialect(fc_command())
+        if (config%openmp) s = trim(dialect%openmp_flag())
         do i = 1, config%n_flags
+            mapped = dialect%translate_flag(config%flags(i))
+            if (len_trim(mapped) == 0) cycle
             if (len_trim(s) > 0) then
-                s = trim(s)//' '//trim(config%flags(i))
+                s = trim(s)//' '//trim(mapped)
             else
-                s = trim(config%flags(i))
+                s = trim(mapped)
             end if
         end do
     end function config_flags_str
