@@ -6,7 +6,8 @@ Speed never permits dropping a source, result, dependency edge, or diagnostic.
 
 ## Current truth
 
-The current `main` tip is `32ef96d` and has no completed remote check suite
+The implementation baseline is `32ef96d` and the current roadmap tip is
+`c4102dd`; the implementation baseline has no completed remote check suite
 yet. It adds ancestor and immediate-parent edges for nested submodules and a
 child-first gfortran compile/run oracle. The last checked ancestor was
 `e3cff007` in [run 31122586327](https://github.com/lazy-fortran/fo/actions/runs/31122586327),
@@ -31,8 +32,9 @@ The canonical compiler plan is in the
 these prerequisites:
 
 1. The parent/ancestor dependency repair and adversarial compile/run oracle are
-   landed in `32ef96d`; remove ffc's 18 `_order.f90` shims and keep the DAG
-   contract in the next clean gate.
+   landed in `32ef96d`; ffc's 18 `_order.f90` shims were removed in `763ba0c`.
+   Keep the DAG contract in the next clean gate and never use filename ordering
+   as a replacement.
 2. Finish #117's formatter correctness oracle before applying ffc's formatting
    sweep; then finish #119 with unbounded/streamed JSON and an oracle beyond both old caps.
    Counts, records, exit status, and human output must agree.
