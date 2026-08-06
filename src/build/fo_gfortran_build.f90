@@ -4,6 +4,7 @@ module fo_gfortran_build
     use fo_scan, only: scan_unit_t, scan_dir, scan_dir_cached, source_defines_module, &
         MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
+    use fo_dep_update, only: dep_update_missing_sources, MAX_UPDATE_NAMES
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
         resolve_dev_dep_srcs, MAX_RESOLVED, join_path, merge_dep_link_libs
     use fo_stat_memo, only: memo_save, memo_hash_file
@@ -253,7 +254,8 @@ contains
         type(fpm_config_t), intent(in) :: config
         integer, intent(out) :: exitcode
         character(len=512), allocatable :: includes(:), objects(:), object_keys(:)
-        integer :: n_includes, n_objects, n_object_keys
+        character(len=256) :: missing(MAX_UPDATE_NAMES)
+        integer :: n_includes, n_objects, n_object_keys, n_missing, i
 
         n_includes = 0
         n_objects = 0
@@ -262,10 +264,19 @@ contains
             object_keys(MAX_DEP_OBJS))
         call collect_dep_artifacts(project_dir, config, includes, n_includes, &
             objects, n_objects, object_keys, n_object_keys)
-        if (n_objects > 0) then
+        ! Reusing the compiled objects is only safe while the sources they came
+        ! from are still there. Once the clone under build/dependencies is gone,
+        ! the objects are the last trace of a revision nothing can reproduce, so
+        ! re-fetch instead of linking them blind.
+        call dep_update_missing_sources(project_dir, missing, n_missing)
+        if (n_objects > 0 .and. n_missing == 0) then
             exitcode = 0
             return
         end if
+        do i = 1, n_missing
+            write (error_unit, '(a)') 'fo: re-fetching dependency '// &
+                trim(missing(i))//': its source tree is missing'
+        end do
         call run_fpm_bootstrap(project_dir, log_file, exitcode)
     end subroutine bootstrap_config_deps
 

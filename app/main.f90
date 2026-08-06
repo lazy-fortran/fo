@@ -85,6 +85,8 @@ program fo_main
         call cmd_fmt()
     case ('clean')
         call cmd_clean()
+    case ('update')
+        call cmd_update()
     case ('install')
         call cmd_install()
     case ('lock')
@@ -354,6 +356,7 @@ contains
         write (output_unit, '(a)') '  lint --json  lint results as JSON'
         write (output_unit, '(a)') '  lint --fix   remove unused imports in place'
         write (output_unit, '(a)') '  clean      drop project build tree (--cache also purges shared store)'
+        write (output_unit, '(a)') '  update     re-fetch git/registry dependencies on the next build'
         write (output_unit, '(a)') &
             '  install    install release binary (fpm install --profile release)'
         write (output_unit, '(a)') '  lock       write fo.lock for current compiler, flags, and deps'
@@ -1551,6 +1554,23 @@ contains
                 'cache kept (shared store); use `fo clean --cache` to purge it'
         end if
     end subroutine cmd_clean
+
+    subroutine cmd_update()
+        use fo_dep_update, only: dep_update_run
+        type(backend_t) :: b
+        integer :: n_deps
+        logical :: refreshed
+
+        b = detect_backend('.')
+        call dep_update_run(trim(b%project_dir), n_deps, refreshed)
+        if (.not. refreshed) then
+            write (output_unit, '(a)') &
+                'no git or registry dependencies to refresh'
+            return
+        end if
+        write (output_unit, '(a,i0,a)') 'dropped cached sources and objects for ', &
+            n_deps, ' external dependency(ies); the next build re-fetches them'
+    end subroutine cmd_update
 
     subroutine cmd_info()
         use fo_capabilities, only: capabilities_t, detect_capabilities, &
