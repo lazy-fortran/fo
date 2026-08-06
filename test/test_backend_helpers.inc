@@ -1578,14 +1578,16 @@
         write (u, '(a)') 'name = "fo_compile_error"'
         close (u)
         open (newunit=u, file=trim(project_dir)//'/src/bad.f90', status='replace')
-        write (u, '(a)') 'program bad'
-        write (u, '(a)') '  print *, "hello"'
-        write (u, '(a)') 'end subroutine bad'
+        write (u, '(a)') 'module bad'
+        write (u, '(a)') 'integer :: value ='
+        write (u, '(a)') 'end module bad'
         close (u)
 
         call gfortran_build(project_dir, log_file, exitcode, n_first)
         call assert(exitcode /= 0, 'gfortran build fails on bad source')
-        call assert(file_contains(log_file, 'failed source'), 'compile failure is reported')
+        call assert(file_contains(log_file, &
+            'failed source: '//trim(project_dir)//'/src/bad.f90'), &
+            'unparseable source reaches the compiler')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
