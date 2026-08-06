@@ -17,6 +17,8 @@ program test_fpm_config
     call test_flags_multiline_array()
     call test_preprocess_macros()
     call test_per_test_arguments()
+    call test_external_modules_array()
+    call test_implicit_typing_allowed()
 
     write (output_unit, '(a,i0,a,i0,a)') 'fpm_config: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -256,5 +258,67 @@ contains
             'per_test_arguments: argument boundaries are retained')
         call execute_command_line('rm -rf '//dir, wait=.true.)
     end subroutine test_per_test_arguments
+
+    subroutine test_external_modules_array()
+        !! libneo declares its system modules as a multi-line array; the parser
+        !! has to keep every entry, not just the one on the opening line.
+        type(fpm_config_t) :: c
+        integer :: ierr, u
+        character(len=*), parameter :: dir = '/tmp/fo_test_external_modules'
+
+        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        open (newunit=u, file=dir//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "external-modules"'
+        write (u, '(a)') '[build]'
+        write (u, '(a)') 'external-modules = ['
+        write (u, '(a)') '    "netcdf", "hdf5",'
+        write (u, '(a)') '    "omp_lib"'
+        write (u, '(a)') ']'
+        close (u)
+
+        call fpm_config_parse(dir, c, ierr)
+        call assert(ierr == 0, 'external_modules: parse succeeds')
+        call assert(c%n_external_modules == 3, &
+            'external_modules: all three entries survive the line breaks')
+        if (c%n_external_modules == 3) then
+            call assert(trim(c%external_modules(1)) == 'netcdf', &
+                'external_modules: first entry')
+            call assert(trim(c%external_modules(3)) == 'omp_lib', &
+                'external_modules: last entry')
+        end if
+        call execute_command_line('rm -rf '//dir, wait=.true.)
+    end subroutine test_external_modules_array
+
+    subroutine test_implicit_typing_allowed()
+        !! fpm defaults implicit-typing to false, so the strict flag applies.
+        !! A manifest that sets it true is asking for the flag to be left off;
+        !! recording only the false case silently ignored that request and made
+        !! legacy fixed-form sources uncompilable.
+        type(fpm_config_t) :: c
+        integer :: ierr, u
+        character(len=*), parameter :: dir = '/tmp/fo_test_implicit_typing'
+
+        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        open (newunit=u, file=dir//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "implicit-typing"'
+        write (u, '(a)') '[fortran]'
+        write (u, '(a)') 'implicit-typing = true'
+        write (u, '(a)') 'implicit-external = true'
+        close (u)
+
+        call fpm_config_parse(dir, c, ierr)
+        call assert(ierr == 0, 'implicit_typing: parse succeeds')
+        call assert(c%implicit_typing, 'implicit_typing: true is recorded')
+        call assert(c%implicit_external, 'implicit_external: true is recorded')
+        open (newunit=u, file=dir//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "implicit-typing-off"'
+        write (u, '(a)') '[fortran]'
+        write (u, '(a)') 'implicit-typing = false'
+        close (u)
+        call fpm_config_parse(dir, c, ierr)
+        call assert(.not. c%implicit_typing, &
+            'implicit_typing: false leaves the strict default in place')
+        call execute_command_line('rm -rf '//dir, wait=.true.)
+    end subroutine test_implicit_typing_allowed
 
 end program test_fpm_config
