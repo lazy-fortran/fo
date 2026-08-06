@@ -25,10 +25,11 @@ deliberately narrower than the early logos design.
   GNU Fortran, NVIDIA `nvfortran`, Intel LLVM `ifx`, and LLVM Flang. Module
   output, free-form, OpenMP, profile, linker, and fpm-flag translation now
   live behind one policy object. Legacy `ifort` is intentionally unsupported.
-- [x] Verify the nvfortran lane on a real FortML build and all 13 FortML tests
-  with nvfortran 26.5. Keep the compiler selection in `FO_FC` (with `FC` as
-  the standard fallback) and pass the selected compiler to fpm bootstrap via
-  fpm's `FPM_FC` variable.
+- [ ] Re-establish the nvfortran lane on the current FortML dependency graph
+  and all FortML tests with nvfortran 26.5. The compiler selection remains in
+  `FO_FC` (with `FC` as the standard fallback) and is passed to fpm bootstrap
+  via fpm's `FPM_FC` variable; the current gate is blocked by the FortFront
+  semantic-submodule link failure and FortAD's `fortad_lower.f90` ICE.
 - [ ] Add an executable ifx CI/cluster gate. The ifx dialect is implemented and
   independently policy-tested, but no ifx executable is installed on the
   current cluster.
@@ -66,11 +67,15 @@ manifest-flag translation, while the native scheduler and cache remain
 compiler-neutral. This prevents GNU flags such as `-J`, `-ffree-form`, and
 `-funroll-loops` from leaking into nvfortran, ifx, or Flang commands.
 
-The fo executable itself still cannot be declared a cold nvfortran build
-because nvfortran 26.5 crashes in the external FortFront dependency's
-`parser_expression_stacks.f90` during both debug and release fpm builds.
-That is recorded as an upstream compiler failure. The native compiler policy
-and the FortML path-only build/test gate pass independently.
+The fo executable itself still cannot be declared a cold nvfortran build.
+FortFront source units now compile with nvfortran, but its executable/link gate
+has unresolved semantic-analyzer module-procedure symbols; the downstream
+FortAD source transformer also triggers an `nvfortran 26.5` internal compiler
+error in `fortad_lower.f90`. The earlier FortFront
+`parser_expression_stacks.f90` crash was isolated and removed. The native
+compiler policy and the GNU FortML path-only build/test gate pass independently.
+Legacy `ifort` remains unsupported and is not interchangeable with the
+supported Intel LLVM `ifx` lane.
 
 ### A source fo cannot scan is silently dropped from the build
 
