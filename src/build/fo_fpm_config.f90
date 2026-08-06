@@ -7,6 +7,7 @@ module fo_fpm_config
     public :: manifest_exe_name, manifest_test_name, manifest_example_name
     public :: manifest_test_args
     public :: MAX_LINK_LIBS, add_link_lib
+    public :: MAX_EXTERNAL_MODULES
 
     ! How a dependency is acquired, derived from which fields the manifest set.
     ! path = local dir (mutable, may be edited); git = cloned at a ref (pinned,
@@ -19,6 +20,7 @@ module fo_fpm_config
     integer, parameter :: MAX_DEPS = 64
     integer, parameter :: MAX_DEV_DEPS = 32
     integer, parameter :: MAX_LINK_LIBS = 32
+    integer, parameter :: MAX_EXTERNAL_MODULES = 32
     integer, parameter :: MAX_FLAGS = 16
     integer, parameter :: MAX_EXES = 64
     integer, parameter :: MAX_TEST_ARG_SETS = 128
@@ -64,6 +66,12 @@ module fo_fpm_config
         type(fpm_dep_t) :: dev_deps(MAX_DEV_DEPS)
         integer :: n_link_libs = 0
         character(len=128) :: link_libs(MAX_LINK_LIBS)
+        ! [build] external-modules: modules the project uses but does not
+        ! define, such as hdf5 or netcdf from a system package.  fo does not
+        ! resolve them in the DAG and instead searches the system module path
+        ! for each one, so that gfortran gets a -I to wherever it is installed.
+        integer :: n_external_modules = 0
+        character(len=128) :: external_modules(MAX_EXTERNAL_MODULES)
         integer :: n_flags = 0
         character(len=128) :: flags(MAX_FLAGS)
         integer :: n_exes = 0
@@ -78,6 +86,12 @@ module fo_fpm_config
         ! fo compiles and links with -fopenmp so the project's `!$omp` regions
         ! run in parallel. Without it gfortran ignores the directives.
         logical :: openmp = .false.
+        ! [fortran] implicit-typing / implicit-external.  fpm defaults both to
+        ! false, meaning the strict flags apply; a manifest that sets one to
+        ! true is asking for the corresponding flag to be left off, which is
+        ! what legacy fixed-form sources such as libneo's polylag_3.f90 need.
+        logical :: implicit_typing = .false.
+        logical :: implicit_external = .false.
     end type fpm_config_t
 
 contains
@@ -112,9 +126,12 @@ contains
         c%auto_tests = .true.
         c%auto_examples = .true.
         c%openmp = .false.
+        c%implicit_typing = .false.
+        c%implicit_external = .false.
         c%n_deps = 0
         c%n_dev_deps = 0
         c%n_link_libs = 0
+        c%n_external_modules = 0
         c%n_flags = 0
         c%n_exes = 0
         c%n_tests = 0
@@ -281,6 +298,8 @@ contains
             config%auto_examples = (index(val, 'true') > 0)
         case ('link')
             call parse_link_libs(val, config)
+        case ('external-modules')
+            call parse_external_modules(val, config)
         case ('flags')
             call parse_flags(val, config)
         end select
@@ -303,9 +322,11 @@ contains
 
         select case (trim(key))
         case ('implicit-typing')
+            config%implicit_typing = (index(val, 'true') > 0)
             if (index(val, 'false') > 0) call append_config_flag( &
                 '-fimplicit-none', config)
         case ('implicit-external')
+            config%implicit_external = (index(val, 'true') > 0)
             if (index(val, 'false') > 0) call append_config_flag( &
                 '-Werror=implicit-interface', config)
         case ('source-form')
@@ -570,6 +591,38 @@ contains
             pos = pos + 1
         end do
     end subroutine parse_link_libs
+
+    subroutine parse_external_modules(val, config)
+        character(len=*), intent(in) :: val
+        type(fpm_config_t), intent(inout) :: config
+
+        integer :: pos, start, n
+        character(len=128) :: name
+        logical :: in_str
+
+        pos = 1
+        n = len_trim(val)
+        in_str = .false.
+
+        do while (pos <= n)
+            if (val(pos:pos) == '"') then
+                if (.not. in_str) then
+                    in_str = .true.
+                    start = pos + 1
+                else
+                    in_str = .false.
+                    name = val(start:pos - 1)
+                    if (len_trim(name) > 0 .and. &
+                        config%n_external_modules < MAX_EXTERNAL_MODULES) then
+                        config%n_external_modules = config%n_external_modules + 1
+                        config%external_modules(config%n_external_modules) = &
+                            trim(name)
+                    end if
+                end if
+            end if
+            pos = pos + 1
+        end do
+    end subroutine parse_external_modules
 
     subroutine parse_flags(val, config)
         character(len=*), intent(in) :: val

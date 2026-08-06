@@ -30,6 +30,7 @@ module fo_gfortran_build
         COMPILER_FLANG
     use fo_compiler_flags, only: append_array_temporary_warning_flag, append_pipe_flag
     use fo_linker_policy, only: select_linker
+    use fo_external_modules, only: collect_external_module_dirs
     use fo_build_stamp, only: build_stamp_matches, build_stamp_quick_matches, &
         build_stamp_save
     use fo_compiler_memo, only: compiler_memo_load, compiler_memo_save
@@ -43,6 +44,13 @@ module fo_gfortran_build
     character(len=512), save :: detected_fc = ''
     character(len=512), save :: detected_fc_path = ''
     character(len=512), save :: detected_compiler = ''
+    !> Set from [fortran] implicit-typing before compiling.  The baseline flags
+    !> carry -fimplicit-none because that is fpm's default, but a manifest that
+    !> allows implicit typing has to be able to turn it back off, and the
+    !> baseline is appended after the per-project flags so a flag alone cannot
+    !> win.  Module state keeps fc_base_flags callable from the compile path,
+    !> which has no view of the config.
+    logical, save :: allow_implicit_typing = .false.
 
     public :: gfortran_build, gfortran_test, gfortran_test_names
     public :: config_flags_str
@@ -277,17 +285,20 @@ contains
             write (error_unit, '(a)') 'fo: re-fetching dependency '// &
                 trim(missing(i))//': its source tree is missing'
         end do
-        call run_fpm_bootstrap(project_dir, log_file, exitcode)
+        call run_fpm_bootstrap(project_dir, config, log_file, exitcode)
     end subroutine bootstrap_config_deps
 
-    subroutine run_fpm_bootstrap(project_dir, log_file, exitcode)
+    subroutine run_fpm_bootstrap(project_dir, config, log_file, exitcode)
         character(len=*), intent(in) :: project_dir, log_file
+        type(fpm_config_t), intent(in) :: config
         integer, intent(out) :: exitcode
 
         character(len=:), allocatable :: packed
         character(len=4096) :: bootstrap_env, lib_dir, lib_path, prior_paths
         character(len=512) :: selected_fc
-        integer :: n_args
+        character(len=512) :: ext_dirs(MAX_DEP_DIRS)
+        character(len=4096) :: ext_flag
+        integer :: n_args, n_ext, i
         integer :: stat, cut
         logical :: has_local_liric
 
@@ -316,9 +327,25 @@ contains
             end if
         end if
 
+        ! fpm has no notion of external-modules either, so the bootstrap of a
+        ! git dependency would fail on the very system modules fo already
+        ! located.  Hand it the same include directories as an extra flag.
+        n_ext = 0
+        call collect_external_module_dirs(config%external_modules, &
+            config%n_external_modules, ext_dirs, n_ext, MAX_DEP_DIRS)
+        ext_flag = ''
+        do i = 1, n_ext
+            if (len_trim(ext_flag) > 0) ext_flag = trim(ext_flag)//' '
+            ext_flag = trim(ext_flag)//'-I'//trim(ext_dirs(i))
+        end do
+
         n_args = 0
         call argv_push(packed, n_args, 'fpm')
         call argv_push(packed, n_args, 'build')
+        if (len_trim(ext_flag) > 0) then
+            call argv_push(packed, n_args, '--flag')
+            call argv_push(packed, n_args, trim(ext_flag))
+        end if
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
             .true., build_timeout_seconds(), exitcode, &
             env_extra=trim(bootstrap_env))
@@ -735,6 +762,14 @@ contains
         call fs_collect_mod_dirs(trim(project_dir)//'/build', dep_includes, &
             n_dep_includes)
         call filter_module_dirs_for_compiler(dep_includes, n_dep_includes)
+
+        ! Modules the manifest declares as external live outside build/, in a
+        ! system package.  gfortran will not look in /usr/include for them on
+        ! its own, so their directories have to join the include list or the
+        ! compile fails as if the package were not installed at all.
+        call collect_external_module_dirs(config%external_modules, &
+            config%n_external_modules, dep_includes, n_dep_includes, MAX_DEP_DIRS)
+        if (config%implicit_typing) allow_implicit_typing = .true.
 
         suffixes(1) = '.f90.o'
         suffixes(2) = '.F90.o'
@@ -2634,6 +2669,8 @@ contains
 
         dialect = compiler_dialect(fc_command())
         flags = dialect%base_flags()
+        if (allow_implicit_typing) flags = flags//' '//dialect%translate_flag( &
+            '-fno-implicit-none')
         call append_pipe_flag(fc_command(), flags)
     end function fc_base_flags
 

@@ -164,7 +164,8 @@ contains
                 mapped = '-Mfree'
             case ('-ffixed-form')
                 mapped = '-Mnofree'
-            case ('-fimplicit-none', '-Werror=implicit-interface')
+            case ('-fimplicit-none', '-fno-implicit-none', &
+                  '-Werror=implicit-interface')
                 mapped = ''
             end select
         case (COMPILER_IFX)
@@ -175,6 +176,10 @@ contains
                 mapped = '-fixed'
             case ('-fimplicit-none')
                 mapped = '-implicit-none'
+            case ('-fno-implicit-none')
+                ! ifx allows implicit typing unless -implicit-none is given,
+                ! and its baseline does not set it, so nothing to undo.
+                mapped = ''
             case ('-Werror=implicit-interface')
                 mapped = ''
             end select
