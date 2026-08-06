@@ -7,7 +7,7 @@ module fo_scan_cache
     implicit none
     private
 
-    character(len=16), parameter :: CACHE_MAGIC = 'fo-scan-v2'
+    character(len=16), parameter :: CACHE_MAGIC = 'fo-scan-v3'
 
     public :: scan_cache_load, scan_cache_load_trusted, scan_cache_save
 

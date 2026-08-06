@@ -12,6 +12,7 @@ program test_dag
     n_fail = 0
 
     call test_linear_chain()
+    call test_submodule_ancestry_chain()
     call test_diamond()
     call test_reverse_deps()
     call test_affected_tests()
@@ -67,6 +68,42 @@ contains
         call assert(position(order, n_order, dag_find_node(dag, 'b')) < &
             position(order, n_order, dag_find_node(dag, 'a')), 'linear: b before a')
     end subroutine test_linear_chain
+
+    subroutine test_submodule_ancestry_chain()
+        type(scan_unit_t) :: units(3)
+        type(dag_t) :: dag
+        integer :: order(MAX_NODES), n_order
+        logical :: has_cycle
+
+        ! Lexical/source discovery order is child, parent, ancestor. The graph
+        ! must still compile the complete submodule ancestry in the reverse
+        ! order required by the compiler.
+        units(1)%filename = '00_child.f90'
+        units(1)%module_name = 'child_sm'
+        units(1)%n_deps = 2
+        units(1)%deps(1) = 'ancestor_m'
+        units(1)%deps(2) = 'parent_sm'
+
+        units(2)%filename = '10_parent.f90'
+        units(2)%module_name = 'parent_sm'
+        units(2)%n_deps = 1
+        units(2)%deps(1) = 'ancestor_m'
+
+        units(3)%filename = '20_ancestor.f90'
+        units(3)%module_name = 'ancestor_m'
+        units(3)%n_deps = 0
+
+        call build_dag_from_units(units, 3, dag)
+        call dag_topo_sort(dag, order, n_order, has_cycle)
+        call assert(.not. has_cycle, 'submodule chain: no cycle')
+        call assert(position(order, n_order, &
+            dag_find_node(dag, 'ancestor_m')) < &
+            position(order, n_order, dag_find_node(dag, 'parent_sm')), &
+            'submodule chain: ancestor before parent')
+        call assert(position(order, n_order, dag_find_node(dag, 'parent_sm')) < &
+            position(order, n_order, dag_find_node(dag, 'child_sm')), &
+            'submodule chain: parent before child')
+    end subroutine test_submodule_ancestry_chain
 
     subroutine test_diamond()
         ! d -> b, d -> c, b -> a, c -> a

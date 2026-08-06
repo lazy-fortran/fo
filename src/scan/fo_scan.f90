@@ -112,7 +112,8 @@ contains
         type(program_unit_query_t) :: selected_unit, candidate_unit
         type(use_statement_query_t), allocatable :: use_statements(:)
         integer :: i, j, primary
-        character(len=MAX_NAME) :: unit_kind, name, parent_name
+        character(len=MAX_NAME) :: unit_kind, name, parent_identifier
+        character(len=MAX_NAME) :: ancestor_name, parent_name
 
         call reset_scan_unit(filename, unit_info)
         ierr = 1
@@ -199,9 +200,14 @@ contains
 
         if (trim(unit_kind) == 'submodule' .and. &
             allocated(selected_unit%parent_identifier)) then
-            parent_name = selected_unit%parent_identifier
-            call to_lower(parent_name)
-            call first_parent_component(parent_name)
+            parent_identifier = selected_unit%parent_identifier
+            call to_lower(parent_identifier)
+            call split_parent_identifier(parent_identifier, ancestor_name, &
+                parent_name)
+            if (len_trim(ancestor_name) > 0) then
+                call add_dep(unit_info, ancestor_name, &
+                    selected_unit%line, selected_unit%column)
+            end if
             if (len_trim(parent_name) > 0) then
                 call add_dep(unit_info, parent_name, &
                     selected_unit%line, selected_unit%column)
@@ -397,17 +403,23 @@ contains
             trim(policy) == '1'
     end function regex_fallback_policy
 
-    subroutine first_parent_component(value)
-        character(len=*), intent(inout) :: value
+    subroutine split_parent_identifier(value, ancestor, parent)
+        character(len=*), intent(in) :: value
+        character(len=*), intent(out) :: ancestor, parent
         integer :: colon
 
+        ancestor = ''
+        parent = ''
         colon = index(value, ':')
-        if (colon == 1) then
-            value = ''
-        else if (colon > 1) then
-            value = value(:colon - 1)
+        if (colon == 0) then
+            ancestor = trim(adjustl(value))
+        else
+            if (colon > 1) ancestor = trim(adjustl(value(:colon - 1)))
+            if (colon < len_trim(value)) then
+                parent = trim(adjustl(value(colon + 1:)))
+            end if
         end if
-    end subroutine first_parent_component
+    end subroutine split_parent_identifier
 
     logical function is_test_path(path)
         !! A unit is a test iff it lives under a test directory, matching fpm's
@@ -430,7 +442,7 @@ contains
         integer, intent(in), optional :: line_number
 
         character(len=512) :: trimmed
-        character(len=MAX_NAME) :: name, parent_name
+        character(len=MAX_NAME) :: name, ancestor_name, parent_name
         integer :: current_line
 
         current_line = 0
@@ -456,11 +468,15 @@ contains
             return
         end if
 
-        call extract_submodule_def(trimmed, name, parent_name)
+        call extract_submodule_def(trimmed, name, ancestor_name, parent_name)
         if (len_trim(name) > 0) then
             unit_info%module_name = name
             unit_info%source_line = current_line
             unit_info%source_column = leading_column(line)
+            if (len_trim(ancestor_name) > 0) then
+                call add_dep(unit_info, ancestor_name, current_line, &
+                    leading_column(line))
+            end if
             if (len_trim(parent_name) > 0) then
                 call add_dep(unit_info, parent_name, current_line, &
                     leading_column(line))
@@ -570,16 +586,17 @@ contains
         call to_lower(name)
     end subroutine extract_module_def
 
-    subroutine extract_submodule_def(line, name, parent)
+    subroutine extract_submodule_def(line, name, ancestor, parent)
         character(len=*), intent(in) :: line
         character(len=*), intent(out) :: name
-        character(len=*), intent(out), optional :: parent
+        character(len=*), intent(out) :: ancestor, parent
 
-        character(len=512) :: lower_line, parent_text
+        character(len=512) :: lower_line, parent_text, ancestor_text
         integer :: open_pos, close_pos, start, fin
 
         name = ''
-        if (present(parent)) parent = ''
+        ancestor = ''
+        parent = ''
         lower_line = line
         call to_lower(lower_line)
 
@@ -594,10 +611,9 @@ contains
         end if
 
         parent_text = adjustl(lower_line(open_pos + 1:close_pos - 1))
-        if (index(parent_text, ':') > 0) then
-            parent_text = parent_text(1:index(parent_text, ':') - 1)
-        end if
-        if (present(parent)) parent = trim(parent_text)
+        call split_parent_identifier(parent_text, ancestor_text, lower_line)
+        ancestor = trim(ancestor_text)
+        parent = trim(lower_line)
 
         start = close_pos + 1
         do while (start <= len_trim(line))

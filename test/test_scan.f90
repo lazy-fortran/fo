@@ -141,21 +141,24 @@ contains
         call assert(ierr == 0, 'scan_submodule_ast: compiler query path succeeds')
         call assert(trim(ast_info%module_name) == 'child_sub', &
             'scan_submodule_ast: submodule name')
-        call assert(ast_info%n_deps == 2, &
-            'scan_submodule_ast: parent and USE dependencies')
+        call assert(ast_info%n_deps == 3, &
+            'scan_submodule_ast: ancestry and USE dependencies')
         call assert(trim(ast_info%deps(1)) == 'parent_mod', &
-            'scan_submodule_ast: parent dependency')
-        call assert(trim(ast_info%deps(2)) == 'child_dep', &
+            'scan_submodule_ast: ancestor module dependency')
+        call assert(trim(ast_info%deps(2)) == 'parent_sub', &
+            'scan_submodule_ast: immediate parent dependency')
+        call assert(trim(ast_info%deps(3)) == 'child_dep', &
             'scan_submodule_ast: USE dependency')
         call assert(ast_info%source_line == 1 .and. &
             ast_info%dependency_lines(1) == 1 .and. &
-            ast_info%dependency_lines(2) == 2, &
+            ast_info%dependency_lines(2) == 1 .and. &
+            ast_info%dependency_lines(3) == 2, &
             'scan_submodule_ast: source spans')
 
         call scan_file_regex(path, regex_info, ierr)
         call assert(ierr == 0, 'scan_submodule_regex: bootstrap path succeeds')
         call assert(regex_info%n_deps == ast_info%n_deps .and. &
-            all(regex_info%deps(1:2) == ast_info%deps(1:2)), &
+            all(regex_info%deps(1:3) == ast_info%deps(1:3)), &
             'scan_submodule_compare: dependency DAG agrees')
         call execute_command_line('rm -f '//trim(path))
     end subroutine test_scan_ast_submodule_spans

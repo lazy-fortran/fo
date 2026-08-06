@@ -12,6 +12,12 @@ argv vectors, without a shell. Applications, tests, and examples link against
 a content-keyed static archive, so unreachable library objects cannot introduce
 symbols or dependencies into a target.
 
+Submodule ancestry is part of that DAG. A direct submodule depends on its
+ancestor module; `submodule (ancestor:parent) child` depends on both the
+ancestor module and the immediate parent submodule. Repeating that rule builds
+longer ancestry chains in compiler order without source-filename conventions or
+artificial ordering modules.
+
 Each compilation action is keyed by:
 
 ```text
