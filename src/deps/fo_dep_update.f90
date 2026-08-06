@@ -15,7 +15,7 @@ module fo_dep_update
     !! declared git dependencies whose source tree is gone while their objects
     !! remain, which is the silent case the build must never accept.
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, dep_kind, DEP_PATH
-    use fo_fs, only: fs_remove_tree, fs_stat
+    use fo_fs, only: fs_remove_tree, fs_remove_file, fs_stat
     use fo_dep_resolve, only: normalize_path
     use, intrinsic :: iso_c_binding, only: c_long_long
     implicit none
@@ -91,6 +91,11 @@ contains
         if (n_deps == 0) return
 
         call fs_remove_tree(trim(root)//'/build/dependencies')
+        ! fpm records the acquired dependency tree in build/cache.toml. Leaving
+        ! it behind after the clones are gone does not make fpm re-fetch: it
+        ! makes fpm fail with "Error while retrieving commit information",
+        ! because it looks for a checkout the cache still promises.
+        call fs_remove_file(trim(root)//'/build/cache.toml')
         call remove_profile_trees(trim(root)//'/build')
         refreshed = .true.
     end subroutine dep_update_run

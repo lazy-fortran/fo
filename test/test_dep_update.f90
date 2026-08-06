@@ -53,6 +53,8 @@ contains
         call assert(.not. exists(trim(root)// &
             '/build/gfortran_AB12CD34EF56/up.mod'), &
             'update drops the compiled dependency objects')
+        call assert(.not. exists(trim(root)//'/build/cache.toml'), &
+            'update drops the fpm dependency cache record')
         call remove_tree(root)
     end subroutine test_update_drops_clone_and_objects
 
@@ -113,6 +115,7 @@ contains
         call touch(trim(root)//'/build/dependencies/up/fpm.toml')
         call touch(trim(root)//'/build/gfortran_AB12CD34EF56/up.mod')
         call touch(trim(root)//'/build/fo/mod/own.mod')
+        call touch(trim(root)//'/build/cache.toml')
     end subroutine make_git_project
 
     subroutine write_project(dir, deps_block)
