@@ -158,6 +158,13 @@ contains
         mod_dir = trim(project_dir)//'/build/fo/mod'
         obj_dir = trim(project_dir)//'/build/fo/obj'
         bin_dir = trim(project_dir)//'/build/fo/bin'
+        ! The native tree is shared by every compiler, so a build with a
+        ! different one would overwrite the modules, objects and binaries of
+        ! the last. The .mod formats are incompatible, and worse, `fo exec`
+        ! would then run a binary built by a compiler the caller did not ask
+        ! for: a benchmark switching FO_FC measures the wrong lane and says
+        ! nothing. Clear the tree when the compiler changes.
+        call guard_compiler_switch(project_dir, mod_dir, obj_dir, bin_dir)
         call fs_make_dir(mod_dir)
         call fs_make_dir(obj_dir)
         call fs_make_dir(bin_dir)
@@ -356,6 +363,36 @@ contains
             write (error_unit, '(a)') 'fo: see '//trim(log_file)
         end if
     end subroutine run_fpm_bootstrap
+
+    subroutine guard_compiler_switch(project_dir, mod_dir, obj_dir, bin_dir)
+        !! Record which compiler owns the native build tree and wipe it when
+        !! that changes.
+        use fo_fs, only: fs_remove_tree, fs_write_text
+        character(len=*), intent(in) :: project_dir, mod_dir, obj_dir, bin_dir
+
+        character(len=512) :: stamp_path, recorded, current
+        integer :: unit, iostat
+
+        current = trim(fc_command())
+        stamp_path = trim(project_dir)//'/build/fo/compiler'
+        recorded = ''
+        open (newunit=unit, file=trim(stamp_path), status='old', &
+            action='read', iostat=iostat)
+        if (iostat == 0) then
+            read (unit, '(a)', iostat=iostat) recorded
+            close (unit)
+        end if
+
+        if (len_trim(recorded) > 0 .and. trim(recorded) /= trim(current)) then
+            write (error_unit, '(a)') 'fo: compiler changed from '// &
+                trim(recorded)//' to '//trim(current)//'; rebuilding'
+            call fs_remove_tree(trim(mod_dir))
+            call fs_remove_tree(trim(obj_dir))
+            call fs_remove_tree(trim(bin_dir))
+        end if
+        call fs_make_dir(trim(project_dir)//'/build/fo')
+        call fs_write_text(trim(stamp_path), trim(current)//new_line('a'))
+    end subroutine guard_compiler_switch
 
     subroutine guard_root_mod_shadow(project_dir, log_file)
         !! Stale root module and object files silently shadow

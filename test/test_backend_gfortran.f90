@@ -30,6 +30,7 @@ program test_backend_gfortran
     call test_gfortran_named_test_links_helper_modules()
     call test_gfortran_named_test_uses_manifest_name()
     call test_gfortran_app_links_only_reachable_library_objects()
+    call test_compiler_switch_clears_the_tree()
     call test_slow_test_gets_its_own_timeout()
     call test_gfortran_builds_manifest_example()
     call test_gfortran_builds_nested_auto_example()
@@ -94,6 +95,39 @@ contains
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_passes_manifest_test_arguments
+
+    subroutine test_compiler_switch_clears_the_tree()
+        !! The native build tree is shared by every compiler. Reusing it after
+        !! a switch leaves incompatible modules and, worse, lets `fo exec` run
+        !! a binary the caller did not ask for. The stamp must clear it.
+        character(len=512) :: project_dir, log_file, marker
+        integer :: u, exitcode
+        logical :: exists
+
+        call make_tmp_path('fo_compiler_switch', project_dir)
+        call make_tmp_path('fo_compiler_switch_log', log_file)
+        call remove_tree(project_dir)
+        call make_simple_fpm_project(project_dir)
+        call gfortran_build(project_dir, log_file, exitcode)
+        call assert(exitcode == 0, 'compiler switch: first build succeeds')
+
+        ! A marker inside the tree stands in for every artifact the previous
+        ! compiler left behind.
+        marker = trim(project_dir)//'/build/fo/obj/previous.marker'
+        open (newunit=u, file=trim(marker), status='replace')
+        write (u, '(a)') 'stale'
+        close (u)
+
+        call set_env('FO_FC', 'f77')
+        call gfortran_build(project_dir, log_file, exitcode)
+        call set_env('FO_FC', '')
+        inquire (file=trim(marker), exist=exists)
+        call assert(.not. exists, &
+            'compiler switch: the previous tree is cleared')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_compiler_switch_clears_the_tree
 
     subroutine test_slow_test_gets_its_own_timeout()
         !! A test marked slow must be allowed to take longer than the fast
