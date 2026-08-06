@@ -23,6 +23,7 @@ program test_scan
     call test_slow_test_detection()
     call test_scan_dir_empty()
     call test_scan_dir_path_with_spaces()
+    call test_scan_dir_recovers_unparseable_source()
     call test_scan_dir_skips_nested_projects()
     call test_scan_dir_skips_build_outputs()
     call test_scan_dir_skips_agent_worktrees()
@@ -415,6 +416,43 @@ contains
 
         call remove_tree(dir)
     end subroutine test_scan_dir_path_with_spaces
+
+    subroutine test_scan_dir_recovers_unparseable_source()
+        !! A source the front end cannot parse must still reach the build
+        !! graph. Dropping it silently produces a missing-module error in an
+        !! unrelated file, which is what a BLOCK construct used to do.
+        type(scan_unit_t), allocatable :: units(:)
+        integer :: n_units, ierr, i, found
+        character(len=512) :: dir
+        character(len=80) :: hard_lines(4), user_lines(4)
+
+        call make_tmp_path('fo_test_scan_recover', dir, '')
+        call remove_tree(dir)
+        call make_dir(trim(dir)//'/src')
+
+        hard_lines(1) = 'module hard_unit'
+        hard_lines(2) = 'implicit none'
+        hard_lines(3) = 'integer :: value ='
+        hard_lines(4) = 'end module hard_unit'
+        call write_file(trim(dir)//'/src/hard_unit.f90', hard_lines, 4)
+
+        user_lines(1) = 'module user_unit'
+        user_lines(2) = 'use hard_unit'
+        user_lines(3) = 'implicit none'
+        user_lines(4) = 'end module user_unit'
+        call write_file(trim(dir)//'/src/user_unit.f90', user_lines, 4)
+
+        call scan_dir(dir, units, n_units, ierr)
+        found = 0
+        do i = 1, n_units
+            if (trim(units(i)%module_name) == 'hard_unit') found = i
+        end do
+        call assert(ierr == 0, 'scan recover: no error')
+        call assert(n_units == 2, 'scan recover: keeps both units')
+        call assert(found > 0, 'scan recover: reports the module name')
+
+        call remove_tree(dir)
+    end subroutine test_scan_dir_recovers_unparseable_source
 
     subroutine test_scan_dir_skips_nested_projects()
         type(scan_unit_t), allocatable :: units(:)
