@@ -827,7 +827,7 @@ contains
             do j = 1, size(suffixes)
                 call fs_collect_files(trim(project_dir)//'/build', &
                     '_'//trim(config%deps(i)%name)//'_src_', &
-                    trim(suffixes(j)), '/'//trim(compiler_profile_prefix()), found, &
+                    trim(suffixes(j)), trim(compiler_profile_prefix()), found, &
                     n_found)
                 call add_dep_objs(found, n_found, dep_objs, n_dep_objs, &
                     obj_basenames, n_obj_seen)
@@ -842,7 +842,7 @@ contains
         character(len=64) :: compiler_marker
         integer :: i, kept
 
-        compiler_marker = '/'//trim(compiler_profile_prefix())
+        compiler_marker = trim(compiler_profile_prefix())
         kept = 0
         do i = 1, n_directories
             if (index(trim(directories(i)), trim(compiler_marker)) == 0 .and. &
@@ -854,19 +854,23 @@ contains
     end subroutine filter_module_dirs_for_compiler
 
     function compiler_profile_prefix() result(prefix)
+        !! Compiler-family token in an fpm profile directory.  fpm may wrap
+        !! the family in a target triple and append a version, for example
+        !! x86_64-linux-gnu-gfortran-14_<hash>, so neither a leading slash nor
+        !! a trailing underscore is part of the stable match.
         character(len=32) :: prefix
         type(compiler_dialect_t) :: dialect
 
         dialect = compiler_dialect(fc_command())
         select case (dialect%kind)
         case (COMPILER_NVFORTRAN)
-            prefix = 'nvfortran_'
+            prefix = 'nvfortran'
         case (COMPILER_IFX)
-            prefix = 'ifx_'
+            prefix = 'ifx'
         case (COMPILER_FLANG)
-            prefix = 'flang_'
+            prefix = 'flang'
         case default
-            prefix = 'gfortran_'
+            prefix = 'gfortran'
         end select
     end function compiler_profile_prefix
 
