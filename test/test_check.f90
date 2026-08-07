@@ -114,7 +114,8 @@ contains
             index(res%error_msg, 'Fatal Error:') > 0 .or. &
             index(res%error_msg, 'Error:') > 0, &
             'error summary includes compiler line')
-        call assert(index(res%error_msg, 'log: /tmp/fo-build-') > 0, &
+        call assert(index(res%error_msg, 'log: ') > 0 .and. &
+            index(res%error_msg, 'fo-build-') > 0, &
             'error summary includes build log')
         call assert(index(res%error_msg, 'rerun: fo build') > 0, &
             'error summary includes rerun command')

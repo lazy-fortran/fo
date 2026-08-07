@@ -41,7 +41,8 @@ contains
         integer :: count
         integer(c_int) :: pid
         integer, save :: serial = 0
-        integer :: serial_local
+        integer :: serial_local, tmpdir_len, tmpdir_status
+        character(len=512) :: tmpdir
 
         !$omp critical (fo_tmpfile_serial)
         serial = serial + 1
@@ -49,8 +50,22 @@ contains
         !$omp end critical (fo_tmpfile_serial)
         call fo_c_getpid(pid)
         call system_clock(count)
-        write (path, '(a,a,a,i0,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
-            int(pid), '-', count, '-', serial_local, '.tmp'
+        tmpdir = ''
+        call get_environment_variable('TMPDIR', tmpdir, length=tmpdir_len, &
+            status=tmpdir_status)
+        if (tmpdir_status /= 0 .or. tmpdir_len <= 0 .or. tmpdir_len > len(tmpdir)) then
+            tmpdir = '/tmp'
+        else
+            tmpdir = trim(tmpdir)
+            if (len_trim(tmpdir) == 0) tmpdir = '/tmp'
+        end if
+        if (tmpdir(len_trim(tmpdir):len_trim(tmpdir)) == '/') then
+            write (path, '(a,a,a,i0,a,i0,a,i0,a)') trim(tmpdir), trim(prefix), '-', &
+                int(pid), '-', count, '-', serial_local, '.tmp'
+        else
+            write (path, '(a,a,a,a,i0,a,i0,a,i0,a)') trim(tmpdir), '/', &
+                trim(prefix), '-', int(pid), '-', count, '-', serial_local, '.tmp'
+        end if
     end subroutine make_tmpfile
 
     subroutine make_sibling_tmpfile(target, path)
