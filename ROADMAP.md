@@ -19,6 +19,26 @@ Current main does not have a green remote gate:
 failed the git-dependency bootstrap test and a later run was cancelled. Restore
 that exact gate before expanding the workflow.
 
+### Current compiler handoff (2026-08-07)
+
+The FortFront dependency used for this handoff is semantic code `193457a9`,
+with roadmap/documentation head `2179929e`. The former FortFront self-source
+parse/semantic-drop blocker is closed at that pin; the focused GNU and
+`nvfortran` 26.5 cold-build evidence covers the 381-target lane. FortFront
+merge run [31136187566](https://github.com/lazy-fortran/fortfront/actions/runs/31136187566)
+was cancelled, while the documentation merge [31136399036](https://github.com/lazy-fortran/fortfront/actions/runs/31136399036)
+was queued at this snapshot. The completed aggregate run
+[31134675652](https://github.com/lazy-fortran/fortfront/actions/runs/31134675652)
+is historical evidence for its `ca26bf9d` parent and is not a current-head
+gate.
+
+The remote NVHPC handoff is toolchain evidence, not a green fo GPU gate:
+`faepkub4:/var/tmp/ert` has verified NVHPC 23.9 and 26.5 installations with
+85 GiB free; the driver-matched NVHPC 23.9 OpenACC smoke passed on the
+acluster Tesla T4 (CUDA 12.2), and the scluster Slurm smoke (job 1033639)
+was cancelled while pending resources, without an allocation. No local
+NVIDIA compute process was running during the check.
+
 [#119](https://github.com/lazy-fortran/fo/issues/119) is only partly fixed. The
 former 256-result array now grows, but machine-readable output can still
 truncate at 16 KB. #119 closes only when every child result and the final exit
