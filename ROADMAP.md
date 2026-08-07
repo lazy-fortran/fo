@@ -1,6 +1,6 @@
 # fo roadmap
 
-Snapshot: 2026-08-06. fo is the native Fortran build, test, lint, dependency,
+Snapshot: 2026-08-07. fo is the native Fortran build, test, lint, dependency,
 and affected-test-selection driver. It must make work and failures visible.
 Speed never permits dropping a source, result, dependency edge, or diagnostic.
 
@@ -21,23 +21,22 @@ that exact gate before expanding the workflow.
 
 ### Current compiler handoff (2026-08-07)
 
-The FortFront dependency used for this handoff is semantic code `193457a9`,
-with roadmap/documentation head `2179929e`. The former FortFront self-source
-parse/semantic-drop blocker is closed at that pin; the focused GNU and
-`nvfortran` 26.5 cold-build evidence covers the 381-target lane. FortFront
-merge run [31136187566](https://github.com/lazy-fortran/fortfront/actions/runs/31136187566)
-was cancelled, while the documentation merge [31136399036](https://github.com/lazy-fortran/fortfront/actions/runs/31136399036)
-was queued at this snapshot. The completed aggregate run
-[31134675652](https://github.com/lazy-fortran/fortfront/actions/runs/31134675652)
-is historical evidence for its `ca26bf9d` parent and is not a current-head
-gate.
+The FortFront dependency used for this handoff is semantic code `c0a32743`,
+with documentation head `0a082664` (source handoff `d8c8769`). Its focused
+GNU and `nvfortran` 26.5 cold-build evidence covers the 381-target lane. The
+latest regression run [31147308041](https://github.com/lazy-fortran/fortfront/actions/runs/31147308041)
+has a successful Ubuntu job, including the #2975 nested-associate
+owner-boundary regression; Windows retains the documented nine-test
+portability baseline. No aggregate FortFront PASS is claimed here.
 
 The remote NVHPC handoff is toolchain evidence, not a green fo GPU gate:
 `faepkub4:/var/tmp/ert` has verified NVHPC 23.9 and 26.5 installations with
 85 GiB free; the driver-matched NVHPC 23.9 OpenACC smoke passed on the
-acluster Tesla T4 (CUDA 12.2), and the scluster Slurm smoke (job 1033639)
-was cancelled while pending resources, without an allocation. No local
-NVIDIA compute process was running during the check.
+acluster Tesla T4 (CUDA 12.2), and the scluster Slurm smoke (job 1033712)
+allocated an NVIDIA RTX PRO 6000 Blackwell Max-Q and printed
+`GPU_SMOKE_PASS` under driver 590.48.01. No local or remote NVIDIA compute
+process was active after the smoke. This records toolchain/device availability
+only and does not close fo's full multi-compiler or GPU application gates.
 
 [#119](https://github.com/lazy-fortran/fo/issues/119) is only partly fixed. The
 former 256-result array now grows, but machine-readable output can still
