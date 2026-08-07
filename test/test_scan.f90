@@ -17,6 +17,7 @@ program test_scan
     call test_scan_module_name_containing_procedure()
     call test_scan_submodule_def()
     call test_scan_external_subroutine_def()
+    call test_scan_external_after_internal_with_unit_expression()
     call test_scan_contained_subroutine_keeps_program()
     call test_scan_program_def()
     call test_scan_intrinsic_skip()
@@ -281,6 +282,36 @@ contains
             'scan_external_subroutine: procedure name')
         call execute_command_line('rm -f '//trim(path))
     end subroutine test_scan_external_subroutine_def
+
+    subroutine test_scan_external_after_internal_with_unit_expression()
+        type(scan_unit_t) :: info
+        integer :: ierr
+        character(len=512) :: path
+        character(len=80) :: lines(13)
+
+        lines(1) = 'subroutine potato_style(iunit)'
+        lines(2) = '    implicit none'
+        lines(3) = '    integer, intent(in) :: iunit'
+        lines(4) = '    write (iunit + 1000, *) iunit'
+        lines(5) = 'contains'
+        lines(6) = '    subroutine helper()'
+        lines(7) = '        implicit none'
+        lines(8) = '    end subroutine helper'
+        lines(9) = 'end subroutine potato_style'
+        lines(10) = ''
+        lines(11) = 'subroutine following_external()'
+        lines(12) = '    implicit none'
+        lines(13) = 'end subroutine following_external'
+        call make_tmp_path('fo_test_potato_style', path, '.f90')
+        call write_file(path, lines, 13)
+
+        call scan_file(path, info, ierr)
+        call assert(ierr == 0, &
+            'scan_potato_style: AST scanner accepts valid source')
+        call assert(trim(info%module_name) == 'potato_style', &
+            'scan_potato_style: host remains the primary external unit')
+        call execute_command_line('rm -f '//trim(path))
+    end subroutine test_scan_external_after_internal_with_unit_expression
 
     subroutine test_scan_contained_subroutine_keeps_program()
         type(scan_unit_t) :: info
