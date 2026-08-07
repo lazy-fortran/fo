@@ -182,7 +182,9 @@ contains
         write (u, '(a)') 'call system_clock(start, rate)'
         write (u, '(a)') 'do'
         write (u, '(a)') '    call system_clock(now)'
-        write (u, '(a)') '    if (real(now - start)/real(rate) > 3.0) exit'
+        ! Stay clearly beyond the one-second fast-test budget without making
+        ! this regression consume most of its caller's ten-second budget.
+        write (u, '(a)') '    if (real(now - start)/real(rate) > 1.5) exit'
         write (u, '(a)') 'end do'
         write (u, '(a)') 'print *, "done"'
         write (u, '(a)') 'end program '//trim(name)
