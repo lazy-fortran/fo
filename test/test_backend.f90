@@ -1,4 +1,5 @@
 program test_backend
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
         detect_jobs, backend_build, backend_test, &
@@ -18,6 +19,7 @@ program test_backend
     call isolate_backend_cache()
     call test_detect_fpm()
     call test_detect_fpm_preferred_over_cmake()
+    call test_detect_cmake_override()
     call test_detect_fpm_from_child()
     call test_detect_cmake_from_child()
     call test_detect_none()
@@ -74,6 +76,45 @@ contains
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_native_combined_build_keeps_apps
+
+    subroutine test_detect_cmake_override()
+        interface
+            function setenv(name, value, overwrite) bind(C, name='setenv') result(ierr)
+                import :: c_char, c_int
+                character(kind=c_char), intent(in) :: name(*), value(*)
+                integer(c_int), value :: overwrite
+                integer(c_int) :: ierr
+            end function setenv
+
+            function unsetenv(name) bind(C, name='unsetenv') result(ierr)
+                import :: c_char, c_int
+                character(kind=c_char), intent(in) :: name(*)
+                integer(c_int) :: ierr
+            end function unsetenv
+        end interface
+
+        type(backend_t) :: b
+        character(len=512) :: project_dir
+        integer :: u
+        integer(c_int) :: ierr
+
+        call make_tmp_path('fo_test_cmake_override', project_dir)
+        call make_dir(project_dir)
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "cmake_override"'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', status='replace')
+        close (u)
+
+        ierr = setenv('FO_BACKEND'//c_null_char, 'cmake'//c_null_char, 1_c_int)
+        call assert(ierr == 0, 'set FO_BACKEND for CMake override')
+        b = detect_backend(project_dir)
+        call assert(b%kind == BACKEND_CMAKE, &
+            'FO_BACKEND=cmake selects CMake when both manifests coexist')
+        ierr = unsetenv('FO_BACKEND'//c_null_char)
+        call assert(ierr == 0, 'unset FO_BACKEND after CMake override')
+        call remove_tree(project_dir)
+    end subroutine test_detect_cmake_override
 
     subroutine test_cmake_exec_target_resolution()
         type(backend_t) :: b

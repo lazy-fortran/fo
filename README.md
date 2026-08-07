@@ -96,7 +96,9 @@ including values that contain spaces.
 If no `fpm.toml` exists, fo searches parent directories for `CMakeLists.txt`.
 It configures with Ninja, builds with `cmake --build -j`, and runs CTest.
 `FO_CMAKE_ARGS` supplies extra configure arguments. `FO_JOBS` controls build
-and test fanout. A directory containing both manifests uses `fpm.toml`.
+and test fanout. A directory containing both manifests uses `fpm.toml`; set
+`FO_BACKEND=cmake` to select CMake explicitly (`FO_BACKEND=fpm` restores the
+native fpm backend explicitly).
 
 ## Cache and concurrency
 

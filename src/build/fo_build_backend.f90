@@ -33,19 +33,31 @@ contains
         character(len=*), intent(in) :: dir
         type(backend_t) :: b
         logical :: has_fpm, has_cmake
+        logical :: force_cmake, force_fpm
+        character(len=16) :: preference
         character(len=512) :: current, parent
-        integer :: depth
+        integer :: depth, status
 
         current = absolute_dir(dir)
+        preference = ''
+        call get_environment_variable('FO_BACKEND', preference, status=status)
+        force_cmake = status == 0 .and. trim(adjustl(preference)) == 'cmake'
+        force_fpm = status == 0 .and. trim(adjustl(preference)) == 'fpm'
 
         do depth = 1, 64
             b%project_dir = current
             inquire (file=trim(current)//'/fpm.toml', exist=has_fpm)
             inquire (file=trim(current)//'/CMakeLists.txt', exist=has_cmake)
-            if (has_fpm) then
+            if (force_cmake .and. has_cmake) then
+                b%kind = BACKEND_CMAKE
+                return
+            else if (force_fpm .and. has_fpm) then
                 b%kind = BACKEND_NATIVE
                 return
-            else if (has_cmake) then
+            else if (.not. force_cmake .and. .not. force_fpm .and. has_fpm) then
+                b%kind = BACKEND_NATIVE
+                return
+            else if (.not. force_cmake .and. .not. force_fpm .and. has_cmake) then
                 b%kind = BACKEND_CMAKE
                 return
             end if
