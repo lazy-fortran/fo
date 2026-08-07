@@ -22,7 +22,8 @@ that exact gate before expanding the workflow.
 ### Current compiler handoff (2026-08-07)
 
 The FortFront dependency used for this handoff is semantic code `c0a32743`,
-with documentation head `0a082664` (source handoff `d8c8769`). Its focused
+with documentation head `0689f81c` (source handoff `d8c8769`, including the
+#2973 legacy-I/O AST oracle). Its focused
 GNU and `nvfortran` 26.5 cold-build evidence covers the 381-target lane. The
 latest regression run [31147308041](https://github.com/lazy-fortran/fortfront/actions/runs/31147308041)
 has a successful Ubuntu job, including the #2975 nested-associate
