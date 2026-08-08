@@ -32,7 +32,7 @@ contains
     function detect_backend(dir) result(b)
         character(len=*), intent(in) :: dir
         type(backend_t) :: b
-        logical :: has_fpm, has_cmake
+        logical :: has_fpm, has_cmake, has_cmake_tests
         logical :: force_cmake, force_fpm
         character(len=16) :: preference
         character(len=512) :: current, parent
@@ -48,11 +48,18 @@ contains
             b%project_dir = current
             inquire (file=trim(current)//'/fpm.toml', exist=has_fpm)
             inquire (file=trim(current)//'/CMakeLists.txt', exist=has_cmake)
+            has_cmake_tests = .false.
+            if (has_cmake) has_cmake_tests = cmake_declares_tests( &
+                trim(current)//'/CMakeLists.txt')
             if (force_cmake .and. has_cmake) then
                 b%kind = BACKEND_CMAKE
                 return
             else if (force_fpm .and. has_fpm) then
                 b%kind = BACKEND_NATIVE
+                return
+            else if (.not. force_cmake .and. .not. force_fpm .and. &
+                    has_fpm .and. has_cmake_tests) then
+                b%kind = BACKEND_CMAKE
                 return
             else if (.not. force_cmake .and. .not. force_fpm .and. has_fpm) then
                 b%kind = BACKEND_NATIVE
@@ -70,6 +77,34 @@ contains
         b%kind = BACKEND_NONE
         b%project_dir = ''
     end function detect_backend
+
+    logical function cmake_declares_tests(filename) result(declares_tests)
+        character(len=*), intent(in) :: filename
+
+        character(len=2048) :: line, lowered
+        integer :: unit, iostat, i, code
+
+        declares_tests = .false.
+        open (newunit=unit, file=filename, status='old', action='read', &
+            iostat=iostat)
+        if (iostat /= 0) return
+        do
+            read (unit, '(a)', iostat=iostat) line
+            if (iostat /= 0) exit
+            lowered = line
+            do i = 1, len_trim(lowered)
+                code = iachar(lowered(i:i))
+                if (code >= iachar('A') .and. code <= iachar('Z')) &
+                    lowered(i:i) = achar(code + iachar('a') - iachar('A'))
+            end do
+            if (index(lowered, 'include(ctest') > 0 .or. &
+                index(lowered, 'enable_testing') > 0) then
+                declares_tests = .true.
+                exit
+            end if
+        end do
+        close (unit)
+    end function cmake_declares_tests
 
     function absolute_dir(dir) result(absdir)
         character(len=*), intent(in) :: dir
