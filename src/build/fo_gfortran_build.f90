@@ -178,6 +178,11 @@ contains
         call bootstrap_external_deps(project_dir, config, lf, exitcode)
         if (exitcode /= 0) return
 
+        ! External dependencies only become part of the resolved source closure
+        ! after bootstrap has acquired them. Merge their link requirements now
+        ! as well as the path dependencies that were available before it.
+        call merge_dep_link_libs(project_dir, config)
+
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
         allocate (stamp_roots(MAX_RESOLVED))
@@ -757,23 +762,23 @@ contains
         type(resolved_src_t), allocatable :: deps(:)
         type(fpm_config_t), allocatable :: dep_config
         integer :: i, n_deps, n_unresolved, ierr
-        integer :: n_obj_seen
-        character(len=512), allocatable :: obj_basenames(:)
 
         n_dep_includes = 0
         n_dep_objs = 0
-        n_obj_seen = 0
-        allocate (deps(MAX_RESOLVED), obj_basenames(MAX_DEP_OBJS))
+        allocate (deps(MAX_RESOLVED))
         allocate (dep_config)
-        call collect_dep_artifacts(project_dir, config, dep_includes, &
-            n_dep_includes, dep_objs, n_dep_objs, obj_basenames, n_obj_seen)
+        call collect_external_module_dirs(config%external_modules, &
+            config%n_external_modules, dep_includes, n_dep_includes, MAX_DEP_DIRS)
+        if (config%implicit_typing) allow_implicit_typing = .true.
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
         if (ierr /= 0) return
         do i = 1, n_deps
             call fpm_config_parse(deps(i)%dir, dep_config, ierr)
             if (ierr /= 0) cycle
-            call collect_dep_artifacts(deps(i)%dir, dep_config, dep_includes, &
-                n_dep_includes, dep_objs, n_dep_objs, obj_basenames, n_obj_seen)
+            call collect_external_module_dirs(dep_config%external_modules, &
+                dep_config%n_external_modules, dep_includes, n_dep_includes, &
+                MAX_DEP_DIRS)
+            if (dep_config%implicit_typing) allow_implicit_typing = .true.
         end do
     end subroutine find_dep_artifacts
 
@@ -1009,11 +1014,11 @@ contains
             all_units(n_all) = units_c(i)
         end do
 
-        ! Fold path-dependency library sources into the same unit set, so the
-        ! module DAG spans packages and the existing content-addressed compile
-        ! loop builds deps once and caches them like first-party modules. Only
-        ! modules actually reached by a `use` edge get compiled, so an unused
-        ! dep (e.g. a declared-but-unreferenced stdlib) costs nothing.
+        ! Fold every locally available dependency library into the same unit
+        ! set, so the module DAG spans packages and the content-addressed
+        ! compile loop builds deps once and caches them like first-party code.
+        ! This also avoids trusting a partial fpm profile merely because it
+        ! happens to contain some dependency objects.
         call add_dep_sources(project_dir, all_units, n_all, deps, n_deps_resolved)
 
         call build_dag_from_units(all_units, n_all, dag, filenames, is_test_arr, is_prog)
@@ -1299,7 +1304,7 @@ contains
 
 
     subroutine add_dep_sources(project_dir, all_units, n_all, deps, n_deps)
-        !! Scan every transitive path-dependency's library source dir and append
+        !! Scan every transitive dependency's library source dir and append
         !! its module units to all_units. Program units in a dep are skipped: a
         !! dependency contributes a library, never an executable of ours. The
         !! resolved dep list is returned so the caller can also compile each

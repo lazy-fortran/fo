@@ -1161,6 +1161,85 @@
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_bootstraps_git_dependency
 
+    subroutine test_gfortran_repairs_partial_git_dependency_artifacts()
+        !! A nonempty fpm profile is not proof that every dependency module was
+        !! built. Keep one leaf artifact but remove the public module consumed
+        !! by the app; a fresh native build must recover from dependency source
+        !! and produce a working executable.
+        type(backend_t) :: b
+        integer :: exitcode, u, ios
+        character(len=512) :: base, libdir, appdir, log_file, outfile
+        character(len=64) :: line
+
+        call make_tmp_path('fo_test_partial_gitdep', base)
+        libdir = trim(base)//'/lib'
+        appdir = trim(base)//'/app'
+        call make_tmp_path('fo_backend_partial_gitdep', log_file)
+
+        call make_dir(trim(libdir)//'/src')
+        call make_dir(trim(appdir)//'/app')
+        open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "deplib"'
+        close (u)
+        open (newunit=u, file=trim(libdir)//'/src/dep_leaf.f90', status='replace')
+        write (u, '(a)') 'module dep_leaf'
+        write (u, '(a)') '  integer, parameter :: leaf_value = 12'
+        write (u, '(a)') 'end module dep_leaf'
+        close (u)
+        open (newunit=u, file=trim(libdir)//'/src/dep_public.f90', status='replace')
+        write (u, '(a)') 'module dep_public'
+        write (u, '(a)') '  use dep_leaf, only: leaf_value'
+        write (u, '(a)') '  integer, parameter :: public_value = leaf_value + 1'
+        write (u, '(a)') 'end module dep_public'
+        close (u)
+        call execute_command_line('git -C "'//trim(libdir)//'" init -q')
+        call execute_command_line('git -C "'//trim(libdir)// &
+            '" -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src')
+        call execute_command_line('git -C "'//trim(libdir)// &
+            '" -c user.email=fo@example.invalid -c user.name=fo commit -q -m init')
+
+        open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "depapp"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a,a,a)') 'deplib = { git = "file://', trim(libdir), '" }'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/app/main.f90', status='replace')
+        write (u, '(a)') 'program main'
+        write (u, '(a)') '  use dep_public, only: public_value'
+        write (u, '(a)') '  print "(i0)", public_value'
+        write (u, '(a)') 'end program main'
+        close (u)
+
+        b = detect_backend(appdir)
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'two-module git dependency builds initially')
+
+        ! Preserve dep_leaf in the fpm profile while deleting dep_public. The
+        ! previous bootstrap heuristic saw the surviving object and skipped
+        ! rebuilding, leaving the app with no dep_public.mod.
+        call remove_tree(trim(appdir)//'/build/fo')
+        call execute_command_line('find "'//trim(appdir)//'/build" '// &
+            '\( -name "dep_public.mod" -o -name "*dep_public*.o" \) -delete')
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, &
+            'native dependency DAG repairs a partial fpm artifact profile')
+
+        outfile = trim(base)//'/out.txt'
+        call execute_command_line(trim(appdir)//'/build/fo/bin/depapp > "'// &
+            trim(outfile)//'"')
+        line = ''
+        open (newunit=u, file=trim(outfile), status='old', iostat=ios)
+        if (ios == 0) then
+            read (u, '(a)', iostat=ios) line
+            close (u)
+        end if
+        call assert(trim(adjustl(line)) == '13', &
+            'repaired git dependency preserves executable behaviour')
+
+        call remove_tree(base)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_repairs_partial_git_dependency_artifacts
+
     subroutine test_gfortran_worktree_path_dep_bootstraps_git_dependency()
         type(backend_t) :: b
         integer :: exitcode, ios, u
