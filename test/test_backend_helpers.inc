@@ -1114,18 +1114,21 @@
         open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "deplib"'
         close (u)
-        open (newunit=u, file=trim(libdir)//'/src/depmod.F90', status='replace')
+        open (newunit=u, file=trim(libdir)//'/src/depmod.f90', status='replace')
         write (u, '(a)') 'module depmod'
         write (u, '(a)') '  implicit none'
         write (u, '(a)') 'contains'
         write (u, '(a)') '  integer function dep_value()'
+        write (u, '(a)') '#ifdef FO_INACTIVE_BRANCH'
+        write (u, '(a)') '    call symbol_that_must_not_be_linked'
+        write (u, '(a)') '#endif'
         write (u, '(a)') '    dep_value = 13'
         write (u, '(a)') '  end function dep_value'
         write (u, '(a)') 'end module depmod'
         close (u)
         call execute_command_line('git -C '//trim(libdir)//' init -q')
         call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src/depmod.F90')
+            ' -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src/depmod.f90')
         call execute_command_line('git -C '//trim(libdir)// &
             ' -c user.email=fo@example.invalid -c user.name=fo commit -q -m init')
 

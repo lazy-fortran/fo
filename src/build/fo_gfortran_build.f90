@@ -339,13 +339,14 @@ contains
             end if
         end if
 
-        ! fpm has no notion of external-modules either, so the bootstrap of a
-        ! git dependency would fail on the very system modules fo already
-        ! located.  Hand it the same include directories as an extra flag.
+        ! The fpm bootstrap must compile with the same baseline policy as the
+        ! native path. This includes preprocessing lowercase sources and the
+        ! compiler's source-form dialect. fpm also has no notion of
+        ! external-modules, so append the system module include directories.
         n_ext = 0
         call collect_external_module_dirs(config%external_modules, &
             config%n_external_modules, ext_dirs, n_ext, MAX_DEP_DIRS)
-        ext_flag = ''
+        ext_flag = fc_base_flags()
         do i = 1, n_ext
             if (len_trim(ext_flag) > 0) ext_flag = trim(ext_flag)//' '
             ext_flag = trim(ext_flag)//'-I'//trim(ext_dirs(i))
