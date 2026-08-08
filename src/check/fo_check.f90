@@ -259,7 +259,7 @@ contains
             end do
             deallocate (gf_dirs)
 
-            ! Candidate 3: build/dependencies/**/<lower>.mod
+            ! Candidate 3: recursively under build/dependencies as <lower>.mod
             allocate (dep_items(MAX_EXT_DEPS))
             call fs_collect_files(trim(dep_dir), '', trim(mod_file), '', &
                 dep_items, n_dep)

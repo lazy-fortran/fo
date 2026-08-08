@@ -481,7 +481,7 @@ contains
     end subroutine is_symbol_used
 
     subroutine collect_fortran_sources(dir, files, n_files)
-        !! Collect *.f90/*.F90/*.f/*.F under dir, sorted, excluding generated
+        !! Collect supported lowercase and uppercase Fortran sources, excluding generated
         !! and dependency trees. Replaces the find | sort pipeline.
         character(len=*), intent(in) :: dir
         character(len=512), allocatable, intent(out) :: files(:)

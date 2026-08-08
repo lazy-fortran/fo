@@ -519,7 +519,7 @@ contains
         !! remaining args, inheriting the terminal. The sanctioned way to run a
         !! built binary (app or test): it can never be stale, because the build
         !! runs first and fo's cache is content-addressed. Running
-        !! build/fo/bin/* by hand skips that and may execute an artifact older
+        !! build/fo/bin executables by hand skips that and may execute an artifact older
         !! than the current sources.
         type(backend_t) :: b
         integer :: exitcode, i, target_index

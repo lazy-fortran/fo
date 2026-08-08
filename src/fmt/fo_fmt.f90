@@ -18,7 +18,7 @@ module fo_fmt
 contains
 
     subroutine write_source_list(scan_root, list_file)
-        !! Write the sorted list of *.f90/*.F90 project sources under scan_root.
+        !! Write the sorted list of lowercase and uppercase F90 sources under scan_root.
         !! Replaces the `find ... | sort > list_file` pipeline.
         character(len=*), intent(in) :: scan_root, list_file
 
