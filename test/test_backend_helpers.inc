@@ -1189,7 +1189,10 @@
         open (newunit=u, file=trim(libdir)//'/src/dep_public.f90', status='replace')
         write (u, '(a)') 'module dep_public'
         write (u, '(a)') '  use dep_leaf, only: leaf_value'
-        write (u, '(a)') '  integer, parameter :: public_value = leaf_value + 1'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer function public_value()'
+        write (u, '(a)') '    public_value = leaf_value + 1'
+        write (u, '(a)') '  end function public_value'
         write (u, '(a)') 'end module dep_public'
         close (u)
         call execute_command_line('git -C "'//trim(libdir)//'" init -q')
@@ -1206,13 +1209,16 @@
         open (newunit=u, file=trim(appdir)//'/app/main.f90', status='replace')
         write (u, '(a)') 'program main'
         write (u, '(a)') '  use dep_public, only: public_value'
-        write (u, '(a)') '  print "(i0)", public_value'
+        write (u, '(a)') '  print "(i0)", public_value()'
         write (u, '(a)') 'end program main'
         close (u)
 
         b = detect_backend(appdir)
         call backend_build(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'two-module git dependency builds initially')
+        call execute_command_line('find "'//trim(appdir)//'/build" '// &
+            '-name "dep_public.mod" -exec cp "{}" "'//trim(base)// &
+            '/dep_public.mod.saved" \;')
 
         ! Preserve dep_leaf in the fpm profile while deleting dep_public. The
         ! previous bootstrap heuristic saw the surviving object and skipped
@@ -1235,6 +1241,27 @@
         end if
         call assert(trim(adjustl(line)) == '13', &
             'repaired git dependency preserves executable behaviour')
+
+        ! A module interface without its implementation object also represents
+        ! an incomplete fpm profile. Restore only the saved interface; the
+        ! native DAG must compile the provider so public_value still links.
+        call remove_tree(trim(appdir)//'/build/fo')
+        call execute_command_line('find "'//trim(appdir)//'/build" '// &
+            '-name "dep_leaf.mod" -execdir cp "'//trim(base)// &
+            '/dep_public.mod.saved" dep_public.mod \;')
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, &
+            'native dependency DAG repairs a missing provider object')
+        call execute_command_line(trim(appdir)//'/build/fo/bin/depapp > "'// &
+            trim(outfile)//'"')
+        line = ''
+        open (newunit=u, file=trim(outfile), status='old', iostat=ios)
+        if (ios == 0) then
+            read (u, '(a)', iostat=ios) line
+            close (u)
+        end if
+        call assert(trim(adjustl(line)) == '13', &
+            'object-repaired git dependency preserves executable behaviour')
 
         call remove_tree(base)
         call execute_command_line('rm -f '//trim(log_file))

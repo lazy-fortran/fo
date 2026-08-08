@@ -203,7 +203,7 @@ contains
         nc = 0
         call compile_sources(project_dir, config%source_dir, config%app_dir, &
             config%example_dir, config%auto_examples .or. config%n_examples > 0, &
-            mod_dir, obj_dir, dep_includes, n_dep_includes, lf, &
+            mod_dir, obj_dir, dep_includes, n_dep_includes, dep_objs, n_dep_objs, lf, &
             src_objs, n_src_objs, is_prog_arr, exitcode, nc, &
             flag_text, compiler, want_apps, use_cache)
         if (exitcode /= 0) return
@@ -493,7 +493,7 @@ contains
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
         call collect_current_lib_objs(project_dir, config, obj_dir, dep_includes, &
-            n_dep_includes, lib_objs, n_lib_objs)
+            n_dep_includes, dep_objs, n_dep_objs, lib_objs, n_lib_objs)
 
         call compile_and_run_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
             bin_dir, dep_includes, n_dep_includes, &
@@ -572,7 +572,7 @@ contains
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
         call collect_current_lib_objs(project_dir, config, obj_dir, dep_includes, &
-            n_dep_includes, lib_objs, n_lib_objs)
+            n_dep_includes, dep_objs, n_dep_objs, lib_objs, n_lib_objs)
 
         call compile_and_run_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
             bin_dir, dep_includes, n_dep_includes, &
@@ -925,7 +925,7 @@ contains
 
     subroutine compile_sources(project_dir, src_dir, app_dir, example_dir, &
             include_examples, mod_dir, obj_dir, &
-            dep_includes, n_dep_includes, log_file, &
+            dep_includes, n_dep_includes, dep_objs, n_dep_objs, log_file, &
             src_objs, n_src_objs, is_prog_arr, exitcode, &
             n_compiled, flags, compiler, include_apps, use_cache)
         character(len=*), intent(in) :: project_dir, src_dir, app_dir, example_dir
@@ -934,6 +934,8 @@ contains
         character(len=*), intent(in) :: flags, compiler
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
         integer, intent(in) :: n_dep_includes
+        character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
+        integer, intent(in) :: n_dep_objs
         character(len=512), intent(out) :: src_objs(MAX_SRC_OBJS)
         integer, intent(out) :: n_src_objs
         logical, intent(out) :: is_prog_arr(MAX_SRC_OBJS)
@@ -1012,7 +1014,7 @@ contains
         ! Fold path dependencies and any missing external-dependency module
         ! providers into the same source-ordered native DAG.
         call add_dep_sources(project_dir, all_units, n_all, deps, n_deps_resolved, &
-            dep_includes, n_dep_includes)
+            dep_includes, n_dep_includes, dep_objs, n_dep_objs)
 
         call build_dag_from_units(all_units, n_all, dag, filenames, is_test_arr, is_prog)
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
@@ -1297,7 +1299,7 @@ contains
 
 
     subroutine add_dep_sources(project_dir, all_units, n_all, deps, n_deps, &
-            dep_includes, n_dep_includes)
+            dep_includes, n_dep_includes, dep_objs, n_dep_objs)
         !! Scan every transitive path-dependency's library source dir and append
         !! its module units to all_units. Program units in a dep are skipped: a
         !! dependency contributes a library, never an executable of ours. The
@@ -1312,6 +1314,8 @@ contains
         integer, intent(out) :: n_deps
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
         integer, intent(in) :: n_dep_includes
+        character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
+        integer, intent(in) :: n_dep_objs
 
         type(scan_unit_t), allocatable :: ud(:), grown(:)
         integer :: n_unres, ierr, d, j, nu, old_n
@@ -1334,21 +1338,23 @@ contains
             call move_alloc(grown, all_units)
         end do
         call add_missing_external_dep_sources(project_dir, all_units, n_all, &
-            dep_includes, n_dep_includes)
+            dep_includes, n_dep_includes, dep_objs, n_dep_objs)
     end subroutine add_dep_sources
 
     subroutine add_missing_external_dep_sources(project_dir, units, n_units, &
-            dep_includes, n_dep_includes)
+            dep_includes, n_dep_includes, dep_objs, n_dep_objs)
         !! Repair a partial fpm dependency profile without compiling the entire
         !! external dependency closure. Scan direct acquired dependency sources,
-        !! then append only providers required by an existing unit for which no
-        !! module artifact exists. Repeat to include the missing providers'
-        !! dependencies as well.
+        !! then append only providers required by an existing unit for which the
+        !! module interface or provider object is absent. Repeat to include the
+        !! missing providers' dependencies as well.
         character(len=*), intent(in) :: project_dir
         type(scan_unit_t), allocatable, intent(inout) :: units(:)
         integer, intent(inout) :: n_units
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
         integer, intent(in) :: n_dep_includes
+        character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
+        integer, intent(in) :: n_dep_objs
 
         type(fpm_config_t), allocatable :: config, dep_config
         type(scan_unit_t), allocatable :: candidates(:), scanned(:)
@@ -1381,10 +1387,11 @@ contains
                     if (unit_set_defines_module(units, n_units, units(i)%deps(j))) cycle
                     call find_dep_mod_file(units(i)%deps(j), dep_includes, &
                         n_dep_includes, modpath, found)
-                    if (found) cycle
                     do k = 1, n_candidates
                         if (trim(candidates(k)%module_name) /= &
                             trim(units(i)%deps(j))) cycle
+                        if (found .and. dep_provider_object_exists( &
+                            candidates(k)%filename, dep_objs, n_dep_objs)) exit
                         call append_module_unit(units, n_units, candidates(k))
                         added = .true.
                         exit
@@ -1394,6 +1401,44 @@ contains
             if (.not. added) exit
         end do
     end subroutine add_missing_external_dep_sources
+
+    logical function dep_provider_object_exists(source, dep_objs, n_dep_objs) &
+            result(found)
+        !! fpm object names end in the original source basename plus '.o',
+        !! prefixed by the dependency-relative path with '_' separators.
+        character(len=*), intent(in) :: source
+        character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
+        integer, intent(in) :: n_dep_objs
+
+        character(len=512) :: source_base, object_base, needle
+        integer :: i, slash, nbase, nneedle
+
+        found = .false.
+        slash = index(trim(source), '/', back=.true.)
+        if (slash > 0) then
+            source_base = source(slash + 1:len_trim(source))
+        else
+            source_base = trim(source)
+        end if
+        needle = trim(source_base)//'.o'
+        nneedle = len_trim(needle)
+        do i = 1, n_dep_objs
+            slash = index(trim(dep_objs(i)), '/', back=.true.)
+            if (slash > 0) then
+                object_base = dep_objs(i)(slash + 1:len_trim(dep_objs(i)))
+            else
+                object_base = trim(dep_objs(i))
+            end if
+            nbase = len_trim(object_base)
+            if (nbase < nneedle) cycle
+            if (object_base(nbase - nneedle + 1:nbase) /= needle(1:nneedle)) cycle
+            if (nbase > nneedle) then
+                if (object_base(nbase - nneedle:nbase - nneedle) /= '_') cycle
+            end if
+            found = .true.
+            return
+        end do
+    end function dep_provider_object_exists
 
     logical function unit_set_defines_module(units, n_units, name) result(found)
         type(scan_unit_t), intent(in) :: units(:)
@@ -2606,11 +2651,13 @@ contains
     end function is_slow_name
 
     subroutine collect_current_lib_objs(project_dir, config, obj_dir, dep_includes, &
-            n_dep_includes, lib_objs, n_lib_objs)
+            n_dep_includes, dep_objs, n_dep_objs, lib_objs, n_lib_objs)
         character(len=*), intent(in) :: project_dir, obj_dir
         type(fpm_config_t), intent(in) :: config
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
         integer, intent(in) :: n_dep_includes
+        character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
+        integer, intent(in) :: n_dep_objs
         character(len=512), intent(out) :: lib_objs(MAX_SRC_OBJS)
         integer, intent(out) :: n_lib_objs
 
@@ -2641,7 +2688,7 @@ contains
             end do
         end if
         call add_dep_sources(project_dir, all_units, n_all, deps, n_deps, &
-            dep_includes, n_dep_includes)
+            dep_includes, n_dep_includes, dep_objs, n_dep_objs)
 
         if (n_all > 0) then
             allocate (filenames(MAX_NODES), is_prog(MAX_NODES), &
