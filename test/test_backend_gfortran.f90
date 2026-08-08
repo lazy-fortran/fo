@@ -21,6 +21,7 @@ program test_backend_gfortran
 
     call isolate_backend_cache()
     call test_gfortran_flags_change_action_id()
+    call test_compiler_baseline_flags_change_action_id()
     call test_gfortran_compiler_identity_changes_action_id()
     call test_gfortran_private_change_keeps_dependent_cached()
     call test_gfortran_interface_change_rebuilds_dependent()
@@ -61,6 +62,68 @@ program test_backend_gfortran
     call report('backend_gfortran')
 
 contains
+
+    subroutine test_compiler_baseline_flags_change_action_id()
+        character(len=512) :: project_dir, log_file, gnu_wrapper, flang_wrapper
+        character(len=512) :: old_fc
+        integer :: u, exitcode, changed_exitcode, fc_status
+
+        call make_tmp_path('fo_baseline_flags_project', project_dir)
+        call make_tmp_path('fo_baseline_flags_log', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "baseline-flags-fixture"'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/src/fixture.f90', &
+            status='replace')
+        write (u, '(a)') 'module baseline_flags_fixture'
+        write (u, '(a)') 'character(len=*), parameter :: long_value = "'// &
+            repeat('x', 120)//'"'
+        write (u, '(a)') 'end module baseline_flags_fixture'
+        close (u)
+
+        gnu_wrapper = trim(project_dir)//'/fixture-gfortran'
+        flang_wrapper = trim(project_dir)//'/fixture-flang'
+        call write_compiler_wrapper(gnu_wrapper)
+        call write_compiler_wrapper(flang_wrapper)
+        call get_environment_variable('FO_FC', old_fc, status=fc_status)
+
+        call set_env('FO_FC', trim(gnu_wrapper))
+        call gfortran_build(project_dir, log_file, exitcode)
+        call assert(exitcode == 0, &
+            'baseline flags fixture first build accepts a long free-form line')
+
+        call set_env('FO_FC', trim(flang_wrapper))
+        call gfortran_build(project_dir, log_file, exitcode)
+        changed_exitcode = exitcode
+        if (fc_status == 0) then
+            call set_env('FO_FC', trim(old_fc))
+        else
+            call set_env('FO_FC', '')
+        end if
+        ! Reset the backend's resolved executable before later tests supply a
+        ! synthetic compiler identity without asking for compiler detection.
+        call gfortran_build(project_dir, log_file, exitcode, use_cache=.false.)
+        call assert(exitcode == 0, &
+            'baseline flags fixture restores the original compiler')
+        call assert(changed_exitcode /= 0, &
+            'changed compiler baseline flags miss stamps and action cache')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_compiler_baseline_flags_change_action_id
+
+    subroutine write_compiler_wrapper(path)
+        character(len=*), intent(in) :: path
+        integer :: u
+
+        open (newunit=u, file=trim(path), status='replace')
+        write (u, '(a)') '#!/bin/sh'
+        write (u, '(a)') 'exec gfortran "$@"'
+        close (u)
+        call execute_command_line('chmod +x '//trim(path))
+    end subroutine write_compiler_wrapper
 
     subroutine test_gfortran_preprocesses_lowercase_f90()
         character(len=512) :: project_dir, log_file

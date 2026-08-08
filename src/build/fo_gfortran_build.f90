@@ -93,6 +93,7 @@ contains
         logical, allocatable :: is_prog_arr(:)
         character(len=512) :: lf
         character(len=512) :: flag_text, compiler, request_flags, stamp_test_dir
+        character(len=512) :: stamp_flags, stamp_request_flags
         character(len=512), allocatable :: stamp_roots(:)
         character(len=256) :: lock_message
         logical :: lock_ok, stamp_ok, stamp_hit, allow_cache, stamp_tests_ready
@@ -109,6 +110,7 @@ contains
         flag_text = ''
         if (present(flags)) flag_text = flags
         request_flags = flag_text
+        stamp_request_flags = request_key_flags(request_flags)
         if (present(compiler_id)) then
             compiler = compiler_id
         else
@@ -120,7 +122,8 @@ contains
         if (present(build_apps)) want_apps = build_apps
         stamp_hit = .false.
         if (allow_cache) then
-            call build_stamp_quick_matches(project_dir, compiler, request_flags, &
+            call build_stamp_quick_matches(project_dir, compiler, &
+                stamp_request_flags, &
                 stamp_hit, stamp_tests_ready, stamp_apps_ready, stamp_test_dir)
         end if
         if (stamp_hit .and. want_apps .and. .not. stamp_apps_ready) &
@@ -180,11 +183,12 @@ contains
 
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
+        stamp_flags = compile_key_flags(flag_text)
         allocate (stamp_roots(MAX_RESOLVED))
         call collect_stamp_roots(project_dir, stamp_roots, n_stamp_roots, stamp_ok)
         stamp_hit = .false.
         if (allow_cache .and. stamp_ok) then
-            call build_stamp_matches(project_dir, compiler, flag_text, stamp_roots, &
+            call build_stamp_matches(project_dir, compiler, stamp_flags, stamp_roots, &
                 n_stamp_roots, stamp_hit, stamp_tests_ready, stamp_apps_ready, &
                 stamp_test_dir)
         end if
@@ -216,8 +220,9 @@ contains
                 flags=flag_text, use_cache=use_cache)
         end if
         if (exitcode == 0 .and. allow_cache .and. stamp_ok) then
-            call build_stamp_save(project_dir, compiler, flag_text, request_flags, &
-                stamp_roots, n_stamp_roots, .false., want_apps, config%test_dir)
+            call build_stamp_save(project_dir, compiler, stamp_flags, &
+                stamp_request_flags, stamp_roots, n_stamp_roots, .false., want_apps, &
+                config%test_dir)
         end if
         if (present(apps_ready)) apps_ready = want_apps
         if (present(cached_test_dir)) cached_test_dir = config%test_dir
@@ -615,7 +620,7 @@ contains
         character(len=*), intent(in) :: test_dir
         logical, intent(in), optional :: use_cache
 
-        character(len=512) :: compiler, stamp_flags
+        character(len=512) :: compiler, stamp_flags, stamp_request_flags
         character(len=512), allocatable :: roots(:)
         integer :: n_roots
         logical :: ok, allow_cache
@@ -628,9 +633,11 @@ contains
         if (.not. ok) return
         stamp_flags = flags
         call append_array_temporary_warning_flag(fc_command(), stamp_flags)
+        stamp_flags = compile_key_flags(stamp_flags)
+        stamp_request_flags = request_key_flags(request_flags)
         call detect_compiler(compiler)
-        call build_stamp_save(project_dir, compiler, stamp_flags, request_flags, &
-            roots, n_roots, .true., apps_ready, test_dir)
+        call build_stamp_save(project_dir, compiler, stamp_flags, &
+            stamp_request_flags, roots, n_roots, .true., apps_ready, test_dir)
     end subroutine refresh_build_stamp
 
     subroutine run_current_tests(project_dir, test_dir, bin_dir, selected_names, &
@@ -806,7 +813,7 @@ contains
         ! compile fails as if the package were not installed at all.
         call collect_external_module_dirs(config%external_modules, &
             config%n_external_modules, dep_includes, n_dep_includes, MAX_DEP_DIRS)
-        if (config%implicit_typing) allow_implicit_typing = .true.
+        allow_implicit_typing = config%implicit_typing
 
         suffixes(1) = '.f90.o'
         suffixes(2) = '.F90.o'
@@ -1075,8 +1082,8 @@ contains
                         compile_keys(n_compile) = ''
                         cycle
                     end if
-                    source_key = cache_key_for(filenames(node_id), compiler, flags, &
-                        dep_keys, n_dep)
+                    source_key = cache_key_for(filenames(node_id), compiler, &
+                        compile_key_flags(flags), dep_keys, n_dep)
 
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
                     if (.not. source_may_emit_smod(filenames(node_id)) .and. &
@@ -2144,10 +2151,10 @@ contains
                 n_dep = n_dep + 1
                 dep_keys(n_dep) = lib_hash
             end if
-            test_key_flags = test_flags
+            test_key_flags = compile_key_flags(test_flags)
             if (len_trim(run_args(i)) > 0) then
-                test_key_flags = trim(test_flags)//new_line('a')//'test-args:'// &
-                    trim(run_args(i))
+                test_key_flags = trim(test_key_flags)//new_line('a')// &
+                    'test-args:'//trim(run_args(i))
             end if
             run_keys(i) = cache_key_for(filenames(node_id), compiler, &
                 test_key_flags, dep_keys, n_dep)
@@ -2841,7 +2848,7 @@ contains
         fc_is_flang = dialect%is_flang()
     end function fc_is_flang
 
-    recursive function fc_base_flags() result(flags)
+    recursive function fc_policy_flags() result(flags)
         !! Compiler-appropriate baseline compile flags. gfortran needs the long
         !! free-form line length; flang has no line limit and rejects that flag.
         !! -fopenmp is added per project via the fpm openmp metapackage (see
@@ -2852,10 +2859,34 @@ contains
 
         dialect = compiler_dialect(fc_command())
         flags = dialect%base_flags()
+        call append_pipe_flag(fc_command(), flags)
+    end function fc_policy_flags
+
+    recursive function fc_base_flags() result(flags)
+        character(len=:), allocatable :: flags
+        type(compiler_dialect_t) :: dialect
+
+        dialect = compiler_dialect(fc_command())
+        flags = fc_policy_flags()
         if (allow_implicit_typing) flags = flags//' '//dialect%translate_flag( &
             '-fno-implicit-none')
-        call append_pipe_flag(fc_command(), flags)
     end function fc_base_flags
+
+    recursive function request_key_flags(flags) result(key_flags)
+        character(len=*), intent(in) :: flags
+        character(len=:), allocatable :: key_flags
+
+        key_flags = 'compiler-policy:'//trim(fc_policy_flags())//new_line('a')// &
+            'request-flags:'//trim(flags)
+    end function request_key_flags
+
+    recursive function compile_key_flags(flags) result(key_flags)
+        character(len=*), intent(in) :: flags
+        character(len=:), allocatable :: key_flags
+
+        key_flags = 'compiler-baseline:'//trim(fc_base_flags())//new_line('a')// &
+            'project-flags:'//trim(flags)
+    end function compile_key_flags
 
     subroutine make_includes_flag(mod_dir, dep_includes, n_dep_includes, flag)
         character(len=*), intent(in) :: mod_dir
