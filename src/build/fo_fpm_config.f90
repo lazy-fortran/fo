@@ -1,4 +1,7 @@
 module fo_fpm_config
+    use fo_process, only: process_run_argv_logged, argv_push
+    use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file
+    use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
     private
     public :: fpm_dep_t, fpm_exe_t, fpm_config_t
@@ -19,9 +22,9 @@ module fo_fpm_config
 
     integer, parameter :: MAX_DEPS = 64
     integer, parameter :: MAX_DEV_DEPS = 32
-    integer, parameter :: MAX_LINK_LIBS = 32
-    integer, parameter :: MAX_EXTERNAL_MODULES = 32
-    integer, parameter :: MAX_FLAGS = 16
+    integer, parameter :: MAX_LINK_LIBS = 64
+    integer, parameter :: MAX_EXTERNAL_MODULES = 64
+    integer, parameter :: MAX_FLAGS = 64
     integer, parameter :: MAX_EXES = 64
     integer, parameter :: MAX_TEST_ARG_SETS = 128
 
@@ -86,6 +89,18 @@ module fo_fpm_config
         ! fo compiles and links with -fopenmp so the project's `!$omp` regions
         ! run in parallel. Without it gfortran ignores the directives.
         logical :: openmp = .false.
+        ! fpm "blas" metapackage. Resolution is performed through the same
+        ! pkg-config candidate order as fpm, so a consumer inherits the
+        ! provider's actual link and compile flags rather than naming OpenBLAS
+        ! (or netlib BLAS) itself.
+        logical :: blas = .false.
+        ! The remaining fpm metapackages.  They are resolved below into the
+        ! same flags, external modules, and source dependencies that fpm adds.
+        logical :: mpi = .false.
+        logical :: hdf5 = .false.
+        logical :: netcdf = .false.
+        logical :: stdlib = .false.
+        logical :: minpack = .false.
         ! [fortran] implicit-typing / implicit-external.  fpm defaults both to
         ! false, meaning the strict flags apply; a manifest that sets one to
         ! true is asking for the corresponding flag to be left off, which is
@@ -126,6 +141,12 @@ contains
         c%auto_tests = .true.
         c%auto_examples = .true.
         c%openmp = .false.
+        c%blas = .false.
+        c%mpi = .false.
+        c%hdf5 = .false.
+        c%netcdf = .false.
+        c%stdlib = .false.
+        c%minpack = .false.
         c%implicit_typing = .false.
         c%implicit_external = .false.
         c%n_deps = 0
@@ -227,12 +248,7 @@ contains
             case ('build')
                 call parse_build(key, val, config)
             case ('dependencies')
-                if (trim(key) == 'openmp') then
-                    ! fpm metapackage, not a real dependency: maps to -fopenmp.
-                    config%openmp = .true.
-                else
-                    call parse_dep_entry(key, val, config%deps, config%n_deps)
-                end if
+                call parse_dependency_entry(key, val, config)
             case ('dev-dependencies')
                 call parse_dep_entry(key, val, config%dev_deps, config%n_dev_deps)
             case ('executable')
@@ -256,6 +272,7 @@ contains
         end do
 
         close (u)
+        if (ierr == 0) call resolve_metapackages(config, ierr)
     end subroutine fpm_config_parse
 
     subroutine parse_top_level(key, val, config)
@@ -271,8 +288,43 @@ contains
         case ('version')
             call extract_string(val, str_val)
             config%version = trim(str_val)
+        case default
+            if (index(trim(key), 'dependencies.') == 1) then
+                call parse_top_level_dependency(trim(key(14:)), val, config)
+            end if
         end select
     end subroutine parse_top_level
+
+    subroutine parse_top_level_dependency(key, val, config)
+        character(len=*), intent(in) :: key, val
+        type(fpm_config_t), intent(inout) :: config
+
+        call parse_dependency_entry(key, val, config)
+    end subroutine parse_top_level_dependency
+
+    subroutine parse_dependency_entry(key, val, config)
+        character(len=*), intent(in) :: key, val
+        type(fpm_config_t), intent(inout) :: config
+
+        select case (trim(key))
+        case ('openmp')
+            config%openmp = .true.
+        case ('blas')
+            config%blas = .true.
+        case ('mpi')
+            config%mpi = .true.
+        case ('hdf5')
+            config%hdf5 = .true.
+        case ('netcdf')
+            config%netcdf = .true.
+        case ('stdlib')
+            config%stdlib = .true.
+        case ('minpack')
+            config%minpack = .true.
+        case default
+            call parse_dep_entry(key, val, config%deps, config%n_deps)
+        end select
+    end subroutine parse_dependency_entry
 
     subroutine parse_build(key, val, config)
         character(len=*), intent(in) :: key, val
@@ -881,5 +933,495 @@ contains
             end if
         end do
     end subroutine parse_inline_table
+
+    subroutine resolve_metapackages(config, ierr)
+        !! Resolve every metapackage currently understood by fpm.  The parser
+        !! deliberately records requests first and performs discovery only
+        !! after the complete manifest is known, because stdlib's configuration
+        !! depends on whether the BLAS metapackage was requested as well.
+        type(fpm_config_t), intent(inout) :: config
+        integer, intent(out) :: ierr
+
+        ierr = 0
+        if (config%blas) call resolve_blas_metapackage(config, ierr)
+        if (ierr /= 0) return
+        if (config%hdf5) call resolve_hdf5_metapackage(config, ierr)
+        if (ierr /= 0) return
+        if (config%netcdf) call resolve_netcdf_metapackage(config, ierr)
+        if (ierr /= 0) return
+        if (config%mpi) call resolve_mpi_metapackage(config, ierr)
+        if (ierr /= 0) return
+        if (config%stdlib) call resolve_stdlib_metapackage(config)
+        if (config%minpack) call resolve_minpack_metapackage(config)
+    end subroutine resolve_metapackages
+
+    subroutine resolve_blas_metapackage(config, ierr)
+        !! Mirror fpm's BLAS provider order and import both pkg-config link
+        !! and compiler flags.  The order is intentionally fpm's order.
+        type(fpm_config_t), intent(inout) :: config
+        integer, intent(out) :: ierr
+
+        character(len=*), parameter :: candidates(4) = [ character(len=32) :: &
+            'mkl-dynamic-lp64-tbb', 'openblas', 'blas', 'flexiblas' ]
+        integer :: i
+        logical :: found
+
+        ierr = 0
+        if (.not. config%blas) return
+        if (.not. pkg_config_available()) then
+            write (error_unit, '(a)') &
+                'fo: blas metapackage requires pkg-config'
+            ierr = 1
+            return
+        end if
+
+        found = .false.
+        do i = 1, size(candidates)
+            if (.not. pkg_config_has_package(trim(candidates(i)))) cycle
+            call import_pkg_config_package(config, trim(candidates(i)), ierr)
+            if (ierr /= 0) return
+            write (error_unit, '(a,a)') &
+                'fo: found blas package: ', trim(candidates(i))
+            found = .true.
+            exit
+        end do
+        if (.not. found) then
+            write (error_unit, '(a)') &
+                'fo: pkg-config could not find a suitable blas package'
+            ierr = 1
+        end if
+    end subroutine resolve_blas_metapackage
+
+    subroutine resolve_hdf5_metapackage(config, ierr)
+        type(fpm_config_t), intent(inout) :: config
+        integer, intent(out) :: ierr
+
+        character(len=*), parameter :: candidates(7) = [ character(len=32) :: &
+            'hdf5_hl_fortran', 'hdf5-hl-fortran', 'hdf5_fortran', &
+            'hdf5-fortran', 'hdf5_hl', 'hdf5', 'hdf5-serial' ]
+        character(len=128) :: package
+        integer :: i
+
+        ierr = 0
+        if (.not. pkg_config_available()) then
+            write (error_unit, '(a)') 'fo: hdf5 metapackage requires pkg-config'
+            ierr = 1
+            return
+        end if
+
+        package = ''
+        do i = 1, size(candidates)
+            if (pkg_config_has_package(trim(candidates(i)))) then
+                package = trim(candidates(i))
+                exit
+            end if
+        end do
+        if (len_trim(package) == 0) then
+            call pkg_config_find_package('hdf5', package)
+        end if
+        if (len_trim(package) == 0) then
+            write (error_unit, '(a)') &
+                'fo: pkg-config could not find a suitable hdf5 package'
+            ierr = 1
+            return
+        end if
+
+        call import_pkg_config_package(config, trim(package), ierr)
+        if (ierr /= 0) return
+        call add_hdf5_external_modules(config)
+        write (error_unit, '(a,a)') 'fo: found hdf5 package: ', trim(package)
+    end subroutine resolve_hdf5_metapackage
+
+    subroutine resolve_netcdf_metapackage(config, ierr)
+        type(fpm_config_t), intent(inout) :: config
+        integer, intent(out) :: ierr
+
+        ierr = 0
+        if (.not. pkg_config_available()) then
+            write (error_unit, '(a)') 'fo: netcdf metapackage requires pkg-config'
+            ierr = 1
+            return
+        end if
+        if (.not. pkg_config_has_package('netcdf')) then
+            write (error_unit, '(a)') &
+                'fo: pkg-config could not find a suitable netcdf package'
+            ierr = 1
+            return
+        end if
+        if (.not. pkg_config_has_package('netcdf-fortran')) then
+            write (error_unit, '(a)') &
+                'fo: pkg-config could not find a suitable netcdf-fortran package'
+            ierr = 1
+            return
+        end if
+
+        call import_pkg_config_package(config, 'netcdf', ierr)
+        if (ierr /= 0) return
+        call import_pkg_config_package(config, 'netcdf-fortran', ierr)
+        if (ierr /= 0) return
+        call add_netcdf_external_modules(config)
+        write (error_unit, '(a)') 'fo: found netcdf packages: netcdf netcdf-fortran'
+    end subroutine resolve_netcdf_metapackage
+
+    subroutine resolve_mpi_metapackage(config, ierr)
+        !! Import the flags emitted by the local MPI wrapper.  OpenMPI uses
+        !! --showme, MPICH uses -compile-info/-link-info, and older wrappers
+        !! expose the complete command through -show; these are the same query
+        !! families fpm probes in its MPI metapackage.
+        type(fpm_config_t), intent(inout) :: config
+        integer, intent(out) :: ierr
+
+        character(len=*), parameter :: wrappers(6) = [ character(len=32) :: &
+            'mpifort', 'mpif90', 'mpiifx', 'mpifort.openmpi', 'mpif90.openmpi', 'ftn' ]
+        character(len=128) :: wrapper
+        character(len=4096) :: output
+        logical :: found
+        integer :: i
+
+        ierr = 0
+        wrapper = ''
+        do i = 1, size(wrappers)
+            call command_run(trim(wrappers(i)), '--version', output, ierr)
+            if (ierr == 0) then
+                wrapper = trim(wrappers(i))
+                exit
+            end if
+        end do
+        found = len_trim(wrapper) > 0 .and. ierr == 0
+        if (.not. found) then
+            write (error_unit, '(a)') 'fo: cannot find an MPI wrapper compiler'
+            ierr = 1
+            return
+        end if
+
+        call import_mpi_wrapper_flags(config, trim(wrapper), 'compile', found)
+        if (.not. found) then
+            write (error_unit, '(a,a)') &
+                'fo: MPI wrapper cannot report compile flags: ', trim(wrapper)
+            ierr = 1
+            return
+        end if
+        call import_mpi_wrapper_flags(config, trim(wrapper), 'link', found)
+        if (.not. found) then
+            write (error_unit, '(a,a)') &
+                'fo: MPI wrapper cannot report link flags: ', trim(wrapper)
+            ierr = 1
+            return
+        end if
+        call add_external_module(config, 'mpi')
+        call add_external_module(config, 'mpi_f08')
+        write (error_unit, '(a,a)') 'fo: found MPI wrapper: ', trim(wrapper)
+    end subroutine resolve_mpi_metapackage
+
+    subroutine resolve_stdlib_metapackage(config)
+        type(fpm_config_t), intent(inout) :: config
+
+        call add_git_dependency(config%deps, config%n_deps, 'stdlib', &
+            'https://github.com/fortran-lang/stdlib', branch='stdlib-fpm')
+        call add_git_dependency(config%dev_deps, config%n_dev_deps, 'test-drive', &
+            'https://github.com/fortran-lang/test-drive', branch='v0.4.0')
+        if (config%blas) then
+            call append_config_flag('-DSTDLIB_EXTERNAL_BLAS', config)
+            call append_config_flag('-DSTDLIB_EXTERNAL_LAPACK', config)
+        end if
+    end subroutine resolve_stdlib_metapackage
+
+    subroutine resolve_minpack_metapackage(config)
+        type(fpm_config_t), intent(inout) :: config
+
+        call add_git_dependency(config%deps, config%n_deps, 'minpack', &
+            'https://github.com/fortran-lang/minpack', tag='v2.0.0-rc.1')
+    end subroutine resolve_minpack_metapackage
+
+    subroutine add_git_dependency(deps, n_deps, name, url, branch, tag)
+        type(fpm_dep_t), intent(inout) :: deps(:)
+        integer, intent(inout) :: n_deps
+        character(len=*), intent(in) :: name, url
+        character(len=*), intent(in), optional :: branch, tag
+        integer :: i
+
+        do i = 1, n_deps
+            if (trim(deps(i)%name) == trim(name)) return
+        end do
+        if (n_deps >= size(deps)) return
+        n_deps = n_deps + 1
+        call parse_dep(name, '', deps(n_deps))
+        deps(n_deps)%git = trim(url)
+        if (present(branch)) deps(n_deps)%branch = trim(branch)
+        if (present(tag)) deps(n_deps)%tag = trim(tag)
+    end subroutine add_git_dependency
+
+    subroutine import_pkg_config_package(config, package, ierr)
+        type(fpm_config_t), intent(inout) :: config
+        character(len=*), intent(in) :: package
+        integer, intent(out) :: ierr
+        character(len=4096) :: output
+        integer :: exitcode
+
+        ierr = 0
+        call pkg_config_run(trim(package), '--libs', output, exitcode)
+        if (exitcode /= 0) then
+            write (error_unit, '(a,a)') &
+                'fo: pkg-config could not read package ', trim(package)
+            ierr = 1
+            return
+        end if
+        call append_pkg_config_flags(output, config)
+
+        call pkg_config_run(trim(package), '--cflags', output, exitcode)
+        if (exitcode /= 0) then
+            write (error_unit, '(a,a)') &
+                'fo: pkg-config could not read compiler flags for ', trim(package)
+            ierr = 1
+            return
+        end if
+        call append_pkg_config_flags(output, config)
+    end subroutine import_pkg_config_package
+
+    logical function pkg_config_available()
+        character(len=64) :: output
+        integer :: exitcode
+
+        call pkg_config_run('', '--version', output, exitcode)
+        pkg_config_available = exitcode == 0
+    end function pkg_config_available
+
+    logical function pkg_config_has_package(package)
+        character(len=*), intent(in) :: package
+        character(len=64) :: output
+        integer :: exitcode
+
+        call pkg_config_run(trim(package), '--exists', output, exitcode)
+        pkg_config_has_package = exitcode == 0
+    end function pkg_config_has_package
+
+    subroutine pkg_config_find_package(prefix, package)
+        character(len=*), intent(in) :: prefix
+        character(len=*), intent(out) :: package
+        character(len=4096) :: output
+        character(len=256) :: line, word
+        integer :: exitcode, i, start, finish
+
+        package = ''
+        call pkg_config_run('', '--list-all', output, exitcode)
+        if (exitcode /= 0) return
+        start = 1
+        do i = 1, len_trim(output) + 1
+            if (i <= len_trim(output) .and. output(i:i) /= new_line('a')) cycle
+            finish = i - 1
+            if (finish >= start) then
+                line = output(start:finish)
+                call first_word(line, word)
+                if (index(trim(word), trim(prefix)) == 1) then
+                    package = trim(word)
+                    return
+                end if
+            end if
+            start = i + 1
+        end do
+    end subroutine pkg_config_find_package
+
+    subroutine first_word(line, word)
+        character(len=*), intent(in) :: line
+        character(len=*), intent(out) :: word
+        integer :: i, n
+
+        word = ''
+        n = len_trim(line)
+        i = 1
+        do while (i <= n .and. is_space(line(i:i)))
+            i = i + 1
+        end do
+        if (i > n) return
+        word = line(i:min(n, i + len(word) - 1))
+    end subroutine first_word
+
+    subroutine add_hdf5_external_modules(config)
+        type(fpm_config_t), intent(inout) :: config
+        character(len=*), parameter :: names(22) = [ character(len=16) :: &
+            'h5a', 'h5d', 'h5es', 'h5e', 'h5f', 'h5g', 'h5i', 'h5l', &
+            'h5o', 'h5p', 'h5r', 'h5s', 'h5t', 'h5vl', 'h5z', 'h5lt', &
+            'h5lib', 'h5global', 'h5_gen', 'h5fortkit', 'hdf5', 'h5']
+        integer :: i
+
+        do i = 1, size(names)
+            call add_external_module(config, trim(names(i)))
+        end do
+    end subroutine add_hdf5_external_modules
+
+    subroutine add_netcdf_external_modules(config)
+        type(fpm_config_t), intent(inout) :: config
+        character(len=*), parameter :: names(10) = [ character(len=32) :: &
+            'netcdf', 'netcdf4_f03', 'netcdf4_nc_interfaces', &
+            'netcdf4_nf_interfaces', 'netcdf_f03', &
+            'netcdf_fortv2_c_interfaces', 'netcdf_nc_data', &
+            'netcdf_nc_interfaces', 'netcdf_nf_data', 'netcdf_nf_interfaces']
+        integer :: i
+
+        do i = 1, size(names)
+            call add_external_module(config, trim(names(i)))
+        end do
+    end subroutine add_netcdf_external_modules
+
+    subroutine add_external_module(config, name)
+        type(fpm_config_t), intent(inout) :: config
+        character(len=*), intent(in) :: name
+        integer :: i
+
+        do i = 1, config%n_external_modules
+            if (trim(config%external_modules(i)) == trim(name)) return
+        end do
+        if (config%n_external_modules >= MAX_EXTERNAL_MODULES) return
+        config%n_external_modules = config%n_external_modules + 1
+        config%external_modules(config%n_external_modules) = trim(name)
+    end subroutine add_external_module
+
+    subroutine import_mpi_wrapper_flags(config, wrapper, kind, found)
+        type(fpm_config_t), intent(inout) :: config
+        character(len=*), intent(in) :: wrapper, kind
+        logical, intent(out) :: found
+        character(len=*), parameter :: compile_options(3) = [ character(len=32) :: &
+            '--showme:compile', '-compile-info', '-show' ]
+        character(len=*), parameter :: link_options(3) = [ character(len=32) :: &
+            '--showme:link', '-link-info', '-show' ]
+        character(len=32) :: option
+        character(len=4096) :: output
+        integer :: i, exitcode
+
+        found = .false.
+        do i = 1, 3
+            if (trim(kind) == 'compile') then
+                option = compile_options(i)
+            else
+                option = link_options(i)
+            end if
+            call command_run(trim(wrapper), trim(option), output, exitcode)
+            if (exitcode /= 0) cycle
+            call append_command_flags(output, config, &
+                skip_command=(index(trim(option), 'showme') == 0))
+            found = .true.
+            return
+        end do
+    end subroutine import_mpi_wrapper_flags
+
+    subroutine command_run(command, option, output, exitcode)
+        character(len=*), intent(in) :: command, option
+        character(len=*), intent(out) :: output
+        integer, intent(out) :: exitcode
+        character(len=512) :: tmpfile
+        character(len=:), allocatable :: packed
+        integer :: n_args
+
+        output = ''
+        call make_tmpfile('fo-command', tmpfile)
+        n_args = 0
+        call argv_push(packed, n_args, trim(command))
+        if (len_trim(option) > 0) call argv_push(packed, n_args, trim(option))
+        call process_run_argv_logged('', packed, n_args, trim(tmpfile), .false., &
+            30, exitcode)
+        if (exitcode == 0) call read_text_file(trim(tmpfile), output)
+        call delete_tmpfile(trim(tmpfile))
+    end subroutine command_run
+
+    subroutine pkg_config_run(package, option, output, exitcode)
+        character(len=*), intent(in) :: package, option
+        character(len=*), intent(out) :: output
+        integer, intent(out) :: exitcode
+
+        character(len=512) :: tmpfile
+        character(len=:), allocatable :: packed
+        integer :: n_args
+
+        output = ''
+        call make_tmpfile('fo-pkg-config', tmpfile)
+        n_args = 0
+        call argv_push(packed, n_args, 'pkg-config')
+        if (len_trim(option) > 0) call argv_push(packed, n_args, trim(option))
+        if (len_trim(package) > 0) call argv_push(packed, n_args, trim(package))
+        call process_run_argv_logged('', packed, n_args, trim(tmpfile), .false., &
+            30, exitcode)
+        if (exitcode == 0) call read_text_file(trim(tmpfile), output)
+        call delete_tmpfile(trim(tmpfile))
+    end subroutine pkg_config_run
+
+    subroutine append_pkg_config_flags(output, config)
+        character(len=*), intent(in) :: output
+        type(fpm_config_t), intent(inout) :: config
+
+        integer :: i, n, start, finish
+        character(len=256) :: token
+
+        n = len_trim(output)
+        i = 1
+        do while (i <= n)
+            do while (i <= n .and. is_space(output(i:i)))
+                i = i + 1
+            end do
+            if (i > n) exit
+            start = i
+            do while (i <= n .and. .not. is_space(output(i:i)))
+                i = i + 1
+            end do
+            finish = min(i - 1, start + len(token) - 1)
+            token = ''
+            token(:finish - start + 1) = output(start:finish)
+            call append_provider_token(trim(token), config)
+        end do
+    end subroutine append_pkg_config_flags
+
+    subroutine append_command_flags(output, config, skip_command)
+        character(len=*), intent(in) :: output
+        type(fpm_config_t), intent(inout) :: config
+        logical, intent(in) :: skip_command
+
+        integer :: i, n, start, finish
+        logical :: skipped
+        character(len=256) :: token
+
+        n = len_trim(output)
+        i = 1
+        skipped = .not. skip_command
+        do while (i <= n)
+            do while (i <= n .and. is_space(output(i:i)))
+                i = i + 1
+            end do
+            if (i > n) exit
+            start = i
+            do while (i <= n .and. .not. is_space(output(i:i)))
+                i = i + 1
+            end do
+            finish = min(i - 1, start + len(token) - 1)
+            token = ''
+            token(:finish - start + 1) = output(start:finish)
+            if (.not. skipped) then
+                skipped = .true.
+            else
+                call append_provider_token(trim(token), config)
+            end if
+        end do
+    end subroutine append_command_flags
+
+    subroutine append_provider_token(token, config)
+        character(len=*), intent(in) :: token
+        type(fpm_config_t), intent(inout) :: config
+
+        if (len_trim(token) == 0) return
+        if (len_trim(token) >= 3 .and. token(1:2) == '-l') then
+            call add_link_lib(config, trim(token(3:)))
+        else if (token(1:1) == '-') then
+            ! fpm separates link flags and build flags; fo's compiler backend
+            ! uses one translated stream for both phases.  These options are
+            ! valid in both contexts and preserve provider-specific paths,
+            ! rpaths, pthread/OpenMP settings, and wrapper flags.
+            call append_config_flag(trim(token), config)
+        end if
+    end subroutine append_provider_token
+
+    logical pure function is_space(ch)
+        character(len=1), intent(in) :: ch
+
+        is_space = ch == ' ' .or. ch == char(9) .or. ch == char(10) .or. &
+            ch == char(13)
+    end function is_space
 
 end module fo_fpm_config

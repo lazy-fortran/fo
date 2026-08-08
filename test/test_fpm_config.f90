@@ -13,6 +13,9 @@ program test_fpm_config
     call test_init_defaults()
     call test_parse_missing_file()
     call test_dotted_dependency_keys()
+    call test_blas_metapackage()
+    call test_source_metapackages()
+    call test_system_metapackages()
     call test_flags_with_equals_inline()
     call test_flags_multiline_array()
     call test_preprocess_macros()
@@ -136,6 +139,157 @@ contains
         end if
         call execute_command_line('rm -rf '//dir, wait=.true.)
     end subroutine test_dotted_dependency_keys
+
+    subroutine test_blas_metapackage()
+        !! The oracle is the provider contract: when pkg-config has a BLAS
+        !! provider, fo must import at least one provider flag; when none is
+        !! installed, the metapackage must fail instead of silently guessing.
+        type(fpm_config_t) :: c
+        integer :: ierr, u, ios, exitstat, i
+        logical :: provider_available
+        character(len=*), parameter :: candidates(4) = [ character(len=32) :: &
+            'mkl-dynamic-lp64-tbb', 'openblas', 'blas', 'flexiblas' ]
+        character(len=*), parameter :: dir = '/tmp/fo_test_blas_meta'
+
+        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        open (newunit=u, file=dir//'/fpm.toml', status='replace', iostat=ios)
+        if (ios /= 0) then
+            call assert(.false., 'blas_metapackage: cannot write fpm.toml')
+            return
+        end if
+        write (u, '(a)') 'name = "blas-metapackage"'
+        write (u, '(a)') 'dependencies.blas = "*"'
+        close (u)
+
+        provider_available = .false.
+        do i = 1, size(candidates)
+            call execute_command_line('pkg-config --exists '//trim(candidates(i))// &
+                ' >/dev/null 2>&1', wait=.true., exitstat=exitstat)
+            if (exitstat == 0) provider_available = .true.
+        end do
+
+        call fpm_config_parse(dir, c, ierr)
+        call assert(c%blas, 'blas_metapackage: request is recorded')
+        call assert((ierr == 0) .eqv. provider_available, &
+            'blas_metapackage: provider availability controls resolution')
+        if (ierr == 0) then
+            call assert(c%n_link_libs > 0 .or. c%n_flags > 0, &
+                'blas_metapackage: provider flags are imported')
+        end if
+        call execute_command_line('rm -rf '//dir, wait=.true.)
+    end subroutine test_blas_metapackage
+
+    subroutine test_source_metapackages()
+        !! stdlib and minpack are fpm metapackages backed by pinned git
+        !! dependencies.  The oracle is the dependency contract, not a copy of
+        !! fo's parser: both source names and the stdlib test dependency must be
+        !! present after resolution.
+        type(fpm_config_t) :: c
+        integer :: ierr, u, ios
+        character(len=*), parameter :: dir = '/tmp/fo_test_source_meta'
+
+        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        open (newunit=u, file=dir//'/fpm.toml', status='replace', iostat=ios)
+        if (ios /= 0) then
+            call assert(.false., 'source_metapackages: cannot write fpm.toml')
+            return
+        end if
+        write (u, '(a)') 'name = "source-metapackages"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'stdlib = "*"'
+        write (u, '(a)') 'minpack = "*"'
+        close (u)
+
+        call fpm_config_parse(dir, c, ierr)
+        call assert(ierr == 0, 'source_metapackages: resolution succeeds')
+        call assert(c%stdlib .and. c%minpack, &
+            'source_metapackages: requests are recorded')
+        call assert(has_dependency(c, 'stdlib'), &
+            'source_metapackages: stdlib source dependency is added')
+        call assert(has_dependency(c, 'minpack'), &
+            'source_metapackages: minpack source dependency is added')
+        call assert(has_dev_dependency(c, 'test-drive'), &
+            'source_metapackages: test-drive dev dependency is added')
+        call execute_command_line('rm -rf '//dir, wait=.true.)
+    end subroutine test_source_metapackages
+
+    subroutine test_system_metapackages()
+        !! hdf5, netcdf, and mpi are resolved from the local system.  The
+        !! independent oracle asks the provider tools whether each package is
+        !! available, then checks that fo agrees and imports usable metadata.
+        type(fpm_config_t) :: c
+        integer :: ierr, u, ios, exitstat
+        logical :: available
+        character(len=*), parameter :: dir = '/tmp/fo_test_system_meta'
+
+        call execute_command_line('mkdir -p '//dir, wait=.true.)
+        open (newunit=u, file=dir//'/fpm.toml', status='replace', iostat=ios)
+        if (ios /= 0) then
+            call assert(.false., 'system_metapackages: cannot write fpm.toml')
+            return
+        end if
+        write (u, '(a)') 'name = "system-metapackages"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'hdf5 = "*"'
+        write (u, '(a)') 'netcdf = "*"'
+        write (u, '(a)') 'mpi = "*"'
+        close (u)
+
+        available = .true.
+        call execute_command_line('pkg-config --exists hdf5 >/dev/null 2>&1', &
+            wait=.true., exitstat=exitstat)
+        available = available .and. exitstat == 0
+        call execute_command_line('pkg-config --exists netcdf >/dev/null 2>&1', &
+            wait=.true., exitstat=exitstat)
+        available = available .and. exitstat == 0
+        call execute_command_line('pkg-config --exists netcdf-fortran >/dev/null 2>&1', &
+            wait=.true., exitstat=exitstat)
+        available = available .and. exitstat == 0
+        call execute_command_line('mpifort --version >/dev/null 2>&1', &
+            wait=.true., exitstat=exitstat)
+        available = available .and. exitstat == 0
+
+        call fpm_config_parse(dir, c, ierr)
+        call assert((ierr == 0) .eqv. available, &
+            'system_metapackages: provider availability controls resolution')
+        if (ierr == 0) then
+            call assert(c%hdf5 .and. c%netcdf .and. c%mpi, &
+                'system_metapackages: requests are recorded')
+            call assert(c%n_link_libs > 0 .and. c%n_flags > 0, &
+                'system_metapackages: provider flags are imported')
+            call assert(c%n_external_modules > 0, &
+                'system_metapackages: external modules are recorded')
+        end if
+        call execute_command_line('rm -rf '//dir, wait=.true.)
+    end subroutine test_system_metapackages
+
+    logical function has_dependency(c, name)
+        type(fpm_config_t), intent(in) :: c
+        character(len=*), intent(in) :: name
+        integer :: i
+
+        has_dependency = .false.
+        do i = 1, c%n_deps
+            if (trim(c%deps(i)%name) == trim(name)) then
+                has_dependency = .true.
+                return
+            end if
+        end do
+    end function has_dependency
+
+    logical function has_dev_dependency(c, name)
+        type(fpm_config_t), intent(in) :: c
+        character(len=*), intent(in) :: name
+        integer :: i
+
+        has_dev_dependency = .false.
+        do i = 1, c%n_dev_deps
+            if (trim(c%dev_deps(i)%name) == trim(name)) then
+                has_dev_dependency = .true.
+                return
+            end if
+        end do
+    end function has_dev_dependency
 
     subroutine test_flags_with_equals_inline()
         !! Flags with '=' (e.g. -fsanitize=address) must be preserved verbatim
