@@ -178,11 +178,6 @@ contains
         call bootstrap_external_deps(project_dir, config, lf, exitcode)
         if (exitcode /= 0) return
 
-        ! External dependencies only become part of the resolved source closure
-        ! after bootstrap has acquired them. Merge their link requirements now
-        ! as well as the path dependencies that were available before it.
-        call merge_dep_link_libs(project_dir, config)
-
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
         allocate (stamp_roots(MAX_RESOLVED))
@@ -497,8 +492,8 @@ contains
             lib_objs(MAX_SRC_OBJS))
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
-        call collect_current_lib_objs(project_dir, config, obj_dir, lib_objs, &
-            n_lib_objs)
+        call collect_current_lib_objs(project_dir, config, obj_dir, dep_includes, &
+            n_dep_includes, lib_objs, n_lib_objs)
 
         call compile_and_run_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
             bin_dir, dep_includes, n_dep_includes, &
@@ -576,8 +571,8 @@ contains
             lib_objs(MAX_SRC_OBJS))
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
-        call collect_current_lib_objs(project_dir, config, obj_dir, lib_objs, &
-            n_lib_objs)
+        call collect_current_lib_objs(project_dir, config, obj_dir, dep_includes, &
+            n_dep_includes, lib_objs, n_lib_objs)
 
         call compile_and_run_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
             bin_dir, dep_includes, n_dep_includes, &
@@ -762,23 +757,23 @@ contains
         type(resolved_src_t), allocatable :: deps(:)
         type(fpm_config_t), allocatable :: dep_config
         integer :: i, n_deps, n_unresolved, ierr
+        integer :: n_obj_seen
+        character(len=512), allocatable :: obj_basenames(:)
 
         n_dep_includes = 0
         n_dep_objs = 0
-        allocate (deps(MAX_RESOLVED))
+        n_obj_seen = 0
+        allocate (deps(MAX_RESOLVED), obj_basenames(MAX_DEP_OBJS))
         allocate (dep_config)
-        call collect_external_module_dirs(config%external_modules, &
-            config%n_external_modules, dep_includes, n_dep_includes, MAX_DEP_DIRS)
-        if (config%implicit_typing) allow_implicit_typing = .true.
+        call collect_dep_artifacts(project_dir, config, dep_includes, &
+            n_dep_includes, dep_objs, n_dep_objs, obj_basenames, n_obj_seen)
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
         if (ierr /= 0) return
         do i = 1, n_deps
             call fpm_config_parse(deps(i)%dir, dep_config, ierr)
             if (ierr /= 0) cycle
-            call collect_external_module_dirs(dep_config%external_modules, &
-                dep_config%n_external_modules, dep_includes, n_dep_includes, &
-                MAX_DEP_DIRS)
-            if (dep_config%implicit_typing) allow_implicit_typing = .true.
+            call collect_dep_artifacts(deps(i)%dir, dep_config, dep_includes, &
+                n_dep_includes, dep_objs, n_dep_objs, obj_basenames, n_obj_seen)
         end do
     end subroutine find_dep_artifacts
 
@@ -1014,12 +1009,10 @@ contains
             all_units(n_all) = units_c(i)
         end do
 
-        ! Fold every locally available dependency library into the same unit
-        ! set, so the module DAG spans packages and the content-addressed
-        ! compile loop builds deps once and caches them like first-party code.
-        ! This also avoids trusting a partial fpm profile merely because it
-        ! happens to contain some dependency objects.
-        call add_dep_sources(project_dir, all_units, n_all, deps, n_deps_resolved)
+        ! Fold path dependencies and any missing external-dependency module
+        ! providers into the same source-ordered native DAG.
+        call add_dep_sources(project_dir, all_units, n_all, deps, n_deps_resolved, &
+            dep_includes, n_dep_includes)
 
         call build_dag_from_units(all_units, n_all, dag, filenames, is_test_arr, is_prog)
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
@@ -1303,24 +1296,29 @@ contains
     end subroutine append_compile_failure_source
 
 
-    subroutine add_dep_sources(project_dir, all_units, n_all, deps, n_deps)
-        !! Scan every transitive dependency's library source dir and append
+    subroutine add_dep_sources(project_dir, all_units, n_all, deps, n_deps, &
+            dep_includes, n_dep_includes)
+        !! Scan every transitive path-dependency's library source dir and append
         !! its module units to all_units. Program units in a dep are skipped: a
         !! dependency contributes a library, never an executable of ours. The
         !! resolved dep list is returned so the caller can also compile each
-        !! dep's C sources for linking.
+        !! dep's C sources for linking. Acquired external dependencies normally
+        !! keep using fpm artifacts; only source providers for modules absent
+        !! from those artifacts are added to the native DAG.
         character(len=*), intent(in) :: project_dir
         type(scan_unit_t), allocatable, intent(inout) :: all_units(:)
         integer, intent(inout) :: n_all
         type(resolved_src_t), intent(out) :: deps(MAX_RESOLVED)
         integer, intent(out) :: n_deps
+        character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
+        integer, intent(in) :: n_dep_includes
 
         type(scan_unit_t), allocatable :: ud(:), grown(:)
         integer :: n_unres, ierr, d, j, nu, old_n
 
         n_deps = 0
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unres, ierr)
-        if (ierr /= 0 .or. n_deps == 0) return
+        if (ierr /= 0) return
 
         do d = 1, n_deps
             call scan_dir(trim(deps(d)%src_dir), ud, nu, ierr)
@@ -1335,7 +1333,96 @@ contains
             end do
             call move_alloc(grown, all_units)
         end do
+        call add_missing_external_dep_sources(project_dir, all_units, n_all, &
+            dep_includes, n_dep_includes)
     end subroutine add_dep_sources
+
+    subroutine add_missing_external_dep_sources(project_dir, units, n_units, &
+            dep_includes, n_dep_includes)
+        !! Repair a partial fpm dependency profile without compiling the entire
+        !! external dependency closure. Scan direct acquired dependency sources,
+        !! then append only providers required by an existing unit for which no
+        !! module artifact exists. Repeat to include the missing providers'
+        !! dependencies as well.
+        character(len=*), intent(in) :: project_dir
+        type(scan_unit_t), allocatable, intent(inout) :: units(:)
+        integer, intent(inout) :: n_units
+        character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
+        integer, intent(in) :: n_dep_includes
+
+        type(fpm_config_t), allocatable :: config, dep_config
+        type(scan_unit_t), allocatable :: candidates(:), scanned(:)
+        character(len=512) :: dep_dir, src_dir, modpath
+        integer :: ierr, i, j, k, n_candidates, n_scanned, old_n
+        logical :: found, added
+
+        allocate (config, dep_config)
+        allocate (candidates(0))
+        n_candidates = 0
+        call fpm_config_parse(project_dir, config, ierr)
+        if (ierr /= 0) return
+        do i = 1, config%n_deps
+            if (dep_kind(config%deps(i)) == DEP_PATH) cycle
+            dep_dir = trim(project_dir)//'/build/dependencies/'// &
+                trim(config%deps(i)%name)
+            call fpm_config_parse(dep_dir, dep_config, ierr)
+            if (ierr /= 0) cycle
+            src_dir = trim(dep_dir)//'/'//trim(dep_config%source_dir)
+            call scan_dir(src_dir, scanned, n_scanned, ierr)
+            if (ierr /= 0) cycle
+            call append_module_units(candidates, n_candidates, scanned, n_scanned)
+        end do
+
+        do
+            added = .false.
+            old_n = n_units
+            do i = 1, old_n
+                do j = 1, units(i)%n_deps
+                    if (unit_set_defines_module(units, n_units, units(i)%deps(j))) cycle
+                    call find_dep_mod_file(units(i)%deps(j), dep_includes, &
+                        n_dep_includes, modpath, found)
+                    if (found) cycle
+                    do k = 1, n_candidates
+                        if (trim(candidates(k)%module_name) /= &
+                            trim(units(i)%deps(j))) cycle
+                        call append_module_unit(units, n_units, candidates(k))
+                        added = .true.
+                        exit
+                    end do
+                end do
+            end do
+            if (.not. added) exit
+        end do
+    end subroutine add_missing_external_dep_sources
+
+    logical function unit_set_defines_module(units, n_units, name) result(found)
+        type(scan_unit_t), intent(in) :: units(:)
+        integer, intent(in) :: n_units
+        character(len=*), intent(in) :: name
+
+        integer :: i
+
+        found = .false.
+        do i = 1, n_units
+            if (trim(units(i)%module_name) /= trim(name)) cycle
+            found = .true.
+            return
+        end do
+    end function unit_set_defines_module
+
+    subroutine append_module_unit(units, n_units, candidate)
+        type(scan_unit_t), allocatable, intent(inout) :: units(:)
+        integer, intent(inout) :: n_units
+        type(scan_unit_t), intent(in) :: candidate
+
+        type(scan_unit_t), allocatable :: grown(:)
+
+        allocate (grown(n_units + 1))
+        if (n_units > 0) grown(1:n_units) = units(1:n_units)
+        n_units = n_units + 1
+        grown(n_units) = candidate
+        call move_alloc(grown, units)
+    end subroutine append_module_unit
 
     subroutine append_module_units(units, n_units, candidates, n_candidates)
         type(scan_unit_t), allocatable, intent(inout) :: units(:)
@@ -2518,10 +2605,12 @@ contains
         if (.not. slow) slow = index(trim(lower_name), '_slow_') > 0
     end function is_slow_name
 
-    subroutine collect_current_lib_objs(project_dir, config, obj_dir, lib_objs, &
-            n_lib_objs)
+    subroutine collect_current_lib_objs(project_dir, config, obj_dir, dep_includes, &
+            n_dep_includes, lib_objs, n_lib_objs)
         character(len=*), intent(in) :: project_dir, obj_dir
         type(fpm_config_t), intent(in) :: config
+        character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
+        integer, intent(in) :: n_dep_includes
         character(len=512), intent(out) :: lib_objs(MAX_SRC_OBJS)
         integer, intent(out) :: n_lib_objs
 
@@ -2551,7 +2640,8 @@ contains
                 all_units(n_all) = units(i)
             end do
         end if
-        call add_dep_sources(project_dir, all_units, n_all, deps, n_deps)
+        call add_dep_sources(project_dir, all_units, n_all, deps, n_deps, &
+            dep_includes, n_dep_includes)
 
         if (n_all > 0) then
             allocate (filenames(MAX_NODES), is_prog(MAX_NODES), &

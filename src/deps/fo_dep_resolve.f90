@@ -2,12 +2,11 @@ module fo_dep_resolve
     !! Resolve a project's dependency closure to the set of library source
     !! directories fo must compile alongside the project's own sources.
     !!
-    !! Dependencies with a local source tree are resolved transitively here:
-    !! path deps use their declared path, while acquired git/registry deps live
-    !! under build/dependencies. Each dep's own fpm.toml is parsed for its
-    !! source-dir and further dependencies, walked to a fixpoint with a visit
-    !! guard. Unacquired external deps are reported separately so the build can
-    !! fetch them before asking for the source closure again.
+    !! Path dependencies are resolved transitively here: each path dep's own
+    !! fpm.toml is parsed for its source-dir and its further path deps, walked to
+    !! a fixpoint with a visit guard. Git and registry deps are classified and
+    !! reported separately; a dep whose modules are never `use`d contributes no
+    !! compiles because the module DAG only pulls in reachable units.
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, dep_kind, &
         DEP_PATH, DEP_GIT, DEP_REGISTRY, add_link_lib
     implicit none
@@ -151,16 +150,11 @@ contains
 
         do i = 1, cfg%n_deps
             kind = dep_kind(cfg%deps(i))
-            if (kind == DEP_PATH) then
-                call resolve_path_dep(dir, trim(cfg%deps(i)%path), dep_dir)
-            else
-                dep_dir = trim(dir)//'/build/dependencies/'// &
-                    trim(cfg%deps(i)%name)
-                if (.not. has_manifest(dep_dir)) then
-                    n_unresolved = n_unresolved + 1
-                    cycle
-                end if
+            if (kind /= DEP_PATH) then
+                n_unresolved = n_unresolved + 1
+                cycle
             end if
+            call resolve_path_dep(dir, trim(cfg%deps(i)%path), dep_dir)
             seen = .false.
             do k = 1, n_out
                 if (trim(out(k)%dir) == trim(dep_dir)) then
@@ -173,7 +167,6 @@ contains
             ! on the resolved dep dir so a diamond is compiled once.
             if (.not. seen) then
                 call record_dep_src(cfg%deps(i)%name, dep_dir, out, n_out)
-                out(n_out)%kind = kind
                 call walk(dep_dir, out, n_out, n_unresolved, ierr, depth + 1)
                 ierr = 0
             end if
