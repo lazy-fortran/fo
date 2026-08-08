@@ -35,6 +35,8 @@ contains
         call check(dialect%kind == COMPILER_GFORTRAN, 'gfortran is identified')
         call check(index(dialect%base_flags(), '-fimplicit-none') > 0, &
             'gfortran keeps implicit-none')
+        call check(index(dialect%base_flags(), '-cpp') > 0, &
+            'gfortran preprocesses lowercase Fortran sources')
         call check(index(dialect%module_flags('/tmp/mod'), '-J') > 0, &
             'gfortran uses -J for modules')
         call check(dialect%supports_fuse_ld(), 'gfortran supports fuse-ld')
@@ -50,6 +52,8 @@ contains
             'nvfortran uses the free-form flag')
         call check(index(dialect%base_flags(), '-Mbackslash') > 0, &
             'nvfortran preserves backslashes in character literals')
+        call check(index(dialect%base_flags(), '-Mpreprocess') > 0, &
+            'nvfortran preprocesses lowercase Fortran sources')
         call check(trim(dialect%translate_flag('-ffree-form')) == '-Mfree', &
             'nvfortran translates fpm free-form flags')
         call check(len_trim(dialect%translate_flag('-fimplicit-none')) == 0, &
@@ -72,8 +76,10 @@ contains
 
         dialect = compiler_dialect('ifx')
         call check(dialect%kind == COMPILER_IFX, 'ifx is identified')
-        call check(trim(dialect%base_flags()) == '-free', &
+        call check(index(dialect%base_flags(), '-free') > 0, &
             'ifx uses the free-form flag')
+        call check(index(dialect%base_flags(), '-fpp') > 0, &
+            'ifx preprocesses lowercase Fortran sources')
         call check(trim(dialect%translate_flag('-ffree-form')) == '-free', &
             'ifx translates fpm free-form flags')
         call check(index(dialect%module_flags('/tmp/mod'), '-module') > 0, &
@@ -90,6 +96,8 @@ contains
 
         dialect = compiler_dialect('flang-new')
         call check(dialect%kind == COMPILER_FLANG, 'flang is identified')
+        call check(index(dialect%base_flags(), '-cpp') > 0, &
+            'flang preprocesses lowercase Fortran sources')
         call check(index(dialect%module_flags('/tmp/mod'), '-module-dir') > 0, &
             'flang uses -module-dir for modules')
         call check(trim(dialect%openmp_flag()) == '-fopenmp', &

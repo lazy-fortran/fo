@@ -33,6 +33,7 @@ program test_backend_gfortran
     call test_compiler_switch_clears_the_tree()
     call test_slow_test_gets_its_own_timeout()
     call test_gfortran_builds_manifest_example()
+    call test_gfortran_preprocesses_lowercase_f90()
     call test_gfortran_builds_nested_auto_example()
     call test_gfortran_builds_c_source_with_public_header()
     call test_gfortran_builds_path_dependency()
@@ -60,6 +61,45 @@ program test_backend_gfortran
     call report('backend_gfortran')
 
 contains
+
+    subroutine test_gfortran_preprocesses_lowercase_f90()
+        character(len=512) :: project_dir, log_file
+        integer :: u, exitcode
+
+        call make_tmp_path('fo_preprocess_project', project_dir)
+        call make_tmp_path('fo_preprocess_log', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        call make_dir(trim(project_dir)//'/app')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "preprocess_fixture"'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/src/fixture.f90', &
+            status='replace')
+        write (u, '(a)') 'module preprocess_fixture'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'subroutine active_branch'
+        write (u, '(a)') '#ifdef FO_INACTIVE_BRANCH'
+        write (u, '(a)') 'call symbol_that_must_not_be_linked'
+        write (u, '(a)') '#endif'
+        write (u, '(a)') 'end subroutine active_branch'
+        write (u, '(a)') 'end module preprocess_fixture'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/app/main.f90', &
+            status='replace')
+        write (u, '(a)') 'program main'
+        write (u, '(a)') 'use preprocess_fixture, only: active_branch'
+        write (u, '(a)') 'call active_branch'
+        write (u, '(a)') 'end program main'
+        close (u)
+
+        call gfortran_build(project_dir, log_file, exitcode, use_cache=.false.)
+        call assert(exitcode == 0, &
+            'lowercase .f90 preprocesses inactive branches before linking')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_gfortran_preprocesses_lowercase_f90
 
     subroutine test_gfortran_passes_manifest_test_arguments()
         character(len=512) :: project_dir, log_file

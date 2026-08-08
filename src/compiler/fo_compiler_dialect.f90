@@ -63,13 +63,13 @@ contains
 
         select case (self%kind)
         case (COMPILER_GFORTRAN)
-            flags = '-ffree-line-length-none -fimplicit-none -pipe'
+            flags = '-ffree-line-length-none -fimplicit-none -cpp -pipe'
         case (COMPILER_NVFORTRAN)
-            flags = '-Mfree -Mbackslash'
+            flags = '-Mfree -Mbackslash -Mpreprocess'
         case (COMPILER_IFX)
-            flags = '-free'
+            flags = '-free -fpp'
         case (COMPILER_FLANG)
-            flags = '-fimplicit-none'
+            flags = '-fimplicit-none -cpp'
         case default
             flags = ''
         end select
@@ -165,7 +165,7 @@ contains
             case ('-ffixed-form')
                 mapped = '-Mnofree'
             case ('-fimplicit-none', '-fno-implicit-none', &
-                  '-Werror=implicit-interface')
+                    '-Werror=implicit-interface')
                 mapped = ''
             end select
         case (COMPILER_IFX)
