@@ -135,8 +135,29 @@ static int fo_str_contains(const char *hay, const char *needle) {
     return strstr(hay, needle) != NULL;
 }
 
+/* Profile filters are matched against the directory portion of a path.  A
+   compiler name is also allowed in a source basename (for example
+   semantic_analyzer_nvfortran_wrappers.f90), so matching the whole path would
+   make a GNU profile look like an NVHPC profile. */
+static int fo_directory_contains(const char *path, const char *needle) {
+    const char *last_slash;
+    const char *match;
+    size_t needle_len;
+
+    if (needle == NULL || needle[0] == '\0') return 1;
+    last_slash = strrchr(path, '/');
+    if (last_slash == NULL) return 0;
+    needle_len = strlen(needle);
+    match = path;
+    while ((match = strstr(match, needle)) != NULL) {
+        if (match + needle_len <= last_slash) return 1;
+        match++;
+    }
+    return 0;
+}
+
 /* Recursively collect regular files under root whose basename contains infix
-   and ends with suffix, and whose full path contains path_needle (when set).
+   and ends with suffix, and whose directory path contains path_needle (when set).
    Matches are written to out as NUL-separated paths; returns the count, or -1
    if the buffer overflows or a hard error occurs. Replaces a find pipeline. */
 static int fo_collect_rec(const char *root, const char *infix,
@@ -173,7 +194,7 @@ static int fo_collect_rec(const char *root, const char *infix,
         if (slen > 0 && (nlen < slen ||
             strcmp(ent->d_name + (nlen - slen), suffix) != 0)) continue;
         if (!fo_str_contains(ent->d_name, infix)) continue;
-        if (!fo_str_contains(child, path_needle)) continue;
+        if (!fo_directory_contains(child, path_needle)) continue;
         plen = strlen(child);
         if (*used + (int)plen + 1 > cap) { closedir(dir); return -1; }
         memcpy(out + *used, child, plen);

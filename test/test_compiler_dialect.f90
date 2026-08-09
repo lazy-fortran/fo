@@ -2,6 +2,7 @@ program test_compiler_dialect
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         COMPILER_GFORTRAN, COMPILER_NVFORTRAN, COMPILER_IFX, COMPILER_FLANG
+    use fo_fs, only: fs_collect_mod_dirs
     use fo_util, only: make_tmpfile, delete_tmpfile
     implicit none
 
@@ -79,13 +80,32 @@ contains
         !! independent compiler oracle for the 26.5 EXIT-token regression.
         type(compiler_dialect_t) :: dialect
         character(len=512) :: compiler, object_path, command
+        character(len=512) :: module_dirs(64), dependency_module_dir
         character(len=256) :: source
-        integer :: i, status, exitcode
+        integer :: i, status, exitcode, n_module_dirs
+        logical :: module_exists
 
         call get_environment_variable('FO_FC', compiler, status=status)
         if (status /= 0 .or. len_trim(compiler) == 0) return
         dialect = compiler_dialect(trim(compiler))
         if (dialect%kind /= COMPILER_NVFORTRAN) return
+
+        ! Acquired dependencies are kept in the compiler-specific fpm profile,
+        ! not in fo's native module directory.  The direct compiler oracle must
+        ! use the same coherent NVHPC module profile as the native build.
+        dependency_module_dir = ''
+        call fs_collect_mod_dirs('build', module_dirs, n_module_dirs)
+        do i = 1, n_module_dirs
+            if (index(trim(module_dirs(i)), 'nvfortran') == 0) cycle
+            inquire (file=trim(module_dirs(i))//'/fx_dag.mod', &
+                exist=module_exists)
+            if (.not. module_exists) cycle
+            dependency_module_dir = trim(module_dirs(i))
+            exit
+        end do
+        call check(len_trim(dependency_module_dir) > 0, &
+            'nvfortran dependency module profile is available')
+        if (len_trim(dependency_module_dir) == 0) return
 
         do i = 1, 2
             call make_tmpfile('fo_nvfortran_error_stop', object_path)
@@ -95,7 +115,8 @@ contains
                 source = 'src/build/fo_ffc_cli.f90'
             end if
             command = trim(compiler)//' -Mfree -Mbackslash -Mpreprocess '// &
-                '-module build/fo/mod -Ibuild/fo/mod -c '//trim(source)// &
+                '-module build/fo/mod -Ibuild/fo/mod -I'// &
+                trim(dependency_module_dir)//' -c '//trim(source)// &
                 ' -o '//trim(object_path)
             call execute_command_line(trim(command), exitstat=exitcode)
             call check(exitcode == 0, 'nvfortran compiles '//trim(source))
