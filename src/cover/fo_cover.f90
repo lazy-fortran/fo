@@ -68,7 +68,9 @@ contains
         end if
         if (exitcode /= 0) then
             call report_stage_failure('cover', fortcov_log, 'fo cover')
-            error stop exitcode
+            ! nvfortran 26.5 lexes an identifier beginning with `exit` as
+            ! EXIT after ERROR STOP; keep the real fortcov status explicit.
+            error stop int(exitcode)
         end if
         call delete_tmpfile(fortcov_log)
     end subroutine fo_cover_run

@@ -34,7 +34,9 @@ contains
         end do
         call ffc_native_run(source, args, n_run_args, exitcode, error_msg)
         if (len_trim(error_msg) > 0) write (error_unit, '(a)') trim(error_msg)
-        if (exitcode /= 0) error stop exitcode
+        ! nvfortran 26.5 lexes an identifier beginning with `exit` as EXIT
+        ! after ERROR STOP; keep the real ffc status explicit.
+        if (exitcode /= 0) error stop int(exitcode)
     end subroutine ffc_cmd_run
 
     subroutine ffc_cmd_build()
@@ -76,7 +78,8 @@ contains
         end if
         call ffc_native_build(sources, n_sources, output, exitcode, error_msg)
         if (len_trim(error_msg) > 0) write (error_unit, '(a)') trim(error_msg)
-        if (exitcode /= 0) error stop exitcode
+        ! See the corresponding run path above for the nvfortran workaround.
+        if (exitcode /= 0) error stop int(exitcode)
     end subroutine ffc_cmd_build
 
     subroutine print_run_usage(unit)

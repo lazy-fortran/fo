@@ -2,6 +2,7 @@ program test_compiler_dialect
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         COMPILER_GFORTRAN, COMPILER_NVFORTRAN, COMPILER_IFX, COMPILER_FLANG
+    use fo_util, only: make_tmpfile, delete_tmpfile
     implicit none
 
     integer :: n_pass, n_fail
@@ -10,6 +11,7 @@ program test_compiler_dialect
     n_fail = 0
     call test_gfortran_policy()
     call test_nvfortran_policy()
+    call test_nvfortran_error_stop_sources()
     call test_ifx_policy()
     call test_flang_policy()
     call report()
@@ -70,6 +72,36 @@ contains
         call check(.not. dialect%supports_fuse_ld(), &
             'nvfortran avoids GNU linker flags')
     end subroutine test_nvfortran_policy
+
+    subroutine test_nvfortran_error_stop_sources()
+        !! Compile the real sources containing variable ERROR STOP codes with
+        !! nvfortran when that compiler is the active test lane.  This is an
+        !! independent compiler oracle for the 26.5 EXIT-token regression.
+        type(compiler_dialect_t) :: dialect
+        character(len=512) :: compiler, object_path, command
+        character(len=256) :: source
+        integer :: i, status, exitcode
+
+        call get_environment_variable('FO_FC', compiler, status=status)
+        if (status /= 0 .or. len_trim(compiler) == 0) return
+        dialect = compiler_dialect(trim(compiler))
+        if (dialect%kind /= COMPILER_NVFORTRAN) return
+
+        do i = 1, 2
+            call make_tmpfile('fo_nvfortran_error_stop', object_path)
+            if (i == 1) then
+                source = 'src/cover/fo_cover.f90'
+            else
+                source = 'src/build/fo_ffc_cli.f90'
+            end if
+            command = trim(compiler)//' -Mfree -Mbackslash -Mpreprocess '// &
+                '-module build/fo/mod -Ibuild/fo/mod -c '//trim(source)// &
+                ' -o '//trim(object_path)
+            call execute_command_line(trim(command), exitstat=exitcode)
+            call check(exitcode == 0, 'nvfortran compiles '//trim(source))
+            call delete_tmpfile(object_path)
+        end do
+    end subroutine test_nvfortran_error_stop_sources
 
     subroutine test_ifx_policy()
         type(compiler_dialect_t) :: dialect
