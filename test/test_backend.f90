@@ -33,6 +33,7 @@ program test_backend
     call test_cmake_named_test_rebuilds_changed_source()
     call test_cmake_exec_target_resolution()
     call test_cmake_affected_tests_use_registered_names()
+    call test_native_honors_auto_executables()
     call test_gfortran_named_tests_select_requested()
     call test_gfortran_named_test_restores_cached_object()
     call test_gfortran_recovers_from_root_mod_shadow()
@@ -77,6 +78,60 @@ contains
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_native_combined_build_keeps_apps
+
+    subroutine test_native_honors_auto_executables()
+        !! fpm's auto-executables switch is the oracle: an explicit executable
+        !! remains available, while an unregistered app program is not a target.
+        type(backend_t) :: b
+        integer :: exitcode, u
+        character(len=512) :: base, log_file, bin_path
+        logical :: selected_exists, ignored_exists, found
+
+        call make_tmp_path('fo_test_auto_executables', base)
+        call make_tmp_path('fo_backend_auto_executables', log_file)
+        call make_dir(trim(base)//'/app')
+        open (newunit=u, file=trim(base)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "auto_executables"'
+        close (u)
+        open (newunit=u, file=trim(base)//'/app/selected.f90', status='replace')
+        write (u, '(a)') 'program selected'
+        write (u, '(a)') 'end program selected'
+        close (u)
+        open (newunit=u, file=trim(base)//'/app/ignored.f90', status='replace')
+        write (u, '(a)') 'program ignored'
+        write (u, '(a)') 'end program ignored'
+        close (u)
+
+        b = detect_backend(base)
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'auto-executables project builds initially')
+        inquire (file=trim(base)//'/build/fo/bin/ignored', exist=ignored_exists)
+        call assert(ignored_exists, 'auto-discovered app program is initially built')
+
+        open (newunit=u, file=trim(base)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "auto_executables"'
+        write (u, '(a)') '[build]'
+        write (u, '(a)') 'auto-executables = false'
+        write (u, '(a)') '[[executable]]'
+        write (u, '(a)') 'name = "selected"'
+        write (u, '(a)') 'source-dir = "app"'
+        write (u, '(a)') 'main = "selected.f90"'
+        close (u)
+
+        call backend_build(b, exitcode, log_file=log_file)
+        inquire (file=trim(base)//'/build/fo/bin/selected', exist=selected_exists)
+        inquire (file=trim(base)//'/build/fo/bin/ignored', exist=ignored_exists)
+        call resolve_exec_target(b, 'selected', bin_path, found)
+        call assert(exitcode == 0, 'auto-executables=false project builds')
+        call assert(found, 'explicit executable remains resolvable')
+        call resolve_exec_target(b, 'ignored', bin_path, found)
+        call assert(.not. found, 'undeclared app program is not resolvable')
+        call assert(selected_exists .and. .not. ignored_exists, &
+            'only the explicit app program is linked')
+
+        call remove_tree(base)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_native_honors_auto_executables
 
     subroutine test_detect_cmake_override()
         interface

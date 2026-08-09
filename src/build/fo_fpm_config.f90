@@ -8,6 +8,7 @@ module fo_fpm_config
     public :: fpm_config_init, fpm_config_parse
     public :: dep_kind, DEP_PATH, DEP_GIT, DEP_REGISTRY
     public :: manifest_exe_name, manifest_test_name, manifest_example_name
+    public :: manifest_executable_selected
     public :: manifest_test_args
     public :: MAX_LINK_LIBS, add_link_lib
     public :: MAX_EXTERNAL_MODULES
@@ -443,6 +444,18 @@ contains
             end if
         end do
     end function manifest_exe_name
+
+    logical function manifest_executable_selected(config, app_dir, stem) result(selected)
+        !! fpm only auto-discovers app programs when auto-executables is true.
+        !! With it disabled, an app program is buildable only when an explicit
+        !! executable entry names its source stem.
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: app_dir, stem
+
+        selected = config%auto_executables
+        if (.not. selected) selected = len_trim(manifest_exe_name( &
+            config, app_dir, stem)) > 0
+    end function manifest_executable_selected
 
     function manifest_test_name(config, test_dir, stem) result(name)
         type(fpm_config_t), intent(in) :: config

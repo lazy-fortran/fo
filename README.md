@@ -65,6 +65,7 @@ and compact output. Supported manifest behavior includes:
 - C preprocessing macros
 - Fortran source form, implicit typing, and implicit external settings
 - the OpenMP metapackage
+- `build.auto-executables = false` with explicit `[[executable]]` selection
 - release, debug, and sanitizer profiles
 
 `fo run` accepts fpm-style `--target`, `--example`, `--profile`, and `--flag`

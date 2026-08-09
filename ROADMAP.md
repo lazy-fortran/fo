@@ -1,6 +1,6 @@
 # fo roadmap
 
-Snapshot: 2026-08-07. fo is the native Fortran build, test, lint, dependency,
+Snapshot: 2026-08-09. fo is the native Fortran build, test, lint, dependency,
 and affected-test-selection driver. It must make work and failures visible.
 Speed never permits dropping a source, result, dependency edge, or diagnostic.
 
@@ -18,6 +18,12 @@ Current main does not have a green remote gate:
 [run 31107864451](https://github.com/lazy-fortran/fo/actions/runs/31107864451)
 failed the git-dependency bootstrap test and a later run was cancelled. Restore
 that exact gate before expanding the workflow.
+
+Native fpm target discovery now honors `build.auto-executables = false`:
+programs under `app/` are compiled only when an explicit `[[executable]]` entry
+selects them. The native backend regression also checks that the selected target
+resolves through the `fo exec` target path while an undeclared app program does
+not.
 
 ### Current compiler handoff (2026-08-07)
 

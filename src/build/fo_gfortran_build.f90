@@ -1,5 +1,6 @@
 module fo_gfortran_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, manifest_exe_name, &
+        manifest_executable_selected, &
         manifest_test_name, manifest_test_args, manifest_example_name, dep_kind, DEP_PATH
     use fo_scan, only: scan_unit_t, scan_dir, scan_dir_regex, scan_dir_cached, &
         source_defines_module, &
@@ -22,7 +23,7 @@ module fo_gfortran_build
         process_run_argv_logged, argv_push, argv_push_split, &
         argv_push_split_nl, process_detect_nproc
     use fo_lock, only: lock_check
-    use fo_fs, only: fs_make_dir, fs_remove_file, fs_append_file, &
+    use fo_fs, only: fs_make_dir, fs_remove_tree, fs_remove_file, fs_append_file, &
         fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec, &
         fs_find_executable
     use fo_progress, only: progress_begin, progress_step, progress_end
@@ -210,7 +211,7 @@ contains
             config%example_dir, config%auto_examples .or. config%n_examples > 0, &
             mod_dir, obj_dir, dep_includes, n_dep_includes, dep_objs, n_dep_objs, lf, &
             src_objs, n_src_objs, is_prog_arr, exitcode, nc, &
-            flag_text, compiler, want_apps, use_cache)
+            flag_text, compiler, want_apps, config, use_cache)
         if (exitcode /= 0) return
 
         if (present(n_compiled)) n_compiled = nc
@@ -936,11 +937,12 @@ contains
             include_examples, mod_dir, obj_dir, &
             dep_includes, n_dep_includes, dep_objs, n_dep_objs, log_file, &
             src_objs, n_src_objs, is_prog_arr, exitcode, &
-            n_compiled, flags, compiler, include_apps, use_cache)
+            n_compiled, flags, compiler, include_apps, config, use_cache)
         character(len=*), intent(in) :: project_dir, src_dir, app_dir, example_dir
         logical, intent(in) :: include_examples
         character(len=*), intent(in) :: mod_dir, obj_dir, log_file
         character(len=*), intent(in) :: flags, compiler
+        type(fpm_config_t), intent(in) :: config
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
         integer, intent(in) :: n_dep_includes
         character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
@@ -1050,6 +1052,8 @@ contains
                 project_dir, app_dir)) cycle
             if (.not. include_apps .and. source_is_in_dir(filenames(node_id), &
                 project_dir, example_dir)) cycle
+            if (is_prog(node_id) .and. .not. app_program_selected( &
+                filenames(node_id), project_dir, app_dir, config)) cycle
             total_source = total_source + 1
             n_compdb = n_compdb + 1
             compdb_sources(n_compdb) = filenames(node_id)
@@ -1073,6 +1077,8 @@ contains
                         filenames(node_id), project_dir, app_dir)) cycle
                     if (.not. include_apps .and. source_is_in_dir( &
                         filenames(node_id), project_dir, example_dir)) cycle
+                    if (is_prog(node_id) .and. .not. app_program_selected( &
+                        filenames(node_id), project_dir, app_dir, config)) cycle
 
                     call collect_dep_keys_source_order(all_units, n_all, dag, node_id, &
                         new_mod_keys, dep_includes, &
@@ -1185,6 +1191,8 @@ contains
                     project_dir, app_dir)) cycle
                 if (.not. include_apps .and. source_is_in_dir(filenames(node_id), &
                     project_dir, example_dir)) cycle
+                if (is_prog(node_id) .and. .not. app_program_selected( &
+                    filenames(node_id), project_dir, app_dir, config)) cycle
                 call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
                 call compile_f90(project_dir, filenames(node_id), obj_path, &
                     effective_flags, log_file, &
@@ -1211,6 +1219,8 @@ contains
                 project_dir, app_dir)) cycle
             if (.not. include_apps .and. source_is_in_dir(filenames(node_id), &
                 project_dir, example_dir)) cycle
+            if (is_prog(node_id) .and. .not. app_program_selected( &
+                filenames(node_id), project_dir, app_dir, config)) cycle
             call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
             if (n_src_objs < MAX_SRC_OBJS) then
                 n_src_objs = n_src_objs + 1
@@ -1243,6 +1253,18 @@ contains
         call compile_dep_c_sources(deps, n_deps_resolved, project_dir, obj_dir, &
             log_file, src_objs, n_src_objs, is_prog_arr, exitcode)
     end subroutine compile_sources
+
+    logical function app_program_selected(source, project_dir, app_dir, config) &
+            result(selected)
+        character(len=*), intent(in) :: source, project_dir, app_dir
+        type(fpm_config_t), intent(in) :: config
+        character(len=128) :: stem
+
+        selected = .true.
+        if (.not. source_is_in_dir(source, project_dir, app_dir)) return
+        call file_basename(source, stem)
+        selected = manifest_executable_selected(config, app_dir, stem)
+    end function app_program_selected
 
     logical function source_may_emit_smod(path) result(may_emit)
         character(len=*), intent(in) :: path
@@ -1783,6 +1805,14 @@ contains
         link_flags = ''
         if (present(flags)) link_flags = flags
         exitcode = 0
+        ! Switching off auto-discovery must not leave an old app binary
+        ! addressable through `fo exec`. Re-materialize the selected targets;
+        ! link-cache hits restore them without recompiling.
+        if (.not. config%auto_executables) then
+            call fs_remove_tree(trim(bin_dir))
+            call fs_remove_tree(trim(project_dir)//'/build/fo/app')
+            call fs_make_dir(trim(bin_dir))
+        end if
         n_lib = 0
         allocate (lib_objs(MAX_SRC_OBJS))
         do i = 1, n_src_objs
