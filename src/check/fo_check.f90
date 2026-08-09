@@ -560,7 +560,13 @@ contains
         if (trim(stage) == 'test') then
             call collect_failed_test_names(log_file, res%failed_tests, &
                 res%n_failed_tests)
-            if (is_runner_crash(diag%message)) &
+            ! A signal exit reported by the target executable is a target
+            ! failure, not a crash of fo's test runner.  Keep the per-target
+            ! diagnostic and its actionable crash hint; only classify a crash
+            ! without a target-status line as a runner failure.
+            if (is_runner_crash(diag%message) .and. &
+                .not. (index(diag%message, 'fo: test target ') > 0 .and. &
+                index(diag%message, ' returned exit code') > 0)) &
                 diag%hint = 'runner crash (not a test failure); check fpm/OpenMP'
         end if
         call set_failure(res, stage, diag%target, diag%message, &

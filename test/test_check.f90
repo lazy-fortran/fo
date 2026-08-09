@@ -23,6 +23,7 @@ program test_check
 
     call test_check_from_child_reports_backend_error()
     call test_check_reports_test_failure_advice()
+    call test_check_keeps_child_crash_as_target_failure()
     call test_check_rejects_zero_exit_with_failing_summary()
     call test_check_result_json()
     call test_check_result_compact_json_success()
@@ -145,6 +146,30 @@ contains
 
         call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_check_reports_test_failure_advice
+
+    subroutine test_check_keeps_child_crash_as_target_failure()
+        !! A child can exit with a signal-shaped status while fo itself is
+        !! healthy.  The report must retain that target failure and must not
+        !! relabel it as a runner crash or turn it into a pass.
+        type(check_result_t) :: res
+        character(len=512) :: project_dir
+
+        call make_tmp_path('fo_child_crash_project', project_dir)
+        call make_child_crash_test_project(project_dir)
+        call fo_check_run(trim(project_dir)//'/test', res)
+
+        call assert(res%build_ok, 'child-crash project builds')
+        call assert(.not. res%tests_ok, 'child crash remains a target failure')
+        call assert(res%n_failed_tests == 1 .and. &
+            trim(res%failed_tests(1)) == 'test_child_crash', &
+            'child-crash report keeps the failing target name')
+        call assert(index(res%hint, 'test crashed') > 0, &
+            'child-crash report gives target crash advice')
+        call assert(index(res%hint, 'runner crash') == 0, &
+            'child-crash report does not blame the fo runner')
+
+        call remove_dir(project_dir)
+    end subroutine test_check_keeps_child_crash_as_target_failure
 
     subroutine test_check_rejects_zero_exit_with_failing_summary()
         !! A suite that exits 0 while printing a nonzero fail count leaves fo's
@@ -1017,6 +1042,25 @@ contains
         write (u, '(a)') 'end program test_fail'
         close (u)
     end subroutine make_failing_test_project
+
+    subroutine make_child_crash_test_project(project_dir)
+        character(len=*), intent(in) :: project_dir
+        integer :: u
+
+        call execute_command_line('rm -rf '//trim(project_dir))
+        call execute_command_line('mkdir -p '//trim(project_dir)//'/test')
+
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "fo_child_crash_test_project"'
+        close (u)
+
+        open (newunit=u, file=trim(project_dir)// &
+            '/test/test_child_crash.f90', status='replace')
+        write (u, '(a)') 'program test_child_crash'
+        write (u, '(a)') 'error stop 134'
+        write (u, '(a)') 'end program test_child_crash'
+        close (u)
+    end subroutine make_child_crash_test_project
 
     subroutine make_tmp_path(prefix, path)
         character(len=*), intent(in) :: prefix
