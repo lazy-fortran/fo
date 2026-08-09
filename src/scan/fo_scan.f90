@@ -12,7 +12,8 @@ module fo_scan
     implicit none
     private
 
-    public :: scan_unit_t, scan_file, scan_file_regex, scan_dir, scan_dir_cached
+    public :: scan_unit_t, scan_file, scan_file_regex, scan_dir, scan_dir_regex, &
+        scan_dir_cached
     public :: is_slow_test, source_defines_module
     public :: MAX_NAME, MAX_PATH, MAX_UNITS
 
@@ -274,6 +275,32 @@ contains
         integer, intent(out) :: n_units, ierr
         logical, intent(in), optional :: allow_regex_fallback
 
+        call scan_dir_impl(dirname, units, n_units, ierr, allow_regex_fallback, &
+            .false.)
+    end subroutine scan_dir
+
+    subroutine scan_dir_regex(dirname, units, n_units, ierr)
+        !! Scan a dependency source directory without invoking FortFront.
+        !!
+        !! Acquired dependencies have already passed their compiler's build
+        !! step. The repair path only needs module names and USE edges, and
+        !! must remain safe for valid legacy Fortran that the optional AST
+        !! frontend cannot parse or report without crashing.
+        character(len=*), intent(in) :: dirname
+        type(scan_unit_t), allocatable, intent(out) :: units(:)
+        integer, intent(out) :: n_units, ierr
+
+        call scan_dir_impl(dirname, units, n_units, ierr, .false., .true.)
+    end subroutine scan_dir_regex
+
+    subroutine scan_dir_impl(dirname, units, n_units, ierr, allow_regex_fallback, &
+            regex_only)
+        character(len=*), intent(in) :: dirname
+        type(scan_unit_t), allocatable, intent(out) :: units(:)
+        integer, intent(out) :: n_units, ierr
+        logical, intent(in), optional :: allow_regex_fallback
+        logical, intent(in) :: regex_only
+
         character(len=512), allocatable :: paths(:)
         character(len=512) :: tmpfile, line, diagnostic
         integer :: funit, iostat, sub_ierr, n_files, i
@@ -323,14 +350,20 @@ contains
         close (funit)
         call delete_tmpfile(tmpfile)
 
-        call scan_cache_load(dirname, paths, units, cache_hit)
-        if (cache_hit) then
-            n_units = n_files
-            return
+        if (.not. regex_only) then
+            call scan_cache_load(dirname, paths, units, cache_hit)
+            if (cache_hit) then
+                n_units = n_files
+                return
+            end if
         end if
 
         do i = 1, n_files
             n_units = n_units + 1
+            if (regex_only) then
+                call scan_file_regex(trim(paths(i)), units(n_units), sub_ierr)
+                cycle
+            end if
             call scan_file(trim(paths(i)), units(n_units), sub_ierr, &
                 allow_regex_fallback=allow_regex_fallback, diagnostic=diagnostic)
             if (sub_ierr /= 0) then
@@ -351,8 +384,10 @@ contains
             end if
         end do
 
-        if (n_units == n_files) call scan_cache_save(dirname, paths, units)
-    end subroutine scan_dir
+        if (.not. regex_only .and. n_units == n_files) then
+            call scan_cache_save(dirname, paths, units)
+        end if
+    end subroutine scan_dir_impl
 
     subroutine reset_scan_unit(filename, unit_info)
         character(len=*), intent(in) :: filename

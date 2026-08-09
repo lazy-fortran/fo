@@ -1,7 +1,8 @@
 module fo_gfortran_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, manifest_exe_name, &
         manifest_test_name, manifest_test_args, manifest_example_name, dep_kind, DEP_PATH
-    use fo_scan, only: scan_unit_t, scan_dir, scan_dir_cached, source_defines_module, &
+    use fo_scan, only: scan_unit_t, scan_dir, scan_dir_regex, scan_dir_cached, &
+        source_defines_module, &
         MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
     use fo_dep_update, only: dep_update_missing_sources, MAX_UPDATE_NAMES
@@ -1382,7 +1383,7 @@ contains
             call fpm_config_parse(dep_dir, dep_config, ierr)
             if (ierr /= 0) cycle
             src_dir = trim(dep_dir)//'/'//trim(dep_config%source_dir)
-            call scan_dir(src_dir, scanned, n_scanned, ierr)
+            call scan_dir_regex(src_dir, scanned, n_scanned, ierr)
             if (ierr /= 0) cycle
             call append_module_units(candidates, n_candidates, scanned, n_scanned)
         end do

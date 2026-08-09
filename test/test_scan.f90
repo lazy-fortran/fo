@@ -1,7 +1,7 @@
 program test_scan
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_scan, only: scan_unit_t, scan_file, scan_file_regex, scan_dir, &
-        is_slow_test
+        scan_dir_regex, is_slow_test
     implicit none
 
     integer :: n_pass, n_fail
@@ -25,6 +25,7 @@ program test_scan
     call test_scan_dir_empty()
     call test_scan_dir_path_with_spaces()
     call test_scan_dir_recovers_unparseable_source()
+    call test_scan_dir_regex_legacy_source()
     call test_scan_dir_skips_nested_projects()
     call test_scan_dir_skips_build_outputs()
     call test_scan_dir_skips_agent_worktrees()
@@ -487,6 +488,47 @@ contains
 
         call remove_tree(dir)
     end subroutine test_scan_dir_recovers_unparseable_source
+
+    subroutine test_scan_dir_regex_legacy_source()
+        !! Dependency repair must not send compiler-valid legacy syntax through
+        !! the optional frontend. Its line scanner still has the exact module
+        !! and USE information needed to extend the native DAG.
+        type(scan_unit_t), allocatable :: units(:)
+        integer :: n_units, ierr
+        character(len=512) :: dir
+        character(len=120) :: lines(9), support_lines(3)
+
+        call make_tmp_path('fo_test_scan_regex_only', dir, '')
+        call remove_tree(dir)
+        call make_dir(trim(dir))
+
+        lines(1) = 'module legacy_dependency'
+        lines(2) = '    use legacy_support, only: value'
+        lines(3) = '    implicit none'
+        lines(4) = 'contains'
+        lines(5) = '    subroutine emit_value()'
+        lines(6) = '        write (*, 10) value'
+        lines(7) = '    10 format (i0)'
+        lines(8) = '    end subroutine emit_value'
+        lines(9) = 'end module legacy_dependency'
+        call write_file(trim(dir)//'/legacy_dependency.f90', lines, 9)
+
+        support_lines(1) = 'module legacy_support'
+        support_lines(2) = '    integer, parameter :: value = 1'
+        support_lines(3) = 'end module legacy_support'
+        call write_file(trim(dir)//'/legacy_support.f90', support_lines, 3)
+
+        call scan_dir_regex(dir, units, n_units, ierr)
+        call assert(ierr == 0, 'scan regex-only: no error')
+        call assert(n_units == 2, 'scan regex-only: finds legacy sources')
+        call assert(trim(units(1)%module_name) == 'legacy_dependency', &
+            'scan regex-only: preserves module name')
+        call assert(units(1)%n_deps == 1 .and. &
+            trim(units(1)%deps(1)) == 'legacy_support', &
+            'scan regex-only: preserves USE dependency')
+
+        call remove_tree(dir)
+    end subroutine test_scan_dir_regex_legacy_source
 
     subroutine test_scan_dir_skips_nested_projects()
         type(scan_unit_t), allocatable :: units(:)
