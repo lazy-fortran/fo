@@ -199,6 +199,21 @@ contains
         call resolve_exec_target(b, 'demo.x', bin_path, found)
         call assert(.not. found, 'ambiguous CMake executable name is rejected')
 
+        ! A project built with both CMake and fpm holds the same executable at
+        ! build/bin and under the fpm compiler-hash tree. The canonical CMake
+        ! path wins instead of the duplicate making the target unresolvable.
+        call make_dir(trim(base)//'/build/bin')
+        call make_dir(trim(base)//'/build/gfortran_DEADBEEF/app')
+        open (newunit=u, file=trim(base)//'/build/bin/dual.x', status='replace')
+        close (u)
+        open (newunit=u, file=trim(base)//'/build/gfortran_DEADBEEF/app/dual.x', &
+            status='replace')
+        close (u)
+        call resolve_exec_target(b, 'dual.x', bin_path, found)
+        call assert(found, 'canonical CMake bin wins over a stale fpm copy')
+        call assert(trim(bin_path) == trim(base)//'/build/bin/dual.x', &
+            'resolution picks build/bin over the fpm tree')
+
         call remove_tree(base)
     end subroutine test_cmake_exec_target_resolution
 

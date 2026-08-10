@@ -25,6 +25,16 @@ contains
         inquire (file=trim(bin_path), exist=found)
         if (found) return
 
+        ! CMake's conventional output directory, checked before the recursive
+        ! scan below. A project that has also been built with fpm keeps a
+        ! second copy under build/<compiler-hash>/app, and the scan rejects
+        ! anything it finds twice. Without this probe a target that is present
+        ! at the canonical path is reported as missing purely because a stale
+        ! sibling build tree exists.
+        bin_path = trim(b%project_dir)//'/build/bin/'//trim(target)
+        inquire (file=trim(bin_path), exist=found)
+        if (found) return
+
         last_slash = index(trim(target), '/', back=.true.)
         if (last_slash > 0) return
 
