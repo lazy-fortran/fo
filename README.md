@@ -27,8 +27,14 @@ fo changed                 changed modules and reverse dependents
 fo graph [--dot]           module dependency graph
 fo lint                    native source checks and compiler warnings
 fo fmt [--check]           format or check formatting
+fo prove                   run proof/verification obligations (--json for agent output)
+fo derive                  generate scalar derived kernels under build/fo/generated/
+fo generate                alias of derive
+fo verify                  derive + prove + property tests
+fo check --proofs          fold verification into the ordinary check pipeline
 fo clean                   remove the project build tree
 fo clean --cache           also remove the shared content store
+fo clean --proof-cache     drop generated proof artifacts and certificates
 fo install [--prefix DIR]  install a release build
 fo info                    backend, source, compiler, and cache information
 fo mcp-server              MCP JSON-RPC server on standard input/output
@@ -134,3 +140,46 @@ correctly selected.
 Run `fo` with no arguments before each commit. This executes the full static,
 build, test, lint, and formatting-check pipeline. Architecture and compatibility
 details are in [doc/FO.md](doc/FO.md).
+
+## Verification pipeline
+
+`fo prove`, `fo derive`, `fo generate`, and `fo verify` drive a text-level
+verification pipeline that needs no parse tree, exactly like the linter.
+Assumptions, claims, runtime properties, and scalar symbolic derivations are
+declared as `!@` source comments:
+
+```fortran
+!@assume finite_x: x > -1.0d0
+!@property commutative: a + b == b + a
+!@claim array-bounds index_ok: n >= 1
+!@derive derived_sum: 2.0d0 * x + 3.0d0 => result
+```
+
+Each obligation is content-addressed by its directive text, the file-scoped
+assumptions it depends on, the verification policy, and the backend identity.
+Changing an unrelated implementation line does not change the key, so the
+cached proof is reused. Changing an assumption changes the key, so dependent
+proofs and generated kernels are invalidated.
+
+External provers (Why3, Lean) are invoked when installed. A missing tool never
+silently converts a `PROVED` requirement into a skipped check: it produces an
+explicit `UNKNOWN` status with a rerun command. The numeric probe backend can
+`DISPROVE` (with a minimal counterexample) but never `PROVE`, so agent JSON
+always distinguishes proof evidence (backend `why3`/`lean`) from numerical
+probe evidence (backend `probe`).
+
+Project policy lives in the manifest:
+
+```toml
+[extra.fo.verification]
+require-proof = ["generated-kernel-equivalence", "array-bounds"]
+allow-unknown = ["special-function-identity"]
+property-test-unknown = true
+lean = "auto"
+why3 = "auto"
+```
+
+`fo derive` emits scalar kernels under `build/fo/generated/` with provenance
+hashes; `fo check --proofs` folds verification into the ordinary bounded
+workflow and fails when a required proof is missing; `fo clean --proof-cache`
+drops the generated proof artifacts and certificates.

@@ -11,7 +11,7 @@ program fo_main
         collect_failed_test_names, MAX_TEST_RESULTS
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, &
         array_temporary_warnings_from_log
-    use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds
+    use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds, json_int
     use fo_check_output, only: check_result_json, check_result_compact_json, &
         check_result_full_json
     use fo_test_results, only: test_result_entry_t, &
@@ -33,6 +33,11 @@ program fo_main
     use fo_scaffold, only: scaffold_project
     use fo_bench, only: bench_result_t, fo_bench_run
     use fo_doc, only: fo_doc_run
+    use fo_verification, only: verification_config_t, &
+        verification_config_parse, claim_t, verification_scan_dir, &
+        verification_result_t, verification_run, verification_json, &
+        verification_text, derive_generate_all, derive_generated_path, &
+        verification_clear_proof_cache
     use fo_version_info, only: FO_VERSION
     implicit none
 
@@ -97,6 +102,14 @@ program fo_main
         call cmd_mcp_server()
     case ('lsp')
         call cmd_lsp()
+    case ('prove')
+        call cmd_prove()
+    case ('derive')
+        call cmd_derive()
+    case ('generate')
+        call cmd_generate()
+    case ('verify')
+        call cmd_verify()
     case ('new')
         call cmd_new()
     case ('init')
@@ -362,6 +375,10 @@ contains
         write (output_unit, '(a)') '  lock       write fo.lock for current compiler, flags, and deps'
         write (output_unit, '(a)') '  info       backend, file count, module count'
         write (output_unit, '(a)') '  info --capabilities  compiler and tooling limits'
+        write (output_unit, '(a)') '  prove      run proof/verification obligations'
+        write (output_unit, '(a)') '  derive     generate scalar derived kernels'
+        write (output_unit, '(a)') '  generate   alias of derive'
+        write (output_unit, '(a)') '  verify     derive + prove + property tests'
         write (output_unit, '(a)') ''
         write (output_unit, '(a)') 'integration:'
         write (output_unit, '(a)') '  mcp-server  MCP JSON-RPC on stdin/stdout'
@@ -446,6 +463,32 @@ contains
         end if
 
         call fo_check_run('.', res)
+
+        ! `fo check --proofs` folds the verification pipeline into the ordinary
+        ! workflow: after build+test, run proof obligations and fail when policy
+        ! requires a proof that is missing. Cheap no-op when the project has no
+        ! `!@` verification directives.
+        if (has_arg('--proofs')) then
+            block
+                type(verification_config_t) :: vcfg
+                type(claim_t) :: vclaims(512)
+                type(verification_result_t) :: vresults(512)
+                integer :: vn_claims, vn_results, vierr, vk
+                call verification_config_parse('.', vcfg)
+                call verification_scan_dir('.', vclaims, vn_claims)
+                if (vn_claims > 0) then
+                    call verification_run('.', vcfg, vclaims, vn_claims, &
+                        vresults, vn_results, vierr)
+                    write (output_unit, '(a)') &
+                        trim(verification_text(vresults, vn_results))
+                    if (vierr > 0) then
+                        write (error_unit, '(a)') &
+                            'fo: proof policy violated; rerun with: fo prove'
+                        error stop 1
+                    end if
+                end if
+            end block
+        end if
 
         select case (output_mode)
         case (1)
@@ -1527,7 +1570,7 @@ contains
         type(backend_t) :: b
         character(len=512) :: store_root, arg
         integer :: i
-        logical :: purge_store, build_removed, store_removed
+        logical :: purge_store, build_removed, store_removed, proof_cache_only
 
         ! Default clean is project-scoped: drop only this project's build/ tree
         ! (a disposable view that fo regenerates from the cache). The store at
@@ -1535,11 +1578,23 @@ contains
         ! across all projects; wiping it on a per-project clean cold-starts every
         ! other project. Purge it only when explicitly asked.
         purge_store = .false.
+        proof_cache_only = .false.
         do i = 2, command_argument_count()
             call get_command_argument(i, arg)
             if (trim(arg) == '--cache' .or. trim(arg) == '--all') &
                 purge_store = .true.
+            if (trim(arg) == '--proof-cache') proof_cache_only = .true.
         end do
+
+        if (proof_cache_only) then
+            block
+                integer :: nrem
+                call verification_clear_proof_cache(trim(b%project_dir), nrem)
+                write (output_unit, '(a)') &
+                    'proof cache cleared (generated artifacts and certificates)'
+            end block
+            return
+        end if
 
         call cache_store_root(store_root)
         b = detect_backend('.')
@@ -1623,6 +1678,90 @@ contains
             write (output_unit, '(a,i0)') 'modules: ', dag%n_nodes
         end if
     end subroutine cmd_info
+
+    subroutine cmd_prove()
+        !! Run the verification pipeline over all proof obligations and report
+        !! per-claim statuses. Exit nonzero when a policy-required proof is
+        !! missing or disproved.
+        type(verification_config_t) :: config
+        type(claim_t) :: claims(512)
+        type(verification_result_t) :: results(512)
+        integer :: n_claims, n_results, ierr, i
+        character(len=64) :: name_filter
+        logical :: as_json
+
+        name_filter = ''
+        as_json = .false.
+        do i = 2, command_argument_count()
+            call get_command_argument(i, name_filter)
+            if (trim(name_filter) == '--json') as_json = .true.
+        end do
+        call verification_config_parse('.', config)
+        call verification_scan_dir('.', claims, n_claims)
+        call verification_run('.', config, claims, n_claims, results, &
+            n_results, ierr)
+        if (as_json) then
+            write (output_unit, '(a)') trim(verification_json(results, n_results))
+            if (ierr > 0) error stop 1
+            return
+        end if
+        block
+            integer :: k
+            character(len=64) :: nm
+            do k = 1, n_results
+                if (len_trim(name_filter) == 0) exit
+                nm = results(k)%name
+                if (trim(nm) == trim(name_filter)) then
+                    write (output_unit, '(a)') trim(results(k)%status)//' '// &
+                        trim(results(k)%name)//' ('//trim(results(k)%class)//') '// &
+                        trim(results(k)%file)//':'// &
+                        trim(json_int(results(k)%line))//' backend='// &
+                        trim(results(k)%backend)//' evidence='// &
+                        trim(results(k)%evidence)
+                end if
+            end do
+        end block
+        if (len_trim(name_filter) == 0) &
+            write (output_unit, '(a)') trim(verification_text(results, n_results))
+        if (ierr > 0) error stop 1
+    end subroutine cmd_prove
+
+    subroutine cmd_derive()
+        !! Generate derived scalar kernels and report their paths and provenance.
+        type(claim_t) :: claims(512)
+        integer :: n_claims, n_generated, ierr
+
+        call verification_scan_dir('.', claims, n_claims)
+        call derive_generate_all('.', claims, n_claims, n_generated, ierr)
+        if (ierr > 0) then
+            write (error_unit, '(a,i0,a)') 'derive: ', ierr, &
+                ' derivation(s) failed'
+            error stop 1
+        end if
+        write (output_unit, '(a,i0,a)') 'derive: generated ', n_generated, &
+            ' kernel(s) under build/fo/generated/'
+    end subroutine cmd_derive
+
+    subroutine cmd_generate()
+        call cmd_derive()
+    end subroutine cmd_generate
+
+    subroutine cmd_verify()
+        !! Full pipeline: derive + prove + property tests. Same as `fo prove`
+        !! but always runs derivation generation first.
+        type(verification_config_t) :: config
+        type(claim_t) :: claims(512)
+        type(verification_result_t) :: results(512)
+        integer :: n_claims, n_results, ierr, n_generated
+
+        call verification_config_parse('.', config)
+        call verification_scan_dir('.', claims, n_claims)
+        call derive_generate_all('.', claims, n_claims, n_generated, ierr)
+        call verification_run('.', config, claims, n_claims, results, &
+            n_results, ierr)
+        write (output_unit, '(a)') trim(verification_text(results, n_results))
+        if (ierr > 0) error stop 1
+    end subroutine cmd_verify
 
     subroutine cmd_watch()
         use fo_watch, only: watch_loop

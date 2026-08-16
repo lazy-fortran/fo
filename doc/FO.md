@@ -113,3 +113,54 @@ explicit LFortran and Fortfront adapters. Both adapters are unavailable stubs:
 the native build path does not instantiate or invoke them. Wiring either one
 requires independent module-file, diagnostic, runtime-library, and concurrency
 correctness tests first.
+
+## Verification pipeline
+
+`fo prove`, `fo derive`, `fo generate`, and `fo verify` implement the cheap
+always-on verification tier: text-level `!@` directives in source comments, no
+parse tree, exactly like the linter. Assumptions, claims, properties, and
+derivations are declared as:
+
+- `!@assume <name>: <expr>` — a fact taken as given for the file
+- `!@claim [class] <name>: <expr>` — a proof obligation
+- `!@property <name>: <expr>` — a runtime property
+- `!@derive <name>: <expr> => <target>` — generate a scalar kernel
+
+Each obligation is content-addressed by its directive text, the file-scoped
+assumptions it depends on, the `[extra.fo.verification]` policy, and the
+backend identity. An unrelated implementation edit does not change the key, so
+the cached proof is reused (no rerun). Changing an assumption changes the key,
+so dependent proofs and generated kernels are invalidated. Proof results are
+stored in the shared content-addressed CAS via `cache_store_action` /
+`cache_restore_action`, keyed by the claim key.
+
+External provers are invoked when present:
+
+- Why3: `fo prove` emits a `.mlw` contract under `build/fo/generated/` and runs
+  `why3 prove`; a non-zero exit leaves the obligation `UNKNOWN`.
+- Lean: `fo prove` emits a `.lean` identity and runs `lean`.
+
+A missing tool never silently converts a `PROVED` requirement into a skipped
+check: it produces an explicit `UNKNOWN` status with an exact rerun command and
+a log/certificate path. The numeric probe backend compiles a small Fortran
+probe that samples the obligation over a deterministic grid. It can `DISPROVE`
+(with a minimal counterexample) but never `PROVE`, so agent JSON distinguishes
+proof evidence (backend `why3`/`lean`) from numerical probe evidence (backend
+`probe`).
+
+Policy:
+
+```toml
+[extra.fo.verification]
+require-proof = ["generated-kernel-equivalence", "array-bounds"]
+allow-unknown = ["special-function-identity"]
+property-test-unknown = true
+lean = "auto"
+why3 = "auto"
+```
+
+`fo check --proofs` folds verification into the ordinary bounded workflow:
+after build+test it runs the obligations and fails when a required proof is
+missing or disproved. `fo clean --proof-cache` drops the generated proof
+artifacts and certificates (the shared CAS is preserved). MCP exposes `prove`,
+`derive`, and `verify` actions returning the same JSON as `fo prove --json`.

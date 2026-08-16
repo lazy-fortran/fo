@@ -18,6 +18,9 @@ module fo_mcp
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
         RUN_RERUN_PENDING
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
+    use fo_verification, only: verification_config_t, verification_config_parse, &
+        claim_t, verification_scan_dir, verification_result_t, verification_run, &
+        verification_json, derive_generate_all
     implicit none
     private
     public :: mcp_serve
@@ -153,6 +156,15 @@ contains
             call handle_clean(line, id_str, dir, output_text, exitcode, response)
         case ('install')
             call handle_install(line, id_str, dir, output_text, exitcode, response)
+        case ('prove')
+            call handle_prove(id_str, dir, output_text, exitcode, response)
+            return
+        case ('derive')
+            call handle_derive(id_str, dir, output_text, exitcode, response)
+            return
+        case ('verify')
+            call handle_verify(id_str, dir, output_text, exitcode, response)
+            return
         case default
             call jsonrpc_error(id_str, -32602, &
                 'unknown action: '//trim(action), response)
@@ -337,6 +349,9 @@ contains
         use fx_dag, only: dag_t, dag_to_dot
         use fo_dag_bridge, only: build_dag_from_units
         use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
+    use fo_verification, only: verification_config_t, verification_config_parse, &
+        claim_t, verification_scan_dir, verification_result_t, verification_run, &
+        verification_json, derive_generate_all
         character(len=*), intent(in) :: line, id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
@@ -525,6 +540,9 @@ contains
 
     subroutine handle_install(line, id_str, dir, output_text, exitcode, response)
         use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
+    use fo_verification, only: verification_config_t, verification_config_parse, &
+        claim_t, verification_scan_dir, verification_result_t, verification_run, &
+        verification_json, derive_generate_all
         character(len=*), intent(in) :: line, id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
@@ -880,7 +898,7 @@ contains
             '"action":{"type":"string",'// &
             '"enum":["check","status","diagnostics","cancel",'// &
             '"build","test","graph","info","changed","clean",'// &
-            '"lint","fmt","install"],'// &
+            '"lint","fmt","install","prove","derive","verify"],'// &
             '"description":"Action to run"},'// &
             '"dir":{"type":"string",'// &
             '"description":"Project directory (default: cwd)"},'// &
@@ -920,6 +938,67 @@ contains
         end if
         response = trim(response)//',"pending":'//trim(json_bool(pending))//'}}'
     end subroutine make_run_start_response
+
+    subroutine handle_prove(id_str, dir, output_text, exitcode, response)
+        character(len=*), intent(in) :: id_str, dir
+        character(len=*), intent(out) :: output_text
+        integer, intent(out) :: exitcode
+        character(len=*), intent(out) :: response
+
+        type(verification_config_t) :: config
+        type(claim_t) :: claims(512)
+        type(verification_result_t) :: results(512)
+        integer :: n_claims, n_results, ierr
+
+        call verification_config_parse(trim(dir), config)
+        call verification_scan_dir(trim(dir), claims, n_claims)
+        call verification_run(trim(dir), config, claims, n_claims, results, &
+            n_results, ierr)
+        output_text = verification_json(results, n_results)
+        exitcode = 0
+        if (ierr > 0) exitcode = 1
+        call make_tool_text_response(id_str, output_text, exitcode, response)
+    end subroutine handle_prove
+
+    subroutine handle_derive(id_str, dir, output_text, exitcode, response)
+        character(len=*), intent(in) :: id_str, dir
+        character(len=*), intent(out) :: output_text
+        integer, intent(out) :: exitcode
+        character(len=*), intent(out) :: response
+
+        type(claim_t) :: claims(512)
+        integer :: n_claims, n_generated, ierr
+
+        call verification_scan_dir(trim(dir), claims, n_claims)
+        call derive_generate_all(trim(dir), claims, n_claims, n_generated, ierr)
+        output_text = '{"derive":{"generated":'//trim(json_int(n_generated))// &
+            ',"failed":'//trim(json_int(ierr))//'}}'
+        exitcode = 0
+        if (ierr > 0) exitcode = 1
+        call make_tool_text_response(id_str, output_text, exitcode, response)
+    end subroutine handle_derive
+
+    subroutine handle_verify(id_str, dir, output_text, exitcode, response)
+        character(len=*), intent(in) :: id_str, dir
+        character(len=*), intent(out) :: output_text
+        integer, intent(out) :: exitcode
+        character(len=*), intent(out) :: response
+
+        type(verification_config_t) :: config
+        type(claim_t) :: claims(512)
+        type(verification_result_t) :: results(512)
+        integer :: n_claims, n_results, ierr, n_generated
+
+        call verification_config_parse(trim(dir), config)
+        call verification_scan_dir(trim(dir), claims, n_claims)
+        call derive_generate_all(trim(dir), claims, n_claims, n_generated, ierr)
+        call verification_run(trim(dir), config, claims, n_claims, results, &
+            n_results, ierr)
+        output_text = verification_json(results, n_results)
+        exitcode = 0
+        if (ierr > 0) exitcode = 1
+        call make_tool_text_response(id_str, output_text, exitcode, response)
+    end subroutine handle_verify
 
     subroutine make_tool_text_response(id_str, output_text, exitcode, response)
         character(len=*), intent(in) :: id_str, output_text
