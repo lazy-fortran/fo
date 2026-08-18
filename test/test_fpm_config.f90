@@ -218,7 +218,7 @@ contains
         !! independent oracle asks the provider tools whether each package is
         !! available, then checks that fo agrees and imports usable metadata.
         type(fpm_config_t) :: c
-        integer :: ierr, u, ios, exitstat
+        integer :: ierr, u, ios, exitstat, cmdstat
         logical :: available
         character(len=*), parameter :: dir = '/tmp/fo_test_system_meta'
 
@@ -246,8 +246,8 @@ contains
             wait=.true., exitstat=exitstat)
         available = available .and. exitstat == 0
         call execute_command_line('mpifort --version >/dev/null 2>&1', &
-            wait=.true., exitstat=exitstat)
-        available = available .and. exitstat == 0
+            wait=.true., exitstat=exitstat, cmdstat=cmdstat)
+        available = available .and. cmdstat == 0 .and. exitstat == 0
 
         call fpm_config_parse(dir, c, ierr)
         call assert((ierr == 0) .eqv. available, &
