@@ -10,7 +10,8 @@ program fo_main
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
         collect_failed_test_names, MAX_TEST_RESULTS
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, &
-        array_temporary_warnings_from_log
+        array_temporary_warnings_from_log, frontend_diagnostics_from_file, &
+        FO_DIAG_SEVERITY_ERROR
     use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds
     use fo_check_output, only: check_result_json, check_result_compact_json, &
         check_result_full_json
@@ -426,6 +427,7 @@ contains
         type(capabilities_t) :: cap
         character(len=2048) :: cap_json
         integer :: output_mode, mode_ierr
+        logical :: frontend_had_error
 
         if (has_arg('--help') .or. has_arg('-h')) then
             write (output_unit, '(a)') &
@@ -447,26 +449,38 @@ contains
 
         call fo_check_run('.', res)
 
+        ! Surface FortFront's structured parser diagnostics on the project's
+        ! own sources. A parser (syntax) error makes the check fail exactly
+        ! like a failed build or test; warnings are reported but do not fail.
+        call report_frontend_diagnostics('.', frontend_had_error)
+
         select case (output_mode)
         case (1)
             write (output_unit, '(a)') trim(check_result_json(res))
-            if (.not. (res%build_ok .and. res%tests_ok)) error stop 1
+            if (.not. (res%build_ok .and. res%tests_ok) .or. &
+                frontend_had_error) error stop 1
             return
         case (2)
             write (output_unit, '(a)') trim(check_result_compact_json(res))
-            if (.not. (res%build_ok .and. res%tests_ok)) error stop 1
+            if (.not. (res%build_ok .and. res%tests_ok) .or. &
+                frontend_had_error) error stop 1
             return
         case (3)
             write (output_unit, '(a)') trim(check_result_full_json(res, cap_json))
-            if (.not. (res%build_ok .and. res%tests_ok)) error stop 1
+            if (.not. (res%build_ok .and. res%tests_ok) .or. &
+                frontend_had_error) error stop 1
             return
         case (4)
             write (output_unit, '(a)') trim(check_result_compact_json(res))
-            if (.not. (res%build_ok .and. res%tests_ok)) error stop 1
+            if (.not. (res%build_ok .and. res%tests_ok) .or. &
+                frontend_had_error) error stop 1
             return
         end select
 
-        if (res%build_ok .and. res%tests_ok) then
+        if (frontend_had_error) then
+            write (output_unit, '(a)') 'Frontend: FAIL'
+            error stop 1
+        else if (res%build_ok .and. res%tests_ok) then
             write (output_unit, '(a,i0,a,i0,a,i0,a,i0,a,f0.1,a)') &
                 'Build: OK (', res%n_modules, ' modules, ', &
                 res%n_cached, ' cached, ', res%n_changed, &
@@ -489,6 +503,56 @@ contains
             error stop 1
         end if
     end subroutine cmd_check
+
+    subroutine report_frontend_diagnostics(dir, had_error)
+        !! Run FortFront's structured frontend over every source file in the
+        !! project and report the mapped parser diagnostics. Only parser
+        !! (syntax) diagnostics are surfaced and made fatal: per-file semantic
+        !! analysis cannot resolve cross-file interfaces and declarations, so
+        !! it would report false positives on valid code. Parser errors set
+        !! had_error so cmd_check fails with the exact path/span; warnings are
+        !! printed and ignored for exit status, matching fo's warning policy.
+        !! Distinct FortFront and gfortran diagnostics are never deduplicated:
+        !! each frontend diagnostic is reported verbatim.
+        character(len=*), intent(in) :: dir
+        logical, intent(out) :: had_error
+
+        type(scan_unit_t), allocatable :: units(:)
+        type(diagnostic_t), allocatable :: diags(:)
+        integer :: n_units, n_diags, i, j, ierr
+        logical :: file_error
+        character(len=64) :: loc
+
+        had_error = .false.
+        allocate (units(MAX_UNITS))
+        call scan_dir(dir, units, n_units, ierr)
+        if (ierr /= 0 .or. n_units < 1) then
+            deallocate (units)
+            return
+        end if
+
+        allocate (diags(64))
+        do i = 1, n_units
+            if (len_trim(units(i)%filename) == 0) cycle
+            call frontend_diagnostics_from_file(trim(units(i)%filename), &
+                diags, n_diags, file_error, with_semantics=.false.)
+            if (file_error) had_error = .true.
+            do j = 1, n_diags
+                write (loc, '(i0,a,i0)') diags(j)%line, ':', diags(j)%column
+                if (diags(j)%severity == FO_DIAG_SEVERITY_ERROR) then
+                    write (error_unit, '(a,a,a,a,a)') &
+                        'fo: frontend error: ', trim(diags(j)%file), &
+                        ':', trim(loc), ': '//trim(diags(j)%message)
+                else
+                    write (error_unit, '(a,a,a,a,a)') &
+                        'fo: frontend warning: ', trim(diags(j)%file), &
+                        ':', trim(loc), ': '//trim(diags(j)%message)
+                end if
+            end do
+        end do
+        deallocate (diags)
+        deallocate (units)
+    end subroutine report_frontend_diagnostics
 
     subroutine report_failed_tests(failed, n_failed)
         !! List every failing test, not just the first. A single reported

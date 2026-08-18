@@ -1,8 +1,23 @@
 module fo_diagnostics
+    use fortfront_compiler, only: compiler_diagnostic_t, &
+        compiler_frontend_options_t, compiler_frontend_result_t, &
+        compile_frontend_from_file, get_compiler_diagnostics, &
+        DIAGNOSTIC_PHASE_PARSER, DIAGNOSTIC_PHASE_SEMANTIC, &
+        DIAGNOSTIC_CODE_PARSER, DIAGNOSTIC_CODE_SEMANTIC, &
+        DIAGNOSTIC_ERROR, DIAGNOSTIC_WARNING, DIAGNOSTIC_INFO, &
+        INPUT_MODE_STANDARD, OPERATING_MODE_INFER
     implicit none
     private
     public :: diagnostic_t, diagnostic_from_log, is_runner_crash
     public :: array_temporary_warnings_from_log
+    public :: map_fortfront_diagnostic, frontend_diagnostics_from_file
+
+    ! Severity values follow FortFront's public diagnostic scale so a mapped
+    ! frontend diagnostic keeps its original severity without any prose
+    ! parsing. 0 means "not a frontend diagnostic".
+    integer, parameter, public :: FO_DIAG_SEVERITY_NONE = 0
+    integer, parameter, public :: FO_DIAG_SEVERITY_ERROR = 1
+    integer, parameter, public :: FO_DIAG_SEVERITY_WARNING = 2
 
     type :: diagnostic_t
         character(len=32) :: kind = 'backend'
@@ -14,6 +29,11 @@ module fo_diagnostics
         character(len=256) :: hint = ''
         character(len=256) :: rerun = ''
         character(len=512) :: log_path = ''
+        ! Frontend-only fields: populated by map_fortfront_diagnostic, left
+        ! at their defaults by the log parsers.
+        integer :: severity = FO_DIAG_SEVERITY_NONE
+        integer :: phase = 0
+        integer :: code = 0
     end type diagnostic_t
 
 contains
@@ -289,5 +309,103 @@ contains
             index(text, 'double free') > 0 .or. &
             index(text, 'corrupted') > 0
     end function is_runner_crash
+
+    subroutine frontend_diagnostics_from_file(filename, diags, n_diags, &
+            had_error, with_semantics)
+        !! Run FortFront's standard-mode frontend over one source file and map
+        !! every structured parser/semantic diagnostic into fo diagnostics.
+        !! Errors set had_error so the caller can fail the check; warnings are
+        !! surfaced but do not fail. Per-file semantic analysis cannot resolve
+        !! cross-file interfaces and declarations, so callers that only want
+        !! reliable syntax diagnostics pass with_semantics=.false. (the
+        !! default here is .true. so the mapping is fully exercised).
+        character(len=*), intent(in) :: filename
+        type(diagnostic_t), intent(inout) :: diags(:)
+        integer, intent(out) :: n_diags
+        logical, intent(out) :: had_error
+        logical, intent(in), optional :: with_semantics
+
+        type(compiler_frontend_options_t) :: options
+        type(compiler_frontend_result_t) :: result
+        type(compiler_diagnostic_t), allocatable :: fds(:)
+        integer :: i
+        logical :: do_semantics
+
+        do_semantics = .true.
+        if (present(with_semantics)) do_semantics = with_semantics
+
+        n_diags = 0
+        had_error = .false.
+        options = compiler_frontend_options_t()
+        options%input_mode = INPUT_MODE_STANDARD
+        options%operating_mode = OPERATING_MODE_INFER
+        options%run_semantics = do_semantics
+        call compile_frontend_from_file(filename, result, options)
+        fds = get_compiler_diagnostics(result)
+        do i = 1, size(fds)
+            if (n_diags >= size(diags)) exit
+            n_diags = n_diags + 1
+            call map_fortfront_diagnostic(fds(i), filename, diags(n_diags))
+            if (fds(i)%severity == DIAGNOSTIC_ERROR) had_error = .true.
+        end do
+    end subroutine frontend_diagnostics_from_file
+
+    subroutine map_fortfront_diagnostic(fd, source_file, diag)
+        !! Map FortFront's structured phase/code/severity/span fields into a
+        !! fo diagnostic without parsing diagnostic prose. The source path and
+        !! start-of-span location are preserved, severity is carried on the
+        !! diagnostic's own field, the stable integer code is kept, and the
+        !! formatted message embeds the phase, code, severity and message text.
+        type(compiler_diagnostic_t), intent(in) :: fd
+        character(len=*), intent(in) :: source_file
+        type(diagnostic_t), intent(out) :: diag
+
+        character(len=32) :: phase_str, code_str, severity_str
+        character(len=512) :: message_text
+
+        diag = diagnostic_t()
+        diag%kind = 'frontend'
+        diag%file = source_file
+        diag%line = fd%span%start%line
+        diag%column = fd%span%start%column
+        diag%severity = fd%severity
+        diag%phase = fd%phase
+        diag%code = fd%code
+
+        select case (fd%phase)
+        case (DIAGNOSTIC_PHASE_PARSER)
+            phase_str = 'parser'
+            if (fd%code == 0) diag%code = DIAGNOSTIC_CODE_PARSER
+        case (DIAGNOSTIC_PHASE_SEMANTIC)
+            phase_str = 'semantic'
+            if (fd%code == 0) diag%code = DIAGNOSTIC_CODE_SEMANTIC
+        case default
+            phase_str = 'frontend'
+        end select
+
+        write (code_str, '(i0)') diag%code
+
+        select case (fd%severity)
+        case (DIAGNOSTIC_ERROR)
+            severity_str = 'error'
+        case (DIAGNOSTIC_WARNING)
+            severity_str = 'warning'
+        case (DIAGNOSTIC_INFO)
+            severity_str = 'info'
+        case default
+            severity_str = 'note'
+        end select
+
+        message_text = ''
+        if (allocated(fd%message)) then
+            if (len_trim(fd%message) > 0) message_text = trim(fd%message)
+        end if
+        if (len_trim(message_text) == 0) message_text = 'FortFront reported no message'
+
+        diag%message = '['//trim(phase_str)//' '//trim(code_str)//'] '// &
+            trim(severity_str)//': '//trim(message_text)
+        diag%hint = 'fix the reported frontend diagnostic in '// &
+            trim(source_file)
+    end subroutine map_fortfront_diagnostic
 
 end module fo_diagnostics
