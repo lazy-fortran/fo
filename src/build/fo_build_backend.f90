@@ -5,7 +5,7 @@ module fo_build_backend
     use fo_process, only: process_detect_nproc, process_getpid, &
         process_getcwd, process_run_argv_logged, argv_push, argv_push_split
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
-        gfortran_test_names
+        gfortran_test_names, gfortran_run_tests
     use fo_compiler_flags, only: append_array_temporary_warning_flag
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         selected_compiler_command
@@ -259,6 +259,7 @@ contains
         character(len=*), intent(in), optional :: flags
         logical, intent(in), optional :: use_cache
 
+        character(len=128) :: no_names(1)
         character(len=512) :: log_path, lock_dir, flag_text
         integer :: lock_ierr
         logical :: slow
@@ -285,14 +286,23 @@ contains
         select case (self%kind)
         case (BACKEND_NATIVE)
             call gfortran_test(self%project_dir, log_path, exitcode, &
-                include_slow=slow, flags=flag_text, use_cache=use_cache)
+                include_slow=slow, flags=flag_text, build_only=.true., &
+                use_cache=use_cache)
         case (BACKEND_CMAKE)
             call cmake_build(self%project_dir, flag_text, log_path, exitcode)
-            if (exitcode == 0) &
-                call cmake_test(self%project_dir, '', slow, log_path, exitcode)
         end select
 
         call release_project_lock(lock_dir)
+        if (exitcode == 0) then
+            select case (self%kind)
+            case (BACKEND_NATIVE)
+                no_names = ''
+                call gfortran_run_tests(self%project_dir, log_path, exitcode, &
+                    slow, no_names, 0)
+            case (BACKEND_CMAKE)
+                call cmake_test(self%project_dir, '', slow, log_path, exitcode)
+            end select
+        end if
         if (exitcode == 124) then
             write (error_unit, '(a)') &
                 'fo: WARNING: tests timed out (FO_TEST_TIMEOUT exceeded);' // &
@@ -317,6 +327,7 @@ contains
         logical :: slow
         integer :: n_fast
         character(len=512) :: log_path, lock_dir, flag_text
+        character(len=1024) :: regex
 
         slow = .false.
         if (present(include_slow)) slow = include_slow
@@ -351,19 +362,21 @@ contains
         case (BACKEND_NATIVE)
             call gfortran_test_names(self%project_dir, fast_names, n_fast, &
                 log_path, exitcode, include_slow=slow, flags=flag_text, &
-                use_cache=use_cache)
+                use_cache=use_cache, build_only=.true.)
         case (BACKEND_CMAKE)
-            block
-                character(len=1024) :: regex
-                call cmake_build(self%project_dir, flag_text, log_path, exitcode)
-                if (exitcode == 0) then
-                    call names_to_ctest_regex(fast_names, n_fast, regex)
-                    call cmake_test(self%project_dir, regex, slow, log_path, &
-                        exitcode)
-                end if
-            end block
+            call cmake_build(self%project_dir, flag_text, log_path, exitcode)
         end select
         call release_project_lock(lock_dir)
+        if (exitcode /= 0) return
+
+        select case (self%kind)
+        case (BACKEND_NATIVE)
+            call gfortran_run_tests(self%project_dir, log_path, exitcode, slow, &
+                fast_names, n_fast)
+        case (BACKEND_CMAKE)
+            call names_to_ctest_regex(fast_names, n_fast, regex)
+            call cmake_test(self%project_dir, regex, slow, log_path, exitcode)
+        end select
     end subroutine backend_test_names
 
     subroutine backend_test_affected(self, names, n_names, exitcode, &

@@ -28,6 +28,7 @@ program test_backend
     call test_detect_jobs()
     call test_config_flags_str_joins_with_spaces()
     call test_fpm_skips_slow_by_default()
+    call test_native_test_runs_without_build_lock()
     call test_cmake_build_and_test()
     call test_native_combined_build_keeps_apps()
     call test_cmake_named_test_rebuilds_changed_source()
@@ -45,6 +46,36 @@ program test_backend
     call report('backend')
 
 contains
+
+    subroutine test_native_test_runs_without_build_lock()
+        type(backend_t) :: b
+        character(len=512) :: project_dir, log_file
+        integer :: exitcode, u
+
+        call make_tmp_path('fo_test_unlocked_run', project_dir)
+        call make_tmp_path('fo_test_unlocked_run_log', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/test')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "unlocked_test_run"'
+        close (u)
+        open (newunit=u, file=trim(project_dir)//'/test/check_lock.f90', &
+            status='replace')
+        write (u, '(a)') 'program check_lock'
+        write (u, '(a)') 'logical :: exists'
+        write (u, '(a)') 'inquire (file="build/fo/.lock", exist=exists)'
+        write (u, '(a)') 'if (exists) error stop 1'
+        write (u, '(a)') 'end program check_lock'
+        close (u)
+
+        b = detect_backend(project_dir)
+        call backend_test(b, exitcode, log_file=log_file, use_cache=.false.)
+        call assert(exitcode == 0, &
+            'native tests run after the materialization lock is released')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_native_test_runs_without_build_lock
 
     subroutine test_native_combined_build_keeps_apps()
         type(backend_t) :: b

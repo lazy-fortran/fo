@@ -55,6 +55,7 @@ module fo_gfortran_build
     logical, save :: allow_implicit_typing = .false.
 
     public :: gfortran_build, gfortran_test, gfortran_test_names
+    public :: gfortran_run_tests
     public :: config_flags_str
 
 contains
@@ -516,7 +517,7 @@ contains
     end subroutine gfortran_test
 
     subroutine gfortran_test_names(project_dir, names, n_names, log_file, &
-            exitcode, include_slow, n_compiled, flags, use_cache)
+            exitcode, include_slow, n_compiled, flags, use_cache, build_only)
         character(len=*), intent(in) :: project_dir, log_file
         character(len=128), intent(in) :: names(:)
         integer, intent(in) :: n_names
@@ -525,6 +526,7 @@ contains
         integer, intent(out), optional :: n_compiled
         character(len=*), intent(in), optional :: flags
         logical, intent(in), optional :: use_cache
+        logical, intent(in), optional :: build_only
 
         type(fpm_config_t), allocatable :: config
         integer :: ierr, n_dep_includes, n_dep_objs, n_lib_objs
@@ -533,12 +535,14 @@ contains
         character(len=512), allocatable :: dep_objs(:)
         character(len=512), allocatable :: lib_objs(:)
         character(len=512) :: lf, flag_text, request_flags, test_dir
-        logical :: slow, build_current, tests_current, apps_current
+        logical :: slow, bonly, build_current, tests_current, apps_current
 
         lf = log_file
         if (len_trim(lf) == 0) lf = '/dev/null'
         slow = .false.
         if (present(include_slow)) slow = include_slow
+        bonly = .false.
+        if (present(build_only)) bonly = build_only
         flag_text = ''
         if (present(flags)) flag_text = flags
         request_flags = flag_text
@@ -552,8 +556,8 @@ contains
 
         bin_dir = trim(project_dir)//'/build/fo/bin'
         if (build_current .and. tests_current .and. len_trim(test_dir) > 0) then
-            call run_current_tests(project_dir, test_dir, bin_dir, names, &
-                n_names, slow, lf, exitcode)
+            if (.not. bonly) call run_current_tests(project_dir, test_dir, bin_dir, &
+                names, n_names, slow, lf, exitcode)
             return
         end if
 
@@ -570,8 +574,8 @@ contains
         obj_dir = trim(project_dir)//'/build/fo/obj'
         bin_dir = trim(project_dir)//'/build/fo/bin'
         if (build_current .and. tests_current) then
-            call run_current_tests(project_dir, config%test_dir, bin_dir, names, &
-                n_names, slow, lf, exitcode)
+            if (.not. bonly) call run_current_tests(project_dir, config%test_dir, &
+                bin_dir, names, n_names, slow, lf, exitcode)
             return
         end if
 
@@ -587,10 +591,34 @@ contains
             dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
             config%link_libs, config%n_link_libs, lf, &
             names, n_names, slow, exitcode, n_compiled, &
-            flags=flag_text, use_cache=use_cache)
+            flags=flag_text, build_only=bonly, use_cache=use_cache)
         if (exitcode == 0) call refresh_build_stamp(project_dir, flag_text, &
             request_flags, apps_current, config%test_dir, use_cache)
     end subroutine gfortran_test_names
+
+    subroutine gfortran_run_tests(project_dir, log_file, exitcode, include_slow, &
+            names, n_names)
+        character(len=*), intent(in) :: project_dir, log_file
+        integer, intent(out) :: exitcode
+        logical, intent(in) :: include_slow
+        character(len=128), intent(in) :: names(:)
+        integer, intent(in) :: n_names
+
+        type(fpm_config_t), allocatable :: config
+        character(len=512) :: bin_dir, lf
+        integer :: ierr
+
+        exitcode = 1
+        if (n_names < 0 .or. n_names > size(names)) return
+        allocate (config)
+        call fpm_config_parse(project_dir, config, ierr)
+        if (ierr /= 0) return
+        lf = log_file
+        if (len_trim(lf) == 0) lf = '/dev/null'
+        bin_dir = trim(project_dir)//'/build/fo/bin'
+        call run_current_tests(project_dir, config%test_dir, bin_dir, names, &
+            n_names, include_slow, lf, exitcode)
+    end subroutine gfortran_run_tests
 
     subroutine collect_stamp_roots(project_dir, roots, n_roots, ok)
         character(len=*), intent(in) :: project_dir
