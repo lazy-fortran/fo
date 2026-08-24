@@ -40,14 +40,20 @@ program fo_main
     character(len=256) :: action
     integer :: nargs
 
-    call process_configure_openmp()
     nargs = command_argument_count()
+    action = ''
+    if (nargs > 0) call get_command_argument(1, action)
+    ! Build/test pipelines benefit from sleeping compiler workers, but an
+    ! executable launched by `fo exec` (or its `fo run` alias) must inherit
+    ! the caller's OpenMP policy.  Injecting OMP_WAIT_POLICY=PASSIVE here
+    ! otherwise changes the benchmark/runtime behavior of the target.
+    if (nargs == 0 .or. (trim(action) /= 'exec' .and. trim(action) /= 'run')) then
+        call process_configure_openmp()
+    end if
     if (nargs == 0) then
         call cmd_run()
         stop
     end if
-
-    call get_command_argument(1, action)
 
     select case (trim(action))
     case ('check')

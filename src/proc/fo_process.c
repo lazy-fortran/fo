@@ -456,7 +456,9 @@ void fo_c_detect_nproc(int *nproc) {
 void fo_c_configure_openmp(void) {
     /* libgomp's default active wait burns a full worker team while fo waits
      * for compiler children.  Preserve an explicit user choice, but default
-     * the build driver to sleeping workers before its first parallel region. */
+     * the build driver to sleeping workers before its first parallel region.
+     * Target execution deliberately skips this hook in app/main.f90 so the
+     * launched program keeps its own OpenMP/runtime policy. */
     if (getenv("OMP_WAIT_POLICY") == NULL) {
         setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
     }
