@@ -351,8 +351,15 @@ contains
             config%n_external_modules, ext_dirs, n_ext, MAX_DEP_DIRS)
         ext_flag = fc_base_flags()
         do i = 1, n_ext
-            if (len_trim(ext_flag) > 0) ext_flag = trim(ext_flag)//' '
-            ext_flag = trim(ext_flag)//'-I'//trim(ext_dirs(i))
+            ! Keep each external-module include as a separate fpm flag.  Do
+            ! not assign a trailing blank and then trim it away: that turns
+            ! ``-pipe`` followed by ``-I...`` into the invalid token
+            ! ``-pipe-I...`` in fpm's argv.
+            if (len_trim(ext_flag) > 0) then
+                ext_flag = trim(ext_flag)//' -I'//trim(ext_dirs(i))
+            else
+                ext_flag = '-I'//trim(ext_dirs(i))
+            end if
         end do
 
         n_args = 0
