@@ -15,6 +15,7 @@ module fo_check
     implicit none
     private
     public :: check_result_t, test_result_t, fo_check_run, fo_changed_modules
+    public :: should_report_frontend_diagnostics
     public :: MAX_TEST_RESULTS, collect_failed_test_names
 
     integer, parameter :: MAX_EXT_DEPS = 256
@@ -54,6 +55,16 @@ module fo_check
     end type check_result_t
 
 contains
+
+    logical function should_report_frontend_diagnostics(res) result(report)
+        !! FortFront is a diagnostic supplement, not the project's compiler.
+        !! Run it only to enrich an actual compiler build failure. In
+        !! particular, do not let its incomplete legacy-Fortran coverage turn
+        !! a successful compiler build (or a missing backend) into a failure.
+        type(check_result_t), intent(in) :: res
+
+        report = .not. res%build_ok .and. trim(res%stage) == 'build'
+    end function should_report_frontend_diagnostics
 
     subroutine fo_changed_modules(dir, dag, changed_ids, n_changed, &
             affected_ids, n_affected, n_cached, ierr, &

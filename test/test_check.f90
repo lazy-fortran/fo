@@ -1,6 +1,7 @@
 program test_check
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_check, only: check_result_t, fo_check_run
+    use fo_check, only: check_result_t, fo_check_run, &
+        should_report_frontend_diagnostics
     use fo_check_output, only: check_result_json, check_result_compact_json, &
         check_result_full_json, fo_check_write
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, &
@@ -25,6 +26,7 @@ program test_check
     call test_check_reports_test_failure_advice()
     call test_check_keeps_child_crash_as_target_failure()
     call test_check_rejects_zero_exit_with_failing_summary()
+    call test_frontend_diagnostics_only_enrich_compiler_failure()
     call test_check_result_json()
     call test_check_result_compact_json_success()
     call test_check_result_compact_json_failure()
@@ -60,6 +62,30 @@ program test_check
     if (n_fail > 0) stop 1
 
 contains
+
+    subroutine test_frontend_diagnostics_only_enrich_compiler_failure()
+        type(check_result_t) :: res
+
+        res%stage = 'project'
+        res%build_ok = .false.
+        call assert(.not. should_report_frontend_diagnostics(res), &
+            'frontend does not obscure a missing project backend')
+
+        res%stage = 'build'
+        res%build_ok = .true.
+        call assert(.not. should_report_frontend_diagnostics(res), &
+            'frontend does not override a successful compiler build')
+
+        res%stage = 'build'
+        res%build_ok = .false.
+        call assert(should_report_frontend_diagnostics(res), &
+            'frontend enriches an actual compiler build failure')
+
+        res%stage = 'test'
+        res%build_ok = .true.
+        call assert(.not. should_report_frontend_diagnostics(res), &
+            'frontend does not obscure a test failure')
+    end subroutine test_frontend_diagnostics_only_enrich_compiler_failure
 
     subroutine test_array_temporary_warning_log()
         type(diagnostic_t) :: warnings(4)

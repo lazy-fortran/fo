@@ -367,18 +367,17 @@ contains
             call scan_file(trim(paths(i)), units(n_units), sub_ierr, &
                 allow_regex_fallback=allow_regex_fallback, diagnostic=diagnostic)
             if (sub_ierr /= 0) then
-                if (len_trim(diagnostic) > 0) then
-                    write (error_unit, '(a)') 'fo: '//trim(diagnostic)
-                end if
                 ! A front-end parse failure must never silently remove a
                 ! compilation unit: the build would then link against a stale
                 ! module or fail with a missing .mod far from the real cause.
                 ! Recover the unit with the line scanner and keep building.
+                ! Successful recovery is an implementation detail, not a
+                ! project error; the configured compiler remains authoritative.
                 call scan_file_regex(trim(paths(i)), units(n_units), sub_ierr)
-                if (sub_ierr == 0) then
-                    write (error_unit, '(a)') 'fo: recovered '// &
-                        trim(paths(i))//' with the line scanner'
-                else
+                if (sub_ierr /= 0) then
+                    if (len_trim(diagnostic) > 0) then
+                        write (error_unit, '(a)') 'fo: '//trim(diagnostic)
+                    end if
                     n_units = n_units - 1
                 end if
             end if

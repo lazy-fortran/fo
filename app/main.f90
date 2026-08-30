@@ -8,7 +8,8 @@ program fo_main
         backend_test, backend_test_names, backend_test_affected, BACKEND_NONE, &
         BACKEND_NATIVE, BACKEND_CMAKE, profile_flags
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
-        collect_failed_test_names, MAX_TEST_RESULTS
+        collect_failed_test_names, should_report_frontend_diagnostics, &
+        MAX_TEST_RESULTS
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, &
         array_temporary_warnings_from_log, frontend_diagnostics_from_file, &
         FO_DIAG_SEVERITY_ERROR
@@ -455,10 +456,14 @@ contains
 
         call fo_check_run('.', res)
 
-        ! Surface FortFront's structured parser diagnostics on the project's
-        ! own sources. A parser (syntax) error makes the check fail exactly
-        ! like a failed build or test; warnings are reported but do not fail.
-        call report_frontend_diagnostics('.', frontend_had_error)
+        ! The configured compiler is authoritative. FortFront has deliberately
+        ! narrower language coverage, especially for legacy fixed-form code,
+        ! so use it only to enrich a compiler build failure. It must never
+        ! override a successful build or obscure a missing-backend diagnostic.
+        frontend_had_error = .false.
+        if (should_report_frontend_diagnostics(res)) then
+            call report_frontend_diagnostics('.', frontend_had_error)
+        end if
 
         select case (output_mode)
         case (1)
@@ -512,12 +517,14 @@ contains
 
     subroutine report_frontend_diagnostics(dir, had_error)
         !! Run FortFront's structured frontend over every source file in the
-        !! project and report the mapped parser diagnostics. Only parser
-        !! (syntax) diagnostics are surfaced and made fatal: per-file semantic
+        !! project after its compiler has already rejected the build, and
+        !! report mapped parser diagnostics. Only parser diagnostics are
+        !! surfaced: per-file semantic
         !! analysis cannot resolve cross-file interfaces and declarations, so
         !! it would report false positives on valid code. Parser errors set
-        !! had_error so cmd_check fails with the exact path/span; warnings are
-        !! printed and ignored for exit status, matching fo's warning policy.
+        !! had_error; warnings are printed and ignored for exit status,
+        !! matching fo's warning policy. The compiler failure remains the
+        !! authoritative reason that cmd_check fails.
         !! Distinct FortFront and gfortran diagnostics are never deduplicated:
         !! each frontend diagnostic is reported verbatim.
         character(len=*), intent(in) :: dir
