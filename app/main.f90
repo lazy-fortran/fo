@@ -1203,7 +1203,8 @@ contains
 
         type(test_result_entry_t), allocatable :: entries(:)
         integer :: n_entries, parse_ierr
-        character(len=16384) :: json_output, human_output
+        character(len=:), allocatable :: json_output
+        character(len=16384) :: human_output
         type(diagnostic_t) :: diag
         character(len=128) :: failed_tests(MAX_TEST_RESULTS)
         integer :: n_failed_tests

@@ -54,3 +54,6 @@ jobs:
 
       - name: Test
         run: fpm test
+
+      - name: Test complete JSON reports
+        run: node test/test_test_results_json.js

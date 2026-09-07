@@ -416,7 +416,7 @@ contains
         type(test_result_entry_t), intent(in) :: entries(:)
         integer, intent(in) :: n_entries
         integer, intent(in) :: exit_code
-        character(len=*), intent(out) :: output
+        character(len=:), allocatable, intent(out) :: output
 
         integer :: i, n_pass, n_fail, n_skip
         real :: total_secs
