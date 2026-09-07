@@ -57,6 +57,7 @@ module fo_gfortran_build
     public :: gfortran_build, gfortran_test, gfortran_test_names
     public :: gfortran_run_tests
     public :: config_flags_str
+    public :: gfortran_app_source_name, gfortran_test_source_name
 
 contains
 
@@ -708,13 +709,7 @@ contains
         end if
         do i = 1, n_units
             if (.not. units(i)%is_program) cycle
-            call file_basename(units(i)%filename, name)
-            block
-                character(len=128) :: public_name
-
-                public_name = manifest_test_name(config, test_dir, name)
-                if (len_trim(public_name) > 0) name = public_name
-            end block
+            name = gfortran_test_source_name(config, test_dir, units(i)%filename)
             if (.not. include_slow .and. is_slow_name(name)) cycle
             if (n_selected > 0) then
                 if (.not. selected_test(name, selected_names, n_selected)) cycle
@@ -1823,12 +1818,12 @@ contains
         character(len=512), allocatable :: lib_objs(:)
         character(len=512) :: prog_obj, bin_path, app_bin_dir, app_bin_path
         character(len=512) :: archive_path, link_inputs(1)
-        character(len=128) :: prog_name, manifest_name, object_name
+        character(len=128) :: prog_name
         character(len=512) :: link_flags
         type(cache_t) :: c
         integer :: cache_ierr
         character(len=HASH_LEN) :: base_digest
-        logical :: allow_cache, is_example
+        logical :: allow_cache
 
         link_flags = ''
         if (present(flags)) link_flags = flags
@@ -1874,27 +1869,7 @@ contains
         do i = 1, n_src_objs
             if (.not. is_prog_arr(i)) cycle
             prog_obj = src_objs(i)
-            ! fpm naming: app/main.f90 takes the package name; every other app
-            ! program takes its own source stem. Selecting by stem (not source
-            ! order) keeps `main` mapped to the package binary even when another
-            ! app source sorts ahead of it.
-            call file_basename(prog_obj, object_name)
-            is_example = index(trim(object_name), &
-                trim(config%example_dir)//'_') == 1
-            if (is_example) then
-                call app_prog_stem(prog_obj, config%example_dir, prog_name)
-                manifest_name = manifest_example_name(config, &
-                    config%example_dir, prog_name)
-                if (len_trim(manifest_name) > 0) prog_name = trim(manifest_name)
-            else
-                call app_prog_stem(prog_obj, config%app_dir, prog_name)
-                manifest_name = manifest_exe_name(config, config%app_dir, prog_name)
-                if (len_trim(manifest_name) > 0) then
-                    prog_name = trim(manifest_name)
-                else if (prog_name == 'main' .and. len_trim(config%name) > 0) then
-                    prog_name = trim(config%name)
-                end if
-            end if
+            prog_name = app_binary_name(config, prog_obj)
             bin_path = trim(bin_dir)//'/'//trim(prog_name)
             call link_binary(project_dir, prog_obj, link_inputs, n_link_inputs, &
                 dep_objs, n_dep_objs, config%link_libs, config%n_link_libs, bin_path, &
@@ -1966,6 +1941,53 @@ contains
         call hash_mod_file(tmpfile, digest)
         call delete_tmpfile(tmpfile)
     end subroutine link_base_digest
+
+    function gfortran_test_source_name(config, test_dir, source) result(name)
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: test_dir, source
+        character(len=128) :: name, public_name
+
+        call file_basename(source, name)
+        public_name = manifest_test_name(config, test_dir, name)
+        if (len_trim(public_name) > 0) name = public_name
+    end function gfortran_test_source_name
+
+    function gfortran_app_source_name(config, source) result(name)
+        !! Classify a selected program using the same naming rules as linking.
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: source
+        character(len=128) :: name
+        character(len=512) :: obj_path
+
+        name = ''
+        if (.not. app_program_selected(source, config%project_dir, &
+            config%app_dir, config)) return
+        call make_obj_path(source, config%project_dir, '', obj_path)
+        name = app_binary_name(config, obj_path)
+    end function gfortran_app_source_name
+
+    function app_binary_name(config, obj_path) result(name)
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: obj_path
+        character(len=128) :: name, manifest_name, object_name
+        logical :: is_example
+
+        call file_basename(obj_path, object_name)
+        is_example = index(trim(object_name), trim(config%example_dir)//'_') == 1
+        if (is_example) then
+            call app_prog_stem(obj_path, config%example_dir, name)
+            manifest_name = manifest_example_name(config, config%example_dir, name)
+            if (len_trim(manifest_name) > 0) name = trim(manifest_name)
+        else
+            call app_prog_stem(obj_path, config%app_dir, name)
+            manifest_name = manifest_exe_name(config, config%app_dir, name)
+            if (len_trim(manifest_name) > 0) then
+                name = trim(manifest_name)
+            else if (name == 'main' .and. len_trim(config%name) > 0) then
+                name = trim(config%name)
+            end if
+        end if
+    end function app_binary_name
 
     subroutine app_prog_stem(obj_path, app_dir, stem)
         !! Source stem of an app program from its object path. Object names
@@ -2051,7 +2073,7 @@ contains
         logical :: allow_cache
         character(len=512) :: obj_path, bin_path
         character(len=4096) :: incl_flag
-        character(len=128) :: tname, manifest_name
+        character(len=128) :: tname
         character(len=MAX_PATH) :: fname_local
         character(len=512) :: log_local, rerun_log
         type(cache_t) :: c
@@ -2127,9 +2149,8 @@ contains
             node_id = topo_order(i)
             if (len_trim(filenames(node_id)) == 0) cycle
             if (.not. is_prog(node_id)) cycle
-            call file_basename(filenames(node_id), tname)
-            manifest_name = manifest_test_name(manifest_config, test_dir, tname)
-            if (len_trim(manifest_name) > 0) tname = manifest_name
+            tname = gfortran_test_source_name(manifest_config, test_dir, &
+                filenames(node_id))
             if (.not. include_slow .and. is_slow_name(tname)) cycle
             if (n_selected > 0 .and. .not. selected_test(tname, selected_names, &
                 n_selected)) cycle

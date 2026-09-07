@@ -29,7 +29,7 @@ program fo_main
     use fo_process, only: process_run_argv_logged, argv_push, &
         process_configure_openmp
     use fo_ffc_cli, only: ffc_cmd_build, ffc_cmd_run, ffc_native_requested
-    use fo_exec_target, only: resolve_exec_target
+    use fo_exec_target, only: resolve_exec_target, exec_target_is_app
     use fo_cover, only: fo_cover_run
     use fo_lock, only: lock_write
     use fo_scaffold, only: scaffold_project
@@ -697,7 +697,7 @@ contains
                 call backend_build(b, exitcode, flags=all_flags, log_file=build_log)
             else
                 call backend_build(b, exitcode, flags=all_flags, log_file=build_log, &
-                    with_tests=.true.)
+                    with_tests=.not. exec_target_is_app(b, target))
             end if
             if (exitcode /= 0) then
                 write (error_unit, '(a)') 'fo exec: build failed'

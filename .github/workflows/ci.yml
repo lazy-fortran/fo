@@ -57,3 +57,6 @@ jobs:
 
       - name: Test complete JSON reports
         run: node test/test_test_results_json.js
+
+      - name: Test application exec build scope
+        run: node test/test_exec_app.js
