@@ -701,7 +701,7 @@ contains
         character(len=8) :: exit_str
         integer :: n_units, ierr, i, run_exit, warn_s
         integer(8) :: clk0, clk1, clk_rate
-        real :: secs
+        real :: secs, cpu_secs
         logical :: flaky
         type(fpm_config_t), allocatable :: config
 
@@ -731,7 +731,7 @@ contains
             call make_tmpfile('fo_test_case', case_log)
             call system_clock(clk0, clk_rate)
             call run_test_binary(project_dir, bin_path, arg_lines, case_log, &
-                config, is_slow_name(name), run_exit)
+                config, is_slow_name(name), run_exit, cpu_secs)
             call system_clock(clk1)
             secs = 0.0
             if (clk_rate > 0) secs = real(clk1 - clk0) / real(clk_rate)
@@ -767,25 +767,31 @@ contains
                 call write_test_result_line(log_file, name, 'FAIL', trim(exit_str), &
                     secs)
             end if
+            ! Warn by CPU time where known: wall time also measures host load.
+            if (cpu_secs >= 0.0) secs = cpu_secs
             if (run_exit == 0 .and. secs >= real(warn_s)) &
-                call warn_current_slow_test(name, secs, log_file)
+                call warn_current_slow_test(name, secs, cpu_secs >= 0.0, log_file)
         end do
     end subroutine run_current_tests
 
-    subroutine warn_current_slow_test(name, secs, log_file)
+    subroutine warn_current_slow_test(name, secs, is_cpu, log_file)
         character(len=*), intent(in) :: name, log_file
         real, intent(in) :: secs
+        logical, intent(in) :: is_cpu
 
         integer :: u, ios
+        character(len=:), allocatable :: unit_text
 
         if (is_slow_name(name)) return
+        unit_text = 's'
+        if (is_cpu) unit_text = 's CPU'
         write (error_unit, '(a,f0.1,a)') 'fo: slow test '//trim(name)//' took ', &
-            secs, 's; name it *_slow or speed it up'
+            secs, unit_text//'; name it *_slow or speed it up'
         open (newunit=u, file=trim(log_file), position='append', status='old', &
             iostat=ios)
         if (ios /= 0) return
         write (u, '(a,f0.1,a)') 'fo: warning: slow test '//trim(name)//' took ', &
-            secs, 's (threshold above is advisory)'
+            secs, unit_text//' (threshold above is advisory)'
         close (u)
     end subroutine warn_current_slow_test
 
@@ -2075,7 +2081,7 @@ contains
         character(len=4096), allocatable :: run_args(:)
         logical, allocatable :: run_compiled(:)
         logical, allocatable :: ran(:), flaky(:)
-        real, allocatable :: run_secs(:)
+        real, allocatable :: run_secs(:), run_cpu(:)
         integer :: test_timeout, test_warn
         integer(8) :: clk0, clk1, clk_rate
         integer :: n_order
@@ -2117,11 +2123,12 @@ contains
         allocate (run_nodes(MAX_NODES), run_exits(MAX_NODES), run_logs(MAX_NODES))
         allocate (run_keys(MAX_NODES))
         allocate (run_names(MAX_NODES), run_args(MAX_NODES))
-        allocate (run_compiled(MAX_NODES), run_secs(MAX_NODES))
+        allocate (run_compiled(MAX_NODES), run_secs(MAX_NODES), run_cpu(MAX_NODES))
         allocate (ran(MAX_NODES), flaky(MAX_NODES))
         ran = .false.
         flaky = .false.
         run_secs = 0.0
+        run_cpu = -1.0
         call scan_dir(trim(project_dir)//'/'//trim(test_dir), tunits, n_tests, ierr)
         if (n_tests == 0) return
         allocate (manifest_config)
@@ -2292,7 +2299,8 @@ contains
                 ! invoked from, so a test that opens a project-relative path
                 ! behaves the same under the CLI and under the MCP server.
                 call run_test_binary(project_dir, bin_path, run_args(i), log_local, &
-                    manifest_config, is_slow_name(run_names(i)), run_exits(i))
+                    manifest_config, is_slow_name(run_names(i)), run_exits(i), &
+                    run_cpu(i))
                 call system_clock(clk1)
                 if (clk_rate > 0) run_secs(i) = real(clk1 - clk0) / real(clk_rate)
             end if
@@ -2387,19 +2395,21 @@ contains
         end if
 
         if (.not. bonly) &
-            call warn_slow_tests(filenames, run_nodes, run_exits, run_secs, n_run, &
-            test_warn, log_file)
+            call warn_slow_tests(filenames, run_nodes, run_exits, run_secs, run_cpu, &
+            n_run, test_warn, log_file)
     end subroutine compile_and_run_tests
 
     subroutine run_test_binary(project_dir, bin_path, arg_lines, log_file, &
-            config, slow, exitcode)
+            config, slow, exitcode, cpu_seconds)
         !! Run one test binary under its CPU budget and wall-clock cap (see
         !! fo_test_budget). A timeout returns 124 and appends a line naming the
-        !! limit that fired to the test's own log.
+        !! limit that fired to the test's own log. cpu_seconds is the CPU time
+        !! the test used, negative when unknown.
         character(len=*), intent(in) :: project_dir, bin_path, arg_lines, log_file
         type(fpm_config_t), intent(in) :: config
         logical, intent(in) :: slow
         integer, intent(out) :: exitcode
+        real, intent(out), optional :: cpu_seconds
 
         character(len=:), allocatable :: packed
         integer :: n_args, budget, wall_cap, kind, u, ios
@@ -2414,6 +2424,7 @@ contains
         call process_run_argv_logged(project_dir, packed, n_args, log_file, .true., &
             wall_cap, exitcode, cpu_budget_s=budget, timeout_kind=kind, &
             cpu_seconds=cpu_s, wall_seconds=wall_s)
+        if (present(cpu_seconds)) cpu_seconds = cpu_s
         if (exitcode /= 124) return
         open (newunit=u, file=trim(log_file), position='append', &
             status='unknown', action='write', iostat=ios)
@@ -2614,31 +2625,28 @@ contains
         if (w > timeout_s) w = timeout_s
     end function test_warn_seconds
 
-    subroutine warn_slow_tests(filenames, run_nodes, run_exits, run_secs, n_run, &
-            test_warn, log_file)
+    subroutine warn_slow_tests(filenames, run_nodes, run_exits, run_secs, run_cpu, &
+            n_run, test_warn, log_file)
+        !! Advise renaming fast-suite tests that approach their budget. CPU time
+        !! is used where known (run_cpu >= 0): wall time also measures host load.
         character(len=MAX_PATH), intent(in) :: filenames(:)
         integer, intent(in) :: run_nodes(:), run_exits(:), n_run, test_warn
-        real, intent(in) :: run_secs(:)
+        real, intent(in) :: run_secs(:), run_cpu(:)
         character(len=*), intent(in) :: log_file
 
-        integer :: i, u, ios
+        integer :: i
         character(len=128) :: tname
 
         do i = 1, n_run
             if (run_exits(i) /= 0) cycle
-            if (run_secs(i) < real(test_warn)) cycle
             call file_basename(filenames(run_nodes(i)), tname)
-            ! tests already named *_slow are an intentional opt-in (fo test --all);
-            ! only nag fast-suite tests that are creeping toward the hard limit
-            if (is_slow_name(tname)) cycle
-            write (error_unit, '(a,f0.1,a)') 'fo: slow test '//trim(tname)// &
-                ' took ', run_secs(i), 's; name it *_slow or speed it up'
-            open (newunit=u, file=trim(log_file), position='append', &
-                status='old', iostat=ios)
-            if (ios /= 0) cycle
-            write (u, '(a,f0.1,a)') 'fo: warning: slow test '//trim(tname)// &
-                ' took ', run_secs(i), 's (threshold above is advisory)'
-            close (u)
+            if (run_cpu(i) >= 0.0) then
+                if (run_cpu(i) < real(test_warn)) cycle
+                call warn_current_slow_test(tname, run_cpu(i), .true., log_file)
+            else
+                if (run_secs(i) < real(test_warn)) cycle
+                call warn_current_slow_test(tname, run_secs(i), .false., log_file)
+            end if
         end do
     end subroutine warn_slow_tests
 

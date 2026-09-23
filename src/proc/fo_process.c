@@ -14,6 +14,8 @@
 #ifdef __linux__
 #include <sys/syscall.h>
 #endif
+#include <sys/resource.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -280,7 +282,7 @@ enum { CPU_POLL_MS = 200 };
 struct run_budget {
     int cpu_s;         /* in: CPU-second budget; 0 means wall clock only */
     int kind;          /* out: 0 none, 1 CPU, 2 wall cap, 3 CPU unmeasurable */
-    long long cpu_ms;  /* out: child CPU time at the kill, -1 if unknown */
+    long long cpu_ms;  /* out: child CPU time at exit or kill, -1 if unknown */
     long long wall_ms; /* out: wall time at the kill */
 };
 
@@ -457,8 +459,34 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
         }
 
         for (;;) {
-            pid_t waited = waitpid(pid, &status, WNOHANG);
-            if (waited == pid) break;
+            siginfo_t info;
+            int waited;
+
+            /* Peek without reaping, so the exited child's own CPU time can
+               still be read; the rusage from wait4 would also count every
+               process the test spawned and waited for (compilers, shells). */
+            memset(&info, 0, sizeof(info));
+            waited = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
+            if (waited == 0 && info.si_pid == pid) {
+                struct rusage usage;
+                long long own = budget != NULL ? child_cpu_ms(pid) : -1;
+
+                while (wait4(pid, &status, 0, &usage) < 0) {
+                    if (errno == EINTR) continue;
+                    if (pid_fd >= 0) close(pid_fd);
+                    return 1;
+                }
+                if (budget != NULL) {
+                    if (own < 0) {
+                        own = (long long)(usage.ru_utime.tv_sec +
+                                          usage.ru_stime.tv_sec) * 1000LL +
+                              (long long)(usage.ru_utime.tv_usec +
+                                          usage.ru_stime.tv_usec) / 1000LL;
+                    }
+                    budget->cpu_ms = own;
+                }
+                break;
+            }
             if (waited < 0 && errno != EINTR) {
                 if (pid_fd >= 0) close(pid_fd);
                 return 1;
