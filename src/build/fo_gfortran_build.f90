@@ -187,7 +187,16 @@ contains
 
         call guard_root_mod_shadow(project_dir, lf)
 
-        call bootstrap_external_deps(project_dir, config, lf, exitcode)
+        ! request_flags, not flag_text: the CLI-resolved profile/optimization
+        ! flags only, captured before merge_flags folds in this project's own
+        ! [fortran] warning/error flags (e.g. -Warray-temporaries,
+        ! -Werror=implicit-interface). Those are this project's policy, not
+        ! a third-party dependency's, and appending them to a git dependency
+        ! build can turn warnings already present in vendored code into
+        ! build noise (or, with -Werror flags, failures) that has nothing to
+        ! do with the optimization-level bug this is fixing.
+        call bootstrap_external_deps(project_dir, config, lf, request_flags, &
+            exitcode)
         if (exitcode /= 0) return
 
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
@@ -239,9 +248,11 @@ contains
         call memo_save()
     end subroutine gfortran_build
 
-    subroutine bootstrap_external_deps(project_dir, config, log_file, exitcode)
+    subroutine bootstrap_external_deps(project_dir, config, log_file, &
+            project_flags, exitcode)
         character(len=*), intent(in) :: project_dir, log_file
         type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: project_flags
         integer, intent(out) :: exitcode
 
         type(resolved_src_t), allocatable :: deps(:)
@@ -252,7 +263,8 @@ contains
         allocate (deps(MAX_RESOLVED))
         allocate (dep_config)
         if (config_has_external_deps(config)) then
-            call bootstrap_config_deps(project_dir, config, log_file, exitcode)
+            call bootstrap_config_deps(project_dir, config, log_file, &
+                project_flags, exitcode)
             if (exitcode /= 0) return
         end if
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
@@ -261,7 +273,8 @@ contains
             call fpm_config_parse(deps(i)%dir, dep_config, ierr)
             if (ierr /= 0) cycle
             if (.not. config_has_external_deps(dep_config)) cycle
-            call bootstrap_config_deps(deps(i)%dir, dep_config, log_file, exitcode)
+            call bootstrap_config_deps(deps(i)%dir, dep_config, log_file, &
+                project_flags, exitcode)
             if (exitcode /= 0) return
         end do
     end subroutine bootstrap_external_deps
@@ -279,9 +292,11 @@ contains
         end do
     end function config_has_external_deps
 
-    subroutine bootstrap_config_deps(project_dir, config, log_file, exitcode)
+    subroutine bootstrap_config_deps(project_dir, config, log_file, &
+            project_flags, exitcode)
         character(len=*), intent(in) :: project_dir, log_file
         type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: project_flags
         integer, intent(out) :: exitcode
         character(len=512), allocatable :: includes(:), objects(:), object_keys(:)
         character(len=256) :: missing(MAX_UPDATE_NAMES)
@@ -307,12 +322,15 @@ contains
             write (error_unit, '(a)') 'fo: re-fetching dependency '// &
                 trim(missing(i))//': its source tree is missing'
         end do
-        call run_fpm_bootstrap(project_dir, config, log_file, exitcode)
+        call run_fpm_bootstrap(project_dir, config, project_flags, log_file, &
+            exitcode)
     end subroutine bootstrap_config_deps
 
-    subroutine run_fpm_bootstrap(project_dir, config, log_file, exitcode)
+    subroutine run_fpm_bootstrap(project_dir, config, project_flags, &
+            log_file, exitcode)
         character(len=*), intent(in) :: project_dir, log_file
         type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: project_flags
         integer, intent(out) :: exitcode
 
         character(len=:), allocatable :: packed
@@ -356,7 +374,18 @@ contains
         n_ext = 0
         call collect_external_module_dirs(config%external_modules, &
             config%n_external_modules, ext_dirs, n_ext, MAX_DEP_DIRS)
+        ! fpm's own --profile default is "debug" (-O0) whenever --flag is
+        ! given (its docs: "If --flag is not specified the debug flags
+        ! default"), so without the caller's optimization flags here a git
+        ! dependency is always compiled unoptimized, regardless of the
+        ! native path building at -O3 -funroll-loops for --profile release.
+        ! Appending project_flags after the base policy flags lets its -O
+        ! level win (gfortran honors the last -O flag on the line), so a
+        ! dependency ends up at the same optimization as the rest of the
+        ! project instead of silently staying at fpm's debug default.
         ext_flag = fc_base_flags()
+        if (len_trim(project_flags) > 0) &
+            ext_flag = trim(ext_flag)//' '//trim(project_flags)
         do i = 1, n_ext
             if (len_trim(ext_flag) > 0) ext_flag = trim(ext_flag)//' '
             ext_flag = trim(ext_flag)//'-I'//trim(ext_dirs(i))
