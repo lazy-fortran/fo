@@ -1,5 +1,6 @@
 module fo_exec_target
     use fo_build_backend, only: backend_t, BACKEND_CMAKE, BACKEND_NATIVE
+    use fo_build_tree, only: native_output_dir
     use fo_fs, only: fs_collect_files
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_gfortran_build, only: gfortran_app_source_name, gfortran_test_source_name
@@ -8,8 +9,132 @@ module fo_exec_target
     private
 
     public :: resolve_exec_target, exec_target_is_app
+    public :: exec_args_t, parse_exec_args
+
+    type :: exec_args_t
+        !! Parsed `fo exec` / `fo run` command line. to_program marks the
+        !! arguments handed to the executable, in order.
+        character(len=512) :: cwd = ''
+        character(len=256) :: target = ''
+        integer :: target_index = 0
+        logical :: skip_build = .false.
+        logical :: help = .false.
+        character(len=512) :: flags = ''
+        character(len=64) :: profile = ''
+        character(len=256) :: error = ''
+        logical, allocatable :: to_program(:)
+    end type exec_args_t
 
 contains
+
+    subroutine parse_exec_args(args, run_style, parsed)
+        !! args are the words after the subcommand. For `fo exec` the first
+        !! non-option word is the target and everything after it belongs to
+        !! the program, so `fo exec app --no-build` passes --no-build to app
+        !! instead of silently skipping the build. `fo run` (run_style) follows
+        !! fpm: fo options may also follow the target, and only words after
+        !! `--` or not recognised as fo options go to the program.
+        character(len=*), intent(in) :: args(:)
+        logical, intent(in) :: run_style
+        type(exec_args_t), intent(out) :: parsed
+
+        character(len=:), allocatable :: arg
+        integer :: i, n, eq
+        logical :: literal
+
+        n = size(args)
+        allocate (parsed%to_program(n))
+        parsed%to_program = .false.
+        literal = .false.
+        i = 1
+        do while (i <= n)
+            arg = trim(args(i))
+            if (literal) then
+                parsed%to_program(i) = .true.
+            else if (parsed%target_index > 0 .and. .not. run_style) then
+                parsed%to_program(i) = .true.
+            else if (arg == '--') then
+                literal = parsed%target_index > 0
+            else if (option_takes_value(arg)) then
+                if (i == n) then
+                    parsed%error = arg//' requires a value'
+                    return
+                end if
+                i = i + 1
+                call apply_option(arg, trim(args(i)), parsed)
+                if (arg == '--target') parsed%target_index = i
+            else if (keyed_option(arg)) then
+                eq = index(arg, '=')
+                call apply_option(arg(:eq - 1), arg(eq + 1:), parsed)
+                if (arg(:eq - 1) == '--target') parsed%target_index = i
+            else if (apply_switch(arg, parsed)) then
+                continue
+            else if (parsed%target_index == 0) then
+                parsed%target = arg
+                parsed%target_index = i
+            else
+                parsed%to_program(i) = .true.
+            end if
+            i = i + 1
+        end do
+    end subroutine parse_exec_args
+
+    logical function keyed_option(arg) result(keyed)
+        !! --name=value form of an option that takes a value.
+        character(len=*), intent(in) :: arg
+        integer :: eq
+
+        keyed = .false.
+        eq = index(arg, '=')
+        if (eq > 1) keyed = option_takes_value(arg(:eq - 1))
+    end function keyed_option
+
+    logical function option_takes_value(arg) result(takes)
+        character(len=*), intent(in) :: arg
+
+        select case (arg)
+        case ('--cwd', '--profile', '--flag', '--target')
+            takes = .true.
+        case default
+            takes = .false.
+        end select
+    end function option_takes_value
+
+    subroutine apply_option(name, value, parsed)
+        character(len=*), intent(in) :: name, value
+        type(exec_args_t), intent(inout) :: parsed
+
+        select case (name)
+        case ('--cwd')
+            parsed%cwd = value
+        case ('--profile')
+            parsed%profile = value
+        case ('--flag')
+            parsed%flags = value
+        case ('--target')
+            parsed%target = value
+        end select
+    end subroutine apply_option
+
+    logical function apply_switch(arg, parsed) result(known)
+        character(len=*), intent(in) :: arg
+        type(exec_args_t), intent(inout) :: parsed
+
+        known = .true.
+        select case (arg)
+        case ('--no-build')
+            parsed%skip_build = .true.
+        case ('--example')
+            ! Examples share fo's executable namespace; the fpm selector is
+            ! accepted without changing resolution.
+        case ('--release', '--debug', '--asan')
+            parsed%profile = arg(3:)
+        case ('-h', '--help')
+            parsed%help = .true.
+        case default
+            known = .false.
+        end select
+    end function apply_switch
 
     logical function exec_target_is_app(b, target) result(is_app)
         type(backend_t), intent(in) :: b
@@ -67,16 +192,25 @@ contains
         end do
     end function source_dir_has_target
 
-    subroutine resolve_exec_target(b, target, bin_path, found)
+    subroutine resolve_exec_target(b, target, bin_path, found, flags)
+        !! Locate the built executable for target. For the native backend the
+        !! requested flags select the build tree (see fo_build_tree): a binary
+        !! built with other flags is never substituted.
         type(backend_t), intent(in) :: b
         character(len=*), intent(in) :: target
         character(len=*), intent(out) :: bin_path
         logical, intent(out) :: found
+        character(len=*), intent(in), optional :: flags
 
         character(len=1024) :: candidates(64)
         integer :: i, last_slash, n_candidates, n_exact
 
-        bin_path = trim(b%project_dir)//'/build/fo/bin/'//trim(target)
+        if (present(flags)) then
+            bin_path = native_output_dir(b%project_dir, flags, 'bin')//'/'// &
+                trim(target)
+        else
+            bin_path = trim(b%project_dir)//'/build/fo/bin/'//trim(target)
+        end if
         inquire (file=trim(bin_path), exist=found)
         if (found .or. b%kind /= BACKEND_CMAKE) return
 

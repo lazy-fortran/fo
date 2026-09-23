@@ -86,6 +86,41 @@ try {
   fixture('discovered_collision', 'name = "collision"\n',
     'test/shared.f90', 'shared', false, { 'app/shared.f90': application });
 
+  // Each requested flag set builds into its own tree, and exec selects the
+  // tree by the flags it is given, also under --no-build. The program's output
+  // shows which flags it was compiled with.
+  const flavours = path.join(scratch, 'flavours');
+  write(path.join(flavours, 'fpm.toml'), 'name = "flavour"\n');
+  write(path.join(flavours, 'app/main.F90'), [
+    'program flavour', 'implicit none', 'character(len=64) :: word',
+    '#ifdef FAST', "print '(a)', 'fast'", '#else', "print '(a)', 'plain'", '#endif',
+    'if (command_argument_count() > 0) then', 'call get_command_argument(1, word)',
+    "print '(a)', trim(word)", 'end if', 'end program flavour', ''
+  ].join('\n'));
+  let flavour = run(flavours, ['build', '--flag', '-DFAST']);
+  assert.equal(flavour.status, 0, flavour.stdout + flavour.stderr);
+  flavour = run(flavours, ['exec', '--no-build', '--flag', '-DFAST', 'flavour']);
+  assert.equal(flavour.stdout.trim(), 'fast', flavour.stderr);
+  flavour = run(flavours, ['exec', '--no-build', 'flavour']);
+  assert.notEqual(flavour.status, 0, 'no default build exists yet');
+  assert.match(flavour.stderr, /--flag '-DFAST'/, 'names the flags that were built');
+  flavour = run(flavours, ['build']);
+  assert.equal(flavour.status, 0, flavour.stdout + flavour.stderr);
+  flavour = run(flavours, ['exec', '--no-build', '--flag', '-DFAST', 'flavour']);
+  assert.equal(flavour.stdout.trim(), 'fast', 'a default build must not replace it');
+  flavour = run(flavours, ['exec', '--no-build', 'flavour']);
+  assert.equal(flavour.stdout.trim(), 'plain', flavour.stderr);
+  assert.match(flavour.stderr, /also built with/, 'notes the unused build');
+  console.log('exec-app: flag sets keep separate executables');
+
+  // fo exec options end at the target; later words belong to the program.
+  flavour = run(flavours, ['exec', 'flavour', '--flag']);
+  assert.equal(flavour.status, 0, flavour.stdout + flavour.stderr);
+  assert.equal(flavour.stdout.trim(), 'plain\n--flag', 'passes --flag to the program');
+  flavour = run(flavours, ['exec', 'flavour', '--help']);
+  assert.equal(flavour.stdout.trim(), 'plain\n--help', 'passes --help to the program');
+  console.log('exec-app: arguments after the target reach the program');
+
   const failed = run(broken, ['test', 'broken']);
   assert.equal(failed.status, 1, 'unrelated test must actually fail compilation');
   console.log('exec-app: explicitly requested broken test fails');

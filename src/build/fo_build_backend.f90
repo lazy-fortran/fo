@@ -299,7 +299,7 @@ contains
             case (BACKEND_NATIVE)
                 no_names = ''
                 call gfortran_run_tests(self%project_dir, log_path, exitcode, &
-                    slow, no_names, 0)
+                    slow, no_names, 0, flags=flag_text)
             case (BACKEND_CMAKE)
                 call cmake_test(self%project_dir, '', slow, log_path, exitcode)
             end select
@@ -374,7 +374,7 @@ contains
         select case (self%kind)
         case (BACKEND_NATIVE)
             call gfortran_run_tests(self%project_dir, log_path, exitcode, slow, &
-                fast_names, n_fast)
+                fast_names, n_fast, flags=flag_text)
         case (BACKEND_CMAKE)
             call names_to_ctest_regex(fast_names, n_fast, regex)
             call cmake_test(self%project_dir, regex, slow, log_path, exitcode)

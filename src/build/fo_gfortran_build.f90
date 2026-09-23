@@ -10,6 +10,8 @@ module fo_gfortran_build
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
         resolve_dev_dep_srcs, MAX_RESOLVED, join_path, merge_dep_link_libs
     use fo_stat_memo, only: memo_save, memo_hash_file
+    use fo_build_tree, only: native_output_dir, native_profiles_dir, &
+        native_record_profile
     use fo_test_budget, only: test_timeout_seconds, test_budget_seconds, &
         test_wall_cap_seconds, timeout_detail
     use fx_action_cache, only: cache_set_file_hash_hook
@@ -166,7 +168,7 @@ contains
 
         mod_dir = trim(project_dir)//'/build/fo/mod'
         obj_dir = trim(project_dir)//'/build/fo/obj'
-        bin_dir = trim(project_dir)//'/build/fo/bin'
+        bin_dir = native_output_dir(project_dir, request_flags, 'bin')
         ! The native tree is shared by every compiler, so a build with a
         ! different one would overwrite the modules, objects and binaries of
         ! the last. The .mod formats are incompatible, and worse, `fo exec`
@@ -177,6 +179,7 @@ contains
         call fs_make_dir(mod_dir)
         call fs_make_dir(obj_dir)
         call fs_make_dir(bin_dir)
+        call native_record_profile(project_dir, request_flags)
         exitcode = 0
         if (exitcode /= 0) return
 
@@ -221,8 +224,9 @@ contains
         if (present(n_compiled)) n_compiled = nc
 
         if (want_apps) then
-            call link_app_binaries(project_dir, config, bin_dir, src_objs, n_src_objs, &
-                is_prog_arr, dep_objs, n_dep_objs, lf, exitcode, &
+            call link_app_binaries(project_dir, config, bin_dir, &
+                native_output_dir(project_dir, request_flags, 'app'), src_objs, &
+                n_src_objs, is_prog_arr, dep_objs, n_dep_objs, lf, exitcode, &
                 flags=flag_text, use_cache=use_cache)
         end if
         if (exitcode == 0 .and. allow_cache .and. stamp_ok) then
@@ -401,6 +405,9 @@ contains
             call fs_remove_tree(trim(mod_dir))
             call fs_remove_tree(trim(obj_dir))
             call fs_remove_tree(trim(bin_dir))
+            call fs_remove_tree(trim(project_dir)//'/build/fo/bin')
+            call fs_remove_tree(trim(project_dir)//'/build/fo/app')
+            call fs_remove_tree(native_profiles_dir(project_dir))
         end if
         call fs_make_dir(trim(project_dir)//'/build/fo')
         call fs_write_text(trim(stamp_path), trim(current)//new_line('a'))
@@ -474,7 +481,7 @@ contains
             apps_ready=apps_current, cached_test_dir=test_dir)
         if (exitcode /= 0) return
 
-        bin_dir = trim(project_dir)//'/build/fo/bin'
+        bin_dir = native_output_dir(project_dir, request_flags, 'bin')
         if (build_current .and. tests_current .and. .not. bonly .and. &
             len_trim(test_dir) > 0) then
             call run_current_tests(project_dir, test_dir, bin_dir, no_names, &
@@ -493,7 +500,7 @@ contains
 
         mod_dir = trim(project_dir)//'/build/fo/mod'
         obj_dir = trim(project_dir)//'/build/fo/obj'
-        bin_dir = trim(project_dir)//'/build/fo/bin'
+        bin_dir = native_output_dir(project_dir, request_flags, 'bin')
         if (build_current .and. tests_current .and. .not. bonly) then
             call run_current_tests(project_dir, config%test_dir, bin_dir, no_names, &
                 0, slow, lf, exitcode)
@@ -557,7 +564,7 @@ contains
             apps_ready=apps_current, cached_test_dir=test_dir)
         if (exitcode /= 0) return
 
-        bin_dir = trim(project_dir)//'/build/fo/bin'
+        bin_dir = native_output_dir(project_dir, request_flags, 'bin')
         if (build_current .and. tests_current .and. len_trim(test_dir) > 0) then
             if (.not. bonly) call run_current_tests(project_dir, test_dir, bin_dir, &
                 names, n_names, slow, lf, exitcode)
@@ -575,7 +582,7 @@ contains
 
         mod_dir = trim(project_dir)//'/build/fo/mod'
         obj_dir = trim(project_dir)//'/build/fo/obj'
-        bin_dir = trim(project_dir)//'/build/fo/bin'
+        bin_dir = native_output_dir(project_dir, request_flags, 'bin')
         if (build_current .and. tests_current) then
             if (.not. bonly) call run_current_tests(project_dir, config%test_dir, &
                 bin_dir, names, n_names, slow, lf, exitcode)
@@ -600,15 +607,17 @@ contains
     end subroutine gfortran_test_names
 
     subroutine gfortran_run_tests(project_dir, log_file, exitcode, include_slow, &
-            names, n_names)
+            names, n_names, flags)
+        !! Run already-built tests from the tree of the given requested flags.
         character(len=*), intent(in) :: project_dir, log_file
         integer, intent(out) :: exitcode
         logical, intent(in) :: include_slow
         character(len=128), intent(in) :: names(:)
         integer, intent(in) :: n_names
+        character(len=*), intent(in), optional :: flags
 
         type(fpm_config_t), allocatable :: config
-        character(len=512) :: bin_dir, lf
+        character(len=512) :: bin_dir, lf, request_flags
         integer :: ierr
 
         exitcode = 1
@@ -618,7 +627,9 @@ contains
         if (ierr /= 0) return
         lf = log_file
         if (len_trim(lf) == 0) lf = '/dev/null'
-        bin_dir = trim(project_dir)//'/build/fo/bin'
+        request_flags = ''
+        if (present(flags)) request_flags = flags
+        bin_dir = native_output_dir(project_dir, request_flags, 'bin')
         call run_current_tests(project_dir, config%test_dir, bin_dir, names, &
             n_names, include_slow, lf, exitcode)
     end subroutine gfortran_run_tests
@@ -1800,10 +1811,10 @@ contains
         close (u)
     end subroutine append_test_stdout_block
 
-    subroutine link_app_binaries(project_dir, config, bin_dir, src_objs, n_src_objs, &
-            is_prog_arr, dep_objs, n_dep_objs, log_file, exitcode, &
+    subroutine link_app_binaries(project_dir, config, bin_dir, app_bin_dir, src_objs, &
+            n_src_objs, is_prog_arr, dep_objs, n_dep_objs, log_file, exitcode, &
             flags, use_cache)
-        character(len=*), intent(in) :: project_dir, bin_dir, log_file
+        character(len=*), intent(in) :: project_dir, bin_dir, app_bin_dir, log_file
         type(fpm_config_t), intent(in) :: config
         character(len=512), intent(in) :: src_objs(MAX_SRC_OBJS)
         integer, intent(in) :: n_src_objs
@@ -1816,7 +1827,7 @@ contains
 
         integer :: i, n_lib, n_link_inputs, copy_rc
         character(len=512), allocatable :: lib_objs(:)
-        character(len=512) :: prog_obj, bin_path, app_bin_dir, app_bin_path
+        character(len=512) :: prog_obj, bin_path, app_bin_path
         character(len=512) :: archive_path, link_inputs(1)
         character(len=128) :: prog_name
         character(len=512) :: link_flags
@@ -1833,7 +1844,7 @@ contains
         ! link-cache hits restore them without recompiling.
         if (.not. config%auto_executables) then
             call fs_remove_tree(trim(bin_dir))
-            call fs_remove_tree(trim(project_dir)//'/build/fo/app')
+            call fs_remove_tree(trim(app_bin_dir))
             call fs_make_dir(trim(bin_dir))
         end if
         n_lib = 0
@@ -1854,7 +1865,6 @@ contains
         base_digest = ''
         if (cache_ierr == 0) call link_base_digest(project_dir, lib_objs, n_lib, dep_objs, &
             n_dep_objs, config%link_libs, config%n_link_libs, base_digest)
-        app_bin_dir = trim(project_dir)//'/build/fo/app'
         call fs_make_dir(app_bin_dir)
         n_link_inputs = 0
         archive_path = ''

@@ -13,7 +13,8 @@ fo check          # build + test, one-line status
 fo check --json   # JSON status
 fo build          # build only
 fo test           # run tests
-fo exec <t> [args] # build, then run build/fo/bin/<t> (never run it by hand: may be stale)
+fo exec <t> [args] # build, then run <t> (never run build/fo/bin/* by hand: may be stale)
+fo exec --release --no-build <t> [args]  # run the fo build --release binary
 fo lint           # unused imports + gfortran warnings
 fo lint --json    # lint results as JSON
 fo fmt            # format sources (native, 88 col, 4 sp)

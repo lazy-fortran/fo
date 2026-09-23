@@ -53,6 +53,20 @@ test-wall-timeout = 900  # wall-clock cap per test
 CPU time is read from `/proc` on Linux. Elsewhere the budget stays a
 wall-clock limit.
 
+Builds with requested flags (`--flag`, `--profile NAME`, `--release`) keep
+their executables apart from the default build, under
+`build/fo/profiles/<flags>/`. `fo exec` and `fo test` pick the tree by the
+flags they are given, also with `--no-build`, so a later plain `fo` cannot swap
+an optimised binary for an unoptimised one under a running job:
+
+```sh
+fo build --release
+fo exec --release --no-build solver input.nml
+```
+
+`fo exec` options go before the target; everything after it is passed to the
+program unchanged.
+
 The default output is intentionally quieter than fpm. `fo check --agent` and
 MCP checks return one bounded JSON object with the failure, hint, rerun command,
 and log path.

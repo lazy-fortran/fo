@@ -29,7 +29,9 @@ program fo_main
     use fo_process, only: process_run_argv_logged, argv_push, &
         process_configure_openmp
     use fo_ffc_cli, only: ffc_cmd_build, ffc_cmd_run, ffc_native_requested
-    use fo_exec_target, only: resolve_exec_target, exec_target_is_app
+    use fo_exec_target, only: resolve_exec_target, exec_target_is_app, &
+        exec_args_t, parse_exec_args
+    use fo_build_tree, only: native_other_builds
     use fo_cover, only: fo_cover_run
     use fo_lock, only: lock_write
     use fo_scaffold, only: scaffold_project
@@ -414,19 +416,27 @@ contains
         out = output_unit
         if (present(unit)) out = unit
         write (out, '(a)') &
-            'usage: fo exec [--cwd <dir>] [--no-build] <target> [args...]'
+            'usage: fo exec [options] <target> [args...]'
         write (out, '(a)') ''
         write (out, '(a)') 'Build incrementally, resolve a target, then run it.'
+        write (out, '(a)') 'Options go before the target; later words go to the program.'
         write (out, '(a)') ''
         write (out, '(a)') 'options:'
-        write (out, '(a)') '  --cwd <dir>     run the target in this directory'
-        write (out, '(a)') '  --no-build      resolve and run without rebuilding'
-        write (out, '(a)') '  -h, --help      show this help'
+        write (out, '(a)') '  --cwd <dir>       run the target in this directory'
+        write (out, '(a)') '  --no-build        resolve and run without rebuilding'
+        write (out, '(a)') '  --flag <flags>    build with extra compiler flags'
+        write (out, '(a)') '  --profile <name>  build profile: debug, release, asan'
+        write (out, '(a)') '  --release         same as --profile release'
+        write (out, '(a)') '  -h, --help        show this help'
+        write (out, '(a)') ''
+        write (out, '(a)') 'Each flag set has its own build tree. --flag/--profile also'
+        write (out, '(a)') 'select the tree under --no-build; a binary built with other'
+        write (out, '(a)') 'flags is never run in its place.'
         write (out, '(a)') ''
         write (out, '(a)') 'examples:'
         write (out, '(a)') '  fo exec simple simple.in'
         write (out, '(a)') '  fo exec --cwd /tmp/run simple simple.in'
-        write (out, '(a)') '  fo exec --no-build --cwd /tmp/run simple simple.in'
+        write (out, '(a)') '  fo build --release && fo exec --release --no-build simple in'
     end subroutine print_exec_usage
 
     subroutine cmd_check()
@@ -592,80 +602,39 @@ contains
     end subroutine report_failed_tests
 
     subroutine cmd_exec()
-        !! Build incrementally, then exec build/fo/bin/<target> with the
-        !! remaining args, inheriting the terminal. The sanctioned way to run a
-        !! built binary (app or test): it can never be stale, because the build
-        !! runs first and fo's cache is content-addressed. Running
-        !! build/fo/bin executables by hand skips that and may execute an artifact older
-        !! than the current sources.
+        !! Build incrementally, then exec the built <target> with the remaining
+        !! args, inheriting the terminal. The sanctioned way to run a built
+        !! binary (app or test): it can never be stale, because the build runs
+        !! first and fo's cache is content-addressed. Running build/fo/bin
+        !! executables by hand skips that and may execute an artifact older
+        !! than the current sources. The requested flags (--flag, --profile,
+        !! --release) select the build tree, also with --no-build, so a binary
+        !! built with other flags is never run in its place.
         type(backend_t) :: b
-        integer :: exitcode, i, target_index
-        character(len=256) :: target, arg
-        character(len=512) :: build_log, bin_path, run_cwd
-        character(len=512) :: flags
-        character(len=64) :: profile
+        type(exec_args_t) :: parsed
+        integer :: exitcode, i, n_words
+        character(len=4096), allocatable :: words(:)
+        character(len=512) :: build_log, bin_path
         character(len=1024) :: all_flags
         character(len=:), allocatable :: packed
         integer :: n_args
-        logical :: exists, skip_build, pass_args
+        logical :: exists
 
-        if (has_arg('--help') .or. has_arg('-h')) then
+        n_words = max(0, command_argument_count() - 1)
+        allocate (words(n_words))
+        do i = 1, n_words
+            call get_command_argument(i + 1, words(i))
+        end do
+        call parse_exec_args(words, trim(action) == 'run', parsed)
+        if (parsed%help) then
             call print_exec_usage()
             return
         end if
-        if (command_argument_count() < 2) then
-            call print_exec_usage(error_unit)
+        if (len_trim(parsed%error) > 0) then
+            write (error_unit, '(a)') 'fo '//trim(action)//': '//trim(parsed%error)
             stop 1
         end if
-        run_cwd = ''
-        skip_build = .false.
-        target = ''
-        target_index = 0
-        i = 2
-        do while (i <= command_argument_count())
-            call get_command_argument(i, arg)
-            if (trim(arg) == '--cwd') then
-                if (i == command_argument_count()) then
-                    write (error_unit, '(a)') 'fo exec: --cwd requires a directory'
-                    stop 1
-                end if
-                i = i + 1
-                call get_command_argument(i, run_cwd)
-            else if (index(trim(arg), '--cwd=') == 1) then
-                run_cwd = trim(arg(7:))
-            else if (trim(arg) == '--no-build') then
-                skip_build = .true.
-            else if (trim(arg) == '--example') then
-                ! Examples share fo's executable namespace; this fpm-compatible
-                ! selector is therefore accepted without changing resolution.
-            else if (trim(arg) == '--profile' .or. trim(arg) == '--flag') then
-                if (i == command_argument_count()) then
-                    write (error_unit, '(a,a,a)') 'fo run: ', trim(arg), &
-                        ' requires a value'
-                    stop 1
-                end if
-                i = i + 1
-            else if (index(trim(arg), '--profile=') == 1) then
-                continue
-            else if (trim(arg) == '--target') then
-                if (i == command_argument_count()) then
-                    write (error_unit, '(a)') 'fo run: --target requires a name'
-                    stop 1
-                end if
-                i = i + 1
-                call get_command_argument(i, target)
-                target_index = i
-            else if (trim(arg) == '--') then
-                continue
-            else
-                if (target_index == 0) then
-                    target = arg
-                    target_index = i
-                end if
-            end if
-            i = i + 1
-        end do
-        if (target_index == 0) then
+        if (parsed%target_index == 0) then
             call print_exec_usage(error_unit)
             stop 1
         end if
@@ -675,29 +644,27 @@ contains
             stop 1
         end if
 
-        if (.not. skip_build) then
-            call get_flags_arg(flags)
-            call get_profile_arg(profile)
-            if (len_trim(profile) > 0 .and. &
-                len_trim(profile_flags(profile)) == 0) then
-                write (error_unit, '(a)') &
-                    'fo: unknown run profile: '//trim(profile)
-                stop 1
+        if (len_trim(parsed%profile) > 0 .and. &
+            len_trim(profile_flags(parsed%profile)) == 0) then
+            write (error_unit, '(a)') 'fo: unknown run profile: '//trim(parsed%profile)
+            stop 1
+        end if
+        all_flags = trim(profile_flags(parsed%profile))
+        if (len_trim(parsed%flags) > 0) then
+            if (len_trim(all_flags) > 0) then
+                all_flags = trim(all_flags)//' '//trim(parsed%flags)
+            else
+                all_flags = trim(parsed%flags)
             end if
-            all_flags = trim(profile_flags(profile))
-            if (len_trim(flags) > 0) then
-                if (len_trim(all_flags) > 0) then
-                    all_flags = trim(all_flags)//' '//trim(flags)
-                else
-                    all_flags = trim(flags)
-                end if
-            end if
+        end if
+
+        if (.not. parsed%skip_build) then
             call make_tmpfile('fo-exec-build', build_log)
             if (trim(action) == 'run') then
                 call backend_build(b, exitcode, flags=all_flags, log_file=build_log)
             else
                 call backend_build(b, exitcode, flags=all_flags, log_file=build_log, &
-                    with_tests=.not. exec_target_is_app(b, target))
+                    with_tests=.not. exec_target_is_app(b, parsed%target))
             end if
             if (exitcode /= 0) then
                 write (error_unit, '(a)') 'fo exec: build failed'
@@ -708,46 +675,65 @@ contains
             call delete_tmpfile(build_log)
         end if
 
-        call resolve_exec_target(b, target, bin_path, exists)
+        call resolve_exec_target(b, parsed%target, bin_path, exists, flags=all_flags)
+        if (b%kind == BACKEND_NATIVE .and. parsed%skip_build) &
+            call report_other_builds(b%project_dir, all_flags, parsed%target, exists)
         if (.not. exists) then
-            write (error_unit, '(a)') 'fo exec: no such target: '//trim(target)
+            write (error_unit, '(a)') 'fo exec: no such target: '//trim(parsed%target)
             error stop 1
         end if
 
         n_args = 0
         call argv_push(packed, n_args, trim(bin_path))
-        if (trim(action) == 'run') then
-            pass_args = .false.
-            i = target_index + 1
-            do while (i <= command_argument_count())
-                call get_command_argument(i, arg)
-                if (trim(arg) == '--') then
-                    pass_args = .true.
-                else if (.not. pass_args .and. &
-                        (trim(arg) == '--profile' .or. trim(arg) == '--flag')) then
-                    i = i + 1
-                else if (.not. pass_args .and. trim(arg) == '--example') then
-                    continue
-                else if (.not. pass_args .and. &
-                        index(trim(arg), '--profile=') == 1) then
-                    continue
-                else
-                    call argv_push(packed, n_args, trim(arg))
-                end if
-                i = i + 1
-            end do
-        else
-            do i = target_index + 1, command_argument_count()
-                call get_command_argument(i, arg)
-                call argv_push(packed, n_args, trim(arg))
-            end do
-        end if
+        do i = 1, n_words
+            if (parsed%to_program(i)) call argv_push(packed, n_args, trim(words(i)))
+        end do
         ! Empty log_file makes the child inherit this terminal's stdout/stderr;
         ! timeout 0 means no limit (an interactive app may run arbitrarily long).
-        call process_run_argv_logged(trim(run_cwd), packed, n_args, '', .false., &
+        call process_run_argv_logged(trim(parsed%cwd), packed, n_args, '', .false., &
             0, exitcode)
         if (exitcode /= 0) error stop 1
     end subroutine cmd_exec
+
+    subroutine report_other_builds(project_dir, flags, target, found)
+        !! `fo exec --no-build` runs only the build made with the requested
+        !! flags. Say so when builds with other flags exist: fail with the flags
+        !! that select them if the requested build is missing, and otherwise
+        !! note that they were not used.
+        character(len=*), intent(in) :: project_dir, flags, target
+        logical, intent(in) :: found
+        character(len=512) :: labels(16)
+        integer :: i, n_labels
+
+        call native_other_builds(project_dir, flags, target, labels, n_labels)
+        if (n_labels == 0) return
+        if (found) then
+            write (error_unit, '(a)') 'fo exec: note: running the '// &
+                flags_label(flags)//' build of '//trim(target)// &
+                '; it is also built with:'
+        else
+            write (error_unit, '(a)') 'fo exec: '//trim(target)// &
+                ' has no '//flags_label(flags)//' build; it is built with:'
+        end if
+        do i = 1, n_labels
+            write (error_unit, '(a)') 'fo exec:   '//flags_label(labels(i))
+        end do
+        write (error_unit, '(a)') 'fo exec: pass the same --flag/--profile '// &
+            'as the build to select one'
+        flush (error_unit)
+        if (.not. found) error stop 1
+    end subroutine report_other_builds
+
+    function flags_label(flags) result(label)
+        character(len=*), intent(in) :: flags
+        character(len=:), allocatable :: label
+
+        if (len_trim(flags) == 0) then
+            label = 'default (no --flag)'
+        else
+            label = "--flag '"//trim(flags)//"'"
+        end if
+    end function flags_label
 
     subroutine check_output_mode(mode, ierr)
         integer, intent(out) :: mode, ierr
@@ -1010,6 +996,8 @@ contains
                 profile = 'debug'
             case ('--asan')
                 profile = 'asan'
+            case ('--release')
+                profile = 'release'
             case ('--profile')
                 if (i < command_argument_count()) &
                     call get_command_argument(i + 1, profile)
