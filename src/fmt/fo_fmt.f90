@@ -425,12 +425,12 @@ contains
             ! diff -q via byte-exact content hash of original vs formatted copy.
             call sha256_file(trim(fpath), orig_hash, ho)
             call sha256_file(trim(tmpf), fmt_hash, hf)
-            call delete_tmpfile(tmpf)
 
             if (ho /= 0 .or. hf /= 0 .or. orig_hash /= fmt_hash) then
                 n_bad = n_bad + 1
-                output = trim(output)//trim(fpath)//': needs formatting'//achar(10)
+                output = trim(output)//first_difference(trim(fpath), trim(tmpf))
             end if
+            call delete_tmpfile(tmpf)
         end do
         close (u)
 
@@ -440,6 +440,43 @@ contains
             call store_fmt_marker(action_id)
         end if
     end subroutine fo_fmt_check_list
+
+    function first_difference(path, formatted) result(report)
+        !! "path:LINE: needs formatting" and the first differing line before
+        !! (-) and after (+) formatting, one entry per line of the report.
+        character(len=*), intent(in) :: path, formatted
+        character(len=:), allocatable :: report
+        character(len=4096) :: old_line, new_line
+        character(len=16) :: line_text
+        integer :: uo, uf, ios_o, ios_f, line_no
+
+        report = path//': needs formatting'//achar(10)
+        open (newunit=uo, file=path, status='old', action='read', iostat=ios_o)
+        if (ios_o /= 0) return
+        open (newunit=uf, file=formatted, status='old', action='read', iostat=ios_f)
+        if (ios_f /= 0) then
+            close (uo)
+            return
+        end if
+        line_no = 0
+        do
+            line_no = line_no + 1
+            old_line = ''
+            new_line = ''
+            read (uo, '(a)', iostat=ios_o) old_line
+            read (uf, '(a)', iostat=ios_f) new_line
+            if (ios_o /= 0 .and. ios_f /= 0) exit
+            if (ios_o /= ios_f .or. old_line /= new_line) then
+                write (line_text, '(i0)') line_no
+                report = path//':'//trim(line_text)//': needs formatting'// &
+                    achar(10)//'  -'//trim(old_line)//achar(10)//'  +'// &
+                    trim(new_line)//achar(10)
+                exit
+            end if
+        end do
+        close (uo)
+        close (uf)
+    end function first_difference
 
     logical function is_fortran_source(path)
         character(len=*), intent(in) :: path

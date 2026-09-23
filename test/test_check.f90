@@ -831,6 +831,15 @@ contains
         call assert(index(output, 'bad.f90') > 0, &
             'full format check reports the unformatted file')
 
+        files(1) = trim(src_dir)//'/bad.f90'
+        call fo_fmt_check_files(project_dir, files, 1, output, exitcode)
+        call assert(exitcode /= 0, 'format check of a listed unformatted file fails')
+        call assert(index(output, 'bad.f90:2: needs formatting') > 0, &
+            'format check names the file and first differing line')
+        call assert(index(output, '  -implicit none') > 0 .and. &
+            index(output, '  +    implicit none') > 0, &
+            'format check shows the line before and after formatting')
+
         call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)
     end subroutine test_fmt_check_files_limits_scope
 

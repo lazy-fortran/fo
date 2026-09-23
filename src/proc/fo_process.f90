@@ -7,7 +7,7 @@ module fo_process
     public :: process_start_fo_check, process_poll_pid, process_cancel_pid
     public :: process_run_logged
     public :: process_stderr_is_tty, process_write_stderr
-    public :: process_getpid, process_getcwd
+    public :: process_getpid, process_getcwd, process_exit
     public :: process_suppress_heartbeats
     public :: process_run_argv_logged, argv_push, argv_push_split
     public :: argv_push_split_nl
@@ -105,6 +105,11 @@ module fo_process
             integer(c_long_long), intent(out) :: cpu_ms, wall_ms
         end subroutine fo_c_run_argv_budget
 
+        subroutine fo_c_exit(code) bind(C, name='fo_c_exit')
+            import :: c_int
+            integer(c_int), value :: code
+        end subroutine fo_c_exit
+
         subroutine fo_c_poll_pid(pid, done, exitcode) &
                 bind(C, name='fo_c_poll_pid')
             import :: c_int
@@ -164,6 +169,19 @@ contains
         !! animated carriage-return bar instead of plain lines.
         process_stderr_is_tty = fo_c_isatty(2_c_int) /= 0
     end function process_stderr_is_tty
+
+    subroutine process_exit(code)
+        !! End the program with exit status code, after flushing standard
+        !! output and error, without the "Error termination" banner and
+        !! backtrace of ERROR STOP (which also printed before still-buffered
+        !! messages when stderr is not a terminal).
+        use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
+        integer, intent(in) :: code
+
+        flush (output_unit)
+        flush (error_unit)
+        call fo_c_exit(int(code, c_int))
+    end subroutine process_exit
 
     subroutine process_write_stderr(s)
         !! Raw unbuffered write of s to stderr (no newline added, no fork).

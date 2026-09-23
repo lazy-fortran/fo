@@ -596,6 +596,15 @@ void fo_c_configure_openmp(void) {
     }
 }
 
+/* Terminate with a status and no runtime banner: Fortran ERROR STOP prints
+   "Error termination" and a backtrace, which buries the actual message. The
+   Fortran side flushes its units first; exit() then runs the runtime's own
+   cleanup. */
+void fo_c_exit(int code) {
+    fflush(NULL);
+    exit(code);
+}
+
 void fo_c_getpid(int *pid_out) {
     *pid_out = (int)getpid();
 }

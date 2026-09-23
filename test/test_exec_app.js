@@ -121,6 +121,19 @@ try {
   assert.equal(flavour.stdout.trim(), 'plain\n--help', 'passes --help to the program');
   console.log('exec-app: arguments after the target reach the program');
 
+  // A failing command reports its message without a runtime backtrace.
+  const unformatted = path.join(scratch, 'unformatted');
+  write(path.join(unformatted, 'x.f90'), [
+    'module m', '    implicit none', 'contains', '    function f(x) &',
+    '        result(y)', '        real, intent(in) :: x', '        real :: y',
+    '        y = x', '    end function f', 'end module m', ''
+  ].join('\n'));
+  const fmtCheck = run(unformatted, ['fmt', '--check', 'x.f90']);
+  assert.equal(fmtCheck.status, 1, fmtCheck.stdout + fmtCheck.stderr);
+  assert.match(fmtCheck.stderr, /x\.f90:5: needs formatting/, fmtCheck.stderr);
+  assert.doesNotMatch(fmtCheck.stderr, /Backtrace|ERROR STOP/, fmtCheck.stderr);
+  console.log('exec-app: fo fmt --check names the file without a backtrace');
+
   const failed = run(broken, ['test', 'broken']);
   assert.equal(failed.status, 1, 'unrelated test must actually fail compilation');
   console.log('exec-app: explicitly requested broken test fails');
