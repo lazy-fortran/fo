@@ -869,9 +869,11 @@ contains
         write (u, '(a)') 'implicit none'
         write (u, '(a)') 'end module stack_dependency_marker'
         close (u)
+        ! -J keeps the module file out of the working directory (the fo
+        ! checkout), where it would shadow build/fo/mod on the next build.
         command = 'gfortran -c "'//trim(dependency_dir)// &
-            '/src/marker.f90" -o "'//trim(dependency_dir)// &
-            '/build/marker.o"'
+            '/src/marker.f90" -J "'//trim(dependency_dir)//'/build" -o "'// &
+            trim(dependency_dir)//'/build/marker.o"'
         call execute_command_line(trim(command))
         command = 'ar rcs "'//trim(dependency_dir)// &
             '/build/libstack_dependency.a" "'//trim(dependency_dir)// &
