@@ -33,6 +33,7 @@ program test_backend_gfortran
     call test_gfortran_app_links_only_reachable_library_objects()
     call test_compiler_switch_clears_the_tree()
     call test_slow_test_gets_its_own_timeout()
+    call test_test_budget_counts_cpu_not_wall()
     call test_gfortran_builds_manifest_example()
     call test_gfortran_preprocesses_lowercase_f90()
     call test_gfortran_builds_nested_auto_example()
@@ -276,19 +277,97 @@ contains
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_slow_test_gets_its_own_timeout
 
+    subroutine test_test_budget_counts_cpu_not_wall()
+        !! The per-test budget is CPU time. A test that is off-CPU (here: it
+        !! sleeps, as a test on a saturated host effectively does) passes past
+        !! its budget; only the wall-clock cap stops it. A test that really
+        !! uses the CPU is stopped at the budget, and each timeout names the
+        !! limit that fired. The budget may also come from [extra.fo].
+        character(len=512) :: project_dir, log_file
+        integer :: u, exitcode
+
+        call make_tmp_path('fo_cpu_budget', project_dir)
+        call make_tmp_path('fo_cpu_budget_log', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/test')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "cpu-budget"'
+        close (u)
+        call write_idle_test(trim(project_dir)//'/test/test_idle.f90', 'test_idle', 2)
+
+        call set_env('FO_TEST_TIMEOUT', '1')
+        call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
+        call assert(exitcode == 0, 'cpu budget: an idle test outlives its budget')
+        call assert(file_contains(log_file, 'TEST_RESULT test_idle PASS'), &
+            'cpu budget: the idle test reports a pass')
+
+        call set_env('FO_TEST_WALL_TIMEOUT', '1')
+        call write_idle_test(trim(project_dir)//'/test/test_idle.f90', 'test_idle', 30)
+        call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
+        call assert(exitcode == 124, 'wall cap: a hung idle test is killed')
+        call assert(file_contains(log_file, 'wall-clock cap of 1 s exceeded'), &
+            'wall cap: the timeout names the wall-clock cap')
+        call set_env('FO_TEST_WALL_TIMEOUT', '')
+        call set_env('FO_TEST_TIMEOUT', '')
+
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/test')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "cpu-budget"'
+        write (u, '(a)') '[extra.fo]'
+        write (u, '(a)') 'test-timeout = 1'
+        close (u)
+        call write_sleeping_test(trim(project_dir)//'/test/test_busy.f90', &
+            'test_busy')
+        call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
+        call assert(exitcode == 124, '[extra.fo] test-timeout: a busy test is killed')
+        call assert(file_contains(log_file, 'CPU budget of 1 s exceeded'), &
+            'cpu budget: the timeout names the CPU budget')
+        call assert(file_contains(log_file, 'TEST_RESULT test_busy TIMEOUT'), &
+            'cpu budget: the busy test reports a timeout')
+
+        call set_env('FO_TEST_TIMEOUT', '60')
+        call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
+        call assert(exitcode == 0, 'FO_TEST_TIMEOUT overrides [extra.fo]')
+        call set_env('FO_TEST_TIMEOUT', '')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_test_budget_counts_cpu_not_wall
+
+    subroutine write_idle_test(path, name, seconds)
+        !! A test that spends its time asleep, using almost no CPU.
+        character(len=*), intent(in) :: path, name
+        integer, intent(in) :: seconds
+        integer :: u
+
+        open (newunit=u, file=trim(path), status='replace')
+        write (u, '(a)') 'program '//trim(name)
+        write (u, '(a)') 'use, intrinsic :: iso_c_binding, only: c_int'
+        write (u, '(a)') 'interface'
+        write (u, '(a)') 'integer(c_int) function c_sleep(s) bind(C, name="sleep")'
+        write (u, '(a)') 'import :: c_int'
+        write (u, '(a)') 'integer(c_int), value :: s'
+        write (u, '(a)') 'end function c_sleep'
+        write (u, '(a)') 'end interface'
+        write (u, '(a,i0,a)') 'if (c_sleep(', seconds, '_c_int) /= 0) error stop 1'
+        write (u, '(a)') 'print *, "rested"'
+        write (u, '(a)') 'end program '//trim(name)
+        close (u)
+    end subroutine write_idle_test
+
     subroutine write_sleeping_test(path, name)
+        !! A test that burns 1.5 s of CPU time (not wall time), so it exceeds a
+        !! one-second CPU budget however loaded the host is.
         character(len=*), intent(in) :: path, name
         integer :: u
 
         open (newunit=u, file=trim(path), status='replace')
         write (u, '(a)') 'program '//trim(name)
-        write (u, '(a)') 'integer(8) :: start, now, rate'
-        write (u, '(a)') 'call system_clock(start, rate)'
+        write (u, '(a)') 'real :: t'
         write (u, '(a)') 'do'
-        write (u, '(a)') '    call system_clock(now)'
-        ! Stay clearly beyond the one-second fast-test budget without making
-        ! this regression consume most of its caller's ten-second budget.
-        write (u, '(a)') '    if (real(now - start)/real(rate) > 1.5) exit'
+        write (u, '(a)') '    call cpu_time(t)'
+        write (u, '(a)') '    if (t > 1.5) exit'
         write (u, '(a)') 'end do'
         write (u, '(a)') 'print *, "done"'
         write (u, '(a)') 'end program '//trim(name)

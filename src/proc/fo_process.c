@@ -269,9 +269,100 @@ static void free_env_with_extra(char **env) {
     free(env);
 }
 
+static void add_milliseconds(struct timespec *ts, int ms) {
+    ts->tv_nsec += (long)(ms % 1000) * 1000000L;
+    ts->tv_sec += ms / 1000 + ts->tv_nsec / 1000000000L;
+    ts->tv_nsec %= 1000000000L;
+}
+
+enum { CPU_POLL_MS = 200 };
+
+struct run_budget {
+    int cpu_s;         /* in: CPU-second budget; 0 means wall clock only */
+    int kind;          /* out: 0 none, 1 CPU, 2 wall cap, 3 CPU unmeasurable */
+    long long cpu_ms;  /* out: child CPU time at the kill, -1 if unknown */
+    long long wall_ms; /* out: wall time at the kill */
+};
+
+/* User plus system CPU time of a live (or zombie) child over all of its
+   threads, in milliseconds; -1 where it cannot be read cheaply. Processes the
+   child spawns are not counted, matching RLIMIT_CPU. */
+static long long child_cpu_ms(pid_t pid) {
+#ifdef __linux__
+    char path[64], buf[1024];
+    char *p, *end;
+    unsigned long long utime, stime;
+    long ticks = sysconf(_SC_CLK_TCK);
+    ssize_t n;
+    int fd, field;
+
+    if (ticks <= 0) return -1;
+    snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+    fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = '\0';
+    p = strrchr(buf, ')');
+    if (p == NULL) return -1;
+    p++;
+    /* After "pid (comm)" come field 3 (state) onward; utime and stime are
+       fields 14 and 15. */
+    for (field = 3; field < 14; field++) {
+        while (*p == ' ') p++;
+        while (*p != ' ' && *p != '\0') p++;
+        if (*p == '\0') return -1;
+    }
+    utime = strtoull(p, &end, 10);
+    if (end == p) return -1;
+    p = end;
+    stime = strtoull(p, &end, 10);
+    if (end == p) return -1;
+    return (long long)((utime + stime) * 1000ULL / (unsigned long long)ticks);
+#else
+    (void)pid;
+    return -1;
+#endif
+}
+
+static void record_timeout(struct run_budget *budget, int kind,
+                           long long cpu_ms, const struct timespec *start,
+                           const struct timespec *now) {
+    if (budget == NULL) return;
+    budget->kind = kind;
+    budget->cpu_ms = cpu_ms;
+    budget->wall_ms =
+        (long long)(now->tv_sec - start->tv_sec) * 1000LL +
+        (long long)(now->tv_nsec - start->tv_nsec) / 1000000LL;
+}
+
+/* SIGTERM the child's process group, give it up to three seconds to exit,
+   then SIGKILL the group and reap the child. */
+static void kill_group_and_reap(pid_t pid, int *status) {
+    int reaped = 0;
+    pid_t waited;
+
+    kill(-pid, SIGTERM);
+    for (int k = 0; k < 15; k++) {
+        waited = waitpid(pid, status, WNOHANG);
+        if (waited == pid) {
+            reaped = 1;
+            break;
+        }
+        if (waited < 0 && errno != EINTR) break;
+        sleep_ms(200);
+    }
+    kill(-pid, SIGKILL);
+    if (!reaped) {
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+        }
+    }
+}
+
 static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                     int append, int jobs, int timeout_s, int heartbeat_s,
-                    const char *env_extra) {
+                    const char *env_extra, struct run_budget *budget) {
     pid_t pid;
     int status;
     int pid_fd = -1;
@@ -342,14 +433,27 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
 #endif
 
     if (timeout_s > 0) {
-        struct timespec deadline, next_heartbeat, now;
+        struct timespec start, deadline, next_heartbeat, cpu_check, now;
+        int cpu_s = budget ? budget->cpu_s : 0;
 
-        clock_gettime(CLOCK_MONOTONIC, &deadline);
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        deadline = start;
         add_seconds(&deadline, timeout_s);
         next_heartbeat = deadline;
         if (heartbeat_s > 0) {
-            clock_gettime(CLOCK_MONOTONIC, &next_heartbeat);
+            next_heartbeat = start;
             add_seconds(&next_heartbeat, heartbeat_s);
+        }
+        /* The CPU budget is only consulted once the child has also been
+           running for that long in wall time: a child cannot have used more
+           CPU than that on one thread, and a multi-threaded one keeps the old
+           wall-clock grace. Host load then never decides a timeout; only the
+           wall-clock cap does, and it is meant to be generous. */
+        if (cpu_s <= 0 || cpu_s >= timeout_s) cpu_s = 0;
+        cpu_check = deadline;
+        if (cpu_s > 0) {
+            cpu_check = start;
+            add_seconds(&cpu_check, cpu_s);
         }
 
         for (;;) {
@@ -362,25 +466,21 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
 
             clock_gettime(CLOCK_MONOTONIC, &now);
             if (timespec_at_or_after(&now, &deadline)) {
-                int reaped = 0;
-
-                kill(-pid, SIGTERM);
-                for (int k = 0; k < 15; k++) {
-                    waited = waitpid(pid, &status, WNOHANG);
-                    if (waited == pid) {
-                        reaped = 1;
-                        break;
-                    }
-                    if (waited < 0 && errno != EINTR) break;
-                    sleep_ms(200);
-                }
-                kill(-pid, SIGKILL);
-                if (!reaped) {
-                    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
-                    }
-                }
+                record_timeout(budget, 2, child_cpu_ms(pid), &start, &now);
+                kill_group_and_reap(pid, &status);
                 if (pid_fd >= 0) close(pid_fd);
                 return 124;
+            }
+            if (cpu_s > 0 && timespec_at_or_after(&now, &cpu_check)) {
+                long long used = child_cpu_ms(pid);
+                if (used < 0 || used >= (long long)cpu_s * 1000LL) {
+                    record_timeout(budget, used < 0 ? 3 : 1, used, &start, &now);
+                    kill_group_and_reap(pid, &status);
+                    if (pid_fd >= 0) close(pid_fd);
+                    return 124;
+                }
+                cpu_check = now;
+                add_milliseconds(&cpu_check, CPU_POLL_MS);
             }
             if (heartbeat_s > 0 &&
                 timespec_at_or_after(&now, &next_heartbeat)) {
@@ -402,6 +502,10 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                     int heartbeat_ms =
                         milliseconds_until(&now, &next_heartbeat);
                     if (heartbeat_ms < wait_ms) wait_ms = heartbeat_ms;
+                }
+                if (cpu_s > 0) {
+                    int cpu_ms = milliseconds_until(&now, &cpu_check);
+                    if (cpu_ms < wait_ms) wait_ms = cpu_ms;
                 }
                 poll_result = poll(&child, 1, wait_ms);
                 if (poll_result < 0 && errno == EINTR) continue;
@@ -498,7 +602,7 @@ void fo_c_run_logged(const char *cwd, const char *exe_path, const char *log_file
     argv[1] = NULL;
     *exitcode = run_argv(has_text(cwd) ? cwd : NULL, argv, log_file, append, 0,
                          timeout_s, heartbeat_seconds(),
-                         has_text(env_extra) ? env_extra : NULL);
+                         has_text(env_extra) ? env_extra : NULL, NULL);
 }
 
 /* Run an arbitrary command given as an argv vector, with no shell. args is a
@@ -506,10 +610,11 @@ void fo_c_run_logged(const char *cwd, const char *exe_path, const char *log_file
    total); argv[0] is the program. This is the quote-proof, async-signal-safe
    path for compile/link invocations inside the OpenMP build loop: fork+execve
    with no /bin/sh, so quoting never breaks and libgomp is never corrupted. */
-void fo_c_run_argv_logged(const char *cwd, const char *args, int args_len,
-                          int n_args, const char *log_file, int append,
-                          int timeout_s, int heartbeat_s,
-                          const char *env_extra, int *exitcode) {
+static void run_packed_argv(const char *cwd, const char *args, int args_len,
+                            int n_args, const char *log_file, int append,
+                            int timeout_s, int heartbeat_s,
+                            const char *env_extra, struct run_budget *budget,
+                            int *exitcode) {
     char **argv;
     const char *p;
     const char *end;
@@ -534,8 +639,35 @@ void fo_c_run_argv_logged(const char *cwd, const char *args, int args_len,
     argv[idx] = NULL;
     *exitcode = run_argv(has_text(cwd) ? cwd : NULL, argv, log_file, append, 0,
                          timeout_s, heartbeat_s < 0 ? heartbeat_seconds() : heartbeat_s,
-                         has_text(env_extra) ? env_extra : NULL);
+                         has_text(env_extra) ? env_extra : NULL, budget);
     free(argv);
+}
+
+void fo_c_run_argv_logged(const char *cwd, const char *args, int args_len,
+                          int n_args, const char *log_file, int append,
+                          int timeout_s, int heartbeat_s,
+                          const char *env_extra, int *exitcode) {
+    run_packed_argv(cwd, args, args_len, n_args, log_file, append, timeout_s,
+                    heartbeat_s, env_extra, NULL, exitcode);
+}
+
+/* As fo_c_run_argv_logged, with a CPU-second budget below the wall-clock cap
+   timeout_s. On a timeout (exit 124) timeout_kind reports which limit fired:
+   1 CPU budget, 2 wall-clock cap, 3 budget reached where CPU time cannot be
+   measured (the budget then acts as a wall clock). cpu_ms is -1 if unknown. */
+void fo_c_run_argv_budget(const char *cwd, const char *args, int args_len,
+                          int n_args, const char *log_file, int append,
+                          int cpu_budget_s, int timeout_s, int heartbeat_s,
+                          const char *env_extra, int *exitcode,
+                          int *timeout_kind, long long *cpu_ms,
+                          long long *wall_ms) {
+    struct run_budget budget = {cpu_budget_s, 0, -1, 0};
+
+    run_packed_argv(cwd, args, args_len, n_args, log_file, append, timeout_s,
+                    heartbeat_s, env_extra, &budget, exitcode);
+    *timeout_kind = budget.kind;
+    *cpu_ms = budget.cpu_ms;
+    *wall_ms = budget.wall_ms;
 }
 
 void fo_c_start_fo_check(const char *project_dir, const char *mode,

@@ -1,5 +1,5 @@
 module fo_process
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
     implicit none
     private
     public :: process_detect_nproc, process_configure_openmp
@@ -11,8 +11,12 @@ module fo_process
     public :: process_suppress_heartbeats
     public :: process_run_argv_logged, argv_push, argv_push_split
     public :: argv_push_split_nl
+    public :: TIMEOUT_NONE, TIMEOUT_CPU, TIMEOUT_WALL, TIMEOUT_UNMEASURED
     integer, parameter :: C_PATH_LEN = 4096
     integer, parameter :: C_ARG_LEN = 4096
+    !! Which limit killed a budgeted child (process_run_argv_logged).
+    integer, parameter :: TIMEOUT_NONE = 0, TIMEOUT_CPU = 1, TIMEOUT_WALL = 2
+    integer, parameter :: TIMEOUT_UNMEASURED = 3
 
     interface
         subroutine fo_c_detect_nproc(nproc) bind(C, name='fo_c_detect_nproc')
@@ -88,6 +92,19 @@ module fo_process
             integer(c_int), intent(out) :: exitcode
         end subroutine fo_c_run_argv_logged
 
+        subroutine fo_c_run_argv_budget(cwd, args, args_len, n_args, log_file, &
+                append, cpu_budget_s, timeout_s, heartbeat_s, env_extra, &
+                exitcode, timeout_kind, cpu_ms, wall_ms) &
+                bind(C, name='fo_c_run_argv_budget')
+            import :: c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: cwd(*), args(*), log_file(*)
+            character(kind=c_char), intent(in) :: env_extra(*)
+            integer(c_int), value :: args_len, n_args, append, cpu_budget_s
+            integer(c_int), value :: timeout_s, heartbeat_s
+            integer(c_int), intent(out) :: exitcode, timeout_kind
+            integer(c_long_long), intent(out) :: cpu_ms, wall_ms
+        end subroutine fo_c_run_argv_budget
+
         subroutine fo_c_poll_pid(pid, done, exitcode) &
                 bind(C, name='fo_c_poll_pid')
             import :: c_int
@@ -155,11 +172,16 @@ contains
     end subroutine process_write_stderr
 
     recursive subroutine process_run_argv_logged(cwd, packed, n_args, log_file, append, &
-            timeout_s, exitcode, env_extra, heartbeat_s)
+            timeout_s, exitcode, env_extra, heartbeat_s, cpu_budget_s, &
+            timeout_kind, cpu_seconds, wall_seconds)
         !! Run a command given as an argv vector with no shell. packed holds
         !! n_args NUL-terminated tokens back-to-back (built by argv_begin/
         !! argv_push). This is the quote-proof, async-signal-safe path for
         !! compile/link inside the OpenMP build loop: fork+execve, no /bin/sh.
+        !! With cpu_budget_s, timeout_s is a wall-clock safety cap and the child
+        !! is killed early only once it has used cpu_budget_s of CPU time and
+        !! been running that long; timeout_kind then reports which limit fired
+        !! (see TIMEOUT_* parameters) and cpu_seconds is negative if unknown.
         character(len=*), intent(in) :: cwd, packed, log_file
         integer, intent(in) :: n_args
         logical, intent(in) :: append
@@ -167,7 +189,11 @@ contains
         integer, intent(out) :: exitcode
         character(len=*), intent(in), optional :: env_extra
         integer, intent(in), optional :: heartbeat_s
-        integer(c_int) :: ec, ap, heartbeat
+        integer, intent(in), optional :: cpu_budget_s
+        integer, intent(out), optional :: timeout_kind
+        real, intent(out), optional :: cpu_seconds, wall_seconds
+        integer(c_int) :: ec, ap, heartbeat, kind
+        integer(c_long_long) :: cpu_ms, wall_ms
         character(kind=c_char) :: c_env(C_PATH_LEN)
         logical :: has_env
         integer :: args_len
@@ -184,11 +210,25 @@ contains
         else
             c_env(1) = c_null_char
         end if
-        call fo_c_run_argv_logged(trim(cwd)//c_null_char, packed, &
-            int(args_len, c_int), int(n_args, c_int), &
-            trim(log_file)//c_null_char, ap, &
-            int(timeout_s, c_int), heartbeat, c_env, ec)
+        if (present(cpu_budget_s)) then
+            call fo_c_run_argv_budget(trim(cwd)//c_null_char, packed, &
+                int(args_len, c_int), int(n_args, c_int), &
+                trim(log_file)//c_null_char, ap, int(cpu_budget_s, c_int), &
+                int(timeout_s, c_int), heartbeat, c_env, ec, kind, cpu_ms, &
+                wall_ms)
+        else
+            call fo_c_run_argv_logged(trim(cwd)//c_null_char, packed, &
+                int(args_len, c_int), int(n_args, c_int), &
+                trim(log_file)//c_null_char, ap, &
+                int(timeout_s, c_int), heartbeat, c_env, ec)
+            kind = TIMEOUT_NONE
+            cpu_ms = -1
+            wall_ms = 0
+        end if
         exitcode = int(ec)
+        if (present(timeout_kind)) timeout_kind = int(kind)
+        if (present(cpu_seconds)) cpu_seconds = real(cpu_ms) / 1000.0
+        if (present(wall_seconds)) wall_seconds = real(wall_ms) / 1000.0
     end subroutine process_run_argv_logged
 
     recursive subroutine argv_push(packed, n_args, token)

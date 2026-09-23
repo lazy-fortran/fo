@@ -7,6 +7,7 @@ module fo_build_backend
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names, gfortran_run_tests
     use fo_compiler_flags, only: append_array_temporary_warning_flag
+    use fo_test_budget, only: test_timeout_seconds, test_wall_cap_seconds
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         selected_compiler_command
     implicit none
@@ -305,8 +306,9 @@ contains
         end if
         if (exitcode == 124) then
             write (error_unit, '(a)') &
-                'fo: WARNING: tests timed out (FO_TEST_TIMEOUT exceeded);' // &
-                ' set FO_TEST_TIMEOUT env var or mark slow tests with _slow suffix'
+                'fo: WARNING: tests timed out (CPU budget FO_TEST_TIMEOUT or' // &
+                ' wall cap FO_TEST_WALL_TIMEOUT exceeded); raise them, set' // &
+                ' [extra.fo] test-timeout, or mark slow tests with _slow suffix'
         end if
     end subroutine backend_test
 
@@ -449,7 +451,7 @@ contains
         integer, intent(out) :: exitcode
 
         character(len=:), allocatable :: packed
-        character(len=32) :: jobs_text
+        character(len=32) :: jobs_text, timeout_text
         logical :: has_tests
         integer :: n_args
 
@@ -478,8 +480,18 @@ contains
             call argv_push(packed, n_args, &
                 'slow|regression|performance|scalability')
         end if
+        ! FO_TEST_TIMEOUT is a per-test limit. It used to bound the whole ctest
+        ! run, so a suite of individually fast tests failed once their sum
+        ! passed ten seconds. ctest can only enforce wall time per test, so it
+        ! gets the generous wall-clock cap that accompanies the CPU budget. The
+        ! whole run keeps only a day-long backstop, which also keeps the
+        ! still-running heartbeats flowing.
+        write (timeout_text, '(i0)') &
+            test_wall_cap_seconds(budget=test_timeout_seconds())
+        call argv_push(packed, n_args, '--timeout')
+        call argv_push(packed, n_args, timeout_text)
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
-            .false., environment_timeout('FO_TEST_TIMEOUT', 10), exitcode)
+            .false., 86400, exitcode)
     end subroutine cmake_test
 
     integer function environment_timeout(name, fallback) result(timeout)

@@ -35,9 +35,23 @@ fo mcp-server              MCP JSON-RPC server on standard input/output
 fo lsp                     diagnostics-on-save language server
 ```
 
-Tests have a 10-second hard timeout by default. Set `FO_TEST_TIMEOUT` for an
-intentional override; longer tests should normally use a `_slow` suffix and
-run through `fo test --all`.
+Each test has a budget of 10 seconds of CPU time (300 for tests named
+`*_slow`, which run only under `fo test --all`). The budget counts CPU, not
+wall time, so a heavily loaded host does not turn a passing test into a
+timeout. A wall-clock cap of ten times the budget still stops a test that hangs
+without using CPU. A timeout names the limit that fired. Override per project
+in `fpm.toml`, or per invocation with `FO_TEST_TIMEOUT`,
+`FO_SLOW_TEST_TIMEOUT` and `FO_TEST_WALL_TIMEOUT` (these take precedence):
+
+```toml
+[extra.fo]
+test-timeout = 20        # CPU seconds per test
+slow-test-timeout = 600  # CPU seconds per *_slow test
+test-wall-timeout = 900  # wall-clock cap per test
+```
+
+CPU time is read from `/proc` on Linux. Elsewhere the budget stays a
+wall-clock limit.
 
 The default output is intentionally quieter than fpm. `fo check --agent` and
 MCP checks return one bounded JSON object with the failure, hint, rerun command,

@@ -311,7 +311,10 @@ contains
             call format_single_test_entry(entries(i), line)
             output = trim(output)//trim(line)//achar(10)
             n_shown = n_shown + 1
-            if (trim(entries(i)%status) == 'FAIL') then
+            ! A timed-out test's output ends with the line naming the limit
+            ! that killed it (CPU budget or wall-clock cap).
+            if (trim(entries(i)%status) == 'FAIL' .or. &
+                trim(entries(i)%status) == 'TIMEOUT') then
                 call extract_captured_stdout(log_file, entries(i)%name, captured)
                 if (len_trim(captured) > 0) then
                     output = trim(output)//'  --- captured stdout ---'//achar(10)

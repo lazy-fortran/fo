@@ -10,6 +10,8 @@ module fo_gfortran_build
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
         resolve_dev_dep_srcs, MAX_RESOLVED, join_path, merge_dep_link_libs
     use fo_stat_memo, only: memo_save, memo_hash_file
+    use fo_test_budget, only: test_timeout_seconds, test_budget_seconds, &
+        test_wall_cap_seconds, timeout_detail
     use fx_action_cache, only: cache_set_file_hash_hook
     use fo_compdb, only: compdb_write
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
@@ -686,15 +688,13 @@ contains
         character(len=:), allocatable :: arg_lines
         character(len=128) :: name
         character(len=8) :: exit_str
-        integer :: n_units, ierr, i, run_exit, timeout_s, warn_s
+        integer :: n_units, ierr, i, run_exit, warn_s
         integer(8) :: clk0, clk1, clk_rate
         real :: secs
         logical :: flaky
         type(fpm_config_t), allocatable :: config
 
         exitcode = 0
-        timeout_s = test_timeout_seconds()
-        warn_s = test_warn_seconds(timeout_s)
         call scan_dir_cached(trim(project_dir)//'/'//trim(test_dir), units, &
             n_units, ierr)
         if (ierr /= 0) then
@@ -707,6 +707,7 @@ contains
             exitcode = 1
             return
         end if
+        warn_s = test_warn_seconds(test_timeout_seconds(config))
         do i = 1, n_units
             if (.not. units(i)%is_program) cycle
             name = gfortran_test_source_name(config, test_dir, units(i)%filename)
@@ -718,9 +719,8 @@ contains
             arg_lines = manifest_test_args(config, name)
             call make_tmpfile('fo_test_case', case_log)
             call system_clock(clk0, clk_rate)
-            timeout_s = timeout_for_test(name)
             call run_test_binary(project_dir, bin_path, arg_lines, case_log, &
-                timeout_s, run_exit)
+                config, is_slow_name(name), run_exit)
             call system_clock(clk1)
             secs = 0.0
             if (clk_rate > 0) secs = real(clk1 - clk0) / real(clk_rate)
@@ -728,7 +728,7 @@ contains
             if (run_exit /= 0 .and. run_exit /= 124) then
                 call make_tmpfile('fo_test_rerun', rerun_log)
                 call run_test_binary(project_dir, bin_path, arg_lines, rerun_log, &
-                    timeout_s, run_exit)
+                    config, is_slow_name(name), run_exit)
                 call delete_tmpfile(rerun_log)
                 flaky = run_exit == 0
             end if
@@ -737,7 +737,7 @@ contains
             else
                 call append_test_stdout_block(case_log, log_file, name)
                 if (run_exit == 124) then
-                    call append_timeout_status(log_file, name, timeout_s)
+                    call append_timeout_status(log_file, name)
                 else
                     call append_test_status(log_file, name, run_exit)
                 end if
@@ -2112,13 +2112,13 @@ contains
         ran = .false.
         flaky = .false.
         run_secs = 0.0
-        test_timeout = test_timeout_seconds()
-        test_warn = test_warn_seconds(test_timeout)
         call scan_dir(trim(project_dir)//'/'//trim(test_dir), tunits, n_tests, ierr)
         if (n_tests == 0) return
         allocate (manifest_config)
         call fpm_config_parse(project_dir, manifest_config, ierr)
         if (ierr /= 0) return
+        test_timeout = test_timeout_seconds(manifest_config)
+        test_warn = test_warn_seconds(test_timeout)
 
         call resolve_dev_dep_srcs(project_dir, devsrcs, n_dev, ierr)
         if (ierr == 0 .and. n_dev > 0) then
@@ -2282,7 +2282,7 @@ contains
                 ! invoked from, so a test that opens a project-relative path
                 ! behaves the same under the CLI and under the MCP server.
                 call run_test_binary(project_dir, bin_path, run_args(i), log_local, &
-                    timeout_for_test(run_names(i)), run_exits(i))
+                    manifest_config, is_slow_name(run_names(i)), run_exits(i))
                 call system_clock(clk1)
                 if (clk_rate > 0) run_secs(i) = real(clk1 - clk0) / real(clk_rate)
             end if
@@ -2307,7 +2307,7 @@ contains
                 bin_path = trim(bin_dir)//'/'//trim(tname)
                 call make_tmpfile('fo_test_rerun', rerun_log)
                 call run_test_binary(project_dir, bin_path, run_args(i), rerun_log, &
-                    timeout_for_test(tname), run_exits(i))
+                    manifest_config, is_slow_name(tname), run_exits(i))
                 call delete_tmpfile(rerun_log)
                 if (run_exits(i) == 0) flaky(i) = .true.
             end do
@@ -2318,8 +2318,7 @@ contains
             if (run_exits(i) /= 0) then
                 call append_test_stdout_block(run_logs(i), log_file, tname)
                 if (run_exits(i) == 124) then
-                    call append_timeout_status(log_file, tname, &
-                        timeout_for_test(tname))
+                    call append_timeout_status(log_file, tname)
                 else
                     call append_test_status(log_file, tname, run_exits(i))
                 end if
@@ -2383,20 +2382,35 @@ contains
     end subroutine compile_and_run_tests
 
     subroutine run_test_binary(project_dir, bin_path, arg_lines, log_file, &
-            timeout_seconds, exitcode)
+            config, slow, exitcode)
+        !! Run one test binary under its CPU budget and wall-clock cap (see
+        !! fo_test_budget). A timeout returns 124 and appends a line naming the
+        !! limit that fired to the test's own log.
         character(len=*), intent(in) :: project_dir, bin_path, arg_lines, log_file
-        integer, intent(in) :: timeout_seconds
+        type(fpm_config_t), intent(in) :: config
+        logical, intent(in) :: slow
         integer, intent(out) :: exitcode
 
         character(len=:), allocatable :: packed
-        integer :: n_args
+        integer :: n_args, budget, wall_cap, kind, u, ios
+        real :: cpu_s, wall_s
 
         packed = ''
         n_args = 0
         call argv_push(packed, n_args, bin_path)
         call argv_push_split_nl(packed, n_args, arg_lines)
+        budget = test_budget_seconds(config, slow)
+        wall_cap = test_wall_cap_seconds(config, budget)
         call process_run_argv_logged(project_dir, packed, n_args, log_file, .true., &
-            timeout_seconds, exitcode)
+            wall_cap, exitcode, cpu_budget_s=budget, timeout_kind=kind, &
+            cpu_seconds=cpu_s, wall_seconds=wall_s)
+        if (exitcode /= 124) return
+        open (newunit=u, file=trim(log_file), position='append', &
+            status='unknown', action='write', iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a)') 'fo: test killed: '// &
+            timeout_detail(kind, budget, wall_cap, cpu_s, wall_s)
+        close (u)
     end subroutine run_test_binary
 
     subroutine archive_objects(project_dir, objects, n_objects, archive_path, &
@@ -2544,43 +2558,6 @@ contains
         close (u)
     end subroutine write_test_result_line
 
-    integer function test_timeout_seconds() result(t)
-        character(len=32) :: buf
-        integer :: status, iostat
-
-        t = 10
-        call get_environment_variable('FO_TEST_TIMEOUT', buf, status=status)
-        if (status /= 0 .or. len_trim(buf) == 0) return
-        read (buf, *, iostat=iostat) t
-        if (iostat /= 0 .or. t < 1) t = 10
-    end function test_timeout_seconds
-
-    integer function slow_test_timeout_seconds() result(t)
-        !! Wall clock for a test marked slow. Naming a test `*_slow` only kept
-        !! it out of the default run; it still had to finish inside the fast
-        !! budget, so a corpus sweep that legitimately takes half a minute
-        !! could not pass under `fo test --all` at all. Tune with
-        !! FO_SLOW_TEST_TIMEOUT.
-        character(len=32) :: buf
-        integer :: status, iostat
-
-        t = 300
-        call get_environment_variable('FO_SLOW_TEST_TIMEOUT', buf, status=status)
-        if (status /= 0 .or. len_trim(buf) == 0) return
-        read (buf, *, iostat=iostat) t
-        if (iostat /= 0 .or. t < 1) t = 300
-    end function slow_test_timeout_seconds
-
-    integer function timeout_for_test(name) result(t)
-        character(len=*), intent(in) :: name
-
-        if (is_slow_name(name)) then
-            t = slow_test_timeout_seconds()
-        else
-            t = test_timeout_seconds()
-        end if
-    end function timeout_for_test
-
     integer function build_timeout_seconds() result(t)
         !! Per-invocation wall clock for a single compile or link. A hung
         !! compiler is killed at this deadline (exit 124) instead of stalling
@@ -2655,18 +2632,19 @@ contains
         end do
     end subroutine warn_slow_tests
 
-    subroutine append_timeout_status(log_file, test_name, timeout_s)
+    subroutine append_timeout_status(log_file, test_name)
+        !! The test's own log already names the limit that fired
+        !! (run_test_binary); this line says what to do about it.
         character(len=*), intent(in) :: log_file, test_name
-        integer, intent(in) :: timeout_s
 
         integer :: u, ios
 
         open (newunit=u, file=trim(log_file), position='append', &
             status='old', iostat=ios)
         if (ios /= 0) return
-        write (u, '(a,i0,a)') 'fo: test target '//trim(test_name)// &
-            ' exceeded the ', timeout_s, &
-            's hard timeout and was killed; fix the hang or name it *_slow'
+        write (u, '(a)') 'fo: test target '//trim(test_name)// &
+            ' timed out and was killed; fix the hang, name it *_slow, or raise '// &
+            'the CPU budget (FO_TEST_TIMEOUT or [extra.fo] test-timeout)'
         close (u)
     end subroutine append_timeout_status
 

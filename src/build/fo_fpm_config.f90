@@ -86,6 +86,12 @@ module fo_fpm_config
         type(fpm_exe_t) :: examples(MAX_EXES)
         integer :: n_test_arg_sets = 0
         type(fpm_test_args_t) :: test_arg_sets(MAX_TEST_ARG_SETS)
+        ! [extra.fo] test budgets in seconds; 0 leaves fo's default. The
+        ! FO_TEST_TIMEOUT, FO_SLOW_TEST_TIMEOUT and FO_TEST_WALL_TIMEOUT
+        ! environment variables override these per invocation.
+        integer :: test_timeout = 0
+        integer :: slow_test_timeout = 0
+        integer :: test_wall_timeout = 0
         ! fpm "openmp" metapackage (openmp = "*" under [dependencies]). When set,
         ! fo compiles and links with -fopenmp so the project's `!$omp` regions
         ! run in parallel. Without it gfortran ignores the directives.
@@ -265,6 +271,11 @@ contains
                 call parse_preprocess(key, val, config)
             case ('extra.fo.test-args')
                 call parse_test_args(key, val, config)
+            case ('extra.fo')
+                call parse_extra_fo(key, val, config)
+            case ('extra')
+                if (index(key, 'fo.') == 1) &
+                    call parse_extra_fo(key(4:), val, config)
             case ('library')
                 call parse_library(key, val, config)
             case ('fortran')
@@ -719,6 +730,35 @@ contains
             pos = pos + 1
         end do
     end subroutine parse_flags
+
+    subroutine parse_extra_fo(key, val, config)
+        !! Scalar fo settings under [extra.fo]; unknown keys are left to other
+        !! tools sharing the namespace.
+        character(len=*), intent(in) :: key, val
+        type(fpm_config_t), intent(inout) :: config
+
+        select case (trim(key))
+        case ('test-timeout')
+            config%test_timeout = positive_seconds(val, 'test-timeout')
+        case ('slow-test-timeout')
+            config%slow_test_timeout = positive_seconds(val, 'slow-test-timeout')
+        case ('test-wall-timeout')
+            config%test_wall_timeout = positive_seconds(val, 'test-wall-timeout')
+        end select
+    end subroutine parse_extra_fo
+
+    integer function positive_seconds(val, key) result(seconds)
+        character(len=*), intent(in) :: val, key
+        integer :: ios
+
+        read (val, *, iostat=ios) seconds
+        if (ios == 0) then
+            if (seconds > 0) return
+        end if
+        write (error_unit, '(a)') 'fo: warning: ignoring [extra.fo] '//trim(key)// &
+            ' = '//trim(val)//' (expected a positive whole number of seconds)'
+        seconds = 0
+    end function positive_seconds
 
     subroutine parse_test_args(name, val, config)
         character(len=*), intent(in) :: name, val
