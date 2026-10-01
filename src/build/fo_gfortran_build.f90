@@ -63,6 +63,20 @@ module fo_gfortran_build
     !> fpm's own profile flags have to be visible to the compile path.
     character(len=512), save :: build_request_flags = ''
 
+    type, private :: current_test_t
+        !! One selected test: what to run, where its log went, how it ended.
+        character(len=128) :: name = ''
+        character(len=MAX_PATH) :: bin = ''
+        character(len=512) :: log = ''
+        character(len=:), allocatable :: args
+        integer :: exit = 0
+        integer :: rerun_exit = 0
+        real :: secs = 0.0
+        real :: cpu_secs = -1.0
+        logical :: flaky = .false.
+        logical :: ran = .false.
+    end type current_test_t
+
     public :: gfortran_build, gfortran_test, gfortran_test_names
     public :: gfortran_run_tests
     public :: config_flags_str
@@ -722,6 +736,11 @@ contains
 
     subroutine run_current_tests(project_dir, test_dir, bin_dir, selected_names, &
             n_selected, include_slow, log_file, exitcode)
+        !! Run the tests the current flag profile already built, and report each
+        !! by name. Independent executables run as a team (suite wall used to be
+        !! the sum of ~500 serial 20ms runs while 30 cores sat idle); results
+        !! still report in scan order, so the fail-name set is run-width
+        !! independent.
         character(len=*), intent(in) :: project_dir, test_dir, bin_dir, log_file
         character(len=*), intent(in) :: selected_names(:)
         integer, intent(in) :: n_selected
@@ -729,16 +748,9 @@ contains
         integer, intent(out) :: exitcode
 
         type(scan_unit_t), allocatable :: units(:)
-        character(len=MAX_PATH) :: bin_path
-        character(len=512) :: case_log, rerun_log
-        character(len=:), allocatable :: arg_lines
-        character(len=128) :: name
-        character(len=8) :: exit_str
-        integer :: n_units, ierr, i, run_exit, warn_s
-        integer(8) :: clk0, clk1, clk_rate
-        real :: secs, cpu_secs
-        logical :: flaky
         type(fpm_config_t), allocatable :: config
+        type(current_test_t), allocatable :: tests(:)
+        integer :: n_units, n_tests, ierr, warn_s, i
 
         exitcode = 0
         call scan_dir_cached(trim(project_dir)//'/'//trim(test_dir), units, &
@@ -754,6 +766,33 @@ contains
             return
         end if
         warn_s = test_warn_seconds(test_timeout_seconds(config))
+        call select_current_tests(config, units, n_units, test_dir, bin_dir, &
+            selected_names, n_selected, include_slow, tests, n_tests)
+        call run_current_team(project_dir, config, tests, n_tests)
+        call report_current_tests(project_dir, log_file, tests, n_tests, warn_s, &
+            exitcode)
+        do i = 1, n_tests
+            if (allocated(tests(i)%args)) deallocate (tests(i)%args)
+        end do
+    end subroutine run_current_tests
+
+    subroutine select_current_tests(config, units, n_units, test_dir, bin_dir, &
+            selected_names, n_selected, include_slow, tests, n_tests)
+        !! The tests to run: programs of this profile, minus slow unless asked,
+        !! intersected with an explicit selection; each gets its own log path.
+        type(fpm_config_t), intent(in) :: config
+        type(scan_unit_t), intent(in) :: units(:)
+        integer, intent(in) :: n_units, n_selected
+        character(len=*), intent(in) :: test_dir, bin_dir, selected_names(:)
+        logical, intent(in) :: include_slow
+        type(current_test_t), allocatable, intent(out) :: tests(:)
+        integer, intent(out) :: n_tests
+
+        character(len=128) :: name
+        integer :: i
+
+        allocate (tests(max(1, n_units)))
+        n_tests = 0
         do i = 1, n_units
             if (.not. units(i)%is_program) cycle
             name = gfortran_test_source_name(config, test_dir, units(i)%filename)
@@ -761,53 +800,116 @@ contains
             if (n_selected > 0) then
                 if (.not. selected_test(name, selected_names, n_selected)) cycle
             end if
-            bin_path = trim(bin_dir)//'/'//trim(name)
-            arg_lines = manifest_test_args(config, name)
-            call make_tmpfile('fo_test_case', case_log)
-            call system_clock(clk0, clk_rate)
-            call run_test_binary(project_dir, bin_path, arg_lines, case_log, &
-                config, is_slow_name(name), run_exit, cpu_secs)
-            call system_clock(clk1)
-            secs = 0.0
-            if (clk_rate > 0) secs = real(clk1 - clk0) / real(clk_rate)
-            flaky = .false.
-            if (run_exit /= 0 .and. run_exit /= 124) then
-                call make_tmpfile('fo_test_rerun', rerun_log)
-                call run_test_binary(project_dir, bin_path, arg_lines, rerun_log, &
-                    config, is_slow_name(name), run_exit)
-                call delete_tmpfile(rerun_log)
-                flaky = run_exit == 0
-            end if
-            if (run_exit == 0) then
-                call append_log_file(case_log, log_file)
-            else
-                call append_test_stdout_block(case_log, log_file, name)
-                if (run_exit == 124) then
-                    call append_timeout_status(log_file, name)
-                else
-                    call append_test_status(log_file, name, run_exit)
-                end if
-                if (exitcode == 0) exitcode = run_exit
-                call delete_tmpfile(case_log)
-            end if
-            if (flaky) then
-                call append_flaky_status(log_file, name)
-                call write_test_result_line(log_file, name, 'FLAKY', '-', secs)
-            else if (run_exit == 124) then
-                call write_test_result_line(log_file, name, 'TIMEOUT', '124', secs)
-            else if (run_exit == 0) then
-                call write_test_result_line(log_file, name, 'PASS', '-', secs)
-            else
-                write (exit_str, '(i0)') run_exit
-                call write_test_result_line(log_file, name, 'FAIL', trim(exit_str), &
-                    secs)
-            end if
-            ! Warn by CPU time where known: wall time also measures host load.
-            if (cpu_secs >= 0.0) secs = cpu_secs
-            if (run_exit == 0 .and. secs >= real(warn_s)) &
-                call warn_current_slow_test(name, secs, cpu_secs >= 0.0, log_file)
+            n_tests = n_tests + 1
+            tests(n_tests)%name = name
+            tests(n_tests)%bin = trim(bin_dir)//'/'//trim(name)
+            tests(n_tests)%args = manifest_test_args(config, name)
+            call make_tmpfile('fo_test_case', tests(n_tests)%log)
         end do
-    end subroutine run_current_tests
+    end subroutine select_current_tests
+
+    subroutine run_current_team(project_dir, config, tests, n_tests)
+        !! Run independent test executables as an OpenMP team, `FO_JOBS`-wide.
+        !! A single flaky rerun happens inside the worker, so the recorded exit
+        !! is the same one the serial runner would have reported.
+        character(len=*), intent(in) :: project_dir
+        type(fpm_config_t), intent(in) :: config
+        type(current_test_t), intent(inout) :: tests(:)
+        integer, intent(in) :: n_tests
+
+        integer :: i
+        integer :: rerun_log
+        integer(8) :: clk0, clk1, clk_rate
+
+        !$omp parallel do if (n_tests > 1) num_threads(max(1, min(n_tests, native_jobs()))) &
+        !$omp& schedule(dynamic) private(i, rerun_log, clk0, clk1, clk_rate)
+        do i = 1, n_tests
+            call run_one_current_test(project_dir, config, tests(i))
+        end do
+        !$omp end parallel do
+    end subroutine run_current_team
+
+    subroutine run_one_current_test(project_dir, config, test)
+        !! One worker: run, time, and if it failed, rerun once to tell a genuine
+        !! failure from flakiness.
+        character(len=*), intent(in) :: project_dir
+        type(fpm_config_t), intent(in) :: config
+        type(current_test_t), intent(inout) :: test
+
+        character(len=512) :: rerun_log
+        integer(8) :: clk0, clk1, clk_rate
+
+        call system_clock(clk0, clk_rate)
+        call run_test_binary(project_dir, test%bin, test%args, test%log, config, &
+            is_slow_name(test%name), test%exit, test%cpu_secs)
+        call system_clock(clk1, clk_rate)
+        test%ran = .true.
+        if (clk_rate > 0) test%secs = real(clk1 - clk0) / real(clk_rate)
+        if (test%exit /= 0 .and. test%exit /= 124) then
+            call make_tmpfile('fo_test_rerun', rerun_log)
+            call run_test_binary(project_dir, test%bin, test%args, rerun_log, &
+                config, is_slow_name(test%name), test%rerun_exit)
+            call delete_tmpfile(rerun_log)
+            if (test%rerun_exit == 0) then
+                test%flaky = .true.
+                test%exit = 0
+            else
+                test%exit = test%rerun_exit
+            end if
+        end if
+    end subroutine run_one_current_test
+
+    subroutine report_current_tests(project_dir, log_file, tests, n_tests, warn_s, &
+            exitcode)
+        !! Emit result lines in scan order, never in completion order, so the
+        !! fail-name set does not depend on how wide the team ran.
+        character(len=*), intent(in) :: project_dir, log_file
+        type(current_test_t), intent(in) :: tests(:)
+        integer, intent(in) :: n_tests, warn_s
+        integer, intent(out) :: exitcode
+
+        character(len=8) :: exit_str
+        real :: secs
+        integer :: i
+
+        exitcode = 0
+        do i = 1, n_tests
+            if (.not. tests(i)%ran) cycle
+            if (tests(i)%exit == 0) then
+                call append_log_file(tests(i)%log, log_file)
+            else
+                call append_test_stdout_block(tests(i)%log, log_file, tests(i)%name)
+                if (tests(i)%exit == 124) then
+                    call append_timeout_status(log_file, tests(i)%name)
+                else
+                    call append_test_status(log_file, tests(i)%name, tests(i)%exit)
+                end if
+                if (exitcode == 0) exitcode = tests(i)%exit
+            end if
+            if (tests(i)%flaky) then
+                call append_flaky_status(log_file, tests(i)%name)
+                call write_test_result_line(log_file, tests(i)%name, 'FLAKY', '-', &
+                    tests(i)%secs)
+            else if (tests(i)%exit == 124) then
+                call write_test_result_line(log_file, tests(i)%name, 'TIMEOUT', &
+                    '124', tests(i)%secs)
+            else if (tests(i)%exit == 0) then
+                call write_test_result_line(log_file, tests(i)%name, 'PASS', '-', &
+                    tests(i)%secs)
+            else
+                write (exit_str, '(i0)') tests(i)%exit
+                call write_test_result_line(log_file, tests(i)%name, 'FAIL', &
+                    trim(exit_str), tests(i)%secs)
+            end if
+            call delete_tmpfile(tests(i)%log)
+            secs = tests(i)%secs
+            ! Warn by CPU time where known: wall time also measures host load.
+            if (tests(i)%cpu_secs >= 0.0) secs = tests(i)%cpu_secs
+            if (tests(i)%exit == 0 .and. secs >= real(warn_s)) &
+                call warn_current_slow_test(tests(i)%name, secs, &
+                    tests(i)%cpu_secs >= 0.0, log_file)
+        end do
+    end subroutine report_current_tests
 
     subroutine warn_current_slow_test(name, secs, is_cpu, log_file)
         character(len=*), intent(in) :: name, log_file
@@ -3825,6 +3927,17 @@ contains
                 s = trim(mapped)
             end if
         end do
+
+        ! The manifest's debug-info budget goes last: a project that declares
+        ! `debug-info = "g0"` means it, even against its own [build] flags.
+        mapped = dialect%debug_info_flag(config%debug_info)
+        if (len_trim(mapped) > 0) then
+            if (len_trim(s) > 0) then
+                s = trim(s)//' '//trim(mapped)
+            else
+                s = trim(mapped)
+            end if
+        end if
     end function config_flags_str
 
 end module fo_gfortran_build

@@ -92,6 +92,11 @@ module fo_fpm_config
         integer :: test_timeout = 0
         integer :: slow_test_timeout = 0
         integer :: test_wall_timeout = 0
+        !> [extra.fo] debug-info = "g0" | "line-tables" | "full": how much
+        !> debug info the default profile emits. A project declares its own
+        !> budget here so the diet is visible in the manifest, not only in fo's
+        !> defaults. Empty leaves fo's default (`g0`).
+        character(len=32) :: debug_info = ''
         ! fpm "openmp" metapackage (openmp = "*" under [dependencies]). When set,
         ! fo compiles and links with -fopenmp so the project's `!$omp` regions
         ! run in parallel. Without it gfortran ignores the directives.
@@ -737,6 +742,8 @@ contains
         character(len=*), intent(in) :: key, val
         type(fpm_config_t), intent(inout) :: config
 
+        character(len=64) :: str_val
+
         select case (trim(key))
         case ('test-timeout')
             config%test_timeout = positive_seconds(val, 'test-timeout')
@@ -744,6 +751,21 @@ contains
             config%slow_test_timeout = positive_seconds(val, 'slow-test-timeout')
         case ('test-wall-timeout')
             config%test_wall_timeout = positive_seconds(val, 'test-wall-timeout')
+        case ('debug-info')
+            call extract_string(val, str_val)
+            select case (trim(str_val))
+            case ('g0', '-g0', 'none')
+                config%debug_info = 'g0'
+            case ('line-tables', '-gline-tables-only', 'line-tables-only')
+                config%debug_info = 'line-tables'
+            case ('full', 'g', '-g')
+                config%debug_info = 'full'
+            case default
+                write (error_unit, '(a)') 'fo: warning: ignoring [extra.fo] '// &
+                    'debug-info = '//trim(val)// &
+                ' (expected g0, line-tables, or full)'
+            end select
+        case default
         end select
     end subroutine parse_extra_fo
 

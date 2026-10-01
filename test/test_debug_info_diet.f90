@@ -5,6 +5,7 @@ program test_debug_info_diet
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         COMPILER_GFORTRAN, COMPILER_FLANG, COMPILER_NVFORTRAN
+    use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     implicit none
     integer :: n_pass, n_fail
 
@@ -14,6 +15,7 @@ program test_debug_info_diet
     call test_default_diet()
     call test_requested_debug_survives()
     call test_other_compilers()
+    call test_manifest_budget()
     call report()
 
 contains
@@ -76,6 +78,50 @@ contains
         call check(.not. d%requests_debug_info(''), 'empty request on nvfortran')
         call check(COMPILER_GFORTRAN == 1, 'gfortran kind stable')
     end subroutine test_other_compilers
+
+
+    subroutine test_manifest_budget()
+        !! A project declares its debug-info budget in fpm.toml; the dialect
+        !! maps it to the flag, and an unset budget emits nothing so fo's
+        !! default still decides.
+        type(compiler_dialect_t) :: d
+        type(fpm_config_t) :: config
+        integer :: unit, ios
+
+        d = compiler_dialect('gfortran')
+        call check(trim(d%debug_info_flag('g0')) == '-g0', 'g0 maps to -g0')
+        call check(trim(d%debug_info_flag('line-tables')) == '-gline-tables-only', &
+            'line-tables maps to -gline-tables-only')
+        call check(trim(d%debug_info_flag('full')) == '-g', 'full maps to -g')
+        call check(len_trim(d%debug_info_flag('')) == 0, 'no budget, no flag')
+
+        call write_manifest('/var/tmp/ffc-goal/diet-g0/fpm.toml', 'g0')
+        call fpm_config_parse('/var/tmp/ffc-goal/diet-g0', config, ios)
+        call check(ios == 0, 'manifest with debug-info parses')
+        call check(trim(config%debug_info) == 'g0', 'manifest budget is g0')
+
+        call write_manifest('/var/tmp/ffc-goal/diet-bad/fpm.toml', 'sideways')
+        call fpm_config_parse('/var/tmp/ffc-goal/diet-bad', config, ios)
+        call check(ios == 0, 'manifest with a bad budget still parses')
+        call check(len_trim(config%debug_info) == 0, 'bad budget is ignored')
+    end subroutine test_manifest_budget
+
+    subroutine write_manifest(path, budget)
+        character(len=*), intent(in) :: path, budget
+
+        integer :: unit, cut
+        character(len=512) :: dir
+
+        cut = index(path(1:len_trim(path)), '/fpm.toml')
+        dir = path(1:cut - 1)
+        call execute_command_line('mkdir -p '//trim(dir))
+        open (newunit=unit, file=trim(path), action='write', status='replace')
+        write (unit, '(a)') 'name = "diet"'
+        write (unit, '(a)') ''
+        write (unit, '(a)') '[extra.fo]'
+        write (unit, '(a)') 'debug-info = "'//trim(budget)//'"'
+        close (unit)
+    end subroutine write_manifest
 
     subroutine report()
         write (output_unit, '(a,i0,a,i0)') 'debug-info diet: pass=', n_pass, &

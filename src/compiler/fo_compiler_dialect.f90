@@ -14,6 +14,7 @@ module fo_compiler_dialect
     contains
         procedure, public :: base_flags => dialect_base_flags
         procedure, public :: debug_info_diet_flag => dialect_debug_info_diet_flag
+        procedure, public :: debug_info_flag => dialect_debug_info_flag
         procedure, public :: sections_split_flags => dialect_sections_split_flags
         procedure, public :: requests_sanitizer => dialect_requests_sanitizer
         procedure, public :: gc_sections_link_flag => dialect_gc_sections_link_flag
@@ -61,6 +62,26 @@ contains
         end if
         if (status /= 0 .or. len_trim(command) == 0) command = 'gfortran'
     end function selected_compiler_command
+
+    pure function dialect_debug_info_flag(self, kind) result(flag)
+        !! The debug-info flag a manifest asks for: `g0`, `line-tables`, `full`.
+        !! Empty kind means "the manifest has no opinion", so fo emits nothing
+        !! and its own default profile decides.
+        class(compiler_dialect_t), intent(in) :: self
+        character(len=*), intent(in) :: kind
+        character(len=32) :: flag
+
+        select case (trim(kind))
+        case ('g0')
+            flag = '-g0'
+        case ('line-tables')
+            flag = '-gline-tables-only'
+        case ('full')
+            flag = '-g'
+        case default
+            flag = ''
+        end select
+    end function dialect_debug_info_flag
 
     pure function dialect_debug_info_diet_flag(self, request_flags) result(flag)
         !! The debug-info flag the default build profile should add so the

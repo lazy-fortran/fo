@@ -1184,6 +1184,17 @@ contains
         end if
     end subroutine cmd_test
 
+    logical function env_flag(name) result(on)
+        !! True when the environment variable is set to a truthy 1.
+        character(len=*), intent(in) :: name
+
+        character(len=64) :: value
+        integer :: length
+
+        call get_environment_variable(name, value, length)
+        on = length > 0 .and. trim(value) == '1'
+    end function env_flag
+
     subroutine report_test_result(exitcode, test_log, summary_mode, use_json)
         integer, intent(in) :: exitcode
         character(len=*), intent(in) :: test_log
@@ -1196,9 +1207,25 @@ contains
         character(len=16384) :: human_output
         type(diagnostic_t) :: diag
         character(len=128) :: failed_tests(MAX_TEST_RESULTS)
-        integer :: n_failed_tests
+        integer :: n_failed_tests, i
+        character(len=8) :: exit_out
+        character(len=16) :: secs_out
 
         call parse_test_results(test_log, entries, n_entries, parse_ierr)
+
+        ! `fo test` normally prints an aggregate count and the failures, and the
+        ! per-test log is deleted. A CI that diffs the fail-name set against a
+        ! baseline needs every name reported, pass included; FO_TEST_REPORT_NAMES=1
+        ! prints the TEST_RESULT lines to stdout before the log goes away.
+        if (env_flag('FO_TEST_REPORT_NAMES')) then
+            do i = 1, n_entries
+                write (secs_out, '(F8.2)') entries(i)%seconds
+                write (exit_out, '(i0)') entries(i)%exit_code
+                write (output_unit, '(a,a,a,a,a,a,a,a)') 'TEST_RESULT ', &
+                    trim(entries(i)%name), ' ', trim(entries(i)%status), ' ', &
+                    trim(exit_out), ' ', trim(secs_out)
+            end do
+        end if
 
         if (n_entries > 0) then
             if (use_json) then
