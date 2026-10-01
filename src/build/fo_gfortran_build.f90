@@ -57,6 +57,11 @@ module fo_gfortran_build
     !> win.  Module state keeps fc_base_flags callable from the compile path,
     !> which has no view of the config.
     logical, save :: allow_implicit_typing = .false.
+    !> The flags the current build was asked for, kept so the baseline can add
+    !> its debug-info diet (`-g0`) without overwriting a caller's `-g`.
+    !> `--debug` and `--asan` arrive here as request flags, the same reason
+    !> fpm's own profile flags have to be visible to the compile path.
+    character(len=512), save :: build_request_flags = ''
 
     public :: gfortran_build, gfortran_test, gfortran_test_names
     public :: gfortran_run_tests
@@ -118,6 +123,7 @@ contains
         flag_text = ''
         if (present(flags)) flag_text = flags
         request_flags = flag_text
+        build_request_flags = request_flags
         stamp_request_flags = request_key_flags(request_flags)
         if (present(compiler_id)) then
             compiler = compiler_id
@@ -2962,9 +2968,15 @@ contains
         character(len=:), allocatable :: flags
 
         type(compiler_dialect_t) :: dialect
+        character(len=512) :: diet_flag
 
         dialect = compiler_dialect(fc_command())
         flags = dialect%base_flags()
+        ! Debug-info diet: the default build emits no DWARF, so 500 test
+        ! binaries stop each carrying their own copy of it. A caller that asked
+        ! for debug info (`--debug`, `--asan`, `-g`) keeps it.
+        diet_flag = dialect%debug_info_diet_flag(build_request_flags)
+        if (len_trim(diet_flag) > 0) flags = trim(flags)//' '//trim(diet_flag)
         call append_pipe_flag(fc_command(), flags)
     end function fc_policy_flags
 

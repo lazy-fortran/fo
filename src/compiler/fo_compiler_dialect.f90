@@ -13,6 +13,8 @@ module fo_compiler_dialect
         character(len=512) :: command = ''
     contains
         procedure, public :: base_flags => dialect_base_flags
+        procedure, public :: debug_info_diet_flag => dialect_debug_info_diet_flag
+        procedure, public :: requests_debug_info => dialect_requests_debug_info
         procedure, public :: module_flags => dialect_module_flags
         procedure, public :: profile_flags => dialect_profile_flags
         procedure, public :: translate_flag => dialect_translate_flag
@@ -56,6 +58,52 @@ contains
         end if
         if (status /= 0 .or. len_trim(command) == 0) command = 'gfortran'
     end function selected_compiler_command
+
+    pure function dialect_debug_info_diet_flag(self, request_flags) result(flag)
+        !! The debug-info flag the default build profile should add so the
+        !! compiler emits no DWARF, or empty when it must not.
+        !!
+        !! A 500-binary test tree pays for full debug info in every link even
+        !! though nobody attaches a debugger to a test run: measured here, the
+        !! default `fo build` of ffc carried 0.74 GB of `.debug_*` sections
+        !! across 9.66 GB of executables.  The default profile therefore asks
+        !! for `-g0`, and `--debug`/`--asan` keep their own `-g`, which the
+        !! caller passes in request_flags and which must not be overwritten.
+        class(compiler_dialect_t), intent(in) :: self
+        character(len=*), intent(in) :: request_flags
+        character(len=:), allocatable :: flag
+
+        if (self%requests_debug_info(request_flags)) return
+        select case (self%kind)
+        case (COMPILER_GFORTRAN, COMPILER_FLANG)
+            flag = '-g0'
+        case default
+            flag = ''
+        end select
+    end function dialect_debug_info_diet_flag
+
+    pure logical function dialect_requests_debug_info(self, request_flags)
+        !! True when the caller already asked for debug info, either with a
+        !! profile flag (`--debug`, `--asan`) or directly (`-g`, `-g1`,
+        !! `-gline-tables-only`, `-ggdb`).  `-g0` is a request for none.
+        class(compiler_dialect_t), intent(in) :: self
+        character(len=*), intent(in) :: request_flags
+
+        character(len=512) :: rest
+        integer :: pos
+
+        dialect_requests_debug_info = .false.
+        rest = adjustl(request_flags)
+        do while (len_trim(rest) > 0)
+            pos = index(rest, ' ')
+            if (pos == 0) pos = len_trim(rest) + 1
+            if (rest(1:2) == '-g' .and. rest(1:min(pos - 1, 3)) /= '-g0') then
+                dialect_requests_debug_info = .true.
+                return
+            end if
+            rest = adjustl(rest(pos:))
+        end do
+    end function dialect_requests_debug_info
 
     function dialect_base_flags(self) result(flags)
         class(compiler_dialect_t), intent(in) :: self
