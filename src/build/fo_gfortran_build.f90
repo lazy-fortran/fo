@@ -992,7 +992,15 @@ contains
             team_width = max(1, min(n_tests, native_jobs()))
             n_shardable = 0
             do i = 1, n_tests
-                if (is_slow_name(tests(i)%name)) n_shardable = n_shardable + 1
+                ! `is_slow_name` matches only names containing `_slow_`, and no
+                ! conformance walker is named that - so with that predicate
+                ! alone n_shardable stayed 0, the variable was never set, and
+                ! the suite wall stayed at the floor set by the longest single
+                ! test (test_conformance_gauntlet_smoke, ~145 s). The walkers
+                ! are the long ones, so they are what gets the leftover cores.
+                if (is_slow_name(tests(i)%name) .or. &
+                    index(tests(i)%name, 'conformance') > 0) &
+                    n_shardable = n_shardable + 1
             end do
             ! The default the walkers use when the user says nothing.
             shard_allow = 1
