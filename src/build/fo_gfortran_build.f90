@@ -929,6 +929,14 @@ contains
         do i = 1, n_units
             if (.not. units(i)%is_program) cycle
             name = gfortran_test_source_name(config, test_dir, units(i)%filename)
+            ! The dispatcher is infrastructure, not a test: scanned as one it
+            ! gets run bare and fails its own usage check, which would read as
+            ! a suite regression. It still builds, because routed tests link it
+            ! through their own node, and `fo test <dispatcher>` by explicit
+            ! request reaches it below this line.
+            if (len_trim(config%dispatcher) > 0 .and. &
+                trim(name) == trim(config%dispatcher) .and. &
+                .not. selected_test(name, selected_names, n_selected)) cycle
             if (.not. include_slow .and. is_slow_name(name)) cycle
             if (n_selected > 0) then
                 if (.not. selected_test(name, selected_names, n_selected)) cycle
