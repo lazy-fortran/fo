@@ -98,6 +98,7 @@ module fo_fpm_config
         !> defaults. Empty leaves fo's default (`g0`).
         character(len=32) :: debug_info = ''
         logical :: pic = .false.
+        logical :: link_shared = .false.
         !! Name of the consolidated test executable, if the project uses one
         !! (`[extra.fo] dispatcher = "ffc_suite"`). Tests whose source carries
         !! the `! fo: dispatcher` marker run inside that binary with their name
@@ -789,6 +790,21 @@ contains
             case default
                 write (error_unit, '(a)') 'fo: warning: ignoring [extra.fo] '// &
                     'pic = '//trim(val)//' (expected true or false)'
+            end select
+        case ('link')
+            ! `shared` folds the library once into a .so and lets every test
+            ! executable link against it, instead of relinking the whole static
+            ! archive ~500 times. Needs `pic = "true"`; the build says so
+            ! rather than letting the linker emit a relocation wall.
+            call extract_string(val, str_val)
+            select case (trim(str_val))
+            case ('shared', 'so', 'dynamic')
+                config%link_shared = .true.
+            case ('static', 'archive', 'a')
+                config%link_shared = .false.
+            case default
+                write (error_unit, '(a)') 'fo: warning: ignoring [extra.fo] '// &
+                    'link = '//trim(val)//' (expected shared or static)'
             end select
         case default
         end select

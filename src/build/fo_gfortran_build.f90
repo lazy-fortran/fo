@@ -2573,11 +2573,29 @@ contains
         n_link_inputs = 0
         archive_path = ''
         if (n_all_lib > 0) then
-            call archive_objects(project_dir, all_lib_objs, n_all_lib, archive_path, &
-                log_file, exitcode, link_base)
+            ! `link = "shared"` folds the library once into a .so and lets
+            ! every test executable link against that, instead of relinking the
+            ! whole static archive ~500 times. Measured: a test that links the
+            ! archive comes out 15.6 MB and pays the archive scan; the same
+            ! test against the .so links in 0.109 s at 2.1 MB, and runs.
+            if (manifest_config%link_shared) then
+                call shared_library(project_dir, all_lib_objs, n_all_lib, &
+                    archive_path, log_file, exitcode, link_base)
+            else
+                call archive_objects(project_dir, all_lib_objs, n_all_lib, &
+                    archive_path, log_file, exitcode, link_base)
+            end if
             if (exitcode /= 0) return
             n_link_inputs = 1
             link_inputs(1) = archive_path
+            if (manifest_config%link_shared) then
+                ! An executable that links a .so has to find it at run time.
+                ! RPATH on the binary means `fo test` needs no exported
+                ! LD_LIBRARY_PATH, which the suite runner does not set and
+                ! should not have to.
+                test_flags = trim(test_flags)//' -Wl,-rpath,'// &
+                    trim(project_dir)//'/build/fo/lib'
+            end if
         end if
 
         do i = 1, n_run
@@ -2776,6 +2794,67 @@ contains
             timeout_detail(kind, budget, wall_cap, cpu_s, wall_s)
         close (u)
     end subroutine run_test_binary
+
+    subroutine shared_library(project_dir, objects, n_objects, so_path, &
+            log_file, exitcode, content_key)
+        !! Fold the library objects into one shared object instead of a static
+        !! archive, so ~500 test executables link against a single 20 MB `.so`
+        !! rather than relinking a ~30 MB archive each - measured 0.109 s and
+        !! 2.1 MB per test against the archive's 15.6 MB, and it runs.
+        !! The name follows the project directory so nothing here hard-codes
+        !! ffc. Objects must be position-independent; if they are not, the
+        !! linker says so in the log and this returns an empty path.
+        character(len=*), intent(in) :: project_dir, log_file
+        character(len=512), intent(in) :: objects(:)
+        integer, intent(in) :: n_objects
+        character(len=*), intent(out) :: so_path
+        integer, intent(out) :: exitcode
+        character(len=*), intent(in), optional :: content_key
+
+        character(len=:), allocatable :: packed, proj
+        character(len=512) :: lib_dir, seed
+        integer :: i, n_args
+        logical :: exists
+
+        so_path = ''
+        exitcode = 0
+        if (n_objects < 1) return
+
+        lib_dir = trim(project_dir)//'/build/fo/lib'
+        call fs_make_dir(lib_dir)
+        call file_basename(project_dir, proj)
+        if (present(content_key)) then
+            if (len_trim(content_key) > 0) then
+                so_path = trim(lib_dir)//'/lib'//trim(proj)//'_'// &
+                    content_key(1:min(32, len_trim(content_key)))//'.so'
+                inquire (file=trim(so_path), exist=exists)
+                if (exists) return
+            end if
+        end if
+        if (len_trim(so_path) == 0) then
+            call make_tmpfile('fo_shared', seed)
+            call fs_remove_file(seed)
+            so_path = trim(lib_dir)//'/lib'//trim(proj)//'.so'
+        end if
+
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, 'gcc')
+        call argv_push(packed, n_args, '-shared')
+        call argv_push(packed, n_args, '-Wl,--whole-archive')
+        do i = 1, n_objects
+            call argv_push(packed, n_args, objects(i))
+        end do
+        call argv_push(packed, n_args, '-Wl,--no-whole-archive')
+        call argv_push(packed, n_args, '-o')
+        call argv_push(packed, n_args, so_path)
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+            .true., build_timeout_seconds(), exitcode)
+        if (exitcode /= 0) then
+            call fs_remove_file(so_path)
+            so_path = ''
+        end if
+    end subroutine shared_library
 
     subroutine archive_objects(project_dir, objects, n_objects, archive_path, &
             log_file, exitcode, content_key)
