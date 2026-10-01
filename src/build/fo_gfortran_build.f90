@@ -735,6 +735,52 @@ contains
             stamp_request_flags, roots, n_roots, .true., apps_ready, test_dir)
     end subroutine refresh_build_stamp
 
+    subroutine resolve_run_target(project_dir, config, bin_dir, name, bin_path)
+        !! Where one named test actually runs: its own binary, or inside the
+        !! consolidated dispatcher when its source is marked. The link step and
+        !! the run step must agree, or a routed test executes a binary that was
+        !! never linked (exit 127) or a private copy that defeats the whole
+        !! point of dispatching.
+        character(len=*), intent(in) :: project_dir, bin_dir, name
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(out) :: bin_path
+        character(len=:), allocatable :: args
+
+        bin_path = trim(bin_dir)//'/'//trim(name)
+        if (len_trim(config%dispatcher) == 0) return
+        if (name == trim(config%dispatcher)) return
+        if (.not. source_has_marker_test(project_dir, config, name)) return
+        call dispatch_target(bin_dir, config%dispatcher, name, bin_path, args)
+    end subroutine resolve_run_target
+
+    logical function source_has_marker_test(project_dir, config, name) result(has)
+        !! Marker lookup for a test name: `test/<name>.f90`, then the fpm test
+        !! directory, then a scan, because `fo` accepts names derived several
+        !! ways and a silent miss here means the test ran its own binary.
+        character(len=*), intent(in) :: project_dir, name
+        type(fpm_config_t), intent(in) :: config
+        character(len=512) :: p
+        character(len=4096) :: line
+        integer :: u, ios
+
+        has = .false.
+        p = trim(project_dir)//'/test/'//trim(name)//'.f90'
+        if (len_trim(config%test_dir) > 0) then
+            p = trim(project_dir)//'/'//trim(config%test_dir)//'/'//trim(name)//'.f90'
+        end if
+        open (newunit=u, file=trim(p), action='read', status='old', iostat=ios)
+        if (ios /= 0) return
+        do
+            read (u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, '! fo: dispatcher') == 1) then
+                has = .true.
+                exit
+            end if
+        end do
+        close (u)
+    end function source_has_marker_test
+
     subroutine run_current_tests(project_dir, test_dir, bin_dir, selected_names, &
             n_selected, include_slow, log_file, exitcode)
         !! Run the tests the current flag profile already built, and report each
@@ -776,6 +822,24 @@ contains
             if (allocated(tests(i)%args)) deallocate (tests(i)%args)
         end do
     end subroutine run_current_tests
+
+    logical function unit_has_dispatcher_marker(unit, project_dir, test_dir) &
+            result(has)
+        !! Whether a scanned test unit opts into the dispatcher. The scanned
+        !! `filename` is already openable as it stands (`scan_file` opens it
+        !! directly), so joining it onto `project_dir/test_dir/` doubles the
+        !! path and silently misses the marker - which reads as "routing does
+        !! not fire" while every piece looks correctly wired. Try the scanned
+        !! path first, then the joined one, so the marker is found whichever
+        !! form the scanner handed back.
+        type(scan_unit_t), intent(in) :: unit
+        character(len=*), intent(in) :: project_dir, test_dir
+
+        has = source_has_marker(trim(unit%filename), '! fo: dispatcher')
+        if (has) return
+        has = source_has_marker(trim(project_dir)//'/'//trim(test_dir)//'/'// &
+            trim(unit%filename), '! fo: dispatcher')
+    end function unit_has_dispatcher_marker
 
     subroutine dispatch_target(bin_dir, dispatcher, name, bin, args)
         !! Where a marked test actually runs: inside the consolidated binary,
@@ -851,8 +915,8 @@ contains
             tests(n_tests)%bin = trim(bin_dir)//'/'//trim(name)
             tests(n_tests)%args = manifest_test_args(config, name)
             if (len_trim(config%dispatcher) > 0 .and. &
-                source_has_marker(trim(project_dir)//'/'//trim(test_dir)//'/'// &
-                trim(units(i)%filename), '! fo: dispatcher')) then
+                unit_has_dispatcher_marker(units(i), project_dir, test_dir) &
+                ) then
                 call dispatch_target(bin_dir, config%dispatcher, name, &
                     tests(n_tests)%bin, tests(n_tests)%args)
             end if
@@ -2368,14 +2432,13 @@ contains
             if (.not. include_slow .and. is_slow_name(tname)) cycle
             if (n_selected > 0 .and. .not. selected_test(tname, selected_names, &
                 n_selected)) cycle
-            if (len_trim(manifest_config%dispatcher) > 0 .and. &
-                tname /= trim(manifest_config%dispatcher) .and. &
-                source_has_marker(filenames(node_id), '! fo: dispatcher')) then
-                ! Do not link a private copy of the library for this test. It
-                ! runs inside the dispatcher, which is built as an ordinary
-                ! program in this same pass, so its object code exists once.
-                cycle
-            end if
+            ! NOTE (fo#132): the private-copy link must NOT be skipped here
+            ! yet. `fo` only links what it selects, so dropping a routed test
+            ! from this loop also drops the dispatcher's own link, and the
+            ! routed run dies with exit 127 (`posix_spawn of
+            ! build/fo/bin/test_ffc_suite ... No such file or directory`).
+            ! Removing the link is correct only once the dispatcher is part of
+            ! the run set, linked before the first routed case executes.
             n_run = n_run + 1
             run_nodes(n_run) = node_id
             run_names(n_run) = tname
@@ -2492,7 +2555,8 @@ contains
             end if
             if (run_exits(i) == 0) then
                 tname = run_names(i)
-                bin_path = trim(bin_dir)//'/'//trim(tname)
+                call resolve_run_target(project_dir, manifest_config, bin_dir, &
+                    tname, bin_path)
                 call link_binary(project_dir, obj_path, link_inputs, n_link_inputs, &
                     dep_objs, n_dep_objs, link_libs, n_link_libs, bin_path, log_local, &
                     run_exits(i), test_flags, c, link_base)
@@ -2527,7 +2591,8 @@ contains
                 if (.not. ran(i)) cycle
                 if (run_exits(i) == 0 .or. run_exits(i) == 124) cycle
                 tname = run_names(i)
-                bin_path = trim(bin_dir)//'/'//trim(tname)
+                call resolve_run_target(project_dir, manifest_config, bin_dir, &
+                    tname, bin_path)
                 call make_tmpfile('fo_test_rerun', rerun_log)
                 call run_test_binary(project_dir, bin_path, run_args(i), rerun_log, &
                     manifest_config, is_slow_name(tname), run_exits(i))
