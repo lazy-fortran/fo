@@ -4144,6 +4144,21 @@ contains
                 s = trim(mapped)
             end if
         end if
+
+        ! PIC last, like the debug budget: the manifest states what this
+        ! project needs to be able to link at all, so it must not be beaten by
+        ! a stale [build] flag. Without it the linker refuses to fold the
+        ! archive into a shared object at all:
+        ! "relocation R_X86_64_PC32 ... can not be used when making a shared
+        ! object; recompile with -fPIC".
+        mapped = dialect%pic_flag(config%pic)
+        if (len_trim(mapped) > 0) then
+            if (len_trim(s) > 0) then
+                s = trim(s)//' '//trim(mapped)
+            else
+                s = trim(mapped)
+            end if
+        end if
     end function config_flags_str
 
 end module fo_gfortran_build

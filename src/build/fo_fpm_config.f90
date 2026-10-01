@@ -97,6 +97,7 @@ module fo_fpm_config
         !> budget here so the diet is visible in the manifest, not only in fo's
         !> defaults. Empty leaves fo's default (`g0`).
         character(len=32) :: debug_info = ''
+        logical :: pic = .false.
         !! Name of the consolidated test executable, if the project uses one
         !! (`[extra.fo] dispatcher = "ffc_suite"`). Tests whose source carries
         !! the `! fo: dispatcher` marker run inside that binary with their name
@@ -774,6 +775,20 @@ contains
                 write (error_unit, '(a)') 'fo: warning: ignoring [extra.fo] '// &
                     'debug-info = '//trim(val)// &
                 ' (expected g0, line-tables, or full)'
+            end select
+        case ('pic')
+            ! Position-independent code is not a style preference here: it is
+            ! the precondition for a shared libffc, without which every test
+            ! executable relinks the whole static archive.
+            call extract_string(val, str_val)
+            select case (trim(str_val))
+            case ('true', 'True', 'TRUE', 'yes', 'on', '1')
+                config%pic = .true.
+            case ('false', 'False', 'FALSE', 'no', 'off', '0')
+                config%pic = .false.
+            case default
+                write (error_unit, '(a)') 'fo: warning: ignoring [extra.fo] '// &
+                    'pic = '//trim(val)//' (expected true or false)'
             end select
         case default
         end select
