@@ -366,6 +366,7 @@ contains
         write (output_unit, '(a)') '  lint --json  lint results as JSON'
         write (output_unit, '(a)') '  lint --fix   remove unused imports in place'
         write (output_unit, '(a)') '  clean      drop project build tree (--cache also purges shared store)'
+        write (output_unit, '(a)') '  clean --stale  drop unreferenced artifacts (--keep N rescues newest N)'
         write (output_unit, '(a)') '  update     re-fetch git/registry dependencies on the next build'
         write (output_unit, '(a)') &
             '  install    install release binary (fpm install --profile release)'
@@ -1590,10 +1591,12 @@ contains
     subroutine cmd_clean()
         use fo_cache, only: cache_store_root
         use fo_build_backend, only: backend_clean
+        use fo_clean_stale, only: clean_stale_run, CLEAN_STALE_DEFAULT_KEEP
         type(backend_t) :: b
         character(len=512) :: store_root, arg
-        integer :: i
-        logical :: purge_store, build_removed, store_removed
+        integer :: i, n_removed, keep
+        integer(8) :: freed_bytes
+        logical :: purge_store, stale_only, build_removed, store_removed
 
         ! Default clean is project-scoped: drop only this project's build/ tree
         ! (a disposable view that fo regenerates from the cache). The store at
@@ -1601,11 +1604,33 @@ contains
         ! across all projects; wiping it on a per-project clean cold-starts every
         ! other project. Purge it only when explicitly asked.
         purge_store = .false.
+        stale_only = .false.
+        keep = CLEAN_STALE_DEFAULT_KEEP
         do i = 2, command_argument_count()
             call get_command_argument(i, arg)
             if (trim(arg) == '--cache' .or. trim(arg) == '--all') &
                 purge_store = .true.
+            if (trim(arg) == '--stale') stale_only = .true.
+            if (trim(arg) == '--keep') then
+                call get_command_argument(i + 1, arg)
+                read (arg, *, iostat=n_removed) keep
+                if (n_removed /= 0) keep = CLEAN_STALE_DEFAULT_KEEP
+            end if
         end do
+
+        ! `--stale` is the opposite trade from a full clean: keep everything the
+        ! last build still references, delete the generations a content-addressed
+        ! tree can never revisit. ffc carried 6.5 GB of unreachable link archives
+        ! and stale compiler profile dirs this way.
+        if (stale_only) then
+            b = detect_backend('.')
+            call clean_stale_run(trim(b%project_dir), keep, n_removed, freed_bytes)
+            write (output_unit, '(a,i0,a,f0.1,a,i0,a)') &
+                'stale artifacts removed: ', n_removed, ' entries, ', &
+                real(freed_bytes)/1024.0/1024.0, ' MiB (kept the newest ', keep, &
+                ' unreferenced archives)'
+            return
+        end if
 
         call cache_store_root(store_root)
         b = detect_backend('.')

@@ -14,6 +14,9 @@ module fo_compiler_dialect
     contains
         procedure, public :: base_flags => dialect_base_flags
         procedure, public :: debug_info_diet_flag => dialect_debug_info_diet_flag
+        procedure, public :: sections_split_flags => dialect_sections_split_flags
+        procedure, public :: requests_sanitizer => dialect_requests_sanitizer
+        procedure, public :: gc_sections_link_flag => dialect_gc_sections_link_flag
         procedure, public :: requests_debug_info => dialect_requests_debug_info
         procedure, public :: module_flags => dialect_module_flags
         procedure, public :: profile_flags => dialect_profile_flags
@@ -81,6 +84,54 @@ contains
             flag = ''
         end select
     end function dialect_debug_info_diet_flag
+
+    pure function dialect_sections_split_flags(self, request_flags) result(flags)
+        !! One section per function and per global, so the link step can drop
+        !! everything a given executable never reaches.
+        !!
+        !! Every one of ffc's 503 executables links the whole 55 MB library
+        !! archive today: 9.66 GB of binaries whose median size is 20.9 MB,
+        !! because a test of `ubound` still carries every lowering in the tree.
+        !! A sanitizer build must not split: its instrumentation lives in
+        !! constructor tables that section garbage collection can collect, and a
+        !! sanitizer that silently collects nothing is worse than a big binary.
+        class(compiler_dialect_t), intent(in) :: self
+        character(len=*), intent(in) :: request_flags
+        character(len=:), allocatable :: flags
+
+        if (self%requests_sanitizer(request_flags)) return
+        select case (self%kind)
+        case (COMPILER_GFORTRAN, COMPILER_FLANG)
+            flags = '-ffunction-sections -fdata-sections'
+        case default
+            flags = ''
+        end select
+    end function dialect_sections_split_flags
+
+    pure logical function dialect_requests_sanitizer(self, request_flags)
+        !! True when the request asked for a sanitizer, by `-fsanitize=...`
+        !! or by the `asan` profile spelling of it.
+        class(compiler_dialect_t), intent(in) :: self
+        character(len=*), intent(in) :: request_flags
+
+        dialect_requests_sanitizer = index(request_flags, '-fsanitize') > 0
+    end function dialect_requests_sanitizer
+
+    pure function dialect_gc_sections_link_flag(self, request_flags) result(flag)
+        !! The link half of `dialect_sections_split_flags`. Empty when the
+        !! compile step did not split, so the two never disagree.
+        class(compiler_dialect_t), intent(in) :: self
+        character(len=*), intent(in) :: request_flags
+        character(len=:), allocatable :: flag
+
+        if (len_trim(self%sections_split_flags(request_flags)) == 0) return
+        select case (self%kind)
+        case (COMPILER_GFORTRAN, COMPILER_FLANG)
+            flag = '-Wl,--gc-sections'
+        case default
+            flag = ''
+        end select
+    end function dialect_gc_sections_link_flag
 
     pure logical function dialect_requests_debug_info(self, request_flags)
         !! True when the caller already asked for debug info, either with a

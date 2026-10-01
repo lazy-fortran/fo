@@ -2968,7 +2968,7 @@ contains
         character(len=:), allocatable :: flags
 
         type(compiler_dialect_t) :: dialect
-        character(len=512) :: diet_flag
+        character(len=512) :: diet_flag, split_flags
 
         dialect = compiler_dialect(fc_command())
         flags = dialect%base_flags()
@@ -2977,8 +2977,26 @@ contains
         ! for debug info (`--debug`, `--asan`, `-g`) keeps it.
         diet_flag = dialect%debug_info_diet_flag(build_request_flags)
         if (len_trim(diet_flag) > 0) flags = trim(flags)//' '//trim(diet_flag)
+        ! Section splitting pairs with `--gc-sections` in fc_link_policy_flags.
+        ! A sanitizer build skips both: its instrumentation lives in
+        ! constructor tables that section garbage collection can collect.
+        split_flags = dialect%sections_split_flags(build_request_flags)
+        if (len_trim(split_flags) > 0) &
+            flags = trim(flags)//' '//trim(split_flags)
         call append_pipe_flag(fc_command(), flags)
     end function fc_policy_flags
+
+    function fc_link_policy_flags() result(flags)
+        !! Link-side half of the section-split policy; it reads the same module
+        !! state as `fc_policy_flags`, so compile and link cannot disagree about
+        !! whether garbage collection is on.
+        character(len=:), allocatable :: flags
+
+        type(compiler_dialect_t) :: dialect
+
+        dialect = compiler_dialect(fc_command())
+        flags = dialect%gc_sections_link_flag(build_request_flags)
+    end function fc_link_policy_flags
 
     recursive function fc_base_flags() result(flags)
         character(len=:), allocatable :: flags
@@ -3373,6 +3391,7 @@ contains
         integer, intent(out) :: n_args
 
         integer :: i
+        character(len=512) :: policy_flag
 
         n_args = 0
         call argv_push_split(packed, n_args, fc_executable_command())
@@ -3394,6 +3413,8 @@ contains
             call argv_push(packed, n_args, '-Wl,-rpath,/opt/homebrew/opt/libomp/lib')
         end if
         if (len_trim(flags) > 0) call argv_push_split(packed, n_args, flags)
+        policy_flag = fc_link_policy_flags()
+        if (len_trim(policy_flag) > 0) call argv_push_split(packed, n_args, policy_flag)
         call argv_push(packed, n_args, '-o')
         call argv_push(packed, n_args, output)
     end subroutine make_link_argv
