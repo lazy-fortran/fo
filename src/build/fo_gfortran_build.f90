@@ -2368,6 +2368,14 @@ contains
             if (.not. include_slow .and. is_slow_name(tname)) cycle
             if (n_selected > 0 .and. .not. selected_test(tname, selected_names, &
                 n_selected)) cycle
+            if (len_trim(manifest_config%dispatcher) > 0 .and. &
+                tname /= trim(manifest_config%dispatcher) .and. &
+                source_has_marker(filenames(node_id), '! fo: dispatcher')) then
+                ! Do not link a private copy of the library for this test. It
+                ! runs inside the dispatcher, which is built as an ordinary
+                ! program in this same pass, so its object code exists once.
+                cycle
+            end if
             n_run = n_run + 1
             run_nodes(n_run) = node_id
             run_names(n_run) = tname
