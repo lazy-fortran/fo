@@ -966,6 +966,8 @@ contains
 
         integer :: i
         integer :: rerun_log
+        integer :: team_width, n_shardable, shard_allow
+        character(len=8) :: shard_txt
         integer(8) :: clk0, clk1, clk_rate
 
         ! The team is the concurrency. A conformance walker running inside a
@@ -975,7 +977,30 @@ contains
         ! team 24 + shard 16 -> 361 s wall and a 1241 s test-time sum, team 24
         ! + serial shards -> 235 s wall and 779 s). A value the user exported
         ! still wins, because this only sets a default.
-        if (n_tests > 1) call process_setenv_default('FFC_CONFORMANCE_JOBS', '1')
+        ! A blanket 1 was the wrong answer. It fixed oversubscription by
+        ! putting the ceiling on the wrong axis: the suite wall is not the
+        ! link phase and not the sum, it is the single longest test. Measured
+        ! on ffc, `test_conformance_gauntlet_smoke` alone runs 139.87 s, so
+        ! no amount of parallelism across the other 499 gets the wall under
+        ! 140 s (sum 736 s / 12 jobs = 61 s ideal, actual 262 s). The long
+        ! conformance walkers carry their own corpus sharding, so they are
+        ! allowed to use the cores the team is not holding, bounded so the
+        ! total never exceeds the machine: cores left over, divided by how
+        ! many tests may shard at once. Set once, not per test, because the
+        ! environment is process-global and a parallel region would race it.
+        if (n_tests > 1) then
+            team_width = max(1, min(n_tests, native_jobs()))
+            n_shardable = 0
+            do i = 1, n_tests
+                if (is_slow_name(tests(i)%name)) n_shardable = n_shardable + 1
+            end do
+            ! The default the walkers use when the user says nothing.
+            shard_allow = 1
+            if (n_shardable > 0) &
+                shard_allow = max(1, (native_jobs() - team_width) / n_shardable)
+            write(shard_txt, '(i0)') shard_allow
+            call process_setenv_default('FFC_CONFORMANCE_JOBS', trim(shard_txt))
+        end if
         !$omp parallel do if (n_tests > 1) num_threads(max(1, min(n_tests, native_jobs()))) &
         !$omp& schedule(dynamic) private(i, rerun_log, clk0, clk1, clk_rate)
         do i = 1, n_tests
