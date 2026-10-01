@@ -97,6 +97,13 @@ module fo_fpm_config
         !> budget here so the diet is visible in the manifest, not only in fo's
         !> defaults. Empty leaves fo's default (`g0`).
         character(len=32) :: debug_info = ''
+        !! Name of the consolidated test executable, if the project uses one
+        !! (`[extra.fo] dispatcher = "ffc_suite"`). Tests whose source carries
+        !! the `! fo: dispatcher` marker run inside that binary with their name
+        !! as the argument instead of linking their own copy of the library:
+        !! one link instead of one per test. Empty means no dispatcher and the
+        !! behaviour is exactly as before.
+        character(len=64) :: dispatcher = ''
         ! fpm "openmp" metapackage (openmp = "*" under [dependencies]). When set,
         ! fo compiles and links with -fopenmp so the project's `!$omp` regions
         ! run in parallel. Without it gfortran ignores the directives.
@@ -751,6 +758,9 @@ contains
             config%slow_test_timeout = positive_seconds(val, 'slow-test-timeout')
         case ('test-wall-timeout')
             config%test_wall_timeout = positive_seconds(val, 'test-wall-timeout')
+        case ('dispatcher')
+            call extract_string(val, str_val)
+            config%dispatcher = trim(str_val)
         case ('debug-info')
             call extract_string(val, str_val)
             select case (trim(str_val))

@@ -81,6 +81,7 @@ module fo_gfortran_build
     public :: gfortran_run_tests
     public :: config_flags_str
     public :: gfortran_app_source_name, gfortran_test_source_name
+    public :: source_has_marker, dispatch_target
 
 contains
 
@@ -766,8 +767,8 @@ contains
             return
         end if
         warn_s = test_warn_seconds(test_timeout_seconds(config))
-        call select_current_tests(config, units, n_units, test_dir, bin_dir, &
-            selected_names, n_selected, include_slow, tests, n_tests)
+        call select_current_tests(project_dir, config, units, n_units, test_dir, &
+            bin_dir, selected_names, n_selected, include_slow, tests, n_tests)
         call run_current_team(project_dir, config, tests, n_tests)
         call report_current_tests(project_dir, log_file, tests, n_tests, warn_s, &
             exitcode)
@@ -776,10 +777,55 @@ contains
         end do
     end subroutine run_current_tests
 
-    subroutine select_current_tests(config, units, n_units, test_dir, bin_dir, &
-            selected_names, n_selected, include_slow, tests, n_tests)
+    subroutine dispatch_target(bin_dir, dispatcher, name, bin, args)
+        !! Where a marked test actually runs: inside the consolidated binary,
+        !! with its own name as argv, instead of linking a fresh copy of the
+        !! library. The dispatcher itself never dispatches to itself - that
+        !! recursion has no base case and shows up as a hung suite.
+        character(len=*), intent(in) :: bin_dir, dispatcher, name
+        character(len=*), intent(out) :: bin
+        character(len=:), allocatable, intent(out) :: args
+        character(len=:), allocatable :: args_
+
+        if (name == trim(dispatcher)) then
+            bin = trim(bin_dir)//'/'//trim(name)
+            return
+        end if
+        bin = trim(bin_dir)//'/'//trim(dispatcher)
+        allocate (character(len=len_trim(name)) :: args_)
+        args_ = trim(name)
+        call move_alloc(args_, args)
+    end subroutine dispatch_target
+
+    logical function source_has_marker(path, marker) result(has)
+        !! Whether a test source carries the dispatcher marker. Explicit per
+        !! file, so the conversion is visible in `git diff` and a test that
+        !! needs its own executable (shell-driven parity oracle, corpus
+        !! walker) simply never gets the marker.
+        character(len=*), intent(in) :: path, marker
+        character(len=4096) :: line
+        integer :: u, ios
+
+        has = .false.
+        open (newunit=u, file=trim(path), action='read', status='old', iostat=ios)
+        if (ios /= 0) return
+        do
+            read (u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, marker) == 1) then
+                has = .true.
+                exit
+            end if
+        end do
+        close (u)
+    end function source_has_marker
+
+    subroutine select_current_tests(project_dir, config, units, n_units, &
+            test_dir, bin_dir, selected_names, n_selected, include_slow, &
+            tests, n_tests)
         !! The tests to run: programs of this profile, minus slow unless asked,
         !! intersected with an explicit selection; each gets its own log path.
+        character(len=*), intent(in) :: project_dir
         type(fpm_config_t), intent(in) :: config
         type(scan_unit_t), intent(in) :: units(:)
         integer, intent(in) :: n_units, n_selected
@@ -804,6 +850,12 @@ contains
             tests(n_tests)%name = name
             tests(n_tests)%bin = trim(bin_dir)//'/'//trim(name)
             tests(n_tests)%args = manifest_test_args(config, name)
+            if (len_trim(config%dispatcher) > 0 .and. &
+                source_has_marker(trim(project_dir)//'/'//trim(test_dir)//'/'// &
+                trim(units(i)%filename), '! fo: dispatcher')) then
+                call dispatch_target(bin_dir, config%dispatcher, name, &
+                    tests(n_tests)%bin, tests(n_tests)%args)
+            end if
             call make_tmpfile('fo_test_case', tests(n_tests)%log)
         end do
     end subroutine select_current_tests
