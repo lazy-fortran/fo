@@ -4111,6 +4111,19 @@ contains
                 combined = trim(flag_text)
             end if
         end if
+        ! PIC last, and here rather than only in `config_flags_str`: this is
+        ! the function the compile path actually calls (three call sites),
+        ! while `config_flags_str` has no callers at all - the first time this
+        ! flag was wired it went into the dead function and the linker kept
+        ! refusing the archive with "recompile with -fPIC".
+        mapped = dialect%pic_flag(config%pic)
+        if (len_trim(mapped) > 0) then
+            if (len_trim(combined) > 0) then
+                combined = trim(combined)//' '//trim(mapped)
+            else
+                combined = trim(mapped)
+            end if
+        end if
         flag_text = combined
     end subroutine merge_flags
 
