@@ -25,7 +25,7 @@ module fo_gfortran_build
         clean_root_build_artifacts
     use fo_process, only: process_run_logged, &
         process_run_argv_logged, argv_push, argv_push_split, &
-        argv_push_split_nl, process_detect_nproc
+        argv_push_split_nl, process_detect_nproc, process_setenv_default
     use fo_lock, only: lock_check
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_remove_file, fs_append_file, &
         fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec, &
@@ -821,6 +821,14 @@ contains
         integer :: rerun_log
         integer(8) :: clk0, clk1, clk_rate
 
+        ! The team is the concurrency. A conformance walker running inside a
+        ! team member must not shard its own corpus on top of it: 24 test
+        ! processes each opening 16 compiler children is oversubscription, and
+        ! the measured cost is that every one of them gets slower (ffc suite:
+        ! team 24 + shard 16 -> 361 s wall and a 1241 s test-time sum, team 24
+        ! + serial shards -> 235 s wall and 779 s). A value the user exported
+        ! still wins, because this only sets a default.
+        if (n_tests > 1) call process_setenv_default('FFC_CONFORMANCE_JOBS', '1')
         !$omp parallel do if (n_tests > 1) num_threads(max(1, min(n_tests, native_jobs()))) &
         !$omp& schedule(dynamic) private(i, rerun_log, clk0, clk1, clk_rate)
         do i = 1, n_tests

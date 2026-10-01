@@ -596,6 +596,19 @@ void fo_c_configure_openmp(void) {
     }
 }
 
+/* Publish a default into the environment that every test child inherits, but
+   only when the user has not set the variable themselves: an explicit value
+   in the shell is a request and outranks the driver's preference. This is how
+   the parallel test team tells a conformance walker inside it to stop sharding
+   (FFC_CONFORMANCE_JOBS=1): 24 tests each opening 16 compiler children is
+   oversubscription, and the measured effect is that every one of them gets
+   slower. */
+void fo_c_setenv_default(const char *name, const char *value) {
+    if (name == NULL || value == NULL) return;
+    if (getenv(name) != NULL) return;
+    setenv(name, value, 1);
+}
+
 /* Terminate with a status and no runtime banner: Fortran ERROR STOP prints
    "Error termination" and a backtrace, which buries the actual message. The
    Fortran side flushes its units first; exit() then runs the runtime's own

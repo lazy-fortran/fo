@@ -3,6 +3,7 @@ module fo_process
     implicit none
     private
     public :: process_detect_nproc, process_configure_openmp
+    public :: process_setenv_default
     public :: process_scan_sources
     public :: process_start_fo_check, process_poll_pid, process_cancel_pid
     public :: process_run_logged
@@ -26,6 +27,13 @@ module fo_process
 
         subroutine fo_c_configure_openmp() bind(C, name='fo_c_configure_openmp')
         end subroutine fo_c_configure_openmp
+
+        subroutine fo_c_setenv_default(name, value) &
+                bind(C, name='fo_c_setenv_default')
+            import :: c_char
+            character(kind=c_char), intent(in) :: name(*)
+            character(kind=c_char), intent(in) :: value(*)
+        end subroutine fo_c_setenv_default
 
         subroutine fo_c_suppress_heartbeats(suppress) &
                 bind(C, name='fo_c_suppress_heartbeats')
@@ -126,6 +134,13 @@ module fo_process
     end interface
 
 contains
+
+    subroutine process_setenv_default(name, value)
+        !! Put `name=value` in the environment unless the user already set it.
+        character(len=*), intent(in) :: name, value
+
+        call fo_c_setenv_default(trim(name)//c_null_char, trim(value)//c_null_char)
+    end subroutine process_setenv_default
 
     subroutine process_configure_openmp()
         call fo_c_configure_openmp()
