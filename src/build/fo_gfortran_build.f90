@@ -735,6 +735,29 @@ contains
             stamp_request_flags, roots, n_roots, .true., apps_ready, test_dir)
     end subroutine refresh_build_stamp
 
+    integer function dispatcher_node(filenames, topo_order, n_order, dispatcher) &
+            result(node)
+        !! The DAG node that builds the consolidated dispatcher program, found
+        !! by its file's basename. 0 when a project declares a dispatcher it
+        !! does not ship: the caller keeps the test's own node, so a missing
+        !! dispatcher degrades to the old behaviour instead of failing every
+        !! routed test.
+        character(len=*), intent(in) :: filenames(:), dispatcher
+        integer, intent(in) :: topo_order(:), n_order
+        character(len=256) :: base
+        integer :: i
+
+        node = 0
+        do i = 1, n_order
+            if (len_trim(filenames(topo_order(i))) == 0) cycle
+            call file_basename(filenames(topo_order(i)), base)
+            if (trim(base) == trim(dispatcher)//'.f90') then
+                node = topo_order(i)
+                return
+            end if
+        end do
+    end function dispatcher_node
+
     subroutine resolve_run_target(project_dir, config, bin_dir, name, bin_path)
         !! Where one named test actually runs: its own binary, or inside the
         !! consolidated dispatcher when its source is marked. The link step and
@@ -2361,6 +2384,7 @@ contains
         integer :: n_dep, n_test_includes
         character(len=512) :: test_includes(MAX_DEP_DIRS)
         character(len=1024) :: test_flags
+        integer :: dnode
         character(len=:), allocatable :: test_key_flags
         character(len=512), allocatable :: helper_objs(:)
         character(len=512), allocatable :: all_lib_objs(:), link_inputs(:)
@@ -2443,6 +2467,22 @@ contains
             run_nodes(n_run) = node_id
             run_names(n_run) = tname
             run_args(n_run) = manifest_test_args(manifest_config, tname)
+            if (len_trim(manifest_config%dispatcher) > 0 .and. &
+                tname /= trim(manifest_config%dispatcher) .and. &
+                source_has_marker(filenames(node_id), '! fo: dispatcher')) then
+                ! Build the dispatcher once and run it with this test's name.
+                ! `run_names` keeps the original name, so `fo` still reports
+                ! every test by name; pointing the node at the dispatcher is
+                ! what stops the library from being recompiled and relinked per
+                ! test. Without the remap the link step feeds this test's own
+                ! objects to the dispatcher path, one binary per test anyway.
+                dnode = dispatcher_node(filenames, topo_order, n_order, &
+                    manifest_config%dispatcher)
+                if (dnode > 0) then
+                    run_nodes(n_run) = dnode
+                    run_args(n_run) = tname
+                end if
+            end if
             call make_tmpfile('fo_test_case', run_logs(n_run))
         end do
 
