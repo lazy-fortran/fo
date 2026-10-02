@@ -989,7 +989,13 @@ contains
         ! many tests may shard at once. Set once, not per test, because the
         ! environment is process-global and a parallel region would race it.
         if (n_tests > 1) then
-            team_width = max(1, min(n_tests, native_jobs()))
+            ! Team at a quarter of the machine: the four conformance walkers
+            ! are the critical path (gauntlet_smoke 158 s at jobs=1,
+            ! sampling 85 s, corpus 79 s, flake 63 s, w04n), and 495 short
+            ! tests sum to ~570 s, so team 8 keeps their floor at ~71 s
+            ! while the leftover 24 cores shard the walkers 6-wide -
+            ! their walls divide by ~6 (w04n sum 954 s, wall 264 s).
+            team_width = max(1, min(n_tests, native_jobs()/4))
             n_shardable = 0
             do i = 1, n_tests
                 ! `is_slow_name` matches only names containing `_slow_`, and no
