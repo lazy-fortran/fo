@@ -96,30 +96,44 @@ contains
     end function path_exists
 
     function locate_fo_binary() result(path)
+        !! Absolute path only. The first version returned the relative
+        !! `build/fo/app/fo`, which then broke at runtime: run_fo shells out as
+        !! `cd <root> && <binary> clean ...`, so by the time the shell ran the
+        !! binary the cwd had changed and a relative path could no longer resolve
+        !! (gfortran reported EXECUTE_COMMAND_LINE: Invalid command line). The
+        !! binary lives in the project the test runs from, so pwd at startup is
+        !! the prefix that makes it absolute.
         character(len=512) :: path
-        character(len=4096) :: env, cand
-        integer :: stat
+        character(len=4096) :: env, pwd
+        character(len=64) :: cands(2)
+        integer :: stat, u, io, i
+        character(len=512) :: line
 
+        cands = [character(len=64) :: '/build/fo/app/fo', &
+                 '/../fo/build/fo/app/fo']
         path = ''
         call get_environment_variable('FO_BIN', env, status=stat)
         if (stat == 0 .and. len_trim(env) > 0) then
-            if (path_exists(trim(env))) path = trim(env)
+            if (path_exists(trim(env))) then
+                path = trim(env)
+                return
+            end if
         end if
-        if (len_trim(path) > 0) return
-        do
-            if (path_exists('build/fo/app/fo')) then
-                path = 'build/fo/app/fo'
+        pwd = ''
+        call execute_command_line('pwd >/var/tmp/fo_clean_help_pwd.txt', exitstat=stat)
+        open (newunit=u, file='/var/tmp/fo_clean_help_pwd.txt', status='old', &
+             action='read', iostat=io)
+        if (io == 0) then
+            read (u, '(a)', iostat=io) line
+            if (io == 0) pwd = trim(line)
+            close (u)
+        end if
+        if (len_trim(pwd) == 0) return
+        do i = 1, size(cands)
+            if (path_exists(trim(pwd)//'/'//cands(i))) then
+                path = trim(pwd)//'/'//cands(i)
                 return
             end if
-            if (path_exists('../fo/build/fo/app/fo')) then
-                path = '../fo/build/fo/app/fo'
-                return
-            end if
-            if (path_exists('../../fo/build/fo/app/fo')) then
-                path = '../../fo/build/fo/app/fo'
-                return
-            end if
-            return
         end do
     end function locate_fo_binary
 
@@ -137,7 +151,12 @@ contains
         if (in_root) cmd = 'cd '//trim(root)//' && '//trim(cmd)
         cmd = trim(cmd)//' >/var/tmp/fo_clean_help_out.txt 2>&1'
         call execute_command_line(cmd, exitstat=io)
-        allocate (character(len=0) :: out)
+        ! Leave `out` unallocated and let assignment set the length.
+        ! `allocate(character(len=0) :: out)` pins the length at zero, so the
+        ! later `out = trim(acc)` is an illegal reallocation of a fixed-length
+        ! allocatable scalar and aborts at runtime - which is what happened when
+        ! the test ran without FO_BIN in the environment, where this path was
+        ! first reached after the file read.
         open (newunit=unit, file='/var/tmp/fo_clean_help_out.txt', status='old', &
              action='read', iostat=io)
         if (io /= 0) return
