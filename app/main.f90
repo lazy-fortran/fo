@@ -1624,6 +1624,40 @@ contains
         integer :: i, n_removed, keep
         integer(8) :: freed_bytes
         logical :: purge_store, stale_only, build_removed, store_removed
+        logical :: want_help
+
+        ! `--help` must never reach the destructive path below. The flag loop
+        ! only knows --cache/--all/--stale/--keep and ignores everything else, so
+        ! `fo clean --help` used to fall through and wipe the build tree while
+        ! printing no usage at all (#136). The flag a cautious user types to ask
+        ! what a command does is exactly the one that must not act.
+        want_help = .false.
+        do i = 1, command_argument_count()
+            call get_command_argument(i, arg)
+            if (trim(arg) == '--help' .or. trim(arg) == '-h') want_help = .true.
+        end do
+        if (want_help) then
+            write (output_unit, '(a)') 'usage: fo clean [OPTIONS]'
+            write (output_unit, '(a)') ''
+            write (output_unit, '(a)') &
+                '  (no flags)   drop this project''s build/ tree; the shared'// &
+                ' cache is kept'
+            write (output_unit, '(a)') &
+                '  --stale      drop only unreferenced artifacts, keeping the'// &
+                ' newest N archives'
+            write (output_unit, '(a)') &
+                '  --keep N     number of unreferenced archives to keep with'// &
+                ' --stale'
+            write (output_unit, '(a)') &
+                '  --cache      also purge the shared content-addressed store'// &
+                ' (cold-starts every project)'
+            write (output_unit, '(a)') &
+                '  --all        same as --cache'
+            write (output_unit, '(a)') &
+                '  -h, --help   print this text and exit without deleting'// &
+                ' anything'
+            return
+        end if
 
         ! Default clean is project-scoped: drop only this project's build/ tree
         ! (a disposable view that fo regenerates from the cache). The store at
