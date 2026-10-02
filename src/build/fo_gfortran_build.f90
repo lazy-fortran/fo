@@ -2443,7 +2443,7 @@ contains
         character(len=:), allocatable :: test_key_flags
         character(len=512), allocatable :: helper_objs(:)
         character(len=512), allocatable :: all_lib_objs(:), link_inputs(:)
-        integer :: n_helper_objs, n_all_lib, n_link_inputs
+        integer :: n_helper_objs, n_all_lib, n_link_inputs, n_link_dep_objs
         character(len=512) :: archive_path
         logical :: in_lib
         type(resolved_src_t) :: devsrcs(MAX_RESOLVED)
@@ -2603,6 +2603,7 @@ contains
         allocate (link_inputs(MAX_SRC_OBJS))
         link_inputs = ''
         n_link_inputs = 0
+        n_link_dep_objs = n_dep_objs
         archive_path = ''
         if (n_all_lib > 0) then
             ! `link = "shared"` folds the library once into a .so and lets
@@ -2612,7 +2613,9 @@ contains
             ! test against the .so links in 0.109 s at 2.1 MB, and runs.
             if (manifest_config%link_shared) then
                 call shared_library(project_dir, all_lib_objs, n_all_lib, &
-                    archive_path, log_file, exitcode, link_base)
+                    archive_path, log_file, exitcode, dep_objs, n_dep_objs, &
+                    link_libs, n_link_libs, test_flags, link_base)
+                if (is_macos()) n_link_dep_objs = 0
             else
                 call archive_objects(project_dir, all_lib_objs, n_all_lib, &
                     archive_path, log_file, exitcode, link_base)
@@ -2681,8 +2684,8 @@ contains
             if (run_exits(i) == 0) then
                 bin_path = run_bins(i)
                 call link_binary(project_dir, obj_path, link_inputs, n_link_inputs, &
-                    dep_objs, n_dep_objs, link_libs, n_link_libs, bin_path, log_local, &
-                    run_exits(i), test_flags, c, link_base)
+                    dep_objs, n_link_dep_objs, link_libs, n_link_libs, bin_path, &
+                    log_local, run_exits(i), test_flags, c, link_base)
             end if
         end do
         !$omp end parallel do
@@ -2842,7 +2845,8 @@ contains
     end subroutine run_test_binary
 
     subroutine shared_library(project_dir, objects, n_objects, so_path, &
-            log_file, exitcode, content_key)
+            log_file, exitcode, dep_objs, n_dep_objs, link_libs, n_link_libs, &
+            flags, content_key)
         !! Fold the library objects into one shared object instead of a static
         !! archive, so ~500 test executables link against a single 20 MB `.so`
         !! rather than relinking a ~30 MB archive each - measured 0.109 s and
@@ -2855,10 +2859,17 @@ contains
         integer, intent(in) :: n_objects
         character(len=*), intent(out) :: so_path
         integer, intent(out) :: exitcode
+        character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
+        integer, intent(in) :: n_dep_objs, n_link_libs
+        character(len=128), intent(in) :: link_libs(*)
+        character(len=*), intent(in) :: flags
         character(len=*), intent(in), optional :: content_key
 
         character(len=:), allocatable :: packed
         character(len=512) :: lib_dir, seed, proj
+        character(len=6) :: extension
+        character(len=4096) :: shared_keys(5)
+        character(len=HASH_LEN) :: shared_key
         integer :: i, n_args
         logical :: exists
 
@@ -2869,10 +2880,21 @@ contains
         lib_dir = trim(project_dir)//'/build/fo/lib'
         call fs_make_dir(lib_dir)
         call file_basename(project_dir, proj)
+        extension = '.so'
+        if (is_macos()) extension = '.dylib'
         if (present(content_key)) then
             if (len_trim(content_key) > 0) then
+                shared_key = content_key
+                if (is_macos()) then
+                    shared_keys(1) = content_key
+                    shared_keys(2) = fc_executable_command()
+                    shared_keys(3) = flags
+                    shared_keys(4) = fc_link_policy_flags()
+                    shared_keys(5) = 'darwin-dylib-v1'
+                    shared_key = cache_digest(shared_keys, 5)
+                end if
                 so_path = trim(lib_dir)//'/lib'//trim(proj)//'_'// &
-                    content_key(1:min(32, len_trim(content_key)))//'.so'
+                    shared_key(1:min(32, len_trim(shared_key)))//trim(extension)
                 inquire (file=trim(so_path), exist=exists)
                 if (exists) return
             end if
@@ -2880,20 +2902,28 @@ contains
         if (len_trim(so_path) == 0) then
             call make_tmpfile('fo_shared', seed)
             call fs_remove_file(seed)
-            so_path = trim(lib_dir)//'/lib'//trim(proj)//'.so'
+            so_path = trim(lib_dir)//'/lib'//trim(proj)//trim(extension)
         end if
 
         n_args = 0
         packed = ''
-        call argv_push(packed, n_args, 'gcc')
-        call argv_push(packed, n_args, '-shared')
-        call argv_push(packed, n_args, '-Wl,--whole-archive')
-        do i = 1, n_objects
-            call argv_push(packed, n_args, objects(i))
-        end do
-        call argv_push(packed, n_args, '-Wl,--no-whole-archive')
-        call argv_push(packed, n_args, '-o')
-        call argv_push(packed, n_args, so_path)
+        if (is_macos()) then
+            ! Darwin requires dependency symbols to be resolved in the dylib.
+            ! The Fortran driver also supplies the selected compiler runtime.
+            call make_link_argv(project_dir, objects(1), objects(2:n_objects), &
+                n_objects - 1, dep_objs, n_dep_objs, link_libs, n_link_libs, &
+                so_path, trim(flags)//' -dynamiclib', .false., packed, n_args)
+        else
+            call argv_push(packed, n_args, 'gcc')
+            call argv_push(packed, n_args, '-shared')
+            call argv_push(packed, n_args, '-Wl,--whole-archive')
+            do i = 1, n_objects
+                call argv_push(packed, n_args, objects(i))
+            end do
+            call argv_push(packed, n_args, '-Wl,--no-whole-archive')
+            call argv_push(packed, n_args, '-o')
+            call argv_push(packed, n_args, so_path)
+        end if
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
             .true., build_timeout_seconds(), exitcode)
         if (exitcode /= 0) then
@@ -3433,7 +3463,11 @@ contains
         flags = dialect%gc_sections_link_flag(build_request_flags)
         if (len_trim(flags) > 0) then
             if (.not. compiler_supports_section_splitting(fc_command(), &
-                dialect%sections_split_flags(build_request_flags))) flags = ''
+                dialect%sections_split_flags(build_request_flags))) then
+                flags = ''
+            else if (is_macos()) then
+                flags = '-Wl,-dead_strip'
+            end if
         end if
     end function fc_link_policy_flags
 
