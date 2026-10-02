@@ -22,11 +22,67 @@ program test_fmt
     call test_empty_line_preserved()
     call test_nested_blocks()
     call test_where_block()
+    call test_procedure_words_in_assignments()
+    call test_procedure_keyword_after_embedded_suffix()
 
     write (output_unit, '(a,i0,a,i0,a)') 'fmt: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
 
 contains
+
+    subroutine test_procedure_words_in_assignments()
+        character(len=MAX_LINE_LEN) :: inp(6), out(6)
+        character(len=32), parameter :: names(20) = [character(len=32) :: &
+            'function', 'subroutine', 'helper_function', 'helper_subroutine', &
+            'myfunction', 'mysubroutine', 'a_function', 'a_subroutine', &
+            'value1function', 'value1subroutine', 'function_count', &
+            'subroutine_count', 'FUNCTION', 'SUBROUTINE', 'helper_FUNCTION', &
+            'helper_SUBROUTINE', 'prefix2_function', 'prefix2_subroutine', &
+            'xfunction', 'xsubroutine']
+        integer :: i, n_out
+
+        do i = 1, size(names)
+            inp(1) = 'program assignment_probe'
+            inp(2) = 'implicit none'
+            inp(3) = 'integer :: '//trim(names(i))
+            inp(4) = trim(names(i))//' = 7'
+            inp(5) = 'print *, '//trim(names(i))
+            inp(6) = 'end program assignment_probe'
+            call fmt(inp, size(inp), out, n_out)
+            call assert(trim(out(5)) == '    '//trim(inp(5)), &
+                'procedure-word assignment leaves following statement at one level: '// &
+                trim(names(i)))
+            call assert(trim(out(6)) == trim(inp(6)), &
+                'procedure-word assignment closes program at column 1: '//trim(names(i)))
+            inp = out
+            call fmt(inp, size(inp), out, n_out)
+            call assert(all(inp == out), &
+                'procedure-word assignment formatting is idempotent: '//trim(names(i)))
+        end do
+    end subroutine test_procedure_words_in_assignments
+
+    subroutine test_procedure_keyword_after_embedded_suffix()
+        character(len=MAX_LINE_LEN) :: inp(8), out(8)
+        integer :: n_out
+
+        inp(1) = 'program typed_function_probe'
+        inp(2) = 'integer, parameter :: kind_function = 4'
+        inp(3) = 'contains'
+        inp(4) = 'real(kind=kind_function ) function answer()'
+        inp(5) = 'answer = 7.0'
+        inp(6) = 'end function answer'
+        inp(7) = ''
+        inp(8) = 'end program typed_function_probe'
+        call fmt(inp, size(inp), out, n_out)
+        call assert(trim(out(4)) == '    '//trim(inp(4)), &
+            'typed function header starts at the internal procedure level')
+        call assert(trim(out(5)) == '        '//trim(inp(5)), &
+            'embedded suffix before real keyword does not hide the function body')
+        call assert(trim(out(6)) == '    '//trim(inp(6)), &
+            'typed function closes at its header level')
+        call assert(trim(out(8)) == trim(inp(8)), &
+            'typed function leaves program closing at column 1')
+    end subroutine test_procedure_keyword_after_embedded_suffix
 
     subroutine assert(cond, msg)
         logical, intent(in) :: cond

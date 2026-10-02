@@ -1182,7 +1182,8 @@ contains
                 do i = 1, n_affected
                     if (is_test_arr(affected_ids(i))) then
                         n_test_names = n_test_names + 1
-                        test_names(n_test_names) = dag%nodes(affected_ids(i))%label(1:128)
+                        test_names(n_test_names) = &
+                            dag%nodes(affected_ids(i))%label(1:128)
                     end if
                 end do
             end if

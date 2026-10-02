@@ -1461,7 +1461,8 @@ contains
                     if (is_prog(node_id) .and. .not. app_program_selected( &
                         filenames(node_id), project_dir, app_dir, config)) cycle
 
-                    call collect_dep_keys_source_order(all_units, n_all, dag, node_id, &
+                    call collect_dep_keys_source_order(all_units, n_all, dag, &
+                        filenames(node_id), &
                         new_mod_keys, dep_includes, &
                         n_dep_includes, dep_keys, n_dep, &
                         restored)
@@ -1941,24 +1942,22 @@ contains
         deallocate (cfiles)
     end subroutine compile_dep_c_sources
 
-    subroutine add_external_dep_keys(units, n_units, dag, node_id, &
+    subroutine add_external_dep_keys(units, n_units, dag, source_path, &
             dep_includes, n_dep_includes, dep_keys, n_dep)
         type(scan_unit_t), intent(in) :: units(:)
-        integer, intent(in) :: n_units, node_id, n_dep_includes
+        integer, intent(in) :: n_units, n_dep_includes
+        character(len=*), intent(in) :: source_path
         type(dag_t), intent(in) :: dag
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
         character(len=HASH_LEN), intent(inout) :: dep_keys(64)
         integer, intent(inout) :: n_dep
 
         integer :: i, j
-        character(len=MAX_NAME) :: node_name
         character(len=512) :: modpath
         logical :: found
 
-        node_name = dag%nodes(node_id)%label(1:MAX_NAME)
         do i = 1, n_units
-            if (trim(units(i)%module_name) /= trim(node_name) .and. &
-                trim(units(i)%program_name) /= trim(node_name)) cycle
+            if (trim(units(i)%filename) /= trim(source_path)) cycle
 
             do j = 1, units(i)%n_deps
                 if (dag_find_node(dag, units(i)%deps(j)) > 0) cycle
@@ -1973,11 +1972,12 @@ contains
         end do
     end subroutine add_external_dep_keys
 
-    subroutine collect_dep_keys_source_order(units, n_units, dag, node_id, &
+    subroutine collect_dep_keys_source_order(units, n_units, dag, source_path, &
             mod_keys, dep_includes, &
             n_dep_includes, dep_keys, n_dep, complete)
         type(scan_unit_t), intent(in) :: units(:)
-        integer, intent(in) :: n_units, node_id, n_dep_includes
+        integer, intent(in) :: n_units, n_dep_includes
+        character(len=*), intent(in) :: source_path
         type(dag_t), intent(in) :: dag
         character(len=HASH_LEN), intent(in) :: mod_keys(MAX_NODES)
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
@@ -1986,17 +1986,14 @@ contains
         logical, intent(out) :: complete
 
         integer :: i, j, dep_id
-        character(len=MAX_NAME) :: node_name
         character(len=512) :: modpath
         logical :: found
 
         n_dep = 0
         dep_keys = ''
         complete = .true.
-        node_name = dag%nodes(node_id)%label(1:MAX_NAME)
         do i = 1, n_units
-            if (trim(units(i)%module_name) /= trim(node_name) .and. &
-                trim(units(i)%program_name) /= trim(node_name)) cycle
+            if (trim(units(i)%filename) /= trim(source_path)) cycle
 
             do j = 1, units(i)%n_deps
                 if (n_dep >= 64) return
@@ -2637,7 +2634,7 @@ contains
             if (run_build_indices(i) /= i) cycle
             node_id = run_nodes(i)
             n_dep = 0
-            call add_external_dep_keys(tunits, n_tests, dag, node_id, &
+            call add_external_dep_keys(tunits, n_tests, dag, filenames(node_id), &
                 test_includes, n_test_includes, &
                 dep_keys, n_dep)
             if (len_trim(lib_hash) > 0 .and. n_dep < size(dep_keys)) then

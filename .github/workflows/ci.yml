@@ -60,3 +60,12 @@ jobs:
 
       - name: Test application exec build scope
         run: node test/test_exec_app.js
+
+      - name: Test consolidated test routing
+        run: node test/test_dispatcher_cli.js
+
+      - name: Test formatter executable behavior
+        run: |
+          node test/test_fmt_cli.js
+          node test/test_program_names_cli.js
+          node test/test_dependency_membership_cli.js

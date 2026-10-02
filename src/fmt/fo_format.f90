@@ -606,21 +606,7 @@ contains
     ! 'pure', 'elemental', 'recursive', 'real', 'integer', etc.
     logical function has_function_opener(low)
         character(len=*), intent(in) :: low
-        integer :: pos
-        has_function_opener = .false.
-        pos = index(low, 'function ')
-        if (pos > 0) then
-            ! The keyword has to start a word. Without this check a declaration
-            ! such as 'integer, parameter :: kernel_function = 1' matches at the
-            ! tail of the identifier and opens a block that is never closed, so
-            ! everything below it drifts one level deeper on every format.
-            if (.not. starts_word(low, pos)) return
-            ! Exclude 'end function'
-            if (pos >= 5) then
-                if (low(pos - 4:pos - 1) == 'end ') return
-            end if
-            has_function_opener = .true.
-        end if
+        has_function_opener = procedure_keyword_opens(low, 'function')
     end function has_function_opener
 
     ! True when position pos begins a word, i.e. the character before it cannot
@@ -645,19 +631,40 @@ contains
     ! 'pure', 'elemental', 'recursive', or 'module subroutine'.
     logical function has_subroutine_opener(low)
         character(len=*), intent(in) :: low
-        integer :: pos
-        has_subroutine_opener = .false.
-        pos = index(low, 'subroutine ')
-        if (pos > 0) then
-            ! Same word-boundary requirement as has_function_opener: a name
-            ! ending in _subroutine must not be read as the keyword.
-            if (.not. starts_word(low, pos)) return
-            ! Exclude 'end subroutine'
-            if (pos >= 5) then
-                if (low(pos - 4:pos - 1) == 'end ') return
-            end if
-            has_subroutine_opener = .true.
-        end if
+        has_subroutine_opener = procedure_keyword_opens(low, 'subroutine')
     end function has_subroutine_opener
+
+    logical function procedure_keyword_opens(low, keyword) result(opens)
+        character(len=*), intent(in) :: low, keyword
+        integer :: from, pos, after, n
+        character :: next
+
+        opens = .false.
+        from = 1
+        n = len_trim(low)
+        do while (from <= n)
+            pos = index(low(from:), keyword//' ')
+            if (pos == 0) return
+            pos = pos + from - 1
+            from = pos + len(keyword)
+            if (.not. starts_word(low, pos)) cycle
+            if (pos >= 5) then
+                if (low(pos - 4:pos - 1) == 'end ') cycle
+            end if
+            ! A definition needs a procedure name after the keyword. Fortran
+            ! also permits variables named FUNCTION or SUBROUTINE, so a whole
+            ! word followed by assignment, association or '(' is not a header.
+            after = from
+            do while (after <= n)
+                if (low(after:after) /= ' ') exit
+                after = after + 1
+            end do
+            if (after > n) return
+            next = low(after:after)
+            if (next < 'a' .or. next > 'z') cycle
+            opens = .true.
+            return
+        end do
+    end function procedure_keyword_opens
 
 end module fo_format

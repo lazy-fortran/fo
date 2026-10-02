@@ -153,7 +153,8 @@ contains
         do i = 1, n_order
             node_id = order(i)
 
-            call collect_dep_keys_source_order(units, n_units, dag, node_id, &
+            call collect_dep_keys_source_order(units, n_units, dag, &
+                local_filenames(node_id), &
                 mod_keys, ext_names, ext_keys, n_ext, &
                 dep_keys, n_dep_keys)
 
@@ -369,11 +370,12 @@ contains
             (ch >= '0' .and. ch <= '9') .or. ch == '_'
     end function is_alnum_us
 
-    subroutine collect_dep_keys_source_order(units, n_units, dag, node_id, &
+    subroutine collect_dep_keys_source_order(units, n_units, dag, source_path, &
             mod_keys, ext_names, ext_keys, n_ext, &
             dep_keys, n_dep_keys)
         type(scan_unit_t), intent(in) :: units(:)
-        integer, intent(in) :: n_units, node_id, n_ext
+        integer, intent(in) :: n_units, n_ext
+        character(len=*), intent(in) :: source_path
         type(dag_t), intent(in) :: dag
         character(len=HASH_LEN), intent(in) :: mod_keys(MAX_NODES)
         character(len=MAX_NAME), intent(in) :: ext_names(MAX_EXT_DEPS)
@@ -382,14 +384,11 @@ contains
         integer, intent(out) :: n_dep_keys
 
         integer :: i, j, k, dep_id
-        character(len=MAX_NAME) :: node_name
 
         dep_keys = ''
         n_dep_keys = 0
-        node_name = dag%nodes(node_id)%label(1:MAX_NAME)
         do i = 1, n_units
-            if (trim(units(i)%module_name) /= trim(node_name) .and. &
-                trim(units(i)%program_name) /= trim(node_name)) cycle
+            if (trim(units(i)%filename) /= trim(source_path)) cycle
 
             do j = 1, units(i)%n_deps
                 if (n_dep_keys >= 64) return
@@ -500,7 +499,8 @@ contains
                 if (is_test_arr(affected_ids(i))) then
                     if (.not. is_slow_test(dag%nodes(affected_ids(i))%label)) then
                         n_test_names = n_test_names + 1
-                        test_names(n_test_names) = dag%nodes(affected_ids(i))%label(1:128)
+                        test_names(n_test_names) = &
+                            dag%nodes(affected_ids(i))%label(1:128)
                     end if
                 end if
             end do
