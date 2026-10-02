@@ -7,7 +7,8 @@ module fo_check
     use fo_dag_bridge, only: build_dag_from_units
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_build_backend, only: backend_t, detect_backend, backend_build, &
-        backend_test_affected, BACKEND_NONE
+        backend_test_affected, BACKEND_NONE, BACKEND_NATIVE
+    use fo_gfortran_build, only: gfortran_selected_test_names
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
         cache_action_mod_key, hash_mod_file, HASH_LEN
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, is_runner_crash
@@ -426,6 +427,7 @@ contains
         character(len=128) :: test_names(MAX_NODES)
         integer :: i, n_test_names
         logical :: is_test_arr(MAX_NODES)
+        character(len=MAX_PATH) :: filenames(MAX_NODES)
         type(backend_t) :: b
 
         t0 = wall_time_seconds()
@@ -446,7 +448,7 @@ contains
         call fo_changed_modules(trim(project_dir), dag, changed_ids, &
             n_changed, affected_ids, n_affected, n_cached, &
             ierr, res%n_in_cycle, &
-            is_test_arr=is_test_arr)
+            filenames=filenames, is_test_arr=is_test_arr)
         if (ierr /= 0) then
             call set_failure(res, 'scan', '', 'scan or dag failed', &
                 'check source parsing and module cycles', &
@@ -490,14 +492,19 @@ contains
         res%build_ok = .true.
 
         n_test_names = 0
-        do i = 1, n_affected
-            if (is_test_arr(affected_ids(i))) then
-                if (.not. is_slow_test(dag%nodes(affected_ids(i))%label)) then
-                    n_test_names = n_test_names + 1
-                    test_names(n_test_names) = dag%nodes(affected_ids(i))%label(1:128)
+        if (b%kind == BACKEND_NATIVE) then
+            call gfortran_selected_test_names(project_dir, filenames, &
+                affected_ids, n_affected, .false., test_names, n_test_names)
+        else
+            do i = 1, n_affected
+                if (is_test_arr(affected_ids(i))) then
+                    if (.not. is_slow_test(dag%nodes(affected_ids(i))%label)) then
+                        n_test_names = n_test_names + 1
+                        test_names(n_test_names) = dag%nodes(affected_ids(i))%label(1:128)
+                    end if
                 end if
-            end if
-        end do
+            end do
+        end if
 
         if (n_test_names == 0) then
             res%tests_ok = .true.

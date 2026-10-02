@@ -19,6 +19,7 @@ program fo_main
     use fo_test_results, only: test_result_entry_t, &
         parse_test_results, format_test_results_human, format_test_results_json
     use fo_test_random, only: select_random_tests
+    use fo_gfortran_build, only: gfortran_selected_test_names
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
     use fo_fmt, only: fo_fmt_run, fo_fmt_files, fo_fmt_changed_run, &
@@ -203,15 +204,20 @@ contains
         else
             ! collect affected test names (excluding slow)
             n_test_names = 0
-            do i = 1, n_affected
-                if (is_test_arr(affected_ids(i))) then
-                    if (.not. is_slow_test(dag%nodes(affected_ids(i))%label)) then
-                        n_test_names = n_test_names + 1
-                        test_names(n_test_names) = &
-                            dag%nodes(affected_ids(i))%label(1:128)
+            if (b%kind == BACKEND_NATIVE) then
+                call gfortran_selected_test_names(b%project_dir, filenames, &
+                    affected_ids, n_affected, .false., test_names, n_test_names)
+            else
+                do i = 1, n_affected
+                    if (is_test_arr(affected_ids(i))) then
+                        if (.not. is_slow_test(dag%nodes(affected_ids(i))%label)) then
+                            n_test_names = n_test_names + 1
+                            test_names(n_test_names) = &
+                                dag%nodes(affected_ids(i))%label(1:128)
+                        end if
                     end if
-                end if
-            end do
+                end do
+            end if
 
             if (n_test_names == 0) then
                 write (output_unit, '(a)') 'Tests: skipped, no affected tests'
@@ -1023,6 +1029,8 @@ contains
         character(len=64) :: profile
         character(len=1024) :: all_flags
         logical :: is_test_arr(MAX_NODES)
+        character(len=MAX_PATH) :: filenames(MAX_NODES)
+        integer :: candidate_ids(MAX_NODES)
 
         if (has_arg('--help') .or. has_arg('-h')) then
             call print_test_usage()
@@ -1108,19 +1116,28 @@ contains
             end if
             call fo_changed_modules('.', dag, changed_ids, n_changed, &
                 affected_ids, n_affected, n_cached, ierr, &
-                is_test_arr=is_test_arr)
+                filenames=filenames, is_test_arr=is_test_arr)
             if (ierr /= 0) then
                 write (error_unit, '(a)') 'fo: scan or dag failed'
                 stop 1
             end if
             n_test_names = 0
-            do i = 1, dag%n_nodes
-                if (.not. is_test_arr(i)) cycle
-                if (.not. include_all .and. &
-                    is_slow_test(dag%nodes(i)%label)) cycle
-                n_test_names = n_test_names + 1
-                random_candidates(n_test_names) = dag%nodes(i)%label(1:128)
-            end do
+            if (b%kind == BACKEND_NATIVE) then
+                do i = 1, dag%n_nodes
+                    candidate_ids(i) = i
+                end do
+                call gfortran_selected_test_names(b%project_dir, filenames, &
+                    candidate_ids, dag%n_nodes, include_all, random_candidates, &
+                    n_test_names)
+            else
+                do i = 1, dag%n_nodes
+                    if (.not. is_test_arr(i)) cycle
+                    if (.not. include_all .and. &
+                        is_slow_test(dag%nodes(i)%label)) cycle
+                    n_test_names = n_test_names + 1
+                    random_candidates(n_test_names) = dag%nodes(i)%label(1:128)
+                end do
+            end if
             if (random_seed == 0) then
                 call system_clock(clock_count)
                 random_seed = clock_count
@@ -1145,7 +1162,7 @@ contains
         else if (only_changed) then
             call fo_changed_modules('.', dag, changed_ids, n_changed, &
                 affected_ids, n_affected, n_cached, ierr, &
-                is_test_arr=is_test_arr)
+                filenames=filenames, is_test_arr=is_test_arr)
             if (ierr /= 0) then
                 write (error_unit, '(a)') 'fo: scan or dag failed'
                 stop 1
@@ -1158,12 +1175,17 @@ contains
 
             ! collect affected test names
             n_test_names = 0
-            do i = 1, n_affected
-                if (is_test_arr(affected_ids(i))) then
-                    n_test_names = n_test_names + 1
-                    test_names(n_test_names) = dag%nodes(affected_ids(i))%label(1:128)
-                end if
-            end do
+            if (b%kind == BACKEND_NATIVE) then
+                call gfortran_selected_test_names(b%project_dir, filenames, &
+                    affected_ids, n_affected, include_all, test_names, n_test_names)
+            else
+                do i = 1, n_affected
+                    if (is_test_arr(affected_ids(i))) then
+                        n_test_names = n_test_names + 1
+                        test_names(n_test_names) = dag%nodes(affected_ids(i))%label(1:128)
+                    end if
+                end do
+            end if
 
             if (n_test_names == 0) then
                 write (output_unit, '(a)') 'no affected tests'

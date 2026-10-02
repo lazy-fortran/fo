@@ -82,6 +82,7 @@ module fo_gfortran_build
     public :: config_flags_str
     public :: gfortran_app_source_name, gfortran_test_source_name
     public :: source_has_marker, dispatch_target
+    public :: gfortran_selected_test_names
 
 contains
 
@@ -735,14 +736,17 @@ contains
             stamp_request_flags, roots, n_roots, .true., apps_ready, test_dir)
     end subroutine refresh_build_stamp
 
-    integer function dispatcher_node(filenames, topo_order, n_order, dispatcher) &
+    integer function dispatcher_node(filenames, is_prog, topo_order, n_order, &
+            config, test_dir) &
             result(node)
         !! The DAG node that builds the consolidated dispatcher program, found
-        !! by its file's basename. 0 when a project declares a dispatcher it
+        !! by its public manifest name. 0 when a project declares a dispatcher it
         !! does not ship: the caller keeps the test's own node, so a missing
         !! dispatcher degrades to the old behaviour instead of failing every
         !! routed test.
-        character(len=*), intent(in) :: filenames(:), dispatcher
+        character(len=*), intent(in) :: filenames(:), test_dir
+        logical, intent(in) :: is_prog(:)
+        type(fpm_config_t), intent(in) :: config
         integer, intent(in) :: topo_order(:), n_order
         character(len=256) :: base
         integer :: i
@@ -750,59 +754,15 @@ contains
         node = 0
         do i = 1, n_order
             if (len_trim(filenames(topo_order(i))) == 0) cycle
-            call file_basename(filenames(topo_order(i)), base)
-            if (trim(base) == trim(dispatcher)//'.f90') then
+            if (.not. is_prog(topo_order(i))) cycle
+            base = gfortran_test_source_name(config, test_dir, &
+                filenames(topo_order(i)))
+            if (trim(base) == trim(config%dispatcher)) then
                 node = topo_order(i)
                 return
             end if
         end do
     end function dispatcher_node
-
-    subroutine resolve_run_target(project_dir, config, bin_dir, name, bin_path)
-        !! Where one named test actually runs: its own binary, or inside the
-        !! consolidated dispatcher when its source is marked. The link step and
-        !! the run step must agree, or a routed test executes a binary that was
-        !! never linked (exit 127) or a private copy that defeats the whole
-        !! point of dispatching.
-        character(len=*), intent(in) :: project_dir, bin_dir, name
-        type(fpm_config_t), intent(in) :: config
-        character(len=*), intent(out) :: bin_path
-        character(len=:), allocatable :: args
-
-        bin_path = trim(bin_dir)//'/'//trim(name)
-        if (len_trim(config%dispatcher) == 0) return
-        if (name == trim(config%dispatcher)) return
-        if (.not. source_has_marker_test(project_dir, config, name)) return
-        call dispatch_target(bin_dir, config%dispatcher, name, bin_path, args)
-    end subroutine resolve_run_target
-
-    logical function source_has_marker_test(project_dir, config, name) result(has)
-        !! Marker lookup for a test name: `test/<name>.f90`, then the fpm test
-        !! directory, then a scan, because `fo` accepts names derived several
-        !! ways and a silent miss here means the test ran its own binary.
-        character(len=*), intent(in) :: project_dir, name
-        type(fpm_config_t), intent(in) :: config
-        character(len=512) :: p
-        character(len=4096) :: line
-        integer :: u, ios
-
-        has = .false.
-        p = trim(project_dir)//'/test/'//trim(name)//'.f90'
-        if (len_trim(config%test_dir) > 0) then
-            p = trim(project_dir)//'/'//trim(config%test_dir)//'/'//trim(name)//'.f90'
-        end if
-        open (newunit=u, file=trim(p), action='read', status='old', iostat=ios)
-        if (ios /= 0) return
-        do
-            read (u, '(a)', iostat=ios) line
-            if (ios /= 0) exit
-            if (index(line, '! fo: dispatcher') == 1) then
-                has = .true.
-                exit
-            end if
-        end do
-        close (u)
-    end function source_has_marker_test
 
     subroutine run_current_tests(project_dir, test_dir, bin_dir, selected_names, &
             n_selected, include_slow, log_file, exitcode)
@@ -907,6 +867,51 @@ contains
         close (u)
     end function source_has_marker
 
+    subroutine gfortran_selected_test_names(project_dir, filenames, node_ids, &
+            n_ids, include_slow, names, n_names)
+        !! Selection uses source identities, not DAG module labels. Marked
+        !! module-only cases keep their filenames as public names; ordinary
+        !! helper modules and the dispatcher's infrastructure are excluded.
+        character(len=*), intent(in) :: project_dir, filenames(:)
+        integer, intent(in) :: node_ids(:), n_ids
+        logical, intent(in) :: include_slow
+        character(len=*), intent(out) :: names(:)
+        integer, intent(out) :: n_names
+
+        type(fpm_config_t), allocatable :: config
+        type(scan_unit_t), allocatable :: units(:)
+        character(len=128) :: name
+        integer :: i, j, n_units, ierr
+
+        names = ''
+        n_names = 0
+        allocate (config)
+        call fpm_config_parse(project_dir, config, ierr)
+        if (ierr /= 0) return
+        call scan_dir_cached(trim(project_dir)//'/'//trim(config%test_dir), &
+            units, n_units, ierr)
+        if (ierr /= 0) return
+        do i = 1, n_units
+            if (.not. units(i)%is_program) then
+                if (len_trim(config%dispatcher) == 0) cycle
+                if (.not. unit_has_dispatcher_marker(units(i), project_dir, &
+                    config%test_dir)) cycle
+            end if
+            do j = 1, n_ids
+                if (trim(filenames(node_ids(j))) == trim(units(i)%filename)) exit
+            end do
+            if (j > n_ids) cycle
+            name = gfortran_test_source_name(config, config%test_dir, &
+                units(i)%filename)
+            if (trim(name) == trim(config%dispatcher)) cycle
+            if (.not. include_slow .and. is_slow_name(name)) cycle
+            if (selected_test(name, names, n_names)) cycle
+            if (n_names >= size(names)) exit
+            n_names = n_names + 1
+            names(n_names) = name
+        end do
+    end subroutine gfortran_selected_test_names
+
     subroutine select_current_tests(project_dir, config, units, n_units, &
             test_dir, bin_dir, selected_names, n_selected, include_slow, &
             tests, n_tests)
@@ -927,7 +932,11 @@ contains
         allocate (tests(max(1, n_units)))
         n_tests = 0
         do i = 1, n_units
-            if (.not. units(i)%is_program) cycle
+            if (.not. units(i)%is_program) then
+                if (len_trim(config%dispatcher) == 0) cycle
+                if (.not. unit_has_dispatcher_marker(units(i), project_dir, &
+                    test_dir)) cycle
+            end if
             name = gfortran_test_source_name(config, test_dir, units(i)%filename)
             ! The dispatcher is infrastructure, not a test: scanned as one it
             ! gets run bare and fails its own usage check, which would read as
@@ -1101,7 +1110,7 @@ contains
             if (tests(i)%cpu_secs >= 0.0) secs = tests(i)%cpu_secs
             if (tests(i)%exit == 0 .and. secs >= real(warn_s)) &
                 call warn_current_slow_test(tests(i)%name, secs, &
-                    tests(i)%cpu_secs >= 0.0, log_file)
+                tests(i)%cpu_secs >= 0.0, log_file)
         end do
     end subroutine report_current_tests
 
@@ -2405,8 +2414,9 @@ contains
         character(len=MAX_PATH), allocatable :: filenames(:)
         logical, allocatable :: is_prog(:), is_test_arr(:)
         integer, allocatable :: topo_order(:)
-        integer, allocatable :: run_nodes(:), run_exits(:)
+        integer, allocatable :: run_nodes(:), run_exits(:), run_build_indices(:)
         character(len=512), allocatable :: run_logs(:)
+        character(len=512), allocatable :: run_bins(:)
         character(len=HASH_LEN), allocatable :: run_keys(:)
         character(len=128), allocatable :: run_names(:)
         character(len=4096), allocatable :: run_args(:)
@@ -2453,6 +2463,7 @@ contains
         allocate (filenames(MAX_NODES), is_prog(MAX_NODES), is_test_arr(MAX_NODES))
         allocate (topo_order(MAX_NODES))
         allocate (run_nodes(MAX_NODES), run_exits(MAX_NODES), run_logs(MAX_NODES))
+        allocate (run_build_indices(MAX_NODES), run_bins(MAX_NODES))
         allocate (run_keys(MAX_NODES))
         allocate (run_names(MAX_NODES), run_args(MAX_NODES))
         allocate (run_compiled(MAX_NODES), run_secs(MAX_NODES), run_cpu(MAX_NODES))
@@ -2494,27 +2505,33 @@ contains
         ! link line are scoped to exactly the tests' dependency closure (as fpm
         ! does) and never pull in an unrelated, possibly broken, test module.
         n_run = 0
+        dnode = 0
+        if (len_trim(manifest_config%dispatcher) > 0) then
+            dnode = dispatcher_node(filenames, is_prog, topo_order, n_order, &
+                manifest_config, test_dir)
+        end if
         do i = 1, n_order
             node_id = topo_order(i)
             if (len_trim(filenames(node_id)) == 0) cycle
-            if (.not. is_prog(node_id)) cycle
+            if (.not. is_prog(node_id)) then
+                if (dnode == 0) cycle
+                if (.not. source_has_marker(filenames(node_id), &
+                    '! fo: dispatcher')) cycle
+            end if
             tname = gfortran_test_source_name(manifest_config, test_dir, &
                 filenames(node_id))
             if (.not. include_slow .and. is_slow_name(tname)) cycle
+            if (trim(tname) == trim(manifest_config%dispatcher)) then
+                if (.not. selected_test(tname, selected_names, n_selected)) cycle
+            end if
             if (n_selected > 0 .and. .not. selected_test(tname, selected_names, &
                 n_selected)) cycle
-            ! NOTE (fo#132): the private-copy link must NOT be skipped here
-            ! yet. `fo` only links what it selects, so dropping a routed test
-            ! from this loop also drops the dispatcher's own link, and the
-            ! routed run dies with exit 127 (`posix_spawn of
-            ! build/fo/bin/test_ffc_suite ... No such file or directory`).
-            ! Removing the link is correct only once the dispatcher is part of
-            ! the run set, linked before the first routed case executes.
             n_run = n_run + 1
             run_nodes(n_run) = node_id
             run_names(n_run) = tname
             run_args(n_run) = manifest_test_args(manifest_config, tname)
-            if (len_trim(manifest_config%dispatcher) > 0 .and. &
+            run_bins(n_run) = trim(bin_dir)//'/'//trim(tname)
+            if (dnode > 0 .and. &
                 tname /= trim(manifest_config%dispatcher) .and. &
                 source_has_marker(filenames(node_id), '! fo: dispatcher')) then
                 ! Build the dispatcher once and run it with this test's name.
@@ -2523,13 +2540,16 @@ contains
                 ! what stops the library from being recompiled and relinked per
                 ! test. Without the remap the link step feeds this test's own
                 ! objects to the dispatcher path, one binary per test anyway.
-                dnode = dispatcher_node(filenames, topo_order, n_order, &
-                    manifest_config%dispatcher)
-                if (dnode > 0) then
-                    run_nodes(n_run) = dnode
-                    run_args(n_run) = tname
-                end if
+                run_nodes(n_run) = dnode
+                run_args(n_run) = tname
+                run_bins(n_run) = trim(bin_dir)//'/'//trim(manifest_config%dispatcher)
             end if
+            run_build_indices(n_run) = n_run
+            do d = 1, n_run - 1
+                if (run_nodes(d) /= run_nodes(n_run)) cycle
+                run_build_indices(n_run) = d
+                exit
+            end do
             call make_tmpfile('fo_test_case', run_logs(n_run))
         end do
 
@@ -2613,6 +2633,7 @@ contains
         end if
 
         do i = 1, n_run
+            if (run_build_indices(i) /= i) cycle
             node_id = run_nodes(i)
             n_dep = 0
             call add_external_dep_keys(tunits, n_tests, dag, node_id, &
@@ -2644,6 +2665,7 @@ contains
         !$omp& obj_path, bin_path, tname, log_local, restored, clk0, clk1, &
         !$omp& clk_rate)
         do i = 1, n_run
+            if (run_build_indices(i) /= i) cycle
             node_id = run_nodes(i)
             fname_local = filenames(node_id)
             log_local = run_logs(i)
@@ -2659,13 +2681,26 @@ contains
                 run_compiled(i) = run_exits(i) == 0
             end if
             if (run_exits(i) == 0) then
-                tname = run_names(i)
-                call resolve_run_target(project_dir, manifest_config, bin_dir, &
-                    tname, bin_path)
+                bin_path = run_bins(i)
                 call link_binary(project_dir, obj_path, link_inputs, n_link_inputs, &
                     dep_objs, n_dep_objs, link_libs, n_link_libs, bin_path, log_local, &
                     run_exits(i), test_flags, c, link_base)
             end if
+        end do
+        !$omp end parallel do
+
+        ! All cases sharing a dispatcher wait for its single compile and link.
+        ! Compiling into the same object or replacing a running binary in
+        ! parallel corrupts the build and can execute another case's main.
+        do i = 1, n_run
+            if (run_build_indices(i) == i) cycle
+            run_exits(i) = run_exits(run_build_indices(i))
+        end do
+        !$omp parallel do if(n_run > 1) num_threads(team_size) schedule(dynamic) &
+        !$omp& private(bin_path, log_local, clk0, clk1, clk_rate)
+        do i = 1, n_run
+            bin_path = run_bins(i)
+            log_local = run_logs(i)
             if (run_exits(i) == 0 .and. .not. bonly) then
                 ran(i) = .true.
                 call system_clock(clk0, clk_rate)
@@ -2696,8 +2731,7 @@ contains
                 if (.not. ran(i)) cycle
                 if (run_exits(i) == 0 .or. run_exits(i) == 124) cycle
                 tname = run_names(i)
-                call resolve_run_target(project_dir, manifest_config, bin_dir, &
-                    tname, bin_path)
+                bin_path = run_bins(i)
                 call make_tmpfile('fo_test_rerun', rerun_log)
                 call run_test_binary(project_dir, bin_path, run_args(i), rerun_log, &
                     manifest_config, is_slow_name(tname), run_exits(i))
@@ -2825,8 +2859,8 @@ contains
         integer, intent(out) :: exitcode
         character(len=*), intent(in), optional :: content_key
 
-        character(len=:), allocatable :: packed, proj
-        character(len=512) :: lib_dir, seed
+        character(len=:), allocatable :: packed
+        character(len=512) :: lib_dir, seed, proj
         integer :: i, n_args
         logical :: exists
 

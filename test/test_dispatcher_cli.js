@@ -1,0 +1,124 @@
+#!/usr/bin/env node
+// Run: node test/test_dispatcher_cli.js [/path/to/installed/fo]
+// The fixture writes independent execution receipts and rejects every wrong argv.
+const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const project = path.resolve(__dirname, '..');
+const installed = process.argv[2];
+const driver = installed || process.env.FO || 'fo';
+const scratch = fs.mkdtempSync('/var/tmp/fo-dispatcher-cli-');
+const allCases = ['test_alpha', 'test_beta', 'test_legacy', 'test_plain'];
+const options = {
+  encoding: 'utf8', maxBuffer: 8 * 1024 * 1024,
+  env: { ...process.env, TMPDIR: '/var/tmp', FO_JOBS: '4' }
+};
+
+function run(args) {
+  const command = installed ? args : ['exec', '--no-build', '--cwd', scratch, 'fo', ...args];
+  const result = spawnSync(driver, command, { ...options, cwd: installed ? scratch : project });
+  if (result.error) throw result.error;
+  assert.equal(result.signal, null, result.stderr);
+  return result;
+}
+
+function write(file, contents) {
+  const target = path.join(scratch, file);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, contents);
+}
+
+function caseSource(name, value) {
+  return [
+    '! fo: dispatcher', `module ${name}_case`, 'implicit none', 'contains',
+    'subroutine run_case()', 'integer :: unit',
+    `open(newunit=unit, file='${name}.receipt', status='replace')`,
+    `write(unit, '(a)') '${value}'`, 'close(unit)', 'end subroutine run_case',
+    `end module ${name}_case`, ''
+  ].join('\n');
+}
+
+function expectCases(args, names, receipts) {
+  for (const name of allCases) {
+    fs.rmSync(path.join(scratch, `${name}.receipt`), { force: true });
+  }
+  const result = run([...args, '--json']);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.deepEqual(report.tests.map(entry => entry.name).sort(), [...names].sort());
+  for (const entry of report.tests) assert.equal(entry.status, 'pass', entry.name);
+  assert.equal(report.summary.failed, 0);
+  for (const [name, expected] of Object.entries(receipts)) {
+    assert.equal(fs.readFileSync(path.join(scratch, `${name}.receipt`), 'utf8').trim(), expected);
+  }
+  for (const name of allCases) {
+    if (!(name in receipts)) assert.equal(fs.existsSync(path.join(scratch, `${name}.receipt`)), false);
+  }
+}
+
+try {
+  if (!installed) {
+    const built = spawnSync(driver, ['build'], { ...options, cwd: project });
+    assert.equal(built.status, 0, built.stdout + built.stderr);
+  }
+  write('fpm.toml', [
+    'name = "dispatcher_probe"', '[extra.fo]', 'dispatcher = "test_dispatcher"',
+    'link = "shared"', 'pic = "true"',
+    '[[test]]', 'name = "test_dispatcher"', 'source-dir = "test"',
+    'main = "suite_entry.f90"', '[[test]]', 'name = "test_beta"',
+    'source-dir = "test"', 'main = "nested/beta_source.f90"', ''
+  ].join('\n'));
+  write('test/test_alpha.f90', caseSource('test_alpha', 'alpha-original'));
+  write('test/nested/beta_source.f90', caseSource('test_beta', 'beta-original'));
+  write('test/support.f90', caseSource('test_legacy', 'legacy-dispatched')
+    .replace('! fo: dispatcher\n', ''));
+  write('test/test_legacy.f90', [
+    '! fo: dispatcher', 'program test_legacy', 'implicit none',
+    'stop 89', 'end program test_legacy', ''
+  ].join('\n'));
+  write('test/suite_entry.f90', [
+    'program suite_entry',
+    'use test_alpha_case, only: alpha => run_case',
+    'use test_beta_case, only: beta => run_case',
+    'use test_legacy_case, only: legacy => run_case',
+    'implicit none', 'character(len=128) :: name',
+    'if(command_argument_count() /= 1) stop 3',
+    'call get_command_argument(1, name)', 'select case(trim(name))',
+    "case('test_alpha')", 'call alpha()', "case('test_beta')", 'call beta()',
+    "case('test_legacy')", 'call legacy()',
+    'case default', 'stop 4', 'end select', 'end program suite_entry', ''
+  ].join('\n'));
+  write('test/test_plain.f90', [
+    'program test_plain', 'implicit none', 'integer :: unit',
+    "open(newunit=unit, file='test_plain.receipt', status='replace')",
+    "write(unit, '(a)') 'plain-original'", 'close(unit)', 'end program test_plain', ''
+  ].join('\n'));
+  const names = allCases;
+  const receipts = {
+    test_alpha: 'alpha-original', test_beta: 'beta-original',
+    test_legacy: 'legacy-dispatched', test_plain: 'plain-original'
+  };
+  expectCases(['test', '--all'], names, receipts);
+  expectCases(['test', '--all'], names, receipts);
+  expectCases(['test', '--random', '4', '--seed', '42'], names, receipts);
+  expectCases(['test', '--only-changed'], names, receipts);
+  expectCases(['test', 'test_alpha'], ['test_alpha'], { test_alpha: 'alpha-original' });
+  expectCases(['test', 'test_beta'], ['test_beta'], { test_beta: 'beta-original' });
+  const explicit = run(['test', 'test_dispatcher', '--json']);
+  assert.notEqual(explicit.status, 0, 'explicit dispatcher runs with no implicit self argument');
+  const explicitReport = JSON.parse(explicit.stdout);
+  assert.equal(explicitReport.tests.length, 1);
+  assert.equal(explicitReport.tests[0].name, 'test_dispatcher');
+  assert.equal(explicitReport.exit_code, 3);
+  write('test/test_alpha.f90', caseSource('test_alpha', 'alpha-updated'));
+  expectCases(['test', 'test_alpha'], ['test_alpha'], { test_alpha: 'alpha-updated' });
+  expectCases(['test', '--all'], names, { ...receipts, test_alpha: 'alpha-updated' });
+  const binaries = fs.readdirSync(path.join(scratch, 'build/fo/bin')).sort();
+  assert.deepEqual(binaries, ['test_dispatcher', 'test_plain'], 'one routed binary, one independent binary');
+  console.log('dispatcher-cli: shared cold/warm all, module/program cases, public aliases, ' +
+    'nested cases, random/changed selection, named edits and explicit self pass');
+} finally {
+  fs.rmSync(scratch, { recursive: true, force: true });
+}

@@ -65,6 +65,22 @@ test_oracle = ["test/data/reference.csv", "--strict"]
 The key is the public test name, and each quoted array element remains one
 argument. Test arguments participate in the cached test-result key.
 
+Consolidated tests can opt into one dispatcher executable:
+
+```toml
+[extra.fo]
+dispatcher = "test_suite"
+```
+
+Each case source starts with `! fo: dispatcher`. It may be a module exporting
+the case procedure, with its original filename retaining the public test name.
+The dispatcher uses those modules and accepts exactly one bare public case name
+as its argument. fo compiles and links the dispatcher once before running cases
+in parallel. Both `fo test <name>` and `fo test --all` report the original names;
+the dispatcher itself runs only when explicitly selected. Manifest aliases and
+nested test sources follow the same rules. Unmarked test programs retain their
+own executables.
+
 fo and fpm deliberately differ in private state:
 
 - fo stores disposable project views in `build/fo`
