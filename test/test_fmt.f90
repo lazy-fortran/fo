@@ -24,11 +24,38 @@ program test_fmt
     call test_where_block()
     call test_procedure_words_in_assignments()
     call test_procedure_keyword_after_embedded_suffix()
+    call test_continued_character_literals()
 
     write (output_unit, '(a,i0,a,i0,a)') 'fmt: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
 
 contains
+
+    subroutine test_continued_character_literals()
+        character(len=MAX_LINE_LEN) :: inp(9), out(9)
+        character(len=1), parameter :: quotes(2) = ["'", '"']
+        integer :: i, n_out
+
+        do i = 1, size(quotes)
+            inp(1) = 'program literal_probe'
+            inp(2) = 'implicit none'
+            inp(3) = 'character(len=80) :: text'
+            inp(4) = 'text = '//quotes(i)//'left &'
+            inp(5) = '! between literal segments'
+            inp(6) = ''
+            inp(7) = '&right!tail'//quotes(i)
+            inp(8) = "print '(a)', trim(text)"
+            inp(9) = 'end program literal_probe'
+            call fmt(inp, size(inp), out, n_out)
+            call assert(trim(out(7)) == '        '//trim(inp(7)), &
+                'continued literal preserves exclamation mark and indentation')
+            call assert(trim(out(8)) == '    '//trim(inp(8)), &
+                'continued literal leaves following statement at one level')
+            inp = out
+            call fmt(inp, size(inp), out, n_out)
+            call assert(all(inp == out), 'continued literal formatting is idempotent')
+        end do
+    end subroutine test_continued_character_literals
 
     subroutine test_procedure_words_in_assignments()
         character(len=MAX_LINE_LEN) :: inp(6), out(6)

@@ -41,7 +41,7 @@ module fo_gfortran_build
     use fo_build_stamp, only: build_stamp_matches, build_stamp_quick_matches, &
         build_stamp_save
     use fo_compiler_memo, only: compiler_memo_load, compiler_memo_save
-    use, intrinsic :: iso_fortran_env, only: error_unit
+    use, intrinsic :: iso_fortran_env, only: error_unit, int64
     implicit none
     private
 
@@ -3607,21 +3607,72 @@ contains
         call argv_push(packed, n_args, source)
         !$omp end critical (fo_compile_command)
 
+        ! A successful process must produce this action's output; an old object
+        ! cannot establish that the compiler actually compiled the new source.
+        call clear_compiler_object(objfile, log_file, exitcode)
+        if (exitcode /= 0) return
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
             .true., build_timeout_seconds(), exitcode)
         if (exitcode == 124) call append_build_hang_hint(log_file, &
             'compile of '//trim(source), build_timeout_seconds())
+        call validate_compiler_object(objfile, source, log_file, exitcode)
         if (exitcode == 0) return
         if (.not. looks_like_stale_mod_failure(log_file)) return
 
         call clean_root_build_artifacts(project_dir, n_removed)
         call append_stale_mod_hint(log_file, n_removed)
 
+        call clear_compiler_object(objfile, log_file, exitcode)
+        if (exitcode /= 0) return
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
             .true., build_timeout_seconds(), exitcode)
         if (exitcode == 124) call append_build_hang_hint(log_file, &
             'compile of '//trim(source), build_timeout_seconds())
+        call validate_compiler_object(objfile, source, log_file, exitcode)
     end subroutine compile_f90
+
+    subroutine clear_compiler_object(objfile, log_file, exitcode)
+        character(len=*), intent(in) :: objfile, log_file
+        integer, intent(out) :: exitcode
+        integer :: unit, ios
+        logical :: exists
+
+        call fs_remove_file(objfile)
+        inquire (file=trim(objfile), exist=exists)
+        exitcode = 0
+        if (.not. exists) return
+        exitcode = 1
+        open (newunit=unit, file=trim(log_file), position='append', &
+            status='unknown', action='write', iostat=ios)
+        if (ios /= 0) return
+        write (unit, '(a)') 'fo: cannot remove previous compiler object: '//trim(objfile)
+        close (unit)
+    end subroutine clear_compiler_object
+
+    subroutine validate_compiler_object(objfile, source, log_file, exitcode)
+        character(len=*), intent(in) :: objfile, source, log_file
+        integer, intent(inout) :: exitcode
+        integer(int64) :: bytes
+        integer :: unit, ios
+        logical :: exists
+
+        if (exitcode /= 0) return
+        inquire (file=trim(objfile), exist=exists, size=bytes, iostat=ios)
+        if (ios == 0) then
+            if (exists) then
+                if (bytes > 0) return
+            end if
+        end if
+        exitcode = 1
+        call fs_remove_file(objfile)
+        open (newunit=unit, file=trim(log_file), position='append', &
+            status='unknown', action='write', iostat=ios)
+        if (ios /= 0) return
+        write (unit, '(a)') 'fo: compiler produced no nonempty object: '//trim(objfile)
+        write (unit, '(a)') 'fo: compiler: '//fc_executable_command()
+        write (unit, '(a)') 'fo: source: '//trim(source)
+        close (unit)
+    end subroutine validate_compiler_object
 
     logical function looks_like_stale_mod_failure(log_file) result(matches)
         character(len=*), intent(in) :: log_file

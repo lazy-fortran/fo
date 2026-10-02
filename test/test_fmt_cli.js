@@ -60,6 +60,23 @@ try {
   ].join('\n');
   fs.writeFileSync(path.join(scratch, 'app', `${typedName}.f90`), typedSource);
   rows.push({ name: typedName, source: typedSource, expected: ' 7.0\n', closing: `end program ${typedName}` });
+  for (let i = 1; i <= 20; i++) {
+    const name = `literal_${i}`;
+    const quote = i % 2 === 0 ? '"' : "'";
+    const escaped = `${quote}${quote}`;
+    const gap = i % 4 === 0 ? ['! between literal segments', ''] : [];
+    const tail = i % 3 === 0 ? [
+      `&right!case${i}&`, `&${escaped}quoted${quote}`
+    ] : [`&right!case${i}${escaped}quoted${quote}`];
+    const source = [
+      `program ${name}`, 'implicit none', 'character(len=80) :: text',
+      `text = ${quote}left &`, ...gap, ...tail,
+      "print '(a)', trim(text)", `end program ${name}`, ''
+    ].join('\n');
+    fs.writeFileSync(path.join(scratch, 'app', `${name}.f90`), source);
+    rows.push({ name, source, expected: `left right!case${i}${quote}quoted\n`,
+      closing: `end program ${name}`, literal: true });
+  }
   for (const row of rows) {
     assert.equal(run(['exec', row.name]), row.expected, `${row.name}: original executable`);
     row.before_md5 = digest(row.name);
@@ -69,7 +86,10 @@ try {
     const formatted = fs.readFileSync(path.join(scratch, 'app', `${row.name}.f90`), 'utf8');
     const lines = formatted.trimEnd().split('\n');
     assert.equal(lines.at(-1), row.closing, `${row.name}: closing scope at column 1`);
-    if (row.name === typedName) {
+    if (row.literal) {
+      assert.equal(lines.at(-2), "    print '(a)', trim(text)",
+        `${row.name}: literal continuation leaves following statement at one scope`);
+    } else if (row.name === typedName) {
       assert.equal(lines[6], '        answer = 7.0', 'typed procedure body opens exactly one scope');
     } else {
       assert.equal(lines[4], `    ${row.source.split('\n')[4]}`, `${row.name}: assignment opens no scope`);

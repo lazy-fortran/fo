@@ -33,7 +33,7 @@ program test_backend_gfortran
     call test_gfortran_app_links_only_reachable_library_objects()
     call test_compiler_switch_clears_the_tree()
     call test_slow_test_gets_its_own_timeout()
-    call test_test_budget_counts_cpu_not_wall()
+    call test_test_budget_respects_available_clock()
     call test_gfortran_builds_manifest_example()
     call test_gfortran_preprocesses_lowercase_f90()
     call test_gfortran_builds_nested_auto_example()
@@ -277,19 +277,19 @@ contains
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_slow_test_gets_its_own_timeout
 
-    subroutine test_test_budget_counts_cpu_not_wall()
-        !! The per-test budget is CPU time. A test that is off-CPU (here: it
-        !! sleeps, as a test on a saturated host effectively does) passes past
-        !! its budget; only the wall-clock cap stops it. A test that really
-        !! uses the CPU is stopped at the budget, and each timeout names the
-        !! limit that fired. The budget may also come from [extra.fo].
+    subroutine test_test_budget_respects_available_clock()
+        !! Linux measures live child CPU time; other platforms use a wall-time
+        !! budget. Sleeping and busy children distinguish those behaviors, and
+        !! each timeout must name the limit that fired.
         character(len=512) :: project_dir, log_file
         integer :: u, exitcode
+        logical :: cpu_measurable
 
         call make_tmp_path('fo_cpu_budget', project_dir)
         call make_tmp_path('fo_cpu_budget_log', log_file)
         call remove_tree(project_dir)
         call make_dir(trim(project_dir)//'/test')
+        cpu_measurable = host_can_measure_child_cpu(project_dir)
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "cpu-budget"'
         close (u)
@@ -297,9 +297,17 @@ contains
 
         call set_env('FO_TEST_TIMEOUT', '1')
         call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
-        call assert(exitcode == 0, 'cpu budget: an idle test outlives its budget')
-        call assert(file_contains(log_file, 'TEST_RESULT test_idle PASS'), &
-            'cpu budget: the idle test reports a pass')
+        if (cpu_measurable) then
+            call assert(exitcode == 0, 'cpu budget: an idle test outlives its budget')
+            call assert(file_contains(log_file, 'TEST_RESULT test_idle PASS'), &
+                'cpu budget: the idle test reports a pass')
+        else
+            call assert(exitcode == 124, 'fallback budget: an idle test is killed')
+            call assert(file_contains(log_file, 'TEST_RESULT test_idle TIMEOUT'), &
+                'fallback budget: the idle test reports a timeout')
+            call assert(file_contains(log_file, 'budget of 1 s exceeded in wall time'), &
+                'fallback budget: the timeout names the wall-time budget')
+        end if
 
         call set_env('FO_TEST_WALL_TIMEOUT', '1')
         call write_idle_test(trim(project_dir)//'/test/test_idle.f90', 'test_idle', 30)
@@ -321,8 +329,13 @@ contains
             'test_busy')
         call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
         call assert(exitcode == 124, '[extra.fo] test-timeout: a busy test is killed')
-        call assert(file_contains(log_file, 'CPU budget of 1 s exceeded'), &
-            'cpu budget: the timeout names the CPU budget')
+        if (cpu_measurable) then
+            call assert(file_contains(log_file, 'CPU budget of 1 s exceeded'), &
+                'cpu budget: the timeout names the CPU budget')
+        else
+            call assert(file_contains(log_file, 'budget of 1 s exceeded in wall time'), &
+                'fallback budget: the timeout names the wall-time budget')
+        end if
         call assert(file_contains(log_file, 'TEST_RESULT test_busy TIMEOUT'), &
             'cpu budget: the busy test reports a timeout')
 
@@ -333,7 +346,30 @@ contains
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
-    end subroutine test_test_budget_counts_cpu_not_wall
+    end subroutine test_test_budget_respects_available_clock
+
+    logical function host_can_measure_child_cpu(project_dir) result(supported)
+        !! Select the expected clock independently of the process runner.
+        character(len=*), intent(in) :: project_dir
+        character(len=512) :: host_file, line
+        integer :: unit, status
+
+        host_file = trim(project_dir)//'/host.txt'
+        call execute_command_line('uname -s > "'//trim(host_file)//'"', &
+            exitstat=status)
+        if (status /= 0) error stop 'cannot determine the host for the budget oracle'
+        open (newunit=unit, file=trim(host_file), status='old', action='read')
+        read (unit, '(a)') line
+        close (unit)
+        supported = .false.
+        if (trim(line) /= 'Linux') return
+        open (newunit=unit, file='/proc/self/stat', status='old', &
+            action='read', iostat=status)
+        if (status /= 0) return
+        read (unit, '(a)', iostat=status) line
+        close (unit)
+        supported = status == 0
+    end function host_can_measure_child_cpu
 
     subroutine write_idle_test(path, name, seconds)
         !! A test that spends its time asleep, using almost no CPU.

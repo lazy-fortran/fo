@@ -31,6 +31,7 @@ contains
 
         character(len=MAX_LINE_LEN) :: content, comment, masked
         character(len=MAX_LINE_LEN) :: prev_content, stmt_head
+        character(len=1) :: quote_state, quote_before
         integer :: i, indent_level, opens, closes, is_both, width
         logical :: in_continuation
 
@@ -39,39 +40,36 @@ contains
         in_continuation = .false.
         prev_content = ''
         stmt_head = ''
+        quote_state = ' '
         width = INDENT_WIDTH
         if (indent_width > 0) width = indent_width
 
         do i = 1, n_input
-            call split_line(lines(i), content, comment)
+            ! Blank, comment and directive lines preserve a pending continuation.
+            quote_before = quote_state
+            call split_line(lines(i), content, comment, quote_state)
 
             ! Preprocessor directives: pass through unchanged. content is a
             ! fixed-length buffer, so content(1:1) is always in range and is '#'
             ! only when the line is non-blank.
             if (content(1:1) == '#') then
                 output(i) = lines(i)
-                in_continuation = .false.
-                prev_content = content
                 cycle
             end if
 
             ! Truly empty line: preserve as blank.
             if (len_trim(content) == 0 .and. len_trim(comment) == 0) then
                 output(i) = ''
-                in_continuation = .false.
-                prev_content = content
                 cycle
             end if
 
             ! Comment-only line: apply current indent to the comment.
             if (len_trim(content) == 0 .and. len_trim(comment) > 0) then
                 call apply_indent('', comment, indent_level, width, output(i))
-                in_continuation = .false.
-                prev_content = content
                 cycle
             end if
 
-            call mask_strings(content, masked)
+            call mask_strings(content, masked, quote_before)
 
             ! Classify this line using the masked content.
             call classify_line(masked, opens, closes, is_both)
@@ -169,18 +167,27 @@ contains
     ! Split a source line into content (stripped of leading whitespace) and
     ! the trailing comment (starting with '!', including the '!').
     ! String literals protect '!' characters inside them from being misread.
-    subroutine split_line(line, content, comment)
+    subroutine split_line(line, content, comment, quote_state)
         character(len=*), intent(in) :: line
         character(len=*), intent(out) :: content, comment
+        character(len=1), intent(inout) :: quote_state
 
         integer :: i, n
         logical :: in_single, in_double
         character(len=1) :: ch
 
         comment = ''
+        content = adjustl(line)
+        ! Whole-line comments can separate continued character-literal segments.
+        if (content(1:1) == '!') then
+            comment = content
+            content = ''
+            return
+        end if
+        if (len_trim(content) == 0 .or. content(1:1) == '#') return
         n = len_trim(line)
-        in_single = .false.
-        in_double = .false.
+        in_single = quote_state == "'"
+        in_double = quote_state == '"'
 
         do i = 1, n
             ch = line(i:i)
@@ -204,19 +211,26 @@ contains
                 comment = line(i:n)
                 content = adjustl(line(1:i - 1))
                 call rstrip(content)
+                quote_state = ' '
                 return
             end if
         end do
 
         content = adjustl(line)
         call rstrip(content)
+        quote_state = ' '
+        if (continuation_pending(content)) then
+            if (in_single) quote_state = "'"
+            if (in_double) quote_state = '"'
+        end if
     end subroutine split_line
 
     ! Replace string literal contents with spaces (so keyword detection
     ! ignores text inside quotes).
-    subroutine mask_strings(line, masked)
+    subroutine mask_strings(line, masked, initial_quote)
         character(len=*), intent(in) :: line
         character(len=*), intent(out) :: masked
+        character(len=1), intent(in) :: initial_quote
 
         integer :: i, n
         logical :: in_single, in_double
@@ -224,8 +238,8 @@ contains
 
         masked = line
         n = len_trim(line)
-        in_single = .false.
-        in_double = .false.
+        in_single = initial_quote == "'"
+        in_double = initial_quote == '"'
 
         do i = 1, n
             ch = line(i:i)

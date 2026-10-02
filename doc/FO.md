@@ -114,6 +114,10 @@ clean, lint, format, and release installation. MCP clean preserves the shared
 CAS unless `cache=true`. MCP installation accepts a prefix and always requests
 the release profile.
 
+MCP `test` accepts `json="full"` or `json="compact"` for the complete structured
+test report, including every failing and passing entry. The report and its MCP
+response grow with the results rather than truncating at a fixed byte limit.
+
 The test-failure-path lint rule follows failure exits through project module
 helpers. It scans module procedures in `src/`, `app/`, and `test/`, repeats the
 collection until transitive helper calls converge, and distinguishes calls from

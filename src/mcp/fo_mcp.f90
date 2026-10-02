@@ -1,7 +1,8 @@
 module fo_mcp
     use fo_util, only: json_bool, json_int, extract_json_field, make_tmpfile, &
         delete_tmpfile, read_text_file, clean_root_build_artifacts, &
-        jsonrpc_error, jsonrpc_null, strip_path_prefix_in_str
+        strip_path_prefix_in_str, jsonrpc_error_fixed => jsonrpc_error, &
+        jsonrpc_null_fixed => jsonrpc_null
     use fx_json_build, only: json_escape_string
     use fx_mcp, only: mcp_read_message, mcp_send_response, MCP_FRAME_UNKNOWN
     use fo_check, only: check_result_t, fo_check_run
@@ -39,7 +40,8 @@ module fo_mcp
 contains
 
     subroutine mcp_serve()
-        character(len=MAX_LINE) :: line, response
+        character(len=MAX_LINE) :: line
+        character(len=:), allocatable :: response
         character(len=256) :: method, id_str
         integer :: framing, read_status
         logical :: eof_flag
@@ -95,7 +97,7 @@ contains
 
     subroutine handle_tools_call(line, id_str, response, async_state)
         character(len=*), intent(in) :: line, id_str
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
         type(mcp_async_state_t), intent(inout) :: async_state
 
         character(len=64) :: action, mode
@@ -166,7 +168,7 @@ contains
         type(check_result_t), intent(out) :: check_res
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
         logical :: want_full
         type(capabilities_t) :: cap
@@ -201,7 +203,7 @@ contains
         character(len=*), intent(in) :: line, id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
         type(lint_finding_t) :: findings(MAX_FINDINGS)
         type(lint_warning_t), allocatable :: warnings(:)
@@ -239,7 +241,7 @@ contains
         use fo_build_backend, only: backend_t, detect_backend, backend_build, &
             BACKEND_NONE
         character(len=*), intent(in) :: id_str, dir, tmpfile
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
         type(backend_t) :: b
         character(len=8192) :: output_text
@@ -262,12 +264,14 @@ contains
             backend_test_names, BACKEND_NONE
         use fx_dag, only: MAX_NODES
         use fo_test_results, only: test_result_entry_t, parse_test_results, &
-            format_test_results_human, MAX_TEST_RESULTS_ENTRIES
+            format_test_results_human, format_test_results_json
         character(len=*), intent(in) :: line, id_str, dir, tmpfile
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
         type(backend_t) :: b
-        character(len=16384) :: output_text
+        character(len=:), allocatable :: output_text
+        character(len=16384) :: human_output
+        character(len=16) :: json_mode
         integer :: exitcode
         character(len=128) :: test_names(MAX_NODES)
         integer :: n_names
@@ -293,11 +297,17 @@ contains
         end if
 
         call parse_test_results(tmpfile, entries, n_entries, ierr)
-        if (ierr == 0 .and. n_entries > 0) then
+        call extract_json_field(line, '"json"', json_mode)
+        if (ierr == 0 .and. &
+            (json_mode == 'compact' .or. json_mode == 'full')) then
+            call format_test_results_json(entries, n_entries, exitcode, output_text)
+        else if (ierr == 0 .and. n_entries > 0) then
             call format_test_results_human(entries, n_entries, tmpfile, &
-                n_names == 0, output_text)
+                n_names == 0, human_output)
+            output_text = trim(human_output)
         else
-            call read_text_file(tmpfile, output_text)
+            call read_text_file(tmpfile, human_output)
+            output_text = trim(human_output)
         end if
         call delete_tmpfile(tmpfile)
         call make_tool_text_response(id_str, output_text, exitcode, response)
@@ -340,7 +350,7 @@ contains
         character(len=*), intent(in) :: line, id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
         type(backend_t) :: b
         type(scan_unit_t), allocatable :: units(:)
@@ -391,7 +401,7 @@ contains
         character(len=*), intent(in) :: id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
         type(backend_t) :: b
         type(scan_unit_t), allocatable :: units(:)
@@ -436,7 +446,7 @@ contains
         character(len=*), intent(in) :: id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
         type(dag_t) :: dag
         integer :: changed_ids(MAX_NODES), n_changed
@@ -498,7 +508,7 @@ contains
         character(len=*), intent(in) :: line, id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
         character(len=512) :: store_root
         type(backend_t) :: b
@@ -528,7 +538,7 @@ contains
         character(len=*), intent(in) :: line, id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
         type(backend_t) :: b
         character(len=256) :: prefix, requested_prefix
@@ -571,7 +581,7 @@ contains
 
     subroutine handle_resources_read(line, id_str, response, async_state)
         character(len=*), intent(in) :: line, id_str
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
         type(mcp_async_state_t), intent(inout) :: async_state
 
         character(len=256) :: uri
@@ -607,7 +617,7 @@ contains
 
     subroutine handle_async_start(line, id_str, response, async_state)
         character(len=*), intent(in) :: line, id_str
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
         type(mcp_async_state_t), intent(inout) :: async_state
 
         character(len=512) :: root
@@ -649,7 +659,7 @@ contains
 
     subroutine handle_async_status(id_str, response, async_state)
         character(len=*), intent(in) :: id_str
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
         type(mcp_async_state_t), intent(inout) :: async_state
 
         character(len=1024) :: status_text
@@ -676,7 +686,7 @@ contains
 
     subroutine handle_async_diagnostics(line, id_str, response, async_state)
         character(len=*), intent(in) :: line, id_str
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
         type(mcp_async_state_t), intent(inout) :: async_state
 
         character(len=8192) :: output_text
@@ -704,7 +714,7 @@ contains
 
     subroutine handle_async_cancel(line, id_str, response, async_state)
         character(len=*), intent(in) :: line, id_str
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
         type(mcp_async_state_t), intent(inout) :: async_state
 
         integer :: run_id, ierr, exitcode
@@ -856,7 +866,7 @@ contains
 
     subroutine make_initialize_response(id_str, line, response)
         character(len=*), intent(in) :: id_str, line
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
         character(len=32) :: proto_ver
 
@@ -871,7 +881,7 @@ contains
 
     subroutine make_tools_list_response(id_str, response)
         character(len=*), intent(in) :: id_str
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
         response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
             '"result":{"tools":[{"name":"fo",'// &
@@ -884,6 +894,8 @@ contains
             '"description":"Action to run"},'// &
             '"dir":{"type":"string",'// &
             '"description":"Project directory (default: cwd)"},'// &
+            '"json":{"type":"string","enum":["compact","full"],'// &
+            '"description":"check/test: structured JSON result"},'// &
             '"cache":{"type":"boolean",'// &
             '"description":"clean: also purge the shared content store"},'// &
             '"prefix":{"type":"string",'// &
@@ -895,7 +907,7 @@ contains
 
     subroutine make_resources_list_response(id_str, response)
         character(len=*), intent(in) :: id_str
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
         response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
             '"result":{"resources":[{"uri":"fo://diagnostics",'// &
@@ -908,7 +920,7 @@ contains
         character(len=*), intent(in) :: id_str
         integer, intent(in) :: run_id
         logical, intent(in) :: pending
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
         response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
             '"result":{"run_id":'//trim(json_int(run_id))// &
@@ -921,12 +933,31 @@ contains
         response = trim(response)//',"pending":'//trim(json_bool(pending))//'}}'
     end subroutine make_run_start_response
 
+    subroutine jsonrpc_error(id_str, code, message, response)
+        character(len=*), intent(in) :: id_str, message
+        integer, intent(in) :: code
+        character(len=:), allocatable, intent(out) :: response
+        character(len=len_trim(id_str) + len_trim(message) + 128) :: buffer
+
+        call jsonrpc_error_fixed(id_str, code, message, buffer)
+        response = trim(buffer)
+    end subroutine jsonrpc_error
+
+    subroutine jsonrpc_null(id_str, response)
+        character(len=*), intent(in) :: id_str
+        character(len=:), allocatable, intent(out) :: response
+        character(len=len_trim(id_str) + 64) :: buffer
+
+        call jsonrpc_null_fixed(id_str, buffer)
+        response = trim(buffer)
+    end subroutine jsonrpc_null
+
     subroutine make_tool_text_response(id_str, output_text, exitcode, response)
         character(len=*), intent(in) :: id_str, output_text
         integer, intent(in) :: exitcode
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
-        character(len=16384) :: escaped
+        character(len=:), allocatable :: escaped
 
         escaped = json_escape_string(output_text)
         response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
