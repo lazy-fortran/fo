@@ -36,6 +36,7 @@ module fo_gfortran_build
         COMPILER_FLANG
     use fo_compiler_flags, only: append_array_temporary_warning_flag, append_pipe_flag
     use fo_linker_policy, only: select_linker
+    use fo_capabilities, only: compiler_supports_section_splitting
     use fo_external_modules, only: collect_external_module_dirs
     use fo_build_stamp, only: build_stamp_matches, build_stamp_quick_matches, &
         build_stamp_save
@@ -3382,8 +3383,10 @@ contains
         ! A sanitizer build skips both: its instrumentation lives in
         ! constructor tables that section garbage collection can collect.
         split_flags = dialect%sections_split_flags(build_request_flags)
-        if (len_trim(split_flags) > 0) &
-            flags = trim(flags)//' '//trim(split_flags)
+        if (len_trim(split_flags) > 0) then
+            if (compiler_supports_section_splitting(fc_command(), &
+                trim(split_flags))) flags = trim(flags)//' '//trim(split_flags)
+        end if
         call append_pipe_flag(fc_command(), flags)
     end function fc_policy_flags
 
@@ -3397,6 +3400,10 @@ contains
 
         dialect = compiler_dialect(fc_command())
         flags = dialect%gc_sections_link_flag(build_request_flags)
+        if (len_trim(flags) > 0) then
+            if (.not. compiler_supports_section_splitting(fc_command(), &
+                dialect%sections_split_flags(build_request_flags))) flags = ''
+        end if
     end function fc_link_policy_flags
 
     recursive function fc_base_flags() result(flags)

@@ -10,8 +10,13 @@ module fo_capabilities
     private
     public :: capabilities_t, detect_capabilities
     public :: capabilities_text, capabilities_json
+    public :: compiler_supports_section_splitting
 
     integer, parameter :: CAP_LEN = 128
+    character(len=512), save :: section_probe_command = ''
+    character(len=512), save :: section_probe_flags = ''
+    logical, save :: section_probe_done = .false.
+    logical, save :: section_probe_supported = .false.
 
     type :: capabilities_t
         character(len=CAP_LEN) :: compiler_id = 'unknown'
@@ -31,6 +36,64 @@ module fo_capabilities
     end interface
 
 contains
+
+    logical function compiler_supports_section_splitting(command, flags) &
+            result(supported)
+        !! Probe the selected executable: LLVM Flang releases do not all
+        !! accept the GNU section flags, even within the same compiler family.
+        !! Cache within a build so per-file policy queries never compile again.
+        character(len=*), intent(in) :: command, flags
+        character(len=512) :: tmpdir, source, object, log
+        character(len=:), allocatable :: packed
+        integer :: unit, io_status, exitcode, n_args
+        logical :: object_exists
+
+        supported = .false.
+        if (len_trim(flags) == 0) return
+        if (section_probe_done) then
+            if (trim(command) == trim(section_probe_command) &
+                .and. trim(flags) == trim(section_probe_flags)) then
+                supported = section_probe_supported
+                return
+            end if
+        end if
+        section_probe_command = command
+        section_probe_flags = flags
+        section_probe_done = .true.
+        section_probe_supported = .false.
+        call make_tmpfile('fo_cap_sections', tmpdir)
+        call fs_make_dir(trim(tmpdir))
+        source = trim(tmpdir)//'/probe.f90'
+        object = trim(tmpdir)//'/probe.o'
+        log = trim(tmpdir)//'/probe.log'
+        open (newunit=unit, file=source, status='replace', iostat=io_status)
+        if (io_status /= 0) then
+            call fs_remove_tree(trim(tmpdir))
+            return
+        end if
+        write (unit, '(a)') 'module fo_section_probe'
+        write (unit, '(a)') 'implicit none'
+        write (unit, '(a)') 'integer :: value = 3'
+        write (unit, '(a)') 'contains'
+        write (unit, '(a)') 'integer function get_value()'
+        write (unit, '(a)') 'get_value = value'
+        write (unit, '(a)') 'end function get_value'
+        write (unit, '(a)') 'end module fo_section_probe'
+        close (unit)
+        n_args = 0
+        call argv_push(packed, n_args, trim(command))
+        call argv_push_split(packed, n_args, trim(flags))
+        call argv_push(packed, n_args, '-c')
+        call argv_push(packed, n_args, trim(source))
+        call argv_push(packed, n_args, '-o')
+        call argv_push(packed, n_args, trim(object))
+        call process_run_argv_logged(trim(tmpdir), packed, n_args, trim(log), &
+            .false., 30, exitcode)
+        inquire (file=object, exist=object_exists)
+        supported = exitcode == 0 .and. object_exists
+        section_probe_supported = supported
+        call fs_remove_tree(trim(tmpdir))
+    end function compiler_supports_section_splitting
 
     subroutine detect_capabilities(cap)
         type(capabilities_t), intent(out) :: cap
