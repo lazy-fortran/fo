@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -92,4 +93,31 @@ int64_t fo_test_write(int descriptor, const char *buffer, size_t length) {
 int fo_test_poll(struct pollfd *descriptors, size_t count, int timeout_ms) {
     int ready = poll(descriptors, (nfds_t)count, timeout_ms);
     return ready < 0 && errno == EINTR ? 0 : ready;
+}
+
+int fo_test_waitpid(pid_t process, int *status, int options) {
+    pid_t waited = waitpid(process, status, options);
+    return waited < 0 && errno == EINTR ? 0 : (int)waited;
+}
+
+int fo_test_silence_output(void) {
+    int descriptor = open("/dev/null", O_WRONLY);
+    if (descriptor < 0) return -1;
+    int result = dup2(descriptor, STDOUT_FILENO) < 0 ||
+        dup2(descriptor, STDERR_FILENO) < 0 ? -1 : 0;
+    close(descriptor);
+    return result;
+}
+
+int fo_test_open_fds(void) {
+    DIR *directory = opendir("/proc/self/fd");
+    if (directory == NULL) directory = opendir("/dev/fd");
+    if (directory == NULL) return -1;
+    int count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL) {
+        if (entry->d_name[0] >= '0' && entry->d_name[0] <= '9') ++count;
+    }
+    if (closedir(directory) != 0) return -1;
+    return count - 1; /* Exclude this directory's own descriptor. */
 }

@@ -1,10 +1,11 @@
 program test_targeted_materialization_cli
     use fo_test_harness, only: process_result_t, string_list_t, list_add
     use fo_test_harness, only: make_scratch, make_directory, join_path, write_text
-    use fo_test_harness, only: remove_path, remove_tree
+    use fo_test_harness, only: remove_path, remove_tree, register_scratch
     use fo_test_harness, only: assert_file_exists, assert_file_absent, assert_file_equals
     use fo_test_harness, only: assert_contains, assert_process_ok
     use fo_test_cli, only: resolve_driver, run_fo
+    use fo_test_harness, only: finish_assertions
     implicit none
 
     character(:), allocatable :: driver, scratch, marker, env_scratch, env_cache, bin_dir
@@ -22,6 +23,7 @@ program test_targeted_materialization_cli
     call make_scratch('fo-targeted-materialization', scratch)
     marker = scratch // '.marker'
     env_scratch = scratch // '.env'
+    call register_scratch(env_scratch)
     home_dir = join_path(env_scratch, 'home')
     config_dir = join_path(env_scratch, 'xdg-config')
     xdg_cache = join_path(env_scratch, 'xdg-cache')
@@ -69,10 +71,11 @@ program test_targeted_materialization_cli
     call run_named(names(2))
     call assert_file_exists(join_path(bin_dir, trim(names(2))), 'second selected test is materialized')
     call assert_file_equals(marker, trim(values(2)) // new_line('a'), 'second target executes')
-    write(*, '(a)') 'targeted-materialization-cli: sequential selected targets each build and run'
     call remove_path(marker)
     call remove_tree(scratch)
     call remove_tree(env_scratch)
+    call finish_assertions()
+    write(*, '(a)') 'targeted-materialization-cli: sequential selected targets each build and run'
 
 contains
 

@@ -8,6 +8,7 @@ program test_cmake_named_cli
     use fo_test_cli, only: resolve_driver, run_fo, parse_json_report, exercise_harness
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value
+    use fo_test_harness, only: finish_assertions
     implicit none
 
     character(:), allocatable :: driver, project, scratch, selected, neighbor
@@ -63,6 +64,7 @@ program test_cmake_named_cli
     call assert_file_absent(selected_receipt, 'no-match does not run a registered case')
     call assert_file_absent(neighbor_receipt, 'no-match does not run a similar case')
 
-    write(*, '(a)') 'cmake-named-cli: exact CTest ID ran alone; no-match failed'
     call remove_tree(scratch)
+    call finish_assertions()
+    write(*, '(a)') 'cmake-named-cli: exact CTest ID ran alone; no-match failed'
 end program test_cmake_named_cli

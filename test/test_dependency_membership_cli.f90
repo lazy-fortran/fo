@@ -6,6 +6,7 @@ program test_dependency_membership_cli
     use fo_test_cli, only: resolve_driver, run_fo, parse_json_report
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value
+    use fo_test_harness, only: finish_assertions
     implicit none
 
     character(:), allocatable :: driver, scratch, consumer, dependency
@@ -51,9 +52,10 @@ program test_dependency_membership_cli
     call expect_value(5)
     call expect_value(5)
 
+    call remove_tree(scratch)
+    call finish_assertions()
     write(*, '(a)') &
         'dependency-membership-cli: uncommitted module under symlinked dependency is built cold/warm'
-    call remove_tree(scratch)
 
 contains
 

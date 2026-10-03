@@ -7,6 +7,7 @@ program test_program_names_cli
     use fo_test_cli, only: resolve_driver, run_fo, parse_json_report
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value
+    use fo_test_harness, only: finish_assertions
     implicit none
 
     character(len=32), parameter :: names(3) = &
@@ -122,9 +123,10 @@ program test_program_names_cli
         call assert_equal_string(result%stdout, '7' // new_line('a'), 'caller recompiles after change')
     end do
 
+    call remove_tree(scratch)
+    call finish_assertions()
     write(*, '(a)') &
         'program-names-cli: separate public targets sharing one PROGRAM name run cold, warm and named'
-    call remove_tree(scratch)
 
 contains
 
