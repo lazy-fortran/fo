@@ -30,6 +30,7 @@ program fo_main
     use fo_process, only: process_exit, process_run_argv_logged, argv_push, &
         process_configure_openmp
     use fo_ffc_cli, only: ffc_cmd_build, ffc_cmd_run, ffc_native_requested
+    use fo_gremlin_cli, only: gremlin_cli_run
     use fo_exec_target, only: resolve_exec_target, exec_target_is_app, &
         exec_args_t, parse_exec_args
     use fo_build_tree, only: native_other_builds
@@ -76,6 +77,8 @@ program fo_main
         end if
     case ('test')
         call cmd_test()
+    case ('gremlin')
+        call gremlin_cli_run()
     case ('bench')
         call cmd_bench()
     case ('cover')
@@ -348,6 +351,7 @@ contains
         write (output_unit, '(a)') &
             '  build --asan    debug flags plus -fsanitize=address,undefined'
         write (output_unit, '(a)') '  test       run tests (--only-changed, --all)'
+        write (output_unit, '(a)') '  gremlin    continuous generation testing'
         write (output_unit, '(a)') '  cover      run tests with coverage, then fortcov'
         write (output_unit, '(a)') &
             '  exec [--cwd <dir>] [--no-build] <t> [args]  build then run target'
@@ -885,9 +889,14 @@ contains
         ! newest fpm backend dir). Foreign projects are untouched.
         type(backend_t), intent(in) :: b
         character(len=1024) :: cmd
+        character(len=8) :: disable_refresh
         integer :: st
+        integer :: env_status
         logical :: here
 
+        call get_environment_variable('FO_DISABLE_SELF_REFRESH', disable_refresh, &
+            status=env_status)
+        if (env_status == 0 .and. trim(disable_refresh) == '1') return
         if (b%kind == BACKEND_NONE) return
         inquire(file='src/build/fo_build_backend.f90', exist=here)
         if (.not. here) return

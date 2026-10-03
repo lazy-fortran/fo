@@ -19,6 +19,7 @@ module fo_mcp
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
         RUN_RERUN_PENDING
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
+    use fo_gremlin_supervisor, only: gremlin_handle
     implicit none
     private
     public :: mcp_serve
@@ -112,6 +113,12 @@ contains
         call make_tmpfile('fo_mcp_output', tmpfile)
 
         select case (trim(action))
+        case ('gremlin_start', 'gremlin_status', 'gremlin_wait', &
+                'gremlin_events', 'gremlin_failures', 'gremlin_reproduce', &
+                'gremlin_stop')
+            call handle_gremlin_action(line, id_str, response)
+            call delete_tmpfile(tmpfile)
+            return
         case ('check')
             call extract_json_field(line, '"mode"', mode)
             if (trim(mode) == 'start') then
@@ -161,6 +168,436 @@ contains
         end select
         call delete_tmpfile(tmpfile)
     end subroutine handle_tools_call
+
+    subroutine handle_gremlin_action(line, id_str, response)
+        character(len=*), intent(in) :: line, id_str
+        character(len=:), allocatable, intent(out) :: response
+
+        character(len=MAX_LINE) :: arguments, project_dir
+        character(len=64) :: public_action, core_action
+        character(len=256) :: message
+        character(len=:), allocatable :: request_json, result_json
+        integer :: ierr, exitcode
+
+        call extract_arguments_object(line, arguments, ierr)
+        if (ierr == 0) then
+            call normalize_gremlin_arguments(arguments, public_action, core_action, &
+                project_dir, request_json, ierr, message)
+        else
+            message = 'missing or malformed Gremlin arguments object'
+        end if
+        if (ierr /= 0) then
+            call make_tool_text_response(id_str, '{"error":"'// &
+                trim(json_escape_string(trim(message)))//'"}', 2, response)
+            return
+        end if
+
+        call gremlin_handle(trim(core_action), trim(project_dir), &
+            trim(request_json), result_json, exitcode)
+        call make_tool_text_response(id_str, result_json, exitcode, response)
+    end subroutine handle_gremlin_action
+
+    subroutine extract_arguments_object(line, arguments, ierr)
+        character(len=*), intent(in) :: line
+        character(len=*), intent(out) :: arguments
+        integer, intent(out) :: ierr
+
+        integer :: key_pos, colon_pos, first, i, depth
+        logical :: in_string, escaped
+        character(len=1) :: ch
+
+        arguments = ''
+        ierr = 1
+        key_pos = index(line, '"arguments"')
+        if (key_pos == 0) return
+        colon_pos = index(line(key_pos:), ':')
+        if (colon_pos == 0) return
+        first = key_pos + colon_pos
+        call skip_json_space(line, first)
+        if (first > len_trim(line)) return
+        if (line(first:first) /= '{') return
+
+        depth = 0
+        in_string = .false.
+        escaped = .false.
+        do i = first, len_trim(line)
+            ch = line(i:i)
+            if (in_string) then
+                if (escaped) then
+                    escaped = .false.
+                else if (ch == achar(92)) then
+                    escaped = .true.
+                else if (ch == '"') then
+                    in_string = .false.
+                end if
+            else if (ch == '"') then
+                in_string = .true.
+            else if (ch == '{') then
+                depth = depth + 1
+            else if (ch == '}') then
+                depth = depth - 1
+                if (depth == 0) then
+                    arguments = line(first:i)
+                    ierr = 0
+                    return
+                end if
+            end if
+        end do
+    end subroutine extract_arguments_object
+
+    subroutine normalize_gremlin_arguments(arguments, public_action, core_action, &
+            project_dir, request_json, ierr, message)
+        character(len=*), intent(in) :: arguments
+        character(len=*), intent(out) :: public_action, core_action, project_dir
+        character(len=:), allocatable, intent(out) :: request_json
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        integer, parameter :: MAX_PROPERTIES = 128
+        character(len=128) :: keys(MAX_PROPERTIES)
+        character(len=MAX_LINE) :: decoded
+        integer :: value_first(MAX_PROPERTIES), value_last(MAX_PROPERTIES)
+        integer :: n_properties, position, parse_status, action_count, dir_count
+        integer :: i, value_end
+        logical :: valid_string
+
+        keys = ''
+        value_first = 0
+        value_last = 0
+        n_properties = 0
+        action_count = 0
+        dir_count = 0
+        public_action = ''
+        project_dir = '.'
+        core_action = ''
+        message = ''
+        ierr = 1
+
+        position = 2
+        call skip_json_space(arguments, position)
+        do while (position <= len_trim(arguments))
+            if (arguments(position:position) == '}') exit
+            if (n_properties >= MAX_PROPERTIES) then
+                message = 'too many Gremlin request fields'
+                return
+            end if
+            call read_json_string(arguments, position, decoded, parse_status)
+            if (parse_status /= 0) then
+                message = 'malformed Gremlin request key'
+                return
+            end if
+            n_properties = n_properties + 1
+            keys(n_properties) = trim(decoded)
+            call skip_json_space(arguments, position)
+            if (position > len_trim(arguments)) then
+                message = 'missing Gremlin request field value'
+                return
+            end if
+            if (arguments(position:position) /= ':') then
+                message = 'malformed Gremlin request field'
+                return
+            end if
+            position = position + 1
+            call skip_json_space(arguments, position)
+            value_first(n_properties) = position
+            call scan_json_value(arguments, position, value_end, parse_status)
+            if (parse_status /= 0) then
+                message = 'malformed Gremlin request field value'
+                return
+            end if
+            value_last(n_properties) = value_end
+            position = value_end + 1
+            call skip_json_space(arguments, position)
+            if (position > len_trim(arguments)) then
+                message = 'unterminated Gremlin arguments object'
+                return
+            end if
+            if (arguments(position:position) == ',') then
+                position = position + 1
+                call skip_json_space(arguments, position)
+            else if (arguments(position:position) == '}') then
+                exit
+            else
+                message = 'malformed Gremlin arguments separator'
+                return
+            end if
+        end do
+
+        do i = 1, n_properties
+            select case (trim(keys(i)))
+            case ('action')
+                action_count = action_count + 1
+                call decode_json_string(arguments(value_first(i):value_last(i)), &
+                    decoded, valid_string)
+                if (.not. valid_string) then
+                    message = 'Gremlin action must be a string'
+                    return
+                end if
+                public_action = trim(decoded)
+            case ('dir')
+                dir_count = dir_count + 1
+                call decode_json_string(arguments(value_first(i):value_last(i)), &
+                    decoded, valid_string)
+                if (.not. valid_string) then
+                    message = 'Gremlin dir must be a string'
+                    return
+                end if
+                project_dir = trim(decoded)
+            end select
+        end do
+        if (action_count /= 1 .or. dir_count > 1) then
+            message = 'Gremlin arguments need one action and at most one dir'
+            return
+        end if
+        call map_gremlin_action(trim(public_action), core_action, valid_string)
+        if (.not. valid_string) then
+            message = 'unknown Gremlin MCP action: '//trim(public_action)
+            return
+        end if
+
+        request_json = '{'
+        action_count = 0
+        do i = 1, n_properties
+            if (trim(keys(i)) == 'action' .or. trim(keys(i)) == 'dir') cycle
+            if (trim(core_action) == 'start' .and. trim(keys(i)) == 'background' .and. &
+                trim(arguments(value_first(i):value_last(i))) == 'true') cycle
+            if (action_count > 0) request_json = request_json//','
+            request_json = request_json//'"'//trim(keys(i))//'":'// &
+                trim(arguments(value_first(i):value_last(i)))
+            action_count = action_count + 1
+        end do
+        request_json = request_json//'}'
+        ierr = 0
+    end subroutine normalize_gremlin_arguments
+
+    subroutine map_gremlin_action(public_action, core_action, valid)
+        character(len=*), intent(in) :: public_action
+        character(len=*), intent(out) :: core_action
+        logical, intent(out) :: valid
+
+        valid = .true.
+        select case (trim(public_action))
+        case ('gremlin_start')
+            core_action = 'start'
+        case ('gremlin_status')
+            core_action = 'status'
+        case ('gremlin_wait')
+            core_action = 'wait'
+        case ('gremlin_events')
+            core_action = 'events'
+        case ('gremlin_failures')
+            core_action = 'failures'
+        case ('gremlin_reproduce')
+            core_action = 'reproduce'
+        case ('gremlin_stop')
+            core_action = 'stop'
+        case default
+            core_action = ''
+            valid = .false.
+        end select
+    end subroutine map_gremlin_action
+
+    subroutine skip_json_space(text, position)
+        character(len=*), intent(in) :: text
+        integer, intent(inout) :: position
+
+        do while (position <= len_trim(text))
+            select case (text(position:position))
+            case (' ', achar(9), achar(10), achar(13))
+                position = position + 1
+            case default
+                return
+            end select
+        end do
+    end subroutine skip_json_space
+
+    subroutine read_json_string(text, position, value, ierr)
+        character(len=*), intent(in) :: text
+        integer, intent(inout) :: position
+        character(len=*), intent(out) :: value
+        integer, intent(out) :: ierr
+
+        integer :: i, n, code, digit, j
+        character(len=1) :: ch
+
+        value = ''
+        ierr = 1
+        if (position > len_trim(text)) return
+        if (text(position:position) /= '"') return
+        n = 0
+        i = position + 1
+        do while (i <= len_trim(text))
+            ch = text(i:i)
+            if (ch == '"') then
+                position = i + 1
+                ierr = 0
+                return
+            end if
+            if (ch == achar(92)) then
+                i = i + 1
+                if (i > len_trim(text)) return
+                ch = text(i:i)
+                select case (ch)
+                case ('"', achar(92), '/')
+                    call append_json_char(value, n, ch)
+                case ('b')
+                    call append_json_char(value, n, achar(8))
+                case ('f')
+                    call append_json_char(value, n, achar(12))
+                case ('n')
+                    call append_json_char(value, n, achar(10))
+                case ('r')
+                    call append_json_char(value, n, achar(13))
+                case ('t')
+                    call append_json_char(value, n, achar(9))
+                case ('u')
+                    if (i + 4 > len_trim(text)) return
+                    code = 0
+                    do j = i + 1, i + 4
+                        digit = json_hex_digit(text(j:j))
+                        if (digit < 0) return
+                        code = code*16 + digit
+                    end do
+                    call append_utf8(value, n, code)
+                    i = i + 4
+                case default
+                    return
+                end select
+            else
+                call append_json_char(value, n, ch)
+            end if
+            i = i + 1
+        end do
+    end subroutine read_json_string
+
+    subroutine scan_json_value(text, position, last, ierr)
+        character(len=*), intent(in) :: text
+        integer, intent(in) :: position
+        integer, intent(out) :: last
+        integer, intent(out) :: ierr
+
+        integer :: first, i, object_depth, array_depth
+        logical :: in_string, escaped, container
+        character(len=1) :: ch
+
+        last = 0
+        ierr = 1
+        first = position
+        if (first > len_trim(text)) return
+        object_depth = 0
+        array_depth = 0
+        in_string = .false.
+        escaped = .false.
+        container = text(first:first) == '{' .or. text(first:first) == '['
+        last = 0
+        do i = first, len_trim(text)
+            ch = text(i:i)
+            if (in_string) then
+                if (escaped) then
+                    escaped = .false.
+                else if (ch == achar(92)) then
+                    escaped = .true.
+                else if (ch == '"') then
+                    in_string = .false.
+                end if
+            else if (ch == '"') then
+                in_string = .true.
+            else if (ch == '{') then
+                object_depth = object_depth + 1
+            else if (ch == '[') then
+                array_depth = array_depth + 1
+            else if (ch == '}') then
+                if (object_depth > 0) then
+                    object_depth = object_depth - 1
+                    if (container .and. object_depth == 0 .and. array_depth == 0) then
+                        last = i
+                        exit
+                    end if
+                else if (array_depth == 0) then
+                    last = i - 1
+                    exit
+                end if
+            else if (ch == ']') then
+                if (array_depth > 0) then
+                    array_depth = array_depth - 1
+                    if (container .and. object_depth == 0 .and. array_depth == 0) then
+                        last = i
+                        exit
+                    end if
+                else
+                    return
+                end if
+            else if (ch == ',' .and. object_depth == 0 .and. array_depth == 0) then
+                last = i - 1
+                exit
+            end if
+        end do
+        if (last == 0) then
+            if (object_depth /= 0 .or. array_depth /= 0 .or. in_string) return
+            last = len_trim(text)
+        end if
+        if (last < first) return
+        ierr = 0
+    end subroutine scan_json_value
+
+    subroutine decode_json_string(raw, value, valid)
+        character(len=*), intent(in) :: raw
+        character(len=*), intent(out) :: value
+        logical, intent(out) :: valid
+
+        integer :: position, ierr
+
+        position = 1
+        call read_json_string(raw, position, value, ierr)
+        valid = ierr == 0
+        if (.not. valid) return
+        call skip_json_space(raw, position)
+        if (position <= len_trim(raw)) valid = .false.
+    end subroutine decode_json_string
+
+    subroutine append_json_char(value, n, ch)
+        character(len=*), intent(inout) :: value
+        integer, intent(inout) :: n
+        character(len=1), intent(in) :: ch
+
+        if (n >= len(value)) return
+        n = n + 1
+        value(n:n) = ch
+    end subroutine append_json_char
+
+    subroutine append_utf8(value, n, code)
+        character(len=*), intent(inout) :: value
+        integer, intent(inout) :: n
+        integer, intent(in) :: code
+
+        if (code < 128) then
+            call append_json_char(value, n, achar(code))
+        else if (code < 2048) then
+            call append_json_char(value, n, achar(192 + code/64))
+            call append_json_char(value, n, achar(128 + mod(code, 64)))
+        else if (code < 55296 .or. code > 57343) then
+            call append_json_char(value, n, achar(224 + code/4096))
+            call append_json_char(value, n, achar(128 + mod(code/64, 64)))
+            call append_json_char(value, n, achar(128 + mod(code, 64)))
+        else
+            call append_json_char(value, n, '?')
+        end if
+    end subroutine append_utf8
+
+    integer function json_hex_digit(ch)
+        character(len=1), intent(in) :: ch
+
+        select case (ch)
+        case ('0':'9')
+            json_hex_digit = iachar(ch) - iachar('0')
+        case ('a':'f')
+            json_hex_digit = iachar(ch) - iachar('a') + 10
+        case ('A':'F')
+            json_hex_digit = iachar(ch) - iachar('A') + 10
+        case default
+            json_hex_digit = -1
+        end select
+    end function json_hex_digit
 
     subroutine handle_check(line, id_str, dir, check_res, output_text, &
             exitcode, response)
@@ -730,6 +1167,11 @@ contains
         end if
 
         call process_cancel_pid(async_state%active_pid, exitcode)
+        if (exitcode /= 0) then
+            call jsonrpc_error(id_str, -32603, &
+                'failed to cancel active run; ownership remains active', response)
+            return
+        end if
         async_state%active_pid = 0
         call async_state%queue%finish(130)
         async_state%last_run_id = run_id
@@ -890,7 +1332,9 @@ contains
             '"action":{"type":"string",'// &
             '"enum":["check","status","diagnostics","cancel",'// &
             '"build","test","graph","info","changed","clean",'// &
-            '"lint","fmt","install"],'// &
+            '"lint","fmt","install","gremlin_start",'// &
+            '"gremlin_status","gremlin_wait","gremlin_events",'// &
+            '"gremlin_failures","gremlin_reproduce","gremlin_stop"],'// &
             '"description":"Action to run"},'// &
             '"dir":{"type":"string",'// &
             '"description":"Project directory (default: cwd)"},'// &
@@ -901,7 +1345,26 @@ contains
             '"prefix":{"type":"string",'// &
             '"description":"install: destination prefix"},'// &
             '"fix":{"type":"boolean",'// &
-            '"description":"lint: remove unused imports in place"}},'// &
+            '"description":"lint: remove unused imports in place"},'// &
+            '"lane_id":{"type":"string"},'// &
+            '"session_id":{"type":"string"},'// &
+            '"targets":{"type":"array","items":{"type":"string"}},'// &
+            '"only_changed":{"type":"boolean"},'// &
+            '"shuffle":{"type":"boolean"},'// &
+            '"random_count":{"type":"integer","minimum":1,"maximum":32},'// &
+            '"seed":{"type":"integer"},'// &
+            '"campaign_seconds":{"type":"integer","minimum":1,"maximum":60},'// &
+            '"timeout_seconds":{"type":"integer","minimum":1,"maximum":5},'// &
+            '"jobs":{"type":"integer","const":1},'// &
+            '"cursor":{"type":"integer","minimum":0},'// &
+            '"max_records":{"type":"integer","minimum":1,"maximum":128},'// &
+            '"max_bytes":{"type":"integer","minimum":1,"maximum":262144},'// &
+            '"wait_ms":{"type":"integer","minimum":0,"maximum":30000},'// &
+            '"fail_on_failure":{"type":"boolean"},'// &
+            '"case_id":{"type":"string"},'// &
+            '"generation_id":{"type":"string"},'// &
+            '"background":{"type":"boolean",'// &
+            '"description":"gremlin_start: true selects the detached engine"}},'// &
             '"required":["action"]}}]}}'
     end subroutine make_tools_list_response
 
