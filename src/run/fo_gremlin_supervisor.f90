@@ -15,6 +15,7 @@ module fo_gremlin_supervisor
     use fo_gremlin_state, only: gremlin_session_t, gremlin_lease_t, &
         gremlin_session_acquire, &
         gremlin_session_publish, gremlin_session_read, gremlin_session_release, &
+        gremlin_session_recovery_complete, &
         gremlin_session_request_stop, gremlin_session_stop_requested, &
         gremlin_lease_release, gremlin_generation_register_at, &
         gremlin_generation_lease_acquire_at, gremlin_generation_pin_at, &
@@ -368,6 +369,8 @@ contains
         recovery_path = trim(session%state_dir)//'/recovery.jsonl'
         call copy_journal_records(trim(recovery_path), trim(journal_path), .true., &
             ierr, message)
+        if (ierr /= 0) return
+        call gremlin_session_recovery_complete(session, ierr, message)
     end subroutine recover_owner_journal
 
     subroutine copy_journal_records(source_path, target_path, remove_source, ierr, &

@@ -27,6 +27,7 @@ module fo_gremlin_state
 
     public :: gremlin_session_acquire, gremlin_session_publish
     public :: gremlin_session_read, gremlin_session_release
+    public :: gremlin_session_recovery_complete
     public :: gremlin_session_request_stop, gremlin_session_stop_requested
     public :: gremlin_session_process_matches
     public :: gremlin_lease_acquire, gremlin_lease_release
@@ -56,6 +57,14 @@ module fo_gremlin_state
             integer(c_int), value :: fd
             integer(c_int) :: ierr
         end function c_session_release
+
+        function c_session_recovery_complete(dir, session, recovered, fd) &
+                bind(C, name='fo_gremlin_session_recovery_complete') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: dir(*), session(*), recovered(*)
+            integer(c_int), value :: fd
+            integer(c_int) :: ierr
+        end function c_session_recovery_complete
 
         function c_session_read(project, lane, dir, dircap, session, sessioncap, &
                 pid, start, startcap, status, statuscap) &
@@ -222,6 +231,28 @@ contains
         session%owner = is_owner /= 0
         session%attached = .not. session%owner
     end subroutine gremlin_session_acquire
+
+    subroutine gremlin_session_recovery_complete(session, ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        integer(c_int) :: c_error
+
+        ierr = 0
+        message = ''
+        if (.not. allocated(session%recovered_session_id)) return
+        if (len_trim(session%recovered_session_id) == 0) return
+        if (.not. session%owner) then
+            ierr = 1
+            message = 'only the live owner may complete journal recovery'
+            return
+        end if
+        c_error = c_session_recovery_complete(session%state_dir//c_null_char, &
+            session%session_id//c_null_char, &
+            session%recovered_session_id//c_null_char, int(session%lock_fd, c_int))
+        ierr = int(c_error)
+        message = error_text(ierr)
+    end subroutine gremlin_session_recovery_complete
 
     subroutine gremlin_session_publish(session, status_text, ierr, message)
         type(gremlin_session_t), intent(in) :: session

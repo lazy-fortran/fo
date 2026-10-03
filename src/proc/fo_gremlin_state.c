@@ -129,6 +129,34 @@ static int read_owner(const char *dir, char *id, size_t idcap, int *pid,
     return 0;
 }
 
+static int read_recovery_source(const char *dir, char *id, size_t cap) {
+    char path[PATH_MAX];
+    if (cap < 2) return EINVAL;
+    if (snprintf(path, sizeof(path), "%s/recovery.source", dir) >= (int)sizeof(path))
+        return ENAMETOOLONG;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return errno;
+    ssize_t n;
+    do { n = read(fd, id, cap - 1); } while (n < 0 && errno == EINTR);
+    int e = n < 0 ? errno : 0;
+    char extra;
+    if (e == 0 && (size_t)n == cap - 1) {
+        ssize_t more;
+        do { more = read(fd, &extra, 1); } while (more < 0 && errno == EINTR);
+        if (more != 0) e = more < 0 ? errno : EOVERFLOW;
+    }
+    if (close(fd) != 0 && e == 0) e = errno;
+    if (e) return e;
+    if (n < 2 || n > 121 || id[n - 1] != '\n') return EINVAL;
+    id[n - 1] = 0;
+    for (ssize_t i = 0; i < n - 1; ++i) {
+        unsigned char c = (unsigned char)id[i];
+        if (!(c == '-' || c == '_' || (c >= '0' && c <= '9') ||
+              (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) return EINVAL;
+    }
+    return 0;
+}
+
 static int stop_path(const char *dir, char *path, size_t cap) {
     return snprintf(path, cap, "%s/stop.request", dir) >= (int)cap ? ENAMETOOLONG : 0;
 }
@@ -232,14 +260,26 @@ int fo_gremlin_session_acquire(const char *project, const char *lane,
             return EAGAIN;
         }
     }
-    e = read_owner(dir, prior_id, sizeof(prior_id), &prior_pid,
-                   prior_start, sizeof(prior_start));
-    if (e == 0 && !fo_gremlin_process_matches(prior_pid, prior_start)) {
-        if (strlen(prior_id) + 1 > (size_t)recoveredcap) {
-            e = ENAMETOOLONG;
-            goto fail;
+    e = read_recovery_source(dir, recovered, (size_t)recoveredcap);
+    if (e != 0 && e != ENOENT) goto fail;
+    if (e == ENOENT) {
+        recovered[0] = 0;
+        e = read_owner(dir, prior_id, sizeof(prior_id), &prior_pid,
+                       prior_start, sizeof(prior_start));
+        if (e == 0 && !fo_gremlin_process_matches(prior_pid, prior_start)) {
+            if (strlen(prior_id) + 1 > (size_t)recoveredcap) {
+                e = ENAMETOOLONG;
+                goto fail;
+            }
+            char record[129];
+            int n = snprintf(record, sizeof(record), "%s\n", prior_id);
+            if (n < 0 || n >= (int)sizeof(record)) { e = EOVERFLOW; goto fail; }
+            /* Keep this pointer across replacement-owner and import crashes.
+               The owner clears it only after the destination journal commits. */
+            e = atomic_write_file(dir, "recovery.source", record, (size_t)n);
+            if (e) goto fail;
+            strcpy(recovered, prior_id);
         }
-        strcpy(recovered, prior_id);
     }
     char sid[128], stamp[64];
     struct timespec ts;
@@ -263,6 +303,28 @@ int fo_gremlin_session_acquire(const char *project, const char *lane,
     return 0;
 fail:
     flock(fd, LOCK_UN); close(fd); return e;
+}
+
+int fo_gremlin_session_recovery_complete(const char *dir, const char *session,
+                                        const char *recovered, int fd) {
+    int e = verify_owner_fd(dir, fd);
+    if (e) return e;
+    char id[128], start[64], pending[128], current[64];
+    int pid = 0;
+    e = read_owner(dir, id, sizeof(id), &pid, start, sizeof(start));
+    if (e) return e;
+    if (strcmp(id, session) != 0 || pid != (int)getpid()) return EPERM;
+    e = process_start(getpid(), current, sizeof(current));
+    if (e || strcmp(current, start) != 0) return EPERM;
+    e = read_recovery_source(dir, pending, sizeof(pending));
+    if (e == ENOENT) return 0;
+    if (e) return e;
+    if (strcmp(pending, recovered) != 0) return EPERM;
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/recovery.source", dir) >= (int)sizeof(path))
+        return ENAMETOOLONG;
+    if (unlink(path) != 0) return errno;
+    return sync_directory(dir);
 }
 
 int fo_gremlin_session_release(const char *dir, const char *session, int fd) {

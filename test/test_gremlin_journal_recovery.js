@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Behavioral crash-recovery fixture for a live Gremlin owner and its journal.
 const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -19,9 +19,10 @@ const env = { ...process.env, HOME: path.join(scratch, 'home'),
   XDG_CACHE_HOME: path.join(scratch, 'xdg-cache'),
   FO_PREFIX: path.join(scratch, 'prefix'),
   FO_GREMLIN_STATE_DIR: path.join(scratch, 'gremlin-state'),
-  FO_CACHE_DIR: path.join(scratch, 'cache'), TMPDIR: '/var/tmp', FO_JOBS: '1',
+  FO_CACHE_DIR: path.join(scratch, 'cache'), TMPDIR: path.join(scratch, 'tmp'), FO_JOBS: '1',
   FO_SELF_REFRESH: '0', FO_DISABLE_SELF_REFRESH: '1' };
 fs.mkdirSync(env.HOME, { recursive: true });
+fs.mkdirSync(env.TMPDIR, { recursive: true });
 fs.mkdirSync(path.join(project, 'test'), { recursive: true });
 fs.mkdirSync(markerRoot, { recursive: true });
 fs.writeFileSync(path.join(project, 'fpm.toml'),
@@ -46,6 +47,127 @@ function createGate(file) {
   const result = spawnSync('mkfifo', [file], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   return file;
+}
+
+// Intercept completed durability operations, rather than racing startup sleeps.
+// Only the explicitly armed process and exact lane owner record can block.
+function buildCrashBarrier() {
+  const source = path.join(scratch, 'recovery_barrier.c');
+  const library = path.join(scratch, 'recovery_barrier.so');
+  fs.writeFileSync(source, String.raw`
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+static int published = 0;
+static char session[128];
+static void barrier(void) {
+    const char *ready = getenv("RECOVERY_BARRIER_READY");
+    const char *gate = getenv("RECOVERY_BARRIER_GATE");
+    char text[64];
+    int n = snprintf(text, sizeof(text), "%ld\n", (long)getpid());
+    int fd = open(ready, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0 || write(fd, text, (size_t)n) != n) _exit(120);
+    close(fd);
+    fd = open(gate, O_RDONLY);
+    if (fd < 0) _exit(121);
+    char byte;
+    (void)read(fd, &byte, 1);
+    close(fd);
+}
+int rename(const char *oldpath, const char *newpath) {
+    int (*real_rename)(const char *, const char *) = dlsym(RTLD_NEXT, "rename");
+    int result = real_rename(oldpath, newpath);
+    const char *owner = getenv("RECOVERY_BARRIER_OWNER");
+    if (result == 0 && owner && strcmp(owner, newpath) == 0) {
+        FILE *file = fopen(owner, "r");
+        if (!file || !fgets(session, sizeof(session), file)) _exit(122);
+        fclose(file);
+        session[strcspn(session, "\n")] = 0;
+        published = 1;
+    }
+    return result;
+}
+int fsync(int fd) {
+    int (*real_fsync)(int) = dlsym(RTLD_NEXT, "fsync");
+    int result = real_fsync(fd);
+    const char *owner = getenv("RECOVERY_BARRIER_OWNER");
+    const char *mode = getenv("RECOVERY_BARRIER_MODE");
+    if (result != 0 || !owner || !mode || !published) return result;
+    char link[64], path[PATH_MAX], expected[PATH_MAX];
+    snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
+    ssize_t n = readlink(link, path, sizeof(path) - 1);
+    if (n < 0) _exit(123);
+    path[n] = 0;
+    snprintf(expected, sizeof(expected), "%s", owner);
+    char *slash = strrchr(expected, '/');
+    if (!slash) _exit(124);
+    *slash = 0;
+    int hit = strcmp(mode, "owner") == 0 && strcmp(path, expected) == 0;
+    if (strcmp(mode, "import") == 0) {
+        snprintf(expected, sizeof(expected), "/%s/journal.jsonl", session);
+        size_t a = strlen(path), b = strlen(expected);
+        hit = a >= b && strcmp(path + a - b, expected) == 0;
+    }
+    if (hit) { published = 0; barrier(); }
+    return result;
+}
+`);
+  const compiled = spawnSync('cc', ['-shared', '-fPIC', source, '-ldl', '-o', library],
+    { env, encoding: 'utf8' });
+  assert.equal(compiled.status, 0, compiled.stdout + compiled.stderr);
+  return library;
+}
+
+async function interruptRestart(library, mode) {
+  const ready = path.join(markerRoot, `restart-${mode}.ready`);
+  const gate = createGate(path.join(markerRoot, `restart-${mode}.fifo`));
+  const child = spawn(fo, ['gremlin', mode === 'owner' ? 'start' : 'run',
+    '--dir', project, '--lane', lane,
+    '--random-count', '32', '--seed', '1729', '--target', 'test_blocked'], {
+    cwd: project, stdio: 'ignore', env: { ...env, LD_PRELOAD: library,
+      RECOVERY_BARRIER_OWNER: ownerFile(), RECOVERY_BARRIER_MODE: mode,
+      RECOVERY_BARRIER_READY: ready, RECOVERY_BARRIER_GATE: gate }
+  });
+  const closed = new Promise(resolve => child.once('close', resolve));
+  try {
+    await waitForFile(ready, 30000);
+    const pid = Number(fs.readFileSync(ready, 'utf8').trim());
+    assert.equal(pid, child.pid, 'barrier belongs to this exact restarting process');
+    const identity = processIdentity(pid);
+    const owner = fs.readFileSync(ownerFile(), 'utf8').trim().split('\n');
+    assert.equal(Number(owner[1]), pid, 'replacement owner pointer is published');
+    assert.equal(owner[2], identity.startTime, 'replacement owner retains PID identity');
+    if (mode === 'import') {
+      function journals(dir) {
+        return fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+          const file = path.join(dir, entry.name);
+          return entry.isDirectory() ? journals(file) : [file];
+        });
+      }
+      const files = journals(path.join(env.FO_GREMLIN_STATE_DIR,
+        'fo', 'gremlin', 'session-journals'));
+      const journal = files.find(file => path.basename(path.dirname(file)) === owner[0]);
+      assert.ok(journal, 'interrupted owner has a destination journal');
+      const records = fs.readFileSync(journal, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.equal(records.length, 1, 'import is interrupted after its first durable receipt');
+      assert.equal(records[0].session_id, firstSession,
+        'the first imported receipt retains its original session identity');
+    }
+    process.kill(pid, 'SIGKILL');
+    await closed;
+    await waitForOwnerExit(identity, 10000);
+    console.log(`Gremlin journal recovery: interrupted ${mode} durability barrier`);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL');
+      await closed;
+    }
+  }
 }
 
 function fortranString(file) {
@@ -234,6 +356,7 @@ const workerIdentities = [];
 let primaryError = null;
 
 async function main() {
+  const barrierLibrary = buildCrashBarrier();
   const firstGate = createGate(path.join(markerRoot, 'blocked-before-crash.fifo'));
   const firstPidFile = path.join(markerRoot, 'blocked-before-crash.pid');
   const firstDone = path.join(markerRoot, 'blocked-before-crash.done');
@@ -281,6 +404,10 @@ async function main() {
     fs.renameSync(path.join(project, 'test/test_fail.f90'),
       path.join(project, 'test/test_fail.disabled'));
     writeBlockedCase(secondGate, secondPidFile, secondDone);
+    await interruptRestart(barrierLibrary, 'owner');
+    if (!process.argv.includes('--handoff-only')) {
+      await interruptRestart(barrierLibrary, 'import');
+    }
     const restarted = start(['test_blocked']);
     restartedSession = restarted.session_id;
     assert.ok(restartedSession && restartedSession !== firstSession,
