@@ -598,6 +598,7 @@ contains
         character(len=512), allocatable :: lib_objs(:)
         character(len=512) :: lf, flag_text, request_flags, test_dir
         logical :: slow, bonly, build_current, tests_current, apps_current
+        logical :: target_outputs_ready
 
         lf = log_file
         if (len_trim(lf) == 0) lf = '/dev/null'
@@ -617,6 +618,11 @@ contains
         if (exitcode /= 0) return
 
         bin_dir = native_output_dir(project_dir, request_flags, 'bin')
+        if (build_current .and. tests_current) then
+            call selected_test_targets_ready(project_dir, test_dir, bin_dir, &
+                names, n_names, slow, target_outputs_ready)
+            if (.not. target_outputs_ready) tests_current = .false.
+        end if
         if (build_current .and. tests_current .and. len_trim(test_dir) > 0) then
             if (.not. bonly) call run_current_tests(project_dir, test_dir, bin_dir, &
                 names, n_names, slow, lf, exitcode)
@@ -806,6 +812,42 @@ contains
             if (allocated(tests(i)%args)) deallocate (tests(i)%args)
         end do
     end subroutine run_current_tests
+
+    subroutine selected_test_targets_ready(project_dir, test_dir, bin_dir, &
+            selected_names, n_selected, include_slow, ready)
+        !! A build stamp records that test outputs were once produced, but a
+        !! targeted build may have materialized only part of the suite. Before
+        !! taking the stamped fast path, confirm every selected executable is
+        !! still present (including dispatcher-routed targets).
+        character(len=*), intent(in) :: project_dir, test_dir, bin_dir
+        character(len=*), intent(in) :: selected_names(:)
+        integer, intent(in) :: n_selected
+        logical, intent(in) :: include_slow
+        logical, intent(out) :: ready
+
+        type(scan_unit_t), allocatable :: units(:)
+        type(fpm_config_t), allocatable :: config
+        type(current_test_t), allocatable :: tests(:)
+        integer :: n_units, n_tests, ierr, i
+        logical :: exists
+
+        ready = .false.
+        call scan_dir_cached(trim(project_dir)//'/'//trim(test_dir), units, &
+            n_units, ierr)
+        if (ierr /= 0) return
+        allocate (config)
+        call fpm_config_parse(project_dir, config, ierr)
+        if (ierr /= 0) return
+        call select_current_tests(project_dir, config, units, n_units, test_dir, &
+            bin_dir, selected_names, n_selected, include_slow, tests, n_tests)
+        ready = .true.
+        do i = 1, n_tests
+            inquire (file=trim(tests(i)%bin), exist=exists)
+            if (.not. exists) ready = .false.
+            call delete_tmpfile(tests(i)%log)
+            if (allocated(tests(i)%args)) deallocate (tests(i)%args)
+        end do
+    end subroutine selected_test_targets_ready
 
     logical function unit_has_dispatcher_marker(unit, project_dir, test_dir) &
             result(has)
