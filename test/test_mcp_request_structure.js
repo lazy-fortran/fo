@@ -8,12 +8,17 @@ const path = require('node:path');
 const driver = process.argv[2] || process.env.FO;
 if (!driver) throw new Error('pass the combined fo path as the first argument');
 const executable = path.resolve(driver);
+if (executable === path.resolve('/home/ert/.local/bin/fo')) {
+  throw new Error('pass the isolated candidate binary, not the global fo install');
+}
 const scratch = fs.mkdtempSync('/var/tmp/fo-mcp-request-structure-');
 const project = path.join(scratch, 'project');
 const env = { ...process.env, HOME: path.join(scratch, 'home'), TMPDIR: '/var/tmp',
-  FO_CACHE_DIR: path.join(scratch, 'cache') };
+  FO_CACHE_DIR: path.join(scratch, 'cache'), FO_PREFIX: path.join(scratch, 'prefix'),
+  FO_SELF_REFRESH: '0', FO_DISABLE_SELF_REFRESH: '1' };
 fs.mkdirSync(project, { recursive: true });
 fs.mkdirSync(env.HOME, { recursive: true });
+fs.mkdirSync(env.FO_PREFIX, { recursive: true });
 fs.writeFileSync(path.join(project, 'fpm.toml'), 'name = "mcp_request_probe"\n');
 
 function startServer() {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Inject repeated kill(2) failures and verify MCP retains ownership through shutdown.
+// Inject cancellation failures and verify MCP retains ownership through shutdown/EOF.
 const assert = require('node:assert/strict');
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -8,14 +8,20 @@ const path = require('node:path');
 const driver = process.argv[2] || process.env.FO;
 if (!driver) throw new Error('pass the newly built fo path as the first argument');
 const executable = path.resolve(driver);
+if (executable === path.resolve('/home/ert/.local/bin/fo')) {
+  throw new Error('pass the isolated candidate binary, not the global fo install');
+}
 const scratch = fs.mkdtempSync('/var/tmp/fo-mcp-cancel-error-');
 const project = path.join(scratch, 'project');
 const env = { ...process.env, HOME: path.join(scratch, 'home'), TMPDIR: '/var/tmp',
-  FO_CACHE_DIR: path.join(scratch, 'cache') };
+  FO_CACHE_DIR: path.join(scratch, 'cache'), FO_PREFIX: path.join(scratch, 'prefix'),
+  FO_SELF_REFRESH: '0', FO_DISABLE_SELF_REFRESH: '1' };
 const bin = path.join(scratch, 'bin');
 const shim = path.join(scratch, 'fail-kill.so');
 const injected = path.join(scratch, 'first-kill-failed');
 const sleepPidFile = path.join(scratch, 'sleep.pid');
+const denyKillFile = path.join(scratch, 'deny-kill');
+const killLog = path.join(scratch, 'kill-attempts.log');
 let server;
 let sleepPid = 0;
 
@@ -23,6 +29,7 @@ function prepare() {
   fs.mkdirSync(path.join(project, 'test'), { recursive: true });
   fs.mkdirSync(bin, { recursive: true });
   fs.mkdirSync(env.HOME, { recursive: true });
+  fs.mkdirSync(env.FO_PREFIX, { recursive: true });
   fs.symlinkSync(executable, path.join(bin, 'fo'));
   fs.writeFileSync(path.join(project, 'fpm.toml'), 'name = "mcp_cancel_probe"\n');
   fs.writeFileSync(path.join(project, 'test/test_cancel_slow.f90'), [
@@ -36,18 +43,39 @@ function prepare() {
   ].join('\n'));
   fs.chmodSync(fakeSleep, 0o755);
   env.FO_TEST_SLEEP_PID_FILE = sleepPidFile;
+  env.FO_TEST_CANCEL_DENY_FILE = denyKillFile;
+  env.FO_TEST_CANCEL_FAIL_LOG = killLog;
   const cSource = path.join(scratch, 'fail_kill.c');
   fs.writeFileSync(cSource, [
     '#define _GNU_SOURCE', '#include <dlfcn.h>', '#include <errno.h>',
-    '#include <fcntl.h>', '#include <signal.h>', '#include <stdlib.h>',
+    '#include <fcntl.h>', '#include <signal.h>', '#include <stdio.h>',
+    '#include <stdlib.h>', '#include <time.h>',
     '#include <sys/types.h>', '#include <unistd.h>',
     'typedef int (*kill_fn)(pid_t, int);',
+    'static void record_denied_kill(void) {',
+    '  const char *log_path = getenv("FO_TEST_CANCEL_FAIL_LOG");',
+    '  struct timespec now;',
+    '  char line[96];',
+    '  int fd, length;',
+    '  if (log_path == NULL || clock_gettime(CLOCK_MONOTONIC, &now) != 0) return;',
+    '  length = snprintf(line, sizeof(line), "%ld %llu\\n", (long)getpid(),',
+    '      (unsigned long long)now.tv_sec * 1000ULL +',
+    '      (unsigned long long)now.tv_nsec / 1000000ULL);',
+    '  if (length <= 0 || length >= (int)sizeof(line)) return;',
+    '  fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0600);',
+    '  if (fd >= 0) { write(fd, line, (size_t)length); close(fd); }',
+    '}',
     'int kill(pid_t pid, int sig) {',
     '  static int failed = 0;',
     '  static kill_fn real_kill = NULL;',
     '  const char *enabled = getenv("FO_TEST_CANCEL_FAIL_COUNT");',
+    '  const char *deny_file = getenv("FO_TEST_CANCEL_DENY_FILE");',
     '  int failure_limit = enabled == NULL ? 0 : atoi(enabled);',
-    '  if (sig == SIGTERM && pid > 1 && enabled != NULL && ',
+    '  if (sig == SIGTERM && (pid > 1 || pid < -1) && deny_file != NULL &&',
+    '      access(deny_file, F_OK) == 0) {',
+    '    record_denied_kill(); errno = EPERM; return -1;',
+    '  }',
+    '  if (sig == SIGTERM && (pid > 1 || pid < -1) && enabled != NULL && ',
     '      failed < failure_limit) {',
     '    const char *marker = getenv("FO_TEST_CANCEL_FAIL_MARKER");',
     '    failed++;',
@@ -55,12 +83,14 @@ function prepare() {
     '      int fd = open(marker, O_WRONLY | O_CREAT | O_EXCL, 0600);',
     '      if (fd >= 0) close(fd);',
     '    }',
+    '    record_denied_kill();',
     '    errno = EPERM; return -1;',
     '  }',
     '  if (real_kill == NULL) real_kill = (kill_fn)dlsym(RTLD_NEXT, "kill");',
     '  if (real_kill == NULL) { errno = ENOSYS; return -1; }',
     '  return real_kill(pid, sig);',
-    '}', ''
+    '}',
+    'int killpg(pid_t pgrp, int sig) { return kill(-pgrp, sig); }', ''
   ].join('\n'));
   const compiled = spawnSync('cc', ['-shared', '-fPIC', '-o', shim, cSource, '-ldl'],
     { encoding: 'utf8', maxBuffer: 1024 * 1024 });
@@ -154,13 +184,113 @@ async function waitForSleepExit(pid, timeoutMs = 5000) {
   throw new Error(`fixture sleep child ${pid} remained alive after retry`);
 }
 
+function deniedAttemptsFor(callerPid) {
+  if (!fs.existsSync(killLog)) return [];
+  return fs.readFileSync(killLog, 'utf8').split('\n').filter(Boolean)
+    .map(line => line.trim().split(/\s+/).map(Number))
+    .filter(parts => parts.length === 2 && parts[0] === callerPid)
+    .map(parts => parts[1]);
+}
+
+function delay(milliseconds) {
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+async function verifyEofRetryBackoff() {
+  let persistentSleepPid = 0;
+  let persistentRunId = 0;
+  env.FO_TEST_CANCEL_FAIL_COUNT = '0';
+  fs.writeFileSync(denyKillFile, 'deny SIGTERM until this file is removed\n');
+  fs.writeFileSync(killLog, '');
+  server = startServer();
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('MCP server did not start')), 5000);
+      server.child.once('spawn', () => { clearTimeout(timer); resolve(); });
+      server.child.once('error', reject);
+    });
+    const start = body(await server.rpc(11,
+      { action: 'check', mode: 'start', root: project }));
+    persistentRunId = start.json.run_id;
+    assert.ok(persistentRunId > 0, 'persistent-denial check started');
+    persistentSleepPid = await waitForSleepPid();
+    assert.ok(pidState(persistentSleepPid) !== null,
+      'owned sleeper is live before EOF');
+
+    const deniedCancel = await server.rpc(12,
+      { action: 'cancel', run_id: persistentRunId });
+    assert.equal(deniedCancel.error.code, -32603,
+      'persistent EPERM is explicit before EOF');
+    const active = body(await server.rpc(13, { action: 'status' }));
+    assert.equal(active.json.state, 'running');
+    assert.equal(active.json.run_id, persistentRunId,
+      'the active run handle remains available before EOF');
+
+    const beforeEofCount = deniedAttemptsFor(server.child.pid).length;
+    server.child.stdin.end();
+    await delay(1800);
+    const eofAttempts = deniedAttemptsFor(server.child.pid).slice(beforeEofCount);
+    assert.equal(server.child.exitCode, null,
+      'EOF does not let the server exit while cancellation is denied');
+    assert.equal(server.child.signalCode, null);
+    assert.ok(pidState(persistentSleepPid) !== null,
+      'owned sleeper remains live while cancellation is denied');
+    assert.ok(eofAttempts.length >= 3,
+      `EOF retry loop made ${eofAttempts.length} attempts while denied`);
+    assert.ok(
+      eofAttempts.length <= 18,
+      'EOF retry loop made ' + eofAttempts.length +
+        ' kill attempts; expected capped backoff');
+
+    fs.unlinkSync(denyKillFile);
+    await server.waitForExit(10000);
+    await waitForSleepExit(persistentSleepPid, 5000);
+    assert.equal(server.child.exitCode, 0,
+      'server exits normally after cancellation succeeds');
+    console.log('mcp-cancel-error: EOF keeps ownership through persistent EPERM, '
+      + 'backs off, then cancels and reaps the process tree after release');
+  } finally {
+    fs.rmSync(denyKillFile, { force: true });
+    if (server && server.child.exitCode === null && server.child.signalCode === null) {
+      if (!server.child.stdin.destroyed && !server.child.stdin.writableEnded &&
+          persistentRunId > 0) {
+        try {
+          await server.rpc(14, { action: 'cancel', run_id: persistentRunId });
+        } catch (_) { /* retry through EOF below */ }
+      }
+      if (!server.child.stdin.destroyed && !server.child.stdin.writableEnded) {
+        server.child.stdin.end();
+      }
+      try { await server.waitForExit(10000); } catch (_) {
+        server.child.kill('SIGTERM');
+        try { await server.waitForExit(3000); } catch (_) {
+          server.child.kill('SIGKILL');
+          await server.waitForExit(3000);
+        }
+      }
+    }
+    if (persistentSleepPid > 1) {
+      const state = pidState(persistentSleepPid);
+      if (state !== null && state !== 'Z' && state !== 'X') {
+        try { process.kill(persistentSleepPid, 'SIGTERM'); } catch (_) { /* gone */ }
+        try { await waitForSleepExit(persistentSleepPid, 1000); } catch (_) {
+          try { process.kill(persistentSleepPid, 'SIGKILL'); } catch (_) { /* gone */ }
+          await waitForSleepExit(persistentSleepPid, 1000);
+        }
+      }
+    }
+  }
+}
+
 async function main() {
   prepare();
   server = startServer();
   let runId = 0;
   try {
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('MCP server did not start')), 5000);
+      const timer = setTimeout(
+        () => reject(new Error('MCP server did not start')), 5000);
       server.child.once('spawn', () => { clearTimeout(timer); resolve(); });
       server.child.once('error', reject);
     });
@@ -241,11 +371,13 @@ async function main() {
         }
       }
     }
-    fs.rmSync(scratch, { recursive: true, force: true });
   }
+  await verifyEofRetryBackoff();
+  fs.rmSync(scratch, { recursive: true, force: true });
 }
 
 main().catch(error => {
   console.error(error);
+  fs.rmSync(scratch, { recursive: true, force: true });
   process.exitCode = 1;
 });

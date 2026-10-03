@@ -26,6 +26,8 @@ module fo_mcp
     public :: mcp_serve
 
     integer, parameter :: MAX_LINE = 32768
+    integer, parameter :: CANCEL_RETRY_INITIAL_DELAY_MS = 100
+    integer, parameter :: CANCEL_RETRY_MAX_DELAY_MS = 5000
 
     type :: mcp_async_state_t
         type(run_queue_t) :: queue
@@ -48,6 +50,7 @@ contains
         character(len=256) :: method
         character(len=MAX_LINE) :: id_str
         integer :: framing, read_status, parse_status, property_count
+        integer :: cancel_retry_delay_ms
         logical :: eof_flag
         type(mcp_async_state_t) :: async_state
 
@@ -121,10 +124,18 @@ contains
                 end if
             end select
         end do
+        cancel_retry_delay_ms = CANCEL_RETRY_INITIAL_DELAY_MS
         do
             call async_cancel_all(async_state, read_status)
             if (read_status == 0) exit
-            call fs_sleep_ms(100)
+            call fs_sleep_ms(cancel_retry_delay_ms)
+            if (cancel_retry_delay_ms < CANCEL_RETRY_MAX_DELAY_MS) then
+                if (cancel_retry_delay_ms > CANCEL_RETRY_MAX_DELAY_MS/2) then
+                    cancel_retry_delay_ms = CANCEL_RETRY_MAX_DELAY_MS
+                else
+                    cancel_retry_delay_ms = 2*cancel_retry_delay_ms
+                end if
+            end if
         end do
         call process_suppress_heartbeats(.false.)
     end subroutine mcp_serve
