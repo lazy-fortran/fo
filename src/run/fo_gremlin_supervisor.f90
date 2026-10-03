@@ -11,12 +11,16 @@ module fo_gremlin_supervisor
     use fo_gremlin_journal, only: journal_append, journal_read_page, &
         journal_compact_tail, journal_record_t, JOURNAL_OK, JOURNAL_INVALID, &
         JOURNAL_MAX_RECORD_BYTES
-    use fo_gremlin_policy, only: select_gremlin_tests, shuffle_gremlin_tests, &
-        GREMLIN_POLICY_OK
+    use fo_gremlin_coverage, only: coverage_epoch_t, coverage_open, &
+        coverage_next_chunk, coverage_record, coverage_record_path, COVERAGE_OK
+    use fo_gremlin_coverage, only: coverage_read_view_path, COVERAGE_NOT_FOUND
+    use fo_gremlin_coverage_view, only: gremlin_coverage_view_t
+    use fo_gremlin_policy, only: shuffle_gremlin_tests, GREMLIN_POLICY_OK, &
+        GREMLIN_NONMANDATORY_LIMIT
     use fo_gremlin_state, only: gremlin_session_t, gremlin_lease_t, &
         gremlin_session_acquire, &
         gremlin_session_publish, gremlin_session_read, gremlin_session_release, &
-        gremlin_session_recovery_complete, &
+        gremlin_session_recovery_complete, gremlin_session_state_dir, &
         gremlin_session_request_stop, gremlin_session_stop_requested, &
         gremlin_lease_release, &
         gremlin_generation_lease_acquire_at, gremlin_generation_pin_at, &
@@ -297,6 +301,10 @@ contains
         character(len=65536) :: status_text
         character(len=PATH_LEN) :: message
         type(gremlin_session_t) :: session
+        type(gremlin_coverage_view_t) :: coverage_view
+        character(len=HASH_LEN) :: generation_id
+        character(len=PATH_LEN) :: coverage_path, coverage_state_dir
+        character(len=:), allocatable :: enriched_status
         integer :: owner_pid, ierr
         logical :: is_live
 
@@ -309,7 +317,30 @@ contains
             return
         end if
         if (is_live) call poll_launcher(owner_pid)
-        call response_with_events('status', status_text, session, request, .false., &
+        generation_id = ''
+        call extract_json_field(status_text, 'active_generation', generation_id)
+        enriched_status = trim(status_text)
+        if (len_trim(generation_id) == HASH_LEN) then
+            call gremlin_session_state_dir(project_dir, request%lane_id, &
+                coverage_state_dir, ierr, message)
+            if (ierr /= 0) then
+                call error_response('status', trim(message), response)
+                exitcode = 2
+                return
+            end if
+            coverage_path = trim(coverage_state_dir)//'/coverage-'// &
+                generation_id//'.state'
+            call coverage_read_view_path(trim(coverage_path), generation_id, &
+                coverage_view, ierr, message)
+            if (ierr == COVERAGE_OK) then
+                enriched_status = status_with_coverage(trim(status_text), coverage_view)
+            else if (ierr /= COVERAGE_NOT_FOUND) then
+                call error_response('status', trim(message), response)
+                exitcode = 2
+                return
+            end if
+        end if
+        call response_with_events('status', enriched_status, session, request, .false., &
             response, ierr, message)
         if (ierr /= 0) then
             call error_response('status', trim(message), response)
@@ -318,6 +349,35 @@ contains
         end if
         exitcode = 0
     end subroutine handle_status
+
+    function status_with_coverage(status_text, view) result(enriched)
+        character(len=*), intent(in) :: status_text
+        type(gremlin_coverage_view_t), intent(in) :: view
+        character(len=:), allocatable :: enriched
+        character(len=:), allocatable :: object
+
+        object = '{"generation_id":"'//trim(view%generation_id)// &
+            '","inventory_digest":"'//trim(view%inventory_digest)// &
+            '","epoch":'//trim(json_int(view%epoch))// &
+            ',"seed":'//trim(json_int(view%seed))// &
+            ',"cursor":'//trim(json_int(view%cursor))// &
+            ',"eligible":'//trim(json_int(view%eligible_count))// &
+            ',"completed":'//trim(json_int(view%completed_count))// &
+            ',"pass":'//trim(json_int(view%pass_count))// &
+            ',"fail":'//trim(json_int(view%fail_count))// &
+            ',"timeout":'//trim(json_int(view%timeout_count))// &
+            ',"flaky":'//trim(json_int(view%flaky_count))// &
+            ',"infra":'//trim(json_int(view%infra_count))// &
+            ',"running":'//trim(json_int(view%running_count))// &
+            ',"cancelled":'//trim(json_int(view%cancelled_count))// &
+            ',"unknown":'//trim(json_int(view%unknown_count))// &
+            ',"remaining":'//trim(json_int(view%remaining_count))// &
+            ',"ordinary_complete":'//trim(json_bool(view%ordinary_complete))// &
+            ',"full_coverage":'//trim(json_bool(view%full_coverage))// &
+            ',"green":'//trim(json_bool(view%green))//'}'
+        enriched = status_text(:len_trim(status_text) - 1)// &
+            ',"coverage":'//object//'}'
+    end function status_with_coverage
 
     subroutine handle_events(project_dir, request, response, exitcode)
         character(len=*), intent(in) :: project_dir
@@ -503,8 +563,9 @@ contains
         selection_request%targets(1) = request%case_id
         selection_request%n_targets = 1
         selection_request%random_count = 0
-        call discover_campaign(trim(active_project), session, selection_request, selected, &
-            n_selected, mandatory_count, seed, ierr, message)
+        call discover_campaign(trim(active_project), generation%identity, session, &
+            selection_request, selected, n_selected, mandatory_count, seed, ierr, message, &
+            bypass_coverage=.true.)
         if (ierr /= 0 .or. n_selected == 0) then
             call release_generation_lease(reproduction_lease, have_reproduction_lease, &
                 release_error, cleanup_message)
@@ -564,7 +625,8 @@ contains
             outcome = 'INFRA_ERROR'
         end if
         call record_immediate_case(session, request, generation, request%case_id, &
-            test_exit, trim(outcome), sequence, 1, seed, trim(log_file), ierr, message)
+            test_exit, trim(outcome), sequence, 1, seed, trim(log_file), ierr, message, &
+            credit_coverage=.false.)
         call release_generation_lease(reproduction_lease, have_reproduction_lease, &
             release_error, cleanup_message)
         if (release_error /= 0) then
@@ -1309,8 +1371,9 @@ contains
         if (was_active) seed = next_campaign_seed(seed)
         selection_request = request
         selection_request%seed = seed
-        call discover_campaign(active%project_root, session, selection_request, selected, selected_count, &
-            mandatory_count, seed, inventory_status, message)
+        call discover_campaign(active%project_root, active%identity, session, &
+            selection_request, selected, selected_count, mandatory_count, seed, &
+            inventory_status, message)
         if (inventory_status /= 0) then
             state_name = 'inventory_failed'
             selected_count = 0
@@ -1330,25 +1393,33 @@ contains
             seed, 'NONE', 0, ierr, message)
     end subroutine complete_build
 
-    subroutine discover_campaign(project_dir, session, request, selected, n_selected, &
-            n_mandatory_selected, seed, ierr, message)
+    subroutine discover_campaign(project_dir, generation_id, session, request, &
+            selected, n_selected, &
+            n_mandatory_selected, seed, ierr, message, bypass_coverage)
         character(len=*), intent(in) :: project_dir
+        character(len=*), intent(in) :: generation_id
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(in) :: request
         character(len=*), intent(out) :: selected(:)
         integer, intent(out) :: n_selected, n_mandatory_selected, seed, ierr
         character(len=*), intent(out) :: message
+        logical, intent(in), optional :: bypass_coverage
 
         type(backend_t) :: backend
         type(dag_t) :: dag
         integer :: changed_ids(MAX_NODES), affected_ids(MAX_NODES)
         integer :: n_changed, n_affected, n_cached, i, n_all, n_impacted
-        integer :: n_history, n_debt, debt_cursor, cursor_seed
-        integer :: candidate_ids(MAX_NODES), shuffle_status
+        integer :: n_history, n_debt, cursor_seed, n_priorities, limit
+        integer :: n_selected_priorities
+        integer :: candidate_ids(MAX_NODES), shuffle_status, coverage_status
         character(len=MAX_PATH) :: filenames(MAX_NODES)
         character(len=NAME_LEN) :: all_names(MAX_NODES), impacted(MAX_NODES)
         character(len=NAME_LEN) :: history(MAX_NODES), debt(MAX_NODES)
+        character(len=NAME_LEN) :: priorities(MAX_NODES)
+        type(coverage_epoch_t) :: coverage
+        character(len=PATH_LEN) :: coverage_path
         logical :: is_test_arr(MAX_NODES)
+        logical :: reproduce_only
 
         selected = ''
         impacted = ''
@@ -1389,16 +1460,61 @@ contains
         else
             n_impacted = 0
         end if
-        debt_cursor = 1
-        if (n_debt > 0) debt_cursor = modulo(cursor_seed, n_debt) + 1
-        call select_gremlin_tests(all_names, n_all, request%targets, &
-            request%n_targets, impacted, n_impacted, history, n_history, debt, n_debt, &
-            request%random_count, seed, selected, n_selected, ierr, &
-            debt_cursor=debt_cursor, n_mandatory_selected=n_mandatory_selected)
-        if (ierr /= GREMLIN_POLICY_OK) then
-            message = 'Gremlin selection rejected test inventory or requested targets'
+        n_priorities = 0
+        call append_priority_names(request%targets, request%n_targets, priorities, &
+            n_priorities)
+        call append_priority_names(impacted, n_impacted, priorities, n_priorities)
+        call append_priority_names(history, n_history, priorities, n_priorities)
+        do i = 1, n_priorities
+            if (.not. any(all_names(:n_all) == priorities(i))) then
+                ierr = 2
+                message = 'requested or prioritized case is outside the eligible inventory'
+                return
+            end if
+        end do
+        reproduce_only = .false.
+        if (present(bypass_coverage)) reproduce_only = bypass_coverage
+        if (reproduce_only) then
+            n_selected = 1
+            n_mandatory_selected = 1
+            selected(1) = request%targets(1)
+            ierr = GREMLIN_POLICY_OK
+            message = ''
             return
         end if
+        n_mandatory_selected = 0
+        limit = n_priorities + min(GREMLIN_NONMANDATORY_LIMIT, request%random_count)
+        if (limit == 0) then
+            ierr = GREMLIN_POLICY_OK
+            message = ''
+            return
+        end if
+        if (len_trim(generation_id) /= HASH_LEN) then
+            ierr = 1
+            message = 'coverage requires an exact generation identity'
+            return
+        end if
+        coverage_path = trim(session%state_dir)//'/coverage-'// &
+            generation_id//'.state'
+        call coverage_open(trim(coverage_path), generation_id, all_names, n_all, &
+            seed, coverage, coverage_status, message)
+        if (coverage_status /= COVERAGE_OK) then
+            ierr = coverage_status
+            message = 'cannot recover current-generation coverage: '//trim(message)
+            return
+        end if
+        seed = coverage%seed
+        call reconcile_coverage(session, coverage, message, ierr)
+        if (ierr /= 0) return
+        call coverage_next_chunk(coverage, priorities, n_priorities, min(limit, &
+            size(selected)), selected, n_selected, coverage_status, &
+            n_selected_priorities)
+        if (coverage_status /= COVERAGE_OK) then
+            ierr = coverage_status
+            message = 'coverage scheduler rejected eligible inventory or priorities'
+            return
+        end if
+        n_mandatory_selected = n_selected_priorities
         if (request%shuffle) then
             call shuffle_gremlin_tests(selected, n_mandatory_selected, n_selected, &
                 seed, shuffle_status)
@@ -1408,6 +1524,90 @@ contains
             end if
         end if
     end subroutine discover_campaign
+
+    subroutine append_priority_names(source, n_source, destination, n_destination)
+        character(len=*), intent(in) :: source(:)
+        integer, intent(in) :: n_source
+        character(len=*), intent(inout) :: destination(:)
+        integer, intent(inout) :: n_destination
+        integer :: i
+
+        do i = 1, n_source
+            if (n_destination >= size(destination)) exit
+            if (any(destination(:n_destination) == source(i))) cycle
+            n_destination = n_destination + 1
+            destination(n_destination) = source(i)
+        end do
+    end subroutine append_priority_names
+
+    subroutine reconcile_coverage(session, coverage, message, ierr)
+        type(gremlin_session_t), intent(in) :: session
+        type(coverage_epoch_t), intent(inout) :: coverage
+        character(len=*), intent(out) :: message
+        integer, intent(out) :: ierr
+
+        type(journal_record_t), allocatable :: records(:)
+        character(len=NAME_LEN) :: case_name
+        character(len=HASH_LEN) :: generation
+        character(len=16) :: outcome, seed_text
+        character(len=HASH_LEN) :: inventory_digest
+        character(len=16) :: epoch_text
+        character(len=PATH_LEN) :: path
+        integer(int64) :: cursor, next_cursor
+        integer :: journal_status, i, status, receipt_seed, receipt_epoch, ios
+        logical :: exists
+
+        ierr = 0
+        message = ''
+        path = trim(session%state_dir)//'/campaign-journal.jsonl'
+        inquire(file=trim(path), exist=exists)
+        if (.not. exists) return
+        cursor = 0_int64
+        do
+            call journal_read_page(trim(path), cursor, 64, &
+                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, &
+                next_cursor, journal_status, message)
+            if (journal_status /= JOURNAL_OK) then
+                ierr = journal_status
+                return
+            end if
+            if (size(records) == 0) exit
+            do i = 1, size(records)
+                case_name = ''
+                generation = ''
+                outcome = ''
+                seed_text = ''
+                inventory_digest = ''
+                epoch_text = ''
+                call extract_json_field(records(i)%json, 'case_id', case_name)
+                call extract_json_field(records(i)%json, 'generation', generation)
+                call extract_json_field(records(i)%json, 'status', outcome)
+                call extract_json_field(records(i)%json, 'seed', seed_text)
+                call extract_json_field(records(i)%json, 'inventory_digest', &
+                    inventory_digest)
+                call extract_json_field(records(i)%json, 'coverage_epoch', epoch_text)
+                if (trim(generation) /= trim(coverage%generation)) cycle
+                read(seed_text, *, iostat=ios) receipt_seed
+                if (ios /= 0) cycle
+                if (receipt_seed /= coverage%seed) cycle
+                read(epoch_text, *, iostat=ios) receipt_epoch
+                if (ios /= 0) cycle
+                if (receipt_epoch /= coverage%epoch .or. &
+                    trim(inventory_digest) /= trim(coverage%inventory_digest)) cycle
+                call coverage_record(coverage, case_name, outcome, status, message)
+                if (status /= COVERAGE_OK) then
+                    ierr = status
+                    return
+                end if
+            end do
+            if (next_cursor <= cursor) then
+                ierr = JOURNAL_INVALID
+                message = 'campaign journal cursor did not advance during coverage recovery'
+                return
+            end if
+            cursor = next_cursor
+        end do
+    end subroutine reconcile_coverage
 
     subroutine read_campaign_history(session, inventory, n_inventory, history, &
             n_history, debt, n_debt, cursor_seed, ierr, message)
@@ -1537,8 +1737,9 @@ contains
         character(len=PATH_LEN) :: executable, log_name
         character(len=PATH_LEN) :: journal_message
         character(len=:), allocatable :: packed
-        integer :: n_args, spawn_exit, journal_status
+        integer :: n_args, spawn_exit, journal_status, coverage_status
         logical :: executable_ok
+        character(len=PATH_LEN) :: coverage_path
 
         child = child_t()
         ierr = 0
@@ -1556,6 +1757,14 @@ contains
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'test')
         call argv_push(packed, n_args, trim(selected(index_case)))
+        coverage_path = trim(session%state_dir)//'/coverage-'// &
+            generation%identity//'.state'
+        call coverage_record_path(trim(coverage_path), generation%identity, &
+            trim(selected(index_case)), 'RUNNING', coverage_status, message)
+        if (coverage_status /= COVERAGE_OK) then
+            ierr = coverage_status
+            return
+        end if
         call process_start_argv_logged(trim(generation%project_root), packed, &
             n_args, trim(child%log_file), child%pid, spawn_exit, 'FO_JOBS=1')
         ierr = spawn_exit
@@ -1614,8 +1823,9 @@ contains
             seed = next_campaign_seed(seed)
             next_request = request
             next_request%seed = seed
-            call discover_campaign(generation%project_root, session, next_request, selected, &
-                n_selected, mandatory_count, seed, ierr, message)
+            call discover_campaign(generation%project_root, generation%identity, &
+                session, next_request, selected, n_selected, mandatory_count, seed, &
+                ierr, message)
             if (ierr /= 0) then
                 state_name = 'inventory_failed'
                 call publish_state(session, request, state_name, generation, generation, '', &
@@ -1680,7 +1890,7 @@ contains
     end subroutine record_case
 
     subroutine record_immediate_case(session, request, generation, case_name, exitcode, &
-            outcome, sequence, case_index, seed, log_file, ierr, message)
+            outcome, sequence, case_index, seed, log_file, ierr, message, credit_coverage)
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(in) :: request
         type(generation_t), intent(in) :: generation
@@ -1689,16 +1899,42 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
+        logical, intent(in), optional :: credit_coverage
+        logical :: credit
         character(len=256) :: completion_id
         character(len=8192) :: record
         character(len=16) :: journal_outcome
         character(len=PATH_LEN) :: journal_path
-        integer :: status
+        character(len=PATH_LEN) :: coverage_path
+        character(len=HASH_LEN) :: inventory_digest
+        character(len=96) :: receipt_epoch
+        character(len=512) :: receipt_identity
+        type(gremlin_coverage_view_t) :: coverage_view
+        integer :: status, coverage_status
 
         write (completion_id, '(a,a,a,a,i0,a,i0)') trim(session%session_id), '-', &
             generation%identity(1:12), '-', sequence, '-', case_index
         journal_outcome = 'fail'
         if (outcome == 'PASS' .or. outcome == 'BUILD_PASS') journal_outcome = 'pass'
+        credit = .true.
+        if (present(credit_coverage)) credit = credit_coverage
+        receipt_identity = ',"evidence_kind":"reproduction"'
+        if (credit) receipt_identity = ',"evidence_kind":"campaign"'
+        if (credit .and. coverage_outcome(outcome)) then
+            coverage_path = trim(session%state_dir)//'/coverage-'// &
+                generation%identity//'.state'
+            call coverage_read_view_path(trim(coverage_path), generation%identity, &
+                coverage_view, coverage_status, message)
+            if (coverage_status /= COVERAGE_OK) then
+                ierr = coverage_status
+                return
+            end if
+            inventory_digest = coverage_view%inventory_digest
+            write(receipt_epoch, '(i0)') coverage_view%epoch
+            receipt_identity = ',"evidence_kind":"campaign","coverage_epoch":'// &
+                trim(receipt_epoch)// &
+                ',"inventory_digest":"'//trim(inventory_digest)//'"'
+        end if
         write (record, '(a)') '{"completion_id":"'//trim(completion_id)// &
             '","session_id":"'//trim(json_escape_string(session%session_id))// &
             '","lane_id":"'//trim(json_escape_string(request%lane_id))// &
@@ -1707,6 +1943,7 @@ contains
             '","outcome":"'//trim(journal_outcome)//'","status":"'// &
             trim(outcome)//'","exitcode":'// &
             trim(json_int(exitcode))//',"seed":'//trim(json_int(seed))// &
+            trim(receipt_identity)// &
             ',"order":'//trim(json_int(case_index))//',"log_path":"'// &
             trim(json_escape_string(log_file))//'"}'
         call gremlin_get_session_journal_path(session%project_key, request%lane_id, &
@@ -1714,11 +1951,19 @@ contains
         if (ierr /= 0) return
         ! The lane ledger is the selection source of truth and is written first.
         ! A restart can therefore never advance coverage from an unreceipted case.
-        if (outcome == 'PASS' .or. outcome == 'FAIL' .or. outcome == 'TIMEOUT') then
+        if (credit .and. coverage_outcome(outcome)) then
             call journal_append(trim(session%state_dir)//'/campaign-journal.jsonl', &
                 trim(completion_id), trim(record), status, message)
             if (status /= JOURNAL_OK) then
                 ierr = status
+                return
+            end if
+            coverage_path = trim(session%state_dir)//'/coverage-'// &
+                generation%identity//'.state'
+            call coverage_record_path(trim(coverage_path), generation%identity, &
+                case_name, outcome, coverage_status, message)
+            if (coverage_status /= COVERAGE_OK) then
+                ierr = coverage_status
                 return
             end if
             call journal_compact_tail(trim(session%state_dir)// &
@@ -1904,6 +2149,14 @@ contains
         status_is_failure = status == 'FAIL' .or. status == 'BUILD_FAIL' .or. &
             status == 'TIMEOUT' .or. status == 'INFRA_ERROR'
     end function status_is_failure
+
+    logical function coverage_outcome(status)
+        character(len=*), intent(in) :: status
+        coverage_outcome = status == 'PASS' .or. status == 'FAIL' .or. &
+            status == 'TIMEOUT' .or. status == 'FLAKY' .or. &
+            status == 'INFRA' .or. status == 'INFRA_ERROR' .or. &
+            status == 'CANCELLED'
+    end function coverage_outcome
 
     function request_policy_key(request) result(key)
         type(gremlin_request_t), intent(in) :: request

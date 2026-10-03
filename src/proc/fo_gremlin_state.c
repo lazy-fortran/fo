@@ -66,6 +66,13 @@ static int state_path(const char *project, const char *lane, char *out,
     return create_dirs ? make_dirs(out) : 0;
 }
 
+int fo_gremlin_session_state_dir(const char *project, const char *lane,
+                                char *dir, size_t dir_capacity) {
+    char canonical[PATH_MAX];
+    return state_path(project, lane, dir, dir_capacity, canonical,
+                      sizeof(canonical), 0);
+}
+
 static int write_all(int fd, const char *s, size_t n) {
     while (n) {
         ssize_t k = write(fd, s, n);

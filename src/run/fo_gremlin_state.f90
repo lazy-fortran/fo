@@ -1,5 +1,5 @@
 module fo_gremlin_state
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, c_size_t
     implicit none
     private
 
@@ -27,6 +27,7 @@ module fo_gremlin_state
 
     public :: gremlin_session_acquire, gremlin_session_publish
     public :: gremlin_session_read, gremlin_session_release
+    public :: gremlin_session_state_dir
     public :: gremlin_session_recovery_complete
     public :: gremlin_session_request_stop, gremlin_session_stop_requested
     public :: gremlin_session_process_matches
@@ -38,6 +39,15 @@ module fo_gremlin_state
     public :: gremlin_generation_root
 
     interface
+        function c_session_state_dir(project, lane, dir, cap) &
+                bind(C, name='fo_gremlin_session_state_dir') result(ierr)
+            import :: c_char, c_int, c_size_t
+            character(kind=c_char), intent(in) :: project(*), lane(*)
+            character(kind=c_char), intent(out) :: dir(*)
+            integer(c_size_t), value :: cap
+            integer(c_int) :: ierr
+        end function c_session_state_dir
+
         function c_session_acquire(project, lane, dir, dircap, session, sessioncap, &
                 recovered, recoveredcap, fd, owner, pid, start, startcap) &
                 bind(C, name='fo_gremlin_session_acquire') result(ierr)
@@ -194,6 +204,21 @@ module fo_gremlin_state
     end interface
 
 contains
+
+    subroutine gremlin_session_state_dir(project_dir, lane_id, state_dir, ierr, message)
+        character(len=*), intent(in) :: project_dir, lane_id
+        character(len=*), intent(out) :: state_dir, message
+        integer, intent(out) :: ierr
+        character(kind=c_char) :: dir(PATH_LEN)
+        integer(c_int) :: c_error
+
+        dir = c_null_char
+        c_error = c_session_state_dir(trim(project_dir)//c_null_char, &
+            trim(lane_id)//c_null_char, dir, int(size(dir), c_size_t))
+        ierr = int(c_error)
+        state_dir = c_string(dir)
+        message = error_text(ierr)
+    end subroutine gremlin_session_state_dir
 
     subroutine gremlin_session_acquire(project_dir, lane_id, session, ierr, message)
         character(len=*), intent(in) :: project_dir, lane_id
