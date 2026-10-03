@@ -268,13 +268,12 @@ async function main() {
     'preempted A case remains unknown rather than receiving a verdict');
 
   await release(bGate);
-  await waitFile(path.join(marks, 'b-result'));
-  assert.equal(fs.readFileSync(path.join(marks, 'b-result'), 'utf8').trim(), 'B:B',
-    'B test uses its compiled source and matching frozen runtime input');
   const completedB = await waitState(project, 'issue-141-a', a.session_id,
     s => s.events.some(e => e.case_id === 'test_capture' &&
       e.generation === bState.active_generation && e.status === 'PASS'),
     'B capture PASS receipt');
+  assert.equal(fs.readFileSync(path.join(marks, 'b-result'), 'utf8').trim(), 'B:B',
+    'B test uses its compiled source and matching frozen runtime input');
   fs.writeFileSync(path.join(scratch, 'completed-b-status.json'), JSON.stringify(completedB, null, 2));
   assert.equal(fs.readFileSync(path.join(marks, 'test_blocked-A.txt'), 'utf8').trim(), 'A:A',
     'no obsolete A rerun reads the live B input');
