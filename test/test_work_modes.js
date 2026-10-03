@@ -26,16 +26,28 @@ const env = {
 };
 fs.mkdirSync(env.HOME, { recursive: true });
 const activeRoots = new Set();
+const rootEnvs = new Map();
 
-function run(args, cwd) {
-  return spawnSync(fo, args, { cwd, env, encoding: 'utf8', timeout: 30000,
+function run(args, cwd, environment = env) {
+  return spawnSync(fo, args, { cwd, env: environment, encoding: 'utf8', timeout: 30000,
     maxBuffer: 8 * 1024 * 1024 });
 }
 
-function json(args, cwd) {
-  const result = run(args, cwd);
+function json(args, cwd, environment = env) {
+  const result = run(args, cwd, environment);
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   return JSON.parse(result.stdout.trim());
+}
+
+function runAsync(args, cwd, environment = env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(fo, args, { cwd, env: environment });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('close', status => resolve({ status, stdout, stderr }));
+  });
 }
 
 function project(name) {
@@ -57,6 +69,19 @@ fs.writeFileSync(adapter, [
   "function finish() { record('end'); process.exit(Number(result)); }",
   "if (gate === '-') setTimeout(finish, 120);",
   "else { const timer=setInterval(()=>{ if(fs.existsSync(gate)){clearInterval(timer);finish();}},10); }",
+  ''
+].join('\n'));
+
+const resistantAdapter = path.join(scratch, 'resistant.js');
+fs.writeFileSync(resistantAdapter, [
+  "const fs = require('node:fs');",
+  "const { spawn } = require('node:child_process');",
+  "const [role, events] = process.argv.slice(2);",
+  "function record(phase) { fs.appendFileSync(events, JSON.stringify({phase,id:role,pid:process.pid,at:Date.now()})+'\\n'); }",
+  "process.on('SIGTERM', () => record('term'));",
+  "record('start');",
+  "if (role === 'parent') spawn(process.execPath, [__filename, 'child', events], {stdio:'ignore'});",
+  "setInterval(() => record('heartbeat'), 25);",
   ''
 ].join('\n'));
 
@@ -111,22 +136,23 @@ async function until(predicate, message, timeoutMs = 15000) {
   throw new Error(`timed out: ${message}`);
 }
 
-async function waitTasks(root, states, timeoutMs = 15000) {
+async function waitTasks(root, states, timeoutMs = 15000, environment = env) {
   return until(() => {
-    const status = json(['work', 'status', '--dir', root], root);
+    const status = json(['work', 'status', '--dir', root], root, environment);
     if (status.tasks && status.tasks.every(t => states.includes(t.state))) return status;
     return null;
   }, `tasks reach ${states.join(',')}`, timeoutMs);
 }
 
-async function cancel(root) {
-  const status = json(['work', 'cancel', '--dir', root], root);
+async function cancel(root, environment = env) {
+  const status = json(['work', 'cancel', '--dir', root], root, environment);
   assert.equal(status.status, 'cancel_requested');
   const finished = await until(() => {
-    const current = json(['work', 'status', '--dir', root], root);
+    const current = json(['work', 'status', '--dir', root], root, environment);
     return current.status === 'cancelled' ? current : null;
   }, 'work owner to publish cancellation', 15000);
   activeRoots.delete(root);
+  rootEnvs.delete(root);
   return finished;
 }
 
@@ -166,6 +192,46 @@ async function mcpText(child, id, argumentsObject) {
 }
 
 async function main() {
+  const sameRoot = project('work_modes_simultaneous');
+  const sameEvents = path.join(scratch, 'simultaneous.jsonl');
+  const sameGate = path.join(scratch, 'simultaneous-gate');
+  const sameFile = saveTasks('simultaneous', [
+    task(sameEvents, 'one-owner', { gate: sameGate })]);
+  const sameArgs = ['work', 'start', '--mode', 'parallel', '--max-workers', '1',
+    '--tasks', sameFile, '--dir', sameRoot];
+  activeRoots.add(sameRoot);
+  const sameStarts = await Promise.all(Array.from({ length: 6 }, () =>
+    runAsync(sameArgs, sameRoot)));
+  assert.ok(sameStarts.every(result => result.status === 0),
+    JSON.stringify(sameStarts));
+  const sameIds = sameStarts.map(result => JSON.parse(result.stdout).work_id);
+  assert.equal(new Set(sameIds).size, 1, 'simultaneous starts attach to one owner');
+  await until(() => eventsFor(sameEvents).length === 1,
+    'one adapter to start for simultaneous requests');
+  fs.writeFileSync(sameGate, 'go');
+  await waitTasks(sameRoot, ['succeeded']);
+  assert.equal(eventsFor(sameEvents).filter(event => event.phase === 'start').length, 1);
+  await cancel(sameRoot);
+
+  const differentRoot = project('work_modes_incompatible');
+  const differentEvents = path.join(scratch, 'incompatible.jsonl');
+  const differentGate = path.join(scratch, 'incompatible-gate');
+  const differentArgs = ['left', 'right'].map(id => ['work', 'start',
+    '--mode', 'parallel', '--max-workers', '1', '--tasks', saveTasks(id, [
+      task(differentEvents, id, { gate: differentGate })]), '--dir', differentRoot]);
+  activeRoots.add(differentRoot);
+  const differentStarts = await Promise.all(differentArgs.map(args =>
+    runAsync(args, differentRoot)));
+  assert.deepEqual(differentStarts.map(result => result.status).sort(), [0, 2]);
+  assert.match(differentStarts.find(result => result.status === 2).stdout,
+    /incompatible request/);
+  await until(() => eventsFor(differentEvents).length === 1,
+    'only the selected policy to launch a worker');
+  fs.writeFileSync(differentGate, 'go');
+  await waitTasks(differentRoot, ['succeeded']);
+  assert.equal(eventsFor(differentEvents).filter(event => event.phase === 'start').length, 1);
+  await cancel(differentRoot);
+
   const root = project('work_modes_probe');
   const events = path.join(scratch, 'events.jsonl');
   const gateB = path.join(scratch, 'gate-b');
@@ -301,6 +367,83 @@ async function main() {
   await waitTasks(resourceRoot, ['succeeded']);
   await cancel(resourceRoot);
 
+  const capOneRoot = project('work_modes_test_capacity_one');
+  const capOneEnv = { ...env, FO_GREMLIN_STATE_DIR: path.join(scratch, 'cap-one-state'),
+    FO_WORK_TEST_CAPACITY: '1' };
+  const capOneEvents = path.join(scratch, 'cap-one.jsonl');
+  const capOneGateA = path.join(scratch, 'cap-one-a');
+  const capOneGateB = path.join(scratch, 'cap-one-b');
+  const capOneTasks = [
+    task(capOneEvents, 'first', { gate: capOneGateA, resources: ['test'] }),
+    task(capOneEvents, 'second', { gate: capOneGateB, resources: ['test'] })
+  ];
+  json(['work', 'start', '--mode', 'parallel', '--max-workers', '2', '--tasks',
+    saveTasks('cap-one', capOneTasks), '--dir', capOneRoot], capOneRoot, capOneEnv);
+  activeRoots.add(capOneRoot);
+  rootEnvs.set(capOneRoot, capOneEnv);
+  await until(() => eventsFor(capOneEvents).some(event => event.id === 'first' &&
+    event.phase === 'start'), 'test task to start with capacity one');
+  await wait(150);
+  assert.ok(!eventsFor(capOneEvents).some(event => event.id === 'second' &&
+    event.phase === 'start'), 'second test task must wait for the sole test slot');
+  fs.writeFileSync(capOneGateA, 'go');
+  await until(() => eventsFor(capOneEvents).some(event => event.id === 'second' &&
+    event.phase === 'start'), 'second test task to start after first finishes');
+  const capOneTimeline = eventsFor(capOneEvents);
+  assert.ok(capOneTimeline.findIndex(event => event.id === 'first' &&
+    event.phase === 'end') < capOneTimeline.findIndex(event => event.id === 'second' &&
+    event.phase === 'start'));
+  fs.writeFileSync(capOneGateB, 'go');
+  await waitTasks(capOneRoot, ['succeeded'], 15000, capOneEnv);
+  await cancel(capOneRoot, capOneEnv);
+
+  const resistantEnv = { ...env,
+    FO_GREMLIN_STATE_DIR: path.join(scratch, 'resistant-state'),
+    FO_WORK_CPU_CAPACITY: '1' };
+  const resistantRoot = project('work_modes_resistant');
+  const followerRoot = project('work_modes_follower');
+  const resistantEvents = path.join(scratch, 'resistant.jsonl');
+  const followerEvents = path.join(scratch, 'follower.jsonl');
+  const followerGate = path.join(scratch, 'follower-gate');
+  json(['work', 'start', '--mode', 'parallel', '--max-workers', '1', '--tasks',
+    saveTasks('resistant', [{ id: 'resistant',
+      argv: [process.execPath, resistantAdapter, 'parent', resistantEvents] }]),
+    '--dir', resistantRoot], resistantRoot, resistantEnv);
+  activeRoots.add(resistantRoot);
+  rootEnvs.set(resistantRoot, resistantEnv);
+  await until(() => eventsFor(resistantEvents).filter(event =>
+    event.phase === 'start').length === 2, 'resistant worker and child to start');
+  json(['work', 'start', '--mode', 'parallel', '--max-workers', '1', '--tasks',
+    saveTasks('follower', [task(followerEvents, 'follower', { gate: followerGate })]),
+    '--dir', followerRoot], followerRoot, resistantEnv);
+  activeRoots.add(followerRoot);
+  rootEnvs.set(followerRoot, resistantEnv);
+  await until(() => json(['work', 'status', '--dir', followerRoot],
+    followerRoot, resistantEnv).tasks[0].blocked_reason === 'cpu_capacity',
+  'follower to wait for the resistant worker lease');
+  assert.equal(json(['work', 'cancel', '--dir', resistantRoot], resistantRoot,
+    resistantEnv).status, 'cancel_requested');
+  await until(() => eventsFor(resistantEvents).filter(event =>
+    event.phase === 'term').length === 2, 'both processes to ignore SIGTERM');
+  assert.equal(json(['work', 'status', '--dir', resistantRoot], resistantRoot,
+    resistantEnv).status, 'cancelling');
+  assert.equal(eventsFor(followerEvents).length, 0,
+    'follower cannot take the lease while the resistant tree is alive');
+  await until(() => json(['work', 'status', '--dir', resistantRoot],
+    resistantRoot, resistantEnv).status === 'cancelled',
+  'resistant tree to be killed before terminal status', 15000);
+  activeRoots.delete(resistantRoot);
+  rootEnvs.delete(resistantRoot);
+  await until(() => eventsFor(followerEvents).some(event => event.phase === 'start'),
+    'follower to start after resistant tree termination');
+  for (const event of eventsFor(resistantEvents).filter(item => item.phase === 'start')) {
+    assert.throws(() => process.kill(event.pid, 0), { code: 'ESRCH' },
+      'registered worker and child must both be dead before lease reuse');
+  }
+  fs.writeFileSync(followerGate, 'go');
+  await waitTasks(followerRoot, ['succeeded'], 15000, resistantEnv);
+  await cancel(followerRoot, resistantEnv);
+
   const failedRoot = project('work_modes_failure');
   const failedEvents = path.join(scratch, 'failed.jsonl');
   const failedTasks = [
@@ -384,7 +527,7 @@ async function main() {
 main().catch(async error => {
   console.error(error.stack || error);
   for (const root of [...activeRoots]) {
-    await cancel(root).catch(() => {});
+    await cancel(root, rootEnvs.get(root) || env).catch(() => {});
   }
   cleanScratch();
   process.exitCode = 1;

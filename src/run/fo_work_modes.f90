@@ -448,12 +448,39 @@ contains
         character(len=*), intent(in) :: project_dir, request_json
         character(len=:), allocatable, intent(out) :: response
         integer, intent(out) :: exitcode
+        type(gremlin_lease_t) :: startup_lease
+        character(len=PATH_LEN) :: message
+        integer :: ierr, release_error, attempt
+
+        do attempt = 1, 200
+            call gremlin_lease_acquire('work-start', 1, startup_lease, ierr, message)
+            if (ierr == 0) exit
+            if (ierr /= 11 .and. ierr /= 16) exit
+            call fs_sleep_ms(50)
+        end do
+        if (ierr /= 0) then
+            call error_json('work startup capacity unavailable', response)
+            exitcode = 2
+            return
+        end if
+        call work_start_locked(project_dir, request_json, response, exitcode)
+        call gremlin_lease_release(startup_lease, release_error, message)
+        if (release_error /= 0) then
+            call error_json('cannot release work startup lease', response)
+            exitcode = 2
+        end if
+    end subroutine work_start
+
+    subroutine work_start_locked(project_dir, request_json, response, exitcode)
+        character(len=*), intent(in) :: project_dir, request_json
+        character(len=:), allocatable, intent(out) :: response
+        integer, intent(out) :: exitcode
 
         type(work_request_t) :: request
         type(gremlin_session_t) :: session
         character(len=PATH_LEN) :: message, owner_start, executable
         character(len=TEXT_MAX) :: status_text
-        character(len=128) :: live_id, stored_policy
+        character(len=128) :: live_id, stored_policy, stored_work_id
         character(len=PATH_LEN) :: request_path, status_path, log_file
         character(len=:), allocatable :: packed
         integer :: ierr, owner_pid, pid, spawn_exit, n_args, i
@@ -564,13 +591,15 @@ contains
             return
         end if
         call extract_json_field(status_text, 'policy_key', stored_policy)
-        if (trim(stored_policy) /= trim(request%policy_key)) then
+        call extract_json_field(status_text, 'work_id', stored_work_id)
+        if (trim(stored_policy) /= trim(request%policy_key) .or. &
+            trim(stored_work_id) /= trim(request%work_id)) then
             call error_json('a concurrent work start selected another request', response)
             exitcode = 2
             return
         end if
         response = trim(status_text)
-    end subroutine work_start
+    end subroutine work_start_locked
 
     subroutine work_status(project_dir, response, exitcode)
         character(len=*), intent(in) :: project_dir
@@ -676,12 +705,11 @@ contains
         type(gremlin_lease_t) :: campaign_lease
         character(len=TEXT_MAX) :: raw_request, status_text
         character(len=PATH_LEN) :: message, request_path, status_path
-        character(len=PATH_LEN) :: campaign_request
+        character(len=128) :: campaign_id, saved_work_id, saved_policy
         character(len=:), allocatable :: response
-        character(len=128) :: campaign_id
-        integer :: ierr, release_error, spawned_total
-        integer :: gremlin_exit
-        logical :: have_campaign_lease, stopping, stop_requested
+        integer :: ierr, release_error, spawned_total, i, j
+        logical :: have_campaign_lease, stopping, stop_requested, workers_stopped
+        logical :: deferred_campaign, campaign_stopped
 
         exitcode = 0
         have_campaign_lease = .false.
@@ -706,40 +734,53 @@ contains
         request%state_dir = state_dir
         request%work_id = work_id
         request%policy_key = policy_digest(trim(raw_request))
+        call read_work_file(status_path, status_text, ierr)
+        if (ierr /= 0) then
+            exitcode = 2
+            return
+        end if
+        call extract_json_field(status_text, 'work_id', saved_work_id)
+        call extract_json_field(status_text, 'policy_key', saved_policy)
+        if (trim(saved_work_id) /= trim(work_id) .or. &
+            trim(saved_policy) /= trim(request%policy_key)) then
+            exitcode = 2
+            return
+        end if
+        deferred_campaign = .false.
+        if (request%mode == 'parallel' .and. resource_capacity('test') == 1) then
+            do i = 1, request%n_tasks
+                do j = 1, request%tasks(i)%n_resources
+                    if (request%tasks(i)%resources(j) == 'test') deferred_campaign = .true.
+                end do
+            end do
+        end if
         call gremlin_session_acquire(project_dir, WORK_LANE, session, ierr, message)
         if (ierr /= 0 .or. .not. session%owner) then
             write (output_unit, '(a)') 'fo work: cannot acquire work owner: '//trim(message)
             exitcode = 2
             return
         end if
-        call gremlin_lease_acquire('work-test', resource_capacity('test'), &
-            campaign_lease, ierr, message)
-        if (ierr /= 0) then
-            call publish_error_status(session, request, 'test campaign capacity unavailable')
-            call gremlin_session_release(session, release_error, message)
-            exitcode = 2
-            return
+        if (.not. deferred_campaign) then
+            call start_campaign(project_dir, campaign_lease, campaign_id, &
+                have_campaign_lease, ierr, message)
+            if (ierr /= 0) then
+                call publish_error_status(session, request, trim(message))
+                call gremlin_session_release(session, release_error, message)
+                exitcode = 2
+                return
+            end if
         end if
-        have_campaign_lease = .true.
-        campaign_request = '{"lane_id":"'//CAMPAIGN_LANE// &
-            '","jobs":1,"random_count":32}'
-        call gremlin_handle('start', project_dir, trim(campaign_request), &
-            response, gremlin_exit)
-        if (gremlin_exit /= 0) then
-            call publish_error_status(session, request, &
-                'cannot start Gremlin campaign: '//trim(response))
-            call gremlin_lease_release(campaign_lease, release_error, message)
-            call gremlin_session_release(session, release_error, message)
-            exitcode = 2
-            return
-        end if
-        campaign_id = ''
-        call extract_json_field(response, 'session_id', campaign_id)
         spawned_total = 0
         call publish_work_status(session, request, 'running', spawned_total, ierr, message)
         if (ierr /= 0) then
-            call stop_campaign(project_dir)
-            call gremlin_lease_release(campaign_lease, release_error, message)
+            if (have_campaign_lease) then
+                do
+                    call stop_campaign(project_dir, campaign_id, campaign_stopped)
+                    if (campaign_stopped) exit
+                    call fs_sleep_ms(100)
+                end do
+                call gremlin_lease_release(campaign_lease, release_error, message)
+            end if
             call gremlin_session_release(session, release_error, message)
             exitcode = 2
             return
@@ -761,6 +802,7 @@ contains
                 if (ierr /= 0) then
                     call publish_work_status(session, request, 'worker_error', &
                         spawned_total, release_error, message)
+                    stopping = .true.
                     exit
                 end if
                 call mark_dependency_failures(request)
@@ -769,6 +811,7 @@ contains
                 if (ierr /= 0) then
                     call publish_work_status(session, request, 'admission_error', &
                         spawned_total, release_error, message)
+                    stopping = .true.
                     exit
                 end if
                 call publish_work_status(session, request, task_overall_state(request), &
@@ -782,6 +825,16 @@ contains
             end do
         end if
 
+        if (deferred_campaign .and. all_tasks_terminal(request) .and. &
+            .not. stopping) then
+            call start_campaign(project_dir, campaign_lease, campaign_id, &
+                have_campaign_lease, ierr, message)
+            if (ierr /= 0) then
+                call publish_error_status(session, request, trim(message))
+                stopping = .true.
+            end if
+        end if
+
         ! The work session owns the campaign until explicit cancellation, even
         ! after its task graph reaches a terminal state.
         do while (.not. stopping)
@@ -793,19 +846,37 @@ contains
                 call fs_sleep_ms(100)
             end if
         end do
-        call cancel_workers(request)
-        call stop_campaign(project_dir)
-        if (request%mode == 'serial') then
-            call publish_work_status(session, request, 'cancelled', spawned_total, &
-                ierr, message)
-        else
-            call publish_work_status(session, request, 'cancelled', spawned_total, &
-                ierr, message)
+        call publish_work_status(session, request, 'cancelling', spawned_total, &
+            ierr, message)
+        do
+            call cancel_workers(request, workers_stopped)
+            if (workers_stopped) exit
+            call publish_work_status(session, request, 'cancelling', &
+                spawned_total, ierr, message)
+            call fs_sleep_ms(100)
+        end do
+        if (have_campaign_lease) then
+            do
+                call stop_campaign(project_dir, campaign_id, campaign_stopped)
+                if (campaign_stopped) exit
+                call publish_work_status(session, request, 'cancelling', &
+                    spawned_total, ierr, message)
+                call fs_sleep_ms(100)
+            end do
         end if
         if (have_campaign_lease) then
-            call gremlin_lease_release(campaign_lease, release_error, message)
-            if (release_error /= 0) exitcode = 2
+            do
+                call gremlin_lease_release(campaign_lease, release_error, message)
+                if (release_error == 0) exit
+                call fs_sleep_ms(100)
+            end do
         end if
+        do
+            call publish_work_status(session, request, 'cancelled', spawned_total, &
+                ierr, message)
+            if (ierr == 0) exit
+            call fs_sleep_ms(100)
+        end do
         call gremlin_session_release(session, release_error, message)
         if (release_error /= 0) exitcode = 2
     end subroutine work_owner_run
@@ -1190,18 +1261,32 @@ contains
         if (running_count(request) == 0) state = 'tasks_blocked'
     end function task_overall_state
 
-    subroutine cancel_workers(request)
+    subroutine cancel_workers(request, workers_stopped)
         type(work_request_t), intent(inout) :: request
+        logical, intent(out) :: workers_stopped
         integer :: i, cancel_error, release_error
         character(len=PATH_LEN) :: message
 
+        workers_stopped = .true.
         do i = 1, request%n_tasks
             if (request%tasks(i)%state == 'running') then
-                call process_cancel_pid(request%tasks(i)%pid, cancel_error)
-                request%tasks(i)%pid = 0
+                if (request%tasks(i)%pid > 0) then
+                    call process_cancel_pid(request%tasks(i)%pid, cancel_error)
+                    if (cancel_error /= 0) then
+                        request%tasks(i)%blocked_reason = 'cancellation_failed'
+                        workers_stopped = .false.
+                        cycle
+                    end if
+                    request%tasks(i)%pid = 0
+                end if
+                call release_task_leases(request%tasks(i), release_error, message)
+                if (release_error /= 0) then
+                    request%tasks(i)%blocked_reason = 'lease_release_failed'
+                    workers_stopped = .false.
+                    cycle
+                end if
                 request%tasks(i)%state = 'cancelled'
                 request%tasks(i)%blocked_reason = 'work_cancelled'
-                call release_task_leases(request%tasks(i), release_error, message)
             else if (request%tasks(i)%state == 'pending') then
                 request%tasks(i)%state = 'cancelled'
                 request%tasks(i)%blocked_reason = 'work_cancelled'
@@ -1209,13 +1294,54 @@ contains
         end do
     end subroutine cancel_workers
 
-    subroutine stop_campaign(project_dir)
+    subroutine start_campaign(project_dir, lease, campaign_id, started, ierr, message)
         character(len=*), intent(in) :: project_dir
+        type(gremlin_lease_t), intent(out) :: lease
+        character(len=*), intent(out) :: campaign_id
+        logical, intent(out) :: started
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
         character(len=:), allocatable :: response
-        integer :: exitcode
+        integer :: release_error
+        character(len=PATH_LEN) :: release_message
 
+        started = .false.
+        campaign_id = ''
+        call gremlin_lease_acquire('work-test', resource_capacity('test'), &
+            lease, ierr, message)
+        if (ierr /= 0) then
+            message = 'test campaign capacity unavailable'
+            return
+        end if
+        call gremlin_handle('start', project_dir, &
+            '{"lane_id":"'//CAMPAIGN_LANE// &
+            '","jobs":1,"random_count":32}', response, ierr)
+        if (ierr /= 0) then
+            message = 'cannot start Gremlin campaign: '//trim(response)
+            call gremlin_lease_release(lease, release_error, release_message)
+            return
+        end if
+        call extract_json_field(response, 'session_id', campaign_id)
+        started = .true.
+    end subroutine start_campaign
+
+    subroutine stop_campaign(project_dir, campaign_id, stopped)
+        character(len=*), intent(in) :: project_dir, campaign_id
+        logical, intent(out) :: stopped
+        character(len=:), allocatable :: response
+        character(len=TEXT_MAX) :: status_text
+        character(len=PATH_LEN) :: owner_start, message
+        character(len=128) :: live_id
+        integer :: exitcode, ierr, owner_pid
+
+        call gremlin_session_read(project_dir, CAMPAIGN_LANE, live_id, &
+            owner_pid, owner_start, status_text, ierr, message)
+        stopped = ierr /= 0
+        if (.not. stopped) stopped = trim(live_id) /= trim(campaign_id)
+        if (stopped) return
         call gremlin_handle('stop', project_dir, &
-            '{"lane_id":"'//CAMPAIGN_LANE//'"}', response, exitcode)
+            '{"lane_id":"'//CAMPAIGN_LANE//'","session_id":"'// &
+            trim(campaign_id)//'"}', response, exitcode)
     end subroutine stop_campaign
 
     subroutine publish_error_status(session, request, message)

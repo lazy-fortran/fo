@@ -126,6 +126,8 @@ parallel --max-workers N --tasks tasks.json` starts the same campaign and
 admits independent ready tasks up to the session worker limit. `fo work status`
 reports the task graph, active worker count, blocked reasons, and worker logs;
 `fo work cancel` requests cancellation of that work session and its campaign.
+Status remains `cancelling` while an owned worker tree or campaign is still
+stopping; the worker's leases are released only after termination is confirmed.
 MCP exposes the same operations as `work_start`, `work_status`, and
 `work_cancel` on the existing `fo` tool.
 
@@ -153,6 +155,8 @@ capacities set by `FO_WORKER_CAPACITY`, `FO_WORK_CPU_CAPACITY`,
 `FO_WORK_TEST_CAPACITY`. Each worker gets `FO_JOBS=1` and `FO_TEST_JOBS=1` to
 bound nested fo pools. A task's exit status and log are evidence for the
 controller; worker processes cannot integrate or promote their changes.
+With one test slot and a task that declares `test`, the task graph runs first;
+the Gremlin campaign starts after those tasks finish and release the slot.
 
 The test-failure-path lint rule follows failure exits through project module
 helpers. It scans module procedures in `src/`, `app/`, and `test/`, repeats the
