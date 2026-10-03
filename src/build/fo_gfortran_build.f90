@@ -3423,6 +3423,7 @@ contains
             read (u, '(a)', iostat=ios) member_line
             if (ios /= 0) exit
             if (len_trim(member_line) == 0) cycle
+            if (archive_member_is_metadata(member_line)) cycle
             member_found = .false.
             do i = 1, n_objects
                 if (matched(i)) cycle
@@ -3458,6 +3459,22 @@ contains
             end if
         end do
     end subroutine archive_has_expected_members
+
+    logical function archive_member_is_metadata(member)
+        character(len=*), intent(in) :: member
+
+        ! BSD/Apple ar may expose its symbol table as an ordinary-looking
+        ! member in `ar -t`. These exact names are archive indexes, not object
+        ! inputs. Keep this list narrow: unknown members must still fail the
+        ! exact expected-object check above.
+        select case (trim(member))
+        case ('__.SYMDEF', '__.SYMDEF SORTED', '__.SYMDEF_64', &
+                '__.SYMDEF_64 SORTED')
+            archive_member_is_metadata = .true.
+        case default
+            archive_member_is_metadata = .false.
+        end select
+    end function archive_member_is_metadata
 
     subroutine archive_member_content_matches(project_dir, archive_path, &
             object_path, matches)
