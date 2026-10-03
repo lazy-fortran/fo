@@ -484,7 +484,7 @@ The target module boundaries are `fo_change_watch`, `fo_gremlin_types`,
 Progress is published continuously even when it is not ready for `main`:
 
 - [draft core PR #146](https://github.com/lazy-fortran/fo/pull/146) targets
-  `main` from `gremlin/core-review` and receives the core CI/review signal;
+  `main` from `gremlin/core-review`; draft pushes publish progress without CI;
 - [stacked work-mode PR #147](https://github.com/lazy-fortran/fo/pull/147)
   targets the core branch from `gremlin/work-modes-review`;
 - `gremlin/integration-provisional-20261003` records the latest combined
@@ -496,13 +496,15 @@ the current-head full pipeline, required behavioral fixtures, CI, review and
 matrix dispositions pass. Never accumulate unpublished controller commits merely
 because a continuous campaign is partial.
 
-Focused development must not wait for the combined `fpm` or GitHub Actions
-pipeline. Workers reuse one exact built driver and run only their owned
-independent behavioral oracle while iterating. The controller runs the combined
-fixed-version pipeline once per reviewed integration batch; GitHub Actions is an
-asynchronous exact-head milestone gate. The #156 audit proved CI already builds
-once and routes all named fixtures through the exact candidate, so it closed
-without a repository change.
+**Never wait for GitHub CI while implementation work is available. GitHub CI is
+a final promotion gate, not part of the development loop. Use Gremlin and
+focused local oracles while developing.** Workers reuse one exact built driver
+and run only their owned independent oracle while iterating. Draft PR pushes run
+no CI. Once Gremlin's promotion gate, review and project matrix are complete,
+mark the PR ready and require one exact-head independent CI audit before merge.
+Gremlin and `fo work` never model, poll or schedule GitHub Actions, refs or
+external CI receipts. #156 confirmed existing CI already builds once and routes
+named fixtures through the exact candidate.
 
 Dogfooding begins during implementation. Keep one named resident `fo gremlin`
 integration lane per active repository and rotate task-worktree lanes for
@@ -532,7 +534,9 @@ are:
    ordinary/full verification, semantic events and typed waits.
 7. [#155](https://github.com/lazy-fortran/fo/issues/155): enter quiescence after
    full green and wake only on relevant shared change events.
-8. Register every late behavioral oracle in CI and obtain a green exact-head run.
+8. Register every late behavioral oracle in the final workflow. Keep PR #146
+   draft through development, then mark it ready and obtain one green exact-head
+   CI audit before merge.
 
 Work modes are frozen at their current published head until the core merges.
 Then rebase the stack onto new `main` and complete
