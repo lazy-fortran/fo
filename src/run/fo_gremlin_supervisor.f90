@@ -1414,6 +1414,7 @@ contains
         character(len=PATH_LEN) :: message, active_project, log_file, executable
         character(len=PATH_LEN) :: cleanup_message
         character(len=PATH_LEN) :: generation_root
+        character(len=32) :: reproduction_id
         character(len=NAME_LEN) :: selected(MAX_NODES)
         character(len=HASH_LEN) :: active_identity
         character(len=16) :: outcome
@@ -1524,14 +1525,18 @@ contains
             exitcode = 2
             return
         end if
-        call log_path(session, 'reproduce.log', log_file)
+        ! The completion sequence is the reproduction execution ID. Allocate it
+        ! before launch so its output path and durable receipt identify the same
+        ! invocation, including concurrent reproductions in one live session.
+        sequence = int(system_clock_count())
+        write (reproduction_id, '(i0)') sequence
+        call log_path(session, 'reproduce-'//trim(reproduction_id)//'.log', log_file)
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'test')
         call argv_push(packed, n_args, trim(request%case_id))
         call process_start_argv_logged(trim(active_project), packed, n_args, &
             trim(log_file), owner_pid, spawn_exit, 'FO_JOBS=1')
-        sequence = int(system_clock_count())
         if (spawn_exit == 0) then
             call process_wait_bounded(owner_pid, request%timeout_seconds, test_exit)
             if (test_exit == 124) then
