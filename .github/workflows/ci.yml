@@ -70,7 +70,7 @@ jobs:
             test_dependency_shadow_cli test_dispatcher_cli test_exec_app_cli \
             test_fmt_cli test_platform_link_cli test_program_names_cli \
             test_targeted_materialization_cli test_test_results_json \
-            test_atomic_link_artifacts test_archive_publication
+            test_atomic_link_artifacts test_archive_publication test_test_os_link
 
       - name: Test complete MCP JSON reports
         run: FO="$(command -v fo)" fo test test_mcp_test_json

@@ -1,4 +1,5 @@
 module fo_test_harness
+    use fo_test_os_link, only: test_os_link_probe
     use, intrinsic :: iso_c_binding, only: c_char, c_short, c_int, c_int64_t, c_size_t, &
         c_ptr, c_loc, c_null_char, c_null_ptr
     use, intrinsic :: iso_fortran_env, only: error_unit
@@ -869,6 +870,7 @@ contains
         integer(c_int) :: rc
         integer :: i, end_at
 
+        rc = int(test_os_link_probe(), c_int)
         template = '/var/tmp/' // trim(prefix) // '-XXXXXX'
         call encode_c_string(template, pattern)
         rc = c_mkdtemp(pattern)

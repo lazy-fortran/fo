@@ -20,6 +20,8 @@
 #include <time.h>
 #include <unistd.h>
 
+int fo_test_link_probe(void) { return 162; }
+
 int fo_test_mkdtemp(char *pattern) {
     return mkdtemp(pattern) == NULL ? -1 : 0;
 }
