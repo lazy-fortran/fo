@@ -11,7 +11,7 @@ module fo_fs
     public :: fs_delete_suffix, fs_append_file, fs_write_text
     public :: fs_collect_files, fs_collect_mod_dirs
     public :: fs_mkdir_excl, fs_sleep_ms, fs_pid_alive
-    public :: fs_copy_exec, fs_rename, fs_stat
+    public :: fs_copy_exec, fs_rename, fs_stat, fs_identity
     public :: fs_tree_fingerprint
     public :: fs_find_executable
 
@@ -90,6 +90,13 @@ module fo_fs
             character(kind=c_char), intent(in) :: path(*)
             integer(c_long_long), intent(out) :: mtime_ns, size
         end function fo_c_stat_fingerprint
+
+        integer(c_int) function fo_c_stat_identity(path, device, inode) &
+                bind(C, name='fo_c_stat_identity')
+            import :: c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_long_long), intent(out) :: device, inode
+        end function fo_c_stat_identity
 
         integer(c_int) function fo_c_tree_fingerprint(path, input_mode, sum, &
                 mixed, count) bind(C, name='fo_c_tree_fingerprint')
@@ -246,6 +253,20 @@ contains
         rc = fo_c_stat_fingerprint(trim(path)//c_null_char, mtime_ns, size)
         ok = (rc == 0)
     end subroutine fs_stat
+
+    subroutine fs_identity(path, device, inode, ok)
+        !! Return the filesystem device and inode for a path.
+        character(len=*), intent(in) :: path
+        integer(c_long_long), intent(out) :: device, inode
+        logical, intent(out) :: ok
+
+        integer(c_int) :: rc
+
+        device = 0_c_long_long
+        inode = 0_c_long_long
+        rc = fo_c_stat_identity(trim(path)//c_null_char, device, inode)
+        ok = (rc == 0)
+    end subroutine fs_identity
 
     subroutine fs_tree_fingerprint(path, input_mode, sum, mixed, count, ok)
         character(len=*), intent(in) :: path
