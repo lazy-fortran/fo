@@ -1,5 +1,6 @@
 program fo_main
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit, real64
+    use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_PATH, &
         is_slow_test
     use fx_dag, only: dag_t, dag_topo_sort, dag_to_dot, MAX_NODES
@@ -14,6 +15,7 @@ program fo_main
         array_temporary_warnings_from_log, frontend_diagnostics_from_file, &
         FO_DIAG_SEVERITY_ERROR
     use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds
+    use fo_fs, only: fs_collect_files, fs_stat
     use fo_check_output, only: check_result_json, check_result_compact_json, &
         check_result_full_json
     use fo_test_results, only: test_result_entry_t, &
@@ -879,41 +881,44 @@ contains
         end if
         call report_array_temporary_warnings(build_log)
         call delete_tmpfile(build_log)
-        call refresh_installed_fo(b)
+        call report_private_fo_driver(b)
     end subroutine cmd_build
 
-    subroutine refresh_installed_fo(b)
-        ! `fo build` refreshing only the build tree left ~/.local/bin/fo a
-        ! stale plain copy, so gates run through PATH verified old code
-        ! (#133). After a successful SELF build, resync the installed copy
-        ! from the freshest produced binary (native path first, then the
-        ! newest fpm backend dir). Foreign projects are untouched.
+    subroutine report_private_fo_driver(b)
+        ! A self-build already creates its current driver inside this
+        ! worktree. Advertise that exact path so callers can run it directly;
+        ! only `fo install` publishes into an installation prefix.
         type(backend_t), intent(in) :: b
-        character(len=1024) :: cmd
-        character(len=8) :: disable_refresh
-        integer :: st
-        integer :: env_status
+        character(len=8) :: disabled
+        character(len=1024) :: candidates(256), private_driver
+        integer(c_long_long) :: mtime_ns, file_size, newest_mtime
+        integer :: env_status, n_candidates, i
         logical :: here
 
-        call get_environment_variable('FO_DISABLE_SELF_REFRESH', disable_refresh, &
+        call get_environment_variable('FO_DISABLE_SELF_REFRESH', disabled, &
             status=env_status)
-        if (env_status == 0 .and. trim(disable_refresh) == '1') return
+        if (env_status == 0 .and. trim(disabled) == '1') return
         if (b%kind == BACKEND_NONE) return
-        inquire(file='src/build/fo_build_backend.f90', exist=here)
+        inquire (file=trim(b%project_dir)//'/src/build/fo_build_backend.f90', &
+            exist=here)
         if (.not. here) return
-        cmd = 'new=""; for c in build/fo/app/fo build/*/app/fo; do ' // &
-              'if [ -f "$c" ]; then if [ -z "$new" ] || ' // &
-              '[ "$c" -nt "$new" ]; then new="$c"; fi; fi; done; ' // &
-              'if [ -n "$new" ] && [ -f "$HOME/.local/bin/fo" ]; then ' // &
-              'if ! cmp -s "$new" "$HOME/.local/bin/fo"; then ' // &
-              'cp "$new" "$HOME/.local/bin/fo.new.$$" && ' // &
-              'chmod +x "$HOME/.local/bin/fo.new.$$" && ' // &
-              'mv -f "$HOME/.local/bin/fo.new.$$" "$HOME/.local/bin/fo" && ' // &
-              'echo "fo: refreshed ~/.local/bin/fo from $new"; fi; fi'
-        call execute_command_line(cmd, exitstat=st)
-        if (st /= 0) write (error_unit, '(a)') &
-            'fo: warning: could not refresh ~/.local/bin/fo'
-    end subroutine refresh_installed_fo
+        call fs_collect_files(trim(b%project_dir)//'/build', '', 'fo', '', &
+            candidates, n_candidates)
+        private_driver = ''
+        newest_mtime = -huge(newest_mtime)
+        do i = 1, n_candidates
+            if (len_trim(candidates(i)) < 7) cycle
+            if (candidates(i)(len_trim(candidates(i)) - 6:len_trim(candidates(i))) &
+                /= '/app/fo') cycle
+            call fs_stat(trim(candidates(i)), mtime_ns, file_size, here)
+            if (.not. here) cycle
+            if (mtime_ns <= newest_mtime) cycle
+            private_driver = candidates(i)
+            newest_mtime = mtime_ns
+        end do
+        if (len_trim(private_driver) > 0) write (output_unit, '(a,a)') &
+            'fo: worktree driver ready: ', trim(private_driver)
+    end subroutine report_private_fo_driver
 
     subroutine report_array_temporary_warnings(build_log)
         character(len=*), intent(in) :: build_log

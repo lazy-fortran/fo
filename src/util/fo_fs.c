@@ -252,6 +252,17 @@ int fo_c_stat_fingerprint(const char *path, long long *mtime_ns,
     return 0;
 }
 
+/* Filesystem identity used by behavioral tests that prove a protected path was
+   not replaced. */
+int fo_c_stat_identity(const char *path, long long *device, long long *inode) {
+    struct stat st;
+    if (!fo_has(path) || device == NULL || inode == NULL || stat(path, &st) != 0)
+        return -1;
+    *device = (long long)st.st_dev;
+    *inode = (long long)st.st_ino;
+    return 0;
+}
+
 /* Complete stat key for file-content memoization. ctime changes when a file is
    rewritten even if its original mtime is restored with utimensat/touch. */
 int fo_c_stat_change_fingerprint(const char *path, long long *mtime_ns,
