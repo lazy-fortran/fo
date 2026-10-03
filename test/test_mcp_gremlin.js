@@ -67,6 +67,72 @@ function writeParityFixture(dir) {
   }
 }
 
+function findJournalForSession(stateRoot, sessionId) {
+  const pending = [stateRoot];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) pending.push(full);
+      else if (entry.name === 'journal.jsonl' &&
+          fs.readFileSync(full, 'utf8').includes(`"session_id":"${sessionId}"`)) {
+        return full;
+      }
+    }
+  }
+  throw new Error(`journal not found for stopped Gremlin session ${sessionId}`);
+}
+
+function seedDurableReceipts(journal, sessionId, laneId, generation, count) {
+  const rows = [];
+  for (let index = 0; index < count; index++) {
+    const completionId = `pagination-${String(index).padStart(4, '0')}`;
+    rows.push(JSON.stringify({ completion_id: completionId, session_id: sessionId,
+      lane_id: laneId, generation, case_id: `test_pagination_${index}`,
+      outcome: 'pass', status: 'PASS' }));
+  }
+  fs.appendFileSync(journal, `${rows.join('\n')}\n`);
+  return rows.map(row => JSON.parse(row).completion_id);
+}
+
+function collectCliEvents(cwd, laneId, sessionId) {
+  const events = [];
+  let cursor = 0;
+  while (true) {
+    const result = runFo(['gremlin', 'events', '--dir', cwd, '--lane', laneId,
+      '--session', sessionId, '--cursor', String(cursor), '--max-records', '128',
+      '--max-bytes', '262144', '--json'], cwd);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const page = JSON.parse(result.stdout.trim());
+    assert.ok(page.events.length <= 128, 'CLI page respects the record bound');
+    events.push(...page.events);
+    if (!page.has_more) break;
+    assert.ok(page.next_cursor > cursor, 'CLI continuation advances the byte cursor');
+    cursor = page.next_cursor;
+  }
+  return events;
+}
+
+async function collectMcpEvents(server, firstRequestId, cwd, laneId, sessionId) {
+  const events = [];
+  let cursor = 0;
+  let requestId = firstRequestId;
+  while (true) {
+    const response = payload(await server.call(requestId++, {
+      action: 'gremlin_events', dir: cwd, lane_id: laneId, session_id: sessionId,
+      cursor, max_records: 128, max_bytes: 262144
+    }));
+    assert.equal(response.isError, false, JSON.stringify(response.body));
+    assert.ok(response.body.events.length <= 128, 'MCP page respects the record bound');
+    events.push(...response.body.events);
+    if (!response.body.has_more) break;
+    assert.ok(response.body.next_cursor > cursor,
+      'MCP continuation advances the byte cursor');
+    cursor = response.body.next_cursor;
+  }
+  return events;
+}
+
 function createGate(file) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const result = spawnSync('mkfifo', [file], { encoding: 'utf8' });
@@ -520,8 +586,36 @@ async function main() {
       '--lane', 'cli-parity', '--session', parityCliSessionId, '--json'], parityFixture);
     assert.equal(cliParityStop.status, 0, cliParityStop.stdout + cliParityStop.stderr);
     await waitForStopped(parityFixture, 'cli-parity', parityCliSessionId, 10000);
+
+    const originalMcpEvents = await collectMcpEvents(server, nextParityStatusId++,
+      parityFixture, 'mcp-parity', parityMcpSessionId);
+    const originalCliEvents = collectCliEvents(parityFixture, 'mcp-parity',
+      parityMcpSessionId);
+    const completionIds = events => events.map(event => event.completion_id);
+    assert.ok(originalMcpEvents.length > 0, 'stopped session retains durable receipts');
+    assert.deepEqual(completionIds(originalMcpEvents), completionIds(originalCliEvents),
+      'CLI and MCP read the same preexisting journal receipts');
+    const journal = findJournalForSession(env.FO_GREMLIN_STATE_DIR, parityMcpSessionId);
+    const generation = originalMcpEvents[0].generation;
+    const seededIds = seedDurableReceipts(journal, parityMcpSessionId, 'mcp-parity',
+      generation, 300);
+    const expectedIds = [...completionIds(originalMcpEvents), ...seededIds];
+    assert.ok(expectedIds.length > 256, 'receipt stream spans more than 256 records');
+
+    const pagedMcpEvents = await collectMcpEvents(server, nextParityStatusId++,
+      parityFixture, 'mcp-parity', parityMcpSessionId);
+    const pagedCliEvents = collectCliEvents(parityFixture, 'mcp-parity',
+      parityMcpSessionId);
+    for (const [transport, events] of [['MCP', pagedMcpEvents], ['CLI', pagedCliEvents]]) {
+      const ids = completionIds(events);
+      assert.equal(new Set(ids).size, ids.length, `${transport} pages contain no duplicate receipts`);
+      assert.deepEqual(ids, expectedIds, `${transport} pages preserve every journal receipt in order`);
+    }
+    assert.deepEqual(completionIds(pagedMcpEvents), completionIds(pagedCliEvents),
+      'CLI and MCP traverse the same complete multi-page receipt stream');
     console.log('mcp-gremlin: discoverable actions, prompt start, idle progress, '
-      + 'shared CLI errors/status, events/failures/reproduce, wait reconnect and scoped stop passed');
+      + 'shared CLI errors/status, events/failures/reproduce, wait reconnect, scoped stop, '
+      + 'and lossless >256 receipt pagination passed');
   } catch (error) {
     primaryError = error;
   } finally {
