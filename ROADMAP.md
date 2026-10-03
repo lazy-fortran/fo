@@ -49,8 +49,11 @@ and feature set; use current CLI after fixes when MCP cannot reload.
 Past snapshots remain in Git history. Gremlin progress is now published through
 draft core PR #146 and stacked work-mode PR #147; `main` remains at the last
 accepted release until the architecture and exact-head verification gates pass.
-Issues #148--#151 own the core change-event, supervisor, JSON and driver-identity
-consolidation; #152 owns work-mode modularization. Early matrix evidence includes
+Issues #148--#151 own the core change-event, supervisor, JSON and execution-
+identity consolidation. #153--#155 add finite coverage epochs, explicit
+promotion/full-verification state and event-driven quiescence. #152 owns the
+work-mode modularization after core merges. Early matrix evidence includes
 one bounded fpm pass, one independent CMake/CTest pass with a fo discovery defect,
 and one honest missing-dependency block. Controller alone promotes reviewed
 paths to main and pushes every integrated milestone while it is under review.
+The work-mode stack stays frozen while core semantics change.

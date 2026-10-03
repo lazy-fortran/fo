@@ -409,6 +409,76 @@ while development continues; complete fixed-version matrix coverage is a final
 provider-completion gate. Store compact receipts and replayable public summary
 when observations exist, never invented benchmark claims.
 
+## Final continuous-verification contract
+
+Gremlin is a deterministic continuous-verification state machine. It never
+merges or pushes. The controller remains the sole promotion authority.
+
+For one immutable execution generation, keep these milestones distinct:
+
+1. **gate**: capture and build pass; every known current reproducer, affected
+   test and configured mandatory test passes; no gate case has FAIL, TIMEOUT or
+   INFRA_ERROR; no relevant input changed; the active generation is unchanged;
+2. **ordinary**: every continuously eligible ordinary case has a current-
+   generation PASS;
+3. **full**: the supported slow/full inventory passes with each case's normal
+   runner budget;
+4. **quiescent**: full is green, inputs are clean, and no candidate or pending
+   reproducer exists, so no tests, builds, captures, hashes or compiler probes
+   run until a relevant filesystem event wakes the owner.
+
+`promotion_ready=true` at the gate. Promotion may occur before ordinary/full
+coverage completes; requiring every slow case before each small integration
+would recreate a blocking full-suite workflow. A later reproducible failure on
+the integrated generation makes Gremlin red, clears readiness for subsequent
+promotions and prioritizes repair or revert. Focused receipts support iteration
+but never manufacture a complete green.
+
+Expose orthogonal `phase`, `health`, `dirty`, active-generation identity,
+`promotion_ready`, `verification_level`, `fully_verified`, per-level coverage
+counts, and epoch identity/cursor. Emit durable typed transitions for generation,
+build, readiness, regression, coverage completion, quiescence, wake and
+supersession. CLI and MCP share typed waits for promotion-ready, ordinary-
+verified, fully-verified, quiescent and failure. Lifecycle events use a versioned
+event envelope; never encode them as fake pass/fail case receipts.
+
+### Finite randomized coverage
+
+For generation `G`, canonicalize its eligible inventory, persist its digest and
+derive a replayable randomized permutation without replacement. Persist
+generation ID, inventory digest, epoch number, seed, cursor and each current-
+generation case outcome. Campaign durations are execution chunks; they do not
+reset the epoch. Crash/restart resumes its unseen set.
+
+Regression, affected, mandatory and bounded reproducer cases may jump ahead. If
+one is still unseen, its run satisfies that coverage obligation and the cursor
+later skips it. No exploratory case repeats before all eligible cases are
+attempted. Historical outcomes prioritize later generations but do not satisfy
+their coverage; CANCELLED remains unknown. Cross-generation PASS transfer is
+allowed only through a future rigorously complete action/oracle cache key.
+
+### Change events, identity and provenance
+
+One shared `fo_change_watch` provider watches project execution inputs and path
+dependencies, debounces bursts and marks the session dirty. Gremlin performs one
+initial capture, then no discovery/capture until a relevant event. `fo watch`
+becomes a thin compatibility policy on the same provider or is deprecated; it
+does not retain an independent event-to-check engine. `.git` and unrelated paths
+are excluded execution inputs.
+
+Execution identity includes project, dependency, test/oracle and runtime input
+contents, toolchain/flags/relevant environment, and the pinned fo driver digest.
+Git base commit and working-tree patch are provenance fields, not execution-key
+inputs. A metadata-only commit therefore preserves the generation and evidence;
+a relevant content edit creates a new generation with fresh provenance.
+
+The target module boundaries are `fo_change_watch`, `fo_gremlin_types`,
+`fo_gremlin_request`/`fo_gremlin_codec`, `fo_gremlin_context`,
+`fo_gremlin_generation`, `fo_gremlin_state`, `fo_gremlin_journal`,
+`fo_gremlin_coverage`, `fo_gremlin_policy`, `fo_gremlin_campaign`,
+`fo_gremlin_commands`/`fo_gremlin_session`, and a small state-machine-only
+`fo_gremlin_supervisor`. CLI and MCP remain adapters.
+
 ## Delivery and architecture consolidation
 
 Progress is published continuously even when it is not ready for `main`:
@@ -426,8 +496,9 @@ the current-head full pipeline, required behavioral fixtures, CI, review and
 matrix dispositions pass. Never accumulate unpublished controller commits merely
 because a continuous campaign is partial.
 
-The implemented core is mature enough to pause feature growth for an architecture
-pass. Ordered blockers before core merge are:
+The implemented core is mature enough to pause unrelated feature growth for an
+architecture and finite-verification pass. Ordered blockers before core merge
+are:
 
 1. [#148](https://github.com/lazy-fortran/fo/issues/148): shared filesystem
    events and dirty/debounce/fingerprint gating so idle Gremlin performs no full
@@ -438,10 +509,16 @@ pass. Ordered blockers before core merge are:
    on the existing typed parser and shared CLI/MCP validation.
 4. [#151](https://github.com/lazy-fortran/fo/issues/151): pin/hash the exact fo
    driver used by a live session and expose it in reproducible receipts.
-5. Register every late behavioral oracle in CI and obtain a green exact-head run.
+5. [#153](https://github.com/lazy-fortran/fo/issues/153): finite deterministic
+   randomized coverage epochs with crash-safe current-generation accounting.
+6. [#154](https://github.com/lazy-fortran/fo/issues/154): promotion readiness,
+   ordinary/full verification, semantic events and typed waits.
+7. [#155](https://github.com/lazy-fortran/fo/issues/155): enter quiescence after
+   full green and wake only on relevant shared change events.
+8. Register every late behavioral oracle in CI and obtain a green exact-head run.
 
-Work modes remain stacked until the core is reviewable. Finish their current
-startup/cancellation/lease repairs, then complete
+Work modes are frozen at their current published head until the core merges.
+Then rebase the stack onto new `main` and complete
 [#152](https://github.com/lazy-fortran/fo/issues/152) to split request/schema,
 task graph, state and scheduling responsibilities before merge. Legacy MCP async
 queue consolidation and the C process-file split follow the core merge unless a
@@ -450,9 +527,8 @@ behavioral verifier proves that they block current correctness.
 ## Active delivery state
 
 **Execution is user-authorized in parallel mode.** The controller started from
-fo main `e4fc193`. The latest published combined milestone is `a0d3515`; its
-exact binary was `1bf5be5f1c546bf58addaf91f3e2ad73432acef16c69464e0bc705aafbee46ca`.
-The core review boundary is `1c89146`; work-mode commits follow it.
+fo main `e4fc193`. Draft core PR #146 is at `34375f8`; frozen stacked work-mode
+PR #147 and the combined integration branch are at `86870cf`.
 
 The `a0d3515` candidate passed the isolated full fo pipeline: static 109/109,
 build 62/62, test build/run 48/48, lint and format check, in 26.6 s. The same
@@ -462,12 +538,16 @@ reproduction logs, atomic link/run publication, Gremlin bootstrap, MCP named
 eligibility, stale-MCP/new-CLI behavior, lossless 300-receipt pagination and the
 then-current work-mode fixture. Four existing array-temporary warnings remain.
 
-Independent review then found more #143 startup/cancellation/lease retry edges.
-Their Sol repair is not yet on the controller branch, so the published combined
-milestone is not merge-ready. The installed global fo remains the known baseline
-with SHA256 `8d5dd29dbb5bb41752e4e712a95ae300a38d99bc1777b96445ab56baf139a4c3`.
-Do not replace it until the final reviewed combined head passes installation
-smoke and MCP system checks with all Gremlin owners stopped.
+The reviewed #143 startup/cancellation/lease retry repair is integrated at
+`e48c91e`. Independent review found no blocker and recorded two low-severity
+follow-ups for alias retargeting and deferred-campaign observation. `86870cf`
+also fixes generic CMake named-test routing and passes its exact real-case oracle.
+The installed fo is the reviewed `e48c91e` candidate, SHA256
+`ae35436a2c6f8fbdbfcc83691a62db4fb2ccf284104970a0fb94b639a994e5cc`; its full
+pipeline passed 109/109 static, 62/62 build, 48/48 test, and lint in 19.0 seconds,
+followed by the work-mode fixture and MCP system test (79/79). The later CMake
+commit has focused and worker-pipeline evidence but still needs exact combined-
+head verification.
 
 Implemented issue state:
 
