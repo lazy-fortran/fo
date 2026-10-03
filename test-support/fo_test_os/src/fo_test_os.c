@@ -127,3 +127,46 @@ int fo_test_open_fds(void) {
     if (closedir(directory) != 0) return -1;
     return count - 1; /* Exclude this directory's own descriptor. */
 }
+
+int fo_test_spawn(char *const arguments[], char *const environment[], const char *directory) {
+    pid_t child = fork();
+    if (child < 0) return -1;
+    if (child == 0) {
+        int null_output = open("/dev/null", O_WRONLY);
+        if (null_output >= 0) {
+            (void)dup2(null_output, STDOUT_FILENO);
+            (void)dup2(null_output, STDERR_FILENO);
+            if (null_output > STDERR_FILENO) close(null_output);
+        }
+        (void)setpgid(0, 0);
+        for (size_t i = 0; environment[i] != NULL; ++i) {
+            char *separator = strchr(environment[i], '=');
+            if (separator == NULL) continue;
+            size_t name_size = (size_t)(separator - environment[i]);
+            char *name = strndup(environment[i], name_size);
+            if (name == NULL) _exit(126);
+            int changed = setenv(name, separator + 1, 1);
+            free(name);
+            if (changed != 0) _exit(126);
+        }
+        if (chdir(directory) != 0) _exit(126);
+        execvp(arguments[0], arguments);
+        _exit(127);
+    }
+    (void)setpgid(child, child);
+    return (int)child;
+}
+
+int fo_test_signal_group(int process, int signal_number) {
+    return kill(-process, signal_number);
+}
+
+int fo_test_wait_nonblocking(int process, int *status) {
+    pid_t waited;
+    do { waited = waitpid(process, status, WNOHANG); } while (waited < 0 && errno == EINTR);
+    if (waited == 0) return 999;
+    if (waited < 0) return -999;
+    if (WIFEXITED(*status)) return WEXITSTATUS(*status);
+    if (WIFSIGNALED(*status)) return -WTERMSIG(*status);
+    return -998;
+}

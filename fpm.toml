@@ -116,3 +116,13 @@ main = "test_mcp_named_eligibility.f90"
 name = "test_mcp_request_structure"
 source-dir = "test"
 main = "test_mcp_request_structure.f90"
+
+[[test]]
+name = "test_atomic_link_artifacts"
+source-dir = "test"
+main = "test_atomic_link_artifacts.f90"
+
+[[test]]
+name = "test_archive_publication"
+source-dir = "test"
+main = "test_archive_publication.f90"

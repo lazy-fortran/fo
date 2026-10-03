@@ -69,7 +69,8 @@ jobs:
           fo test test_cmake_named_cli test_dependency_membership_cli \
             test_dependency_shadow_cli test_dispatcher_cli test_exec_app_cli \
             test_fmt_cli test_platform_link_cli test_program_names_cli \
-            test_targeted_materialization_cli test_test_results_json
+            test_targeted_materialization_cli test_test_results_json \
+            test_atomic_link_artifacts test_archive_publication
 
       - name: Test complete MCP JSON reports
         run: FO="$(command -v fo)" fo test test_mcp_test_json
@@ -124,9 +125,6 @@ jobs:
       - name: Test Gremlin filesystem change capture
         run: node test/test_gremlin_watch.js "$(command -v fo)"
 
-      - name: Test atomic link artifacts
-        run: FO="$(command -v fo)" node test/test_atomic_link_artifacts.js
-
       - name: Test MCP Gremlin parity
         run: node test/test_mcp_gremlin.js "$(command -v fo)"
 
@@ -174,6 +172,3 @@ jobs:
             "$fixture_dir/async_process_nested_cancel.c" \
             -o "$verifier_dir/nested-cancel"
           "$verifier_dir/nested-cancel"
-
-      - name: Test atomic link artifact publication
-        run: node test/test_archive_publication.js

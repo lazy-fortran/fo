@@ -14,6 +14,7 @@ module fo_test_harness
     public :: assert_file_exists, assert_file_absent, assert_file_equals
     public :: assert_process_ok, finish_assertions, register_scratch
     public :: process_alive, start_sentinel, stop_sentinel
+    public :: spawn_process, poll_process, signal_process_group
     public :: reset_assertions_for_probe
     public :: exercise_failure_cleanup_probe, open_descriptor_count
 
@@ -192,9 +193,71 @@ module fo_test_harness
         integer(c_int64_t) function c_monotonic_ms() bind(C, name='fo_test_monotonic_ms')
             import :: c_int64_t
         end function c_monotonic_ms
+
+        integer(c_int) function c_spawn_process(arguments, environment, directory) &
+                bind(C, name='fo_test_spawn')
+            import :: c_char, c_int, c_ptr
+            type(c_ptr), intent(in) :: arguments(*), environment(*)
+            character(kind=c_char), intent(in) :: directory(*)
+        end function c_spawn_process
+
+        integer(c_int) function c_signal_group(process, signal_number) &
+                bind(C, name='fo_test_signal_group')
+            import :: c_int
+            integer(c_int), value :: process, signal_number
+        end function c_signal_group
+
+        integer(c_int) function c_wait_nonblocking(process, status) &
+                bind(C, name='fo_test_wait_nonblocking')
+            import :: c_int
+            integer(c_int), value :: process
+            integer(c_int), intent(out) :: status
+        end function c_wait_nonblocking
     end interface
 
 contains
+
+    subroutine spawn_process(command, directory, process_id, environment)
+        type(string_list_t), intent(in) :: command
+        character(len=*), intent(in) :: directory
+        integer, intent(out) :: process_id
+        type(string_list_t), optional, intent(in) :: environment
+        type(c_ptr), allocatable, target :: pointers(:)
+        type(c_ptr), allocatable, target :: environment_pointers(:)
+        character(kind=c_char), allocatable, target :: storage(:, :), environment_storage(:, :)
+        character(kind=c_char), allocatable, target :: directory_bytes(:)
+        type(string_list_t) :: empty_environment
+        integer(c_int) :: child
+
+        call make_c_vector(command, pointers, storage)
+        if (present(environment)) then
+            call make_c_vector(environment, environment_pointers, environment_storage)
+        else
+            call make_c_vector(empty_environment, environment_pointers, environment_storage)
+        end if
+        call encode_c_string(directory, directory_bytes)
+        child = c_spawn_process(pointers, environment_pointers, directory_bytes)
+        process_id = int(child)
+        call assert_true(process_id > 0, 'start fixture process')
+    end subroutine spawn_process
+
+    subroutine poll_process(process_id, status)
+        integer, intent(in) :: process_id
+        integer, intent(out) :: status
+        integer(c_int) :: child_status, waited
+
+        child_status = 0
+        waited = c_wait_nonblocking(int(process_id, c_int), child_status)
+        status = int(waited)
+    end subroutine poll_process
+
+    subroutine signal_process_group(process_id, signal_number)
+        integer, intent(in) :: process_id, signal_number
+        integer(c_int) :: rc
+
+        rc = c_signal_group(int(process_id, c_int), int(signal_number, c_int))
+        call assert_true(rc == 0, 'signal fixture process group')
+    end subroutine signal_process_group
 
     subroutine list_add(list, value)
         type(string_list_t), intent(inout) :: list
