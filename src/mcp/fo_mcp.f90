@@ -1,9 +1,14 @@
 module fo_mcp
-    use fo_util, only: json_bool, json_int, extract_json_field, make_tmpfile, &
+    use fo_util, only: json_bool_text => json_bool, json_int, &
+        extract_json_field, make_tmpfile, &
         delete_tmpfile, read_text_file, clean_root_build_artifacts, &
         strip_path_prefix_in_str, jsonrpc_error_fixed => jsonrpc_error, &
         jsonrpc_null_fixed => jsonrpc_null
     use fx_json_build, only: json_escape_string
+    use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init, &
+        JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, &
+        JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_BOOL, &
+        JSON_NULL_VAL, JSON_ERROR, JSON_END_OF_INPUT
     use fx_mcp, only: mcp_read_message, mcp_send_response, MCP_FRAME_UNKNOWN
     use fo_check, only: check_result_t, fo_check_run
     use fo_check_output, only: check_result_compact_json, &
@@ -21,6 +26,8 @@ module fo_mcp
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
     use fo_fs, only: fs_sleep_ms
     use fo_gremlin_supervisor, only: gremlin_handle
+    use fo_gremlin_request, only: gremlin_json_text_valid, &
+        json_parser_next => gremlin_json_parser_next
     implicit none
     private
     public :: mcp_serve
@@ -171,6 +178,13 @@ contains
             call jsonrpc_error(id_str, -32602, 'arguments need one string action', response)
             return
         end if
+        select case (trim(action))
+        case ('gremlin_start', 'gremlin_status', 'gremlin_wait', &
+                'gremlin_events', 'gremlin_failures', 'gremlin_reproduce', &
+                'gremlin_stop')
+            call handle_gremlin_action(arguments, id_str, response)
+            return
+        end select
         call extract_json_member(arguments, 'dir', raw_value, property_count, &
             parse_status)
         dir = ''
@@ -190,12 +204,6 @@ contains
         call make_tmpfile('fo_mcp_output', tmpfile)
 
         select case (trim(action))
-        case ('gremlin_start', 'gremlin_status', 'gremlin_wait', &
-                'gremlin_events', 'gremlin_failures', 'gremlin_reproduce', &
-                'gremlin_stop')
-            call handle_gremlin_action(arguments, id_str, response)
-            call delete_tmpfile(tmpfile)
-            return
         case ('check')
             call extract_json_field(arguments, '"mode"', mode)
             if (trim(mode) == 'start') then
@@ -361,110 +369,92 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
-        integer, parameter :: MAX_PROPERTIES = 128
-        character(len=128) :: keys(MAX_PROPERTIES)
-        character(len=MAX_LINE) :: decoded
-        integer :: key_first(MAX_PROPERTIES), key_last(MAX_PROPERTIES)
-        integer :: key_length(MAX_PROPERTIES)
-        integer :: value_first(MAX_PROPERTIES), value_last(MAX_PROPERTIES)
-        integer :: n_properties, position, parse_status, action_count, dir_count
-        integer :: i, value_end, action_length
+        type(json_parser_t) :: parser
+        type(json_event_t) :: event, value_event
+        character(len=:), allocatable :: raw_key, raw_value
+        character(len=4096) :: decoded_dir
+        integer :: action_count, dir_count, key_start, value_start, value_end, dir_length
         logical :: valid_string
 
-        keys = ''
-        key_first = 0
-        key_last = 0
-        key_length = 0
-        value_first = 0
-        value_last = 0
-        n_properties = 0
-        action_count = 0
-        dir_count = 0
         public_action = ''
         project_dir = '.'
         core_action = ''
-        message = ''
+        request_json = '{'
+        message = 'malformed Gremlin request JSON'
         ierr = 1
-
-        position = 2
-        call skip_json_space(arguments, position)
-        do while (position <= len_trim(arguments))
-            if (arguments(position:position) == '}') exit
-            if (n_properties >= MAX_PROPERTIES) then
-                message = 'too many Gremlin request fields'
-                return
-            end if
-            key_first(n_properties + 1) = position
-            call read_json_string(arguments, position, decoded, parse_status, &
-                key_length(n_properties + 1))
-            if (parse_status /= 0) then
-                message = 'malformed Gremlin request key'
-                return
-            end if
-            n_properties = n_properties + 1
-            key_last(n_properties) = position - 1
-            keys(n_properties) = trim(decoded)
-            call skip_json_space(arguments, position)
-            if (position > len_trim(arguments)) then
-                message = 'missing Gremlin request field value'
-                return
-            end if
-            if (arguments(position:position) /= ':') then
-                message = 'malformed Gremlin request field'
-                return
-            end if
-            position = position + 1
-            call skip_json_space(arguments, position)
-            value_first(n_properties) = position
-            call scan_json_value(arguments, position, value_end, parse_status)
-            if (parse_status /= 0) then
-                message = 'malformed Gremlin request field value'
-                return
-            end if
-            value_last(n_properties) = value_end
-            position = value_end + 1
-            call skip_json_space(arguments, position)
-            if (position > len_trim(arguments)) then
-                message = 'unterminated Gremlin arguments object'
-                return
-            end if
-            if (arguments(position:position) == ',') then
-                position = position + 1
-                call skip_json_space(arguments, position)
-            else if (arguments(position:position) == '}') then
-                exit
-            else
-                message = 'malformed Gremlin arguments separator'
-                return
-            end if
-        end do
-
-        do i = 1, n_properties
-            if (json_key_matches(keys(i), key_length(i), 'action')) then
+        action_count = 0
+        dir_count = 0
+        if (.not. gremlin_json_text_valid(arguments)) return
+        call json_parser_init(parser, arguments)
+        call json_parser_next(parser, event)
+        if (event%event_type /= JSON_OBJECT_START) return
+        do
+            key_start = json_value_first(parser)
+            call json_parser_next(parser, event)
+            if (event%event_type == JSON_OBJECT_END) exit
+            if (event%event_type /= JSON_KEY .or. .not. allocated(event%string_val)) return
+            raw_key = parser%input(key_start:parser%pos - 1)
+            value_start = json_value_first(parser)
+            call json_parser_next(parser, value_event)
+            if (json_key_matches(event%string_val, len(event%string_val), 'action')) then
+                value_end = parser%pos - 1
+                raw_value = parser%input(value_start:value_end)
                 action_count = action_count + 1
-                call decode_json_string(arguments(value_first(i):value_last(i)), &
-                    decoded, valid_string, action_length)
-                if (.not. valid_string) then
+                if (value_event%event_type /= JSON_STRING .or. &
+                    .not. allocated(value_event%string_val)) then
                     message = 'Gremlin action must be a string'
                     return
                 end if
-                if (action_length > len(public_action) .or. &
-                    action_length /= len_trim(decoded)) then
+                if (len(value_event%string_val) > len(public_action) .or. &
+                    len(value_event%string_val) /= &
+                    len_trim(value_event%string_val)) then
                     message = 'Gremlin action must be an exact public name'
                     return
                 end if
-                public_action = trim(decoded)
-            else if (json_key_matches(keys(i), key_length(i), 'dir')) then
+                public_action = value_event%string_val
+            else if (json_key_matches(event%string_val, len(event%string_val), 'dir')) then
+                value_end = parser%pos - 1
+                raw_value = parser%input(value_start:value_end)
                 dir_count = dir_count + 1
-                call decode_json_string(arguments(value_first(i):value_last(i)), &
-                    decoded, valid_string)
-                if (.not. valid_string) then
+                if (value_event%event_type /= JSON_STRING .or. &
+                    .not. allocated(value_event%string_val)) then
                     message = 'Gremlin dir must be a string'
                     return
                 end if
-                project_dir = trim(decoded)
+                dir_length = len(value_event%string_val)
+                if (dir_length > len(project_dir) .or. &
+                    dir_length > len(decoded_dir)) then
+                    message = 'Gremlin dir is too long'
+                    return
+                end if
+                if (dir_length == 0) then
+                    message = 'Gremlin dir must be nonempty'
+                    return
+                end if
+                decoded_dir = value_event%string_val
+                if (json_text_has_control(decoded_dir(:dir_length))) then
+                    message = 'Gremlin dir contains a control character'
+                    return
+                end if
+                if (len_trim(decoded_dir(:dir_length)) == 0) then
+                    message = 'Gremlin dir must be nonempty'
+                    return
+                end if
+                project_dir = decoded_dir(:dir_length)
+            else
+                call consume_json_value(parser, value_event, ierr)
+                if (ierr /= 0) then
+                    message = 'malformed Gremlin request JSON'
+                    return
+                end if
+                value_end = parser%pos - 1
+                raw_value = parser%input(value_start:value_end)
+                if (len(request_json) > 1) request_json = request_json//','
+                request_json = request_json//raw_key//':'//raw_value
             end if
         end do
+        call json_parser_next(parser, event)
+        if (event%event_type /= JSON_END_OF_INPUT) return
         if (action_count /= 1 .or. dir_count > 1) then
             message = 'Gremlin arguments need one action and at most one dir'
             return
@@ -474,23 +464,65 @@ contains
             message = 'unknown Gremlin MCP action: '//trim(public_action)
             return
         end if
-
-        request_json = '{'
-        action_count = 0
-        do i = 1, n_properties
-            if (json_key_matches(keys(i), key_length(i), 'action')) cycle
-            if (json_key_matches(keys(i), key_length(i), 'dir')) cycle
-            if (action_count > 0) request_json = request_json//','
-            ! Keep the parsed JSON token: re-emitting the decoded key would
-            ! change escaping or trim significant trailing spaces.
-            request_json = request_json// &
-                arguments(key_first(i):key_last(i))//':'// &
-                trim(arguments(value_first(i):value_last(i)))
-            action_count = action_count + 1
-        end do
         request_json = request_json//'}'
         ierr = 0
+        message = ''
     end subroutine normalize_gremlin_arguments
+
+    integer function json_value_first(parser)
+        type(json_parser_t), intent(in) :: parser
+        integer :: position
+
+        position = parser%pos
+        do while (position <= len(parser%input))
+            select case (parser%input(position:position))
+            case (' ', achar(9), achar(10), achar(13), ':', ',')
+                position = position + 1
+            case default
+                exit
+            end select
+        end do
+        json_value_first = position
+    end function json_value_first
+
+    logical function json_text_has_control(text)
+        character(len=*), intent(in) :: text
+        integer :: i
+
+        json_text_has_control = .false.
+        do i = 1, len(text)
+            if (iachar(text(i:i)) < 32 .or. iachar(text(i:i)) == 127) then
+                json_text_has_control = .true.
+                return
+            end if
+        end do
+    end function json_text_has_control
+
+    recursive subroutine consume_json_value(parser, first, ierr)
+        type(json_parser_t), intent(inout) :: parser
+        type(json_event_t), intent(in) :: first
+        integer, intent(out) :: ierr
+
+        type(json_event_t) :: event
+        integer :: depth
+
+        ierr = 0
+        if (first%event_type /= JSON_ARRAY_START .and. &
+            first%event_type /= JSON_OBJECT_START) return
+        depth = 1
+        do while (depth > 0)
+            call json_parser_next(parser, event)
+            select case (event%event_type)
+            case (JSON_ARRAY_START, JSON_OBJECT_START)
+                depth = depth + 1
+            case (JSON_ARRAY_END, JSON_OBJECT_END)
+                depth = depth - 1
+            case (JSON_END_OF_INPUT)
+                ierr = 1
+                return
+            end select
+        end do
+    end subroutine consume_json_value
 
     subroutine map_gremlin_action(public_action, core_action, valid)
         character(len=*), intent(in) :: public_action
@@ -1572,7 +1604,7 @@ contains
         else
             response = trim(response)//'running"'
         end if
-        response = trim(response)//',"pending":'//trim(json_bool(pending))//'}}'
+        response = trim(response)//',"pending":'//trim(json_bool_text(pending))//'}}'
     end subroutine make_run_start_response
 
     subroutine jsonrpc_error(id_str, code, message, response)
@@ -1605,7 +1637,7 @@ contains
         response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
             '"result":{"content":[{"type":"text",'// &
             '"text":"'//trim(escaped)//'"}],"isError":'// &
-            trim(json_bool(exitcode /= 0))//'}}'
+            trim(json_bool_text(exitcode /= 0))//'}}'
     end subroutine make_tool_text_response
 
 end module fo_mcp

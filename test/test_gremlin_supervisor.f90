@@ -8,6 +8,7 @@ program test_gremlin_supervisor
         gremlin_session_publish, gremlin_session_read, gremlin_session_release, &
         gremlin_session_stop_requested
     use fo_gremlin_supervisor, only: gremlin_handle, gremlin_release_stopped_session
+    use fo_gremlin_request, only: gremlin_request_t, parse_request
     use fo_util, only: extract_json_field, make_tmpfile
     implicit none
 
@@ -84,7 +85,11 @@ contains
 
     subroutine test_strict_request_validation()
         character(len=:), allocatable :: response
+        type(gremlin_request_t) :: request
+        character(len=:), allocatable :: deep_json
+        character(len=256) :: message
         integer :: exitcode
+        integer :: ierr
 
         call gremlin_handle('start', '/tmp/project', '{"background":true}', &
             response, exitcode)
@@ -106,6 +111,86 @@ contains
             '{"cursor":-1}', response, exitcode)
         call check(exitcode /= 0 .and. index(response, 'nonnegative') > 0, &
             'rejects a negative event cursor')
+        call gremlin_handle('status', '/tmp/project', &
+            '{"lane_id":"bad\q"}', response, exitcode)
+        call check(exitcode /= 0 .and. index(response, 'malformed') > 0, &
+            'rejects malformed JSON string escapes')
+        call gremlin_handle('status', '/tmp/project', &
+            '{"lane_id":"bad\u0000"}', response, exitcode)
+        call check(exitcode /= 0 .and. index(response, 'control') > 0, &
+            'rejects embedded NUL values')
+        call gremlin_handle('status', '/tmp/project', &
+            '{"lane_id":"valid"} trailing', response, exitcode)
+        call check(exitcode /= 0 .and. index(response, 'trailing') > 0, &
+            'rejects trailing input after the request object')
+        call gremlin_handle('status', '/tmp/project', &
+            '{"lane_id" "missing-colon"}', response, exitcode)
+        call check(exitcode /= 0 .and. index(response, 'malformed') > 0, &
+            'rejects a missing object colon')
+        call gremlin_handle('status', '/tmp/project', &
+            '{,"lane_id":"extra-comma"}', response, exitcode)
+        call check(exitcode /= 0 .and. index(response, 'malformed') > 0, &
+            'rejects an object comma without a member')
+        call gremlin_handle('status', '/tmp/project', &
+            '{"lane_id":"trailing-comma",}', response, exitcode)
+        call check(exitcode /= 0 .and. index(response, 'malformed') > 0, &
+            'rejects an object trailing comma')
+        call gremlin_handle('status', '/tmp/project', &
+            '{"lane_id":"missing-separator" "cursor":0}', response, exitcode)
+        call check(exitcode /= 0 .and. index(response, 'malformed') > 0, &
+            'rejects missing object separators')
+        call gremlin_handle('status', '/tmp/project', '{"cursor":01}', &
+            response, exitcode)
+        call check(exitcode /= 0 .and. index(response, 'malformed') > 0, &
+            'rejects leading-zero integers')
+        call gremlin_handle('start', '/tmp/project', &
+            '{"targets":["case_a",]}', response, exitcode)
+        call check(exitcode /= 0 .and. index(response, 'malformed') > 0, &
+            'rejects a target array trailing comma')
+        call gremlin_handle('start', '/tmp/project', &
+            '{"targets":["   "]}', response, exitcode)
+        call check(exitcode /= 0 .and. index(response, 'target names') > 0, &
+            'rejects whitespace-only target names')
+        deep_json = '{"targets":'//repeat('[', 65)//'0'//repeat(']', 65)//'}'
+        call gremlin_handle('start', '/tmp/project', deep_json, response, exitcode)
+        call check(exitcode /= 0 .and. index(response, 'malformed') > 0, &
+            'rejects nesting beyond the guarded JSON parser depth')
+        call parse_request('status', '{"cursor":2147483648}', request, ierr, message)
+        call check(ierr == 0 .and. request%cursor == 2147483648_int64, &
+            'preserves a cursor above the fx int32 range')
+        call parse_request('wait', '{"cursor":2147483648,"wait_ms":0}', &
+            request, ierr, message)
+        call check(ierr == 0 .and. request%cursor == 2147483648_int64, &
+            'preserves a lifecycle cursor above the fx int32 range')
+        call parse_request('status', '{"lane_\u00e9id":"safe"}', &
+            request, ierr, message)
+        call check(ierr /= 0 .and. index(message, 'unsupported') > 0, &
+            'non-ASCII escaped key cannot alias lane_id')
+        call parse_request('status', '{"lane_id":"caf\u00e9"}', &
+            request, ierr, message)
+        call check(ierr == 0 .and. trim(request%lane_id) == &
+            'caf'//achar(195)//achar(169), 'decodes a Unicode value to UTF-8')
+        call parse_request('start', '{"targets":["\u20ac","\ud83d\ude80"]}', &
+            request, ierr, message)
+        call check(ierr == 0 .and. request%n_targets == 2, &
+            'accepts BMP and supplementary Unicode targets')
+        call check(trim(request%targets(1)) == achar(226)//achar(130)//achar(172), &
+            'decodes a three-byte Unicode value')
+        call check(trim(request%targets(2)) == &
+            achar(240)//achar(159)//achar(154)//achar(128), &
+            'decodes surrogate pairs to four-byte UTF-8')
+        call parse_request('start', '{"targets":["caf\u00e9","caf'// &
+            achar(195)//achar(169)//'"]}', request, ierr, message)
+        call check(ierr /= 0 .and. index(message, 'duplicate target') > 0, &
+            'literal and escaped Unicode identify the same target')
+        call parse_request('status', '{"lane_id":"bad\ud800"}', &
+            request, ierr, message)
+        call check(ierr /= 0 .and. index(message, 'malformed') > 0, &
+            'rejects an unpaired high surrogate')
+        call parse_request('status', '{"lane_id":"bad\udc00"}', &
+            request, ierr, message)
+        call check(ierr /= 0 .and. index(message, 'malformed') > 0, &
+            'rejects an unpaired low surrogate')
     end subroutine test_strict_request_validation
 
     subroutine test_unknown_terminal_read_is_side_effect_free()

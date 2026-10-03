@@ -11,7 +11,7 @@ const executable = path.resolve(driver);
 if (executable === path.resolve('/home/ert/.local/bin/fo')) {
   throw new Error('pass the isolated candidate binary, not the global fo install');
 }
-const scratch = fs.mkdtempSync('/var/tmp/fo-mcp-request-structure-');
+const scratch = fs.mkdtempSync('/var/tmp/fo-core-150-json-request-structure-');
 const project = path.join(scratch, 'project');
 const env = { ...process.env, HOME: path.join(scratch, 'home'), TMPDIR: '/var/tmp',
   FO_CACHE_DIR: path.join(scratch, 'cache'), FO_PREFIX: path.join(scratch, 'prefix'),

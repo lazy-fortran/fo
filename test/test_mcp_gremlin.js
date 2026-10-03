@@ -8,7 +8,7 @@ const path = require('node:path');
 const project = path.resolve(__dirname, '..');
 const installed = process.argv[2];
 const driver = installed || process.env.FO || 'fo';
-const scratch = fs.mkdtempSync('/var/tmp/fo-mcp-gremlin-');
+const scratch = fs.mkdtempSync('/var/tmp/fo-core-150-json-mcp-');
 if (process.platform !== 'linux' || !fs.existsSync('/proc')) {
   console.log('mcp-gremlin: skipped (requires Linux async process containment)');
   process.exit(0);
@@ -187,7 +187,16 @@ function startServer(cwd) {
   function call(id, args) {
     return rpc(id, 'tools/call', { name: 'fo', arguments: args });
   }
-  return { child, call, rpc, stderr: () => stderr };
+  function callRaw(id, argumentsJson) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`MCP timeout: ${stderr}`)), 30000);
+      pending.push({ resolve, reject, timer });
+      child.stdin.write('{"jsonrpc":"2.0","id":' + JSON.stringify(id) +
+        ',"method":"tools/call","params":{"name":"fo","arguments":' +
+        argumentsJson + '}}\n');
+    });
+  }
+  return { child, call, callRaw, rpc, stderr: () => stderr };
 }
 
 function waitForChildClose(child, timeoutMs) {
@@ -427,9 +436,17 @@ async function main() {
 
     const invalidInputs = [
       { name: 'random_count upper bound', cli: ['--random', '33'],
-        mcp: { random_count: 33 } },
+        mcp: { random_count: 33 }, expected: 'random_count must be between 1 and 32' },
+      { name: 'integer field wrong type', cli: ['--random', 'thirty-three'],
+        mcp: { random_count: 'thirty-three' },
+        expected: 'integer request field has the wrong JSON type' },
       { name: 'unknown property', cli: ['--not-a-field', 'value'],
-        mcp: { not_a_field: 'value' } }
+        mcp: { not_a_field: 'value' },
+        expected: 'unsupported Gremlin request field: not_a_field' },
+      { name: 'duplicate field', cli: ['--lane', 'duplicate-lane'],
+        expected: 'duplicate Gremlin request field: lane_id',
+        mcpRaw: `{"action":"gremlin_start","dir":${JSON.stringify(fixture)},` +
+          `"lane_id":"invalid-23","lane_id":"duplicate-lane"}` }
     ];
     let invalidId = 20;
     for (const invalid of invalidInputs) {
@@ -438,10 +455,14 @@ async function main() {
         '--lane', invalidLane, ...invalid.cli], fixture);
       assert.notEqual(cli.status, 0, `${invalid.name} fails through CLI`);
       const cliBody = JSON.parse(cli.stdout.trim());
-      const mcpResponse = await server.call(invalidId++, {
-        action: 'gremlin_start', dir: fixture, lane_id: invalidLane,
-        ...invalid.mcp
-      });
+      assert.ok(cliBody.error.includes(invalid.expected),
+        `${invalid.name} has the expected validation error: ${JSON.stringify(cliBody)}`);
+      const mcpResponse = invalid.mcpRaw
+        ? await server.callRaw(invalidId++, invalid.mcpRaw)
+        : await server.call(invalidId++, {
+          action: 'gremlin_start', dir: fixture, lane_id: invalidLane,
+          ...invalid.mcp
+        });
       const mcpResult = payload(mcpResponse);
       assert.equal(mcpResult.isError, true,
         `${invalid.name} is returned as an MCP tool error`);
@@ -449,6 +470,132 @@ async function main() {
       assert.deepEqual(mcpBody, cliBody,
         `${invalid.name} returns the same shared-core error through MCP and CLI`);
     }
+
+    const malformedArguments = [
+      '{"action":"gremlin_start","dir":' + JSON.stringify(fixture) +
+        ',"random_count":1 "seed":2}',
+      '{"action":"gremlin_start","dir":' + JSON.stringify(fixture) +
+        ',"targets":["test_mcp_pass",]}',
+      '{"action":"gremlin_start","dir":' + JSON.stringify(fixture) +
+        ',"targets":["test_mcp_pass" "test_mcp_fail"]}',
+      '{"action":"gremlin_start","dir":' + JSON.stringify(fixture) +
+        ',"random_count":01}'
+    ];
+    for (let index = 0; index < malformedArguments.length; index++) {
+      const malformed = payload(await server.callRaw(40 + index,
+        malformedArguments[index]));
+      assert.equal(malformed.isError, true,
+        `malformed JSON case ${index} is rejected through raw MCP`);
+      assert.ok(String(malformed.body.error).includes('malformed Gremlin request JSON'),
+        `malformed JSON case ${index} has the shared parser error`);
+    }
+
+    const largeCursor = 2147483648;
+    const cliWideCursor = runFo(['gremlin', 'events', '--dir', fixture,
+      '--lane', 'mcp-probe', '--session', sessionId, '--cursor',
+      String(largeCursor), '--max-records', '1', '--json'], fixture);
+    assert.equal(cliWideCursor.status, 2,
+      'wide cursor is parsed before the journal range check');
+    const mcpWideCursor = payload(await server.call(50, {
+      action: 'gremlin_events', dir: fixture, lane_id: 'mcp-probe',
+      session_id: sessionId, cursor: largeCursor, max_records: 1
+    }));
+    assert.equal(mcpWideCursor.isError, true, JSON.stringify(mcpWideCursor.body));
+    const wideCursorCliBody = JSON.parse(cliWideCursor.stdout.trim());
+    assert.deepEqual(mcpWideCursor.body, wideCursorCliBody,
+      'cursor above int32 has exact CLI/MCP behavioral parity');
+    assert.ok(wideCursorCliBody.error.includes('cursor is beyond'),
+      'wide cursor reaches the journal range check without int32 truncation');
+
+    const unicodeDir = path.join(scratch, 'project-café');
+    fs.symlinkSync(fixture, unicodeDir, 'dir');
+    const literalDirStatus = payload(await server.call(51, {
+      action: 'gremlin_status', dir: unicodeDir, lane_id: 'mcp-probe',
+      session_id: sessionId
+    }));
+    const escapedUnicodeDir = JSON.stringify(unicodeDir).replace('é', '\\u00e9');
+    assert.equal(JSON.parse(escapedUnicodeDir), unicodeDir,
+      'raw Unicode escape encodes the intended directory');
+    const escapedDirStatus = payload(await server.callRaw(52,
+      `{"action":"gremlin_status","dir":${escapedUnicodeDir},` +
+      `"lane_id":"mcp-probe","session_id":${JSON.stringify(sessionId)}}`));
+    assert.equal(literalDirStatus.isError, false, JSON.stringify(literalDirStatus.body));
+    assert.deepEqual(escapedDirStatus, literalDirStatus,
+      'escaped and literal Unicode MCP directory names resolve identically');
+    assert.equal(escapedDirStatus.body.session_id, sessionId,
+      'escaped Unicode directory reaches the expected Gremlin session');
+
+    for (const [id, rawKey] of [[54, 'lane_\\u00e9id'], [55, 'd\\u00e9ir'],
+      [56, 'dir '], [57, 'action ']]) {
+      const shadow = payload(await server.callRaw(id,
+        `{"action":"gremlin_status","dir":${JSON.stringify(fixture)},` +
+        `"lane_id":"mcp-probe","session_id":${JSON.stringify(sessionId)},` +
+        `"${rawKey}":"shadow"}`));
+      assert.equal(shadow.isError, true, `rejects unsupported key ${rawKey}`);
+      assert.match(shadow.body.error, /unsupported Gremlin request field/,
+        'transport normalization forwards the exact unknown property to the core');
+    }
+    const unicodeLane = payload(await server.callRaw(58,
+      `{"action":"gremlin_status","dir":${JSON.stringify(fixture)},` +
+      `"lane_id":"mcp\\u00e9-probe","session_id":${JSON.stringify(sessionId)}}`));
+    assert.equal(unicodeLane.isError, true,
+      'a Unicode lane does not alias the existing ASCII lane');
+    const literalLane = payload(await server.call(59, {
+      action: 'gremlin_status', dir: fixture, lane_id: 'mcpé-probe', session_id: sessionId
+    }));
+    assert.deepEqual(unicodeLane, literalLane,
+      'literal and escaped Unicode lanes have the same domain behavior');
+
+    const rocketDir = path.join(scratch, 'project-🚀');
+    fs.symlinkSync(fixture, rocketDir, 'dir');
+    const escapedRocketDir = JSON.stringify(rocketDir).replace('🚀', '\\ud83d\\ude80');
+    assert.equal(JSON.parse(escapedRocketDir), rocketDir);
+    const rocketStatus = payload(await server.callRaw(60,
+      `{"action":"gremlin_status","dir":${escapedRocketDir},` +
+      `"lane_id":"mcp-probe","session_id":${JSON.stringify(sessionId)}}`));
+    assert.deepEqual(rocketStatus, literalDirStatus,
+      'surrogate pairs resolve to the same directory as literal supplementary Unicode');
+
+    const longRocketDir = path.join('..', 'a'.repeat(180), 'b'.repeat(180),
+      'c'.repeat(135), 'project-🚀');
+    assert.equal(Buffer.byteLength(longRocketDir, 'utf8'), 513,
+      'relative supplementary path exceeds the legacy 512-byte adapter limit');
+    const longRocketPath = path.resolve(fixture, longRocketDir);
+    fs.mkdirSync(path.dirname(longRocketPath), { recursive: true });
+    fs.symlinkSync(fixture, longRocketPath, 'dir');
+    const literalLongRocket = payload(await server.call(61, {
+      action: 'gremlin_status', dir: longRocketDir, lane_id: 'mcp-probe',
+      session_id: sessionId
+    }));
+    assert.equal(literalLongRocket.isError, false, JSON.stringify(literalLongRocket));
+    assert.equal(literalLongRocket.body.session_id, sessionId);
+    const escapedLongRocketDir = JSON.stringify(longRocketDir)
+      .replace('🚀', '\\ud83d\\ude80');
+    assert.equal(JSON.parse(escapedLongRocketDir), longRocketDir);
+    const escapedLongRocket = payload(await server.callRaw(62,
+      `{"action":"gremlin_status","dir":${escapedLongRocketDir},` +
+      `"lane_id":"mcp-probe","session_id":${JSON.stringify(sessionId)}}`));
+    assert.deepEqual(escapedLongRocket, literalLongRocket,
+      'literal and escaped supplementary paths longer than 512 bytes are equivalent');
+
+    for (const length of [4097, 8193]) {
+      // Preserve trailing spaces so this exercises the untrimmed decoder limit.
+      const longDir = '.'.padEnd(length, ' ');
+      const longDirResult = payload(await server.callRaw(100 + length,
+        `{"action":"gremlin_status","dir":${JSON.stringify(longDir)},` +
+        `"lane_id":"mcp-probe","session_id":${JSON.stringify(sessionId)}}`));
+      assert.equal(longDirResult.isError, true,
+        `rejects a directory with ${length} decoded bytes cleanly`);
+      assert.match(longDirResult.body.error, /dir is too long/,
+        'directory length is checked against the decoder buffer before slicing');
+    }
+
+    const nulDirStatus = payload(await server.callRaw(53,
+      `{"action":"gremlin_status","dir":"bad\\u0000dir",` +
+      `"lane_id":"mcp-probe","session_id":${JSON.stringify(sessionId)}}`));
+    assert.equal(nulDirStatus.isError, true, 'MCP rejects a directory containing NUL');
+    assert.ok(String(nulDirStatus.body.error).includes('control character'),
+      'MCP reports a directory control character error');
 
     // No MCP requests are sent while these markers appear; the child must progress
     // independently of the idle client.
