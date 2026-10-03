@@ -126,3 +126,8 @@ main = "test_atomic_link_artifacts.f90"
 name = "test_archive_publication"
 source-dir = "test"
 main = "test_archive_publication.f90"
+
+[[test]]
+name = "test_test_os_link"
+source-dir = "test"
+main = "test_test_os_link.f90"

@@ -3,5 +3,8 @@ version = "0.1.0"
 license = "MIT"
 description = "POSIX shims for standalone fo test harnesses"
 
+[library]
+type = "static"
+
 [install]
 library = false
