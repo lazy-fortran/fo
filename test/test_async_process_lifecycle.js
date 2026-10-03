@@ -42,7 +42,7 @@ function fixturePids(file) {
 }
 
 const compatCode = {
-  i386: { setsid: 'b842000000cd80c3', setpgid: 'b83900000031db31c9cd80c3' },
+  i386: { setsid: 'b842000000cd80c3', setpgid: '53b83900000031db31c9cd805bc3' },
   x32: { setsid: '48b870000040000000000f05c3',
     setpgid: '48b86d0000400000000031ff31f60f05c3' }
 };
