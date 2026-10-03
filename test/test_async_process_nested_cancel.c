@@ -1,4 +1,4 @@
-/* A filtered owner times out a forked command, then cancels one nested handle.
+/* A filtered owner times out a double-forked command, then cancels one handle.
    Build with cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function. */
 #include "../src/proc/fo_process.c"
 
@@ -61,6 +61,7 @@ int main(int argc, char **argv) {
     char root[] = "/var/tmp/fo-nested-cancel-XXXXXX";
     char target[PATH_MAX], sibling[PATH_MAX], trigger[PATH_MAX];
     char result[PATH_MAX], log_file[PATH_MAX], timeout_file[PATH_MAX];
+    char probe_file[PATH_MAX];
     int outer = 0, error = 0, target_pid = 0, target_child = 0;
     int sibling_pid = 0, sibling_child = 0;
     int target_escape = -1, sibling_escape = -1, success = 0;
@@ -69,10 +70,18 @@ int main(int argc, char **argv) {
     struct stat target_before, target_after, sibling_before, sibling_after;
     struct stat timeout_before, timeout_after;
 
+    if (argc == 3 && strcmp(argv[1], "probe") == 0) {
+        write_line(argv[2], "executed\n");
+        return 7;
+    }
+
     if (argc == 3 && strcmp(argv[1], "timeout") == 0) {
-        pid_t child = fork();
-        if (child < 0) return 96;
-        if (child == 0) {
+        pid_t intermediate = fork();
+        if (intermediate < 0) return 96;
+        if (intermediate == 0) {
+            pid_t child = fork();
+            if (child < 0) _exit(97);
+            if (child != 0) _exit(0);
             char line[64];
             signal(SIGTERM, SIG_IGN);
             snprintf(line, sizeof(line), "%ld\n", (long)getpid());
@@ -80,6 +89,8 @@ int main(int argc, char **argv) {
                 write_line(argv[2], line);
                 sleep_ms(50);
             }
+        }
+        while (waitpid(intermediate, NULL, 0) < 0 && errno == EINTR) {
         }
         sleep(3);
         return 0;
@@ -90,9 +101,20 @@ int main(int argc, char **argv) {
         pid_t child;
         if (strstr(argv[2], "/target") != NULL) {
             char command[3 * PATH_MAX], heartbeat[PATH_MAX];
-            const char *parts[] = {argv[0], "timeout", heartbeat};
+            const char *parts[] = {argv[0], "probe", heartbeat};
             size_t used = 0;
             int timeout_code;
+            snprintf(heartbeat, sizeof(heartbeat), "%s-probe", argv[2]);
+            for (size_t i = 0; i < 3; i++) {
+                size_t length = strlen(parts[i]) + 1;
+                memcpy(command + used, parts[i], length);
+                used += length;
+            }
+            fo_c_run_argv_logged("", command, (int)used, 3,
+                                 "/dev/null", 0, 5, 0, NULL, &timeout_code);
+            if (timeout_code != 7) return 98;
+            used = 0;
+            parts[1] = "timeout";
             snprintf(heartbeat, sizeof(heartbeat), "%s-timeout", argv[2]);
             for (size_t i = 0; i < 3; i++) {
                 size_t length = strlen(parts[i]) + 1;
@@ -143,6 +165,7 @@ int main(int argc, char **argv) {
     path_join(result, sizeof(result), root, "result");
     path_join(log_file, sizeof(log_file), root, "outer.log");
     path_join(timeout_file, sizeof(timeout_file), root, "target-timeout");
+    path_join(probe_file, sizeof(probe_file), root, "target-probe");
     packed_start(argv[0], "outer", root, &outer, &error);
     if (error != 0 || outer <= 0) goto cleanup;
     {
@@ -158,6 +181,16 @@ int main(int argc, char **argv) {
             if (now.tv_sec - start.tv_sec >= 5) goto cleanup;
             sleep_ms(25);
         }
+    }
+    {
+        FILE *file = fopen(probe_file, "r");
+        char line[32];
+        if (file == NULL || fgets(line, sizeof(line), file) == NULL ||
+            strcmp(line, "executed\n") != 0) {
+            if (file != NULL) fclose(file);
+            goto cleanup;
+        }
+        fclose(file);
     }
     {
         FILE *file = fopen(timeout_file, "r");
@@ -221,6 +254,7 @@ cleanup:
     unlink(trigger);
     unlink(result);
     unlink(timeout_file);
+    unlink(probe_file);
     unlink(log_file);
     rmdir(root);
     puts("nested-only cancellation and sibling survival: PASS");

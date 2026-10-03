@@ -30,6 +30,11 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifdef __linux__
+#define FO_MONITOR_FD 9
+#define FO_MONITOR_ARG "\037fo-process-monitor-v1"
+#endif
+
 struct async_process {
     pid_t pid;
     pid_t session;
@@ -458,180 +463,10 @@ static void record_timeout(struct run_budget *budget, int kind,
         (long long)(now->tv_nsec - start->tv_nsec) / 1000000LL;
 }
 
-#if defined(__linux__) && defined(SYS_pidfd_open) && \
-    defined(SYS_pidfd_send_signal)
-struct stopped_descendant {
-    pid_t pid;
-    int fd;
-};
 
-static int process_parent(pid_t pid, pid_t *parent, char *state_out) {
-    char path[64], line[4096], *end, state;
-    long ppid;
-    FILE *file;
-
-    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
-    file = fopen(path, "r");
-    if (file == NULL) return -1;
-    if (fgets(line, sizeof(line), file) == NULL) {
-        fclose(file);
-        return -1;
-    }
-    fclose(file);
-    end = strrchr(line, ')');
-    if (end == NULL || sscanf(end + 1, " %c %ld", &state, &ppid) != 2)
-        return -1;
-    *parent = (pid_t)ppid;
-    *state_out = state;
-    return 0;
-}
-
-static int tracked_pid(const struct stopped_descendant *items, size_t count,
-                       pid_t pid) {
-    for (size_t i = 0; i < count; i++) {
-        if (items[i].pid == pid) return 1;
-    }
-    return 0;
-}
-
-/* The strict nested filter keeps all descendants in the handle's group, but
-   another synchronous command may be using that group. Freeze this command's
-   process tree before killing it, so its forked children cannot outlive a
-   timeout and concurrent commands in the same handle remain untouched. */
-static void kill_shared_tree_and_reap(pid_t pid, int *status) {
-    struct stopped_descendant *items = NULL;
-    size_t count = 0, capacity = 0;
-    int stable = 0, scan_failed = 0;
-
-    for (int pass = 0; pass < 100 && stable < 2; pass++) {
-        DIR *directory;
-        struct dirent *entry;
-        int added = 0;
-
-        if (count == 0) {
-            capacity = 32;
-            items = calloc(capacity, sizeof(*items));
-            if (items == NULL) {
-                scan_failed = 1;
-                break;
-            }
-            items[0].pid = pid;
-            items[0].fd = (int)syscall(SYS_pidfd_open, pid, 0);
-            if (items[0].fd < 0) {
-                scan_failed = 1;
-                break;
-            }
-            count = 1;
-            if (syscall(SYS_pidfd_send_signal, items[0].fd,
-                        SIGSTOP, NULL, 0) != 0) {
-                scan_failed = 1;
-                break;
-            }
-        }
-        directory = opendir("/proc");
-        if (directory == NULL) {
-            scan_failed = 1;
-            break;
-        }
-        while ((entry = readdir(directory)) != NULL) {
-            char *end;
-            long number = strtol(entry->d_name, &end, 10);
-            pid_t candidate, parent, current_parent;
-            char state;
-            int fd;
-
-            if (*entry->d_name == '\0' || *end != '\0' || number <= 0 ||
-                number > INT_MAX) continue;
-            candidate = (pid_t)number;
-            if (tracked_pid(items, count, candidate) ||
-                process_parent(candidate, &parent, &state) != 0 ||
-                !tracked_pid(items, count, parent)) continue;
-            fd = (int)syscall(SYS_pidfd_open, candidate, 0);
-            if (fd < 0) {
-                if (errno != ESRCH) scan_failed = 1;
-                if (scan_failed) break;
-                continue;
-            }
-            if (process_parent(candidate, &current_parent, &state) != 0 ||
-                !tracked_pid(items, count, current_parent)) {
-                close(fd);
-                continue;
-            }
-            if (count == capacity) {
-                size_t next_capacity = capacity * 2;
-                struct stopped_descendant *grown =
-                    realloc(items, next_capacity * sizeof(*items));
-                if (grown == NULL) {
-                    close(fd);
-                    scan_failed = 1;
-                    break;
-                }
-                items = grown;
-                capacity = next_capacity;
-            }
-            items[count].pid = candidate;
-            items[count].fd = fd;
-            count++;
-            added++;
-            if (syscall(SYS_pidfd_send_signal, fd, SIGSTOP, NULL, 0) != 0) {
-                scan_failed = 1;
-                break;
-            }
-        }
-        closedir(directory);
-        if (scan_failed) break;
-        stable = added == 0 ? stable + 1 : 0;
-        for (size_t i = 0; i < count; i++) {
-            pid_t parent;
-            char state;
-            if (process_parent(items[i].pid, &parent, &state) == 0 &&
-                state != 'T' && state != 't' && state != 'Z' &&
-                state != 'X') stable = 0;
-        }
-        sleep_ms(10);
-    }
-    if (scan_failed || stable < 2) {
-        /* This path runs inside a nested handle's group. If discovery could
-           not freeze its subtree, cancel that handle to keep it contained. */
-        if (getpgrp() == getpid() && getsid(0) != getpid())
-            (void)kill(-getpgrp(), SIGKILL);
-    }
-    for (size_t i = count; i > 0; i--) {
-        if (syscall(SYS_pidfd_send_signal, items[i - 1].fd,
-                    SIGKILL, NULL, 0) != 0 && errno != ESRCH)
-            scan_failed = 1;
-    }
-    if (scan_failed && getpgrp() == getpid() && getsid(0) != getpid())
-        (void)kill(-getpgrp(), SIGKILL);
-    for (size_t i = 0; i < count; i++) {
-        if (items[i].pid == pid) {
-            while (waitpid(pid, status, 0) < 0 && errno == EINTR) {
-            }
-        } else {
-            while (waitpid(items[i].pid, NULL, 0) < 0 && errno == EINTR) {
-            }
-        }
-        close(items[i].fd);
-    }
-    free(items);
-    if (count == 0) {
-        (void)kill(pid, SIGKILL);
-        while (waitpid(pid, status, 0) < 0 && errno == EINTR) {
-        }
-    }
-}
-#endif
-
-/* SIGTERM the isolated group, then SIGKILL and reap. A nested synchronous
-   command shares its owner's group and needs scoped descendant cleanup. */
+/* The command monitor cleans its own adopted descendants on SIGTERM. If it
+   cannot finish, fail closed on that nested handle's group. */
 static void kill_group_and_reap(pid_t pid, int *status, int isolated_group) {
-#if defined(__linux__) && defined(SYS_pidfd_open) && \
-    defined(SYS_pidfd_send_signal)
-    if (!isolated_group) {
-        kill_shared_tree_and_reap(pid, status);
-        return;
-    }
-#endif
     int reaped = 0;
     pid_t waited;
     pid_t target = isolated_group ? -pid : pid;
@@ -646,12 +481,95 @@ static void kill_group_and_reap(pid_t pid, int *status, int isolated_group) {
         if (waited < 0 && errno != EINTR) break;
         sleep_ms(200);
     }
+    if (!isolated_group && reaped) return;
+    if (!isolated_group && getpgrp() == getpid() && getsid(0) != getpid())
+        (void)kill(-getpgrp(), SIGKILL);
     kill(target, SIGKILL);
     if (!reaped) {
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
         }
     }
 }
+
+static int read_exact(int fd, void *buffer, size_t size);
+
+#ifdef __linux__
+static int start_command_monitor(const char *cwd, char *const argv[],
+                                 const char *log_file, int append,
+                                 char **child_env, pid_t *monitor_pid,
+                                 pid_t *target_pid, int *report_fd) {
+    posix_spawn_file_actions_t actions;
+    char **monitor_argv;
+    int pipefd[2], error, ready, actions_ready = 0;
+    size_t count = 0;
+
+    *target_pid = 0;
+    while (argv[count] != NULL) count++;
+    monitor_argv = calloc(count + 6, sizeof(*monitor_argv));
+    if (monitor_argv == NULL) return ENOMEM;
+    monitor_argv[0] = "/proc/self/exe";
+    monitor_argv[1] = FO_MONITOR_ARG;
+    monitor_argv[2] = (char *)(cwd != NULL ? cwd : "");
+    monitor_argv[3] = (char *)(log_file != NULL ? log_file : "");
+    monitor_argv[4] = append ? "1" : "0";
+    for (size_t i = 0; i < count; i++) monitor_argv[i + 5] = argv[i];
+    if (pipe2(pipefd, O_CLOEXEC) != 0) {
+        error = errno;
+        free(monitor_argv);
+        return error;
+    }
+    for (int i = 0; i < 2; i++) {
+        if (pipefd[i] == FO_MONITOR_FD) {
+            int moved = fcntl(pipefd[i], F_DUPFD_CLOEXEC, FO_MONITOR_FD + 1);
+            if (moved < 0) {
+                error = errno;
+                close(pipefd[0]); close(pipefd[1]);
+                free(monitor_argv);
+                return error;
+            }
+            close(pipefd[i]);
+            pipefd[i] = moved;
+        }
+    }
+    error = posix_spawn_file_actions_init(&actions);
+    if (error == 0) actions_ready = 1;
+    if (error == 0)
+        error = posix_spawn_file_actions_adddup2(
+            &actions, pipefd[1], FO_MONITOR_FD);
+    if (error == 0)
+        error = posix_spawn_file_actions_addclose(&actions, pipefd[0]);
+    if (error == 0)
+        error = posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+    if (error == 0)
+        error = posix_spawn(monitor_pid, "/proc/self/exe", &actions, NULL,
+                            monitor_argv, child_env ? child_env : environ);
+    if (actions_ready) posix_spawn_file_actions_destroy(&actions);
+    free(monitor_argv);
+    close(pipefd[1]);
+    if (error != 0) {
+        close(pipefd[0]);
+        return error;
+    }
+    {
+        struct pollfd reply = {.fd = pipefd[0], .events = POLLIN};
+        do {
+            ready = poll(&reply, 1, 5000);
+        } while (ready < 0 && errno == EINTR);
+    }
+    if (ready <= 0 || read_exact(pipefd[0], target_pid,
+                                 sizeof(*target_pid)) != 0 ||
+        *target_pid <= 0) {
+        int launch_error = *target_pid < 0 ? -*target_pid : EIO;
+        (void)kill(*monitor_pid, SIGKILL);
+        while (waitpid(*monitor_pid, NULL, 0) < 0 && errno == EINTR) {
+        }
+        close(pipefd[0]);
+        return launch_error;
+    }
+    *report_fd = pipefd[0];
+    return 0;
+}
+#endif
 
 static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                     int append, int jobs, int timeout_s, int heartbeat_s,
@@ -661,7 +579,9 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
     int pid_fd = -1;
     int spawn_error;
     int isolated_group = 1;
+    int report_fd = -1;
     int attrs_ready = 0;
+    pid_t accounted_pid = 0;
     char **child_env = NULL;
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attrs;
@@ -714,15 +634,10 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
        children stay in that job's group so its handle can cancel the tree. */
 #ifdef __linux__
     if (spawn_error == EPERM && prctl(PR_GET_SECCOMP, 0, 0, 0, 0) == 2) {
-        if (attrs_ready) posix_spawnattr_destroy(&attrs);
-        attrs_ready = 0;
-        spawn_error = posix_spawnattr_init(&attrs);
-        if (spawn_error == 0) {
-            attrs_ready = 1;
-            spawn_error = posix_spawnp(&pid, argv[0], &actions, &attrs, argv,
-                                       child_env ? child_env : environ);
-            if (spawn_error == 0) isolated_group = 0;
-        }
+        spawn_error = start_command_monitor(cwd, argv, log_file, append,
+                                            child_env, &pid, &accounted_pid,
+                                            &report_fd);
+        if (spawn_error == 0) isolated_group = 0;
     }
 #endif
     posix_spawn_file_actions_destroy(&actions);
@@ -736,6 +651,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
         emit_spawn_error(log_file, operation, spawn_error);
         return spawn_error == ENOENT ? 127 : 126;
     }
+    if (accounted_pid == 0) accounted_pid = pid;
 
 #if defined(__linux__) && defined(SYS_pidfd_open)
     pid_fd = (int)syscall(SYS_pidfd_open, pid, 0);
@@ -776,14 +692,21 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
             waited = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
             if (waited == 0 && info.si_pid == pid) {
                 struct rusage usage;
-                long long own = budget != NULL ? child_cpu_ms(pid) : -1;
+                long long own = budget != NULL ? child_cpu_ms(accounted_pid) : -1;
 
                 while (wait4(pid, &status, 0, &usage) < 0) {
                     if (errno == EINTR) continue;
                     if (pid_fd >= 0) close(pid_fd);
+                    if (report_fd >= 0) close(report_fd);
                     return 1;
                 }
                 if (budget != NULL) {
+                    if (report_fd >= 0) {
+                        long long reported;
+                        if (read_exact(report_fd, &reported,
+                                       sizeof(reported)) == 0)
+                            own = reported;
+                    }
                     if (own < 0) {
                         own = (long long)(usage.ru_utime.tv_sec +
                                           usage.ru_stime.tv_sec) * 1000LL +
@@ -796,22 +719,25 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
             }
             if (waited < 0 && errno != EINTR) {
                 if (pid_fd >= 0) close(pid_fd);
+                if (report_fd >= 0) close(report_fd);
                 return 1;
             }
 
             clock_gettime(CLOCK_MONOTONIC, &now);
             if (timespec_at_or_after(&now, &deadline)) {
-                record_timeout(budget, 2, child_cpu_ms(pid), &start, &now);
+                record_timeout(budget, 2, child_cpu_ms(accounted_pid), &start, &now);
                 kill_group_and_reap(pid, &status, isolated_group);
                 if (pid_fd >= 0) close(pid_fd);
+                if (report_fd >= 0) close(report_fd);
                 return 124;
             }
             if (cpu_s > 0 && timespec_at_or_after(&now, &cpu_check)) {
-                long long used = child_cpu_ms(pid);
+                long long used = child_cpu_ms(accounted_pid);
                 if (used < 0 || used >= (long long)cpu_s * 1000LL) {
                     record_timeout(budget, used < 0 ? 3 : 1, used, &start, &now);
                     kill_group_and_reap(pid, &status, isolated_group);
                     if (pid_fd >= 0) close(pid_fd);
+                    if (report_fd >= 0) close(report_fd);
                     return 124;
                 }
                 cpu_check = now;
@@ -846,6 +772,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                 if (poll_result < 0 && errno == EINTR) continue;
                 if (poll_result < 0) {
                     close(pid_fd);
+                    if (report_fd >= 0) close(report_fd);
                     return 1;
                 }
             } else {
@@ -855,10 +782,12 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
     } else {
         while (waitpid(pid, &status, 0) < 0) {
             if (errno == EINTR) continue;
+            if (report_fd >= 0) close(report_fd);
             return 1;
         }
     }
     if (pid_fd >= 0) close(pid_fd);
+    if (report_fd >= 0) close(report_fd);
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
     return 1;
@@ -1802,3 +1731,116 @@ void fo_c_write_stderr(const char *buf, int n) {
         off += (int)w;
     }
 }
+
+#ifdef __linux__
+static volatile sig_atomic_t monitor_stop = 0;
+
+static void monitor_term(int signal_number) {
+    (void)signal_number;
+    monitor_stop = 1;
+}
+
+/* The monitor is a fresh exec and the only subreaper for this command.
+   Double-forked orphans become its direct children, so no other command's
+   descendants can be mistaken for this one's. */
+static int monitor_kill_children(void) {
+    char path[96];
+    struct timespec start, now;
+    int count;
+
+    snprintf(path, sizeof(path), "/proc/self/task/%ld/children", (long)getpid());
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    do {
+        FILE *file = fopen(path, "r");
+        long child;
+        count = 0;
+        if (file == NULL) return errno;
+        while (fscanf(file, "%ld", &child) == 1) {
+            if (child > 0 && child <= INT_MAX) {
+                (void)kill((pid_t)child, SIGKILL);
+                count++;
+            }
+        }
+        fclose(file);
+        while (waitpid(-1, NULL, WNOHANG) > 0) {
+        }
+        if (count == 0) return 0;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec - start.tv_sec >= 2) return ETIMEDOUT;
+        sleep_ms(10);
+    } while (count > 0);
+    return 0;
+}
+
+static int monitor_run(int argc, char **argv) {
+    posix_spawn_file_actions_t actions;
+    struct sigaction action = {0};
+    struct rusage usage = {0};
+    pid_t target = 0;
+    int error, status = 1, code = 1;
+    long long cpu_ms = -1;
+
+    if (argc < 6 || prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) return 126;
+    action.sa_handler = monitor_term;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGTERM, &action, NULL) != 0) return 126;
+    error = posix_spawn_file_actions_init(&actions);
+    if (error != 0) return 126;
+    if (has_text(argv[2]))
+        error = posix_spawn_file_actions_addchdir_np(&actions, argv[2]);
+    if (error == 0 && has_text(argv[3])) {
+        int flags = O_WRONLY | O_CREAT |
+                    (argv[4][0] == '1' ? O_APPEND : O_TRUNC);
+        error = posix_spawn_file_actions_addopen(
+            &actions, STDOUT_FILENO, argv[3], flags, 0666);
+        if (error == 0)
+            error = posix_spawn_file_actions_adddup2(
+                &actions, STDOUT_FILENO, STDERR_FILENO);
+    }
+    if (error == 0)
+        error = posix_spawn_file_actions_addclose(&actions, FO_MONITOR_FD);
+    if (error == 0)
+        error = posix_spawnp(&target, argv[5], &actions, NULL,
+                             argv + 5, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    if (error != 0) target = -(pid_t)error;
+    (void)write_exact(FO_MONITOR_FD, &target, sizeof(target));
+    if (error != 0) {
+        emit_spawn_error(argv[3], "nested command", error);
+        close(FO_MONITOR_FD);
+        return error == ENOENT ? 127 : 126;
+    }
+    for (;;) {
+        pid_t waited;
+        if (monitor_stop) break;
+        waited = wait4(target, &status, WNOHANG, &usage);
+        if (waited == target) {
+            cpu_ms = (long long)(usage.ru_utime.tv_sec +
+                                 usage.ru_stime.tv_sec) * 1000LL +
+                     (long long)(usage.ru_utime.tv_usec +
+                                 usage.ru_stime.tv_usec) / 1000LL;
+            code = WIFEXITED(status) ? WEXITSTATUS(status) :
+                   WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1;
+            break;
+        }
+        if (waited < 0 && errno != EINTR) break;
+        sleep_ms(10);
+    }
+    if (monitor_kill_children() != 0) {
+        if (getpgrp() == getppid()) (void)kill(-getpgrp(), SIGKILL);
+        code = 126;
+    }
+    (void)write_exact(FO_MONITOR_FD, &cpu_ms, sizeof(cpu_ms));
+    close(FO_MONITOR_FD);
+    return code;
+}
+
+__attribute__((constructor))
+static void fo_process_monitor_entry(int argc, char **argv, char **envp) {
+    (void)envp;
+    if (argc >= 6 && argv[1] != NULL &&
+        strcmp(argv[1], FO_MONITOR_ARG) == 0 &&
+        fcntl(FO_MONITOR_FD, F_GETFD) >= 0)
+        _exit(monitor_run(argc, argv));
+}
+#endif
