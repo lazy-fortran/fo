@@ -4,7 +4,7 @@
 
 'use strict';
 
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -35,10 +35,86 @@ function countLines(file) {
 function fixturePids(file) {
   try {
     return fs.readFileSync(file, 'utf8').split('\n').flatMap(line => {
-      const match = line.match(/^(?:parent|grandchild|escape-attempt|escaped):(\d+):/);
+      const match = line.match(/^(?:parent|grandchild|escape-attempt|escaped|compat-attempt|compat-(?:i386|x32)):(\d+):/);
       return match ? [Number(match[1])] : [];
     });
   } catch (_) { return []; }
+}
+
+const compatCode = {
+  i386: { setsid: 'b842000000cd80c3', setpgid: 'b83900000031db31c9cd80c3' },
+  x32: { setsid: '48b870000040000000000f05c3',
+    setpgid: '48b86d0000400000000031ff31f60f05c3' }
+};
+
+function probeCompatAbi(abi, syscall) {
+  if (process.arch !== 'x64') {
+    return { supported: false, reason: 'test process is not x86-64' };
+  }
+  const script = [
+    'import ctypes, mmap, os, sys',
+    'code = bytes.fromhex(sys.argv[1])',
+    'memory = mmap.mmap(-1, len(code), prot=mmap.PROT_READ | mmap.PROT_WRITE | mmap.PROT_EXEC)',
+    'memory.write(code)',
+    'address = ctypes.addressof(ctypes.c_char.from_buffer(memory))',
+    'call = ctypes.CFUNCTYPE(ctypes.c_int32)(address)',
+    'value = call()',
+    'expected = os.getpid() if sys.argv[2] == "setsid" else 0',
+    'actual_group = os.getsid(0) if sys.argv[2] == "setsid" else os.getpgid(0)',
+    'if value != expected or actual_group != os.getpid():',
+    '    raise SystemExit("syscall returned %d; group is %d; expected %d" % (value, actual_group, expected))'
+  ].join('\n');
+  const result = spawnSync('python3', ['-c', script, compatCode[abi][syscall], syscall], {
+    encoding: 'utf8', timeout: 5000
+  });
+  if (result.error) return { supported: false, reason: result.error.message };
+  if (result.status !== 0) {
+    return { supported: false, reason: result.signal ||
+      (result.stderr || 'compat syscall unavailable').trim() };
+  }
+  return { supported: true };
+}
+
+async function runCompatScenario(root, abi, syscall, servers, cleanupPids) {
+  const probe = probeCompatAbi(abi, syscall);
+  if (!probe.supported) {
+    process.stdout.write('  skip: ' + abi + ' ' + syscall +
+      ' unavailable in unfiltered child (' + probe.reason + ')\n');
+    return;
+  }
+  process.stdout.write('  probe: ' + abi + ' ' + syscall + ' succeeded unfiltered\n');
+  const file = path.join(root, 'compat-' + abi + '-' + syscall + '.log');
+  const server = startServer(root, {
+    PATH: root + path.delimiter + process.env.PATH,
+    FO_LIFECYCLE_HEARTBEAT: file,
+    FO_LIFECYCLE_COMPAT_ABI: abi,
+    FO_LIFECYCLE_COMPAT_SYSCALL: syscall,
+    FO_LIFECYCLE_COMPAT_CODE: compatCode[abi][syscall]
+  });
+  servers.push(server);
+  await initialize(server);
+  const runId = await startRun(server, root);
+  const label = 'compat-' + abi + ':';
+  await waitFor(() => fs.existsSync(file) &&
+    fs.readFileSync(file, 'utf8').includes(label) &&
+    fs.readFileSync(file, 'utf8').includes('compat-result:' + syscall + ':') &&
+    new Set(fixturePids(file)).size >= 2, 5000, abi + ' ' + syscall + ' heartbeat');
+  assert(fs.readFileSync(file, 'utf8').includes('compat-result:' + syscall + ':-1'),
+    abi + ' ' + syscall + ' is denied with EPERM in the filtered child');
+  const pids = fixturePids(file);
+  cleanupPids.push(...fs.readFileSync(file, 'utf8').split('\n').flatMap(line => {
+    const match = line.match(/^compat-(?:i386|x32):(\d+):/);
+    return match ? [Number(match[1])] : [];
+  }));
+  const result = await cancel(server, runId);
+  const stoppedAtReturn = countLines(file);
+  assert(result.value && result.value.cancelled === true,
+    abi + ' cancellation succeeds after the compat ' + syscall + ' attempt');
+  assert(allProcessesStopped(pids),
+    abi + ' ' + syscall + ' descendant is gone before cancellation returns');
+  await delay(300);
+  assert(countLines(file) === stoppedAtReturn,
+    abi + ' ' + syscall + ' heartbeat does not survive cancellation');
 }
 
 function processIsRunning(pid) {
@@ -158,6 +234,30 @@ if (process.env.FO_LIFECYCLE_ESCAPE === '1') {
       fs.appendFileSync(file, 'setsid-blocked:EPERM\\n');
     }
   });
+}
+if (process.env.FO_LIFECYCLE_COMPAT_ABI) {
+  const abi = process.env.FO_LIFECYCLE_COMPAT_ABI;
+  const syscall = process.env.FO_LIFECYCLE_COMPAT_SYSCALL;
+  const program = [
+    'import ctypes, mmap, os, sys, time',
+    'code = bytes.fromhex(sys.argv[1])',
+    'memory = mmap.mmap(-1, len(code), prot=mmap.PROT_READ | mmap.PROT_WRITE | mmap.PROT_EXEC)',
+    'memory.write(code)',
+    'address = ctypes.addressof(ctypes.c_char.from_buffer(memory))',
+    'value = ctypes.CFUNCTYPE(ctypes.c_int32)(address)()',
+    'path = os.environ["FO_LIFECYCLE_HEARTBEAT"]',
+    'with open(path, "a") as output: output.write("compat-result:" + sys.argv[2] + ":" + str(value) + "\\\\n")',
+    'def beat():',
+    '    with open(path, "a") as output: output.write("compat-' + abi +
+      ':" + str(os.getpid()) + ":" + str(time.time_ns()) + "\\\\n")',
+    'beat()',
+    'while True:',
+    '    time.sleep(0.06)',
+    '    beat()'
+  ].join('\\n');
+  const attempt = spawn('python3', ['-c', program,
+    process.env.FO_LIFECYCLE_COMPAT_CODE, syscall], { stdio: 'ignore' });
+  fs.appendFileSync(file, 'compat-attempt:' + attempt.pid + ':' + Date.now() + '\\n');
 }
 setInterval(() => beat('parent'), 60);
 `);
@@ -281,6 +381,13 @@ async function main() {
     await delay(300);
     assert(countLines(escapeFile) === stoppedAtReturn,
       'a descendant heartbeat cannot continue after cancellation succeeds');
+
+    process.stdout.write('\n--- compat ABI session escape attempts ---\n');
+    for (const abi of ['i386', 'x32']) {
+      for (const syscall of ['setsid', 'setpgid']) {
+        await runCompatScenario(root, abi, syscall, servers, escapedPidsToClean);
+      }
+    }
 
     process.stdout.write('\n--- TERM-ignoring tree and completed output ---\n');
     const ignoreFile = path.join(root, 'ignore.log');

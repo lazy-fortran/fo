@@ -847,37 +847,67 @@ static int ensure_async_subreaper(void) {
     return 0;
 }
 
-/* Linux async descendants cannot leave the owned session. On x86-64, cover
-   both native and 32-bit x86 syscall ABIs; reject unknown ABIs. */
+/* Linux async descendants cannot leave the owned session. Cover every known
+   syscall ABI for a supported architecture and reject unknown ABIs. */
 #if defined(__linux__)
-#if defined(__x86_64__)
+#if defined(FO_ASYNC_TEST_AARCH64) || defined(__aarch64__)
+#define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#define FO_ASYNC_HAS_COMPAT_ABI 1
+#define FO_ASYNC_COMPAT_AUDIT_ARCH AUDIT_ARCH_ARM
+#define FO_ASYNC_COMPAT_SETSID 66
+#define FO_ASYNC_COMPAT_SETPGID 57
+#define FO_ASYNC_NATIVE_SETSID 157
+#define FO_ASYNC_NATIVE_SETPGID 154
+#define FO_ASYNC_NATIVE_MISMATCH_SKIP 6
+#if defined(__aarch64__) && (__NR_setsid != 157 || __NR_setpgid != 154)
+#error "AArch64 session syscall numbers differ from the containment filter"
+#endif
+#elif defined(FO_ASYNC_TEST_ARM) || defined(__arm__)
+#define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_ARM
+#define FO_ASYNC_NATIVE_SETSID 66
+#define FO_ASYNC_NATIVE_SETPGID 57
+#if defined(__arm__) && (__NR_setsid != 66 || __NR_setpgid != 57)
+#error "ARM session syscall numbers differ from the containment filter"
+#endif
+#elif defined(FO_ASYNC_TEST_UNSUPPORTED)
+#define FO_ASYNC_AUDIT_ARCH 0
+#elif defined(__x86_64__)
 #define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_X86_64
 #define FO_ASYNC_HAS_COMPAT_ABI 1
 #define FO_ASYNC_COMPAT_AUDIT_ARCH AUDIT_ARCH_I386
 #define FO_ASYNC_COMPAT_SETSID 66
 #define FO_ASYNC_COMPAT_SETPGID 57
+#define FO_ASYNC_HAS_X32_ABI 1
+#define FO_ASYNC_X32_SYSCALL_BIT 0x40000000U
+#define FO_ASYNC_NATIVE_MISMATCH_SKIP 7
 #elif defined(__i386__)
 #define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_I386
-#elif defined(__aarch64__)
-#define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_AARCH64
-#elif defined(__arm__)
-#define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_ARM
 #else
 #define FO_ASYNC_AUDIT_ARCH 0
 #endif
+#if FO_ASYNC_AUDIT_ARCH != 0 && !defined(FO_ASYNC_NATIVE_SETSID)
+#define FO_ASYNC_NATIVE_SETSID __NR_setsid
+#define FO_ASYNC_NATIVE_SETPGID __NR_setpgid
+#endif
+#ifndef FO_ASYNC_NATIVE_MISMATCH_SKIP
+#define FO_ASYNC_NATIVE_MISMATCH_SKIP 7
+#endif
 #endif
 
-static int install_async_group_containment(void) {
 #if defined(__linux__) && FO_ASYNC_AUDIT_ARCH != 0
-    struct sock_filter filter[] = {
+static const struct sock_filter async_group_filter[] = {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
                  (unsigned int)offsetof(struct seccomp_data, arch)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FO_ASYNC_AUDIT_ARCH, 0, 6),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FO_ASYNC_AUDIT_ARCH, 0,
+                 FO_ASYNC_NATIVE_MISMATCH_SKIP),
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
                  (unsigned int)offsetof(struct seccomp_data, nr)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_setsid, 0, 1),
+#ifdef FO_ASYNC_HAS_X32_ABI
+        BPF_STMT(BPF_ALU | BPF_AND | BPF_K, ~FO_ASYNC_X32_SYSCALL_BIT),
+#endif
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FO_ASYNC_NATIVE_SETSID, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_setpgid, 0, 1),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FO_ASYNC_NATIVE_SETPGID, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 #ifdef FO_ASYNC_HAS_COMPAT_ABI
@@ -894,10 +924,14 @@ static int install_async_group_containment(void) {
 #endif
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA))
-    };
+};
+#endif
+
+static int install_async_group_containment(void) {
+#if defined(__linux__) && FO_ASYNC_AUDIT_ARCH != 0
     struct sock_fprog program = {
-        (unsigned short)(sizeof(filter) / sizeof(filter[0])),
-        filter
+        (unsigned short)(sizeof(async_group_filter) / sizeof(async_group_filter[0])),
+        (struct sock_filter *)async_group_filter
     };
 
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return errno;
