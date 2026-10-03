@@ -7,11 +7,23 @@ module fo_gremlin_supervisor
     use fo_fpm_config, only: DEP_PATH, fpm_config_t, fpm_config_parse, dep_kind
     use fo_gremlin_generation, only: generation_context_t, generation_input_t, &
         generation_t, generation_capture
+    use fo_gremlin_lifecycle, only: gremlin_lifecycle_event_t, &
+        gremlin_lifecycle_append, gremlin_lifecycle_make_id, &
+        gremlin_lifecycle_read_page
     use fo_gremlin_journal, only: journal_append, journal_read_page, &
         journal_compact_tail, journal_record_t, JOURNAL_OK, JOURNAL_INVALID, JOURNAL_IO_ERROR, &
         JOURNAL_MAX_RECORD_BYTES
     use fo_gremlin_policy, only: select_gremlin_tests, shuffle_gremlin_tests, &
         GREMLIN_POLICY_OK
+    use fo_gremlin_readiness, only: gremlin_readiness_t, gremlin_wait_satisfied, &
+        GREMLIN_PHASE_STARTING, GREMLIN_PHASE_BUILDING, GREMLIN_PHASE_TESTING, &
+        GREMLIN_PHASE_QUIESCENT, GREMLIN_PHASE_STOPPED, &
+        GREMLIN_PHASE_FAILED, GREMLIN_HEALTH_UNKNOWN, GREMLIN_HEALTH_HEALTHY, &
+        GREMLIN_HEALTH_DEGRADED, GREMLIN_HEALTH_FAILURE, GREMLIN_VERIFY_GATE, &
+        GREMLIN_VERIFY_ORDINARY, GREMLIN_VERIFY_FULL, GREMLIN_WAIT_FAILURE, &
+        GREMLIN_WAIT_FULLY_VERIFIED, GREMLIN_WAIT_ORDINARY_VERIFIED, &
+        GREMLIN_WAIT_PROMOTION_READY, GREMLIN_WAIT_QUIESCENT, &
+        gremlin_phase_name, gremlin_health_name, gremlin_verification_name
     use fo_gremlin_state, only: gremlin_session_t, gremlin_lease_t, &
         gremlin_session_acquire, &
         gremlin_session_publish, gremlin_session_read, gremlin_session_release, &
@@ -85,12 +97,15 @@ module fo_gremlin_supervisor
         integer :: timeout_seconds = DEFAULT_CASE_TIMEOUT
         integer :: jobs = 1
         integer(int64) :: cursor = 0_int64
+        integer(int64) :: lifecycle_cursor = 0_int64
         integer :: wait_ms = 5000
+        integer :: wait_until = 0
         integer :: max_records = 32
         integer(int64) :: max_bytes = 262144_int64
         logical :: only_changed = .false.
         logical :: shuffle = .false.
         logical :: fail_on_failure = .false.
+        logical :: has_wait_until = .false.
         character(len=HASH_LEN) :: generation_id = ''
         character(len=NAME_LEN) :: targets(MAX_NODES) = ''
         integer :: n_targets = 0
@@ -579,7 +594,7 @@ contains
         type(json_reader_t) :: reader
         character(len=NAME_LEN) :: key
         character(len=PATH_LEN) :: value
-        logical :: is_string, seen(17)
+        logical :: is_string, seen(19)
         integer :: field
 
         ierr = 0
@@ -849,6 +864,11 @@ contains
                 if (action == 'wait') request_field = 14
             case ('fail_on_failure')
                 if (action == 'wait') request_field = 15
+            case ('wait_until')
+                if (action == 'wait') request_field = 18
+            case ('lifecycle_cursor')
+                if (action == 'status' .or. action == 'events' .or. &
+                    action == 'wait') request_field = 19
             case ('case_id')
                 if (action == 'reproduce') request_field = 16
             case ('generation_id')
@@ -870,7 +890,7 @@ contains
         ierr = 0
         message = ''
         select case (field)
-        case (1, 2, 16, 17)
+        case (1, 2, 16, 17, 18)
             if (.not. is_string) then
                 ierr = 1
                 message = 'string request field has the wrong JSON type'
@@ -911,6 +931,25 @@ contains
                     message = 'generation_id must be a hexadecimal digest'
                     return
                 end if
+            case (18)
+                select case (trim(value))
+                case ('promotion-ready')
+                    request%wait_until = GREMLIN_WAIT_PROMOTION_READY
+                case ('ordinary-verified')
+                    request%wait_until = GREMLIN_WAIT_ORDINARY_VERIFIED
+                case ('fully-verified')
+                    request%wait_until = GREMLIN_WAIT_FULLY_VERIFIED
+                case ('quiescent')
+                    request%wait_until = GREMLIN_WAIT_QUIESCENT
+                case ('failure')
+                    request%wait_until = GREMLIN_WAIT_FAILURE
+                case default
+                    ierr = 1
+                    message = 'wait_until must be promotion-ready, ordinary-verified, '// &
+                        'fully-verified, quiescent, or failure'
+                    return
+                end select
+                request%has_wait_until = .true.
             end select
             select case (field)
             case (1)
@@ -921,6 +960,8 @@ contains
                 request%case_id = value
             case (17)
                 request%generation_id = value
+            case (18)
+                continue
             end select
         case (8, 9, 15)
             if (is_string) then
@@ -952,7 +993,7 @@ contains
                 message = 'request field must be a JSON integer'
                 return
             end if
-            if (field == 11 .or. field == 13) then
+            if (field == 11 .or. field == 13 .or. field == 19) then
                 read (value, *, iostat=ios) wide
             else
                 read (value, *, iostat=ios) parsed
@@ -964,6 +1005,7 @@ contains
             end if
             if (field == 11) request%cursor = wide
             if (field == 13) request%max_bytes = wide
+            if (field == 19) request%lifecycle_cursor = wide
             if (field == 3) request%random_count = parsed
             if (field == 4) request%seed = parsed
             if (field == 5) request%campaign_seconds = parsed
@@ -997,6 +1039,11 @@ contains
             if (request%cursor < 0_int64) then
                 ierr = 1
                 message = 'cursor must be nonnegative'
+            end if
+        case (19)
+            if (request%lifecycle_cursor < 0_int64) then
+                ierr = 1
+                message = 'lifecycle_cursor must be nonnegative'
             end if
         case (12)
             if (request%max_records < 1 .or. request%max_records > 128) then
@@ -1337,6 +1384,7 @@ contains
         integer :: owner_pid, ierr, i
         integer(int64) :: next_cursor
         logical :: failed, has_events, is_live
+        logical :: until_reached
 
         failed = .false.
         poll_request = request
@@ -1356,8 +1404,14 @@ contains
                 exitcode = 2
                 return
             end if
-            if ((has_events .and. .not. request%fail_on_failure) .or. &
-                (has_events .and. failed) .or. &
+            until_reached = .false.
+            if (request%has_wait_until) then
+                until_reached = status_satisfies_wait(status_text, request%wait_until)
+            end if
+            if ((request%has_wait_until .and. until_reached) .or. &
+                (.not. request%has_wait_until .and. has_events .and. &
+                .not. request%fail_on_failure) .or. &
+                (.not. request%has_wait_until .and. has_events .and. failed) .or. &
                 index(status_text, '"state":"stopped"') > 0) exit
             if (.not. is_live) exit
             if (has_events .and. request%fail_on_failure .and. &
@@ -1373,7 +1427,49 @@ contains
         end if
         exitcode = 0
         if (request%fail_on_failure .and. failed) exitcode = 1
+        if (request%has_wait_until) then
+            if (request%wait_until == GREMLIN_WAIT_FAILURE .and. &
+                status_satisfies_wait(status_text, request%wait_until)) exitcode = 1
+        end if
     end subroutine handle_wait
+
+    logical function status_satisfies_wait(status_text, until_kind)
+        character(len=*), intent(in) :: status_text
+        integer, intent(in) :: until_kind
+
+        type(gremlin_readiness_t) :: readiness
+        character(len=32) :: phase, health, verification, ready
+        character(len=32) :: state
+
+        phase = ''
+        health = ''
+        verification = ''
+        ready = ''
+        state = ''
+        call extract_json_field(status_text, 'phase', phase)
+        call extract_json_field(status_text, 'health', health)
+        call extract_json_field(status_text, 'verification_level', verification)
+        call extract_json_field(status_text, 'promotion_ready', ready)
+        call extract_json_field(status_text, 'state', state)
+        readiness%phase = GREMLIN_PHASE_STARTING
+        if (trim(phase) == 'quiescent') readiness%phase = GREMLIN_PHASE_QUIESCENT
+        if (trim(phase) == 'stopped' .or. trim(state) == 'stopped') &
+            readiness%phase = GREMLIN_PHASE_STOPPED
+        if (trim(phase) == 'failed' .or. trim(state) == 'error') &
+            readiness%phase = GREMLIN_PHASE_FAILED
+        readiness%health = GREMLIN_HEALTH_UNKNOWN
+        if (trim(health) == 'healthy') readiness%health = GREMLIN_HEALTH_HEALTHY
+        if (trim(health) == 'degraded') readiness%health = GREMLIN_HEALTH_DEGRADED
+        if (trim(health) == 'failure' .or. trim(state) == 'error') &
+            readiness%health = GREMLIN_HEALTH_FAILURE
+        readiness%verification_level = GREMLIN_VERIFY_GATE
+        if (trim(verification) == 'ordinary') &
+            readiness%verification_level = GREMLIN_VERIFY_ORDINARY
+        if (trim(verification) == 'full') &
+            readiness%verification_level = GREMLIN_VERIFY_FULL
+        readiness%promotion_ready = trim(ready) == 'true'
+        status_satisfies_wait = gremlin_wait_satisfied(until_kind, readiness)
+    end function status_satisfies_wait
 
     subroutine handle_failures(project_dir, request, response, exitcode)
         character(len=*), intent(in) :: project_dir
@@ -2982,7 +3078,7 @@ contains
 
     subroutine publish_state(session, request, state, active, candidate, current_case, &
             completed, selected_count, seed, last_outcome, last_exitcode, ierr, message, &
-            status_text_out)
+            status_text_out, readiness_in)
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(in) :: request
         character(len=*), intent(in) :: state, current_case, last_outcome
@@ -2991,14 +3087,40 @@ contains
         integer, intent(out), optional :: ierr
         character(len=*), intent(out), optional :: message
         character(len=*), intent(out), optional :: status_text_out
+        type(gremlin_readiness_t), intent(in), optional :: readiness_in
 
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
         character(len=PATH_LEN) :: local_message
         integer :: status
         character(len=PATH_LEN) :: active_project, candidate_project
+        type(gremlin_readiness_t) :: readiness
+        type(gremlin_lifecycle_event_t) :: event
+        integer(int64) :: event_sequence
+        integer :: event_error
 
         active_project = ''
         candidate_project = ''
+        readiness = gremlin_readiness_t()
+        readiness%phase = phase_for_state(state)
+        readiness%health = health_for_outcome(last_outcome, state)
+        readiness%verification_level = GREMLIN_VERIFY_GATE
+        if (present(readiness_in)) readiness = readiness_in
+        call system_clock(event_sequence)
+        event%event_id = gremlin_lifecycle_make_id(session%session_id, event_sequence)
+        event%event_type = lifecycle_type_for_state(state, current_case)
+        event%generation = active%identity
+        event%phase = gremlin_phase_name(readiness%phase)
+        event%health = gremlin_health_name(readiness%health)
+        event%verification_level = gremlin_verification_name(readiness%verification_level)
+        event%promotion_ready = readiness%promotion_ready
+        call gremlin_lifecycle_append(trim(session%state_dir)//'/lifecycle-v1.jsonl', &
+            event, event_error, local_message)
+        if (event_error /= 0) then
+            if (present(ierr)) ierr = event_error
+            if (present(message)) message = local_message
+            if (present(status_text_out)) status_text_out = ''
+            return
+        end if
         if (len_trim(active%identity) > 0) active_project = trim(active%project_root)
         if (len_trim(candidate%identity) > 0) candidate_project = trim(candidate%project_root)
         status_text = '{"protocol":1,"session_id":"'// &
@@ -3015,11 +3137,98 @@ contains
             ',"seed":'//trim(json_int(seed))//',"last_outcome":"'// &
             trim(last_outcome)//'","last_exitcode":'// &
             trim(json_int(last_exitcode))//'}'
+        status_text = status_text(:len_trim(status_text) - 1)// &
+            ',"phase":"'//trim(gremlin_phase_name(readiness%phase))//'"'// &
+            ',"health":"'//trim(gremlin_health_name(readiness%health))//'"'// &
+            ',"verification_level":"'// &
+            trim(gremlin_verification_name(readiness%verification_level))//'"'// &
+            ',"promotion_ready":'//trim(json_bool(readiness%promotion_ready))// &
+            ',"gates":{"capture_fresh":'// &
+            trim(json_bool(readiness%gates%capture_fresh))// &
+            ',"build_passed":'//trim(json_bool(readiness%gates%build_passed))// &
+            ',"regression_passed":'// &
+            trim(json_bool(readiness%gates%regression_passed))// &
+            ',"affected_passed":'// &
+            trim(json_bool(readiness%gates%affected_passed))// &
+            ',"mandatory_passed":'// &
+            trim(json_bool(readiness%gates%mandatory_passed))// &
+            ',"gate_failure":'//trim(json_bool(readiness%gates%gate_failure))// &
+            ',"ordinary_complete":'// &
+            trim(json_bool(readiness%gates%ordinary_complete))// &
+            ',"full_complete":'//trim(json_bool(readiness%gates%full_complete))// &
+            ',"exact_active_generation":'// &
+            trim(json_bool(readiness%gates%exact_active_generation))//'}}'
         call gremlin_session_publish(session, trim(status_text), status, local_message)
         if (present(ierr)) ierr = status
         if (present(message)) message = local_message
         if (present(status_text_out)) status_text_out = trim(status_text)
     end subroutine publish_state
+
+    function lifecycle_type_for_state(state, current_case) result(event_type)
+        character(len=*), intent(in) :: state, current_case
+        character(len=64) :: event_type
+
+        select case (trim(state))
+        case ('starting')
+            event_type = 'session_started'
+        case ('building')
+            event_type = 'candidate_build_started'
+        case ('testing')
+            if (len_trim(current_case) > 0) then
+                event_type = 'case_started'
+            else
+                event_type = 'verification_started'
+            end if
+        case ('idle', 'quiescent')
+            event_type = 'session_quiescent'
+        case ('build_failed')
+            event_type = 'candidate_build_failed'
+        case ('capture_failed')
+            event_type = 'capture_failed'
+        case ('inventory_failed')
+            event_type = 'verification_gate_failed'
+        case ('stopped')
+            event_type = 'session_stopped'
+        case ('error')
+            event_type = 'session_failed'
+        case default
+            event_type = 'state_changed'
+        end select
+    end function lifecycle_type_for_state
+
+    integer function phase_for_state(state)
+        character(len=*), intent(in) :: state
+
+        phase_for_state = GREMLIN_PHASE_STARTING
+        select case (trim(state))
+        case ('building')
+            phase_for_state = GREMLIN_PHASE_BUILDING
+        case ('testing')
+            phase_for_state = GREMLIN_PHASE_TESTING
+        case ('idle', 'quiescent')
+            phase_for_state = GREMLIN_PHASE_QUIESCENT
+        case ('stopped')
+            phase_for_state = GREMLIN_PHASE_STOPPED
+        case ('error', 'build_failed', 'capture_failed', 'inventory_failed')
+            phase_for_state = GREMLIN_PHASE_FAILED
+        end select
+    end function phase_for_state
+
+    integer function health_for_outcome(outcome, state)
+        character(len=*), intent(in) :: outcome, state
+
+        health_for_outcome = GREMLIN_HEALTH_UNKNOWN
+        if (trim(state) == 'error' .or. trim(state) == 'build_failed' .or. &
+            trim(state) == 'capture_failed' .or. trim(state) == 'inventory_failed' .or. &
+            trim(outcome) == 'FAIL' .or. trim(outcome) == 'BUILD_FAIL' .or. &
+            trim(outcome) == 'TIMEOUT' .or. trim(outcome) == 'INFRA_ERROR') then
+            health_for_outcome = GREMLIN_HEALTH_FAILURE
+        else if (trim(outcome) == 'PASS' .or. trim(outcome) == 'BUILD_PASS') then
+            health_for_outcome = GREMLIN_HEALTH_HEALTHY
+        else if (trim(outcome) == 'RUNNING') then
+            health_for_outcome = GREMLIN_HEALTH_DEGRADED
+        end if
+    end function health_for_outcome
 
     subroutine response_with_events(action, status_text, session, request, failures_only, &
             response, ierr, message)
@@ -3032,9 +3241,13 @@ contains
         character(len=*), intent(out) :: message
 
         type(journal_record_t), allocatable :: records(:)
+        type(gremlin_lifecycle_event_t), allocatable :: lifecycle_events(:)
         integer(int64) :: next_cursor, file_size
+        integer(int64) :: next_lifecycle_cursor
         integer :: journal_status, i, emitted
+        integer :: lifecycle_count
         logical :: exists, has_more
+        logical :: lifecycle_has_more
         character(len=16) :: row_status
         character(len=:), allocatable :: base
 
@@ -3075,6 +3288,23 @@ contains
         end do
         response = response//'],"next_cursor":'//trim(int64_text(next_cursor))// &
             ',"has_more":'//trim(json_bool(has_more))//'}'
+        call gremlin_lifecycle_read_page(session%state_dir//'/lifecycle-v1.jsonl', &
+            request%lifecycle_cursor, request%max_records, request%max_bytes, &
+            lifecycle_events, lifecycle_count, next_lifecycle_cursor, &
+            lifecycle_has_more, journal_status, message)
+        if (journal_status /= 0) then
+            ierr = journal_status
+            message = 'cannot read typed lifecycle event page: '//trim(message)
+            return
+        end if
+        response = response(:len(response) - 1)//',"lifecycle_events":['
+        do i = 1, lifecycle_count
+            if (i > 1) response = response//','
+            response = response//lifecycle_events(i)%json
+        end do
+        response = response//'],"next_lifecycle_cursor":'// &
+            trim(int64_text(next_lifecycle_cursor))//',"lifecycle_has_more":'// &
+            trim(json_bool(lifecycle_has_more))//'}'
         ierr = 0
         message = ''
     end subroutine response_with_events

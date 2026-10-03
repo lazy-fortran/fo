@@ -290,6 +290,169 @@ static int sync_parent(const char *path) {
     return result;
 }
 
+typedef struct {
+    char event_id[COMPLETION_ID_MAX + 1];
+    char event_type[64];
+    int have_id;
+    int have_type;
+    int have_version;
+    int have_phase;
+    int have_health;
+    int have_verification;
+    int have_ready;
+} lifecycle_fields_t;
+
+static int parse_lifecycle(const char *text, size_t length,
+                           lifecycle_fields_t *fields) {
+    json_parser_t parser = {text, length, 0};
+    char key[128];
+    size_t key_length, value_length;
+    int key_ascii, value_ascii;
+    memset(fields, 0, sizeof(*fields));
+    skip_space(&parser);
+    if (parser.offset >= parser.length || parser.text[parser.offset++] != '{') return 1;
+    for (;;) {
+        skip_space(&parser);
+        if (parser.offset >= parser.length ||
+            parse_string(&parser, key, sizeof(key), &key_length, &key_ascii) != 0)
+            return 1;
+        (void)key_length;
+        skip_space(&parser);
+        if (parser.offset >= parser.length || parser.text[parser.offset++] != ':')
+            return 1;
+        skip_space(&parser);
+        if (key_ascii && strcmp(key, "event_id") == 0) {
+            if (fields->have_id || parse_string(&parser, fields->event_id,
+                sizeof(fields->event_id), &value_length, &value_ascii) != 0 ||
+                !value_ascii || value_length == 0) return 1;
+            fields->have_id = 1;
+        } else if (key_ascii && strcmp(key, "event_type") == 0) {
+            if (fields->have_type || parse_string(&parser, fields->event_type,
+                sizeof(fields->event_type), &value_length, &value_ascii) != 0 ||
+                !value_ascii || value_length == 0) return 1;
+            fields->have_type = 1;
+        } else if (key_ascii && strcmp(key, "event_version") == 0) {
+            if (fields->have_version || parser.length - parser.offset == 0 ||
+                parser.text[parser.offset++] != '1') return 1;
+            fields->have_version = 1;
+        } else if (key_ascii && (strcmp(key, "phase") == 0 ||
+                   strcmp(key, "health") == 0 ||
+                   strcmp(key, "verification_level") == 0)) {
+            int *present = strcmp(key, "phase") == 0 ? &fields->have_phase :
+                (strcmp(key, "health") == 0 ? &fields->have_health :
+                 &fields->have_verification);
+            char value[64];
+            if (*present || parse_string(&parser, value, sizeof(value),
+                &value_length, &value_ascii) != 0 || !value_ascii || value_length == 0)
+                return 1;
+            *present = 1;
+        } else if (key_ascii && strcmp(key, "promotion_ready") == 0) {
+            if (fields->have_ready ||
+                (parser.length - parser.offset >= 4 &&
+                 memcmp(parser.text + parser.offset, "true", 4) == 0)) {
+                if (parser.length - parser.offset >= 4 &&
+                    memcmp(parser.text + parser.offset, "true", 4) == 0)
+                    parser.offset += 4;
+                else
+                    return 1;
+            } else if (parser.length - parser.offset >= 5 &&
+                       memcmp(parser.text + parser.offset, "false", 5) == 0) {
+                parser.offset += 5;
+            } else {
+                return 1;
+            }
+            fields->have_ready = 1;
+        } else if (parse_value(&parser, 2) != 0) {
+            return 1;
+        }
+        skip_space(&parser);
+        if (parser.offset >= parser.length) return 1;
+        if (parser.text[parser.offset] == '}') {
+            parser.offset++;
+            break;
+        }
+        if (parser.text[parser.offset++] != ',') return 1;
+    }
+    skip_space(&parser);
+    return parser.offset == parser.length && fields->have_id && fields->have_type &&
+        fields->have_version && fields->have_phase && fields->have_health &&
+        fields->have_verification && fields->have_ready ? 0 : 1;
+}
+
+static int validate_lifecycle(const char *record, size_t length,
+                              lifecycle_fields_t *fields) {
+    if (record == NULL || length == 0 || length > JOURNAL_LINE_MAX ||
+        memchr(record, '\n', length) != NULL || memchr(record, '\r', length) != NULL ||
+        memchr(record, '\0', length) != NULL) return 1;
+    return parse_lifecycle(record, length, fields);
+}
+
+int fo_c_gremlin_lifecycle_validate(const char *record) {
+    lifecycle_fields_t fields;
+    if (record == NULL) return 1;
+    return validate_lifecycle(record, strlen(record), &fields);
+}
+
+int fo_c_gremlin_lifecycle_append(const char *path, const char *event_id,
+                                  const char *record) {
+    int fd = -1, result = 2, found = 0, identical = 0;
+    size_t length, line_length = 0, written = 0;
+    off_t offset = 0, complete_end = 0;
+    struct stat st;
+    char line[JOURNAL_LINE_MAX + 1];
+    lifecycle_fields_t fields, existing;
+    if (path == NULL || event_id == NULL || record == NULL || path[0] == '\0' ||
+        event_id[0] == '\0' || strlen(event_id) > COMPLETION_ID_MAX) return 1;
+    length = strlen(record);
+    result = validate_lifecycle(record, length, &fields);
+    if (result != 0 || strcmp(fields.event_id, event_id) != 0) return 1;
+    result = 2;
+    fd = open(path, O_CREAT | O_RDWR | O_APPEND | O_CLOEXEC, 0600);
+    if (fd < 0) return 2;
+    if (flock(fd, LOCK_EX) != 0 || fstat(fd, &st) != 0) goto done;
+    while (offset < st.st_size) {
+        char c;
+        ssize_t count = pread(fd, &c, 1, offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count != 1) goto done;
+        offset++;
+        if (c != '\n') {
+            if (line_length >= JOURNAL_LINE_MAX) { result = 4; goto done; }
+            line[line_length++] = c;
+            continue;
+        }
+        line[line_length] = '\0';
+        if (validate_lifecycle(line, line_length, &existing) != 0) {
+            result = 1;
+            goto done;
+        }
+        if (strcmp(existing.event_id, event_id) == 0) {
+            if (found) { result = 1; goto done; }
+            found = 1;
+            identical = line_length == length && memcmp(line, record, length) == 0;
+        }
+        complete_end = offset;
+        line_length = 0;
+    }
+    if (found) {
+        result = identical ? 0 : 3;
+        goto done;
+    }
+    if (complete_end < st.st_size && ftruncate(fd, complete_end) != 0) goto done;
+    while (written < length) {
+        ssize_t count = write(fd, record + written, length - written);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) goto done;
+        written += (size_t)count;
+    }
+    if (write(fd, "\n", 1) != 1 || fsync(fd) != 0 || sync_parent(path) != 0) goto done;
+    result = 0;
+done:
+    flock(fd, LOCK_UN);
+    close(fd);
+    return result;
+}
+
 int fo_c_gremlin_journal_validate_record(const char *record) {
     receipt_fields_t fields;
     size_t length;

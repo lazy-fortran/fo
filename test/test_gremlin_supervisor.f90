@@ -106,6 +106,14 @@ contains
             '{"cursor":-1}', response, exitcode)
         call check(exitcode /= 0 .and. index(response, 'nonnegative') > 0, &
             'rejects a negative event cursor')
+        call gremlin_handle('wait', '/tmp/project', &
+            '{"wait_until":"unknown"}', response, exitcode)
+        call check(exitcode /= 0 .and. index(response, 'wait_until must be') > 0, &
+            'rejects an unknown typed wait condition')
+        call gremlin_handle('wait', '/tmp/project', &
+            '{"wait_until":"promotion-ready"}', response, exitcode)
+        call check(exitcode /= 0 .and. index(response, 'unsupported') == 0, &
+            'accepts a named readiness wait condition before session lookup')
     end subroutine test_strict_request_validation
 
     subroutine test_unknown_terminal_read_is_side_effect_free()
