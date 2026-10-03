@@ -221,15 +221,14 @@ candidate at a time; unaffected workers continue. Eventually run comprehensive
 verification on a fixed final generation without pausing useful implementation
 merely to drain an obsolete suite.
 
-After later execution authorization, use available parallel luna capacity when
-parallel mode is selected; after repeated failure
+Use available parallel luna capacity when parallel mode is selected; after repeated failure
 on an **individual task**, transfer that task to sol. Record failure signatures
 and at least two substantive repair attempts, interrupt the previous writer,
 freeze its useful patch/evidence, then give sol the same task, verifier and ownership. Parallel mode uses a
 native Sol worker; serial mode uses the GPT skill for a bounded Sol task and
 returns evidence to the same main session. Do not spawn coding subagents in
-serial mode. Read the current GPT skill before that exception; no escalation
-is executed by this planning delivery. Ordinary first test failures are feedback, not immediate escalation.
+serial mode. Read the current GPT skill before that exception. Ordinary first
+test failures are feedback, not immediate escalation.
 Do not change the whole team's model or give two agents the same writable branch.
 Root/controller remains responsible for integration, main commits and pushes.
 
@@ -412,16 +411,29 @@ when observations exist, never invented benchmark claims.
 
 ## Active delivery state
 
-**Plans only; execution is stopped pending a subsequent user instruction.**
-No new Gremlin runtime has passed integrated behavioral verification on main.
-Earlier authorized workers produced local candidates from `2e781fd`, then were
-interrupted: policy `170d5f3`, journal `1994066`, process `cd6d115`, cache-schema
-test correction `a393675`, plus incomplete/uncommitted generation/state/core/CLI/MCP
-work under `/var/tmp/fo-gremlin-workers`. Preserve them; do not automatically
-resume, integrate or promote. Reinspect after execution is explicitly triggered.
-A preserved link failure suggested incomplete archive reuse (#144); fresh serial
-linking succeeded. Existing candidates/observations do not replace final oracles.
-The workspace master PLAN/AGENTS govern explicit mode and execution authorization.
+**The user has authorized the fo Gremlin bootstrap in parallel mode.** The
+controller's isolated `gremlin/integration` candidate starts at fo main
+`e4fc193` and currently ends at `472d144`. It integrates the policy, journal,
+state, generation, process, dependency-freshness, atomic-link, supervisor and
+CLI/MCP commits. Focused behavioral checks pass, as do the full local fo
+pipeline (static 107/107, build 59/59, tests 48/48, lint OK) and the artifact
+publication fixture. The compiler reports three existing array-temporary
+warnings in `fo_diagnostics.f90` and `fo_scan.f90`.
+
+The first live start against the fo worktree found a generation-capture blocker:
+it rejected tracked `AGENTS.md -> CLAUDE.md` and entered `capture_failed` before
+any test ran. Luna commit `d65b4f6` added descriptor-rooted capture, preserved
+link records and passed a focused and live `test_gremlin_generation` receipt.
+Independent review then found directory-read error handling, parent-swap test
+synchronization and trailing-space path identity gaps. Sol commit `b00c4d7`
+addresses those findings; its focused test and full local pipeline pass. Both
+repair commits remain separate from this integration branch pending independent
+review and controller verification of the combined candidate. Do not promote or
+replace the installed binary until those checks and a fresh integrated live
+receipt pass. The installed CLI remains at its restored baseline. Earlier
+candidates based on `2e781fd` remain preserved evidence, not automatic
+integration inputs; registry-update and toolchain-identity concerns remain
+inspection-only findings.
 
 After each meaningful delivery, rewrite this state and issue acceptance status,
 update the corresponding ffc stage, and close or narrow GitHub issues only when

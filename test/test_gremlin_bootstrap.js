@@ -312,6 +312,18 @@ async function stopLane(project, lane, sessionId) {
   await waitForOwnerExit(project, lane, 10000);
 }
 
+function makeWritableTree(target) {
+  if (!fs.existsSync(target)) return;
+  const stats = fs.lstatSync(target);
+  if (stats.isSymbolicLink()) return;
+  fs.chmodSync(target, stats.mode | 0o700);
+  if (stats.isDirectory()) {
+    for (const entry of fs.readdirSync(target)) {
+      makeWritableTree(path.join(target, entry));
+    }
+  }
+}
+
 function gremlinOwnerPids(project, lane) {
   const owners = [];
   for (const entry of fs.readdirSync('/proc')) {
@@ -474,10 +486,10 @@ async function main() {
       'lane B remains active after lane A stops');
     await releaseGate(laneBGate);
     await waitForEventLines(laneBMarker, 'done', 1, 30000);
-    const secondLaneEvents = await collectEvents(project, 'other', sessionB, 10000);
-    assert.ok(secondLaneEvents.some(event => event.case_id === 'test_lane_b' &&
-      event.generation === secondLaneStatus.active_generation && event.status === 'PASS'),
-    'stopping one lane preserves the other lane result');
+    await waitForEvent(project, 'other', sessionB, event =>
+      event.case_id === 'test_lane_b' &&
+      event.generation === secondLaneStatus.active_generation && event.status === 'PASS',
+    10000);
 
     console.log('Gremlin bootstrap: atomic attach, failed/new generations, '
       + 'durable receipts, and lane-scoped stop passed');
@@ -509,7 +521,10 @@ async function main() {
   if (primaryError) throw primaryError;
 }
 
-main().then(() => fs.rmSync(scratch, { recursive: true, force: true }))
+main().then(() => {
+  makeWritableTree(scratch);
+  fs.rmSync(scratch, { recursive: true, force: true });
+})
   .catch(error => {
     console.error(error);
     console.error(`scratch preserved for diagnosis: ${scratch}`);

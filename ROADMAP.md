@@ -4,7 +4,9 @@ Updated 2026-10-03. The complete Gremlin roadmap, bootstrap and ordered provider
 issues are in [PLAN.md](PLAN.md). This file contains adjacent fo responsibilities,
 not a competing Gremlin schedule. The workspace master orders repositories;
 [ffc PLAN.md](https://github.com/lazy-fortran/ffc/blob/main/PLAN.md) owns compiler
-language work. Current delivery is plans only, with execution deferred.
+language work. Current delivery is the user-authorized fo Gremlin bootstrap in
+parallel mode; ffc implementation remains gated on integrated bootstrap
+acceptance.
 
 ## Build and tool contracts
 

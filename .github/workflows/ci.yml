@@ -88,6 +88,28 @@ jobs:
       - name: Test MCP cancellation cleanup probe
         run: node test/test_mcp_cancel_error.js "$(command -v fo)" --cleanup-probe
 
+      - name: Test asynchronous process lifecycle
+        env:
+          HOME: ${{ runner.temp }}/fo-async-home
+          XDG_CONFIG_HOME: ${{ runner.temp }}/fo-async-xdg-config
+          XDG_CACHE_HOME: ${{ runner.temp }}/fo-async-xdg-cache
+          FO_PREFIX: ${{ runner.temp }}/fo-async-prefix
+          FO_CACHE_DIR: ${{ runner.temp }}/fo-async-cache
+          FO_GREMLIN_STATE_DIR: ${{ runner.temp }}/fo-async-state
+          FO_SELF_REFRESH: "0"
+          FO_DISABLE_SELF_REFRESH: "1"
+          TMPDIR: /var/tmp
+        run: node test/test_async_process_lifecycle.js "$(command -v fo)"
+
+      - name: Test nested process timeout containment
+        run: |
+          verifier_dir="$(mktemp -d)"
+          trap 'rm -rf "$verifier_dir"' EXIT
+          cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
+            test/test_async_process_nested_cancel.c \
+            -o "$verifier_dir/nested-cancel"
+          "$verifier_dir/nested-cancel"
+
       - name: Test formatter executable behavior
         run: |
           node test/test_fmt_cli.js

@@ -148,13 +148,25 @@ async function waitFor(file, timeoutMs) {
   throw new Error(`timed out waiting for ${file}`);
 }
 
+function makeWritableTree(target) {
+  if (!fs.existsSync(target)) return;
+  const stats = fs.lstatSync(target);
+  if (stats.isSymbolicLink()) return;
+  fs.chmodSync(target, stats.mode | 0o700);
+  if (stats.isDirectory()) {
+    for (const entry of fs.readdirSync(target)) {
+      makeWritableTree(path.join(target, entry));
+    }
+  }
+}
+
 async function waitForInitialSample(readStatus, seed, expectedCount, label) {
   const deadline = Date.now() + 30000;
   let latest = {};
   while (Date.now() < deadline) {
     latest = await readStatus();
     const events = Array.isArray(latest.events) ? latest.events : [];
-    const sample = events.filter(event => event.seed === seed);
+    const sample = events.filter(event => event.seed === seed && event.case_id !== '<build>');
     if (latest.seed !== seed && sample.length >= expectedCount) return sample;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
@@ -419,6 +431,25 @@ async function main() {
     assert.ok(!verdicts.some(([name]) => name === 'test_mcp_blocked'),
       'blocked case has no invented completion');
 
+    const failureMarker = path.join(markerRoot, 'mcp_fail.done');
+    const failedRunsBefore = fs.existsSync(failureMarker)
+      ? fs.readFileSync(failureMarker, 'utf8').trim().split('\n').filter(Boolean) : [];
+    assert.ok(failedRunsBefore.length > 0,
+      'the initial failing receipt came from a real test execution');
+    const reproduced = payload(await server.call(11, {
+      action: 'gremlin_reproduce', ...identity, case_id: failureEvent.case_id,
+      generation_id: failureEvent.generation
+    }));
+    assert.equal(reproduced.isError, true,
+      'a reproduced failing case sets MCP isError');
+    assert.equal(reproduced.body.session_id, sessionId, JSON.stringify(reproduced.body));
+    assert.equal(reproduced.body.state, 'FAIL',
+      'reproduce reruns the known failed test on its captured generation');
+    const failedRunsAfter = fs.readFileSync(failureMarker, 'utf8').trim()
+      .split('\n').filter(Boolean);
+    assert.ok(failedRunsAfter.length > failedRunsBefore.length,
+      'reproduce launches a new failing test execution instead of echoing its stored receipt');
+
     const stopped = payload(await server.call(9, { action: 'gremlin_stop', ...identity }));
     assert.equal(stopped.isError, false, JSON.stringify(stopped.body));
     assert.equal(stopped.body.state, 'stopping');
@@ -428,22 +459,6 @@ async function main() {
     assert.equal(reconnected.session_id, sessionId,
       'MCP wait reconnects after the original start request has returned');
     assert.equal(reconnected.state, 'stopped', 'MCP observes the completed stop');
-    const failureMarker = path.join(markerRoot, 'mcp_fail.done');
-    const failedRunsBefore = fs.existsSync(failureMarker)
-      ? fs.readFileSync(failureMarker, 'utf8').trim().split('\n').filter(Boolean) : [];
-    assert.ok(failedRunsBefore.length > 0,
-      'the initial failing receipt came from a real test execution');
-    const reproduced = payload(await server.call(11, {
-      action: 'gremlin_reproduce', ...identity, case_id: failureEvent.case_id,
-      generation_id: failureEvent.generation, timeout_seconds: 5
-    }));
-    assert.equal(reproduced.body.session_id, sessionId);
-    assert.equal(reproduced.body.state, 'FAIL',
-      'reproduce reruns the known failed test on its captured generation');
-    const failedRunsAfter = fs.readFileSync(failureMarker, 'utf8').trim()
-      .split('\n').filter(Boolean);
-    assert.ok(failedRunsAfter.length > failedRunsBefore.length,
-      'reproduce launches a new failing test execution instead of echoing its stored receipt');
 
     // Compare valid random-count and seed mapping across both adapters by the
     // exact cases each independently selects from the same frozen source set.
@@ -551,7 +566,10 @@ async function main() {
   if (primaryError) throw primaryError;
 }
 
-main().then(() => fs.rmSync(scratch, { recursive: true, force: true }))
+main().then(() => {
+  makeWritableTree(scratch);
+  fs.rmSync(scratch, { recursive: true, force: true });
+})
   .catch(error => {
     console.error(error);
     console.error(`scratch preserved for diagnosis: ${scratch}`);

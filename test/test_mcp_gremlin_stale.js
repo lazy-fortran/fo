@@ -23,6 +23,18 @@ const env = { ...process.env, HOME: home, TMPDIR: '/var/tmp',
   FO_GREMLIN_STATE_DIR: path.join(scratch, 'gremlin-state') };
 fs.mkdirSync(home, { recursive: true });
 
+function makeWritableTree(target) {
+  if (!fs.existsSync(target)) return;
+  const stats = fs.lstatSync(target);
+  if (stats.isSymbolicLink()) return;
+  fs.chmodSync(target, stats.mode | 0o700);
+  if (stats.isDirectory()) {
+    for (const entry of fs.readdirSync(target)) {
+      makeWritableTree(path.join(target, entry));
+    }
+  }
+}
+
 function makeStaleBinary() {
   const source = path.join(scratch, 'old-source');
   fs.mkdirSync(source);
@@ -382,7 +394,10 @@ async function main() {
   if (primaryError) throw primaryError;
 }
 
-main().then(() => fs.rmSync(scratch, { recursive: true, force: true }))
+main().then(() => {
+  makeWritableTree(scratch);
+  fs.rmSync(scratch, { recursive: true, force: true });
+})
   .catch(error => {
   console.error(error);
   console.error(`scratch preserved for diagnosis: ${scratch}`);
