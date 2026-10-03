@@ -40,6 +40,7 @@ freshness/result/process behavior before consumers can rely on it.
 | [#174](https://github.com/lazy-fortran/fo/issues/174) | Initialize and diagnose the shared Darwin change provider without adding a second polling engine. |
 | [#175](https://github.com/lazy-fortran/fo/issues/175) | Own one declared execution-input inventory shared by watcher relevance, compact generation capture and later action invalidation. |
 | [#176](https://github.com/lazy-fortran/fo/issues/176) | Replace shell/Python benchmark orchestration and reporting with a standalone Fortran driver. |
+| [#177](https://github.com/lazy-fortran/fo/issues/177) | Make every command-local help path side-effect free, especially `fo install --help`. |
 
 Adjacent scope is [#56](https://github.com/lazy-fortran/fo/issues/56) LSP,
 [#59](https://github.com/lazy-fortran/fo/issues/59) deep-lint provider,

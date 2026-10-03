@@ -690,6 +690,9 @@ completed entries below are retained as prerequisites and evidence:
 20. [#176](https://github.com/lazy-fortran/fo/issues/176): port the benchmark
     driver/report from shell and Python to Fortran, then remove the final
     repository-owned executable scripting-language tools.
+21. [#177](https://github.com/lazy-fortran/fo/issues/177): make global and
+    command-local help side-effect free. `fo install --help` must never build or
+    replace the controller-owned installed driver.
 
 Experimental agent scheduler PR #147 is closed without merge; #143 and #152 are
 closed as not planned. External controllers own worker DAGs, worktrees, model
@@ -766,6 +769,10 @@ Implemented issue state:
   exact selected profiles survive cache hits, explicit install is the only global
   publication path, the inverse Node oracle is replaced by Fortran, and its cold
   CI invocation has an explicit 240-second wall budget.
+- #177 records a newly reproduced public CLI defect: `fo install --help`
+  performed the install and replaced the shared bootstrap during #162 work. The
+  controller restored the known binary immediately; help parsing needs an exact
+  isolated-prefix no-mutation oracle.
 - #171 provider work is delivered through `9331c04`: Darwin selects its native
   feature declarations before headers, the negative compile oracle proves the
   former macro defect, and state/portability/supervisor tests pass on Linux and
