@@ -1154,6 +1154,16 @@ contains
             call report_test_result(exitcode, test_log, .false., use_json)
             call delete_tmpfile(test_log)
         else if (n_arg_names > 0) then
+            ! Validate every named test against the build graph before
+            ! dispatch: an unknown name must fail loudly with exit 1,
+            ! not run nothing and exit 0 (#137) nor crash downstream.
+            do i = 1, n_arg_names
+                if (dag_find_test_index(dag, test_names(i)) /= 0) cycle
+                if (fpm_test_source_exists(b%project_dir, test_names(i))) cycle
+                write (error_unit, '(a,a)') &
+                    'fo: unknown test: '//trim(test_names(i))
+                stop 1
+            end do
             call make_tmpfile('fo-test', test_log)
             call backend_test_names(b, test_names, n_arg_names, exitcode, &
                 include_all, test_log, flags=all_flags)
@@ -1206,6 +1216,84 @@ contains
             call delete_tmpfile(test_log)
         end if
     end subroutine cmd_test
+
+    logical function fpm_test_source_exists(project_dir, name) result(ok)
+        ! fpm names test targets by test/<name>.<suffix>; accept the same
+        ! convention when the source file exists in the project.
+        character(len=*), intent(in) :: project_dir, name
+        character(len=512) :: path
+        inquire(file=trim(project_dir)//'/test/'//trim(name)//'.f90', &
+               exist=ok)
+        if (ok) return
+        inquire(file=trim(project_dir)//'/test/'//trim(name)//'.F90', &
+               exist=ok)
+    end function fpm_test_source_exists
+
+    integer function dag_find_test_index(dag, name) result(index)
+        ! First test-node whose label matches NAME exactly or whose path
+        ! basename without suffix matches (fpm-style bare target name);
+        ! 0 when the graph contains no such test.
+        type(dag_t), intent(in) :: dag
+        character(len=*), intent(in) :: name
+        character(len=512) :: label
+        integer :: i, slash, dot
+        index = 0
+        do i = 1, dag%n_nodes
+            label = trim(dag%nodes(i)%label)
+            if (label == trim(name)) then
+                index = i
+                return
+            end if
+            slash = index_of_last_char(label, '/')
+            if (slash > 0 .and. slash < len(label)) label = label(slash+1:)
+            dot = last_dot_before_f90(label)
+            if (dot > 1 .and. label(1:dot-1) == trim(name)) then
+                index = i
+                return
+            end if
+        end do
+    end function dag_find_test_index
+
+    integer function index_of_last_char(text, ch) result(position)
+        character(len=*), intent(in) :: text
+        character(len=1), intent(in) :: ch
+        integer :: i
+        position = 0
+        do i = 1, len_trim(text)
+            if (text(i:i) == ch) position = i
+        end do
+    end function index_of_last_char
+
+    integer function last_dot_before_f90(label) result(dot)
+        ! Position just before a trailing .f90/.F90/.f95/.f03/.f08 or .c
+        ! suffix; 0 when no such suffix closes the basename.
+        character(len=*), intent(in) :: label
+        integer :: n
+        character(len=8) :: lower
+        n = len_trim(label)
+        lower = label
+        call lowercase_in_place(lower)
+        dot = 0
+        if (n < 4) return
+        if (lower(n-3:n) == '.f90' .or. lower(n-3:n) == '.f95' .or. &
+            lower(n-3:n) == '.f03' .or. lower(n-3:n) == '.f08') then
+            dot = n-3
+        else if (n >= 3 .and. lower(n-1:n) == '.c') then
+            dot = n-1
+        else if (lower(n-2:n) == '.cu' .or. lower(n-2:n) == '.cc') then
+            dot = n-2
+        end if
+    end function last_dot_before_f90
+
+    subroutine lowercase_in_place(text)
+        character(len=*), intent(inout) :: text
+        integer :: i, k
+        do i = 1, len_trim(text)
+            k = index('ABCDEFGHIJKLMNOPQRSTUVWXYZ', text(i:i))
+            if (k > 0) text(i:i) = achar(k + 32)
+        end do
+    end subroutine lowercase_in_place
+
 
     logical function env_flag(name) result(on)
         !! True when the environment variable is set to a truthy 1.
