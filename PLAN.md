@@ -527,7 +527,7 @@ behavioral verifier proves that they block current correctness.
 ## Active delivery state
 
 **Execution is user-authorized in parallel mode.** The controller started from
-fo main `e4fc193`. Draft core PR #146 is at `34375f8`; frozen stacked work-mode
+fo main `e4fc193`. Draft core PR #146 is at `55b3a80`; frozen stacked work-mode
 PR #147 and the combined integration branch are at `86870cf`.
 
 The `a0d3515` candidate passed the isolated full fo pipeline: static 109/109,
@@ -561,6 +561,9 @@ Implemented issue state:
   CMake/CTest row passing while exposing a fo CTest-name discovery defect, and
   one row correctly blocked by a missing private path dependency. This is early
   matrix evidence, not complete coverage.
+- #149's first reviewed slice is integrated: request DTO/parsing/validation now
+  lives in `fo_gremlin_request`, with parser behavior preserved. Context,
+  campaign, command/session and transition/rendering extraction remains.
 
 After each meaningful delivery, update this plan, workspace master and affected
 issues; commit and push the controller branch immediately. Preserve exact bases,
