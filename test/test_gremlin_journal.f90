@@ -33,6 +33,7 @@ contains
         character(len=256) :: path, message
         character(len=256) :: pass_record, fail_record, later_record
         character(len=256) :: conflict_record, cancelled_record, malformed_record
+        character(len=256) :: nul_alias_record
         integer(int64) :: after_first, after_second, next_cursor
         integer :: status, unit, pid, ios
 
@@ -57,6 +58,13 @@ contains
             '"outcome":"cancelled","test":"test_blocked"}'
         malformed_record = '{"completion_id":"run-a/bad",'// &
             '"outcome":"pass",}'
+        nul_alias_record = '{"completion_id":"run-a/pass'//achar(92)// &
+            'u0000suffix","outcome":"pass","test":"test_alias"}'
+
+        call journal_append(trim(path), 'run-a/pass', trim(nul_alias_record), &
+            status, message)
+        call assert(status == JOURNAL_INVALID, &
+            'escaped NUL cannot alias a different completion ID')
 
         call journal_append(trim(path), 'run-a/pass', trim(pass_record), status, &
             message)

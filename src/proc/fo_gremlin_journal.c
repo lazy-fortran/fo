@@ -153,6 +153,7 @@ static int parse_object(json_parser_t *parser, unsigned int depth,
             if ((is_id && fields->have_id) || (is_outcome && fields->have_outcome) ||
                 parse_string(parser, target, capacity, &value_length, &value_ascii) != 0 ||
                 !value_ascii || value_length == 0) return 1;
+            if (is_id && value_length != strlen(target)) return 1;
             if (is_id) fields->have_id = 1;
             else fields->have_outcome = 1;
         } else if (parse_value(parser, depth + 1) != 0) {
