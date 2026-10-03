@@ -36,6 +36,7 @@ freshness/result/process behavior before consumers can rely on it.
 | [#165](https://github.com/lazy-fortran/fo/issues/165)--[#170](https://github.com/lazy-fortran/fo/issues/170), [fx #42](https://github.com/lazy-fortran/fx/issues/42)--[#44](https://github.com/lazy-fortran/fx/issues/44) | Writable execution views, one immutable blob/action store, compact generations, private transactional build sessions, one ordinary/Gremlin engine and rooted low-churn collection. |
 | [#171](https://github.com/lazy-fortran/fo/issues/171) | Complete through `9331c04`: state-provider declarations and portability oracles pass on Linux/macOS; #172 separately owns public lifecycle. |
 | [#172](https://github.com/lazy-fortran/fo/issues/172) | Add scoped Darwin asynchronous owner/descendant containment for public Gremlin lifecycle. |
+| [#173](https://github.com/lazy-fortran/fo/issues/173) | Accept documented platform archive index metadata while preserving exact expected-object verification. |
 
 Adjacent scope is [#56](https://github.com/lazy-fortran/fo/issues/56) LSP,
 [#59](https://github.com/lazy-fortran/fo/issues/59) deep-lint provider,

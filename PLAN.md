@@ -636,7 +636,9 @@ completed entries below are retained as prerequisites and evidence:
     macOS. #172 separately owns the public lifecycle gate.
 15. [#172](https://github.com/lazy-fortran/fo/issues/172): add scoped Darwin
     asynchronous owner/descendant containment and unblock public Gremlin lifecycle.
-16. Deliver the shared store in provider order: [fx #42](https://github.com/lazy-fortran/fx/issues/42),
+16. [#173](https://github.com/lazy-fortran/fo/issues/173): accept only documented
+    platform archive index members while retaining exact object verification.
+17. Deliver the shared store in provider order: [fx #42](https://github.com/lazy-fortran/fx/issues/42),
     then [fx #43](https://github.com/lazy-fortran/fx/issues/43) plus
     [fo #165](https://github.com/lazy-fortran/fo/issues/165), then
     [fo #166](https://github.com/lazy-fortran/fo/issues/166)/[#167](https://github.com/lazy-fortran/fo/issues/167),
@@ -722,6 +724,8 @@ Implemented issue state:
 - #172 owns the subsequently exposed `ENOTSUP` from Linux-only asynchronous
   descendant containment; macOS state/supervisor providers pass, while public
   Gremlin start/status/stop remains blocked until scoped Darwin ownership lands.
+- #173 owns the Apple `ar` `__.SYMDEF SORTED` index-member classification defect
+  exposed by the exact #172 macOS test build; arbitrary extra objects remain errors.
 - #143/#152 and PR #147 are closed without merge after the KISS review assigned
   agent scheduling to the external controller; no work-mode code enters core.
 - #145 has one bounded fpm row passing on the exact candidate, one independent
