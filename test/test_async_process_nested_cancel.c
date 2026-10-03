@@ -1,5 +1,5 @@
-/* A filtered owner cancels one nested handle whose child tries to leave its
-   group. Build with cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function. */
+/* A filtered owner times out a forked command, then cancels one nested handle.
+   Build with cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function. */
 #include "../src/proc/fo_process.c"
 
 static void write_line(const char *path, const char *line) {
@@ -60,20 +60,46 @@ static int alive(int pid) {
 int main(int argc, char **argv) {
     char root[] = "/var/tmp/fo-nested-cancel-XXXXXX";
     char target[PATH_MAX], sibling[PATH_MAX], trigger[PATH_MAX];
-    char result[PATH_MAX], log_file[PATH_MAX];
+    char result[PATH_MAX], log_file[PATH_MAX], timeout_file[PATH_MAX];
     int outer = 0, error = 0, target_pid = 0, target_child = 0;
     int sibling_pid = 0, sibling_child = 0;
     int target_escape = -1, sibling_escape = -1, success = 0;
     int target_child_survived = -1, sibling_child_survived = -1;
+    int timeout_child = 0, timeout_child_survived = -1;
     struct stat target_before, target_after, sibling_before, sibling_after;
+    struct stat timeout_before, timeout_after;
+
+    if (argc == 3 && strcmp(argv[1], "timeout") == 0) {
+        pid_t child = fork();
+        if (child < 0) return 96;
+        if (child == 0) {
+            char line[64];
+            signal(SIGTERM, SIG_IGN);
+            snprintf(line, sizeof(line), "%ld\n", (long)getpid());
+            for (;;) {
+                write_line(argv[2], line);
+                sleep_ms(50);
+            }
+        }
+        sleep(3);
+        return 0;
+    }
 
     if (argc == 3 && strcmp(argv[1], "nested") == 0) {
         char line[64];
         pid_t child;
         if (strstr(argv[2], "/target") != NULL) {
-            static const char command[] = "/bin/sleep\0" "3\0";
+            char command[3 * PATH_MAX], heartbeat[PATH_MAX];
+            const char *parts[] = {argv[0], "timeout", heartbeat};
+            size_t used = 0;
             int timeout_code;
-            fo_c_run_argv_logged("", command, (int)sizeof(command) - 1, 2,
+            snprintf(heartbeat, sizeof(heartbeat), "%s-timeout", argv[2]);
+            for (size_t i = 0; i < 3; i++) {
+                size_t length = strlen(parts[i]) + 1;
+                memcpy(command + used, parts[i], length);
+                used += length;
+            }
+            fo_c_run_argv_logged("", command, (int)used, 3,
                                  "/dev/null", 0, 1, 0, NULL, &timeout_code);
             if (timeout_code != 124) return 95;
         }
@@ -116,6 +142,7 @@ int main(int argc, char **argv) {
     path_join(trigger, sizeof(trigger), root, "cancel");
     path_join(result, sizeof(result), root, "result");
     path_join(log_file, sizeof(log_file), root, "outer.log");
+    path_join(timeout_file, sizeof(timeout_file), root, "target-timeout");
     packed_start(argv[0], "outer", root, &outer, &error);
     if (error != 0 || outer <= 0) goto cleanup;
     {
@@ -132,6 +159,25 @@ int main(int argc, char **argv) {
             sleep_ms(25);
         }
     }
+    {
+        FILE *file = fopen(timeout_file, "r");
+        char line[64];
+        if (file == NULL || fgets(line, sizeof(line), file) == NULL) {
+            if (file != NULL) fclose(file);
+            goto cleanup;
+        }
+        timeout_child = atoi(line);
+        fclose(file);
+    }
+    if (stat(timeout_file, &timeout_before) != 0 ||
+        stat(sibling, &sibling_before) != 0) goto cleanup;
+    sleep_ms(200);
+    if (stat(timeout_file, &timeout_after) != 0 ||
+        stat(sibling, &sibling_after) != 0) goto cleanup;
+    timeout_child_survived = alive(timeout_child);
+    if (timeout_child_survived ||
+        timeout_before.st_size != timeout_after.st_size ||
+        sibling_after.st_size <= sibling_before.st_size) goto cleanup;
     write_line(trigger, "go\n");
     if (!wait_for_file(result, 5)) goto cleanup;
     {
@@ -161,9 +207,11 @@ int main(int argc, char **argv) {
 cleanup:
     if (outer > 0) fo_c_cancel_pid(outer, &error);
     if (!success) {
-        fprintf(stderr, "nested cancellation failed: escape=%d "
+        fprintf(stderr, "nested cancellation failed: timeout_child_survived=%d "
+                "escape=%d "
                 "target_child_survived=%d sibling_child_survived=%d "
-                "files=%s\n", target_escape, target_child_survived,
+                "files=%s\n", timeout_child_survived, target_escape,
+                target_child_survived,
                 sibling_child_survived, root);
         return 1;
     }
@@ -172,6 +220,7 @@ cleanup:
     unlink(sibling);
     unlink(trigger);
     unlink(result);
+    unlink(timeout_file);
     unlink(log_file);
     rmdir(root);
     puts("nested-only cancellation and sibling survival: PASS");

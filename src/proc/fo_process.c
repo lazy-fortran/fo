@@ -458,9 +458,180 @@ static void record_timeout(struct run_budget *budget, int kind,
         (long long)(now->tv_nsec - start->tv_nsec) / 1000000LL;
 }
 
-/* SIGTERM the child or its isolated group, give it up to three seconds to
-   exit, then SIGKILL the same target and reap the child. */
+#if defined(__linux__) && defined(SYS_pidfd_open) && \
+    defined(SYS_pidfd_send_signal)
+struct stopped_descendant {
+    pid_t pid;
+    int fd;
+};
+
+static int process_parent(pid_t pid, pid_t *parent, char *state_out) {
+    char path[64], line[4096], *end, state;
+    long ppid;
+    FILE *file;
+
+    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
+    file = fopen(path, "r");
+    if (file == NULL) return -1;
+    if (fgets(line, sizeof(line), file) == NULL) {
+        fclose(file);
+        return -1;
+    }
+    fclose(file);
+    end = strrchr(line, ')');
+    if (end == NULL || sscanf(end + 1, " %c %ld", &state, &ppid) != 2)
+        return -1;
+    *parent = (pid_t)ppid;
+    *state_out = state;
+    return 0;
+}
+
+static int tracked_pid(const struct stopped_descendant *items, size_t count,
+                       pid_t pid) {
+    for (size_t i = 0; i < count; i++) {
+        if (items[i].pid == pid) return 1;
+    }
+    return 0;
+}
+
+/* The strict nested filter keeps all descendants in the handle's group, but
+   another synchronous command may be using that group. Freeze this command's
+   process tree before killing it, so its forked children cannot outlive a
+   timeout and concurrent commands in the same handle remain untouched. */
+static void kill_shared_tree_and_reap(pid_t pid, int *status) {
+    struct stopped_descendant *items = NULL;
+    size_t count = 0, capacity = 0;
+    int stable = 0, scan_failed = 0;
+
+    for (int pass = 0; pass < 100 && stable < 2; pass++) {
+        DIR *directory;
+        struct dirent *entry;
+        int added = 0;
+
+        if (count == 0) {
+            capacity = 32;
+            items = calloc(capacity, sizeof(*items));
+            if (items == NULL) {
+                scan_failed = 1;
+                break;
+            }
+            items[0].pid = pid;
+            items[0].fd = (int)syscall(SYS_pidfd_open, pid, 0);
+            if (items[0].fd < 0) {
+                scan_failed = 1;
+                break;
+            }
+            count = 1;
+            if (syscall(SYS_pidfd_send_signal, items[0].fd,
+                        SIGSTOP, NULL, 0) != 0) {
+                scan_failed = 1;
+                break;
+            }
+        }
+        directory = opendir("/proc");
+        if (directory == NULL) {
+            scan_failed = 1;
+            break;
+        }
+        while ((entry = readdir(directory)) != NULL) {
+            char *end;
+            long number = strtol(entry->d_name, &end, 10);
+            pid_t candidate, parent, current_parent;
+            char state;
+            int fd;
+
+            if (*entry->d_name == '\0' || *end != '\0' || number <= 0 ||
+                number > INT_MAX) continue;
+            candidate = (pid_t)number;
+            if (tracked_pid(items, count, candidate) ||
+                process_parent(candidate, &parent, &state) != 0 ||
+                !tracked_pid(items, count, parent)) continue;
+            fd = (int)syscall(SYS_pidfd_open, candidate, 0);
+            if (fd < 0) {
+                if (errno != ESRCH) scan_failed = 1;
+                if (scan_failed) break;
+                continue;
+            }
+            if (process_parent(candidate, &current_parent, &state) != 0 ||
+                !tracked_pid(items, count, current_parent)) {
+                close(fd);
+                continue;
+            }
+            if (count == capacity) {
+                size_t next_capacity = capacity * 2;
+                struct stopped_descendant *grown =
+                    realloc(items, next_capacity * sizeof(*items));
+                if (grown == NULL) {
+                    close(fd);
+                    scan_failed = 1;
+                    break;
+                }
+                items = grown;
+                capacity = next_capacity;
+            }
+            items[count].pid = candidate;
+            items[count].fd = fd;
+            count++;
+            added++;
+            if (syscall(SYS_pidfd_send_signal, fd, SIGSTOP, NULL, 0) != 0) {
+                scan_failed = 1;
+                break;
+            }
+        }
+        closedir(directory);
+        if (scan_failed) break;
+        stable = added == 0 ? stable + 1 : 0;
+        for (size_t i = 0; i < count; i++) {
+            pid_t parent;
+            char state;
+            if (process_parent(items[i].pid, &parent, &state) == 0 &&
+                state != 'T' && state != 't' && state != 'Z' &&
+                state != 'X') stable = 0;
+        }
+        sleep_ms(10);
+    }
+    if (scan_failed || stable < 2) {
+        /* This path runs inside a nested handle's group. If discovery could
+           not freeze its subtree, cancel that handle to keep it contained. */
+        if (getpgrp() == getpid() && getsid(0) != getpid())
+            (void)kill(-getpgrp(), SIGKILL);
+    }
+    for (size_t i = count; i > 0; i--) {
+        if (syscall(SYS_pidfd_send_signal, items[i - 1].fd,
+                    SIGKILL, NULL, 0) != 0 && errno != ESRCH)
+            scan_failed = 1;
+    }
+    if (scan_failed && getpgrp() == getpid() && getsid(0) != getpid())
+        (void)kill(-getpgrp(), SIGKILL);
+    for (size_t i = 0; i < count; i++) {
+        if (items[i].pid == pid) {
+            while (waitpid(pid, status, 0) < 0 && errno == EINTR) {
+            }
+        } else {
+            while (waitpid(items[i].pid, NULL, 0) < 0 && errno == EINTR) {
+            }
+        }
+        close(items[i].fd);
+    }
+    free(items);
+    if (count == 0) {
+        (void)kill(pid, SIGKILL);
+        while (waitpid(pid, status, 0) < 0 && errno == EINTR) {
+        }
+    }
+}
+#endif
+
+/* SIGTERM the isolated group, then SIGKILL and reap. A nested synchronous
+   command shares its owner's group and needs scoped descendant cleanup. */
 static void kill_group_and_reap(pid_t pid, int *status, int isolated_group) {
+#if defined(__linux__) && defined(SYS_pidfd_open) && \
+    defined(SYS_pidfd_send_signal)
+    if (!isolated_group) {
+        kill_shared_tree_and_reap(pid, status);
+        return;
+    }
+#endif
     int reaped = 0;
     pid_t waited;
     pid_t target = isolated_group ? -pid : pid;
@@ -1416,6 +1587,7 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
             if (errno != EPERM || setpgid(0, 0) != 0) child_error = errno;
             else nested = 1;
         }
+        if (child_error == 0 && nested) child_error = ensure_async_subreaper();
         if (child_error == 0)
             child_error = install_async_group_containment(nested);
         if (child_error == 0 && has_text(cwd) && chdir(cwd) != 0) {
