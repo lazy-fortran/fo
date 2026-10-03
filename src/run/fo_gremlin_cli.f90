@@ -199,7 +199,8 @@ contains
             end if
 
             if (trim(raw) == 'lane_id' .or. trim(raw) == 'session_id' .or. &
-                trim(raw) == 'case_id' .or. trim(raw) == 'generation_id') then
+                trim(raw) == 'case_id' .or. trim(raw) == 'generation_id' .or. &
+                trim(raw) == 'wait_until') then
                 if (missing_value) value = ''
                 call add_string_field(trim(raw), trim(value), keys, values, n_fields)
             else if (trim(kind) == 'bool') then
@@ -286,6 +287,9 @@ contains
         case ('--cursor')
             key = 'cursor'
             needs_value = .true.
+        case ('--lifecycle-cursor')
+            key = 'lifecycle_cursor'
+            needs_value = .true.
         case ('--max-records')
             key = 'max_records'
             needs_value = .true.
@@ -298,6 +302,10 @@ contains
         case ('--failure', '--fail-on-failure')
             key = 'fail_on_failure'
             kind = 'bool'
+        case ('--until')
+            key = 'wait_until'
+            kind = 'string'
+            needs_value = .true.
         case ('--case', '--case-id')
             key = 'case_id'
             kind = 'string'
@@ -426,8 +434,9 @@ contains
         write (unit, '(a)') 'usage: fo gremlin [start|status|wait|events|failures|reproduce|stop] [options]'
         write (unit, '(a)') '  start: --dir DIR --lane ID --target NAME --random N --seed N'
         write (unit, '(a)') '         --only-changed --shuffle --campaign-seconds N --timeout-seconds N'
-        write (unit, '(a)') '  reads: --session ID --cursor N --max-records N --max-bytes N'
-        write (unit, '(a)') '         wait also accepts --wait-ms N --failure'
+        write (unit, '(a)') '  reads: --session ID --cursor N --lifecycle-cursor N'
+        write (unit, '(a)') '         --max-records N --max-bytes N'
+        write (unit, '(a)') '  wait: --wait-ms N --failure or --until CONDITION'
         write (unit, '(a)') '  reproduce: ID or --case ID; optional --generation ID'
         write (unit, '(a)') '  output is the shared Gremlin JSON response; --json is accepted'
     end subroutine print_gremlin_usage

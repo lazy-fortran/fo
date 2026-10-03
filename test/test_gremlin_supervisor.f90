@@ -4,6 +4,8 @@ program test_gremlin_supervisor
     use fo_cache, only: cache_digest
     use fo_fs, only: fs_make_dir, fs_remove_tree
     use fo_gremlin_journal, only: journal_append
+    use fo_gremlin_coverage, only: coverage_epoch_t, coverage_open, &
+        coverage_record, COVERAGE_OK
     use fo_gremlin_state, only: gremlin_session_t, gremlin_session_acquire, &
         gremlin_session_publish, gremlin_session_read, gremlin_session_release, &
         gremlin_session_stop_requested
@@ -64,6 +66,7 @@ program test_gremlin_supervisor
     call test_unknown_terminal_read_is_side_effect_free()
     call test_same_place_attach_policy()
     call test_event_cursor_and_journal_errors()
+    call test_readiness_status_and_semantic_waits()
     call test_terminal_session_history()
     call test_failed_final_status_uses_constructed_terminal()
     write (output_unit, '(a,i0,a,i0,a)') 'Summary: ', passed, &
@@ -274,7 +277,7 @@ contains
         if (ierr /= 0) return
 
         allocate (character(len=96) :: parts(1))
-        parts(1) = 'v1|r=32|s=0|c=60|t=5|j=1|changed=false|shuffle=false'
+        parts(1) = 'v1|r=32|s=0|c=60|t=0|j=1|changed=false|shuffle=false'
         policy_key = cache_digest(parts, 1)
         status_text = '{"protocol":1,"session_id":"'//trim(session%session_id)// &
             '","lane_id":"attach","policy_key":"'//policy_key// &
@@ -386,11 +389,196 @@ contains
         call fs_remove_tree(trim(project_dir))
     end subroutine test_event_cursor_and_journal_errors
 
+    subroutine test_readiness_status_and_semantic_waits()
+        type(gremlin_session_t) :: session
+        type(coverage_epoch_t) :: coverage
+        character(len=512) :: state_root, project_dir, message, journal_path
+        character(len=512) :: coverage_path
+        character(len=64) :: generation, pending_generation, cursor_text
+        character(len=128) :: names(3), id
+        character(len=8192) :: status_text, record
+        character(len=:), allocatable :: response_json
+        integer :: ierr, exitcode, release_error, status, digest_position
+
+        call make_tmpfile('fo-gremlin-readiness-state', state_root)
+        call make_tmpfile('fo-gremlin-readiness-project', project_dir)
+        call fs_make_dir(trim(project_dir))
+        ierr = c_setenv('FO_GREMLIN_STATE_DIR'//c_null_char, &
+            trim(state_root)//c_null_char, 1_c_int)
+        call check(ierr == 0, 'sets isolated state for readiness API facts')
+        call gremlin_session_acquire(trim(project_dir), 'readiness', session, &
+            ierr, message)
+        call check(ierr == 0 .and. session%owner, 'creates readiness API session')
+        if (ierr /= 0) return
+
+        generation = repeat('c', 64)
+        pending_generation = repeat('d', 64)
+        status_text = '{"protocol":1,"session_id":"'//trim(session%session_id)// &
+            '","lane_id":"readiness","state":"testing",'// &
+            '"active_generation":"'//generation// &
+            '","candidate_generation":"'//generation// &
+            '","requirement_digest":"'//repeat('e',64)//'","event_epoch":0,'// &
+            '"gate_required":1,"completed":0,"selected":3,"seed":9,'// &
+            '"last_outcome":"NONE","last_exitcode":0}'
+        call gremlin_session_publish(session, trim(status_text), ierr, message)
+        call check(ierr == 0, 'publishes exact active-generation status')
+        call session_journal_file(trim(project_dir), 'readiness', &
+            session%session_id, journal_path, ierr)
+        call check(ierr == 0, 'resolves readiness receipt journal')
+
+        id = trim(session%session_id)//'-build'
+        record = '{"completion_id":"'//trim(id)//'","session_id":"'// &
+            trim(session%session_id)//'","lane_id":"readiness",'// &
+            '"generation":"'//generation//'","case_id":"<build>",'// &
+            '"status":"BUILD_PASS","outcome":"pass"}'
+        call journal_append(trim(journal_path), trim(id), trim(record), ierr, message)
+        call check(ierr == 0, 'records the active generation build pass')
+
+        names = ''
+        names(1) = 'test_fast_one'
+        names(2) = 'test_fast_two'
+        names(3) = 'test_readiness_slow'
+        coverage_path = trim(session%state_dir)//'/coverage-'//generation//'.state'
+        call coverage_open(trim(coverage_path), generation, names, 3, 9, coverage, &
+            status, message)
+        call check(status == COVERAGE_OK, 'opens exact-generation coverage inventory')
+        call coverage_record(coverage, 'test_fast_one', 'PASS', status, message)
+        call check(status == COVERAGE_OK, 'records sampled ordinary case pass')
+
+        id = trim(session%session_id)//'-gate'
+        record = '{"completion_id":"'//trim(id)//'","session_id":"'// &
+            trim(session%session_id)//'","lane_id":"readiness",'// &
+            '"generation":"'//generation//'","case_id":"test_fast_one",'// &
+            '"status":"PASS","outcome":"pass","gate_required":true,"requirement_digest":"'// &
+            repeat('e',64)//'"}'
+        call journal_append(trim(journal_path), trim(id), trim(record), ierr, message)
+        call check(ierr == 0, 'records one explicitly required gate case')
+
+        call gremlin_handle('status', trim(project_dir), '{"lane_id":"readiness"}', &
+            response_json, exitcode)
+        call check(exitcode == 0 .and. &
+            index(response_json, '"local_gate_green":true') > 0 .and. &
+            index(response_json, '"verification_level":"gate"') > 0 .and. &
+            index(response_json, '"ordinary_required":2') > 0 .and. &
+            index(response_json, '"ordinary_passed":1') > 0, &
+            'status reports a green partial gate before ordinary completion')
+        digest_position = index(status_text, repeat('e', 64))
+        status_text(digest_position:digest_position + 63) = repeat('f', 64)
+        call gremlin_session_publish(session, trim(status_text), ierr, message)
+        call gremlin_handle('status', trim(project_dir), '{"lane_id":"readiness"}', &
+            response_json, exitcode)
+        call check(exitcode == 0 .and. &
+            index(response_json, '"local_gate_green":false') > 0 .and. &
+            index(response_json, '"gate_token":""') > 0, &
+            'changed requirements invalidate receipts and clear the token before reuse')
+        status_text(digest_position:digest_position + 63) = repeat('e', 64)
+        call gremlin_session_publish(session, trim(status_text), ierr, message)
+        call gremlin_handle('wait', trim(project_dir), &
+            '{"lane_id":"readiness","wait_until":"local-gate-green",'// &
+            '"wait_ms":0}', response_json, exitcode)
+        call check(exitcode == 0 .and. &
+            index(response_json, '"wait_satisfied":true') > 0 .and. &
+            index(response_json, '"wait_timed_out":false') > 0, &
+            'zero-duration semantic wait succeeds when its fact is already true')
+        call gremlin_handle('wait', trim(project_dir), &
+            '{"lane_id":"readiness","wait_until":"ordinary-verified",'// &
+            '"wait_ms":0}', response_json, exitcode)
+        call check(exitcode == 0 .and. &
+            index(response_json, '"wait_satisfied":false') > 0 .and. &
+            index(response_json, '"wait_timed_out":true') > 0, &
+            'zero-duration semantic wait reports an explicit timeout when false')
+
+        call coverage_record(coverage, 'test_fast_two', 'PASS', status, message)
+        call check(status == COVERAGE_OK, 'finishes ordinary inventory independently')
+        call gremlin_handle('status', trim(project_dir), '{"lane_id":"readiness"}', &
+            response_json, exitcode)
+        call check(exitcode == 0 .and. &
+            index(response_json, '"verification_level":"ordinary"') > 0 .and. &
+            index(response_json, '"fully_verified":false') > 0, &
+            'status advances to ordinary facts without implying full verification')
+
+        call coverage_record(coverage, 'test_readiness_slow', 'PASS', status, message)
+        call check(status == COVERAGE_OK, 'finishes slow full-inventory case')
+        call gremlin_handle('wait', trim(project_dir), &
+            '{"lane_id":"readiness","wait_until":"fully-verified",'// &
+            '"wait_ms":0}', response_json, exitcode)
+        call check(exitcode == 0 .and. &
+            index(response_json, '"verification_level":"full"') > 0 .and. &
+            index(response_json, '"fully_verified":true') > 0 .and. &
+            index(response_json, '"wait_satisfied":true') > 0, &
+            'full semantic wait observes every supported inventory pass')
+
+        call gremlin_session_publish(session, &
+            trim(status_text(:len_trim(status_text) - 1))//',"input_changed":true}', &
+            ierr, message)
+        call gremlin_handle('status', trim(project_dir), '{"lane_id":"readiness"}', &
+            response_json, exitcode)
+        call check(exitcode == 0 .and. &
+            index(response_json, '"local_gate_green":false') > 0 .and. &
+            index(response_json, '"fully_verified":false') > 0 .and. &
+            index(response_json, '"verification_level":"none"') > 0, &
+            'a watcher event invalidates even completed receipts before recapture')
+        status_text = '{"protocol":1,"session_id":"'//trim(session%session_id)// &
+            '","lane_id":"readiness","state":"building",'// &
+            '"active_generation":"'//generation// &
+            '","candidate_generation":"'//pending_generation// &
+            '","requirement_digest":"'//repeat('e',64)//'","event_epoch":0,'// &
+            '"gate_required":1,"completed":3,"selected":3,"seed":9,'// &
+            '"last_outcome":"NONE","last_exitcode":0}'
+        call gremlin_session_publish(session, trim(status_text), ierr, message)
+        call check(ierr == 0, 'publishes a newer pending candidate')
+        call gremlin_handle('status', trim(project_dir), '{"lane_id":"readiness"}', &
+            response_json, exitcode)
+        call check(exitcode == 0 .and. &
+            index(response_json, '"dirty":true') > 0 .and. &
+            index(response_json, '"local_gate_green":false') > 0, &
+            'pending candidate makes exact active-generation readiness stale')
+
+        id = trim(session%session_id)//'-failure'
+        record = '{"completion_id":"'//trim(id)//'","session_id":"'// &
+            trim(session%session_id)//'","lane_id":"readiness",'// &
+            '"generation":"'//generation//'","case_id":"test_fast_two",'// &
+            '"status":"FAIL","outcome":"fail","gate_required":false}'
+        call journal_append(trim(journal_path), trim(id), trim(record), ierr, message)
+        call check(ierr == 0, 'records a durable active-generation failure')
+        status_text = '{"protocol":1,"session_id":"'//trim(session%session_id)// &
+            '","lane_id":"readiness","state":"testing",'// &
+            '"active_generation":"'//generation// &
+            '","candidate_generation":"'//generation// &
+            '","requirement_digest":"'//repeat('e',64)//'","event_epoch":0,'// &
+            '"gate_required":1,"completed":4,"selected":3,"seed":9,'// &
+            '"last_outcome":"FAIL","last_exitcode":1}'
+        call gremlin_session_publish(session, trim(status_text), ierr, message)
+        call check(ierr == 0, 'returns readiness status to active generation')
+        call gremlin_handle('status', trim(project_dir), '{"lane_id":"readiness"}', &
+            response_json, exitcode)
+        call check(exitcode == 0 .and. &
+            index(response_json, '"health":"failure"') > 0 .and. &
+            index(response_json, '"local_gate_green":false') > 0, &
+            'durable active-generation failure prevents gate green')
+        cursor_text = ''
+        call extract_json_field(response_json, 'next_cursor', cursor_text)
+        call gremlin_handle('wait', trim(project_dir), &
+            '{"lane_id":"readiness","cursor":'//trim(cursor_text)// &
+            ',"fail_on_failure":true,"wait_ms":0}', response_json, exitcode)
+        call check(exitcode == 1 .and. &
+            index(response_json, '"failure_observed":true') > 0 .and. &
+            index(response_json, '"durable_failure_report"') > 0 .and. &
+            index(response_json, 'test_fast_two') > 0, &
+            'failure wait returns durable receipt even after its cursor passed it')
+
+        call gremlin_session_release(session, release_error, message)
+        call check(release_error == 0, 'releases readiness API session')
+        call fs_remove_tree(trim(state_root))
+        call fs_remove_tree(trim(project_dir))
+    end subroutine test_readiness_status_and_semantic_waits
+
     subroutine test_terminal_session_history()
         type(gremlin_session_t) :: first, second
         character(len=512) :: state_root, project_dir, journal_path
         character(len=8192) :: status_text, final_status, record
         character(len=1024) :: response
+        character(len=64) :: cursor_text
         character(len=:), allocatable :: response_json
         integer :: ierr, exitcode, release_error
         integer(c_int) :: c_error
@@ -468,6 +656,16 @@ contains
             '","fail_on_failure":true}', response_json, exitcode)
         call check(exitcode == 1 .and. index(response_json, 'first_case') > 0, &
             'wait reports failures from a completed exact session')
+        cursor_text = ''
+        call extract_json_field(response_json, 'next_cursor', cursor_text)
+        call gremlin_handle('wait', trim(project_dir), &
+            '{"lane_id":"history","session_id":"'//trim(first%session_id)// &
+            '","cursor":'//trim(cursor_text)//',"fail_on_failure":true}', &
+            response_json, exitcode)
+        call check(exitcode == 1 .and. &
+            index(response_json, '"durable_failure_report"') > 0 .and. &
+            index(response_json, 'first_case') > 0, &
+            'wait includes durable failures when the receipt cursor already passed them')
         call gremlin_handle('stop', trim(project_dir), &
             '{"lane_id":"history","session_id":"'//trim(first%session_id)//'"}', &
             response_json, exitcode)

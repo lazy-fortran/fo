@@ -12,7 +12,7 @@ module fo_gremlin_request
     integer, parameter :: NAME_LEN = 128, PATH_LEN = 4096
     integer, parameter :: MAX_JSON_DEPTH = 64
     integer, parameter :: DEFAULT_RANDOM = 32, DEFAULT_CAMPAIGN = 60
-    integer, parameter :: DEFAULT_CASE_TIMEOUT = 5, MAX_CASE_TIMEOUT = 5
+    integer, parameter :: DEFAULT_CASE_TIMEOUT = 0, MAX_CASE_TIMEOUT = 86400
     integer, parameter :: MAX_LANE_LEN = 96
 
     type :: gremlin_request_t
@@ -25,6 +25,7 @@ module fo_gremlin_request
         integer :: timeout_seconds = DEFAULT_CASE_TIMEOUT
         integer :: jobs = 1
         integer(int64) :: cursor = 0_int64
+        integer(int64) :: lifecycle_cursor = 0_int64
         integer :: wait_ms = 5000
         integer :: max_records = 32
         integer(int64) :: max_bytes = 262144_int64
@@ -32,6 +33,13 @@ module fo_gremlin_request
         logical :: shuffle = .false.
         logical :: fail_on_failure = .false.
         character(len=HASH_LEN) :: generation_id = ''
+        character(len=32) :: wait_until = ''
+        logical :: input_changed = .false.
+        logical :: has_previous_generation = .false.
+        character(len=NAME_LEN) :: gate_cases(MAX_NODES) = ''
+        integer :: event_epoch = 0
+        character(len=HASH_LEN) :: requirement_digest = ''
+        integer :: gate_required_count = 0
         character(len=NAME_LEN) :: targets(MAX_NODES) = ''
         integer :: n_targets = 0
     end type gremlin_request_t
@@ -51,7 +59,7 @@ contains
         type(json_event_t) :: event, value_event
         character(len=NAME_LEN) :: key
         character(len=:), allocatable :: raw_value
-        logical :: seen(17)
+        logical :: seen(19)
         integer :: field, value_start, value_end
 
         ierr = 1
@@ -98,7 +106,7 @@ contains
             call gremlin_json_parser_next(parser, value_event)
             value_end = parser%pos - 1
             raw_value = parser%input(value_start:value_end)
-            if (field == 11 .or. field == 13) then
+            if (field == 11 .or. field == 13 .or. field == 18) then
                 if (value_event%event_type == JSON_ERROR .and. &
                     is_json_integer(raw_value)) value_event%event_type = JSON_INTEGER
             end if
@@ -656,8 +664,13 @@ contains
             case ('max_bytes')
                 if (action == 'status' .or. action == 'events' .or. &
                     action == 'wait' .or. action == 'failures') request_field = 13
+            case ('lifecycle_cursor')
+                if (action == 'status' .or. action == 'events' .or. &
+                    action == 'wait' .or. action == 'failures') request_field = 18
             case ('wait_ms')
                 if (action == 'wait') request_field = 14
+            case ('wait_until')
+                if (action == 'wait') request_field = 19
             case ('fail_on_failure')
                 if (action == 'wait') request_field = 15
             case ('case_id')
@@ -681,7 +694,7 @@ contains
         ierr = 0
         message = ''
         select case (field)
-        case (1, 2, 16, 17)
+        case (1, 2, 16, 17, 19)
             if (.not. is_string) then
                 ierr = 1
                 message = 'string request field has the wrong JSON type'
@@ -722,6 +735,13 @@ contains
                     message = 'generation_id must be a hexadecimal digest'
                     return
                 end if
+            case (19)
+                if (.not. valid_wait_until(value)) then
+                    ierr = 1
+                    message = 'wait_until must be local-gate-green, ordinary-verified, '// &
+                        'fully-verified, quiescent, or failure'
+                    return
+                end if
             end select
             select case (field)
             case (1)
@@ -732,6 +752,8 @@ contains
                 request%case_id = value
             case (17)
                 request%generation_id = value
+            case (19)
+                request%wait_until = value
             end select
         case (8, 9, 15)
             if (is_string) then
@@ -763,7 +785,7 @@ contains
                 message = 'request field must be a JSON integer'
                 return
             end if
-            if (field == 11 .or. field == 13) then
+            if (field == 11 .or. field == 13 .or. field == 18) then
                 read (value, *, iostat=ios) wide
             else
                 read (value, *, iostat=ios) parsed
@@ -774,6 +796,7 @@ contains
                 return
             end if
             if (field == 11) request%cursor = wide
+            if (field == 18) request%lifecycle_cursor = wide
             if (field == 13) request%max_bytes = wide
             if (field == 3) request%random_count = parsed
             if (field == 4) request%seed = parsed
@@ -795,9 +818,9 @@ contains
                 message = 'campaign_seconds must be between 1 and 60'
             end if
         case (6)
-            if (request%timeout_seconds < 1 .or. request%timeout_seconds > MAX_CASE_TIMEOUT) then
+            if (request%timeout_seconds < 0 .or. request%timeout_seconds > MAX_CASE_TIMEOUT) then
                 ierr = 1
-                message = 'timeout_seconds must be between 1 and 5'
+                message = 'timeout_seconds must be between 0 and 86400'
             end if
         case (7)
             if (request%jobs /= 1) then
@@ -808,6 +831,11 @@ contains
             if (request%cursor < 0_int64) then
                 ierr = 1
                 message = 'cursor must be nonnegative'
+            end if
+        case (18)
+            if (request%lifecycle_cursor < 0_int64) then
+                ierr = 1
+                message = 'lifecycle_cursor must be nonnegative'
             end if
         case (12)
             if (request%max_records < 1 .or. request%max_records > 128) then
@@ -826,6 +854,18 @@ contains
             end if
         end select
     end subroutine set_request_field
+
+    logical function valid_wait_until(value)
+        character(len=*), intent(in) :: value
+
+        select case (trim(value))
+        case ('local-gate-green', 'ordinary-verified', 'fully-verified', &
+                'quiescent', 'failure')
+            valid_wait_until = .true.
+        case default
+            valid_wait_until = .false.
+        end select
+    end function valid_wait_until
 
     logical function has_control_character(text)
         character(len=*), intent(in) :: text
