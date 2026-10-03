@@ -1,5 +1,6 @@
 module fo_work_modes
     use, intrinsic :: iso_fortran_env, only: output_unit, int64
+    use, intrinsic :: iso_c_binding, only: c_char, c_null_char, c_ptr, c_associated
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init, &
         json_parser_next, JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, &
         JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_ERROR, &
@@ -57,6 +58,15 @@ module fo_work_modes
     end type work_request_t
 
     public :: work_handle, work_owner_run, read_work_file
+
+    interface
+        function c_realpath(path, resolved) bind(C, name='realpath') result(ptr)
+            import :: c_char, c_ptr
+            character(kind=c_char), intent(in) :: path(*)
+            character(kind=c_char), intent(out) :: resolved(*)
+            type(c_ptr) :: ptr
+        end function c_realpath
+    end interface
 
 contains
 
@@ -444,22 +454,55 @@ contains
         end do
     end function task_index
 
+    subroutine acquire_startup_gate(project_dir, lease, ierr, message)
+        character(len=*), intent(in) :: project_dir
+        type(gremlin_lease_t), intent(out) :: lease
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(kind=c_char) :: resolved(PATH_LEN)
+        character(len=PATH_LEN) :: canonical
+        character(len=HASH_LEN + 11) :: resource
+        type(c_ptr) :: resolved_ptr
+        integer :: i, attempt
+
+        canonical = ''
+        resolved = c_null_char
+        resolved_ptr = c_realpath(trim(project_dir)//c_null_char, resolved)
+        if (.not. c_associated(resolved_ptr)) then
+            ierr = 2
+            message = 'project directory cannot be resolved'
+            return
+        end if
+        do i = 1, PATH_LEN
+            if (resolved(i) == c_null_char) exit
+            canonical(i:i) = achar(iachar(resolved(i)))
+        end do
+        if (i > PATH_LEN) then
+            ierr = 2
+            message = 'project directory is too long'
+            return
+        end if
+        resource = 'work-start-'//policy_digest(trim(canonical))
+        do attempt = 1, 200
+            call gremlin_lease_acquire(trim(resource), 1, lease, ierr, message)
+            if (ierr == 0) return
+            if (ierr /= 11 .and. ierr /= 16) return
+            call fs_sleep_ms(50)
+        end do
+        message = 'work startup capacity unavailable'
+    end subroutine acquire_startup_gate
+
     subroutine work_start(project_dir, request_json, response, exitcode)
         character(len=*), intent(in) :: project_dir, request_json
         character(len=:), allocatable, intent(out) :: response
         integer, intent(out) :: exitcode
         type(gremlin_lease_t) :: startup_lease
         character(len=PATH_LEN) :: message
-        integer :: ierr, release_error, attempt
+        integer :: ierr, release_error
 
-        do attempt = 1, 200
-            call gremlin_lease_acquire('work-start', 1, startup_lease, ierr, message)
-            if (ierr == 0) exit
-            if (ierr /= 11 .and. ierr /= 16) exit
-            call fs_sleep_ms(50)
-        end do
+        call acquire_startup_gate(project_dir, startup_lease, ierr, message)
         if (ierr /= 0) then
-            call error_json('work startup capacity unavailable', response)
+            call error_json(trim(message), response)
             exitcode = 2
             return
         end if
@@ -470,6 +513,27 @@ contains
             exitcode = 2
         end if
     end subroutine work_start
+
+    subroutine wait_start_barrier(ierr)
+        integer, intent(out) :: ierr
+        character(len=PATH_LEN) :: barrier
+        integer :: status, attempt
+        logical :: released
+
+        ierr = 0
+        barrier = ''
+        call get_environment_variable('FO_WORK_START_TEST_BARRIER', &
+            barrier, status=status)
+        if (status /= 0 .or. len_trim(barrier) == 0) return
+        call write_atomic(trim(barrier)//'.ready', 'ready', ierr)
+        if (ierr /= 0) return
+        do attempt = 1, 200
+            inquire (file=trim(barrier)//'.go', exist=released)
+            if (released) return
+            call fs_sleep_ms(50)
+        end do
+        ierr = 110
+    end subroutine wait_start_barrier
 
     subroutine work_start_locked(project_dir, request_json, response, exitcode)
         character(len=*), intent(in) :: project_dir, request_json
@@ -553,6 +617,12 @@ contains
             exitcode = 2
             return
         end if
+        call wait_start_barrier(ierr)
+        if (ierr /= 0) then
+            call error_json('work startup test barrier failed', response)
+            exitcode = 2
+            return
+        end if
         call find_self_executable(executable, executable_ok)
         if (.not. executable_ok) then
             call error_json('cannot locate current fo executable', response)
@@ -605,6 +675,28 @@ contains
         character(len=*), intent(in) :: project_dir
         character(len=:), allocatable, intent(out) :: response
         integer, intent(out) :: exitcode
+        type(gremlin_lease_t) :: startup_lease
+        character(len=PATH_LEN) :: message
+        integer :: ierr, release_error
+
+        call acquire_startup_gate(project_dir, startup_lease, ierr, message)
+        if (ierr /= 0) then
+            call error_json(trim(message), response)
+            exitcode = 2
+            return
+        end if
+        call work_status_locked(project_dir, response, exitcode)
+        call gremlin_lease_release(startup_lease, release_error, message)
+        if (release_error /= 0) then
+            call error_json('cannot release work startup lease', response)
+            exitcode = 2
+        end if
+    end subroutine work_status
+
+    subroutine work_status_locked(project_dir, response, exitcode)
+        character(len=*), intent(in) :: project_dir
+        character(len=:), allocatable, intent(out) :: response
+        integer, intent(out) :: exitcode
 
         type(gremlin_session_t) :: session
         character(len=PATH_LEN) :: message
@@ -646,9 +738,31 @@ contains
                 exitcode = 2
             end if
         end if
-    end subroutine work_status
+    end subroutine work_status_locked
 
     subroutine work_cancel(project_dir, response, exitcode)
+        character(len=*), intent(in) :: project_dir
+        character(len=:), allocatable, intent(out) :: response
+        integer, intent(out) :: exitcode
+        type(gremlin_lease_t) :: startup_lease
+        character(len=PATH_LEN) :: message
+        integer :: ierr, release_error
+
+        call acquire_startup_gate(project_dir, startup_lease, ierr, message)
+        if (ierr /= 0) then
+            call error_json(trim(message), response)
+            exitcode = 2
+            return
+        end if
+        call work_cancel_locked(project_dir, response, exitcode)
+        call gremlin_lease_release(startup_lease, release_error, message)
+        if (release_error /= 0) then
+            call error_json('cannot release work startup lease', response)
+            exitcode = 2
+        end if
+    end subroutine work_cancel
+
+    subroutine work_cancel_locked(project_dir, response, exitcode)
         character(len=*), intent(in) :: project_dir
         character(len=:), allocatable, intent(out) :: response
         integer, intent(out) :: exitcode
@@ -694,7 +808,7 @@ contains
             return
         end if
         call cancel_response(status_text, response)
-    end subroutine work_cancel
+    end subroutine work_cancel_locked
 
     subroutine work_owner_run(project_dir, state_dir, work_id, exitcode)
         character(len=*), intent(in) :: project_dir, state_dir, work_id
@@ -1116,15 +1230,29 @@ contains
         type(work_task_t), intent(inout) :: task
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-        integer :: i, release_error
+        integer :: status, marker_error
+        character(len=PATH_LEN) :: marker
+        logical, save :: injected = .false.
 
         ierr = 0
         message = ''
-        do i = task%n_leases, 1, -1
-            call gremlin_lease_release(task%leases(i), release_error, message)
-            if (release_error /= 0 .and. ierr == 0) ierr = release_error
+        do while (task%n_leases > 0)
+            if (task%n_leases == 2 .and. .not. injected) then
+                marker = ''
+                call get_environment_variable('FO_WORK_TEST_RELEASE_FAIL_ONCE', &
+                    marker, status=status)
+                if (status == 0 .and. len_trim(marker) > 0) then
+                    injected = .true.
+                    call write_atomic(trim(marker), 'injected', marker_error)
+                    ierr = 5
+                    message = 'injected lease release failure'
+                    return
+                end if
+            end if
+            call gremlin_lease_release(task%leases(task%n_leases), ierr, message)
+            if (ierr /= 0) return
+            task%n_leases = task%n_leases - 1
         end do
-        if (ierr == 0) task%n_leases = 0
     end subroutine release_task_leases
 
     integer function resource_capacity(kind) result(capacity)

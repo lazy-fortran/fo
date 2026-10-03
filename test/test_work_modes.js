@@ -206,6 +206,10 @@ async function main() {
     JSON.stringify(sameStarts));
   const sameIds = sameStarts.map(result => JSON.parse(result.stdout).work_id);
   assert.equal(new Set(sameIds).size, 1, 'simultaneous starts attach to one owner');
+  const sameAlias = path.join(scratch, 'simultaneous-alias');
+  fs.symlinkSync(sameRoot, sameAlias);
+  const aliasStart = json([...sameArgs.slice(0, -1), sameAlias], sameAlias);
+  assert.equal(aliasStart.work_id, sameIds[0], 'symlink alias attaches to the same owner');
   await until(() => eventsFor(sameEvents).length === 1,
     'one adapter to start for simultaneous requests');
   fs.writeFileSync(sameGate, 'go');
@@ -231,6 +235,56 @@ async function main() {
   await waitTasks(differentRoot, ['succeeded']);
   assert.equal(eventsFor(differentEvents).filter(event => event.phase === 'start').length, 1);
   await cancel(differentRoot);
+
+  const pausedRoot = project('work_modes_paused_start');
+  const pausedAlias = path.join(scratch, 'paused-alias');
+  fs.symlinkSync(pausedRoot, pausedAlias);
+  const otherRoot = project('work_modes_other_start');
+  const barrier = path.join(scratch, 'startup-barrier');
+  const pausedEnv = { ...env, FO_WORK_START_TEST_BARRIER: barrier };
+  const pausedEvents = path.join(scratch, 'paused.jsonl');
+  const otherEvents = path.join(scratch, 'other-start.jsonl');
+  const pausedGate = path.join(scratch, 'paused-worker-gate');
+  const otherGate = path.join(scratch, 'other-worker-gate');
+  const pausedArgs = ['work', 'start', '--mode', 'parallel', '--max-workers', '1',
+    '--tasks', saveTasks('paused', [task(pausedEvents, 'paused', { gate: pausedGate })]),
+    '--dir', pausedRoot];
+  activeRoots.add(pausedRoot);
+  const pausedStart = runAsync(pausedArgs, pausedRoot, pausedEnv);
+  await until(() => fs.existsSync(`${barrier}.ready`),
+    'startup to reach the parent/child handoff barrier');
+  let cancelResult;
+  const pausedCancel = runAsync(['work', 'cancel', '--dir', pausedAlias],
+    pausedAlias, pausedEnv).then(result => { cancelResult = result; return result; });
+  const otherArgs = ['work', 'start', '--mode', 'parallel', '--max-workers', '1',
+    '--tasks', saveTasks('other-start', [task(otherEvents, 'other', { gate: otherGate })]),
+    '--dir', otherRoot];
+  activeRoots.add(otherRoot);
+  let otherResult;
+  const otherStart = runAsync(otherArgs, otherRoot).then(result => {
+    otherResult = result;
+    return result;
+  });
+  try {
+    await until(() => otherResult, 'other project to start during handoff', 3000);
+    assert.equal(otherResult.status, 0, otherResult.stdout + otherResult.stderr);
+    await until(() => eventsFor(otherEvents).some(event => event.phase === 'start'),
+      'other project worker to start while the first project is paused');
+    assert.equal(cancelResult, undefined,
+      'same-project cancel must wait until startup ownership is handed off');
+  } finally {
+    fs.writeFileSync(`${barrier}.go`, 'release');
+  }
+  assert.equal((await pausedStart).status, 0);
+  assert.equal((await pausedCancel).status, 0);
+  assert.equal(JSON.parse(cancelResult.stdout).status, 'cancel_requested');
+  await until(() => json(['work', 'status', '--dir', pausedAlias], pausedAlias).status ===
+    'cancelled', 'alias-path cancellation to stop the resulting owner');
+  activeRoots.delete(pausedRoot);
+  assert.equal((await otherStart).status, 0);
+  fs.writeFileSync(otherGate, 'go');
+  await waitTasks(otherRoot, ['succeeded']);
+  await cancel(otherRoot);
 
   const root = project('work_modes_probe');
   const events = path.join(scratch, 'events.jsonl');
@@ -399,7 +453,9 @@ async function main() {
 
   const resistantEnv = { ...env,
     FO_GREMLIN_STATE_DIR: path.join(scratch, 'resistant-state'),
-    FO_WORK_CPU_CAPACITY: '1' };
+    FO_WORK_CPU_CAPACITY: '1',
+    FO_WORK_TEST_RELEASE_FAIL_ONCE: path.join(scratch, 'release-injected') };
+  const followerEnv = { ...resistantEnv, FO_WORK_TEST_RELEASE_FAIL_ONCE: '' };
   const resistantRoot = project('work_modes_resistant');
   const followerRoot = project('work_modes_follower');
   const resistantEvents = path.join(scratch, 'resistant.jsonl');
@@ -415,11 +471,11 @@ async function main() {
     event.phase === 'start').length === 2, 'resistant worker and child to start');
   json(['work', 'start', '--mode', 'parallel', '--max-workers', '1', '--tasks',
     saveTasks('follower', [task(followerEvents, 'follower', { gate: followerGate })]),
-    '--dir', followerRoot], followerRoot, resistantEnv);
+    '--dir', followerRoot], followerRoot, followerEnv);
   activeRoots.add(followerRoot);
-  rootEnvs.set(followerRoot, resistantEnv);
+  rootEnvs.set(followerRoot, followerEnv);
   await until(() => json(['work', 'status', '--dir', followerRoot],
-    followerRoot, resistantEnv).tasks[0].blocked_reason === 'cpu_capacity',
+    followerRoot, followerEnv).tasks[0].blocked_reason === 'cpu_capacity',
   'follower to wait for the resistant worker lease');
   assert.equal(json(['work', 'cancel', '--dir', resistantRoot], resistantRoot,
     resistantEnv).status, 'cancel_requested');
@@ -429,6 +485,8 @@ async function main() {
     resistantEnv).status, 'cancelling');
   assert.equal(eventsFor(followerEvents).length, 0,
     'follower cannot take the lease while the resistant tree is alive');
+  await until(() => fs.existsSync(resistantEnv.FO_WORK_TEST_RELEASE_FAIL_ONCE),
+    'lease release fault to occur after one successful release');
   await until(() => json(['work', 'status', '--dir', resistantRoot],
     resistantRoot, resistantEnv).status === 'cancelled',
   'resistant tree to be killed before terminal status', 15000);
@@ -441,8 +499,8 @@ async function main() {
       'registered worker and child must both be dead before lease reuse');
   }
   fs.writeFileSync(followerGate, 'go');
-  await waitTasks(followerRoot, ['succeeded'], 15000, resistantEnv);
-  await cancel(followerRoot, resistantEnv);
+  await waitTasks(followerRoot, ['succeeded'], 15000, followerEnv);
+  await cancel(followerRoot, followerEnv);
 
   const failedRoot = project('work_modes_failure');
   const failedEvents = path.join(scratch, 'failed.jsonl');
