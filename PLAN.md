@@ -504,11 +504,14 @@ asynchronous exact-head milestone gate. The #156 audit proved CI already builds
 once and routes all named fixtures through the exact candidate, so it closed
 without a repository change.
 
-Dogfooding begins during implementation. Every active fo or fx worktree runs a
-named resident `fo gremlin` lane with bounded jobs and campaigns. Preserve its
-receipts, first-verdict latency, failures, restart behavior and idle activity as
-live evidence. Focused independent behavioral oracles remain authoritative;
-self-testing evidence alone never promotes the tested Gremlin implementation.
+Dogfooding begins during implementation. Keep one named resident `fo gremlin`
+integration lane per active repository and rotate task-worktree lanes for
+focused changes. Six simultaneous cold lanes wrote 1.8 GB of state and all
+blocked in kernel writeback, so unrestricted per-worktree residency is rejected
+behavior pending #148/#155 and cross-lane I/O admission. Preserve receipts,
+first-verdict latency, failures, restart behavior, idle activity and resource
+use as live evidence. Independent oracles remain authoritative; self-testing
+evidence alone never promotes the tested Gremlin implementation.
 
 The implemented core is mature enough to pause unrelated feature growth for an
 architecture and finite-verification pass. Ordered blockers before core merge
