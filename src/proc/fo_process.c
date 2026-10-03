@@ -970,7 +970,14 @@ static int ensure_async_subreaper(void) {
    allowed for provider children; cancellation covers every group in the
    session. Cover known syscall ABIs and reject unknown ABIs. */
 #if defined(__linux__)
-#if defined(FO_ASYNC_TEST_AARCH64) || defined(__aarch64__)
+#if defined(FO_ASYNC_TEST_AARCH64) || defined(FO_ASYNC_TEST_ARM) || \
+    defined(FO_ASYNC_TEST_X86_64) || defined(FO_ASYNC_TEST_UNSUPPORTED)
+#define FO_ASYNC_TEST_SYNTHETIC_TARGET 1
+#endif
+#if defined(FO_ASYNC_TEST_UNSUPPORTED)
+#define FO_ASYNC_AUDIT_ARCH 0
+#elif defined(FO_ASYNC_TEST_AARCH64) || \
+    (!defined(FO_ASYNC_TEST_SYNTHETIC_TARGET) && defined(__aarch64__))
 #define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_AARCH64
 #define FO_ASYNC_HAS_COMPAT_ABI 1
 #define FO_ASYNC_COMPAT_AUDIT_ARCH AUDIT_ARCH_ARM
@@ -982,16 +989,16 @@ static int ensure_async_subreaper(void) {
 #if defined(__aarch64__) && (__NR_setsid != 157 || __NR_setpgid != 154)
 #error "AArch64 session syscall numbers differ from the containment filter"
 #endif
-#elif defined(FO_ASYNC_TEST_ARM) || defined(__arm__)
+#elif defined(FO_ASYNC_TEST_ARM) || \
+    (!defined(FO_ASYNC_TEST_SYNTHETIC_TARGET) && defined(__arm__))
 #define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_ARM
 #define FO_ASYNC_NATIVE_SETSID 66
 #define FO_ASYNC_NATIVE_SETPGID 57
 #if defined(__arm__) && (__NR_setsid != 66 || __NR_setpgid != 57)
 #error "ARM session syscall numbers differ from the containment filter"
 #endif
-#elif defined(FO_ASYNC_TEST_UNSUPPORTED)
-#define FO_ASYNC_AUDIT_ARCH 0
-#elif defined(FO_ASYNC_TEST_X86_64) || defined(__x86_64__)
+#elif defined(FO_ASYNC_TEST_X86_64) || \
+    (!defined(FO_ASYNC_TEST_SYNTHETIC_TARGET) && defined(__x86_64__))
 #define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_X86_64
 #define FO_ASYNC_HAS_COMPAT_ABI 1
 #define FO_ASYNC_COMPAT_AUDIT_ARCH AUDIT_ARCH_I386
@@ -1005,7 +1012,7 @@ static int ensure_async_subreaper(void) {
 #if defined(__x86_64__) && (__NR_setsid != 112 || __NR_setpgid != 109)
 #error "x86-64 session syscall numbers differ from the containment filter"
 #endif
-#elif defined(__i386__)
+#elif !defined(FO_ASYNC_TEST_SYNTHETIC_TARGET) && defined(__i386__)
 #define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_I386
 #else
 #define FO_ASYNC_AUDIT_ARCH 0
@@ -1017,6 +1024,7 @@ static int ensure_async_subreaper(void) {
 #ifndef FO_ASYNC_NATIVE_MISMATCH_SKIP
 #define FO_ASYNC_NATIVE_MISMATCH_SKIP 7
 #endif
+#undef FO_ASYNC_TEST_SYNTHETIC_TARGET
 #endif
 
 #if defined(__linux__) && FO_ASYNC_AUDIT_ARCH != 0

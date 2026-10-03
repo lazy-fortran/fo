@@ -1,9 +1,24 @@
-/* Evaluate the installed classic-BPF program against synthetic syscall records.
-   Build once each with FO_ASYNC_TEST_AARCH64, FO_ASYNC_TEST_ARM,
-   FO_ASYNC_TEST_X86_64 and FO_ASYNC_TEST_UNSUPPORTED. */
+/* Evaluate the installed classic-BPF program against syscall records.
+   Without a synthetic target, use the current Linux host architecture. */
 #include "../src/proc/fo_process.c"
 
-#if defined(__linux__) && !defined(FO_ASYNC_TEST_UNSUPPORTED)
+#if !defined(FO_ASYNC_TEST_AARCH64) && !defined(FO_ASYNC_TEST_ARM) && \
+    !defined(FO_ASYNC_TEST_X86_64) && !defined(FO_ASYNC_TEST_UNSUPPORTED)
+#if defined(__linux__) && defined(__aarch64__)
+#define FO_ASYNC_TEST_AARCH64
+#elif defined(__linux__) && defined(__arm__)
+#define FO_ASYNC_TEST_ARM
+#elif defined(__linux__) && defined(__x86_64__)
+#define FO_ASYNC_TEST_X86_64
+#endif
+#endif
+
+#if defined(__linux__) && !defined(FO_ASYNC_TEST_UNSUPPORTED) && \
+    (defined(FO_ASYNC_TEST_AARCH64) || defined(FO_ASYNC_TEST_ARM) || \
+     defined(FO_ASYNC_TEST_X86_64) || \
+     (!defined(FO_ASYNC_TEST_AARCH64) && !defined(FO_ASYNC_TEST_ARM) && \
+      !defined(FO_ASYNC_TEST_X86_64) && \
+      (defined(__aarch64__) || defined(__arm__) || defined(__x86_64__))))
 static unsigned int decision(unsigned int arch, int nr) {
     struct seccomp_data input = { .nr = nr, .arch = arch };
     unsigned int accumulator = 0;
@@ -56,9 +71,12 @@ int main(void) {
 #if defined(FO_ASYNC_TEST_UNSUPPORTED)
     if (install_async_group_containment(0) != ENOTSUP) return 1;
     puts("unsupported architecture: ENOTSUP");
-#elif defined(FO_ASYNC_TEST_AARCH64) || defined(FO_ASYNC_TEST_ARM)
+#elif defined(__linux__) && \
+    (defined(FO_ASYNC_TEST_AARCH64) || defined(FO_ASYNC_TEST_ARM))
     const unsigned int denied = SECCOMP_RET_ERRNO | EPERM;
-#ifdef FO_ASYNC_TEST_AARCH64
+#if defined(FO_ASYNC_TEST_AARCH64) || \
+    (!defined(FO_ASYNC_TEST_ARM) && !defined(FO_ASYNC_TEST_X86_64) && \
+     defined(__aarch64__))
     expect(AUDIT_ARCH_AARCH64, 157, denied); /* setsid */
     expect(AUDIT_ARCH_AARCH64, 154, SECCOMP_RET_ALLOW); /* nested group */
     expect(AUDIT_ARCH_AARCH64, 0, SECCOMP_RET_ALLOW);
@@ -71,8 +89,14 @@ int main(void) {
     expect(AUDIT_ARCH_ARM, 0, SECCOMP_RET_ALLOW);
 #endif
     expect(AUDIT_ARCH_X86_64, 0, denied);
+#if defined(FO_ASYNC_TEST_AARCH64) || \
+    (!defined(FO_ASYNC_TEST_ARM) && !defined(FO_ASYNC_TEST_X86_64) && \
+     defined(__aarch64__))
+    puts("AArch64 filter syscall numbers and unknown architecture: PASS");
+#else
     puts("ARM filter syscall numbers and unknown architecture: PASS");
-#elif defined(FO_ASYNC_TEST_X86_64)
+#endif
+#elif defined(__linux__) && defined(FO_ASYNC_TEST_X86_64)
     const unsigned int denied = SECCOMP_RET_ERRNO | EPERM;
     expect(AUDIT_ARCH_X86_64, 112, denied); /* native setsid */
     expect(AUDIT_ARCH_X86_64, 109, SECCOMP_RET_ALLOW); /* native setpgid */
@@ -83,7 +107,7 @@ int main(void) {
     expect(AUDIT_ARCH_ARM, 0, denied);
     puts("x86-64 native and compat filter: PASS");
 #else
-#error "Select a synthetic ARM target"
+    puts("unsupported host: async filter oracle skipped");
 #endif
     return 0;
 }
