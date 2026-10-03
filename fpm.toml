@@ -83,6 +83,11 @@ source-dir = "test"
 main = "test_platform_link_cli.f90"
 
 [[test]]
+name = "test_archive_metadata_cli"
+source-dir = "test"
+main = "test_archive_metadata_cli.f90"
+
+[[test]]
 name = "test_program_names_cli"
 source-dir = "test"
 main = "test_program_names_cli.f90"
