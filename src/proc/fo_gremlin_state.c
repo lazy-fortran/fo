@@ -159,6 +159,7 @@ static int process_start(pid_t pid, char *out, size_t cap) {
     char *p = strrchr(buf, ')');
     if (!p || p[1] != ' ') return EINVAL;
     p += 2;
+    if (p[0] == 'Z' || p[0] == 'X') return ESRCH;
     for (int field = 3; field < 22; ++field) {
         p = strchr(p, ' ');
         if (!p) return EINVAL;
@@ -193,8 +194,13 @@ static int verify_owner_fd(const char *dir, int fd) {
 
 int fo_gremlin_session_acquire(const char *project, const char *lane,
         char *dir, int dircap, char *session, int sessioncap,
-        int *lockfd, int *owner, int *pid, char *start, int startcap) {
+        char *recovered, int recoveredcap, int *lockfd, int *owner, int *pid,
+        char *start, int startcap) {
     char canonical[PATH_MAX], lockpath[PATH_MAX];
+    char prior_id[128], prior_start[64];
+    int prior_pid = 0;
+    if (recoveredcap <= 0) return EINVAL;
+    recovered[0] = '\0';
     int e = state_path(project, lane, dir, (size_t)dircap, canonical,
                        sizeof(canonical), 1);
     if (e) return e;
@@ -225,6 +231,15 @@ int fo_gremlin_session_acquire(const char *project, const char *lane,
             close(fd);
             return EAGAIN;
         }
+    }
+    e = read_owner(dir, prior_id, sizeof(prior_id), &prior_pid,
+                   prior_start, sizeof(prior_start));
+    if (e == 0 && !fo_gremlin_process_matches(prior_pid, prior_start)) {
+        if (strlen(prior_id) + 1 > (size_t)recoveredcap) {
+            e = ENAMETOOLONG;
+            goto fail;
+        }
+        strcpy(recovered, prior_id);
     }
     char sid[128], stamp[64];
     struct timespec ts;

@@ -12,6 +12,7 @@ module fo_gremlin_state
         character(len=:), allocatable :: project_key
         character(len=:), allocatable :: lane_id
         character(len=:), allocatable :: owner_start
+        character(len=:), allocatable :: recovered_session_id
         integer :: owner_pid = 0
         integer :: lock_fd = -1
         logical :: owner = .false.
@@ -37,12 +38,13 @@ module fo_gremlin_state
 
     interface
         function c_session_acquire(project, lane, dir, dircap, session, sessioncap, &
-                fd, owner, pid, start, startcap) &
+                recovered, recoveredcap, fd, owner, pid, start, startcap) &
                 bind(C, name='fo_gremlin_session_acquire') result(ierr)
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: project(*), lane(*)
-            character(kind=c_char), intent(out) :: dir(*), session(*), start(*)
-            integer(c_int), value :: dircap, sessioncap, startcap
+            character(kind=c_char), intent(out) :: dir(*), session(*), recovered(*)
+            character(kind=c_char), intent(out) :: start(*)
+            integer(c_int), value :: dircap, sessioncap, recoveredcap, startcap
             integer(c_int), intent(out) :: fd, owner, pid
             integer(c_int) :: ierr
         end function c_session_acquire
@@ -190,18 +192,21 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
-        character(kind=c_char) :: dir(PATH_LEN), sid(ID_LEN), start(START_LEN)
+        character(kind=c_char) :: dir(PATH_LEN), sid(ID_LEN), recovered(ID_LEN)
+        character(kind=c_char) :: start(START_LEN)
         integer(c_int) :: fd, is_owner, pid, c_error
 
         dir = c_null_char
         sid = c_null_char
+        recovered = c_null_char
         start = c_null_char
         fd = -1_c_int
         is_owner = 0_c_int
         pid = 0_c_int
         c_error = c_session_acquire(trim(project_dir)//c_null_char, &
             trim(lane_id)//c_null_char, dir, int(PATH_LEN, c_int), sid, &
-            int(ID_LEN, c_int), fd, is_owner, pid, start, int(START_LEN, c_int))
+            int(ID_LEN, c_int), recovered, int(ID_LEN, c_int), fd, is_owner, pid, &
+            start, int(START_LEN, c_int))
         ierr = int(c_error)
         message = error_text(ierr)
         if (ierr /= 0) return
@@ -211,6 +216,7 @@ contains
         session%project_key = trim(project_dir)
         session%lane_id = trim(lane_id)
         session%owner_start = c_string(start)
+        session%recovered_session_id = c_string(recovered)
         session%owner_pid = int(pid)
         session%lock_fd = int(fd)
         session%owner = is_owner /= 0

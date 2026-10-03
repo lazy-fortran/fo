@@ -8,7 +8,8 @@ module fo_gremlin_supervisor
     use fo_gremlin_generation, only: generation_context_t, generation_input_t, &
         generation_t, generation_capture
     use fo_gremlin_journal, only: journal_append, journal_read_page, &
-        journal_record_t, JOURNAL_OK
+        journal_record_t, JOURNAL_OK, JOURNAL_INVALID, JOURNAL_IO_ERROR, &
+        JOURNAL_MAX_RECORD_BYTES
     use fo_gremlin_policy, only: select_gremlin_tests, shuffle_gremlin_tests, &
         GREMLIN_POLICY_OK
     use fo_gremlin_state, only: gremlin_session_t, gremlin_lease_t, &
@@ -28,7 +29,7 @@ module fo_gremlin_supervisor
     use fx_dag, only: dag_t, MAX_NODES
     use fx_json_build, only: json_escape_string
     use fo_fs, only: fs_find_executable, fs_make_dir, fs_sleep_ms, &
-        fs_tree_fingerprint
+        fs_tree_fingerprint, fs_remove_file
     implicit none
     private
 
@@ -328,6 +329,113 @@ contains
             message = 'cannot locate Gremlin session journal ('//trim(int_text(ierr))//')'
         end if
     end subroutine get_session_journal_path
+
+    subroutine stage_recovery_journal(project_dir, session, ierr, message)
+        character(len=*), intent(in) :: project_dir
+        type(gremlin_session_t), intent(in) :: session
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        character(len=PATH_LEN) :: source_path, recovery_path
+
+        call get_session_journal_path(project_dir, session%lane_id, &
+            session%recovered_session_id, source_path, ierr, message)
+        if (ierr /= 0) return
+        recovery_path = trim(session%state_dir)//'/recovery.jsonl'
+        call copy_journal_records(trim(source_path), trim(recovery_path), .false., &
+            ierr, message)
+    end subroutine stage_recovery_journal
+
+    subroutine recover_owner_journal(project_dir, session, ierr, message)
+        character(len=*), intent(in) :: project_dir
+        type(gremlin_session_t), intent(in) :: session
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        character(len=PATH_LEN) :: journal_path, recovery_path
+
+        if (allocated(session%recovered_session_id)) then
+            if (len_trim(session%recovered_session_id) > 0) then
+                call stage_recovery_journal(project_dir, session, ierr, message)
+                if (ierr /= 0) return
+            end if
+        end if
+        call get_session_journal_path(project_dir, session%lane_id, &
+            session%session_id, journal_path, ierr, message)
+        if (ierr /= 0) return
+        recovery_path = trim(session%state_dir)//'/recovery.jsonl'
+        call copy_journal_records(trim(recovery_path), trim(journal_path), .true., &
+            ierr, message)
+    end subroutine recover_owner_journal
+
+    subroutine copy_journal_records(source_path, target_path, remove_source, ierr, &
+            message)
+        character(len=*), intent(in) :: source_path, target_path
+        logical, intent(in) :: remove_source
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        type(journal_record_t), allocatable :: records(:)
+        character(len=512) :: completion_id
+        integer(int64) :: cursor, next_cursor, page_bytes
+        integer :: status, i, ios
+        logical :: source_exists
+
+        ierr = JOURNAL_OK
+        message = ''
+        if (trim(source_path) == trim(target_path)) return
+        inquire (file=trim(source_path), exist=source_exists, iostat=ios)
+        if (ios /= 0) then
+            ierr = JOURNAL_IO_ERROR
+            message = 'cannot inspect recovery journal'
+            return
+        end if
+        if (.not. source_exists) return
+
+        cursor = 0_int64
+        page_bytes = int(JOURNAL_MAX_RECORD_BYTES, int64)*16_int64
+        do
+            call journal_read_page(trim(source_path), cursor, 16, page_bytes, records, &
+                next_cursor, status, message)
+            if (status /= JOURNAL_OK) then
+                ierr = status
+                return
+            end if
+            if (size(records) == 0) exit
+            do i = 1, size(records)
+                completion_id = ''
+                call extract_json_field(records(i)%json, 'completion_id', completion_id)
+                if (len_trim(completion_id) == 0) then
+                    ierr = JOURNAL_INVALID
+                    message = 'recovery journal record has no completion_id'
+                    return
+                end if
+                call journal_append(trim(target_path), trim(completion_id), &
+                    records(i)%json, status, message)
+                if (status /= JOURNAL_OK) then
+                    ierr = status
+                    return
+                end if
+            end do
+            if (next_cursor <= cursor) then
+                ierr = JOURNAL_INVALID
+                message = 'recovery journal cursor did not advance'
+                return
+            end if
+            cursor = next_cursor
+        end do
+
+        if (.not. remove_source) return
+        call fs_remove_file(trim(source_path))
+        inquire (file=trim(source_path), exist=source_exists, iostat=ios)
+        if (ios /= 0) then
+            ierr = JOURNAL_IO_ERROR
+            message = 'cannot clear imported recovery journal'
+        else if (source_exists) then
+            ierr = JOURNAL_IO_ERROR
+            message = 'cannot clear imported recovery journal'
+        end if
+    end subroutine copy_journal_records
 
     subroutine publish_terminal_snapshot(project_dir, session, ierr, message, &
             status_override)
@@ -1073,6 +1181,19 @@ contains
                 'attached', response)
             return
         end if
+        if (allocated(session%recovered_session_id)) then
+            if (len_trim(session%recovered_session_id) > 0) then
+                call stage_recovery_journal(project_dir, session, ierr, message)
+                if (ierr /= 0) then
+                    call gremlin_session_release(session, spawn_exit, owner_start)
+                    call error_response('start', &
+                        'cannot preserve receipts from the previous Gremlin owner: '// &
+                        trim(message), response)
+                    exitcode = 2
+                    return
+                end if
+            end if
+        end if
         call gremlin_session_release(session, ierr, message)
         if (ierr /= 0) then
             call error_response('start', 'cannot reserve Gremlin owner: '//trim(message), &
@@ -1541,6 +1662,14 @@ contains
             end if
             call simple_response('run', request%lane_id, trim(stored_session_id), &
                 'attached', response)
+            return
+        end if
+        call recover_owner_journal(project_dir, session, ierr, message)
+        if (ierr /= 0) then
+            call release_if_owner(session, state_error, state_message)
+            call error_response('run', 'cannot recover prior Gremlin receipts: '// &
+                trim(message), response)
+            exitcode = 2
             return
         end if
         call fs_make_dir(session%state_dir//'/logs')
@@ -2953,7 +3082,8 @@ contains
         character(len=*), intent(in) :: filename
         character(len=*), intent(out) :: path
 
-        path = trim(session%state_dir)//'/logs/'//trim(filename)
+        path = trim(session%state_dir)//'/logs/'//trim(session%session_id)// &
+            '-'//trim(filename)
     end subroutine log_path
 
     subroutine poll_launcher(pid)
