@@ -118,6 +118,42 @@ MCP `test` accepts `json="full"` or `json="compact"` for the complete structured
 test report, including every failing and passing entry. The report and its MCP
 response grow with the results rather than truncating at a fixed byte limit.
 
+## Work modes
+
+`fo work start --mode serial` registers the main-session editor, starts one
+Gremlin campaign, and spawns zero coding workers. `fo work start --mode
+parallel --max-workers N --tasks tasks.json` starts the same campaign and
+admits independent ready tasks up to the session worker limit. `fo work status`
+reports the task graph, active worker count, blocked reasons, and worker logs;
+`fo work cancel` requests cancellation of that work session and its campaign.
+MCP exposes the same operations as `work_start`, `work_status`, and
+`work_cancel` on the existing `fo` tool.
+
+The task file is a JSON array. Each task has a unique `id` and an `argv` array;
+optional `worktree`, `depends_on`, `files`, `apis`, `abis`, and `resources`
+fields declare its checkout, dependency edges, ownership, and resource slots.
+For example:
+
+```json
+[
+  {"id":"parser","worktree":"/tmp/parser-wt",
+   "files":["src/parser.f90"],"apis":["parse_source"],
+   "resources":["build"],"argv":["worker-adapter","--task","parser"]},
+  {"id":"tests","depends_on":["parser"],"files":["test/parser.f90"],
+   "resources":["test"],"argv":["worker-adapter","--task","tests"]}
+]
+```
+
+The adapter is launched directly from its argv vector; fo does not interpolate
+it through a shell or select a paid provider. File, API, and ABI ownership
+overlaps and dependency edges prevent simultaneous admission. Declared `cpu`,
+`memory`, `build`, and `test` resources use shared count-based leases, with
+capacities set by `FO_WORKER_CAPACITY`, `FO_WORK_CPU_CAPACITY`,
+`FO_WORK_MEMORY_CAPACITY`, `FO_WORK_BUILD_CAPACITY`, and
+`FO_WORK_TEST_CAPACITY`. Each worker gets `FO_JOBS=1` and `FO_TEST_JOBS=1` to
+bound nested fo pools. A task's exit status and log are evidence for the
+controller; worker processes cannot integrate or promote their changes.
+
 The test-failure-path lint rule follows failure exits through project module
 helpers. It scans module procedures in `src/`, `app/`, and `test/`, repeats the
 collection until transitive helper calls converge, and distinguishes calls from

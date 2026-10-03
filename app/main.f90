@@ -32,6 +32,7 @@ program fo_main
         process_configure_openmp
     use fo_ffc_cli, only: ffc_cmd_build, ffc_cmd_run, ffc_native_requested
     use fo_gremlin_cli, only: gremlin_cli_run
+    use fo_work_cli, only: work_cli_run
     use fo_exec_target, only: resolve_exec_target, exec_target_is_app, &
         exec_args_t, parse_exec_args
     use fo_build_tree, only: native_other_builds
@@ -80,6 +81,8 @@ program fo_main
         call cmd_test()
     case ('gremlin')
         call gremlin_cli_run()
+    case ('work')
+        call work_cli_run()
     case ('bench')
         call cmd_bench()
     case ('cover')
@@ -353,6 +356,7 @@ contains
             '  build --asan    debug flags plus -fsanitize=address,undefined'
         write (output_unit, '(a)') '  test       run tests (--only-changed, --all)'
         write (output_unit, '(a)') '  gremlin    continuous generation testing'
+        write (output_unit, '(a)') '  work       start, inspect, or cancel a work-mode session'
         write (output_unit, '(a)') '  cover      run tests with coverage, then fortcov'
         write (output_unit, '(a)') &
             '  exec [--cwd <dir>] [--no-build] <t> [args]  build then run target'

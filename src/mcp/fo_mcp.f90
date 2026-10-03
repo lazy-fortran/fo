@@ -21,6 +21,7 @@ module fo_mcp
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
     use fo_fs, only: fs_sleep_ms
     use fo_gremlin_supervisor, only: gremlin_handle
+    use fo_work_modes, only: work_handle
     implicit none
     private
     public :: mcp_serve
@@ -196,6 +197,10 @@ contains
             call handle_gremlin_action(arguments, id_str, response)
             call delete_tmpfile(tmpfile)
             return
+        case ('work_start', 'work_status', 'work_cancel')
+            call handle_work_action(arguments, id_str, response)
+            call delete_tmpfile(tmpfile)
+            return
         case ('check')
             call extract_json_field(arguments, '"mode"', mode)
             if (trim(mode) == 'start') then
@@ -268,6 +273,46 @@ contains
             trim(request_json), result_json, exitcode)
         call make_tool_text_response(id_str, result_json, exitcode, response)
     end subroutine handle_gremlin_action
+
+    subroutine handle_work_action(arguments, id_str, response)
+        character(len=*), intent(in) :: arguments, id_str
+        character(len=:), allocatable, intent(out) :: response
+
+        character(len=64) :: action
+        character(len=MAX_LINE) :: project_dir, raw_dir, decoded_dir
+        character(len=:), allocatable :: result_json
+        integer :: property_count, parse_status, exitcode
+        logical :: valid_string
+
+        call extract_json_string_member(arguments, 'action', action, &
+            property_count, parse_status)
+        if (parse_status /= 0 .or. property_count /= 1) then
+            call make_tool_text_response(id_str, &
+                '{"error":"work action must be work_start, work_status, or work_cancel"}', &
+                2, response)
+            return
+        end if
+        call extract_json_member(arguments, 'dir', raw_dir, &
+            property_count, parse_status)
+        if (parse_status /= 0 .or. property_count > 1) then
+            call make_tool_text_response(id_str, '{"error":"dir must occur at most once"}', &
+                2, response)
+            return
+        end if
+        project_dir = '.'
+        if (property_count == 1) then
+            call decode_json_string(raw_dir, decoded_dir, valid_string)
+            if (.not. valid_string .or. len_trim(decoded_dir) > len(project_dir)) then
+                call make_tool_text_response(id_str, '{"error":"dir must be a valid string"}', &
+                    2, response)
+                return
+            end if
+            project_dir = trim(decoded_dir)
+        end if
+        call work_handle(trim(action), trim(project_dir), arguments, &
+            result_json, exitcode)
+        call make_tool_text_response(id_str, result_json, exitcode, response)
+    end subroutine handle_work_action
 
     subroutine extract_json_member(object_json, property, raw_value, count, ierr)
         character(len=*), intent(in) :: object_json, property
@@ -1512,6 +1557,7 @@ contains
             '"inputSchema":{"type":"object","properties":{'// &
             '"action":{"type":"string",'// &
             '"enum":["check","status","diagnostics","cancel",'// &
+            '"work_start","work_status","work_cancel",'// &
             '"build","test","graph","info","changed","clean",'// &
             '"lint","fmt","install","gremlin_start",'// &
             '"gremlin_status","gremlin_wait","gremlin_events",'// &
@@ -1519,6 +1565,18 @@ contains
             '"description":"Action to run"},'// &
             '"dir":{"type":"string",'// &
             '"description":"Project directory (default: cwd)"},'// &
+            '"mode":{"type":"string","enum":["serial","parallel"]},'// &
+            '"max_workers":{"type":"integer","minimum":1,"maximum":32},'// &
+            '"tasks":{"type":"array","items":{"type":"object",'// &
+            '"properties":{"id":{"type":"string"},'// &
+            '"argv":{"type":"array","items":{"type":"string"}},'// &
+            '"worktree":{"type":"string"},'// &
+            '"depends_on":{"type":"array","items":{"type":"string"}},'// &
+            '"files":{"type":"array","items":{"type":"string"}},'// &
+            '"apis":{"type":"array","items":{"type":"string"}},'// &
+            '"abis":{"type":"array","items":{"type":"string"}},'// &
+            '"resources":{"type":"array","items":{"type":"string",'// &
+            '"enum":["cpu","memory","build","test"]}}}}},'// &
             '"json":{"type":"string","enum":["compact","full"],'// &
             '"description":"check/test: structured JSON result"},'// &
             '"cache":{"type":"boolean",'// &

@@ -88,6 +88,9 @@ jobs:
       - name: Test stale MCP recovery
         run: node test/test_mcp_gremlin_stale.js "$(command -v fo)"
 
+      - name: Test shared work modes
+        run: node test/test_work_modes.js "$(command -v fo)"
+
       - name: Test MCP cancellation backoff
         run: node test/test_mcp_cancel_error.js "$(command -v fo)"
 
