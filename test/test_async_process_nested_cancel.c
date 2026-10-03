@@ -9,9 +9,66 @@ static void write_line(const char *path, const char *line) {
     close(fd);
 }
 
+static int write_text(const char *path, const char *text) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    size_t length = strlen(text);
+    int result = fd >= 0 && write(fd, text, length) == (ssize_t)length;
+    if (fd >= 0) close(fd);
+    return result;
+}
+
 static void path_join(char *output, size_t size, const char *root,
                       const char *name) {
-    snprintf(output, size, "%s/%s", root, name);
+    size_t root_len = strlen(root), name_len = strlen(name);
+    if (size == 0) return;
+    if (root_len + name_len + 2 > size) {
+        output[0] = '\0';
+        return;
+    }
+    memcpy(output, root, root_len);
+    output[root_len] = '/';
+    memcpy(output + root_len + 1, name, name_len + 1);
+}
+
+static int remove_tree(const char *path) {
+    struct stat info;
+    if (lstat(path, &info) != 0) return errno == ENOENT;
+    if (!S_ISDIR(info.st_mode)) return unlink(path) == 0;
+    {
+        DIR *directory = opendir(path);
+        struct dirent *entry;
+        int ok = directory != NULL;
+        if (!ok) return 0;
+        while ((entry = readdir(directory)) != NULL) {
+            char child[PATH_MAX];
+            if (strcmp(entry->d_name, ".") == 0 ||
+                strcmp(entry->d_name, "..") == 0) continue;
+            path_join(child, sizeof(child), path, entry->d_name);
+            if (!remove_tree(child)) {
+                ok = 0;
+                break;
+            }
+        }
+        closedir(directory);
+        return ok && rmdir(path) == 0;
+    }
+}
+
+static int make_nested_project(const char *root, char *project,
+                               size_t project_size) {
+    char app[PATH_MAX], manifest[PATH_MAX], source[PATH_MAX];
+    path_join(project, project_size, root, "fo-project");
+    path_join(app, sizeof(app), project, "app");
+    if (mkdir(project, 0777) != 0 || mkdir(app, 0777) != 0) return 0;
+    path_join(manifest, sizeof(manifest), project, "fpm.toml");
+    path_join(source, sizeof(source), app, "main.f90");
+    if (!write_text(manifest,
+            "name = \"nested_spawn_probe\"\n"
+            "version = \"0.1.0\"\n")) return 0;
+    return write_text(source,
+            "program nested_spawn_probe\n"
+            "    print '(a)', 'nested compiler build complete'\n"
+            "end program nested_spawn_probe\n");
 }
 
 static void packed_start(const char *exe, const char *mode, const char *path,
@@ -58,10 +115,10 @@ static int alive(int pid) {
 }
 
 int main(int argc, char **argv) {
-    char root[] = "/var/tmp/fo-nested-cancel-XXXXXX";
+    char root[] = "build/fo-nested-cancel-XXXXXX";
     char target[PATH_MAX], sibling[PATH_MAX], trigger[PATH_MAX];
     char result[PATH_MAX], log_file[PATH_MAX], timeout_file[PATH_MAX];
-    char probe_file[PATH_MAX];
+    char probe_file[PATH_MAX], project[PATH_MAX], complete[PATH_MAX];
     int outer = 0, error = 0, target_pid = 0, target_child = 0;
     int sibling_pid = 0, sibling_child = 0;
     int target_escape = -1, sibling_escape = -1, success = 0;
@@ -101,9 +158,46 @@ int main(int argc, char **argv) {
         pid_t child;
         if (strstr(argv[2], "/target") != NULL) {
             char command[3 * PATH_MAX], heartbeat[PATH_MAX];
+            char root[PATH_MAX], root_abs[PATH_MAX];
+            char project[PATH_MAX], log_file[PATH_MAX];
+            char complete[PATH_MAX], executable[PATH_MAX];
             const char *parts[] = {argv[0], "probe", heartbeat};
             size_t used = 0;
-            int timeout_code;
+            int timeout_code, slash;
+            const char *fo_cli = getenv("FO_TEST_CLI");
+            char fo_cli_path[PATH_MAX];
+            if (fo_cli == NULL || fo_cli[0] == '\0') fo_cli = "fo";
+            if (strchr(fo_cli, '/') != NULL &&
+                realpath(fo_cli, fo_cli_path) != NULL)
+                fo_cli = fo_cli_path;
+            snprintf(root, sizeof(root), "%s", argv[2]);
+            slash = (int)strlen(root) - 1;
+            while (slash >= 0 && root[slash] != '/') slash--;
+            if (slash < 0) return 88;
+            root[slash] = '\0';
+            if (realpath(root, root_abs) == NULL) return 88;
+            path_join(project, sizeof(project), root_abs, "fo-project");
+            path_join(log_file, sizeof(log_file), root_abs, "fo-check.log");
+            path_join(complete, sizeof(complete), root_abs,
+                      "fo-check-complete");
+            {
+                const char *fo_parts[] = {fo_cli, "check"};
+                for (size_t i = 0; i < 2; i++) {
+                    size_t length = strlen(fo_parts[i]) + 1;
+                    memcpy(command + used, fo_parts[i], length);
+                    used += length;
+                }
+            }
+            fo_c_run_argv_logged(project, command, (int)used, 2, log_file, 0,
+                                 30, 0, NULL, &timeout_code);
+            if (timeout_code != 0) return 89;
+            path_join(executable, sizeof(executable), project,
+                      "build/fo/bin/nested_spawn_probe");
+            if (access(executable, X_OK) != 0 ||
+                !write_text(complete, "compiler child completed\n"))
+                return 87;
+
+            used = 0;
             snprintf(heartbeat, sizeof(heartbeat), "%s-probe", argv[2]);
             for (size_t i = 0; i < 3; i++) {
                 size_t length = strlen(parts[i]) + 1;
@@ -166,6 +260,17 @@ int main(int argc, char **argv) {
     path_join(log_file, sizeof(log_file), root, "outer.log");
     path_join(timeout_file, sizeof(timeout_file), root, "target-timeout");
     path_join(probe_file, sizeof(probe_file), root, "target-probe");
+    path_join(complete, sizeof(complete), root, "fo-check-complete");
+    if (!make_nested_project(root, project, sizeof(project))) goto cleanup;
+    {
+        char abs_root[PATH_MAX], cache[PATH_MAX];
+        if (realpath(root, abs_root) == NULL) goto cleanup;
+        path_join(cache, sizeof(cache), abs_root, "cache");
+        if (setenv("FO_CACHE_DIR", cache, 1) != 0 ||
+            setenv("TMPDIR", abs_root, 1) != 0 ||
+            setenv("FO_DISABLE_SELF_REFRESH", "1", 1) != 0)
+            goto cleanup;
+    }
     packed_start(argv[0], "outer", root, &outer, &error);
     if (error != 0 || outer <= 0) goto cleanup;
     {
@@ -191,6 +296,13 @@ int main(int argc, char **argv) {
             goto cleanup;
         }
         fclose(file);
+    }
+    {
+        char executable[PATH_MAX];
+        path_join(executable, sizeof(executable), project,
+                  "build/fo/bin/nested_spawn_probe");
+        if (access(complete, R_OK) != 0 || access(executable, X_OK) != 0)
+            goto cleanup;
     }
     {
         FILE *file = fopen(timeout_file, "r");
@@ -249,14 +361,7 @@ cleanup:
         return 1;
     }
     if (alive(sibling_pid) || alive(sibling_child)) return 2;
-    unlink(target);
-    unlink(sibling);
-    unlink(trigger);
-    unlink(result);
-    unlink(timeout_file);
-    unlink(probe_file);
-    unlink(log_file);
-    rmdir(root);
-    puts("nested-only cancellation and sibling survival: PASS");
+    if (!remove_tree(root)) return 3;
+    puts("nested fo compiler spawn, cancellation, and sibling survival: PASS");
     return 0;
 }
