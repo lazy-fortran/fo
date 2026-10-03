@@ -1184,6 +1184,13 @@ contains
             call select_random_tests( &
                 random_candidates, n_test_names, random_count, random_seed, &
                 test_names, n_arg_names)
+            if (n_arg_names == 0) then
+                write (error_unit, '(a)') 'fo: no eligible tests for --random'
+                if (.not. include_all) then
+                    write (error_unit, '(a)') 'fo: use --all to include slow tests'
+                end if
+                stop 1
+            end if
             write (error_unit, '(a,i0,a,i0,a)') &
                 'fo: random seed ', random_seed, ' selected ', n_arg_names, &
                 ' test(s)'

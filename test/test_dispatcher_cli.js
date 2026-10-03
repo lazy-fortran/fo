@@ -81,6 +81,20 @@ function expectSlowRejected(names) {
   }
 }
 
+function expectEmptyRandomRejected(options = []) {
+  const result = run(['test', '--random', '3', '--seed', '42', ...options, '--json']);
+  assert.notEqual(result.status, 0, 'an empty random selection must fail');
+  assert.match(result.stderr, /fo: no eligible tests for --random/);
+  if (!options.includes('--all')) assert.match(result.stderr, /use --all/);
+  if (result.stdout.trim()) {
+    const report = JSON.parse(result.stdout);
+    assert.notEqual(report.exit_code, 0, 'no successful empty JSON report');
+  }
+  for (const name of allCases) {
+    assert.equal(fs.existsSync(path.join(scratch, `${name}.receipt`)), false);
+  }
+}
+
 try {
   if (!installed) {
     const built = spawnSync(driver, ['build'], { ...options, cwd: project });
@@ -209,9 +223,24 @@ try {
   expectCases(['test', '--all', 'test_plain', slow], ['test_plain', slow],
     { test_plain: 'plain-original', [slow]: 'slow-executed' });
   expectCases(['test'], ['test_plain'], { test_plain: 'plain-original' });
+  // Only the slow program remains runnable: random must not become an
+  // unfiltered zero-name backend request when default selection excludes it.
+  fs.rmSync(path.join(scratch, 'checks/test_plain.f90'));
+  for (const name of allCases) {
+    fs.rmSync(path.join(scratch, `${name}.receipt`), { force: true });
+  }
+  expectEmptyRandomRejected();
+  expectCases(['test', '--all', '--random', '3', '--seed', '42'], [slow],
+    { [slow]: 'slow-executed' });
+  expectCases(['test', '--all', '--random', '3', '--seed', '42'], [slow],
+    { [slow]: 'slow-executed' });
+  fs.rmSync(path.join(scratch, 'checks/nested/slow_entry.f90'));
+  fs.rmSync(path.join(scratch, `${slow}.receipt`));
+  expectEmptyRandomRejected();
+  expectEmptyRandomRejected(['--all']);
   console.log('dispatcher-cli: shared cold/warm all, module/program cases, public aliases, ' +
     'nested/custom roots, random/changed selection, named edits, explicit self and ' +
-    'ineligible/marker-only/missing-dispatcher rejection and explicit slow gates pass');
+    'ineligible/marker-only/missing-dispatcher rejection, explicit slow and empty random gates pass');
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
