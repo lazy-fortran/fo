@@ -20,7 +20,7 @@ contains
     subroutine select_gremlin_tests( &
             names, n_names, mandatory, n_mandatory, impacted, n_impacted, &
             history, n_history, debt, n_debt, random_count, seed, &
-            selected, n_selected, status, debt_cursor)
+            selected, n_selected, status, debt_cursor, n_mandatory_selected)
         character(len=*), intent(in) :: names(:)
         integer, intent(in) :: n_names
         character(len=*), intent(in) :: mandatory(:), impacted(:), history(:), debt(:)
@@ -30,6 +30,8 @@ contains
         integer, intent(out) :: n_selected, status
         ! One-based next debt index; updated to the position after the scan.
         integer, optional, intent(inout) :: debt_cursor
+        ! Unique mandatory prefix length; zero on unsuccessful selection.
+        integer, optional, intent(out) :: n_mandatory_selected
 
         character(len=len(names)), allocatable :: ordered(:), candidates(:), sample(:)
         character(len=len(names)), allocatable :: reserved_debt(:)
@@ -40,6 +42,7 @@ contains
         selected = ''
         n_selected = 0
         status = GREMLIN_POLICY_OK
+        if (present(n_mandatory_selected)) n_mandatory_selected = 0
         if (n_names < 1 .or. n_names > size(names) .or. random_count < 0) then
             status = GREMLIN_POLICY_INVALID_COUNT
             return
@@ -171,6 +174,9 @@ contains
         end if
         selected(:n_selected) = ordered(:n_selected)
         if (present(debt_cursor)) debt_cursor = cursor_after
+        if (present(n_mandatory_selected)) then
+            n_mandatory_selected = n_mandatory_unique
+        end if
     end subroutine select_gremlin_tests
 
     subroutine shuffle_gremlin_tests(selected, n_mandatory, n_selected, seed, status)
