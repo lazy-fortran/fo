@@ -33,16 +33,22 @@ contains
         character(len=4096) :: root, driver, copied_driver
         character(len=4096) :: home, cache, local_bin, global_fo, prefix
         character(len=4096) :: build_log, test_log, disabled_log, install_log
+        character(len=4096) :: profile_a_log, profile_b_log, profile_a_hit_log
         character(len=4096) :: install_bin
         character(len=:), allocatable :: sentinel_before
-        character(len=64) :: pid_text, env
+        character(len=64) :: pid_text, env, profile_a_flags, profile_b_flags
         character(len=4096) :: private_driver
+        character(len=4096) :: profile_a_driver, profile_b_driver
+        character(len=4096) :: profile_a_hit_driver
         character(len=:), allocatable :: packed
         character(len=:), allocatable :: build_output, test_output
         character(len=:), allocatable :: disabled_output, install_output
+        character(len=:), allocatable :: profile_output
         character(len=:), allocatable :: bytes_before, bytes_after
         integer(c_long_long) :: device_before, inode_before
         integer(c_long_long) :: device_after, inode_after, mtime_ns, size
+        integer(c_long_long) :: profile_device_before, profile_inode_before
+        integer(c_long_long) :: profile_device_after, profile_inode_after
         integer :: root_status, env_status, exitcode, n_args, pid
         integer(c_int) :: env_rc
         logical :: ok, exists
@@ -89,7 +95,15 @@ contains
             '/disabled.log'
         install_log = '/var/tmp/fo-self-refresh-oracle-'//trim(pid_text)// &
             '/install.log'
+        profile_a_log = '/var/tmp/fo-self-refresh-oracle-'//trim(pid_text)// &
+            '/profile-a.log'
+        profile_b_log = '/var/tmp/fo-self-refresh-oracle-'//trim(pid_text)// &
+            '/profile-b.log'
+        profile_a_hit_log = '/var/tmp/fo-self-refresh-oracle-'// &
+            trim(pid_text)//'/profile-a-hit.log'
         install_bin = trim(prefix)//'/bin/fo'
+        write (profile_a_flags, '(a,i0)') '-O3 -fmax-errors=', pid + 1
+        write (profile_b_flags, '(a,i0)') '-O0 -fmax-errors=', pid + 2
 
         call fs_remove_tree('/var/tmp/fo-self-refresh-oracle-'//trim(pid_text))
         call fs_make_dir(trim(local_bin))
@@ -142,6 +156,45 @@ contains
             call check(exitcode == 0, &
                 'plain fo test succeeds through the rebuilt private driver')
 
+            call run_profile_build(trim(root), trim(home), trim(cache), &
+                trim(private_driver), trim(copied_driver), trim(profile_a_flags), &
+                trim(profile_a_log), profile_output, exitcode, env_rc)
+            call check(env_rc == 0, 'first profile uses isolated test state')
+            call check(exitcode == 0, 'first private profile build succeeds')
+            profile_a_driver = advertised_driver(profile_output)
+            call check(index(trim(profile_a_driver), &
+                trim(root)//'/build/fo/profiles/') == 1, &
+                'first profile advertises its selected profile tree')
+
+            call run_profile_build(trim(root), trim(home), trim(cache), &
+                trim(private_driver), trim(copied_driver), trim(profile_b_flags), &
+                trim(profile_b_log), profile_output, exitcode, env_rc)
+            call check(env_rc == 0, 'second profile uses isolated test state')
+            call check(exitcode == 0, 'second private profile build succeeds')
+            profile_b_driver = advertised_driver(profile_output)
+            call check(index(trim(profile_b_driver), &
+                trim(root)//'/build/fo/profiles/') == 1, &
+                'second profile advertises its selected profile tree')
+            call check(trim(profile_b_driver) /= trim(profile_a_driver), &
+                'different flag profiles have different private drivers')
+            call fs_identity(trim(profile_a_driver), profile_device_before, &
+                profile_inode_before, exists)
+            call check(exists, 'first profile driver remains available')
+
+            call run_profile_build(trim(root), trim(home), trim(cache), &
+                trim(private_driver), trim(copied_driver), trim(profile_a_flags), &
+                trim(profile_a_hit_log), profile_output, exitcode, env_rc)
+            call check(env_rc == 0, 'profile cache hit uses isolated test state')
+            call check(exitcode == 0, 'first profile cache-hit build succeeds')
+            profile_a_hit_driver = advertised_driver(profile_output)
+            call check(trim(profile_a_hit_driver) == trim(profile_a_driver), &
+                'cache hit advertises its exact profile, not the newest sibling')
+            call fs_identity(trim(profile_a_driver), profile_device_after, &
+                profile_inode_after, exists)
+            call check(exists .and. profile_device_after == profile_device_before &
+                .and. profile_inode_after == profile_inode_before, &
+                'repeated profile build is a cache hit with unchanged inode')
+
             call set_test_environment(trim(home), trim(cache), .true., env_rc)
             call check(env_rc == 0, 'strict opt-out environment is applied')
             call check(fs_copy_exec(trim(private_driver), trim(copied_driver)) == 0, &
@@ -188,6 +241,32 @@ contains
         call fs_remove_tree('/var/tmp/fo-self-refresh-oracle-'//trim(pid_text))
         call report()
     end subroutine run_oracle
+
+    subroutine run_profile_build(root, home, cache, source_driver, copied_driver, &
+            flags, log_path, output, exitcode, env_rc)
+        character(len=*), intent(in) :: root, home, cache, source_driver
+        character(len=*), intent(in) :: copied_driver, flags, log_path
+        character(len=:), allocatable, intent(out) :: output
+        integer, intent(out) :: exitcode
+        integer(c_int), intent(out) :: env_rc
+
+        character(len=:), allocatable :: command
+        integer :: n_args
+        logical :: read_ok
+
+        call set_test_environment(home, cache, .false., env_rc)
+        exitcode = 1
+        if (env_rc /= 0) return
+        if (fs_copy_exec(source_driver, copied_driver) /= 0) return
+        n_args = 0
+        call argv_push(command, n_args, copied_driver)
+        call argv_push(command, n_args, 'build')
+        call argv_push(command, n_args, '--flag')
+        call argv_push(command, n_args, flags)
+        call process_run_argv_logged(trim(root), command, n_args, log_path, &
+            .false., 180, exitcode)
+        call read_file(log_path, output, read_ok)
+    end subroutine run_profile_build
 
     subroutine check(condition, label)
         logical, intent(in) :: condition
