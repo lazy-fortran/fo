@@ -35,6 +35,7 @@ freshness/result/process behavior before consumers can rely on it.
 | [#164](https://github.com/lazy-fortran/fo/issues/164) | Complete cross-process stat-memo publication and recovery at `d482807`. |
 | [#165](https://github.com/lazy-fortran/fo/issues/165)--[#170](https://github.com/lazy-fortran/fo/issues/170), [fx #42](https://github.com/lazy-fortran/fx/issues/42)--[#44](https://github.com/lazy-fortran/fx/issues/44) | Writable execution views, one immutable blob/action store, compact generations, private transactional build sessions, one ordinary/Gremlin engine and rooted low-churn collection. |
 | [#171](https://github.com/lazy-fortran/fo/issues/171) | Restore Darwin feature declarations in the Gremlin state provider and unblock faepmac1 gates. |
+| [#172](https://github.com/lazy-fortran/fo/issues/172) | Add scoped Darwin asynchronous owner/descendant containment for public Gremlin lifecycle. |
 
 Adjacent scope is [#56](https://github.com/lazy-fortran/fo/issues/56) LSP,
 [#59](https://github.com/lazy-fortran/fo/issues/59) deep-lint provider,
@@ -65,6 +66,7 @@ Agent scheduler PR #147 and issues #143/#152 are closed without merge; external
 controllers own worker/task orchestration.
 
 
-Issue #169 is complete at `7022605`: self-refresh is worktree-private so worker
-builds cannot publish a global driver; only an explicit controller install may
-do that.
+Issue #169 is complete through `af5d144`: self-refresh is worktree-private so
+worker builds cannot publish a global driver; only an explicit controller install
+may do that. The cold standalone Fortran oracle has an explicit 240-second wall
+budget.

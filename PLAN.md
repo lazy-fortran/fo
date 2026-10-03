@@ -618,14 +618,16 @@ completed entries below are retained as prerequisites and evidence:
    the complete matrix as provider-completion/milestone evidence.
 10. [#158](https://github.com/lazy-fortran/fo/issues/158)--[#163](https://github.com/lazy-fortran/fo/issues/163): replace all Node fixtures with standalone Fortran process drivers and remove Node from the test contract.
 11. **Complete:** [#164](https://github.com/lazy-fortran/fo/issues/164): stat-memo publication is cross-process safe.
-12. **Complete:** [#169](https://github.com/lazy-fortran/fo/issues/169): keep worktree
-    self-refresh private; only explicit controller installation publishes the
-    global driver.
+12. **Complete:** [#169](https://github.com/lazy-fortran/fo/issues/169):
+    worktree-private self-refresh is delivered and its deliberate cold
+    multi-build Fortran CI oracle has an explicit 240-second wall budget.
 13. [#170](https://github.com/lazy-fortran/fo/issues/170): give current Gremlin
     tests/runs unique writable execution views without weakening frozen sources.
 14. [#171](https://github.com/lazy-fortran/fo/issues/171): restore Darwin feature
     declarations in the Gremlin state provider, then use macOS as a provider gate.
-15. Deliver the shared store in provider order: [fx #42](https://github.com/lazy-fortran/fx/issues/42),
+15. [#172](https://github.com/lazy-fortran/fo/issues/172): add scoped Darwin
+    asynchronous owner/descendant containment and unblock public Gremlin lifecycle.
+16. Deliver the shared store in provider order: [fx #42](https://github.com/lazy-fortran/fx/issues/42),
     then [fx #43](https://github.com/lazy-fortran/fx/issues/43) plus
     [fo #165](https://github.com/lazy-fortran/fo/issues/165), then
     [fo #166](https://github.com/lazy-fortran/fo/issues/166)/[#167](https://github.com/lazy-fortran/fo/issues/167),
@@ -694,11 +696,15 @@ Implemented issue state:
   unstable-hash retry and write/close/crash recovery passed independent review,
   focused current-head testing and three production mutants. Its macOS rerun is
   blocked before execution by the separate Darwin declaration defect #171.
-- #169 is complete at `7022605`: ordinary self-builds remain worktree-private,
+- #169 is complete through `af5d144`: ordinary self-builds remain worktree-private,
   exact selected profiles survive cache hits, explicit install is the only global
-  publication path, and the inverse Node oracle is replaced by Fortran.
+  publication path, the inverse Node oracle is replaced by Fortran, and its cold
+  CI invocation has an explicit 240-second wall budget.
 - #171 owns the faepmac1 compile failure caused by strict POSIX/XOPEN feature
   macros hiding Darwin/libproc declarations in `fo_gremlin_state.c`.
+- #172 owns the subsequently exposed `ENOTSUP` from Linux-only asynchronous
+  descendant containment; macOS state/supervisor providers pass, while public
+  Gremlin start/status/stop remains blocked until scoped Darwin ownership lands.
 - #143/#152 and PR #147 are closed without merge after the KISS review assigned
   agent scheduling to the external controller; no work-mode code enters core.
 - #145 has one bounded fpm row passing on the exact candidate, one independent
