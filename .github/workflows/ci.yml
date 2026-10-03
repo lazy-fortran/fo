@@ -88,7 +88,7 @@ jobs:
         run: node test/test_continuous_preemption.js "$(command -v fo)"
 
       - name: Test Gremlin campaign history
-        run: node test/test_gremlin_campaign_history.js "$(command -v fo)"
+        run: fo test test_gremlin_campaign_history
 
       - name: Test Gremlin context provenance
         run: node test/test_gremlin_context_provenance.js "$(command -v fo)"
