@@ -71,7 +71,9 @@ If `fo` cannot handle the project, fix `fo` first. Do not route around it.
 
 Protocol: auto-detects input framing (Content-Length headers or bare JSON lines) from the first message and mirrors it. Protocol version is echoed from the client's `initialize` request.
 
-System test: `node test/test_mcp_system.js` (or pass a binary path as arg). Tests both framing modes, protocol negotiation, tool calls, error paths, and clean shutdown.
+System test: `FO=/path/to/fo fo test test_mcp_system`. The standalone Fortran
+client tests both framing modes, protocol negotiation, tool calls, error paths,
+and clean shutdown through the public `fo mcp-server` process.
 
 Key source files:
 - `src/mcp/fo_mcp.f90`: server loop, dispatch, async state.
