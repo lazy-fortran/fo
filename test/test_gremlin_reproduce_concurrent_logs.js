@@ -190,6 +190,16 @@ async function stop(sessionId) {
   assert.equal(ownerPids().length, 0, `Gremlin owner remains: ${ownerPids().join(',')}`);
 }
 
+function makeWritableTree(target) {
+  if (!fs.existsSync(target)) return;
+  const stats = fs.lstatSync(target);
+  if (stats.isSymbolicLink()) return;
+  fs.chmodSync(target, stats.mode | 0o700);
+  if (stats.isDirectory()) {
+    for (const entry of fs.readdirSync(target)) makeWritableTree(path.join(target, entry));
+  }
+}
+
 function verifyLogs(rows, generation) {
   const receipts = cases.map(testCase => rows.find(row => row.case_id === testCase.id &&
     row.generation === generation && row.status === 'FAIL' && row.log_path));
@@ -279,6 +289,7 @@ async function main() {
 }
 
 main().then(() => {
+  makeWritableTree(scratch);
   fs.rmSync(scratch, { recursive: true, force: true });
 }).catch(error => {
   console.error(error);
