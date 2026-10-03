@@ -694,8 +694,10 @@ Implemented issue state:
   compact manifests and private disposable sessions remain required.
 - The installed driver now comes from exact main `b0a356e`, SHA256
   `b0fedbd4bd0179209ed26f20e0210cd2e37aa9e29d15a7bac18ebd0bcf33609f`.
-  One bounded resident lane each is active for fo and fx under dogfood5 state;
-  task worktrees use focused short-lived gates.
+  The fx dogfood5 lane remains resident after completing 18/18 green. The fo
+  resident lane was stopped cleanly after plan-only generations and retained
+  private builds grew state to 2.0 GB; its evidence is preserved. fo uses focused
+  short-lived gates until #148/#165/#166 make residency relevant and bounded.
 
 After each meaningful delivery, update this plan, workspace master and affected
 issues; commit and push the controller branch immediately. Preserve exact bases,
