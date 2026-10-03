@@ -1,8 +1,9 @@
 # fo Gremlin implementation plan
 
-Updated 2026-10-03; planning input `2e781fdf79db869470849a199fb25ba36476c7c7`.
+Updated 2026-10-04; planning input `7022605ef40d342208c536ebb70c10eb9b75f710`.
 This is the complete provider plan for Gremlin, fo's continuous randomized
-regression-testing engine and serial/parallel worker controls. The
+regression-testing engine. External controllers own coding-worker orchestration.
+The
 [ffc roadmap](https://github.com/lazy-fortran/ffc/blob/main/PLAN.md) depends on
 this stage **before further compiler work**. This document is a plan; new
 interfaces below are proposed, not implemented by this documentation change.
@@ -247,9 +248,17 @@ shared immutable source/dependency blobs. Mutable object/module/link output
 lives in a lane/session-owned working directory and becomes usable only through
 an atomic successful-session commit. Every build/test/run process also gets a
 private writable working directory, so relative scratch cannot mutate immutable
-source blobs or wake the watcher. Its execution view preserves explicit relative
-fixture inputs from the immutable source tree while routing relative outputs to
-private scratch. Concurrent cases and reproductions never share mutable scratch.
+source blobs or wake the watcher. Its execution view materializes declared
+relative fixtures by reflink/clone/copy with the same layout, permitting private
+fixture mutation while routing outputs to scratch. Escaping `..`, absolute and
+undeclared inputs have explicit fail-closed rules. Concurrent cases and
+reproductions never share mutable scratch.
+
+Private physical session names are not semantic action inputs. The engine uses
+stable logical source/build paths and supported compiler path mapping for debug
+records, `__FILE__`, module metadata and RPATH, or includes every genuinely
+significant path effect in the action key. Random session paths therefore do not
+manufacture action-output conflicts.
 
 The shared store uses raw content IDs for bytes and canonical manifests for
 roles, modes, names and tree/action structure. Publishing an existing verified
@@ -320,7 +329,8 @@ Issues #158--#163 migrate every current JavaScript fixture in behavior-preservin
 slices, then remove Node from CI. Each old fixture is deleted only after its
 Fortran replacement preserves or strengthens the crash, concurrency, JSON,
 filesystem and execution oracle. Production code never depends on the test
-harness.
+harness. Freeze the exact-head inventory: `1f8a1a3` has 31 JS fixtures, including
+context-provenance and coverage-restart tests omitted from the earlier count.
 
 ## Ordered implementation and independent verifiers
 
@@ -356,8 +366,10 @@ Tests must cover simultaneous same-project CLI/MCP starts, two independent lanes
 TERM-ignoring descendants, source edits during capture, crash during receipt/cache
 publication, stale ownership, large event streams, unchanged action reuse,
 changed dependency invalidation, and bounded disk growth. Preserve these oracles
-when adding features. The normal workflow is focused `fo test`/`fo exec`, then
-bare `fo` before delivery; record pre-existing failures without masking them.
+when adding features. The normal workflow is focused `fo test`/`fo exec` through
+Gremlin's exact local gate. A bare full `fo` pipeline is milestone evidence
+rather than a per-increment delivery prerequisite; record pre-existing failures
+without masking them.
 
 Performance acceptance measures no-op attach/reuse, incremental build latency,
 first useful verdict, build-ready-to-replacement-test latency, cancellation grace,
@@ -487,7 +499,10 @@ receipts support iteration but never manufacture a complete green.
 
 Expose orthogonal `phase`, `health`, `dirty`, active-generation identity,
 `local_gate_green`, `verification_level`, `fully_verified`, per-level coverage
-counts, and epoch identity/cursor. Emit durable typed transitions for generation,
+counts, and epoch identity/cursor. A versioned gate token binds the exact
+generation, inventory/requirement digest and watcher event epoch; any relevant
+event invalidates it without adding Git or CI policy. Emit durable typed
+transitions for generation,
 build, local-gate, regression, coverage completion, quiescence, wake and
 supersession. CLI and MCP share typed waits for local-gate-green, ordinary-
 verified, fully-verified, quiescent and failure. Lifecycle events use a versioned
@@ -511,8 +526,11 @@ allowed only through a future rigorously complete action/oracle cache key.
 ### Change events, identity and provenance
 
 One shared `fo_change_watch` provider watches project execution inputs and path
-dependencies, debounces bursts and marks the session dirty. Gremlin performs one
-initial capture, then no discovery/capture until a relevant event. `fo watch`
+dependencies, debounces bursts and marks the session dirty. Arm it before the
+capture used to declare clean. Directory replacement is relevant; overflow,
+watch loss or an unclassifiable event conservatively marks dirty and causes one
+bounded rescan. Gremlin performs one initial capture, then no discovery/capture
+until a relevant event. `fo watch`
 becomes a thin compatibility policy on the same provider or is deprecated; it
 does not retain an independent event-to-check engine. `.git` and unrelated paths
 are excluded execution inputs.
@@ -527,7 +545,8 @@ and interrupted old cases remain unknown. The continuous-preemption oracle keeps
 this last-good behavior independent from the watcher/debounce implementation.
 
 Execution identity includes project, dependency, test/oracle and runtime input
-contents, toolchain/flags/relevant environment, and the pinned fo driver digest.
+contents, toolchain/flags/relevant environment, the dynamic loader and resolved
+or declared late-loaded libraries, and the pinned fo driver digest.
 Git base commit and working-tree patch are provenance fields, not execution-key
 inputs. A metadata-only commit therefore preserves the generation and evidence;
 a relevant content edit creates a new generation with fresh provenance.
@@ -576,9 +595,11 @@ evidence alone never promotes the tested Gremlin implementation.
 The core is merged. Remaining implementation follows this dependency-aware DAG;
 completed entries below are retained as prerequisites and evidence:
 
-1. **Reopened:** [#148](https://github.com/lazy-fortran/fo/issues/148): shared filesystem
-   events and dirty/debounce/fingerprint gating so idle Gremlin performs no full
-   captures; consolidate or deprecate the independent `fo watch` check loop.
+1. **Reopened:** [#148](https://github.com/lazy-fortran/fo/issues/148): extract one
+   declared-input inventory now, then use it for shared filesystem events and
+   dirty/debounce/fingerprint gating so idle Gremlin performs no full captures;
+   #165 later reuses the inventory for manifests. Consolidate or deprecate the
+   independent `fo watch` check loop.
 2. [#149](https://github.com/lazy-fortran/fo/issues/149): extract request,
    context, campaign/history and session services from the supervisor.
 3. **Complete:** [#150](https://github.com/lazy-fortran/fo/issues/150): converge domain JSON
@@ -596,13 +617,20 @@ completed entries below are retained as prerequisites and evidence:
 9. Register every late behavioral oracle in the post-submit workflow and keep
    the complete matrix as provider-completion/milestone evidence.
 10. [#158](https://github.com/lazy-fortran/fo/issues/158)--[#163](https://github.com/lazy-fortran/fo/issues/163): replace all Node fixtures with standalone Fortran process drivers and remove Node from the test contract.
-11. [#164](https://github.com/lazy-fortran/fo/issues/164): make stat-memo publication cross-process safe.
-12. [#169](https://github.com/lazy-fortran/fo/issues/169): keep worktree
+11. **Complete:** [#164](https://github.com/lazy-fortran/fo/issues/164): stat-memo publication is cross-process safe.
+12. **Complete:** [#169](https://github.com/lazy-fortran/fo/issues/169): keep worktree
     self-refresh private; only explicit controller installation publishes the
     global driver.
 13. [#170](https://github.com/lazy-fortran/fo/issues/170): give current Gremlin
     tests/runs unique writable execution views without weakening frozen sources.
-14. [fx #42](https://github.com/lazy-fortran/fx/issues/42), [fx #43](https://github.com/lazy-fortran/fx/issues/43), [fo #165](https://github.com/lazy-fortran/fo/issues/165)--[#168](https://github.com/lazy-fortran/fo/issues/168), and [fx #44](https://github.com/lazy-fortran/fx/issues/44): converge generation capture, action outputs, private build sessions, ordinary fo and Gremlin on one immutable store and engine with rooted low-churn collection.
+14. [#171](https://github.com/lazy-fortran/fo/issues/171): restore Darwin feature
+    declarations in the Gremlin state provider, then use macOS as a provider gate.
+15. Deliver the shared store in provider order: [fx #42](https://github.com/lazy-fortran/fx/issues/42),
+    then [fx #43](https://github.com/lazy-fortran/fx/issues/43) plus
+    [fo #165](https://github.com/lazy-fortran/fo/issues/165), then
+    [fo #166](https://github.com/lazy-fortran/fo/issues/166)/[#167](https://github.com/lazy-fortran/fo/issues/167),
+    and finally [fx #44](https://github.com/lazy-fortran/fx/issues/44) plus
+    [fo #168](https://github.com/lazy-fortran/fo/issues/168).
 
 Experimental agent scheduler PR #147 is closed without merge; #143 and #152 are
 closed as not planned. External controllers own worker DAGs, worktrees, model
@@ -615,9 +643,11 @@ current correctness.
 
 **Execution is user-authorized in parallel mode.** The controller started from
 fo main at `e4fc193`. The reviewed core and dependency-shadow repair are now on
-fo `main`; PR #146 is merged. The current main head `27600bf` records the
-delivered shared event watcher, context-provenance repair and finite crash-safe
-coverage epochs (`48137f0`, `b2a31e1`, `be5aa7a` and `b0a356e`). Exact combined
+fo `main`; PR #146 is merged. The current main head `7022605` records the
+delivered shared event watcher, context-provenance repair, finite crash-safe
+coverage epochs, the campaign-history Fortran oracle, cross-process stat-memo
+publication and private self-refresh (`48137f0`, `b2a31e1`, `be5aa7a`,
+`361d1ca`, `d482807` and `7022605`). Exact combined
 focused gates passed before each code push;
 post-submit GitHub Actions remains asynchronous. Development continues as small
 locally gated main increments without waiting for CI.
@@ -631,12 +661,12 @@ eligibility, stale-MCP/new-CLI behavior, lossless 300-receipt pagination and the
 then-current work-mode fixture. Four existing array-temporary warnings remain.
 
 The abandoned work-mode stack ended at `86870cf`; its generic CMake named-test
-routing fix and identical oracle already exist in core. The installed fo now
-comes from the locally gated `1787f64` source, SHA256
-`f6d0d66ed041b5046d7b3ad790ffb450b29eb62ce194d4c4d946b5eeb9a16f64`; the earlier full
+routing fix and identical oracle already exist in core. The installed bootstrap
+fo has SHA256 `b0fedbd4bd0179209ed26f20e0210cd2e37aa9e29d15a7bac18ebd0bcf33609f`.
+The historical `1787f64` full
 pipeline passed 109/109 static, 62/62 build, 48/48 test, and lint in 19.0 seconds,
 followed by its historical work-mode fixture and MCP system test (79/79). It is
-used only as the current bootstrap CLI and will be replaced by the accepted core.
+retained only as prior evidence.
 
 Implemented issue state:
 
@@ -656,6 +686,19 @@ Implemented issue state:
   epochs survive stop/crash/restart, priority jumps satisfy unseen obligations,
   reproduction does not earn coverage, and cancelled/stale RUNNING work remains
   unknown with exact counts.
+- #160's campaign-history slice is delivered at `361d1ca`: the stale
+  per-campaign JavaScript sampler is replaced by an independent Fortran oracle
+  for finite epoch order, restart/replay, markers, failure priority and cancelled
+  unknown work. The remaining lifecycle fixtures stay open under #160.
+- #164 is complete at `d482807`: unique descriptor-held temporary publication,
+  unstable-hash retry and write/close/crash recovery passed independent review,
+  focused current-head testing and three production mutants. Its macOS rerun is
+  blocked before execution by the separate Darwin declaration defect #171.
+- #169 is complete at `7022605`: ordinary self-builds remain worktree-private,
+  exact selected profiles survive cache hits, explicit install is the only global
+  publication path, and the inverse Node oracle is replaced by Fortran.
+- #171 owns the faepmac1 compile failure caused by strict POSIX/XOPEN feature
+  macros hiding Darwin/libproc declarations in `fo_gremlin_state.c`.
 - #143/#152 and PR #147 are closed without merge after the KISS review assigned
   agent scheduling to the external controller; no work-mode code enters core.
 - #145 has one bounded fpm row passing on the exact candidate, one independent
