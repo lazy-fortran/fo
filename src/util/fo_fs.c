@@ -252,6 +252,29 @@ int fo_c_stat_fingerprint(const char *path, long long *mtime_ns,
     return 0;
 }
 
+/* Complete stat key for file-content memoization. ctime changes when a file is
+   rewritten even if its original mtime is restored with utimensat/touch. */
+int fo_c_stat_change_fingerprint(const char *path, long long *mtime_ns,
+                                 long long *ctime_ns, long long *size) {
+    struct stat st;
+    if (!fo_has(path) || mtime_ns == NULL || ctime_ns == NULL || size == NULL ||
+        stat(path, &st) != 0)
+        return -1;
+#if defined(__APPLE__)
+    *mtime_ns = (long long)st.st_mtimespec.tv_sec * 1000000000LL +
+                (long long)st.st_mtimespec.tv_nsec;
+    *ctime_ns = (long long)st.st_ctimespec.tv_sec * 1000000000LL +
+                (long long)st.st_ctimespec.tv_nsec;
+#else
+    *mtime_ns = (long long)st.st_mtim.tv_sec * 1000000000LL +
+                (long long)st.st_mtim.tv_nsec;
+    *ctime_ns = (long long)st.st_ctim.tv_sec * 1000000000LL +
+                (long long)st.st_ctim.tv_nsec;
+#endif
+    *size = (long long)st.st_size;
+    return 0;
+}
+
 static unsigned long long fo_fnv1a_bytes(unsigned long long hash,
                                          const void *data, size_t len) {
     const unsigned char *bytes = data;
@@ -307,8 +330,11 @@ static int fo_tree_fingerprint_rec(const char *root, int input_mode, int depth,
 #if defined(__APPLE__)
         item = fo_fnv1a_bytes(item, &st.st_mtimespec,
                               sizeof(st.st_mtimespec));
+        item = fo_fnv1a_bytes(item, &st.st_ctimespec,
+                              sizeof(st.st_ctimespec));
 #else
         item = fo_fnv1a_bytes(item, &st.st_mtim, sizeof(st.st_mtim));
+        item = fo_fnv1a_bytes(item, &st.st_ctim, sizeof(st.st_ctim));
 #endif
         item = fo_fnv1a_bytes(item, &st.st_size, sizeof(st.st_size));
         *sum += item;

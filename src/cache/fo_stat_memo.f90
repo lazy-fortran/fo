@@ -1,16 +1,13 @@
 module fo_stat_memo
-    !! Persistent file-hash memo: maps (path, mtime, size) -> sha256 so a warm
-    !! build never re-reads an unchanged file to hash it. This is the go/Bazel
-    !! "stat first, hash only on change" trick. Without it, every build re-hashes
-    !! all sources (for compile keys) and all objects/archives (for link keys);
-    !! with it, a warm build is stat-bound, not read-bound.
+    !! Persistent file-hash memo: maps (path, mtime, ctime, size) -> sha256 so a
+    !! warm build never re-reads an unchanged file to hash it. ctime detects a
+    !! same-size rewrite even when the original mtime is restored.
     !!
     !! The memo lives under the shared cache root so it survives a project-scoped
     !! `fo clean` and is reused across builds. Access is guarded by a named
     !! critical so the parallel link loop can hash program objects safely.
     use fx_hash, only: sha256_file, fnv1a_string
-    use fo_fs, only: fs_stat
-    use, intrinsic :: iso_c_binding, only: c_long_long
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
     implicit none
     private
     public :: memo_hash_file, memo_save, memo_reset
@@ -19,8 +16,19 @@ module fo_stat_memo
     integer, parameter :: PATH_LEN = 512
     integer, parameter :: HASH_LEN = 64
 
+    interface
+        integer(c_int) function fo_c_stat_change_fingerprint( &
+                path, mtime_ns, ctime_ns, size) &
+                bind(C, name='fo_c_stat_change_fingerprint')
+            import :: c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_long_long), intent(out) :: mtime_ns, ctime_ns, size
+        end function fo_c_stat_change_fingerprint
+    end interface
+
     character(len=PATH_LEN), save :: t_path(CAP)
     integer(c_long_long), save :: t_mtime(CAP) = 0_c_long_long
+    integer(c_long_long), save :: t_ctime(CAP) = 0_c_long_long
     integer(c_long_long), save :: t_size(CAP) = 0_c_long_long
     character(len=HASH_LEN), save :: t_hash(CAP)
     logical, save :: t_used(CAP) = .false.
@@ -30,29 +38,31 @@ module fo_stat_memo
 contains
 
     subroutine memo_hash_file(path, hash, ierr)
-        !! sha256 of path, served from the memo when (mtime, size) are unchanged.
+        !! sha256 of path, served from the memo when its complete stat key matches.
         !! ierr is nonzero only when the file cannot be hashed at all.
         character(len=*), intent(in) :: path
         character(len=HASH_LEN), intent(out) :: hash
         integer, intent(out) :: ierr
 
-        integer(c_long_long) :: mt, sz
+        integer(c_long_long) :: mt, ct, sz
         integer :: slot
-        logical :: ok
+        integer(c_int) :: stat_rc
 
         hash = ''
         ierr = 0
 
         !$omp critical (fo_stat_memo)
         if (.not. loaded) call load_impl()
-        call fs_stat(path, mt, sz, ok)
-        if (.not. ok) then
+        stat_rc = fo_c_stat_change_fingerprint( &
+            trim(path)//c_null_char, mt, ct, sz)
+        if (stat_rc /= 0) then
             call sha256_file(path, hash, ierr)
         else
             slot = find_slot(path)
             if (slot > 0) then
                 if (t_used(slot) .and. trim(t_path(slot)) == trim(path) .and. &
-                    t_mtime(slot) == mt .and. t_size(slot) == sz) then
+                    t_mtime(slot) == mt .and. t_ctime(slot) == ct .and. &
+                    t_size(slot) == sz) then
                     hash = t_hash(slot)
                 else
                     call sha256_file(path, hash, ierr)
@@ -60,6 +70,7 @@ contains
                         t_used(slot) = .true.
                         t_path(slot) = trim(path)
                         t_mtime(slot) = mt
+                        t_ctime(slot) = ct
                         t_size(slot) = sz
                         t_hash(slot) = hash
                         dirty = .true.
@@ -112,8 +123,8 @@ contains
                 if (ios == 0) then
                     do i = 1, CAP
                         if (.not. t_used(i)) cycle
-                        write (u, '(i0,1x,i0,1x,a,1x,a)') t_mtime(i), &
-                            t_size(i), trim(t_hash(i)), trim(t_path(i))
+                        write (u, '(i0,1x,i0,1x,i0,1x,a,1x,a)') t_mtime(i), &
+                            t_ctime(i), t_size(i), trim(t_hash(i)), trim(t_path(i))
                     end do
                     close (u)
                     call rename_file(tmp, file)
@@ -137,7 +148,7 @@ contains
         !! Load persisted entries into the table. Caller holds the critical.
         character(len=PATH_LEN) :: file, path
         character(len=HASH_LEN) :: h
-        integer(c_long_long) :: mt, sz
+        integer(c_long_long) :: mt, ct, sz
         integer :: u, ios, slot
 
         loaded = .true.
@@ -146,13 +157,14 @@ contains
         open (newunit=u, file=trim(file), status='old', iostat=ios)
         if (ios /= 0) return
         do
-            read (u, *, iostat=ios) mt, sz, h, path
+            read (u, *, iostat=ios) mt, ct, sz, h, path
             if (ios /= 0) exit
             slot = find_slot(path)
             if (slot > 0) then
                 t_used(slot) = .true.
                 t_path(slot) = trim(path)
                 t_mtime(slot) = mt
+                t_ctime(slot) = ct
                 t_size(slot) = sz
                 t_hash(slot) = h
             end if
@@ -161,7 +173,7 @@ contains
     end subroutine load_impl
 
     subroutine memo_file(path)
-        !! <cache_root>/stat/v1/memo, honoring FO_CACHE_DIR like fo_cache does.
+        !! <cache_root>/stat/v2/memo, honoring FO_CACHE_DIR like fo_cache does.
         !! Resolved here (not via fo_cache) to keep this module dependency-free.
         character(len=*), intent(out) :: path
         character(len=PATH_LEN) :: root
@@ -175,7 +187,7 @@ contains
             end if
             root = trim(root)//'/.cache/fo'
         end if
-        path = trim(root)//'/stat/v1/memo'
+        path = trim(root)//'/stat/v2/memo'
     end subroutine memo_file
 
     subroutine ensure_parent(file)
