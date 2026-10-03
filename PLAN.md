@@ -329,8 +329,10 @@ Issues #158--#163 migrate every current JavaScript fixture in behavior-preservin
 slices, then remove Node from CI. Each old fixture is deleted only after its
 Fortran replacement preserves or strengthens the crash, concurrency, JSON,
 filesystem and execution oracle. Production code never depends on the test
-harness. Freeze the exact-head inventory: `1f8a1a3` has 31 JS fixtures, including
+harness. The frozen baseline `1f8a1a3` had 31 JS fixtures, including
 context-provenance and coverage-restart tests omitted from the earlier count.
+Issue #158 removes ten CLI fixtures through `4c67189`; 19 JS fixtures remain for
+#159--#163 after the earlier campaign-history and self-refresh migrations.
 
 ## Ordered implementation and independent verifiers
 
@@ -689,6 +691,10 @@ Implemented issue state:
   epochs survive stop/crash/restart, priority jumps satisfy unseen obligations,
   reproduction does not earn coverage, and cancelled/stale RUNNING work remains
   unknown with exact counts.
+- #158 is complete through `4c67189`: ten ordinary CLI/build-routing JS
+  fixtures are replaced by standalone Fortran process oracles. The harness and
+  RFC 8259 parser are test-only; the small POSIX C shim is an external dev
+  dependency and does not enter production executables.
 - #160's campaign-history slice is delivered at `361d1ca`: the stale
   per-campaign JavaScript sampler is replaced by an independent Fortran oracle
   for finite epoch order, restart/replay, markers, failure priority and cancelled
