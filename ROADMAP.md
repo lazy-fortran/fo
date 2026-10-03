@@ -37,6 +37,7 @@ freshness/result/process behavior before consumers can rely on it.
 | [#171](https://github.com/lazy-fortran/fo/issues/171) | Complete through `9331c04`: state-provider declarations and portability oracles pass on Linux/macOS; #172 separately owns public lifecycle. |
 | [#172](https://github.com/lazy-fortran/fo/issues/172) | Add scoped Darwin asynchronous owner/descendant containment for public Gremlin lifecycle. |
 | [#173](https://github.com/lazy-fortran/fo/issues/173) | Accept documented platform archive index metadata while preserving exact expected-object verification. |
+| [#174](https://github.com/lazy-fortran/fo/issues/174) | Initialize and diagnose the shared Darwin change provider without adding a second polling engine. |
 
 Adjacent scope is [#56](https://github.com/lazy-fortran/fo/issues/56) LSP,
 [#59](https://github.com/lazy-fortran/fo/issues/59) deep-lint provider,
