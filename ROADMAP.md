@@ -50,9 +50,9 @@ background bounded tests while implementation proceeds; full fixed-version
 matrix evidence remains completion criteria. CLI and MCP have one shared engine
 and feature set; use current CLI after fixes when MCP cannot reload.
 
-Past snapshots remain in Git history. Gremlin progress is now published through
-draft discussion PR #146 while reviewed locally green increments advance
-`main`; GitHub CI audits the latest main asynchronously.
+Past snapshots remain in Git history. Discussion PR #146 is merged; reviewed
+locally green increments now advance `main` directly while GitHub CI audits the
+latest main asynchronously.
 Issues #148--#151 own the core change-event, supervisor, JSON and execution-
 identity consolidation. #153--#155 add finite coverage epochs, explicit
 local-gate/full-verification facts and event-driven quiescence. Early matrix evidence includes
@@ -61,3 +61,7 @@ and one honest missing-dependency block. Controller alone promotes reviewed
 paths to main and pushes every integrated milestone while it is under review.
 Agent scheduler PR #147 and issues #143/#152 are closed without merge; external
 controllers own worker/task orchestration.
+
+
+Issue #169 makes self-refresh worktree-private so worker builds cannot publish a
+global driver; only an explicit controller install may do that.

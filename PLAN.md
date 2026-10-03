@@ -245,13 +245,18 @@ does not own another cache or recursively run a public fo build inside a shared
 writable generation directory. Generation identity is a compact manifest over
 shared immutable source/dependency blobs. Mutable object/module/link output
 lives in a lane/session-owned working directory and becomes usable only through
-an atomic successful-session commit.
+an atomic successful-session commit. Every build/test/run process also gets a
+private writable working directory, so relative scratch cannot mutate immutable
+source blobs or wake the watcher. Its execution view preserves explicit relative
+fixture inputs from the immutable source tree while routing relative outputs to
+private scratch. Concurrent cases and reproductions never share mutable scratch.
 
 The shared store uses raw content IDs for bytes and canonical manifests for
 roles, modes, names and tree/action structure. Publishing an existing verified
 blob performs no rewrite. Equal action/result publication is idempotent; one
-action ID producing different result IDs is durable nondeterminism or an
-incomplete-key error, never last-writer-wins. Optional Linux reflink and macOS
+action ID producing different result IDs quarantines that action from reuse
+while retaining both result IDs and durable nondeterminism/incomplete-key
+evidence. Optional Linux reflink and macOS
 clone materialization are optimizations with byte-copy fallback. No database,
 cache daemon or application-level bulk RAM cache is introduced; the filesystem
 and OS page cache remain the storage substrate.
@@ -297,7 +302,9 @@ owns semantic roots and private build-session lifetimes. Replace the global
 Boolean generation pin with independently releasable owner/reason roots before
 automatic collection. Maintain the store through infrequent thresholded bounded
 sweeps; unchanged reads and idle Gremlin status do not rewrite access metadata
-or scan the store. Legacy store/v1 and copied generations are lazily validated
+or scan the store. Root acquisition, graph publication and sweep/deletion share
+an explicit synchronization protocol so a newly live graph cannot be collected
+between discovery and unlink. Legacy store/v1 and copied generations are lazily validated
 and imported while live old owners remain protected.
 
 ## Test implementation language
@@ -534,17 +541,14 @@ The target module boundaries are `fo_change_watch`, `fo_gremlin_types`,
 
 ## Delivery and architecture consolidation
 
-Progress is published continuously even when it is not ready for `main`:
+Progress is published continuously. Core PR #146 is merged; historical work-mode
+and combined branches remain immutable evidence only and are not integration
+candidates.
 
-- [draft core PR #146](https://github.com/lazy-fortran/fo/pull/146) targets
-  `main` from `gremlin/core-review`; draft pushes publish progress without CI.
-  Historical work-mode and combined branches remain immutable evidence only;
-  they are not integration candidates.
-
-Push each integrated milestone and exact verifier state. Focused receipts permit
-the next repair but do not redefine the merge gate. `main` advances only after
-the current-head full pipeline, required behavioral fixtures, CI, review and
-matrix dispositions pass. Never accumulate unpublished controller commits merely
+Push each exact integrated generation when its focused local gate is green and
+there is no known current regression. Full pipeline, ordinary/full coverage,
+matrix and remote CI are milestone or post-submit evidence; they are not a
+per-increment merge gate. Never accumulate unpublished controller commits merely
 because a continuous campaign is partial.
 
 **Never wait for GitHub CI while implementation work is available. GitHub CI is
@@ -562,27 +566,27 @@ Dogfooding begins during implementation. Keep one named resident `fo gremlin`
 integration lane per active repository and rotate task-worktree lanes for
 focused changes. Six simultaneous cold lanes wrote 1.8 GB of state and all
 blocked in kernel writeback, so unrestricted per-worktree residency is rejected
-behavior pending #148/#155 and cross-lane I/O admission. Preserve receipts,
+behavior pending #155, compact generations/private sessions and cross-lane I/O
+admission. #148's idle event gate is complete. Preserve receipts,
 first-verdict latency, failures, restart behavior, idle activity and resource
 use as live evidence. Independent oracles remain authoritative; self-testing
 evidence alone never promotes the tested Gremlin implementation.
 
-The implemented core is mature enough to pause unrelated feature growth for an
-architecture and finite-verification pass. Ordered blockers before core merge
-are:
+The core is merged. Remaining implementation follows this dependency-aware DAG;
+completed entries below are retained as prerequisites and evidence:
 
-1. [#148](https://github.com/lazy-fortran/fo/issues/148): shared filesystem
+1. **Complete:** [#148](https://github.com/lazy-fortran/fo/issues/148): shared filesystem
    events and dirty/debounce/fingerprint gating so idle Gremlin performs no full
    captures; consolidate or deprecate the independent `fo watch` check loop.
 2. [#149](https://github.com/lazy-fortran/fo/issues/149): extract request,
    context, campaign/history and session services from the supervisor.
-3. [#150](https://github.com/lazy-fortran/fo/issues/150): converge domain JSON
+3. **Complete:** [#150](https://github.com/lazy-fortran/fo/issues/150): converge domain JSON
    on the existing typed parser and shared CLI/MCP validation.
 4. [#151](https://github.com/lazy-fortran/fo/issues/151): pin/hash the exact fo
    driver used by a live session and expose it in reproducible receipts.
 5. [#157](https://github.com/lazy-fortran/fo/issues/157): bind the complete
    compiler/helper/runtime/external-dependency closure to executed bytes.
-6. [#153](https://github.com/lazy-fortran/fo/issues/153): finite deterministic
+6. **Complete:** [#153](https://github.com/lazy-fortran/fo/issues/153): finite deterministic
    randomized coverage epochs with crash-safe current-generation accounting.
 7. [#154](https://github.com/lazy-fortran/fo/issues/154): local-gate facts,
    ordinary/full verification, semantic events and typed waits.
@@ -592,7 +596,10 @@ are:
    the complete matrix as provider-completion/milestone evidence.
 10. [#158](https://github.com/lazy-fortran/fo/issues/158)--[#163](https://github.com/lazy-fortran/fo/issues/163): replace all Node fixtures with standalone Fortran process drivers and remove Node from the test contract.
 11. [#164](https://github.com/lazy-fortran/fo/issues/164): make stat-memo publication cross-process safe.
-12. [fx #42](https://github.com/lazy-fortran/fx/issues/42), [fx #43](https://github.com/lazy-fortran/fx/issues/43), [fo #165](https://github.com/lazy-fortran/fo/issues/165)--[#168](https://github.com/lazy-fortran/fo/issues/168), and [fx #44](https://github.com/lazy-fortran/fx/issues/44): converge generation capture, action outputs, private build sessions, ordinary fo and Gremlin on one immutable store and engine with rooted low-churn collection.
+12. [#169](https://github.com/lazy-fortran/fo/issues/169): keep worktree
+    self-refresh private; only explicit controller installation publishes the
+    global driver.
+13. [fx #42](https://github.com/lazy-fortran/fx/issues/42), [fx #43](https://github.com/lazy-fortran/fx/issues/43), [fo #165](https://github.com/lazy-fortran/fo/issues/165)--[#168](https://github.com/lazy-fortran/fo/issues/168), and [fx #44](https://github.com/lazy-fortran/fx/issues/44): converge generation capture, action outputs, private build sessions, ordinary fo and Gremlin on one immutable store and engine with rooted low-churn collection.
 
 Experimental agent scheduler PR #147 is closed without merge; #143 and #152 are
 closed as not planned. External controllers own worker DAGs, worktrees, model
@@ -605,9 +612,10 @@ current correctness.
 
 **Execution is user-authorized in parallel mode.** The controller started from
 fo main at `e4fc193`. The reviewed core and dependency-shadow repair are now on
-fo `main`; PR #146 is merged. The current main head `b0a356e` adds shared
-event-driven watching, the context-provenance repair and finite crash-safe
-coverage epochs. Exact combined focused gates passed before each push;
+fo `main`; PR #146 is merged. The current main head `27600bf` records the
+delivered shared event watcher, context-provenance repair and finite crash-safe
+coverage epochs (`48137f0`, `b2a31e1`, `be5aa7a` and `b0a356e`). Exact combined
+focused gates passed before each code push;
 post-submit GitHub Actions remains asynchronous. Development continues as small
 locally gated main increments without waiting for CI.
 
@@ -675,10 +683,13 @@ Implemented issue state:
   `1787f64`: distinct path/Git providers prove root-provider precedence and the
   duplicate-object link failure no longer reproduces. Exact integrated focused
   build, `test_dep_resolve` and the behavioral CLI fixture passed.
-- Resident dogfood lanes now run on the core, fx and active task worktrees.
-  They already exposed the hard five-second case budget, a missing diagnostic
-  on initial capture failure, and cold-start resource contention; these are live
-  evidence, not substitutes for independent task oracles.
+- Resident dogfood lanes now run on fo and fx. The fx lane completed its exact
+  18-case epoch green and became idle. The fo lane exposed a session-model defect:
+  an immutable mode-0555 project root is also used as a test working directory,
+  so native tests creating relative state cannot initialize. #166 now requires
+  private writable build/test/run working directories over the immutable source
+  view. The same run materialized 304 MB across the two lanes, confirming that
+  compact manifests and private disposable sessions remain required.
 - The installed driver now comes from exact main `b0a356e`, SHA256
   `b0fedbd4bd0179209ed26f20e0210cd2e37aa9e29d15a7bac18ebd0bcf33609f`.
   One bounded resident lane each is active for fo and fx under dogfood5 state;
