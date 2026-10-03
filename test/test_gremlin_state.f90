@@ -1,5 +1,6 @@
 program test_gremlin_state
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_associated, c_char, c_int, &
+        c_null_char, c_ptr
     use, intrinsic :: iso_fortran_env, only: output_unit
     use fo_gremlin_state
     use fo_gremlin_generation, only: generation_context_t, generation_t, &
@@ -8,6 +9,13 @@ program test_gremlin_state
     implicit none
 
     interface
+        function c_realpath(path, resolved) bind(C, name='realpath') result(pointer)
+            import :: c_char, c_ptr
+            character(kind=c_char), intent(in) :: path(*)
+            character(kind=c_char), intent(out) :: resolved(*)
+            type(c_ptr) :: pointer
+        end function c_realpath
+
         integer(c_int) function fo_c_generation_list_tree(root, manifest) &
                 bind(C, name='fo_c_generation_list_tree')
             import :: c_char, c_int
@@ -246,6 +254,9 @@ contains
         character(len=256) :: message
         integer :: ierr, u, child_error, ios
         integer(c_int) :: list_rc
+        character(kind=c_char) :: canonical_buffer(4096)
+        character(len=:), allocatable :: canonical_root
+        type(c_ptr) :: canonical_pointer
         type(generation_context_t) :: context
         type(generation_t) :: generation
         logical :: exists
@@ -281,8 +292,14 @@ contains
 
         call gremlin_generation_register_at(trim(generation%root), ierr, message)
         call assert(ierr == 0, 'actual immutable snapshot registers through sidecar')
+        canonical_buffer = c_null_char
+        canonical_pointer = c_realpath(trim(generation%root)//c_null_char, &
+            canonical_buffer)
+        call assert(c_associated(canonical_pointer), &
+            'snapshot root resolves to its canonical path')
+        canonical_root = c_buffer_string(canonical_buffer)
         call gremlin_generation_root(trim(generation%identity), actual_root, ierr, message)
-        call assert(ierr == 0 .and. trim(actual_root) == trim(generation%root), &
+        call assert(ierr == 0 .and. trim(actual_root) == trim(canonical_root), &
             'generation identity resolves to its canonical snapshot root')
         call gremlin_generation_pin_at(trim(generation%root), .true., ierr, message)
         call assert(ierr == 0, 'immutable generation pins outside the bundle')
@@ -567,6 +584,23 @@ contains
         root = '/var/tmp/fo_gremlin_state_test_'//trim(suffix)
         call execute_command_line('mkdir -p '//trim(root))
     end subroutine test_root
+
+    function c_buffer_string(buffer) result(value)
+        character(kind=c_char), intent(in) :: buffer(:)
+        character(len=:), allocatable :: value
+
+        integer :: i, n
+
+        n = 0
+        do i = 1, size(buffer)
+            if (buffer(i) == c_null_char) exit
+            n = n + 1
+        end do
+        allocate (character(len=n) :: value)
+        do i = 1, n
+            value(i:i) = buffer(i)
+        end do
+    end function c_buffer_string
 
     subroutine touch(file)
         character(len=*), intent(in) :: file
