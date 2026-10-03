@@ -541,7 +541,7 @@ behavioral verifier proves that they block current correctness.
 ## Active delivery state
 
 **Execution is user-authorized in parallel mode.** The controller started from
-fo main `e4fc193`. Draft core PR #146 is at `b73f9ac`; frozen stacked work-mode
+fo main `e4fc193`. Draft core PR #146 is advancing through `b987338`; frozen stacked work-mode
 PR #147 and the combined integration branch are at `86870cf`.
 
 The `a0d3515` candidate passed the isolated full fo pipeline: static 109/109,
@@ -575,10 +575,12 @@ Implemented issue state:
   CMake/CTest row passing while exposing a fo CTest-name discovery defect, and
   one row correctly blocked by a missing private path dependency. This is early
   matrix evidence, not complete coverage.
-- #149's first two reviewed slices are integrated: request DTO/parsing/
+- #149's first three reviewed slices are integrated: request DTO/parsing/
   validation lives in `fo_gremlin_request`; context, dependency, environment,
-  toolchain, capture and CAS-root discovery lives in `fo_gremlin_context`.
-  Campaign and command/session extraction remains.
+  toolchain, capture and CAS-root discovery lives in `fo_gremlin_context`; live
+  and terminal session persistence/recovery lives in `fo_gremlin_session` at
+  `b987338`. Campaign and command extraction remains and waits for #153/#154
+  semantics respectively.
 - `58542eb` selects the host ABI for the async-filter oracle while preserving
   explicit synthetic targets. Escalated repair `1cdbaa0` moves standalone C
   fixtures outside fpm auto-discovery and explicitly registers the mixed-unit
@@ -590,6 +592,14 @@ Implemented issue state:
   and gives CLI/MCP the same domain validation. Focused supervisor, MCP parity,
   request-structure and full-pipeline gates passed. GitHub Actions also passed
   the exact published `b73f9ac` head (`build + fpm test`, run 37148134220).
+- #151 repair attempt 2 remains rejected: argv[0] can identify replacement
+  bytes rather than the running image, and the recorded compiler digest is not
+  bound to the compiler actually executed. Its frozen reproducer is in a
+  task-specific Sol escalation after two substantive Luna attempts.
+- Resident dogfood lanes now run on the core, fx and active task worktrees.
+  They already exposed the hard five-second case budget, a missing diagnostic
+  on initial capture failure, and cold-start resource contention; these are live
+  evidence, not substitutes for independent task oracles.
 
 After each meaningful delivery, update this plan, workspace master and affected
 issues; commit and push the controller branch immediately. Preserve exact bases,
