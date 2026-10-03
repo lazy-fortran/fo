@@ -35,7 +35,7 @@ function countLines(file) {
 function fixturePids(file) {
   try {
     return fs.readFileSync(file, 'utf8').split('\n').flatMap(line => {
-      const match = line.match(/^(?:parent|grandchild):(\d+):/);
+      const match = line.match(/^(?:parent|grandchild|escape-attempt|escaped):(\d+):/);
       return match ? [Number(match[1])] : [];
     });
   } catch (_) { return []; }
@@ -142,6 +142,23 @@ const child = spawn(process.execPath, ['-e',
   "const beat=()=>fs.appendFileSync(f,'grandchild:'+process.pid+':'+Date.now()+'\\\\n');" +
   "if(process.env.FO_LIFECYCLE_IGNORE==='1')process.on('SIGTERM',()=>{});" +
   "beat();setInterval(beat,60);"], { stdio: 'ignore' });
+if (process.env.FO_LIFECYCLE_ESCAPE === '1') {
+  const escaped = "const fs=require('fs');const f=process.env.FO_LIFECYCLE_HEARTBEAT;" +
+    "const beat=()=>fs.appendFileSync(f,'escaped:'+process.pid+':'+Date.now()+'\\\\n');" +
+    "beat();setInterval(beat,60);";
+  const attempt = spawn('setsid', [process.execPath, '-e', escaped], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+    env: Object.assign({}, process.env, { LC_ALL: 'C' })
+  });
+  let setsidError = '';
+  attempt.stderr.on('data', chunk => { setsidError += chunk.toString(); });
+  fs.appendFileSync(file, 'escape-attempt:' + attempt.pid + ':' + Date.now() + '\\n');
+  attempt.on('close', code => {
+    if (code !== 0 && setsidError.includes('Operation not permitted')) {
+      fs.appendFileSync(file, 'setsid-blocked:EPERM\\n');
+    }
+  });
+}
 setInterval(() => beat('parent'), 60);
 `);
   fs.chmodSync(fakeFo, 0o755);
@@ -182,6 +199,7 @@ async function main() {
     'fo-async-lifecycle-'));
   const unrelated = path.join(root, 'sentinel.log');
   let sentinel;
+  let escapedPidsToClean = [];
   const servers = [];
   try {
     makeFixture(root);
@@ -233,6 +251,36 @@ async function main() {
     assert(duplicate.error || (duplicate.response && duplicate.response.result &&
       duplicate.response.result.isError), 'duplicate cancellation reports a stale run');
     assert(countLines(unrelated) >= 3, 'unrelated sentinel survives cancellation');
+
+    process.stdout.write('\n--- descendant session escape attempt ---\n');
+    const escapeFile = path.join(root, 'escape.log');
+    const escaping = startServer(root, {
+      PATH: root + path.delimiter + process.env.PATH,
+      FO_LIFECYCLE_HEARTBEAT: escapeFile,
+      FO_LIFECYCLE_ESCAPE: '1'
+    });
+    servers.push(escaping);
+    await initialize(escaping);
+    const escapeRun = await startRun(escaping, root);
+    await waitFor(() => {
+      const text = fs.existsSync(escapeFile) ? fs.readFileSync(escapeFile, 'utf8') : '';
+      return /(?:escaped|setsid-blocked:EPERM)/.test(text) &&
+        new Set(fixturePids(escapeFile)).size >= 2;
+    }, 5000, 'setsid escape or explicit rejection');
+    const escapePids = fixturePids(escapeFile);
+    escapedPidsToClean = fs.readFileSync(escapeFile, 'utf8').split('\n').flatMap(line => {
+      const match = line.match(/^escaped:(\d+):/);
+      return match ? [Number(match[1])] : [];
+    });
+    const escapeCancel = await cancel(escaping, escapeRun);
+    const stoppedAtReturn = countLines(escapeFile);
+    assert(escapeCancel.value && escapeCancel.value.cancelled === true,
+      'owned cancellation succeeds after the setsid attempt');
+    assert(allProcessesStopped(escapePids),
+      'the parent and setsid descendant are gone before cancellation returns');
+    await delay(300);
+    assert(countLines(escapeFile) === stoppedAtReturn,
+      'a descendant heartbeat cannot continue after cancellation succeeds');
 
     process.stdout.write('\n--- TERM-ignoring tree and completed output ---\n');
     const ignoreFile = path.join(root, 'ignore.log');
@@ -307,6 +355,11 @@ async function main() {
     assert(countLines(unrelated) >= 6, 'sentinel remains alive through concurrent cancellation');
   } finally {
     if (sentinel) sentinel.kill('SIGKILL');
+    for (const pid of escapedPidsToClean) {
+      if (processIsRunning(pid)) {
+        try { process.kill(pid, 'SIGKILL'); } catch (_) { /* already gone */ }
+      }
+    }
     await Promise.all(servers.map(stopServer));
     fs.rmSync(root, { recursive: true, force: true });
   }

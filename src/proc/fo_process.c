@@ -13,6 +13,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #ifdef __linux__
+#include <stddef.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
 #include <sys/syscall.h>
 #include <sys/prctl.h>
 #endif
@@ -843,6 +847,68 @@ static int ensure_async_subreaper(void) {
     return 0;
 }
 
+/* Linux async descendants cannot leave the owned session. On x86-64, cover
+   both native and 32-bit x86 syscall ABIs; reject unknown ABIs. */
+#if defined(__linux__)
+#if defined(__x86_64__)
+#define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_X86_64
+#define FO_ASYNC_HAS_COMPAT_ABI 1
+#define FO_ASYNC_COMPAT_AUDIT_ARCH AUDIT_ARCH_I386
+#define FO_ASYNC_COMPAT_SETSID 66
+#define FO_ASYNC_COMPAT_SETPGID 57
+#elif defined(__i386__)
+#define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_I386
+#elif defined(__aarch64__)
+#define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#elif defined(__arm__)
+#define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_ARM
+#else
+#define FO_ASYNC_AUDIT_ARCH 0
+#endif
+#endif
+
+static int install_async_group_containment(void) {
+#if defined(__linux__) && FO_ASYNC_AUDIT_ARCH != 0
+    struct sock_filter filter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                 (unsigned int)offsetof(struct seccomp_data, arch)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FO_ASYNC_AUDIT_ARCH, 0, 6),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                 (unsigned int)offsetof(struct seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_setsid, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_setpgid, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+#ifdef FO_ASYNC_HAS_COMPAT_ABI
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                 (unsigned int)offsetof(struct seccomp_data, arch)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
+                 FO_ASYNC_COMPAT_AUDIT_ARCH, 0, 6),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                 (unsigned int)offsetof(struct seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FO_ASYNC_COMPAT_SETSID, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FO_ASYNC_COMPAT_SETPGID, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+#endif
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA))
+    };
+    struct sock_fprog program = {
+        (unsigned short)(sizeof(filter) / sizeof(filter[0])),
+        filter
+    };
+
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return errno;
+    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) != 0) return errno;
+    return 0;
+#else
+    /* Without an inherited group-escape barrier, do not claim tree ownership. */
+    return ENOTSUP;
+#endif
+}
+
 /* Start ticks on Linux and start time on macOS protect against signalling a
    reused leader PID. A surviving process group keeps its group ID allocated. */
 static uint64_t process_start_identity(pid_t pid) {
@@ -1108,6 +1174,7 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
         close(ready_pipe[0]);
         close(gate_pipe[1]);
         if (setsid() < 0) child_error = errno;
+        if (child_error == 0) child_error = install_async_group_containment();
         if (child_error == 0 && has_text(cwd) && chdir(cwd) != 0) {
             child_error = errno;
         }
