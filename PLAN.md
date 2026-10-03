@@ -457,6 +457,15 @@ becomes a thin compatibility policy on the same provider or is deprecated; it
 does not retain an independent event-to-check engine. `.git` and unrelated paths
 are excluded execution inputs.
 
+An editor or coding agent may write several temporarily inconsistent files in
+one burst. After the short debounce, Gremlin captures only the newest coherent
+candidate it can observe. A candidate that fails to build publishes its compiler
+diagnostic but never runs tests or replaces the active generation. The frozen
+last-compilable generation continues useful testing. A later candidate takes
+over atomically only after its build succeeds; completed old receipts survive,
+and interrupted old cases remain unknown. The continuous-preemption oracle keeps
+this last-good behavior independent from the watcher/debounce implementation.
+
 Execution identity includes project, dependency, test/oracle and runtime input
 contents, toolchain/flags/relevant environment, and the pinned fo driver digest.
 Git base commit and working-tree patch are provenance fields, not execution-key
@@ -518,13 +527,15 @@ are:
    on the existing typed parser and shared CLI/MCP validation.
 4. [#151](https://github.com/lazy-fortran/fo/issues/151): pin/hash the exact fo
    driver used by a live session and expose it in reproducible receipts.
-5. [#153](https://github.com/lazy-fortran/fo/issues/153): finite deterministic
+5. [#157](https://github.com/lazy-fortran/fo/issues/157): bind the complete
+   compiler/helper/runtime/external-dependency closure to executed bytes.
+6. [#153](https://github.com/lazy-fortran/fo/issues/153): finite deterministic
    randomized coverage epochs with crash-safe current-generation accounting.
-6. [#154](https://github.com/lazy-fortran/fo/issues/154): local-gate facts,
+7. [#154](https://github.com/lazy-fortran/fo/issues/154): local-gate facts,
    ordinary/full verification, semantic events and typed waits.
-7. [#155](https://github.com/lazy-fortran/fo/issues/155): enter quiescence after
+8. [#155](https://github.com/lazy-fortran/fo/issues/155): enter quiescence after
    full green and wake only on relevant shared change events.
-8. Register every late behavioral oracle in the post-submit workflow and keep
+9. Register every late behavioral oracle in the post-submit workflow and keep
    the complete matrix as provider-completion/milestone evidence.
 
 Experimental agent scheduler PR #147 is closed without merge; #143 and #152 are
@@ -537,9 +548,10 @@ current correctness.
 ## Active delivery state
 
 **Execution is user-authorized in parallel mode.** The controller started from
-fo main started this delivery at `e4fc193`. Draft discussion PR #146 now includes
-the reviewed dependency-shadow repair at `1787f64`; this exact integrated code
-passed its focused local gate and is the next direct-main increment.
+fo main at `e4fc193`. The reviewed core and dependency-shadow repair are now on
+fo `main` at `1c68c04`; PR #146 is merged. The exact integrated head passed its
+focused local gate and post-submit GitHub Actions run 37151346404. Development
+continues as small locally gated main increments without waiting for CI.
 
 The `a0d3515` candidate passed the isolated full fo pipeline: static 109/109,
 build 62/62, test build/run 48/48, lint and format check, in 26.6 s. The same
@@ -560,10 +572,13 @@ used only as the current bootstrap CLI and will be replaced by the accepted core
 Implemented issue state:
 
 - #138 selection/history and seed replay, #139 owned-tree cancellation and
-  timeout ordering, #140 durable receipts/recovery, #141 generation replacement,
-  #142 CLI/MCP lifecycle and pagination, and #144 atomic artifact publication
-  have passing focused behavior on the published candidate. Keep them open
-  through architecture consolidation and current-generation local gates.
+  timeout ordering, #140 durable receipts/recovery, #142 CLI/MCP lifecycle and
+  pagination, and #144 atomic artifact publication have passing focused behavior
+  on main. Keep their remaining scopes open through architecture consolidation.
+- #141 generation replacement is complete on main. Its behavioral oracle proves
+  that a failed intermediate build retains the active generation and running
+  test, never tests the broken candidate, preserves completed receipts, and
+  switches only after the repaired candidate builds.
 - #143/#152 and PR #147 are closed without merge after the KISS review assigned
   agent scheduling to the external controller; no work-mode code enters core.
 - #145 has one bounded fpm row passing on the exact candidate, one independent
@@ -609,8 +624,15 @@ are outside Git; repository plans are committed.
 
 [Saff and Ernst, ISSRE 2003](https://homes.cs.washington.edu/~mernst/pubs/wasted-time-issre2003.pdf)
 sections 5.3–5.4 describe background testing, random priority and restarting on
-the next compilable version. [Infinitest](https://infinitest.github.io/doc/index)
-automatically selects tests affected by changes. [pytest-randomly](https://github.com/pytest-dev/pytest-randomly)
+the next compilable version. Their later
+[Eclipse continuous-testing plug-in](https://homes.cs.washington.edu/~mernst/pubs/conttest-plugin-etx2004-abstract.html)
+used otherwise idle developer-machine cycles for background regression feedback.
+[Infinitest](https://infinitest.github.io/) automatically runs relevant tests
+after code changes, while [JUnit Max](https://newsletter.kentbeck.com/p/the-economic-case-for-junit-max)
+emphasized automatic post-compile runs and latency to first failure. Gremlin
+extends this lineage with immutable compiled generations, last-compilable
+retention, owned preemption, durable receipts, crash recovery, finite randomized
+coverage and headless CLI/MCP operation. [pytest-randomly](https://github.com/pytest-dev/pytest-randomly)
 records reproducible shuffle seeds. [Git worktrees](https://git-scm.com/docs/git-worktree)
 provide separate checkout/HEAD/index state while sharing repository objects.
 The lane protocol, resource leases, disk budget and CLI/MCP contract are fo design
