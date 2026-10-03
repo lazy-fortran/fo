@@ -496,6 +496,20 @@ the current-head full pipeline, required behavioral fixtures, CI, review and
 matrix dispositions pass. Never accumulate unpublished controller commits merely
 because a continuous campaign is partial.
 
+Focused development must not wait for the combined `fpm` or GitHub Actions
+pipeline. Workers reuse one exact built driver and run only their owned
+independent behavioral oracle while iterating. The controller runs the combined
+fixed-version pipeline once per reviewed integration batch; GitHub Actions is an
+asynchronous exact-head milestone gate. The #156 audit proved CI already builds
+once and routes all named fixtures through the exact candidate, so it closed
+without a repository change.
+
+Dogfooding begins during implementation. Every active fo or fx worktree runs a
+named resident `fo gremlin` lane with bounded jobs and campaigns. Preserve its
+receipts, first-verdict latency, failures, restart behavior and idle activity as
+live evidence. Focused independent behavioral oracles remain authoritative;
+self-testing evidence alone never promotes the tested Gremlin implementation.
+
 The implemented core is mature enough to pause unrelated feature growth for an
 architecture and finite-verification pass. Ordered blockers before core merge
 are:
