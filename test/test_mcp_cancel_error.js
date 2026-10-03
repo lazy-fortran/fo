@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Inject one kill(2) failure and verify MCP retains async cancellation ownership.
+// Inject repeated kill(2) failures and verify MCP retains ownership through shutdown.
 const assert = require('node:assert/strict');
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -15,7 +15,9 @@ const env = { ...process.env, HOME: path.join(scratch, 'home'), TMPDIR: '/var/tm
 const bin = path.join(scratch, 'bin');
 const shim = path.join(scratch, 'fail-kill.so');
 const injected = path.join(scratch, 'first-kill-failed');
+const sleepPidFile = path.join(scratch, 'sleep.pid');
 let server;
+let sleepPid = 0;
 
 function prepare() {
   fs.mkdirSync(path.join(project, 'test'), { recursive: true });
@@ -27,6 +29,13 @@ function prepare() {
     'program test_cancel_slow', 'implicit none',
     "call execute_command_line('sleep 60')", 'end program test_cancel_slow', ''
   ].join('\n'));
+  const fakeSleep = path.join(bin, 'sleep');
+  fs.writeFileSync(fakeSleep, [
+    '#!/bin/sh', 'printf "%s\\n" "$$" > "$FO_TEST_SLEEP_PID_FILE"',
+    'exec /bin/sleep "$@"', ''
+  ].join('\n'));
+  fs.chmodSync(fakeSleep, 0o755);
+  env.FO_TEST_SLEEP_PID_FILE = sleepPidFile;
   const cSource = path.join(scratch, 'fail_kill.c');
   fs.writeFileSync(cSource, [
     '#define _GNU_SOURCE', '#include <dlfcn.h>', '#include <errno.h>',
@@ -36,12 +45,13 @@ function prepare() {
     'int kill(pid_t pid, int sig) {',
     '  static int failed = 0;',
     '  static kill_fn real_kill = NULL;',
-    '  const char *enabled = getenv("FO_TEST_CANCEL_FAIL_ONCE");',
+    '  const char *enabled = getenv("FO_TEST_CANCEL_FAIL_COUNT");',
+    '  int failure_limit = enabled == NULL ? 0 : atoi(enabled);',
     '  if (sig == SIGTERM && pid > 1 && enabled != NULL && ',
-    '      enabled[0] == \'1\' && !failed) {',
+    '      failed < failure_limit) {',
     '    const char *marker = getenv("FO_TEST_CANCEL_FAIL_MARKER");',
-    '    failed = 1;',
-    '    if (marker != NULL) {',
+    '    failed++;',
+    '    if (failed == 1 && marker != NULL) {',
     '      int fd = open(marker, O_WRONLY | O_CREAT | O_EXCL, 0600);',
     '      if (fd >= 0) close(fd);',
     '    }',
@@ -57,7 +67,7 @@ function prepare() {
   assert.equal(compiled.status, 0, compiled.stdout + compiled.stderr);
   env.PATH = `${bin}:${env.PATH || process.env.PATH}`;
   env.LD_PRELOAD = shim;
-  env.FO_TEST_CANCEL_FAIL_ONCE = '1';
+  env.FO_TEST_CANCEL_FAIL_COUNT = '4';
   env.FO_TEST_CANCEL_FAIL_MARKER = injected;
 }
 
@@ -79,39 +89,69 @@ function startServer() {
     }
   });
   child.stderr.on('data', chunk => { stderr += chunk.toString(); });
-  function rpc(id, arguments_) {
+  function request(id, method, params = {}) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`MCP timeout: ${stderr}`)), 30000);
       pending.push({ resolve, reject, timer });
-      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call',
-        params: { name: 'fo', arguments: arguments_ } }) + '\n');
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
     });
   }
-  function shutdown() {
+  function rpc(id, arguments_) {
+    return request(id, 'tools/call', { name: 'fo', arguments: arguments_ });
+  }
+  function waitForExit(timeoutMs = 5000) {
     if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-    return new Promise(resolve => {
-      const onExit = () => {
-        clearTimeout(termTimer);
-        clearTimeout(killTimer);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.removeListener('exit', onExit);
+        reject(new Error(`MCP server did not exit: ${stderr}`));
+      }, timeoutMs);
+      function onExit() {
+        clearTimeout(timer);
         resolve();
-      };
+      }
       child.once('exit', onExit);
-      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'shutdown' }) + '\n');
-      const termTimer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
-      }, 5000);
-      const killTimer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-      }, 10000);
     });
   }
-  return { child, rpc, shutdown };
+  return { child, request, rpc, waitForExit };
 }
 
 function body(response) {
   assert.ok(response.result, JSON.stringify(response));
   return { json: JSON.parse(response.result.content[0].text),
     isError: response.result.isError };
+}
+
+async function waitForSleepPid(timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(sleepPidFile)) {
+      const pid = Number(fs.readFileSync(sleepPidFile, 'utf8').trim());
+      if (Number.isInteger(pid) && pid > 1) return pid;
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error('fixture sleep child did not start');
+}
+
+function pidState(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const end = stat.lastIndexOf(')');
+    return end >= 0 ? stat.slice(end + 1).trimStart()[0] : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function waitForSleepExit(pid, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = pidState(pid);
+    if (state === null || state === 'Z' || state === 'X') return;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error(`fixture sleep child ${pid} remained alive after retry`);
 }
 
 async function main() {
@@ -128,6 +168,8 @@ async function main() {
     assert.equal(start.isError, false);
     runId = start.json.run_id;
     assert.ok(runId > 0, 'async check started');
+    sleepPid = await waitForSleepPid();
+    assert.ok(pidState(sleepPid) !== null, 'fixture sleep PID is live before shutdown');
 
     const failedCancel = await server.rpc(2, { action: 'cancel', run_id: runId });
     assert.ok(fs.existsSync(injected), 'LD_PRELOAD injected EPERM on the first SIGTERM');
@@ -139,32 +181,71 @@ async function main() {
     assert.equal(stillRunning.json.state, 'running',
       'failed cancellation preserves the active PID and run handle');
     assert.equal(stillRunning.json.run_id, runId);
+    assert.ok(pidState(sleepPid) !== null, 'sleep child remains while cancellation failed');
 
-    const retried = body(await server.rpc(4, { action: 'cancel', run_id: runId }));
+    const failedShutdown = await server.request(4, 'shutdown');
+    assert.equal(failedShutdown.error.code, -32603,
+      'shutdown reports cancellation failure instead of exiting');
+    assert.match(failedShutdown.error.message, /shutdown remains active/);
+    const afterShutdownFailure = body(await server.rpc(5, { action: 'status' }));
+    assert.equal(afterShutdownFailure.json.state, 'running',
+      'failed shutdown also preserves the active PID and run handle');
+    assert.equal(afterShutdownFailure.json.run_id, runId);
+
+    const retried = body(await server.rpc(6, { action: 'cancel', run_id: runId }));
     assert.equal(retried.isError, false, 'a later cancellation can complete');
     assert.equal(retried.json.cancelled, true);
-    const finished = body(await server.rpc(5, { action: 'status' }));
+    await waitForSleepExit(sleepPid);
+    const finished = body(await server.rpc(7, { action: 'status' }));
     assert.equal(finished.json.state, 'finished');
-    console.log('mcp-cancel-error: injected EPERM is explicit, ownership remains '
-      + 'active, and retry cancels the same run');
+    const shutdown = await server.request(8, 'shutdown');
+    assert.equal(shutdown.result, null, 'shutdown completes after cancellation succeeds');
+    await server.waitForExit();
+    console.log('mcp-cancel-error: first EPERM preserves cancellation ownership; '
+      + 'shutdown failure remains active; retry exits the sleeping child and server');
   } finally {
-    if (server && runId > 0 && server.child.exitCode === null) {
-      for (let attempt = 0; attempt < 2; attempt++) {
+    if (!sleepPid) {
+      try {
+        if (fs.existsSync(sleepPidFile)) {
+          sleepPid = Number(fs.readFileSync(sleepPidFile, 'utf8').trim());
+        }
+      } catch (_) { /* no fixture PID was recorded */ }
+    }
+    if (server && runId > 0 && server.child.exitCode === null &&
+        server.child.signalCode === null) {
+      for (let attempt = 0; attempt < 3; attempt++) {
         try {
           const result = await server.rpc(90 + attempt,
             { action: 'cancel', run_id: runId });
           if (!result.error) break;
-        } catch (_) { break; }
+        } catch (_) { continue; }
       }
     }
-    if (server) await server.shutdown();
+    if (server && server.child.exitCode === null && server.child.signalCode === null) {
+      try { await server.request(99, 'shutdown'); } catch (_) { /* forced reap below */ }
+      try { await server.waitForExit(5000); } catch (_) {
+        server.child.kill('SIGTERM');
+        try { await server.waitForExit(5000); } catch (_) {
+          server.child.kill('SIGKILL');
+          await server.waitForExit(5000);
+        }
+      }
+    }
+    if (sleepPid > 1) {
+      const state = pidState(sleepPid);
+      if (state !== null && state !== 'Z' && state !== 'X') {
+        try { process.kill(sleepPid, 'SIGTERM'); } catch (_) { /* already exited */ }
+        try { await waitForSleepExit(sleepPid, 1000); } catch (_) {
+          try { process.kill(sleepPid, 'SIGKILL'); } catch (_) { /* already exited */ }
+          await waitForSleepExit(sleepPid, 1000);
+        }
+      }
+    }
     fs.rmSync(scratch, { recursive: true, force: true });
   }
 }
 
 main().catch(error => {
   console.error(error);
-  if (server) server.child.kill('SIGTERM');
-  fs.rmSync(scratch, { recursive: true, force: true });
   process.exitCode = 1;
 });

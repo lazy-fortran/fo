@@ -19,6 +19,7 @@ module fo_mcp
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
         RUN_RERUN_PENDING
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
+    use fo_fs, only: fs_sleep_ms
     use fo_gremlin_supervisor, only: gremlin_handle
     implicit none
     private
@@ -42,9 +43,11 @@ contains
 
     subroutine mcp_serve()
         character(len=MAX_LINE) :: line
+        character(len=MAX_LINE) :: params_json, raw_value
         character(len=:), allocatable :: response
-        character(len=256) :: method, id_str
-        integer :: framing, read_status
+        character(len=256) :: method
+        character(len=MAX_LINE) :: id_str
+        integer :: framing, read_status, parse_status, property_count
         logical :: eof_flag
         type(mcp_async_state_t) :: async_state
 
@@ -56,13 +59,33 @@ contains
             if (read_status /= 0) cycle
             if (len_trim(line) == 0) cycle
 
-            call extract_json_field(line, '"method"', method)
-            call extract_json_field(line, '"id"', id_str)
+            call extract_json_string_member(line, 'method', method, &
+                property_count, parse_status)
+            if (parse_status /= 0 .or. property_count /= 1) then
+                call jsonrpc_error('null', -32600, 'invalid JSON-RPC request', response)
+                call mcp_send_response(trim(response), framing)
+                cycle
+            end if
+            call extract_json_member(line, 'id', id_str, property_count, parse_status)
+            if (parse_status /= 0 .or. property_count > 1) then
+                call jsonrpc_error('null', -32600, 'invalid JSON-RPC id', response)
+                call mcp_send_response(trim(response), framing)
+                cycle
+            end if
+            if (property_count == 0) id_str = ''
+            params_json = '{}'
+            call extract_json_member(line, 'params', raw_value, property_count, &
+                parse_status)
+            if (parse_status == 0 .and. property_count == 1) then
+                if (len_trim(raw_value) > 0) then
+                    if (raw_value(1:1) == '{') params_json = trim(raw_value)
+                end if
+            end if
             call async_poll(async_state)
 
             select case (trim(method))
             case ('initialize')
-                call make_initialize_response(id_str, line, response)
+                call make_initialize_response(id_str, params_json, response)
                 call mcp_send_response(trim(response), framing)
             case ('initialized')
                 ! notification, no response needed
@@ -71,16 +94,22 @@ contains
                 call make_tools_list_response(id_str, response)
                 call mcp_send_response(trim(response), framing)
             case ('tools/call')
-                call handle_tools_call(line, id_str, response, async_state)
+                call handle_tools_call(params_json, id_str, response, async_state)
                 call mcp_send_response(trim(response), framing)
             case ('resources/list')
                 call make_resources_list_response(id_str, response)
                 call mcp_send_response(trim(response), framing)
             case ('resources/read')
-                call handle_resources_read(line, id_str, response, async_state)
+                call handle_resources_read(params_json, id_str, response, async_state)
                 call mcp_send_response(trim(response), framing)
             case ('shutdown')
-                call async_cancel_all(async_state)
+                call async_cancel_all(async_state, read_status)
+                if (read_status /= 0) then
+                    call jsonrpc_error(id_str, -32603, &
+                        'failed to cancel active run; shutdown remains active', response)
+                    call mcp_send_response(trim(response), framing)
+                    cycle
+                end if
                 call jsonrpc_null(id_str, response)
                 call mcp_send_response(trim(response), framing)
                 exit
@@ -92,23 +121,60 @@ contains
                 end if
             end select
         end do
-        call async_cancel_all(async_state)
+        do
+            call async_cancel_all(async_state, read_status)
+            if (read_status == 0) exit
+            call fs_sleep_ms(100)
+        end do
         call process_suppress_heartbeats(.false.)
     end subroutine mcp_serve
 
-    subroutine handle_tools_call(line, id_str, response, async_state)
-        character(len=*), intent(in) :: line, id_str
+    subroutine handle_tools_call(params_json, id_str, response, async_state)
+        character(len=*), intent(in) :: params_json, id_str
         character(len=:), allocatable, intent(out) :: response
         type(mcp_async_state_t), intent(inout) :: async_state
 
         character(len=64) :: action, mode
+        character(len=MAX_LINE) :: arguments, raw_value
+        character(len=MAX_LINE) :: decoded_dir
         character(len=16384) :: output_text
-        integer :: exitcode
+        integer :: exitcode, property_count, parse_status
+        logical :: valid_string
         character(len=512) :: tmpfile, dir
         type(check_result_t) :: check_res
 
-        call extract_json_field(line, '"action"', action)
-        call extract_json_field(line, '"dir"', dir)
+        call extract_json_member(params_json, 'arguments', arguments, &
+            property_count, parse_status)
+        if (parse_status /= 0 .or. property_count /= 1 .or. &
+            len_trim(arguments) == 0) then
+            call jsonrpc_error(id_str, -32602, 'missing MCP arguments object', response)
+            return
+        end if
+        if (arguments(1:1) /= '{') then
+            call jsonrpc_error(id_str, -32602, 'MCP arguments must be an object', response)
+            return
+        end if
+        call extract_json_string_member(arguments, 'action', action, &
+            property_count, parse_status)
+        if (parse_status /= 0 .or. property_count /= 1) then
+            call jsonrpc_error(id_str, -32602, 'arguments need one string action', response)
+            return
+        end if
+        call extract_json_member(arguments, 'dir', raw_value, property_count, &
+            parse_status)
+        dir = ''
+        if (parse_status /= 0 .or. property_count > 1) then
+            call jsonrpc_error(id_str, -32602, 'dir must occur at most once', response)
+            return
+        end if
+        if (property_count == 1) then
+            call decode_json_string(raw_value, decoded_dir, valid_string)
+            if (.not. valid_string .or. len_trim(decoded_dir) > len(dir)) then
+                call jsonrpc_error(id_str, -32602, 'dir must be a valid string', response)
+                return
+            end if
+            dir = trim(decoded_dir)
+        end if
         if (len_trim(dir) == 0) dir = '.'
         call make_tmpfile('fo_mcp_output', tmpfile)
 
@@ -116,28 +182,28 @@ contains
         case ('gremlin_start', 'gremlin_status', 'gremlin_wait', &
                 'gremlin_events', 'gremlin_failures', 'gremlin_reproduce', &
                 'gremlin_stop')
-            call handle_gremlin_action(line, id_str, response)
+            call handle_gremlin_action(arguments, id_str, response)
             call delete_tmpfile(tmpfile)
             return
         case ('check')
-            call extract_json_field(line, '"mode"', mode)
+            call extract_json_field(arguments, '"mode"', mode)
             if (trim(mode) == 'start') then
-                call handle_async_start(line, id_str, response, async_state)
+                call handle_async_start(arguments, id_str, response, async_state)
                 return
             end if
-            call handle_check(line, id_str, dir, check_res, output_text, &
+            call handle_check(arguments, id_str, dir, check_res, output_text, &
                 exitcode, response)
         case ('status')
             call handle_async_status(id_str, response, async_state)
             return
         case ('diagnostics')
-            call handle_async_diagnostics(line, id_str, response, async_state)
+            call handle_async_diagnostics(arguments, id_str, response, async_state)
             return
         case ('cancel')
-            call handle_async_cancel(line, id_str, response, async_state)
+            call handle_async_cancel(arguments, id_str, response, async_state)
             return
         case ('lint')
-            call handle_lint(line, id_str, dir, output_text, exitcode, response)
+            call handle_lint(arguments, id_str, dir, output_text, exitcode, response)
         case ('fmt')
             call fo_fmt_run(trim(dir), exitcode)
             if (exitcode == 0) then
@@ -150,18 +216,18 @@ contains
             call handle_backend_build(id_str, dir, tmpfile, response)
             return
         case ('test')
-            call handle_backend_test_named(line, id_str, dir, tmpfile, response)
+            call handle_backend_test_named(arguments, id_str, dir, tmpfile, response)
             return
         case ('graph')
-            call handle_graph(line, id_str, dir, output_text, exitcode, response)
+            call handle_graph(arguments, id_str, dir, output_text, exitcode, response)
         case ('info')
             call handle_info(id_str, dir, output_text, exitcode, response)
         case ('changed')
             call handle_changed(id_str, dir, output_text, exitcode, response)
         case ('clean')
-            call handle_clean(line, id_str, dir, output_text, exitcode, response)
+            call handle_clean(arguments, id_str, dir, output_text, exitcode, response)
         case ('install')
-            call handle_install(line, id_str, dir, output_text, exitcode, response)
+            call handle_install(arguments, id_str, dir, output_text, exitcode, response)
         case default
             call jsonrpc_error(id_str, -32602, &
                 'unknown action: '//trim(action), response)
@@ -169,23 +235,18 @@ contains
         call delete_tmpfile(tmpfile)
     end subroutine handle_tools_call
 
-    subroutine handle_gremlin_action(line, id_str, response)
-        character(len=*), intent(in) :: line, id_str
+    subroutine handle_gremlin_action(arguments, id_str, response)
+        character(len=*), intent(in) :: arguments, id_str
         character(len=:), allocatable, intent(out) :: response
 
-        character(len=MAX_LINE) :: arguments, project_dir
+        character(len=MAX_LINE) :: project_dir
         character(len=64) :: public_action, core_action
         character(len=256) :: message
         character(len=:), allocatable :: request_json, result_json
         integer :: ierr, exitcode
 
-        call extract_arguments_object(line, arguments, ierr)
-        if (ierr == 0) then
-            call normalize_gremlin_arguments(arguments, public_action, core_action, &
-                project_dir, request_json, ierr, message)
-        else
-            message = 'missing or malformed Gremlin arguments object'
-        end if
+        call normalize_gremlin_arguments(arguments, public_action, core_action, &
+            project_dir, request_json, ierr, message)
         if (ierr /= 0) then
             call make_tool_text_response(id_str, '{"error":"'// &
                 trim(json_escape_string(trim(message)))//'"}', 2, response)
@@ -197,53 +258,89 @@ contains
         call make_tool_text_response(id_str, result_json, exitcode, response)
     end subroutine handle_gremlin_action
 
-    subroutine extract_arguments_object(line, arguments, ierr)
-        character(len=*), intent(in) :: line
-        character(len=*), intent(out) :: arguments
-        integer, intent(out) :: ierr
+    subroutine extract_json_member(object_json, property, raw_value, count, ierr)
+        character(len=*), intent(in) :: object_json, property
+        character(len=*), intent(out) :: raw_value
+        integer, intent(out) :: count, ierr
 
-        integer :: key_pos, colon_pos, first, i, depth
-        logical :: in_string, escaped
-        character(len=1) :: ch
+        character(len=MAX_LINE) :: key
+        integer :: position, key_status, value_end, value_first, key_length
+        logical :: closed
 
-        arguments = ''
+        raw_value = ''
+        count = 0
         ierr = 1
-        key_pos = index(line, '"arguments"')
-        if (key_pos == 0) return
-        colon_pos = index(line(key_pos:), ':')
-        if (colon_pos == 0) return
-        first = key_pos + colon_pos
-        call skip_json_space(line, first)
-        if (first > len_trim(line)) return
-        if (line(first:first) /= '{') return
-
-        depth = 0
-        in_string = .false.
-        escaped = .false.
-        do i = first, len_trim(line)
-            ch = line(i:i)
-            if (in_string) then
-                if (escaped) then
-                    escaped = .false.
-                else if (ch == achar(92)) then
-                    escaped = .true.
-                else if (ch == '"') then
-                    in_string = .false.
-                end if
-            else if (ch == '"') then
-                in_string = .true.
-            else if (ch == '{') then
-                depth = depth + 1
-            else if (ch == '}') then
-                depth = depth - 1
-                if (depth == 0) then
-                    arguments = line(first:i)
-                    ierr = 0
-                    return
+        position = 1
+        call skip_json_space(object_json, position)
+        if (position > len_trim(object_json)) return
+        if (object_json(position:position) /= '{') return
+        position = position + 1
+        closed = .false.
+        do
+            call skip_json_space(object_json, position)
+            if (position > len_trim(object_json)) return
+            if (object_json(position:position) == '}') then
+                position = position + 1
+                closed = .true.
+                exit
+            end if
+            call read_json_string(object_json, position, key, key_status, key_length)
+            if (key_status /= 0) return
+            call skip_json_space(object_json, position)
+            if (position > len_trim(object_json)) return
+            if (object_json(position:position) /= ':') return
+            position = position + 1
+            call skip_json_space(object_json, position)
+            value_first = position
+            call scan_json_value(object_json, position, value_end, key_status)
+            if (key_status /= 0) return
+            if (json_key_matches(key, key_length, property)) then
+                count = count + 1
+                if (count == 1) then
+                    if (value_end - value_first + 1 > len(raw_value)) return
+                    raw_value = object_json(value_first:value_end)
                 end if
             end if
+            position = value_end + 1
+            call skip_json_space(object_json, position)
+            if (position > len_trim(object_json)) return
+            if (object_json(position:position) == ',') then
+                position = position + 1
+                call skip_json_space(object_json, position)
+                if (position > len_trim(object_json)) return
+                if (object_json(position:position) == '}') return
+            else if (object_json(position:position) == '}') then
+                position = position + 1
+                closed = .true.
+                exit
+            else
+                return
+            end if
         end do
-    end subroutine extract_arguments_object
+        if (.not. closed) return
+        call skip_json_space(object_json, position)
+        if (position <= len_trim(object_json)) return
+        ierr = 0
+    end subroutine extract_json_member
+
+    subroutine extract_json_string_member(object_json, property, value, count, ierr)
+        character(len=*), intent(in) :: object_json, property
+        character(len=*), intent(out) :: value
+        integer, intent(out) :: count, ierr
+
+        character(len=MAX_LINE) :: raw_value, decoded
+        logical :: valid
+
+        value = ''
+        call extract_json_member(object_json, property, raw_value, count, ierr)
+        if (ierr /= 0 .or. count /= 1) return
+        call decode_json_string(raw_value, decoded, valid)
+        if (.not. valid .or. len_trim(decoded) > len(value)) then
+            ierr = 1
+            return
+        end if
+        value = trim(decoded)
+    end subroutine extract_json_string_member
 
     subroutine normalize_gremlin_arguments(arguments, public_action, core_action, &
             project_dir, request_json, ierr, message)
@@ -256,12 +353,17 @@ contains
         integer, parameter :: MAX_PROPERTIES = 128
         character(len=128) :: keys(MAX_PROPERTIES)
         character(len=MAX_LINE) :: decoded
+        integer :: key_first(MAX_PROPERTIES), key_last(MAX_PROPERTIES)
+        integer :: key_length(MAX_PROPERTIES)
         integer :: value_first(MAX_PROPERTIES), value_last(MAX_PROPERTIES)
         integer :: n_properties, position, parse_status, action_count, dir_count
-        integer :: i, value_end
+        integer :: i, value_end, action_length
         logical :: valid_string
 
         keys = ''
+        key_first = 0
+        key_last = 0
+        key_length = 0
         value_first = 0
         value_last = 0
         n_properties = 0
@@ -281,12 +383,15 @@ contains
                 message = 'too many Gremlin request fields'
                 return
             end if
-            call read_json_string(arguments, position, decoded, parse_status)
+            key_first(n_properties + 1) = position
+            call read_json_string(arguments, position, decoded, parse_status, &
+                key_length(n_properties + 1))
             if (parse_status /= 0) then
                 message = 'malformed Gremlin request key'
                 return
             end if
             n_properties = n_properties + 1
+            key_last(n_properties) = position - 1
             keys(n_properties) = trim(decoded)
             call skip_json_space(arguments, position)
             if (position > len_trim(arguments)) then
@@ -324,17 +429,21 @@ contains
         end do
 
         do i = 1, n_properties
-            select case (trim(keys(i)))
-            case ('action')
+            if (json_key_matches(keys(i), key_length(i), 'action')) then
                 action_count = action_count + 1
                 call decode_json_string(arguments(value_first(i):value_last(i)), &
-                    decoded, valid_string)
+                    decoded, valid_string, action_length)
                 if (.not. valid_string) then
                     message = 'Gremlin action must be a string'
                     return
                 end if
+                if (action_length > len(public_action) .or. &
+                    action_length /= len_trim(decoded)) then
+                    message = 'Gremlin action must be an exact public name'
+                    return
+                end if
                 public_action = trim(decoded)
-            case ('dir')
+            else if (json_key_matches(keys(i), key_length(i), 'dir')) then
                 dir_count = dir_count + 1
                 call decode_json_string(arguments(value_first(i):value_last(i)), &
                     decoded, valid_string)
@@ -343,7 +452,7 @@ contains
                     return
                 end if
                 project_dir = trim(decoded)
-            end select
+            end if
         end do
         if (action_count /= 1 .or. dir_count > 1) then
             message = 'Gremlin arguments need one action and at most one dir'
@@ -358,11 +467,13 @@ contains
         request_json = '{'
         action_count = 0
         do i = 1, n_properties
-            if (trim(keys(i)) == 'action' .or. trim(keys(i)) == 'dir') cycle
-            if (trim(core_action) == 'start' .and. trim(keys(i)) == 'background' .and. &
-                trim(arguments(value_first(i):value_last(i))) == 'true') cycle
+            if (json_key_matches(keys(i), key_length(i), 'action')) cycle
+            if (json_key_matches(keys(i), key_length(i), 'dir')) cycle
             if (action_count > 0) request_json = request_json//','
-            request_json = request_json//'"'//trim(keys(i))//'":'// &
+            ! Keep the parsed JSON token: re-emitting the decoded key would
+            ! change escaping or trim significant trailing spaces.
+            request_json = request_json// &
+                arguments(key_first(i):key_last(i))//':'// &
                 trim(arguments(value_first(i):value_last(i)))
             action_count = action_count + 1
         end do
@@ -411,17 +522,19 @@ contains
         end do
     end subroutine skip_json_space
 
-    subroutine read_json_string(text, position, value, ierr)
+    subroutine read_json_string(text, position, value, ierr, value_length)
         character(len=*), intent(in) :: text
         integer, intent(inout) :: position
         character(len=*), intent(out) :: value
         integer, intent(out) :: ierr
+        integer, intent(out), optional :: value_length
 
         integer :: i, n, code, digit, j
         character(len=1) :: ch
 
         value = ''
         ierr = 1
+        if (present(value_length)) value_length = 0
         if (position > len_trim(text)) return
         if (text(position:position) /= '"') return
         n = 0
@@ -431,6 +544,7 @@ contains
             if (ch == '"') then
                 position = i + 1
                 ierr = 0
+                if (present(value_length)) value_length = n
                 return
             end if
             if (ch == achar(92)) then
@@ -469,6 +583,15 @@ contains
             i = i + 1
         end do
     end subroutine read_json_string
+
+    logical function json_key_matches(key, key_length, expected)
+        character(len=*), intent(in) :: key, expected
+        integer, intent(in) :: key_length
+
+        json_key_matches = .false.
+        if (key_length /= len(expected)) return
+        json_key_matches = key(1:len(expected)) == expected
+    end function json_key_matches
 
     subroutine scan_json_value(text, position, last, ierr)
         character(len=*), intent(in) :: text
@@ -540,15 +663,17 @@ contains
         ierr = 0
     end subroutine scan_json_value
 
-    subroutine decode_json_string(raw, value, valid)
+    subroutine decode_json_string(raw, value, valid, value_length)
         character(len=*), intent(in) :: raw
         character(len=*), intent(out) :: value
         logical, intent(out) :: valid
+        integer, intent(out), optional :: value_length
 
-        integer :: position, ierr
+        integer :: position, ierr, decoded_length
 
         position = 1
-        call read_json_string(raw, position, value, ierr)
+        call read_json_string(raw, position, value, ierr, decoded_length)
+        if (present(value_length)) value_length = decoded_length
         valid = ierr == 0
         if (.not. valid) return
         call skip_json_space(raw, position)
@@ -1016,21 +1141,22 @@ contains
         call make_tool_text_response(id_str, output_text, exitcode, response)
     end subroutine handle_install
 
-    subroutine handle_resources_read(line, id_str, response, async_state)
-        character(len=*), intent(in) :: line, id_str
+    subroutine handle_resources_read(params_json, id_str, response, async_state)
+        character(len=*), intent(in) :: params_json, id_str
         character(len=:), allocatable, intent(out) :: response
         type(mcp_async_state_t), intent(inout) :: async_state
 
         character(len=256) :: uri
         character(len=8192) :: output_text
-        integer :: exitcode
+        integer :: exitcode, property_count, parse_status
         type(check_result_t) :: check_res
 
-        call extract_json_field(line, '"uri"', uri)
+        call extract_json_string_member(params_json, 'uri', uri, &
+            property_count, parse_status)
         call async_poll(async_state)
 
-        if (trim(uri) == 'fo://diagnostics' .or. &
-            index(line, 'fo://diagnostics') > 0) then
+        if (parse_status == 0 .and. property_count == 1 .and. &
+            trim(uri) == 'fo://diagnostics') then
             if (len_trim(async_state%last_output) > 0) then
                 call read_text_file(async_state%last_output, output_text)
                 exitcode = async_state%last_exitcode
@@ -1255,13 +1381,24 @@ contains
         async_state%active_output = output_file
     end subroutine async_start_current
 
-    subroutine async_cancel_all(async_state)
+    subroutine async_cancel_all(async_state, cancel_status)
         type(mcp_async_state_t), intent(inout) :: async_state
+        integer, intent(out) :: cancel_status
 
-        integer :: exitcode
+        integer :: exitcode, attempt
 
+        cancel_status = 0
         if (async_state%active_pid > 0) then
-            call process_cancel_pid(async_state%active_pid, exitcode)
+            exitcode = 1
+            do attempt = 1, 3
+                call process_cancel_pid(async_state%active_pid, exitcode)
+                if (exitcode == 0) exit
+                if (attempt < 3) call fs_sleep_ms(25*attempt)
+            end do
+            if (exitcode /= 0) then
+                cancel_status = exitcode
+                return
+            end if
             async_state%active_pid = 0
             async_state%last_run_id = async_state%active_run_id
             async_state%last_exitcode = 130
@@ -1306,14 +1443,17 @@ contains
         ierr = 1
     end subroutine requested_run_id
 
-    subroutine make_initialize_response(id_str, line, response)
-        character(len=*), intent(in) :: id_str, line
+    subroutine make_initialize_response(id_str, params_json, response)
+        character(len=*), intent(in) :: id_str, params_json
         character(len=:), allocatable, intent(out) :: response
 
         character(len=32) :: proto_ver
+        integer :: property_count, parse_status
 
-        call extract_json_field(line, '"protocolVersion"', proto_ver)
-        if (len_trim(proto_ver) == 0) proto_ver = '2025-03-26'
+        call extract_json_string_member(params_json, 'protocolVersion', proto_ver, &
+            property_count, parse_status)
+        if (parse_status /= 0 .or. property_count /= 1 .or. &
+            len_trim(proto_ver) == 0) proto_ver = '2025-03-26'
         response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
             '"result":{"protocolVersion":"'//trim(proto_ver)//'",'// &
             '"capabilities":{"tools":{"listChanged":false},'// &
@@ -1362,9 +1502,7 @@ contains
             '"wait_ms":{"type":"integer","minimum":0,"maximum":30000},'// &
             '"fail_on_failure":{"type":"boolean"},'// &
             '"case_id":{"type":"string"},'// &
-            '"generation_id":{"type":"string"},'// &
-            '"background":{"type":"boolean",'// &
-            '"description":"gremlin_start: true selects the detached engine"}},'// &
+            '"generation_id":{"type":"string"}},'// &
             '"required":["action"]}}]}}'
     end subroutine make_tools_list_response
 

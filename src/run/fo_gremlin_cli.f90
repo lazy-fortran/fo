@@ -142,27 +142,6 @@ contains
                 cycle
             end if
 
-            if (trim(name) == '--background') then
-                if (has_equal) then
-                    raw = boolean_or_string(trim(value))
-                else
-                    raw = 'true'
-                    if (i < n_tokens) then
-                        if (trim(tokens(i + 1)) == 'false') then
-                            raw = 'false'
-                            i = i + 1
-                        else if (trim(tokens(i + 1)) == 'true') then
-                            i = i + 1
-                        end if
-                    end if
-                end if
-                if (trim(action) /= 'start' .or. trim(raw) /= 'true') then
-                    call append_field('background', trim(raw), keys, values, n_fields)
-                end if
-                i = i + 1
-                cycle
-            end if
-
             if (recognized .and. trim(raw) == 'targets') then
                 if (.not. has_equal .and. i < n_tokens) then
                     if (.not. looks_like_option(tokens(i + 1))) then
