@@ -104,9 +104,51 @@ static int make_parent(const char *path) {
     return rc;
 }
 
+static int resolve_in_tree_file_link(const char *root, const char *path,
+                                     char **resolved, struct stat *target_st) {
+    char link_target[8192];
+    char *canonical_root = NULL, *canonical_target = NULL;
+    ssize_t target_len;
+    size_t root_len;
+    int rc = -1;
+
+    target_len = readlink(path, link_target, sizeof(link_target) - 1);
+    if (target_len < 0) return -1;
+    if (target_len == 0 || (size_t)target_len >= sizeof(link_target) - 1 ||
+        link_target[0] == '/') {
+        errno = EINVAL;
+        return -1;
+    }
+    link_target[target_len] = '\0';
+    canonical_root = realpath(root, NULL);
+    canonical_target = realpath(path, NULL);
+    if (canonical_root == NULL || canonical_target == NULL) goto done;
+    root_len = strlen(canonical_root);
+    if (!(root_len == 1 && canonical_root[0] == '/') &&
+        (strncmp(canonical_target, canonical_root, root_len) != 0 ||
+         (canonical_target[root_len] != '/' &&
+          canonical_target[root_len] != '\0'))) {
+        errno = EXDEV;
+        goto done;
+    }
+    if (stat(canonical_target, target_st) != 0) goto done;
+    if (!S_ISREG(target_st->st_mode)) {
+        errno = EINVAL;
+        goto done;
+    }
+    *resolved = canonical_target;
+    canonical_target = NULL;
+    rc = 0;
+done:
+    free(canonical_root);
+    free(canonical_target);
+    return rc;
+}
+
 static int walk_tree(const char *root, const char *rel, const char *dest,
                      FILE *manifest, int copy_files) {
     char path[8192], target[8192];
+    char *source_path = path, *resolved_link = NULL;
     struct stat st;
     size_t root_len = strlen(root), rel_len = strlen(rel);
     if (root_len + (rel_len == 0 ? 0 : rel_len + 1) >=
@@ -126,8 +168,10 @@ static int walk_tree(const char *root, const char *rel, const char *dest,
     }
     if (lstat(path, &st) != 0) return -1;
     if (S_ISLNK(st.st_mode)) {
-        errno = ELOOP;
-        return -1;
+        if (resolve_in_tree_file_link(root, path, &resolved_link, &st) != 0) {
+            return -1;
+        }
+        source_path = resolved_link;
     }
     if (S_ISDIR(st.st_mode)) {
         struct dirent **entries = NULL;
@@ -175,13 +219,18 @@ static int walk_tree(const char *root, const char *rel, const char *dest,
         return 0;
     }
     if (!S_ISREG(st.st_mode)) {
+        free(resolved_link);
         errno = EINVAL;
         return -1;
     }
     if (write_path(manifest, 'F', (st.st_mode & 0111) != 0, rel) != 0) {
+        free(resolved_link);
         return -1;
     }
-    if (!copy_files) return 0;
+    if (!copy_files) {
+        free(resolved_link);
+        return 0;
+    }
     {
         int input, output;
         char buffer[65536];
@@ -189,20 +238,28 @@ static int walk_tree(const char *root, const char *rel, const char *dest,
         struct stat after;
         if (snprintf(target, sizeof(target), "%s/%s", dest, rel) >=
             (int)sizeof(target)) {
+            free(resolved_link);
             errno = ENAMETOOLONG;
             return -1;
         }
-        if (make_parent(target) != 0) return -1;
-        input = open(path, O_RDONLY | O_NOFOLLOW);
+        if (make_parent(target) != 0) {
+            free(resolved_link);
+            return -1;
+        }
+        input = open(source_path, O_RDONLY | O_NOFOLLOW);
+        free(resolved_link);
+        resolved_link = NULL;
         if (input < 0) return -1;
         if (fstat(input, &st) != 0 || !S_ISREG(st.st_mode)) {
             close(input);
+            free(resolved_link);
             errno = EINVAL;
             return -1;
         }
         output = open(target, O_WRONLY | O_CREAT | O_EXCL, st.st_mode & 0777);
         if (output < 0) {
             close(input);
+            free(resolved_link);
             return -1;
         }
         while ((n = read(input, buffer, sizeof(buffer))) > 0) {
@@ -213,6 +270,7 @@ static int walk_tree(const char *root, const char *rel, const char *dest,
                 if (written <= 0) {
                     close(input);
                     close(output);
+                    free(resolved_link);
                     return -1;
                 }
                 at += written;
@@ -223,17 +281,23 @@ static int walk_tree(const char *root, const char *rel, const char *dest,
             st.st_ino != after.st_ino || st.st_dev != after.st_dev) {
             close(input);
             close(output);
+            free(resolved_link);
             errno = EAGAIN;
             return -1;
         }
         if (fchmod(output, st.st_mode & 0777) != 0) {
             close(input);
             close(output);
+            free(resolved_link);
             return -1;
         }
         close(input);
-        if (fsync(output) != 0 || close(output) != 0) return -1;
+        if (fsync(output) != 0 || close(output) != 0) {
+            free(resolved_link);
+            return -1;
+        }
     }
+    free(resolved_link);
     return 0;
 }
 

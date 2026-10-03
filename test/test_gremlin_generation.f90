@@ -26,6 +26,11 @@ program test_gremlin_generation
             character(kind=c_char), intent(in) :: target(*), linkpath(*)
         end function c_symlink
 
+        integer(c_int) function c_unlink(path) bind(C, name='unlink')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+        end function c_unlink
+
         integer(c_int) function c_access(path, mode) bind(C, name='access')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
@@ -44,6 +49,7 @@ program test_gremlin_generation
     integer(c_int), parameter :: EXEC_ACCESS = 1_c_int
     integer(c_int), parameter :: MODE_NONEXEC = 420_c_int, MODE_EXEC = 493_c_int
     character(len=512) :: root, project, project_link, dependency, cache
+    character(len=512) :: source_link, escaping_link, external_target
     character(len=512) :: concurrent_cache, race_project, source_file
     character(len=256) :: message
     type(generation_context_t) :: context, race_context
@@ -55,7 +61,7 @@ program test_gremlin_generation
     logical :: exists
     integer :: parallel_ierr_one, parallel_ierr_two
     character(len=256) :: parallel_message_one, parallel_message_two
-    integer(c_int) :: remove_rc, symlink_rc, chmod_rc
+    integer(c_int) :: remove_rc, symlink_rc, escaping_rc, chmod_rc
 
     n_pass = 0
     n_fail = 0
@@ -86,6 +92,10 @@ program test_gremlin_generation
     call fs_write_text(trim(project)//'/.svn/wc.db', 'metadata')
     call fs_write_text(trim(project)//'/.bzr/branch', 'metadata')
     call fs_write_text(trim(dependency)//'/src/runtime.f90', 'runtime_one')
+    source_link = trim(project)//'/source-alias.f90'
+    symlink_rc = c_symlink('src/main.f90'//c_null_char, &
+        trim(source_link)//c_null_char)
+    call check(symlink_rc == 0, 'in-tree relative file link fixture is created')
 
     context%toolchain = 'gfortran 14 test'
     context%flags = '-O0 -g'
@@ -99,7 +109,8 @@ program test_gremlin_generation
 
     call generation_capture(trim(project), trim(cache), context, first, &
         race_ierr, message)
-    call check(race_ierr == 0, 'capture publishes an immutable generation')
+    call check(race_ierr == 0, &
+        'capture publishes an immutable generation with an in-tree file link')
     if (race_ierr /= 0) write (error_unit, '(a)') trim(message)
     project_link = trim(root)//'/project-link'
     symlink_rc = c_symlink(trim(project)//c_null_char, &
@@ -130,6 +141,12 @@ program test_gremlin_generation
             'published project inputs are read-only')
         call check(file_equals(trim(first%project_root)//'/src/main.f90', &
             'program version_one'), 'snapshot preserves original source')
+        call check(file_equals(trim(first%project_root)//'/source-alias.f90', &
+            'program version_one'), &
+            'snapshot materializes a relative file link as captured content')
+        call check(c_access(trim(first%project_root)//'/source-alias.f90'// &
+            c_null_char, WRITE_ACCESS) /= 0, &
+            'materialized file-link content is read-only')
         call check(file_equals(trim(first%project_root)// &
             '/src/build/fo_gremlin_provider.f90', &
             'module generation_provider_v1'), &
@@ -175,6 +192,25 @@ program test_gremlin_generation
         'source changes invalidate generation identity')
     call check(file_equals(trim(first%project_root)//'/src/main.f90', &
         'program version_one'), 'live source edit leaves old snapshot unchanged')
+    call check(file_equals(trim(first%project_root)//'/source-alias.f90', &
+        'program version_one'), &
+        'changing the link target leaves captured link content unchanged')
+    call check(file_equals(trim(source_changed%project_root)// &
+        '/source-alias.f90', 'program version_two'), &
+        'new generation captures the current relative-link target')
+
+    external_target = trim(root)//'/outside-input.txt'
+    escaping_link = trim(project)//'/escaping-alias'
+    call fs_write_text(trim(external_target), 'external')
+    escaping_rc = c_symlink('../outside-input.txt'//c_null_char, &
+        trim(escaping_link)//c_null_char)
+    call check(escaping_rc == 0, 'escaping relative link fixture is created')
+    call generation_capture(trim(project), trim(cache), context, reused, &
+        race_ierr, message)
+    call check(race_ierr /= 0, &
+        'relative file link resolving outside the input root is rejected')
+    remove_rc = c_unlink(trim(escaping_link)//c_null_char)
+    call check(remove_rc == 0, 'escaping link fixture is removed')
 
     call fs_write_text(trim(project)//'/include/config.inc', 'include_two')
     call generation_capture(trim(project), trim(cache), context, include_changed, &
