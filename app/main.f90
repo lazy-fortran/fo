@@ -1204,12 +1204,17 @@ contains
             call report_test_result(exitcode, test_log, .false., use_json)
             call delete_tmpfile(test_log)
         else if (n_arg_names > 0) then
-            ! Validate every named test against the build graph before
-            ! dispatch: an unknown name must fail loudly with exit 1,
-            ! not run nothing and exit 0 (#137) nor crash downstream.
+            ! Validate names against the inventory owned by this backend.
+            ! An unknown name must fail loudly with exit 1, not run nothing
+            ! and exit 0 (#137) nor crash downstream.
             do i = 1, n_arg_names
                 if (b%kind == BACKEND_NATIVE) then
                     if (gfortran_named_test_exists(b%project_dir, test_names(i))) cycle
+                else if (b%kind == BACKEND_CMAKE) then
+                    ! The configured CTest registry is authoritative for CMake
+                    ! IDs. backend_test_names builds first, then CTest applies
+                    ! the exact filter and --no-tests=error rejects no-match.
+                    cycle
                 else
                     if (dag_find_test_index(dag, test_names(i)) /= 0) cycle
                 end if
