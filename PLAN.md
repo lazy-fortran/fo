@@ -331,10 +331,10 @@ Fortran replacement preserves or strengthens the crash, concurrency, JSON,
 filesystem and execution oracle. Production code never depends on the test
 harness. The frozen baseline `1f8a1a3` had 31 JS fixtures, including
 context-provenance and coverage-restart tests omitted from the earlier count.
-Issue #158 removes ten CLI fixtures through `4c67189`; 19 JS fixtures remain for
-#159--#163 after the earlier campaign-history and self-refresh migrations. The
-issue is reopened because post-submit full `fpm test` exposed a test-only Fortran
-JSON parser deallocation SIGSEGV that the focused eleven-case run did not expose.
+Issue #158 is complete through `6eb8045`: ten CLI fixtures are Fortran, the
+recursive test JSON ownership repair passes the full gfortran-13 FPM suite and
+the test-only C shim is Darwin-portable. Nineteen JS fixtures remain for
+#159--#163 after the earlier campaign-history and self-refresh migrations.
 
 ## Ordered implementation and independent verifiers
 
@@ -699,11 +699,10 @@ Implemented issue state:
   epochs survive stop/crash/restart, priority jumps satisfy unseen obligations,
   reproduction does not earn coverage, and cancelled/stale RUNNING work remains
   unknown with exact counts.
-- #158 delivered ten ordinary CLI/build-routing Fortran oracles through
-  `4c67189`, but post-submit run 37160223245 exposed a current test-only JSON
-  parser deallocation SIGSEGV under full `fpm test`. Keep it reopened until the
-  exact triggering mode and an independent stress oracle pass. The harness/C shim
-  remain test-only and must not enter production executables.
+- #158 is complete through `6eb8045`: ten ordinary CLI/build-routing Fortran
+  oracles plus an independent recursive ownership stress test pass. The original
+  parser fails that oracle on Ubuntu gfortran 13 with exit 139; the repaired full
+  FPM and 65-test native pipelines pass. The harness/C shim remain test-only.
 - #160's campaign-history slice is delivered at `361d1ca`: the stale
   per-campaign JavaScript sampler is replaced by an independent Fortran oracle
   for finite epoch order, restart/replay, markers, failure priority and cancelled
