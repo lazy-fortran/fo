@@ -15,13 +15,21 @@ program test_gremlin_generation
             import :: c_int
             integer(c_int), intent(in), value :: mode
         end subroutine arm_directory_oracle
+        subroutine set_directory_oracle_target(path, pid) &
+                bind(C, name='generation_oracle_target')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), intent(in), value :: pid
+        end subroutine set_directory_oracle_target
         integer(c_int) function directory_oracle_state(which) &
                 bind(C, name='generation_oracle_state')
             import :: c_int
             integer(c_int), intent(in), value :: which
         end function directory_oracle_state
-        subroutine release_directory_oracle() &
+        subroutine release_directory_oracle(swapped) &
                 bind(C, name='generation_oracle_release')
+            import :: c_int
+            integer(c_int), intent(in), value :: swapped
         end subroutine release_directory_oracle
 
         integer(c_int) function fo_c_generation_list_tree(root, manifest) &
@@ -424,8 +432,14 @@ program test_gremlin_generation
         race_generation, race_ierr, message, parent_swap_count)
     call check(parent_swap_count > 0, &
         'source parent was replaced by an escaping symlink during capture')
+    call check(directory_oracle_state(4_c_int) == 1, &
+        'pause matched the inode of the already-open src directory')
+    call check(directory_oracle_state(2_c_int) == 1, &
+        'src traversal pause was observed within the bounded wait')
     call check(directory_oracle_state(3_c_int) == 1, &
-        'root traversal resumed only after the observed parent swap')
+        'src traversal resumed only after the completed parent swap')
+    call check(directory_oracle_state(5_c_int) == 0, &
+        'src traversal handshake completed before its release timeout')
     if (race_ierr == 0) then
         call check(file_is_byte_value(trim(race_generation%project_root)// &
             '/src/value.dat', 'I'), &
@@ -437,7 +451,11 @@ program test_gremlin_generation
         inquire (file=trim(race_generation%root), exist=exists)
         call check(.not. exists, &
             'rejected parent-swap capture publishes no generation')
+        call check(count_generation_roots(trim(link_race_cache)) == 0, &
+            'rejected parent-swap capture leaves no published generation')
     end if
+    call check(.not. has_staging_entries(trim(link_race_cache)), &
+        'parent-swap capture leaves no partial staging artifacts')
 
     call check(.not. has_staging_entries(trim(cache)), &
         'successful and rejected captures leave no staging artifacts')
@@ -613,6 +631,8 @@ contains
         source_dir = trim(project_path)//'/src'
         parked_dir = trim(project_path)//'/src-parked'
         swap_count = 0
+        call set_directory_oracle_target(trim(source_dir)//c_null_char, &
+            int(process_getpid(), c_int))
         call arm_directory_oracle(2_c_int)
         !$omp parallel sections num_threads(2) &
         !$omp& shared(generation, ierr, error_message, swap_count)
@@ -620,8 +640,8 @@ contains
         call generation_capture(project_path, cache_path, capture_context, &
             generation, ierr, error_message)
         !$omp section
-        ! The first root enumeration pauses at EOF: its fd is open and its
-        ! original child names are saved, but no child lookup has happened.
+        ! Pause at EOF of the pinned src descriptor, after it was opened and
+        ! enumerated but before its saved child names are looked up.
         do iteration = 1, 5000
             paused = directory_oracle_state(2_c_int) == 1
             if (paused) exit
@@ -636,7 +656,7 @@ contains
                 if (link_rc == 0) swap_count = 1
             end if
         end if
-        call release_directory_oracle()
+        call release_directory_oracle(int(swap_count, c_int))
         !$omp end parallel sections
         ! Hold the replacement through capture's completion, including lookup.
         if (swap_count > 0) ignored = c_unlink(trim(source_dir)//c_null_char)
@@ -803,6 +823,10 @@ module generation_directory_oracle
     logical :: directory_paused = .false., directory_release = .false.
     logical :: directory_fault_observed = .false.
     logical :: directory_pause_completed = .false.
+    logical :: directory_inode_matched = .false., directory_pause_timed_out = .false.
+    logical :: directory_swap_completed = .false.
+    character(len=512) :: directory_target = ''
+    integer(c_int) :: directory_owner_pid = 0
     abstract interface
         function directory_reader(dir) bind(C) result(entry)
             import :: c_ptr
@@ -827,6 +851,10 @@ module generation_directory_oracle
             import :: c_int
             integer(c_int), intent(in), value :: usec
         end function oracle_usleep
+        integer(c_int) function oracle_dirfd(dir) bind(C, name='dirfd')
+            import :: c_int, c_ptr
+            type(c_ptr), intent(in), value :: dir
+        end function oracle_dirfd
     end interface
 contains
     subroutine initialize_directory_oracle() &
@@ -855,7 +883,42 @@ contains
         directory_paused = .false.
         directory_release = .false.
         directory_pause_completed = .false.
+        directory_inode_matched = .false.
+        directory_pause_timed_out = .false.
+        directory_swap_completed = .false.
     end subroutine arm_directory_oracle
+
+    subroutine set_directory_oracle_target(path, pid) &
+            bind(C, name='generation_oracle_target')
+        character(kind=c_char), intent(in) :: path(*)
+        integer(c_int), intent(in), value :: pid
+        integer :: i
+        directory_target = ''
+        do i = 1, len(directory_target)
+            if (path(i) == c_null_char) exit
+            directory_target(i:i) = path(i)
+        end do
+        directory_owner_pid = pid
+    end subroutine set_directory_oracle_target
+
+    logical function directory_descriptor_matches(dir) result(matches)
+        type(c_ptr), intent(in), value :: dir
+        character(len=128) :: descriptor_path
+        integer :: rc, command_status
+        integer(c_int) :: fd
+        matches = .false.
+        fd = oracle_dirfd(dir)
+        if (fd < 0) return
+        write (descriptor_path, '(a,i0,a,i0)') '/proc/', directory_owner_pid, &
+            '/fd/', fd
+        ! The shell's -ef compares device/inode after following the descriptor
+        ! path in this process, independently of the production traversal.
+        call execute_command_line('test "'//trim(descriptor_path)// &
+            '" -ef "'//trim(directory_target)//'"', exitstat=rc, &
+            cmdstat=command_status)
+        if (command_status /= 0) return
+        matches = rc == 0
+    end function directory_descriptor_matches
 
     integer(c_int) function directory_oracle_state(which) &
             bind(C, name='generation_oracle_state') result(state)
@@ -870,12 +933,19 @@ contains
             observed = directory_paused
         case (3)
             observed = directory_pause_completed
+        case (4)
+            observed = directory_inode_matched
+        case (5)
+            observed = directory_pause_timed_out
         end select
         state = 0
         if (observed) state = 1
     end function directory_oracle_state
 
-    subroutine release_directory_oracle() bind(C, name='generation_oracle_release')
+    subroutine release_directory_oracle(swapped) &
+            bind(C, name='generation_oracle_release')
+        integer(c_int), intent(in), value :: swapped
+        directory_swap_completed = swapped == 1
         !$omp atomic write
         directory_release = .true.
     end subroutine release_directory_oracle
@@ -905,6 +975,11 @@ contains
             if (c_associated(entry)) return
             call c_f_pointer(real_errno(), errno_value)
             saved_errno = errno_value
+            if (.not. directory_descriptor_matches(dir)) then
+                errno_value = saved_errno
+                return
+            end if
+            directory_inode_matched = .true.
             directory_fault_mode = 0
             !$omp atomic write
             directory_paused = .true.
@@ -912,12 +987,13 @@ contains
                 !$omp atomic read
                 released = directory_release
                 if (released) then
-                    directory_pause_completed = .true.
+                    directory_pause_completed = directory_swap_completed
                     errno_value = saved_errno
                     return
                 end if
                 ignored = oracle_usleep(1000_c_int)
             end do
+            directory_pause_timed_out = .true.
             call c_f_pointer(real_errno(), errno_value)
             errno_value = 5
         end if
