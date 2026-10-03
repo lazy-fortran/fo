@@ -70,16 +70,25 @@ static int make_dirs(const char *path) {
     return 0;
 }
 
+static int inventory_path_is_valid(const char *rel) {
+    const char *p;
+    for (p = rel; *p != '\0'; ++p) {
+        if (*p == '\n' || *p == '\r' ||
+            (*p == ' ' && (p[1] == '/' || p[1] == '\0'))) {
+            errno = EINVAL;
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int write_path(FILE *manifest, char kind, unsigned int executable,
                       const char *rel) {
     if (strlen(rel) >= FO_GENERATION_FORTRAN_PATH_LEN - 6) {
         errno = ENAMETOOLONG;
         return -1;
     }
-    if (strchr(rel, '\n') != NULL || strchr(rel, '\r') != NULL) {
-        errno = EINVAL;
-        return -1;
-    }
+    if (!inventory_path_is_valid(rel)) return -1;
     return fprintf(manifest, "%c %03u %s\n", kind, executable, rel) < 0 ?
                -1 : 0;
 }
@@ -219,6 +228,7 @@ static int write_link_path(FILE *manifest, const char *rel,
                            const char *target, size_t target_len) {
     static const char hex[] = "0123456789abcdef";
     size_t path_len = strlen(rel), i;
+    if (!inventory_path_is_valid(rel)) return -1;
     if (path_len >= FO_GENERATION_FORTRAN_PATH_LEN - 25 ||
         target_len > (FO_GENERATION_FORTRAN_PATH_LEN - 25 - path_len) / 2 ||
         strchr(rel, '\n') != NULL || strchr(rel, '\r') != NULL) {
@@ -265,8 +275,20 @@ static int list_names(int dir_fd, struct name_list *names) {
         close(scan_fd);
         return -1;
     }
-    while ((entry = readdir(dir)) != NULL) {
+    for (;;) {
         char **grown;
+        errno = 0;
+        entry = readdir(dir);
+        if (entry == NULL) {
+            int scan_error = errno;
+            if (closedir(dir) != 0 && scan_error == 0) scan_error = errno;
+            if (scan_error != 0) {
+                free_names(names);
+                errno = scan_error;
+                return -1;
+            }
+            break;
+        }
         if (strcmp(entry->d_name, ".") == 0 ||
             strcmp(entry->d_name, "..") == 0) continue;
         if (names->count == capacity) {
@@ -287,7 +309,6 @@ static int list_names(int dir_fd, struct name_list *names) {
         }
         ++names->count;
     }
-    closedir(dir);
     if (names->count > 1) {
         qsort(names->items, names->count, sizeof(*names->items),
               compare_name_strings);

@@ -8,6 +8,22 @@ program test_gremlin_generation
     implicit none
 
     interface
+        subroutine initialize_directory_oracle() &
+                bind(C, name='generation_oracle_initialize')
+        end subroutine initialize_directory_oracle
+        subroutine arm_directory_oracle(mode) bind(C, name='generation_oracle_arm')
+            import :: c_int
+            integer(c_int), intent(in), value :: mode
+        end subroutine arm_directory_oracle
+        integer(c_int) function directory_oracle_state(which) &
+                bind(C, name='generation_oracle_state')
+            import :: c_int
+            integer(c_int), intent(in), value :: which
+        end function directory_oracle_state
+        subroutine release_directory_oracle() &
+                bind(C, name='generation_oracle_release')
+        end subroutine release_directory_oracle
+
         integer(c_int) function fo_c_generation_list_tree(root, manifest) &
                 bind(C, name='fo_c_generation_list_tree')
             import :: c_char, c_int
@@ -87,7 +103,8 @@ program test_gremlin_generation
 
     n_pass = 0
     n_fail = 0
-    root = '/tmp/fo-gremlin-generation-'//int_text(process_getpid())
+    call initialize_directory_oracle()
+    root = '/var/tmp/fo-gremlin-generation-'//int_text(process_getpid())
     project = trim(root)//'/project'
     dependency = trim(root)//'/fortfront'
     cache = trim(root)//'/cache'
@@ -269,6 +286,9 @@ program test_gremlin_generation
     remove_rc = c_unlink(trim(excluded_link)//c_null_char)
     call check(remove_rc == 0, 'excluded-output link fixture is removed')
 
+    call check_directory_read_errors()
+    call check_trailing_space_paths()
+
     call fs_write_text(trim(project)//'/include/config.inc', 'include_two')
     call generation_capture(trim(project), trim(cache), context, include_changed, &
         race_ierr, message)
@@ -404,6 +424,8 @@ program test_gremlin_generation
         race_generation, race_ierr, message, parent_swap_count)
     call check(parent_swap_count > 0, &
         'source parent was replaced by an escaping symlink during capture')
+    call check(directory_oracle_state(3_c_int) == 1, &
+        'root traversal resumed only after the observed parent swap')
     if (race_ierr == 0) then
         call check(file_is_byte_value(trim(race_generation%project_root)// &
             '/src/value.dat', 'I'), &
@@ -432,6 +454,75 @@ program test_gremlin_generation
     end if
 
 contains
+
+    subroutine check_directory_read_errors()
+        integer(c_int) :: rc
+        integer :: before
+        character(len=512) :: manifest
+        manifest = trim(root)//'/io-error.list'
+        call arm_directory_oracle(1_c_int)
+        rc = fo_c_generation_list_tree(trim(project)//c_null_char, &
+            trim(manifest)//c_null_char)
+        call check(directory_oracle_state(1_c_int) == 1, &
+            'directory reader delivered real entries before injected EIO')
+        call check(rc == 5, 'directory inventory propagates readdir EIO')
+        before = count_generation_roots(trim(cache))
+        call arm_directory_oracle(1_c_int)
+        call generation_capture(trim(project), trim(cache), context, &
+            race_generation, race_ierr, message)
+        call check(directory_oracle_state(1_c_int) == 1 .and. race_ierr /= 0, &
+            'capture rejects directory I/O failure after partial enumeration')
+        call check(count_generation_roots(trim(cache)) == before, &
+            'directory I/O failure publishes no generation')
+        call check(.not. has_staging_entries(trim(cache)), &
+            'directory I/O failure removes partial staging data')
+    end subroutine check_directory_read_errors
+
+    subroutine check_trailing_space_paths()
+        character(len=512) :: space_project, space_cache, manifest
+        character(len=32) :: names(3)
+        type(generation_context_t) :: space_context
+        type(generation_t) :: baseline, rejected
+        integer :: i, rc, count_before
+        integer(c_int) :: rename_rc, list_rc, link_rc
+        space_project = trim(root)//'/space-project'
+        space_cache = trim(root)//'/space-cache'
+        manifest = trim(root)//'/space.list'
+        call fs_make_dir(trim(space_project)//'/nested')
+        call fs_write_text(trim(space_project)//'/target', 'same bytes')
+        call fs_write_text(trim(space_project)//'/extra', 'same bytes')
+        call fs_write_text(trim(space_project)//'/nested/child', 'same bytes')
+        link_rc = c_symlink('target'//c_null_char, &
+            trim(space_project)//'/alias'//c_null_char)
+        call check(link_rc == 0, 'trailing-space link oracle fixture is created')
+        space_context%toolchain = 'space-path-oracle'
+        call generation_capture(trim(space_project), trim(space_cache), &
+            space_context, baseline, rc, message)
+        call check(rc == 0, 'ordinary path spellings publish a baseline')
+        names = [character(len=32) :: 'alias', 'extra', 'nested']
+        do i = 1, size(names)
+            rename_rc = c_rename(trim(space_project)//'/'//trim(names(i))// &
+                c_null_char, trim(space_project)//'/'//trim(names(i))//' '// &
+                c_null_char)
+            call check(rename_rc == 0, 'name gains an exact trailing space')
+            list_rc = fo_c_generation_list_tree(trim(space_project)// &
+                c_null_char, trim(manifest)//c_null_char)
+            call check(list_rc /= 0, &
+                'inventory rejects trailing-space '//trim(names(i)))
+            count_before = count_generation_roots(trim(space_cache))
+            call generation_capture(trim(space_project), trim(space_cache), &
+                space_context, rejected, rc, message)
+            call check(rc /= 0, &
+                'capture rejects trailing-space '//trim(names(i)))
+            call check(count_generation_roots(trim(space_cache)) == count_before, &
+                'trailing-space rejection publishes no aliased identity')
+            call check(.not. has_staging_entries(trim(space_cache)), &
+                'trailing-space rejection removes partial staging data')
+            rename_rc = c_rename(trim(space_project)//'/'//trim(names(i))//' '// &
+                c_null_char, trim(space_project)//'/'//trim(names(i))//c_null_char)
+            call check(rename_rc == 0, 'exact ordinary path spelling is restored')
+        end do
+    end subroutine check_trailing_space_paths
 
     subroutine check(condition, description)
         logical, intent(in) :: condition
@@ -489,12 +580,12 @@ contains
                         read (unit, '(a)', iostat=ios) record
                         if (ios /= 0) exit
                         if (index(trim(record), &
-                                '/stage/bundle/project/'//trim(relative_file)) == 0) &
+                            '/stage/bundle/project/'//trim(relative_file)) == 0) &
                             cycle
                         staged_file = trim(cache_path)// &
                             '/gremlin/generations/.capture/'//trim(record(7:))
                         if (file_is_byte_value(trim(staged_file), expected, &
-                                n_bytes)) then
+                            n_bytes)) then
                             wait_for_completed_stage_copy = .true.
                             exit
                         end if
@@ -517,32 +608,41 @@ contains
         character(len=*), intent(out) :: error_message
         character(len=512) :: source_dir, parked_dir
         integer :: iteration, rename_rc, link_rc, ignored
+        logical :: paused
 
         source_dir = trim(project_path)//'/src'
         parked_dir = trim(project_path)//'/src-parked'
         swap_count = 0
+        call arm_directory_oracle(2_c_int)
         !$omp parallel sections num_threads(2) &
         !$omp& shared(generation, ierr, error_message, swap_count)
         !$omp section
         call generation_capture(project_path, cache_path, capture_context, &
             generation, ierr, error_message)
         !$omp section
-        do iteration = 1, 100
+        ! The first root enumeration pauses at EOF: its fd is open and its
+        ! original child names are saved, but no child lookup has happened.
+        do iteration = 1, 5000
+            paused = directory_oracle_state(2_c_int) == 1
+            if (paused) exit
+            ignored = c_usleep(1000_c_int)
+        end do
+        if (paused) then
             rename_rc = c_rename(trim(source_dir)//c_null_char, &
                 trim(parked_dir)//c_null_char)
-            if (rename_rc /= 0) cycle
-            link_rc = c_symlink('../outside-source'//c_null_char, &
-                trim(source_dir)//c_null_char)
-            if (link_rc == 0) then
-                swap_count = swap_count + 1
-                ignored = c_usleep(1000_c_int)
-                ignored = c_unlink(trim(source_dir)//c_null_char)
+            if (rename_rc == 0) then
+                link_rc = c_symlink('../outside-source'//c_null_char, &
+                    trim(source_dir)//c_null_char)
+                if (link_rc == 0) swap_count = 1
             end if
-            rename_rc = c_rename(trim(parked_dir)//c_null_char, &
-                trim(source_dir)//c_null_char)
-            if (rename_rc /= 0) exit
-        end do
+        end if
+        call release_directory_oracle()
         !$omp end parallel sections
+        ! Hold the replacement through capture's completion, including lookup.
+        if (swap_count > 0) ignored = c_unlink(trim(source_dir)//c_null_char)
+        if (paused) rename_rc = c_rename(trim(parked_dir)//c_null_char, &
+            trim(source_dir)//c_null_char)
+        call arm_directory_oracle(0_c_int)
     end subroutine run_capture_during_parent_swaps
 
     subroutine run_parallel_captures(project_path, cache_path, capture_context, &
@@ -690,3 +790,136 @@ contains
     end function int_text
 
 end program test_gremlin_generation
+
+! Keep PROGRAM first for the native scanner. C-bound controls avoid a self-use
+! dependency from the program to this module in the same compilation unit.
+! Interpose only in this test executable; production has no fault/pause hooks.
+module generation_directory_oracle
+    use, intrinsic :: iso_c_binding, only: c_ptr, c_funptr, c_int, c_intptr_t, &
+        c_char, c_null_char, c_null_ptr, c_associated, c_f_pointer, c_f_procpointer
+    implicit none
+    private
+    integer :: directory_fault_mode = 0, entry_count = 0
+    logical :: directory_paused = .false., directory_release = .false.
+    logical :: directory_fault_observed = .false.
+    logical :: directory_pause_completed = .false.
+    abstract interface
+        function directory_reader(dir) bind(C) result(entry)
+            import :: c_ptr
+            type(c_ptr), intent(in), value :: dir
+            type(c_ptr) :: entry
+        end function directory_reader
+        function errno_reader() bind(C) result(address)
+            import :: c_ptr
+            type(c_ptr) :: address
+        end function errno_reader
+    end interface
+    procedure(directory_reader), pointer :: real_readdir => null()
+    procedure(errno_reader), pointer :: real_errno => null()
+    interface
+        function c_dlsym(handle, name) bind(C, name='dlsym') result(address)
+            import :: c_ptr, c_char
+            type(c_ptr), intent(in), value :: handle
+            character(kind=c_char), intent(in) :: name(*)
+            type(c_ptr) :: address
+        end function c_dlsym
+        integer(c_int) function oracle_usleep(usec) bind(C, name='usleep')
+            import :: c_int
+            integer(c_int), intent(in), value :: usec
+        end function oracle_usleep
+    end interface
+contains
+    subroutine initialize_directory_oracle() &
+            bind(C, name='generation_oracle_initialize')
+        type(c_ptr) :: next, address
+        type(c_funptr) :: function_address
+        next = transfer(-1_c_intptr_t, next)
+        address = c_dlsym(next, 'readdir'//c_null_char)
+        if (.not. c_associated(address)) error stop 'cannot resolve libc readdir'
+        function_address = transfer(address, function_address)
+        call c_f_procpointer(function_address, real_readdir)
+        address = c_dlsym(next, '__errno_location'//c_null_char)
+        if (.not. c_associated(address)) &
+            address = c_dlsym(next, '__error'//c_null_char)
+        if (.not. c_associated(address)) error stop 'cannot resolve libc errno'
+        function_address = transfer(address, function_address)
+        call c_f_procpointer(function_address, real_errno)
+    end subroutine initialize_directory_oracle
+
+    subroutine arm_directory_oracle(mode) bind(C, name='generation_oracle_arm')
+        integer(c_int), intent(in), value :: mode
+        directory_fault_mode = mode
+        if (mode == 0) return
+        entry_count = 0
+        directory_fault_observed = .false.
+        directory_paused = .false.
+        directory_release = .false.
+        directory_pause_completed = .false.
+    end subroutine arm_directory_oracle
+
+    integer(c_int) function directory_oracle_state(which) &
+            bind(C, name='generation_oracle_state') result(state)
+        integer(c_int), intent(in), value :: which
+        logical :: observed
+        observed = .false.
+        select case (which)
+        case (1)
+            observed = directory_fault_observed
+        case (2)
+            !$omp atomic read
+            observed = directory_paused
+        case (3)
+            observed = directory_pause_completed
+        end select
+        state = 0
+        if (observed) state = 1
+    end function directory_oracle_state
+
+    subroutine release_directory_oracle() bind(C, name='generation_oracle_release')
+        !$omp atomic write
+        directory_release = .true.
+    end subroutine release_directory_oracle
+
+    function oracle_readdir(dir) bind(C, name='readdir') result(entry)
+        type(c_ptr), intent(in), value :: dir
+        type(c_ptr) :: entry
+        integer(c_int), pointer :: errno_value
+        integer(c_int) :: ignored
+        integer :: attempt, saved_errno
+        logical :: released
+
+        if (.not. associated(real_readdir)) call initialize_directory_oracle()
+        entry = real_readdir(dir)
+        if (directory_fault_mode == 1) then
+            if (c_associated(entry)) then
+                entry_count = entry_count + 1
+                if (entry_count < 3) return
+            end if
+            call c_f_pointer(real_errno(), errno_value)
+            errno_value = 5 ! POSIX EIO on supported Linux/macOS platforms.
+            entry = c_null_ptr
+            directory_fault_observed = entry_count >= 3
+            directory_fault_mode = 0
+            entry_count = 0
+        else if (directory_fault_mode == 2) then
+            if (c_associated(entry)) return
+            call c_f_pointer(real_errno(), errno_value)
+            saved_errno = errno_value
+            directory_fault_mode = 0
+            !$omp atomic write
+            directory_paused = .true.
+            do attempt = 1, 10000
+                !$omp atomic read
+                released = directory_release
+                if (released) then
+                    directory_pause_completed = .true.
+                    errno_value = saved_errno
+                    return
+                end if
+                ignored = oracle_usleep(1000_c_int)
+            end do
+            call c_f_pointer(real_errno(), errno_value)
+            errno_value = 5
+        end if
+    end function oracle_readdir
+end module generation_directory_oracle
