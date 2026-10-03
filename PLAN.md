@@ -567,7 +567,8 @@ integration lane per active repository and rotate task-worktree lanes for
 focused changes. Six simultaneous cold lanes wrote 1.8 GB of state and all
 blocked in kernel writeback, so unrestricted per-worktree residency is rejected
 behavior pending #155, compact generations/private sessions and cross-lane I/O
-admission. #148's idle event gate is complete. Preserve receipts,
+admission. #148's idle event gate is delivered, but declared-closure relevance
+is reopened after a plan-only edit triggered a generation. Preserve receipts,
 first-verdict latency, failures, restart behavior, idle activity and resource
 use as live evidence. Independent oracles remain authoritative; self-testing
 evidence alone never promotes the tested Gremlin implementation.
@@ -575,7 +576,7 @@ evidence alone never promotes the tested Gremlin implementation.
 The core is merged. Remaining implementation follows this dependency-aware DAG;
 completed entries below are retained as prerequisites and evidence:
 
-1. **Complete:** [#148](https://github.com/lazy-fortran/fo/issues/148): shared filesystem
+1. **Reopened:** [#148](https://github.com/lazy-fortran/fo/issues/148): shared filesystem
    events and dirty/debounce/fingerprint gating so idle Gremlin performs no full
    captures; consolidate or deprecate the independent `fo watch` check loop.
 2. [#149](https://github.com/lazy-fortran/fo/issues/149): extract request,
@@ -645,9 +646,10 @@ Implemented issue state:
   that a failed intermediate build retains the active generation and running
   test, never tests the broken candidate, preserves completed receipts, and
   switches only after the repaired candidate builds.
-- #148 is complete at `48137f0`: idle capture delta is zero, relevant bursts
-  debounce to one candidate, project/path-dependency/config changes wake the
-  shared watcher, and `fo watch` uses the same provider.
+- #148's event gate landed at `48137f0`: idle capture delta is zero, bursts
+  debounce and `fo watch` uses the provider. Dogfood then proved closure filtering
+  incomplete: changing only `PLAN.md` created generation `56ab9d098b62...`.
+  The issue is reopened and must share #165's declared execution-input inventory.
 - #153 is complete at `be5aa7a` plus `b0a356e`: deterministic without-replacement
   epochs survive stop/crash/restart, priority jumps satisfy unseen obligations,
   reproduction does not earn coverage, and cancelled/stale RUNNING work remains
