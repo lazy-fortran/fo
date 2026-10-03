@@ -411,36 +411,26 @@ when observations exist, never invented benchmark claims.
 
 ## Active delivery state
 
-**The user has authorized the fo Gremlin bootstrap in parallel mode.** The
-controller's isolated `gremlin/integration` candidate starts at fo main
-`e4fc193` and currently ends at `472d144`. It integrates the policy, journal,
-state, generation, process, dependency-freshness, atomic-link, supervisor and
-CLI/MCP commits. Focused behavioral checks pass, as do the full local fo
-pipeline (static 107/107, build 59/59, tests 48/48, lint OK) and the artifact
-publication fixture. The compiler reports three existing array-temporary
-warnings in `fo_diagnostics.f90` and `fo_scan.f90`.
+**Execution is user-authorized in parallel mode:** complete the fo Gremlin bootstrap and continue through the fo Gremlin roadmap. ffc implementation is outside this objective. The controller candidate starts at fo main `e4fc193` and its code HEAD is `0e7f32c`; the committed base-to-head source diff SHA256 is `0aa8de6cbf67508feec0d2865e83bcbacb7e34c3893c87b9d607c822535c2d0a`. It includes the reviewed generation/symlink capture and shared CLI/MCP engine, the CLI empty-random and MCP named-test fixes (`81f3770`, `f8b7e63`, `5fec063`), the nested compiler-spawn containment oracle (`22d089d`), lossless event pagination coverage (`56e6525`), and owner journal crash recovery with session-qualified log paths (`0e7f32c`). The integration worktree also has uncommitted plan and CI edits; code workers use separate task worktrees.
 
-The first live start against the fo worktree found a generation-capture blocker:
-it rejected tracked `AGENTS.md -> CLAUDE.md` and entered `capture_failed` before
-any test ran. Luna commit `d65b4f6` added descriptor-rooted capture, preserved
-link records and passed a focused and live `test_gremlin_generation` receipt.
-Independent review then found directory-read error handling, parent-swap test
-synchronization and trailing-space path identity gaps. Sol commit `b00c4d7`
-addresses those findings; its focused test and full local pipeline pass. Both
-repair commits remain separate from this integration branch pending independent
-review and controller verification of the combined candidate. Do not promote or
-replace the installed binary until those checks and a fresh integrated live
-receipt pass. The installed CLI remains at its restored baseline. Earlier
-candidates based on `2e781fd` remain preserved evidence, not automatic
-integration inputs; registry-update and toolchain-identity concerns remain
-inspection-only findings.
+**Verified:** the combined candidate at `0e7f32c` passed the isolated full fo pipeline: Static 107/107, Build 59/59, Tests 48/48, Lint OK (41.3s). On that same binary the live journal-recovery fixture, MCP named eligibility, >256-receipt CLI/MCP pagination, Gremlin bootstrap, stale-MCP recovery, and strict-filter nested compiler-spawn fixtures passed. Obtain another full combined pipeline and live Gremlin receipt after the pending supervisor fixes. Three existing array-temporary warnings remain in diagnostics/scanning code.
 
-After each meaningful delivery, rewrite this state and issue acceptance status,
-update the corresponding ffc stage, and close or narrow GitHub issues only when
-evidence meets their scope. Commit and push explicit reviewed paths to main
-regularly, then verify remote/local convergence. Keep implementation chronology
-in Git/receipts rather than adding competing plan files. New CLI/core capability
-and any remaining baseline failures must be stated precisely.
+A full MCP `check` under the account HOME failed only in `test_lock`: nested Git commits inherited the user's SSH signing configuration and had no matching private key. The isolated task-HOME full pipeline passed. The earlier live `test_scaffold` PATH mismatch was a stale global CLI in the nested fixture; candidate-first PATH recorded repeated PASS receipts for `test_scaffold` and `test_util` on generation `d3a36c...` (32 completed events, then a scoped stop). That live receipt predates #140 and is not final acceptance.
+
+Independent Sol review of code through `5fec063` found three supervisor defects. The #140 repair fixes restart overwrites by qualifying case/reproduction logs with session identity; its real-owner SIGKILL fixture verifies receipts appear once with unchanged artifact paths/bytes and that blocked work remains untested. The #138 Luna worker is implementing bounded durable lane history/debt and deterministic per-campaign seeds; the original supervisor selected with the request seed and then advertised a different seed. After #138 releases the supervisor files, fix the timeout-before-poll defect under #139: poll for completion before cancelling and recording TIMEOUT, with a synchronized capture-delay oracle and a genuine-timeout control. Sol also noted that replacing the CLI pathname during a live supervisor changes its runtime under the same generation ID. Keep all supervisors stopped during final installation; track driver identity in the future generation-closure audit.
+
+Current ordered work:
+
+1. #138: persistent completed-failure priority, least-recently-completed debt/cursor, unknown-case exclusion, and truthful deterministic campaign seeds. The lane receipt ledger must remain crash-safe and bounded.
+2. #139: preserve an already-completed child's real result when owner capture delays polling beyond its deadline; retain the existing process-tree cancellation verifier.
+3. #141: after #138/#140, prove an old failure survives successful generation replacement and reruns on the newest compatible generation without combining versions into a false green.
+4. #142 pagination verifier is implemented in `test/test_mcp_gremlin.js`; 300 receipts traverse bounded CLI/MCP pages exactly once in order. Keep the issue open through candidate promotion.
+5. #143 shared serial/parallel work-mode admission and #145 bounded non-ffc project matrix follow lifecycle and history acceptance.
+6. Re-run #139 and #144 independent process/artifact verifiers on final combined code; close or narrow issues only against their stated acceptance scope.
+
+The integration documentation commit adds CI steps for the new owner-recovery and MCP named-eligibility scripts. The installed `/home/ert/.local/bin/fo` is the restored baseline, SHA256 `8d5dd29dbb5bb41752e4e712a95ae300a38d99bc1777b96445ab56baf139a4c3`. An accidental earlier refresh is preserved separately. Do not install or push the integrated code until the final combined pipeline, live receipt, and independent review pass.
+
+After each meaningful delivery, update this plan, the workspace master, and affected issues. Keep one controller responsible for integration, promotion and regular main commits/pushes. Preserve exact bases, patch digests and independent behavioral evidence. Root `PLAN.md`/`AGENTS.md` are outside Git; fo repository plans are committed.
 
 ## Research basis
 

@@ -76,8 +76,14 @@ jobs:
       - name: Test Gremlin bootstrap lifecycle
         run: node test/test_gremlin_bootstrap.js "$(command -v fo)"
 
+      - name: Test Gremlin journal owner recovery
+        run: node test/test_gremlin_journal_recovery.js "$(command -v fo)"
+
       - name: Test MCP Gremlin parity
         run: node test/test_mcp_gremlin.js "$(command -v fo)"
+
+      - name: Test MCP named-test eligibility
+        run: node test/test_mcp_named_eligibility.js "$(command -v fo)"
 
       - name: Test stale MCP recovery
         run: node test/test_mcp_gremlin_stale.js "$(command -v fo)"
