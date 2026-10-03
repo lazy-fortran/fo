@@ -56,7 +56,7 @@ static int safe_session_id(const char *session) {
     return 1;
 }
 
-static int base_path(char *out, size_t cap) {
+static int base_path(char *out, size_t cap, int create_dirs) {
     const char *base = getenv("FO_GREMLIN_STATE_DIR");
     char fallback[PATH_MAX];
     if (!base || !*base) base = getenv("XDG_CACHE_HOME");
@@ -69,14 +69,15 @@ static int base_path(char *out, size_t cap) {
     }
     if (snprintf(out, cap, "%s/fo/gremlin", base) >= (int)cap)
         return ENAMETOOLONG;
-    return make_dirs(out);
+    return create_dirs ? make_dirs(out) : 0;
 }
 
 static int paths(const char *project, const char *lane, const char *session,
                  char *canonical, size_t canonical_cap,
                  char *terminal_parent, size_t terminal_parent_cap,
                  char *terminal_dir, size_t terminal_dir_cap,
-                 char *journal_path, size_t journal_path_cap) {
+                 char *journal_path, size_t journal_path_cap,
+                 int create_dirs) {
     char resolved[PATH_MAX], root[PATH_MAX], journal_root[PATH_MAX];
     uint64_t hp, hl;
     int e;
@@ -88,7 +89,7 @@ static int paths(const char *project, const char *lane, const char *session,
     hp = hash_text(UINT64_C(1469598103934665603), resolved);
     hp = hash_separator(hp);
     hl = hash_text(UINT64_C(1469598103934665603), lane);
-    e = base_path(root, sizeof(root));
+    e = base_path(root, sizeof(root), create_dirs);
     if (e) return e;
     if (snprintf(terminal_parent, terminal_parent_cap,
             "%s/terminal/%016llx/%016llx", root,
@@ -102,6 +103,7 @@ static int paths(const char *project, const char *lane, const char *session,
         (int)sizeof(journal_root)) return ENAMETOOLONG;
     if (snprintf(journal_path, journal_path_cap, "%s/journal.jsonl",
             journal_root) >= (int)journal_path_cap) return ENAMETOOLONG;
+    if (!create_dirs) return 0;
     e = make_dirs(terminal_parent);
     if (e) return e;
     return make_dirs(journal_root);
@@ -189,7 +191,7 @@ int fo_gremlin_terminal_journal_path(const char *project, const char *lane,
     if (cap <= 0) return EINVAL;
     int e = paths(project, lane, session, canonical, sizeof(canonical),
                   parent, sizeof(parent), terminal, sizeof(terminal),
-                  journal, sizeof(journal));
+                  journal, sizeof(journal), 1);
     if (e) return e;
     if (strlen(journal) + 1 > (size_t)cap) return ENAMETOOLONG;
     strcpy(out, journal);
@@ -206,7 +208,7 @@ int fo_gremlin_terminal_publish(const char *project, const char *lane,
         return EINVAL;
     int e = paths(project, lane, session, canonical, sizeof(canonical),
                   parent, sizeof(parent), final, sizeof(final),
-                  journal, sizeof(journal));
+                  journal, sizeof(journal), 1);
     if (e) return e;
     int n = snprintf(identity, sizeof(identity), "%s\n%s\n%s\n", canonical,
                      lane, session);
@@ -254,7 +256,7 @@ int fo_gremlin_terminal_read(const char *project, const char *lane,
     if (status_cap <= 0 || journal_cap <= 0) return EINVAL;
     int e = paths(project, lane, session, canonical, sizeof(canonical),
                   parent, sizeof(parent), terminal, sizeof(terminal),
-                  expected_journal, sizeof(expected_journal));
+                  expected_journal, sizeof(expected_journal), 0);
     if (e) return e;
     int n = snprintf(identity, sizeof(identity), "%s\n%s\n%s\n", canonical,
                      lane, session);

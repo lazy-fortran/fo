@@ -102,7 +102,7 @@ module fo_gremlin_supervisor
         real :: started_at = 0.0
     end type child_t
 
-    public :: gremlin_handle
+    public :: gremlin_handle, gremlin_release_stopped_session
 
 contains
 
@@ -329,11 +329,13 @@ contains
         end if
     end subroutine get_session_journal_path
 
-    subroutine publish_terminal_snapshot(project_dir, session, ierr, message)
+    subroutine publish_terminal_snapshot(project_dir, session, ierr, message, &
+            status_override)
         character(len=*), intent(in) :: project_dir
         type(gremlin_session_t), intent(in) :: session
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
+        character(len=*), intent(in), optional :: status_override
 
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
         character(len=PATH_LEN) :: journal_path
@@ -342,28 +344,40 @@ contains
         logical :: exists
         integer(c_int) :: c_error
 
-        file_size = 0_int64
-        inquire (file=session%state_dir//'/status', exist=exists, size=file_size, iostat=ios)
-        if (ios /= 0 .or. .not. exists .or. file_size < 2_int64 .or. &
-            file_size > int(len(status_text), int64)) then
-            ierr = 1
-            message = 'cannot snapshot Gremlin terminal status before release'
-            return
-        end if
-        open (newunit=unit, file=session%state_dir//'/status', access='stream', &
-            form='unformatted', status='old', action='read', iostat=ios)
-        if (ios /= 0) then
-            ierr = ios
-            message = 'cannot open Gremlin terminal status before release'
-            return
-        end if
-        n = int(file_size)
-        read (unit, pos=1, iostat=ios) status_text(:n)
-        close (unit)
-        if (ios /= 0) then
-            ierr = ios
-            message = 'cannot read full Gremlin terminal status before release'
-            return
+        if (present(status_override)) then
+            if (len_trim(status_override) < 2 .or. &
+                len_trim(status_override) > len(status_text)) then
+                ierr = 1
+                message = 'constructed Gremlin terminal status is invalid'
+                return
+            end if
+            status_text = status_override
+            n = len_trim(status_override)
+        else
+            file_size = 0_int64
+            inquire (file=session%state_dir//'/status', exist=exists, size=file_size, &
+                iostat=ios)
+            if (ios /= 0 .or. .not. exists .or. file_size < 2_int64 .or. &
+                file_size > int(len(status_text), int64)) then
+                ierr = 1
+                message = 'cannot snapshot Gremlin terminal status before release'
+                return
+            end if
+            open (newunit=unit, file=session%state_dir//'/status', access='stream', &
+                form='unformatted', status='old', action='read', iostat=ios)
+            if (ios /= 0) then
+                ierr = ios
+                message = 'cannot open Gremlin terminal status before release'
+                return
+            end if
+            n = int(file_size)
+            read (unit, pos=1, iostat=ios) status_text(:n)
+            close (unit)
+            if (ios /= 0) then
+                ierr = ios
+                message = 'cannot read full Gremlin terminal status before release'
+                return
+            end if
         end if
         call get_session_journal_path(project_dir, session%lane_id, &
             session%session_id, journal_path, ierr, message)
@@ -379,6 +393,39 @@ contains
                 trim(int_text(ierr))//')'
         end if
     end subroutine publish_terminal_snapshot
+
+    subroutine gremlin_release_stopped_session(project_dir, session, status_text, &
+            ierr, message)
+        character(len=*), intent(in) :: project_dir, status_text
+        type(gremlin_session_t), intent(inout) :: session
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        if (.not. session%owner) then
+            ierr = 1
+            message = 'only the Gremlin owner may publish a stopped terminal status'
+            return
+        end if
+        if (.not. allocated(session%session_id) .or. &
+            .not. allocated(session%lane_id)) then
+            ierr = 1
+            message = 'Gremlin owner identity is incomplete'
+            return
+        end if
+        if (index(status_text, '"state":"stopped"') == 0) then
+            ierr = 1
+            message = 'terminal release requires a constructed stopped status'
+            return
+        end if
+        call publish_terminal_snapshot(project_dir, session, ierr, message, &
+            status_override=trim(status_text))
+        if (ierr /= 0) return
+        call gremlin_session_release(session, ierr, message)
+        if (ierr /= 0) then
+            message = 'cannot release Gremlin owner after durable terminal snapshot: '// &
+                trim(message)
+        end if
+    end subroutine gremlin_release_stopped_session
 
     function c_buffer_text(buffer) result(text)
         character(kind=c_char), intent(in) :: buffer(:)
@@ -1788,28 +1835,27 @@ contains
         if (stop_requested) state_name = 'CANCELLED'
         call publish_state(session, request, 'stopped', active_generation, &
             candidate_generation, '', completed, selected_count, campaign_seed, &
-            state_name, 0, ierr, message)
+            state_name, 0, ierr, message, status_text_out=status_text)
         if (ierr /= 0) then
-            call publish_terminal_snapshot(project_dir, session, release_error, message)
-            if (release_error == 0) then
-                call gremlin_session_release(session, release_error, message)
+            state_error = ierr
+            call gremlin_release_stopped_session(project_dir, session, &
+                trim(status_text), release_error, state_message)
+            if (release_error /= 0) then
+                call error_response('run', 'cannot durably terminalize stopped Gremlin '// &
+                    'state after state publication error ('//trim(int_text(state_error))// &
+                    '): '//trim(state_message), response)
+            else
+                call error_response('run', 'cannot publish stopped Gremlin state ('// &
+                    trim(int_text(state_error))//'); stored the constructed terminal state', &
+                    response)
             end if
-            call error_response('run', 'cannot publish stopped Gremlin state: '//trim(message), &
-                response)
             exitcode = 2
             return
         end if
-        call publish_terminal_snapshot(project_dir, session, ierr, message)
+        call gremlin_release_stopped_session(project_dir, session, trim(status_text), &
+            ierr, message)
         if (ierr /= 0) then
-            call error_response('run', 'cannot publish terminal Gremlin snapshot: '// &
-                trim(message), response)
-            exitcode = 2
-            return
-        end if
-        call gremlin_session_release(session, ierr, message)
-        if (ierr /= 0) then
-            call error_response('run', 'cannot release Gremlin ownership: '//trim(message), &
-                response)
+            call error_response('run', trim(message), response)
             exitcode = 2
             return
         end if
@@ -2635,7 +2681,8 @@ contains
     end subroutine record_build
 
     subroutine publish_state(session, request, state, active, candidate, current_case, &
-            completed, selected_count, seed, last_outcome, last_exitcode, ierr, message)
+            completed, selected_count, seed, last_outcome, last_exitcode, ierr, message, &
+            status_text_out)
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(in) :: request
         character(len=*), intent(in) :: state, current_case, last_outcome
@@ -2643,6 +2690,7 @@ contains
         integer, intent(in) :: completed, selected_count, seed, last_exitcode
         integer, intent(out), optional :: ierr
         character(len=*), intent(out), optional :: message
+        character(len=*), intent(out), optional :: status_text_out
 
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
         character(len=PATH_LEN) :: local_message
@@ -2670,6 +2718,7 @@ contains
         call gremlin_session_publish(session, trim(status_text), status, local_message)
         if (present(ierr)) ierr = status
         if (present(message)) message = local_message
+        if (present(status_text_out)) status_text_out = trim(status_text)
     end subroutine publish_state
 
     subroutine response_with_events(action, status_text, session, request, failures_only, &

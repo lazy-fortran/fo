@@ -5,9 +5,9 @@ program test_gremlin_supervisor
     use fo_fs, only: fs_make_dir, fs_remove_tree
     use fo_gremlin_journal, only: journal_append
     use fo_gremlin_state, only: gremlin_session_t, gremlin_session_acquire, &
-        gremlin_session_publish, gremlin_session_release, &
+        gremlin_session_publish, gremlin_session_read, gremlin_session_release, &
         gremlin_session_stop_requested
-    use fo_gremlin_supervisor, only: gremlin_handle
+    use fo_gremlin_supervisor, only: gremlin_handle, gremlin_release_stopped_session
     use fo_util, only: extract_json_field, make_tmpfile
     implicit none
 
@@ -36,6 +36,22 @@ program test_gremlin_supervisor
             integer(c_int), value :: status_len
             integer(c_int) :: ierr
         end function c_terminal_publish
+
+        function c_terminal_read(project, lane, session, status, status_cap, &
+                journal, journal_cap) bind(C, name='fo_gremlin_terminal_read') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: project(*), lane(*), session(*)
+            character(kind=c_char), intent(out) :: status(*), journal(*)
+            integer(c_int), value :: status_cap, journal_cap
+            integer(c_int) :: ierr
+        end function c_terminal_read
+
+        function c_chmod(path, mode) bind(C, name='chmod') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: mode
+            integer(c_int) :: ierr
+        end function c_chmod
     end interface
 
     integer :: passed, failed
@@ -43,9 +59,11 @@ program test_gremlin_supervisor
     passed = 0
     failed = 0
     call test_strict_request_validation()
+    call test_unknown_terminal_read_is_side_effect_free()
     call test_same_place_attach_policy()
     call test_event_cursor_and_journal_errors()
     call test_terminal_session_history()
+    call test_failed_final_status_uses_constructed_terminal()
     write (output_unit, '(a,i0,a,i0,a)') 'Summary: ', passed, &
         ' passed, ', failed, ' failed'
     if (failed > 0) stop 1
@@ -89,6 +107,35 @@ contains
         call check(exitcode /= 0 .and. index(response, 'nonnegative') > 0, &
             'rejects a negative event cursor')
     end subroutine test_strict_request_validation
+
+    subroutine test_unknown_terminal_read_is_side_effect_free()
+        character(len=512) :: state_root, project_dir
+        character(kind=c_char) :: status(65536), journal(4097)
+        integer(c_int) :: c_error
+        integer :: ierr
+        logical :: directory_exists
+
+        call make_tmpfile('fo-gremlin-unknown-state', state_root)
+        call make_tmpfile('fo-gremlin-unknown-project', project_dir)
+        call fs_make_dir(trim(project_dir))
+        ierr = c_setenv('FO_GREMLIN_STATE_DIR'//c_null_char, &
+            trim(state_root)//c_null_char, 1_c_int)
+        call check(ierr == 0, 'sets isolated state for unknown terminal lookup')
+        inquire (file=trim(state_root)//'/fo/gremlin/.', exist=directory_exists)
+        call check(.not. directory_exists, 'starts with no Gremlin state directories')
+
+        status = c_null_char
+        journal = c_null_char
+        c_error = c_terminal_read(trim(project_dir)//c_null_char, 'unknown'//c_null_char, &
+            'unknown-session'//c_null_char, status, int(size(status), c_int), journal, &
+            int(size(journal), c_int))
+        call check(c_error /= 0_c_int, 'unknown terminal session returns not found')
+        inquire (file=trim(state_root)//'/fo/gremlin/.', exist=directory_exists)
+        call check(.not. directory_exists, &
+            'unknown terminal read leaves the state tree absent')
+        call fs_remove_tree(trim(state_root))
+        call fs_remove_tree(trim(project_dir))
+    end subroutine test_unknown_terminal_read_is_side_effect_free
 
     subroutine test_same_place_attach_policy()
         type(gremlin_session_t) :: session
@@ -356,6 +403,89 @@ contains
         call fs_remove_tree(trim(state_root))
         call fs_remove_tree(trim(project_dir))
     end subroutine test_terminal_session_history
+
+    subroutine test_failed_final_status_uses_constructed_terminal()
+        type(gremlin_session_t) :: session
+        character(len=512) :: state_root, project_dir, message
+        character(len=2048) :: prior_status, stopped_status, live_status
+        character(len=128) :: read_session_id, owner_start
+        character(kind=c_char) :: terminal_status(8192), terminal_journal(4097)
+        character(len=:), allocatable :: terminal_text, response_json
+        integer(c_int) :: c_error
+        integer :: ierr, read_error, release_error, exitcode, owner_pid
+
+        call make_tmpfile('fo-gremlin-final-state', state_root)
+        call make_tmpfile('fo-gremlin-final-project', project_dir)
+        call fs_make_dir(trim(project_dir))
+        ierr = c_setenv('FO_GREMLIN_STATE_DIR'//c_null_char, &
+            trim(state_root)//c_null_char, 1_c_int)
+        call check(ierr == 0, 'sets isolated state for failed final publication')
+        call gremlin_session_acquire(trim(project_dir), 'final-write', session, &
+            ierr, message)
+        call check(ierr == 0 .and. session%owner, 'creates owner for final publication')
+        if (ierr /= 0) return
+        prior_status = '{"protocol":1,"session_id":"'//trim(session%session_id)// &
+            '","lane_id":"final-write","state":"testing"}'
+        call gremlin_session_publish(session, trim(prior_status), ierr, message)
+        call check(ierr == 0, 'publishes readable prior status')
+        stopped_status = '{"protocol":1,"session_id":"'//trim(session%session_id)// &
+            '","lane_id":"final-write","state":"stopped",'// &
+            '"last_outcome":"CANCELLED"}'
+
+        ierr = c_chmod(session%state_dir//c_null_char, 320_c_int)
+        call check(ierr == 0, 'makes owner status directory read-only')
+        call gremlin_session_publish(session, trim(stopped_status), ierr, message)
+        call check(ierr /= 0, 'final stopped status write fails with prior status present')
+        call gremlin_session_read(trim(project_dir), 'final-write', read_session_id, &
+            owner_pid, owner_start, live_status, read_error, message)
+        call check(read_error == 0 .and. trim(read_session_id) == &
+            trim(session%session_id) .and. trim(live_status) == trim(prior_status), &
+            'failed final write leaves the prior live status readable')
+
+        call gremlin_release_stopped_session(trim(project_dir), session, &
+            trim(stopped_status), release_error, message)
+        call check(release_error /= 0, &
+            'does not release ownership while the status directory blocks cleanup')
+        terminal_status = c_null_char
+        terminal_journal = c_null_char
+        c_error = c_terminal_read(trim(project_dir)//c_null_char, &
+            'final-write'//c_null_char, session%session_id//c_null_char, &
+            terminal_status, int(size(terminal_status), c_int), terminal_journal, &
+            int(size(terminal_journal), c_int))
+        terminal_text = c_buffer_text(terminal_status)
+        call check(c_error == 0_c_int .and. index(terminal_text, '"state":"stopped"') > 0 &
+            .and. index(terminal_text, '"state":"testing"') == 0, &
+            'terminal snapshot contains the constructed stopped status, never stale state')
+
+        ierr = c_chmod(session%state_dir//c_null_char, 448_c_int)
+        call check(ierr == 0, 'restores owner status directory permissions')
+        call gremlin_session_release(session, release_error, message)
+        call check(release_error == 0, 'releases owner after durable stopped snapshot')
+        call gremlin_handle('status', trim(project_dir), &
+            '{"lane_id":"final-write","session_id":"'// &
+            trim(session%session_id)//'"}', response_json, exitcode)
+        call check(exitcode == 0 .and. index(response_json, '"state":"stopped"') > 0 &
+            .and. index(response_json, '"state":"testing"') == 0, &
+            'released session reads the durable stopped terminal record')
+        call fs_remove_tree(trim(state_root))
+        call fs_remove_tree(trim(project_dir))
+    end subroutine test_failed_final_status_uses_constructed_terminal
+
+    function c_buffer_text(buffer) result(value)
+        character(kind=c_char), intent(in) :: buffer(:)
+        character(len=:), allocatable :: value
+        integer :: i, n
+
+        n = 0
+        do i = 1, size(buffer)
+            if (buffer(i) == c_null_char) exit
+            n = n + 1
+        end do
+        allocate (character(len=n) :: value)
+        do i = 1, n
+            value(i:i) = buffer(i)
+        end do
+    end function c_buffer_text
 
     subroutine session_journal_file(project, lane, session, path, ierr)
         character(len=*), intent(in) :: project, lane, session
