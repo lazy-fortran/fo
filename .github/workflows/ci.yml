@@ -101,6 +101,9 @@ jobs:
       - name: Test Gremlin self refresh
         run: node test/test_gremlin_self_refresh.js "$(command -v fo)"
 
+      - name: Test Gremlin filesystem change capture
+        run: node test/test_gremlin_watch.js "$(command -v fo)"
+
       - name: Test atomic link artifacts
         run: FO="$(command -v fo)" node test/test_atomic_link_artifacts.js
 

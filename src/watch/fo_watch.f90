@@ -1,8 +1,10 @@
 module fo_watch
-    use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fx_watch, only: watcher_t, watcher_init, watcher_add, watcher_poll, &
-        watcher_close, watcher_mark_self_written, &
-        WATCH_MODIFY, WATCH_CREATE, WATCH_DELETE
+    use, intrinsic :: iso_fortran_env, only: output_unit, error_unit, int64
+    use fo_change_watch, only: change_watch_t, change_watch_init, &
+        change_watch_add_root, change_watch_poll, change_watch_close, &
+        change_watch_mark_self_written, change_watch_relevant, &
+        CHANGE_DELETE, CHANGE_RECONCILE
+    use fx_proc, only: proc_scan_files
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_util, only: make_tmpfile, delete_tmpfile
     use fo_format, only: format_file
@@ -15,29 +17,31 @@ module fo_watch
 contains
 
     subroutine watch_loop(dir, fmt_mode)
-        !! Rebuild on every Fortran source change. Uses the in-tree fx_watch
-        !! file watcher (kqueue on macOS, inotify on Linux): no inotifywait,
+        !! Rebuild on every Fortran source change using the shared native
+        !! change provider (kqueue on macOS, inotify on Linux): no inotifywait,
         !! no mkfifo, no shell.
         character(len=*), intent(in) :: dir
         logical, intent(in), optional :: fmt_mode
 
-        type(watcher_t) :: w
+        type(change_watch_t) :: w
         character(len=WATCH_PATH_LEN) :: changed
         integer :: event_type, ierr
         logical :: do_fmt, got_event
+        integer(int64) :: debounce_until, now, rate
 
         do_fmt = .false.
         if (present(fmt_mode)) do_fmt = fmt_mode
 
-        call watcher_init(w, ierr)
+        call change_watch_init(w, trim(dir), ierr)
         if (ierr /= 0) then
             write (error_unit, '(a)') 'fo: cannot start file watcher'
+            call change_watch_close(w)
             return
         end if
-        call watcher_add(w, trim(dir), .true., ierr)
+        call change_watch_add_root(w, trim(dir), ierr)
         if (ierr /= 0) then
             write (error_unit, '(a)') 'fo: cannot watch '//trim(dir)
-            call watcher_close(w)
+            call change_watch_close(w)
             return
         end if
 
@@ -48,25 +52,37 @@ contains
             write (output_unit, '(a)') 'fo: watching for Fortran file changes...'
         end if
 
+        debounce_until = 0_8
         do
-            call watcher_poll(w, changed, event_type, 1000, got_event)
-            if (.not. got_event) cycle
-            if (event_type /= WATCH_MODIFY .and. event_type /= WATCH_CREATE &
-                .and. event_type /= WATCH_DELETE) cycle
-            if (.not. is_fortran_source(changed)) cycle
-
-            write (output_unit, '(a,a)') 'change: ', trim(changed)
-
-            if (do_fmt .and. event_type /= WATCH_DELETE) then
-                call format_in_place(trim(changed))
-                ! Suppress the watch event our own reformat will produce.
-                call watcher_mark_self_written(w, trim(changed))
+            call change_watch_poll(w, 100, changed, event_type, got_event, ierr)
+            if (ierr /= 0) then
+                write (error_unit, '(a)') 'fo: file watcher reconciliation failed'
+                call change_watch_close(w)
+                return
             end if
+            call system_clock(count=now, count_rate=rate)
+            if (got_event) then
+                if (is_fortran_source(changed) .or. event_type == CHANGE_RECONCILE) then
+                    write (output_unit, '(a,a)') 'change: ', trim(changed)
+                    debounce_until = now + max(1_int64, rate / 4_int64)
+                    if (do_fmt .and. event_type == CHANGE_RECONCILE) then
+                        call format_reconciled_tree(w)
+                    end if
+                    if (do_fmt .and. event_type /= CHANGE_DELETE .and. &
+                        event_type /= CHANGE_RECONCILE) then
+                        call format_in_place(trim(changed))
+                        call change_watch_mark_self_written(w, trim(changed))
+                    end if
+                end if
+                cycle
+            end if
+            if (debounce_until == 0_8 .or. now < debounce_until) cycle
+            debounce_until = 0_8
 
             call run_check()
         end do
 
-        call watcher_close(w)
+        call change_watch_close(w)
     end subroutine watch_loop
 
     logical function is_fortran_source(path) result(yes)
@@ -83,6 +99,23 @@ contains
             if (path(n - 1:n) == '.f' .or. path(n - 1:n) == '.F') yes = .true.
         end if
     end function is_fortran_source
+
+    subroutine format_reconciled_tree(watch)
+        !! Lost or structural notifications require catch-up for files populated
+        !! before the directory subscription. This scan runs only on an event.
+        type(change_watch_t), intent(inout) :: watch
+        character(len=:), allocatable :: files(:)
+        integer :: count, ierr, i
+
+        call proc_scan_files(trim(watch%roots(1)), files, count, ierr)
+        if (ierr /= 0) return
+        do i = 1, count
+            if (.not. change_watch_relevant(watch, trim(files(i)))) cycle
+            if (.not. is_fortran_source(trim(files(i)))) cycle
+            call format_in_place(trim(files(i)))
+            call change_watch_mark_self_written(watch, trim(files(i)))
+        end do
+    end subroutine format_reconciled_tree
 
     subroutine format_in_place(file)
         !! Format one changed file in place with fo's native formatter, so

@@ -6,6 +6,8 @@ module fo_gremlin_supervisor
     use fo_gremlin_context, only: capture_candidate
     use fo_gremlin_request, only: gremlin_request_t, parse_request, is_hex_digest
     use fo_gremlin_generation, only: generation_t
+    use fo_change_watch, only: change_watch_t, change_watch_init, &
+        change_watch_poll, change_watch_close
     use fo_gremlin_journal, only: journal_append, journal_read_page, &
         journal_compact_tail, journal_record_t, JOURNAL_OK, JOURNAL_INVALID, &
         JOURNAL_MAX_RECORD_BYTES
@@ -596,6 +598,7 @@ contains
         type(gremlin_session_t) :: session
         type(gremlin_lease_t) :: active_lease, candidate_lease
         type(generation_t) :: active_generation, candidate_generation
+        type(change_watch_t) :: change_watch
         type(child_t) :: build_child, test_child
         character(len=PATH_LEN) :: message, state_name, last_failed_identity
         character(len=PATH_LEN) :: fatal_message, state_message
@@ -609,7 +612,7 @@ contains
         integer :: registration_error
         integer :: owner_pid, i
         integer :: sequence, campaign_seed, campaign_number, test_index
-        integer(int64) :: next_capture_ms, campaign_started_ms
+        integer(int64) :: capture_debounce_ms, campaign_started_ms
         logical :: have_active, have_candidate, stop_requested, capture_ok
         logical :: capture_failed
         logical :: have_active_lease, have_candidate_lease
@@ -626,6 +629,7 @@ contains
         sequence = 0
         campaign_number = 0
         test_index = 0
+        capture_debounce_ms = 0_int64
         campaign_started_ms = 0_int64
         have_active = .false.
         have_candidate = .false.
@@ -699,9 +703,16 @@ contains
             exitcode = 2
             return
         end if
-        call set_capture_deadline(next_capture_ms)
+        call change_watch_init(change_watch, project_dir, ierr)
+        if (ierr /= 0) then
+            call change_watch_close(change_watch)
+            call release_if_owner(session, state_error, state_message)
+            call error_response('run', 'cannot start Gremlin change watcher', response)
+            exitcode = 2
+            return
+        end if
         call capture_candidate(project_dir, candidate_generation, &
-            capture_ok, registration_error, message)
+            capture_ok, registration_error, message, change_watch=change_watch)
         if (registration_error /= 0) then
             fatal_error = .true.
             fatal_message = 'cannot register captured generation: '//trim(message)
@@ -851,8 +862,8 @@ contains
 
             call maybe_capture_latest(project_dir, session, request, active_generation, &
                 candidate_generation, have_active, have_candidate, last_failed_identity, &
-                build_child, candidate_lease, have_candidate_lease, next_capture_ms, &
-                sequence, capture_failed, ierr, message)
+                build_child, candidate_lease, have_candidate_lease, capture_debounce_ms, &
+                change_watch, sequence, capture_failed, ierr, message)
             if (ierr /= 0) then
                 fatal_message = trim(message)
                 fatal_error = .true.
@@ -874,6 +885,7 @@ contains
             end if
             call fs_sleep_ms(100)
         end do
+        call change_watch_close(change_watch)
 
         if (fatal_error) then
             if (len_trim(fatal_message) == 0) fatal_message = trim(message)
@@ -1004,14 +1016,10 @@ contains
         call simple_response('run', request%lane_id, session%session_id, 'stopped', response)
     end subroutine run_owner
 
-
-
-
-
-
     subroutine maybe_capture_latest(project_dir, session, request, active, candidate, &
             have_active, have_candidate, last_failed, build_child, candidate_lease, &
-            have_candidate_lease, next_capture_ms, sequence, capture_failed, ierr, message)
+            have_candidate_lease, capture_debounce_ms, change_watch, sequence, &
+            capture_failed, ierr, message)
         character(len=*), intent(in) :: project_dir
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(in) :: request
@@ -1023,25 +1031,38 @@ contains
         type(child_t), intent(inout) :: build_child
         type(gremlin_lease_t), intent(inout) :: candidate_lease
         logical, intent(inout) :: have_candidate_lease
-        integer(int64), intent(inout) :: next_capture_ms
+        integer(int64), intent(inout) :: capture_debounce_ms
+        type(change_watch_t), intent(inout) :: change_watch
         integer, intent(inout) :: sequence
         logical, intent(out) :: capture_failed
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
         type(generation_t) :: current
-        logical :: ok
+        character(len=PATH_LEN) :: changed_path
+        logical :: ok, got_event
         integer(int64) :: now_ms
-        integer :: spawn_error, journal_error, release_error
+        integer :: spawn_error, journal_error, release_error, event_type, watch_error
 
         ierr = 0
         message = ''
         capture_failed = .false.
+        call change_watch_poll(change_watch, 0, changed_path, event_type, &
+            got_event, watch_error)
+        if (watch_error /= 0) then
+            ierr = watch_error
+            message = 'Gremlin change watcher reconciliation failed'
+            return
+        end if
         call clock_milliseconds(now_ms)
-        if (now_ms < next_capture_ms) return
-        next_capture_ms = now_ms + 1000_int64
+        if (got_event) then
+            capture_debounce_ms = now_ms + 250_int64
+            return
+        end if
+        if (capture_debounce_ms <= 0_int64 .or. now_ms < capture_debounce_ms) return
+        capture_debounce_ms = 0_int64
         call capture_candidate(project_dir, current, ok, &
-            release_error, message)
+            release_error, message, change_watch)
         if (release_error /= 0) then
             ierr = release_error
             message = 'cannot register captured generation: '//trim(message)
@@ -2049,14 +2070,6 @@ contains
         end do
     end subroutine cancel_owned_process
 
-
-    subroutine set_capture_deadline(deadline)
-        integer(int64), intent(out) :: deadline
-        integer(int64) :: now
-
-        call clock_milliseconds(now)
-        deadline = now + 1000_int64
-    end subroutine set_capture_deadline
 
     subroutine clock_milliseconds(milliseconds)
         integer(int64), intent(out) :: milliseconds

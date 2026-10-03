@@ -6,10 +6,11 @@ module fo_gremlin_context
     use fo_gremlin_generation, only: generation_context_t, generation_input_t, &
         generation_t, generation_capture
     use fo_gremlin_state, only: gremlin_generation_register_at
+    use fo_change_watch, only: change_watch_t, change_watch_add_context
     use fo_process, only: argv_push, process_cancel_pid, process_poll_pid, &
         process_start_argv_logged
-    use fo_util, only: make_tmpfile, read_text_file
-    use fo_fs, only: fs_find_executable, fs_sleep_ms, fs_tree_fingerprint
+    use fo_util, only: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, read_text_file
+    use fo_fs, only: fs_find_executable, fs_sleep_ms, fs_tree_fingerprint, fs_rename
     implicit none
     private
 
@@ -20,12 +21,13 @@ module fo_gremlin_context
 contains
 
     subroutine capture_candidate(project_dir, generation, ok, &
-            registration_error, message)
+            registration_error, message, change_watch)
         character(len=*), intent(in) :: project_dir
         type(generation_t), intent(out) :: generation
         logical, intent(out) :: ok
         integer, intent(out) :: registration_error
         character(len=*), intent(out) :: message
+        type(change_watch_t), intent(inout), optional :: change_watch
 
         type(generation_context_t) :: context
         character(len=PATH_LEN) :: cas_root
@@ -36,6 +38,15 @@ contains
         if (ierr /= 0) then
             ok = .false.
             return
+        end if
+        if (present(change_watch)) then
+            call change_watch_add_context(change_watch, context, ierr)
+            if (ierr /= 0) then
+                message = 'cannot watch Gremlin path dependencies'
+                registration_error = ierr
+                ok = .false.
+                return
+            end if
         end if
         call common_generation_cas_root(cas_root, ierr, message)
         if (ierr /= 0) then
@@ -49,7 +60,35 @@ contains
         call gremlin_generation_register_at(generation%root, ierr, message)
         ok = ierr == 0
         if (ierr /= 0) registration_error = ierr
+        if (.not. ok) return
+        if (.not. present(change_watch)) return
+        change_watch%capture_count = change_watch%capture_count + 1
+        call observe_test_capture(change_watch%capture_count, generation%identity)
     end subroutine capture_candidate
+
+    subroutine observe_test_capture(count, identity)
+        !! Explicit test opt-in: replace one bounded record atomically. Observer
+        !! failure never changes capture success or the production journal.
+        integer, intent(in) :: count
+        character(len=*), intent(in) :: identity
+        character(len=PATH_LEN) :: path, temporary
+        integer :: status, unit, write_status
+
+        call get_environment_variable('FO_GREMLIN_TEST_CAPTURE_COUNTER', path, &
+            status=status)
+        if (status /= 0 .or. len_trim(path) == 0) return
+        call make_sibling_tmpfile(trim(path), temporary)
+        open (newunit=unit, file=trim(temporary), status='new', &
+            action='write', iostat=status)
+        if (status /= 0) return
+        write (unit, '(a,i0,a,a,a)', iostat=write_status) '{"count":', count, &
+            ',"generation":"', identity, '"}'
+        close (unit, iostat=status)
+        if (status == 0 .and. write_status == 0) then
+            status = fs_rename(trim(temporary), trim(path))
+        end if
+        call delete_tmpfile(trim(temporary))
+    end subroutine observe_test_capture
 
     subroutine common_generation_cas_root(root, ierr, message)
         character(len=*), intent(out) :: root
