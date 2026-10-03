@@ -6,8 +6,9 @@ Fortran build cache, incremental rebuild, affected-test selection, MCP server.
 
 Read [PLAN.md](PLAN.md) for the complete Gremlin provider/bootstrapping plan,
 [ROADMAP.md](ROADMAP.md) for adjacent ownership, and workspace master PLAN/AGENTS
-when available. Current delivery is plans only; implementation/tests need a later
-explicit user instruction. Parallel mode uses a luna coordinator and isolated
+when available. The current Gremlin/storage/test-language program is explicitly
+authorized for implementation and verification. Parallel mode uses a luna
+coordinator and isolated
 luna workers; serial mode stays in the main session without subagents. Repeated
 single-task escalation uses native Sol in parallel or the GPT skill in serial.
 
@@ -16,6 +17,17 @@ if MCP cannot reload. Fix fo workflow problems rather than bypassing them. Keep
 worker worktrees/builds isolated, attach concurrent same-place starts to one owner,
 preserve complete CAS keys/atomic link artifacts and bound generated disk use.
 Only the controller promotes main or the globally installed tool.
+
+Dogfood one bounded resident fo gremlin integration lane when the active storage/
+execution contracts make it safe. During development, use Gremlin and focused
+local behavioral oracles; never wait for GitHub CI while independent work exists.
+CI is asynchronous post-submit evidence, not a Gremlin feature. Push each exact
+locally green integrated increment to main; pause unrelated promotions for a
+confirmed current regression.
+
+All test programs, orchestration and assertions are Fortran. Small test-only C
+OS shims are allowed. Remove JavaScript fixtures only after equivalent independent
+Fortran behavioral oracles pass.
 
 ## Build and Test
 

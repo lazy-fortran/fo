@@ -332,7 +332,9 @@ filesystem and execution oracle. Production code never depends on the test
 harness. The frozen baseline `1f8a1a3` had 31 JS fixtures, including
 context-provenance and coverage-restart tests omitted from the earlier count.
 Issue #158 removes ten CLI fixtures through `4c67189`; 19 JS fixtures remain for
-#159--#163 after the earlier campaign-history and self-refresh migrations.
+#159--#163 after the earlier campaign-history and self-refresh migrations. The
+issue is reopened because post-submit full `fpm test` exposed a test-only Fortran
+JSON parser deallocation SIGSEGV that the focused eleven-case run did not expose.
 
 ## Ordered implementation and independent verifiers
 
@@ -602,8 +604,9 @@ completed entries below are retained as prerequisites and evidence:
    dirty/debounce/fingerprint gating so idle Gremlin performs no full captures;
    #165 later reuses the inventory for manifests. Consolidate or deprecate the
    independent `fo watch` check loop.
-2. [#149](https://github.com/lazy-fortran/fo/issues/149): extract request,
-   context, campaign/history and session services from the supervisor.
+2. [#149](https://github.com/lazy-fortran/fo/issues/149): request, context and
+   session extraction are delivered; campaign/history extraction may proceed now,
+   while command extraction follows #154 public-semantic stabilization.
 3. **Complete:** [#150](https://github.com/lazy-fortran/fo/issues/150): converge domain JSON
    on the existing typed parser and shared CLI/MCP validation.
 4. [#151](https://github.com/lazy-fortran/fo/issues/151): pin/hash the exact fo
@@ -613,9 +616,11 @@ completed entries below are retained as prerequisites and evidence:
 6. **Complete:** [#153](https://github.com/lazy-fortran/fo/issues/153): finite deterministic
    randomized coverage epochs with crash-safe current-generation accounting.
 7. [#154](https://github.com/lazy-fortran/fo/issues/154): local-gate facts,
-   ordinary/full verification, semantic events and typed waits.
-8. [#155](https://github.com/lazy-fortran/fo/issues/155): enter quiescence after
-   full green and wake only on relevant shared change events.
+   ordinary/full verification, semantic events and typed waits, including stale
+   token rejection before replacement generation and after owner restart.
+8. [#155](https://github.com/lazy-fortran/fo/issues/155): land sleeping/wake mechanics,
+   then claim full quiescence only after #151/#157 closure is represented, pinned
+   and watched through the shared declared-input inventory.
 9. Register every late behavioral oracle in the post-submit workflow and keep
    the complete matrix as provider-completion/milestone evidence.
 10. [#158](https://github.com/lazy-fortran/fo/issues/158)--[#163](https://github.com/lazy-fortran/fo/issues/163): replace all Node fixtures with standalone Fortran process drivers and remove Node from the test contract.
@@ -625,9 +630,10 @@ completed entries below are retained as prerequisites and evidence:
     multi-build Fortran CI oracle has an explicit 240-second wall budget.
 13. [#170](https://github.com/lazy-fortran/fo/issues/170): give current Gremlin
     tests/runs unique writable execution views without weakening frozen sources.
-14. **Provider complete:** [#171](https://github.com/lazy-fortran/fo/issues/171):
-    Darwin state declarations and canonical-path portability oracles pass on
-    Linux and macOS; #172 still blocks the public lifecycle gate.
+    It follows #154 only to avoid overlapping supervisor writers, not semantically.
+14. **Complete:** [#171](https://github.com/lazy-fortran/fo/issues/171): Darwin
+    state declarations and canonical-path portability oracles pass on Linux and
+    macOS. #172 separately owns the public lifecycle gate.
 15. [#172](https://github.com/lazy-fortran/fo/issues/172): add scoped Darwin
     asynchronous owner/descendant containment and unblock public Gremlin lifecycle.
 16. Deliver the shared store in provider order: [fx #42](https://github.com/lazy-fortran/fx/issues/42),
@@ -691,10 +697,11 @@ Implemented issue state:
   epochs survive stop/crash/restart, priority jumps satisfy unseen obligations,
   reproduction does not earn coverage, and cancelled/stale RUNNING work remains
   unknown with exact counts.
-- #158 is complete through `4c67189`: ten ordinary CLI/build-routing JS
-  fixtures are replaced by standalone Fortran process oracles. The harness and
-  RFC 8259 parser are test-only; the small POSIX C shim is an external dev
-  dependency and does not enter production executables.
+- #158 delivered ten ordinary CLI/build-routing Fortran oracles through
+  `4c67189`, but post-submit run 37160223245 exposed a current test-only JSON
+  parser deallocation SIGSEGV under full `fpm test`. Keep it reopened until the
+  exact triggering mode and an independent stress oracle pass. The harness/C shim
+  remain test-only and must not enter production executables.
 - #160's campaign-history slice is delivered at `361d1ca`: the stale
   per-campaign JavaScript sampler is replaced by an independent Fortran oracle
   for finite epoch order, restart/replay, markers, failure priority and cancelled
@@ -702,7 +709,8 @@ Implemented issue state:
 - #164 is complete at `d482807`: unique descriptor-held temporary publication,
   unstable-hash retry and write/close/crash recovery passed independent review,
   focused current-head testing and three production mutants. Its macOS rerun is
-  blocked before execution by the separate Darwin declaration defect #171.
+  previously blocked on macOS by #171; that declaration defect is now fixed and
+  its optional platform rerun is no longer blocked.
 - #169 is complete through `af5d144`: ordinary self-builds remain worktree-private,
   exact selected profiles survive cache hits, explicit install is the only global
   publication path, the inverse Node oracle is replaced by Fortran, and its cold
@@ -710,7 +718,7 @@ Implemented issue state:
 - #171 provider work is delivered through `9331c04`: Darwin selects its native
   feature declarations before headers, the negative compile oracle proves the
   former macro defect, and state/portability/supervisor tests pass on Linux and
-  macOS. Keep the issue open until #172 lets the public lifecycle gate run.
+  macOS. The declaration issue is closed; #172 owns the separate public lifecycle gate.
 - #172 owns the subsequently exposed `ENOTSUP` from Linux-only asynchronous
   descendant containment; macOS state/supervisor providers pass, while public
   Gremlin start/status/stop remains blocked until scoped Darwin ownership lands.
