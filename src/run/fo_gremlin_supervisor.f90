@@ -1,13 +1,12 @@
 module fo_gremlin_supervisor
     use, intrinsic :: iso_fortran_env, only: int64
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, c_long_long
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_build_backend, only: BACKEND_NATIVE, backend_t, detect_backend
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_check, only: fo_changed_modules
-    use fo_fpm_config, only: DEP_PATH, fpm_config_t, fpm_config_parse, dep_kind
+    use fo_gremlin_context, only: capture_candidate
     use fo_gremlin_request, only: gremlin_request_t, parse_request, is_hex_digest
-    use fo_gremlin_generation, only: generation_context_t, generation_input_t, &
-        generation_t, generation_capture
+    use fo_gremlin_generation, only: generation_t
     use fo_gremlin_journal, only: journal_append, journal_read_page, &
         journal_compact_tail, journal_record_t, JOURNAL_OK, JOURNAL_INVALID, JOURNAL_IO_ERROR, &
         JOURNAL_MAX_RECORD_BYTES
@@ -26,12 +25,10 @@ module fo_gremlin_supervisor
     use fo_process, only: argv_push, process_cancel_pid, &
         process_poll_pid, process_start_argv_logged
     use fo_scan_types, only: MAX_PATH
-    use fo_util, only: extract_json_field, json_bool, json_int, make_tmpfile, &
-        read_text_file
+    use fo_util, only: extract_json_field, json_bool, json_int, make_tmpfile
     use fx_dag, only: dag_t, MAX_NODES
     use fx_json_build, only: json_escape_string
-    use fo_fs, only: fs_find_executable, fs_make_dir, fs_sleep_ms, &
-        fs_tree_fingerprint, fs_remove_file
+    use fo_fs, only: fs_find_executable, fs_make_dir, fs_sleep_ms, fs_remove_file
     implicit none
     private
 
@@ -1408,259 +1405,10 @@ contains
         call simple_response('run', request%lane_id, session%session_id, 'stopped', response)
     end subroutine run_owner
 
-    subroutine capture_candidate(project_dir, generation, ok, &
-            registration_error, message)
-        character(len=*), intent(in) :: project_dir
-        type(generation_t), intent(out) :: generation
-        logical, intent(out) :: ok
-        integer, intent(out) :: registration_error
-        character(len=*), intent(out) :: message
 
-        type(generation_context_t) :: context
-        character(len=PATH_LEN) :: cas_root
-        integer :: ierr
 
-        registration_error = 0
-        call capture_context(project_dir, context, ierr, message)
-        if (ierr /= 0) then
-            ok = .false.
-            return
-        end if
-        call common_generation_cas_root(cas_root, ierr, message)
-        if (ierr /= 0) then
-            ok = .false.
-            return
-        end if
-        call generation_capture(project_dir, trim(cas_root), context, generation, &
-            ierr, message)
-        ok = ierr == 0
-        if (.not. ok) return
-        call gremlin_generation_register_at(generation%root, ierr, message)
-        ok = ierr == 0
-        if (ierr /= 0) registration_error = ierr
-    end subroutine capture_candidate
 
-    subroutine common_generation_cas_root(root, ierr, message)
-        character(len=*), intent(out) :: root
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
 
-        character(len=PATH_LEN) :: base
-        integer :: length, status
-
-        root = ''
-        base = ''
-        call get_environment_variable('FO_GREMLIN_STATE_DIR', base, length, status)
-        if (status == -1 .or. length >= len(base)) then
-            ierr = 1
-            message = 'FO_GREMLIN_STATE_DIR exceeds the supported path length'
-            return
-        end if
-        if (length <= 0) then
-            base = ''
-            call get_environment_variable('XDG_CACHE_HOME', base, length, status)
-            if (status == -1 .or. length >= len(base)) then
-                ierr = 1
-                message = 'XDG_CACHE_HOME exceeds the supported path length'
-                return
-            end if
-        end if
-        if (length <= 0) then
-            base = ''
-            call get_environment_variable('HOME', base, length, status)
-            if (status /= 0 .or. length <= 0 .or. length >= len(base)) then
-                ierr = 1
-                message = 'no shared Gremlin state base directory is available'
-                return
-            end if
-            base = trim(base(:length))//'/.cache'
-            length = len_trim(base)
-        end if
-        if (length + len('/fo') > len(root)) then
-            ierr = 1
-            message = 'shared Gremlin generation CAS path exceeds the supported length'
-            return
-        end if
-        root = trim(base(:length))//'/fo'
-        ierr = 0
-        message = ''
-    end subroutine common_generation_cas_root
-
-    subroutine capture_context(project_dir, context, ierr, message)
-        character(len=*), intent(in) :: project_dir
-        type(generation_context_t), intent(out) :: context
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-
-        type(fpm_config_t), allocatable :: config
-        type(generation_input_t), allocatable :: inputs(:)
-        character(len=PATH_LEN) :: compiler_path, command_path
-        character(len=:), allocatable :: packed
-        character(len=PATH_LEN) :: log_file, output_line
-        character(len=128) :: base_commit
-        character(len=131072) :: git_status
-        character(len=256) :: fingerprint
-        integer(c_long_long) :: tree_sum, tree_mixed, tree_count
-        integer :: i, n_inputs, n_args, exitcode, git_exit
-        logical :: found, git_found, fingerprint_ok
-
-        ierr = 0
-        message = ''
-        context%toolchain = ''
-        context%flags = ''
-        context%environment = ''
-        context%base_commit = ''
-        context%patch_digest = ''
-        allocate (config)
-        call fpm_config_parse(project_dir, config, ierr)
-        if (ierr /= 0) then
-            message = 'cannot parse fpm.toml for generation inputs'
-            return
-        end if
-        n_inputs = 0
-        do i = 1, config%n_deps
-            if (dep_kind(config%deps(i)) == DEP_PATH) n_inputs = n_inputs + 1
-        end do
-        do i = 1, config%n_dev_deps
-            if (dep_kind(config%dev_deps(i)) == DEP_PATH) n_inputs = n_inputs + 1
-        end do
-        allocate (inputs(n_inputs))
-        n_inputs = 0
-        do i = 1, config%n_deps
-            if (dep_kind(config%deps(i)) /= DEP_PATH) cycle
-            call append_path_dependency(project_dir, config%deps(i)%path, &
-                config%deps(i)%name, inputs, n_inputs, ierr, message)
-            if (ierr /= 0) return
-        end do
-        do i = 1, config%n_dev_deps
-            if (dep_kind(config%dev_deps(i)) /= DEP_PATH) cycle
-            call append_path_dependency(project_dir, config%dev_deps(i)%path, &
-                config%dev_deps(i)%name, inputs, n_inputs, ierr, message)
-            if (ierr /= 0) return
-        end do
-        context%inputs = inputs
-        do i = 1, config%n_flags
-            context%flags = context%flags//' '//trim(config%flags(i))
-        end do
-        call fs_find_executable('gfortran', compiler_path, found)
-        if (.not. found) then
-            context%toolchain = 'gfortran-unresolved'
-        else
-            call make_tmpfile('fo-gremlin-compiler', log_file)
-            n_args = 0
-            call argv_push(packed, n_args, trim(compiler_path))
-            call argv_push(packed, n_args, '--version')
-            call process_start_argv_logged(project_dir, packed, n_args, log_file, i, exitcode)
-            if (exitcode == 0) then
-                call process_wait_bounded(i, 10, exitcode)
-                if (exitcode == 0) then
-                    call read_first_line(log_file, output_line)
-                    context%toolchain = trim(compiler_path)//':'//trim(output_line)
-                else
-                    context%toolchain = trim(compiler_path)//':version-unavailable'
-                end if
-            else
-                context%toolchain = trim(compiler_path)//':version-unavailable'
-            end if
-        end if
-        call append_environment_value(context%environment, 'FC')
-        call append_environment_value(context%environment, 'FFLAGS')
-        call append_environment_value(context%environment, 'FPM_FC')
-        call append_environment_value(context%environment, 'FPM_FFLAGS')
-        call append_environment_value(context%environment, 'OMP_NUM_THREADS')
-        call make_tmpfile('fo-gremlin-git-head', log_file)
-        call fs_find_executable('git', command_path, found)
-        git_found = found
-        if (found) then
-            n_args = 0
-            call argv_push(packed, n_args, trim(command_path))
-            call argv_push(packed, n_args, 'rev-parse')
-            call argv_push(packed, n_args, 'HEAD')
-            call process_start_argv_logged(project_dir, packed, n_args, log_file, &
-                i, git_exit)
-            if (git_exit == 0) call process_wait_bounded(i, 10, git_exit)
-            if (git_exit == 0) then
-                call read_first_line(log_file, output_line)
-                base_commit = trim(output_line)
-            else
-                base_commit = 'unavailable'
-            end if
-        else
-            base_commit = 'unavailable'
-        end if
-        context%base_commit = trim(base_commit)
-        call fs_tree_fingerprint(project_dir, .true., tree_sum, tree_mixed, &
-            tree_count, fingerprint_ok)
-        if (fingerprint_ok) then
-            write (fingerprint, '(i0,":",i0,":",i0)') tree_sum, tree_mixed, tree_count
-        else
-            fingerprint = 'fingerprint-unavailable'
-        end if
-        call make_tmpfile('fo-gremlin-git-diff', log_file)
-        if (git_found) then
-            n_args = 0
-            call argv_push(packed, n_args, trim(command_path))
-            call argv_push(packed, n_args, 'diff')
-            call argv_push(packed, n_args, '--binary')
-            call argv_push(packed, n_args, 'HEAD')
-            call process_start_argv_logged(project_dir, packed, n_args, log_file, &
-                i, git_exit)
-            if (git_exit == 0) call process_wait_bounded(i, 20, git_exit)
-            if (git_exit == 0) then
-                call read_text_file(log_file, git_status)
-                context%patch_digest = text_digest(trim(git_status)//'|'//trim(fingerprint))
-            else
-                context%patch_digest = text_digest('git-diff-unavailable|'//trim(fingerprint))
-            end if
-        else
-            context%patch_digest = text_digest('git-unavailable|'//trim(fingerprint))
-        end if
-    end subroutine capture_context
-
-    subroutine append_environment_value(environment, name)
-        character(len=*), intent(inout) :: environment
-        character(len=*), intent(in) :: name
-        character(len=512) :: value
-        integer :: length, status
-
-        value = ''
-        call get_environment_variable(name, value, length, status)
-        if (status /= 0 .or. length <= 0) return
-        if (len_trim(environment) > 0) environment = trim(environment)//';'
-        environment = trim(environment)//trim(name)//'='//value(:min(length, len(value)))
-    end subroutine append_environment_value
-
-    subroutine append_path_dependency(project_dir, dep_path, dep_name, inputs, &
-            n_inputs, ierr, message)
-        character(len=*), intent(in) :: project_dir, dep_path, dep_name
-        type(generation_input_t), intent(inout) :: inputs(:)
-        integer, intent(inout) :: n_inputs
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-
-        integer :: i
-
-        ierr = 0
-        message = ''
-        if (len_trim(dep_path) == 0) return
-        if (dep_path(1:1) == '/') then
-            ierr = 1
-            message = 'absolute fpm path dependencies cannot be frozen safely'
-            return
-        end if
-        do i = 1, n_inputs
-            if (trim(inputs(i)%destination) == trim(dep_path)) return
-        end do
-        if (n_inputs >= size(inputs)) then
-            ierr = 1
-            message = 'too many path dependencies to freeze'
-            return
-        end if
-        n_inputs = n_inputs + 1
-        inputs(n_inputs)%label = 'dependency:'//trim(dep_name)
-        inputs(n_inputs)%source_root = trim(project_dir)//'/'//trim(dep_path)
-        inputs(n_inputs)%destination = trim(dep_path)
-    end subroutine append_path_dependency
 
     subroutine maybe_capture_latest(project_dir, session, request, active, candidate, &
             have_active, have_candidate, last_failed, build_child, candidate_lease, &
@@ -2702,18 +2450,6 @@ contains
         end do
     end subroutine cancel_owned_process
 
-    subroutine read_first_line(path, line)
-        character(len=*), intent(in) :: path
-        character(len=*), intent(out) :: line
-        integer :: unit, ios
-
-        line = ''
-        open (newunit=unit, file=trim(path), status='old', action='read', iostat=ios)
-        if (ios /= 0) return
-        read (unit, '(a)', iostat=ios) line
-        close (unit)
-        if (ios /= 0) line = ''
-    end subroutine read_first_line
 
     subroutine set_capture_deadline(deadline)
         integer(int64), intent(out) :: deadline
