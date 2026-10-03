@@ -3,6 +3,7 @@ module fo_gremlin_supervisor
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, c_long_long
     use fo_build_backend, only: BACKEND_NATIVE, backend_t, detect_backend
     use fo_cache, only: HASH_LEN, cache_digest
+    use fx_hash, only: sha256_file
     use fo_check, only: fo_changed_modules
     use fo_fpm_config, only: DEP_PATH, fpm_config_t, fpm_config_parse, dep_kind
     use fo_gremlin_generation, only: generation_context_t, generation_input_t, &
@@ -30,7 +31,7 @@ module fo_gremlin_supervisor
     use fx_dag, only: dag_t, MAX_NODES
     use fx_json_build, only: json_escape_string
     use fo_fs, only: fs_find_executable, fs_make_dir, fs_sleep_ms, &
-        fs_tree_fingerprint, fs_remove_file
+        fs_tree_fingerprint, fs_remove_file, fs_copy_exec
     implicit none
     private
 
@@ -40,6 +41,9 @@ module fo_gremlin_supervisor
     integer, parameter :: MAX_LANE_LEN = 96
     integer, parameter :: GREMLIN_HISTORY_LIMIT = 128
     integer, parameter :: GREMLIN_POLICY_RECEIPT_LIMIT = 512
+
+    character(len=PATH_LEN), save :: pinned_driver_source = ''
+    character(len=HASH_LEN), save :: pinned_driver_digest = ''
 
     interface
         function c_terminal_journal_path(project, lane, session, path, cap) &
@@ -1146,7 +1150,8 @@ contains
         character(len=HASH_LEN) :: stored_policy
         integer :: ierr, owner_pid, pid, spawn_exit, i, n_args
         character(len=:), allocatable :: packed
-        character(len=PATH_LEN) :: executable, log_file
+        character(len=PATH_LEN) :: executable, launch_executable, log_file
+        character(len=HASH_LEN) :: driver_digest
         logical :: executable_ok
 
         exitcode = 0
@@ -1212,9 +1217,17 @@ contains
             exitcode = 2
             return
         end if
+        call pin_driver_to(session, 'launch-driver', executable, launch_executable, &
+            driver_digest, ierr, message)
+        if (ierr /= 0) then
+            call error_response('start', 'cannot pin the Gremlin driver: '// &
+                trim(message), response)
+            exitcode = 2
+            return
+        end if
         call make_tmpfile('fo-gremlin-launch', log_file)
         n_args = 0
-        call argv_push(packed, n_args, trim(executable))
+        call argv_push(packed, n_args, trim(launch_executable))
         call argv_push(packed, n_args, 'gremlin')
         call argv_push(packed, n_args, 'run')
         call argv_push(packed, n_args, '--dir')
@@ -1474,6 +1487,10 @@ contains
         generation%identity = active_identity
         generation%root = generation_root
         generation%project_root = active_project
+        generation%driver_path = trim(active_project)//'/build/fo-gremlin-driver/fo'
+        inquire (file=trim(generation%driver_path), exist=executable_ok)
+        if (executable_ok) call sha256_file(trim(generation%driver_path), &
+            generation%driver_digest, ierr)
         call gremlin_generation_lease_acquire_at(generation%root, reproduction_lease, &
             ierr, message)
         if (ierr /= 0) then
@@ -1518,12 +1535,12 @@ contains
             exitcode = 2
             return
         end if
-        call find_self_executable(executable, executable_ok)
-        if (.not. executable_ok) then
+        if (len_trim(generation%driver_path) == 0 .or. &
+            len_trim(generation%driver_digest) /= HASH_LEN) then
             call release_generation_lease(reproduction_lease, have_reproduction_lease, &
                 release_error, cleanup_message)
             call release_if_owner(session, ierr, message)
-            call error_response('reproduce', 'cannot locate the current fo executable', &
+            call error_response('reproduce', 'requested generation has no pinned fo driver', &
                 response)
             exitcode = 2
             return
@@ -1535,7 +1552,7 @@ contains
         write (reproduction_id, '(i0)') sequence
         call log_path(session, 'reproduce-'//trim(reproduction_id)//'.log', log_file)
         n_args = 0
-        call argv_push(packed, n_args, trim(executable))
+        call argv_push(packed, n_args, trim(generation%driver_path))
         call argv_push(packed, n_args, 'test')
         call argv_push(packed, n_args, trim(request%case_id))
         call process_start_argv_logged(trim(active_project), packed, n_args, &
@@ -1597,6 +1614,7 @@ contains
         character(len=PATH_LEN) :: message, state_name, last_failed_identity
         character(len=PATH_LEN) :: fatal_message, state_message
         character(len=PATH_LEN) :: owner_start
+        character(len=PATH_LEN) :: executable, owner_driver
         character(len=NAME_LEN) :: selected(MAX_NODES)
         character(len=HASH_LEN) :: stored_policy
         character(len=65536) :: status_text
@@ -1612,6 +1630,7 @@ contains
         logical :: have_active_lease, have_candidate_lease
         logical :: active_pinned, candidate_pinned
         logical :: build_done, test_done, fatal_error
+        logical :: executable_ok
 
         exitcode = 0
         active_generation = generation_t()
@@ -1673,6 +1692,28 @@ contains
             end if
             call simple_response('run', request%lane_id, trim(stored_session_id), &
                 'attached', response)
+            return
+        end if
+        call find_self_executable(executable, executable_ok)
+        if (.not. executable_ok) then
+            call release_if_owner(session, state_error, state_message)
+            call error_response('run', 'cannot locate the current fo executable', response)
+            exitcode = 2
+            return
+        end if
+        call pin_driver_to(session, 'pinned-driver', executable, owner_driver, &
+            pinned_driver_digest, ierr, message)
+        if (ierr /= 0) then
+            call release_if_owner(session, state_error, state_message)
+            call error_response('run', 'cannot pin the Gremlin driver: '// &
+                trim(message), response)
+            exitcode = 2
+            return
+        end if
+        if (len_trim(owner_driver) == 0) then
+            call release_if_owner(session, state_error, state_message)
+            call error_response('run', 'pinned fo driver path is empty', response)
+            exitcode = 2
             return
         end if
         call recover_owner_journal(project_dir, session, ierr, message)
@@ -2110,14 +2151,7 @@ contains
             message = 'cannot parse fpm.toml for generation inputs'
             return
         end if
-        n_inputs = 0
-        do i = 1, config%n_deps
-            if (dep_kind(config%deps(i)) == DEP_PATH) n_inputs = n_inputs + 1
-        end do
-        do i = 1, config%n_dev_deps
-            if (dep_kind(config%dev_deps(i)) == DEP_PATH) n_inputs = n_inputs + 1
-        end do
-        allocate (inputs(n_inputs))
+        allocate (inputs(count_path_dependencies(config) + 1))
         n_inputs = 0
         do i = 1, config%n_deps
             if (dep_kind(config%deps(i)) /= DEP_PATH) cycle
@@ -2131,7 +2165,18 @@ contains
                 config%dev_deps(i)%name, inputs, n_inputs, ierr, message)
             if (ierr /= 0) return
         end do
+        if (len_trim(pinned_driver_source) == 0 .or. &
+            len_trim(pinned_driver_digest) /= HASH_LEN) then
+            ierr = 1
+            message = 'Gremlin driver was not pinned before generation capture'
+            return
+        end if
+        n_inputs = n_inputs + 1
+        inputs(n_inputs)%label = 'fo-driver'
+        inputs(n_inputs)%source_root = directory_name(trim(pinned_driver_source))
+        inputs(n_inputs)%destination = 'build/fo-gremlin-driver'
         context%inputs = inputs
+        context%driver_digest = pinned_driver_digest
         do i = 1, config%n_flags
             context%flags = context%flags//' '//trim(config%flags(i))
         end do
@@ -2209,6 +2254,18 @@ contains
             context%patch_digest = text_digest('git-unavailable|'//trim(fingerprint))
         end if
     end subroutine capture_context
+
+    integer function count_path_dependencies(config) result(count)
+        type(fpm_config_t), intent(in) :: config
+        integer :: i
+        count = 0
+        do i = 1, config%n_deps
+            if (dep_kind(config%deps(i)) == DEP_PATH) count = count + 1
+        end do
+        do i = 1, config%n_dev_deps
+            if (dep_kind(config%dev_deps(i)) == DEP_PATH) count = count + 1
+        end do
+    end function count_path_dependencies
 
     subroutine append_environment_value(environment, name)
         character(len=*), intent(inout) :: environment
@@ -2363,21 +2420,19 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
-        character(len=PATH_LEN) :: executable
         character(len=:), allocatable :: packed
         integer :: n_args, spawn_exit
-        logical :: executable_ok
 
         child = child_t()
-        call find_self_executable(executable, executable_ok)
-        if (.not. executable_ok) then
+        if (len_trim(generation%driver_path) == 0 .or. &
+            len_trim(generation%driver_digest) /= HASH_LEN) then
             ierr = 1
-            message = 'cannot locate the current fo executable'
+            message = 'candidate generation has no pinned fo driver'
             return
         end if
         call log_path(session, 'build-'//generation%identity(1:16), child%log_file)
         n_args = 0
-        call argv_push(packed, n_args, trim(executable))
+        call argv_push(packed, n_args, trim(generation%driver_path))
         call argv_push(packed, n_args, 'build')
         call process_start_argv_logged(trim(generation%project_root), packed, &
             n_args, trim(child%log_file), child%pid, spawn_exit, &
@@ -2759,26 +2814,25 @@ contains
         character(len=*), intent(out) :: message
         integer, intent(inout) :: sequence
 
-        character(len=PATH_LEN) :: executable, log_name
+        character(len=PATH_LEN) :: log_name
         character(len=PATH_LEN) :: journal_message
         character(len=:), allocatable :: packed
         integer :: n_args, spawn_exit, journal_status
-        logical :: executable_ok
 
         child = child_t()
         ierr = 0
         message = ''
         if (index_case < 1 .or. index_case > n_selected) return
-        call find_self_executable(executable, executable_ok)
-        if (.not. executable_ok) then
+        if (len_trim(generation%driver_path) == 0 .or. &
+            len_trim(generation%driver_digest) /= HASH_LEN) then
             ierr = 1
-            message = 'cannot locate the current fo executable'
+            message = 'active generation has no pinned fo driver'
             return
         end if
         write (log_name, '(a,i0,a,i0,a)') 'case-', campaign, '-', index_case, '.log'
         call log_path(session, trim(log_name), child%log_file)
         n_args = 0
-        call argv_push(packed, n_args, trim(executable))
+        call argv_push(packed, n_args, trim(generation%driver_path))
         call argv_push(packed, n_args, 'test')
         call argv_push(packed, n_args, trim(selected(index_case)))
         call process_start_argv_logged(trim(generation%project_root), packed, &
@@ -2928,6 +2982,11 @@ contains
             '","session_id":"'//trim(json_escape_string(session%session_id))// &
             '","lane_id":"'//trim(json_escape_string(request%lane_id))// &
             '","generation":"'//generation%identity// &
+            '","driver_digest":"'//trim(generation%driver_digest)// &
+            '","base_commit":"'//trim(json_escape_string( &
+            generation_text(generation%base_commit)))// &
+            '","patch_digest":"'//trim(json_escape_string( &
+            generation_text(generation%patch_digest)))// &
             '","case_id":"'//trim(json_escape_string(case_name))// &
             '","outcome":"'//trim(journal_outcome)//'","status":"'// &
             trim(outcome)//'","exitcode":'// &
@@ -3004,7 +3063,8 @@ contains
         status_text = '{"protocol":1,"session_id":"'// &
             trim(json_escape_string(session%session_id))//'","lane_id":"'// &
             trim(json_escape_string(request%lane_id))//'","policy_key":"'// &
-            request_policy_key(request)//'","state":"'//trim(state)// &
+            request_policy_key(request)//'","driver_digest":"'// &
+            trim(pinned_driver_digest)//'","state":"'//trim(state)// &
             '","active_generation":"'//trim(active%identity)// &
             '","candidate_generation":"'//trim(candidate%identity)// &
             '","active_project":"'//trim(json_escape_string(active_project))// &
@@ -3020,6 +3080,13 @@ contains
         if (present(message)) message = local_message
         if (present(status_text_out)) status_text_out = trim(status_text)
     end subroutine publish_state
+
+    function generation_text(value) result(text)
+        character(len=:), allocatable, intent(in) :: value
+        character(len=:), allocatable :: text
+        text = ''
+        if (allocated(value)) text = value
+    end function generation_text
 
     subroutine response_with_events(action, status_text, session, request, failures_only, &
             response, ierr, message)
@@ -3247,6 +3314,52 @@ contains
         end if
         call fs_find_executable('fo', path, ok)
     end subroutine find_self_executable
+
+    subroutine pin_driver_to(session, subdirectory, source, pinned, digest, ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        character(len=*), intent(in) :: subdirectory, source
+        character(len=*), intent(out) :: pinned, digest, message
+        integer, intent(out) :: ierr
+        integer :: rc
+
+        pinned = trim(session%state_dir)//'/'//trim(subdirectory)//'/fo'
+        digest = ''
+        message = ''
+        call fs_make_dir(trim(session%state_dir)//'/'//trim(subdirectory))
+        rc = fs_copy_exec(trim(source), trim(pinned))
+        if (rc /= 0) then
+            ierr = rc
+            message = 'cannot copy the running executable into session storage'
+            return
+        end if
+        call sha256_file(trim(pinned), digest, rc)
+        if (rc /= 0) then
+            ierr = rc
+            message = 'cannot hash the pinned fo executable'
+            return
+        end if
+        if (len_trim(digest) /= HASH_LEN) then
+            ierr = 1
+            message = 'cannot hash the pinned fo executable'
+            return
+        end if
+        pinned_driver_source = trim(pinned)
+        pinned_driver_digest = trim(digest)
+        ierr = 0
+    end subroutine pin_driver_to
+
+    function directory_name(path) result(parent)
+        character(len=*), intent(in) :: path
+        character(len=PATH_LEN) :: parent
+        integer :: slash
+        slash = index(trim(path), '/', back=.true.)
+        parent = ''
+        if (slash > 1) then
+            parent = path(:slash - 1)
+        else if (slash == 1) then
+            parent = '/'
+        end if
+    end function directory_name
 
     subroutine log_path(session, filename, path)
         type(gremlin_session_t), intent(in) :: session

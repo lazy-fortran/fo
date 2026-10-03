@@ -374,15 +374,21 @@ program test_gremlin_generation
     call generation_capture(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
-        metadata_changed%identity /= build_source_changed%identity, &
-        'base commit changes invalidate generation identity')
+        metadata_changed%identity == build_source_changed%identity, &
+        'base commit is provenance and does not change execution identity')
     context%base_commit = 'base-commit'
     context%patch_digest = 'different-patch-digest'
     call generation_capture(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
+        metadata_changed%identity == build_source_changed%identity, &
+        'patch digest is provenance and does not change execution identity')
+    context%driver_digest = repeat('a', 64)
+    call generation_capture(trim(project), trim(cache), context, metadata_changed, &
+        race_ierr, message)
+    call check(race_ierr == 0 .and. &
         metadata_changed%identity /= build_source_changed%identity, &
-        'patch digest changes invalidate generation identity')
+        'fo driver digest changes execution identity')
 
     race_project = trim(root)//'/race-project'
     call fs_make_dir(trim(race_project)//'/src')
