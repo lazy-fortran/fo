@@ -117,9 +117,9 @@ function prepare() {
     'syscall:',
     '  cmpq $SYS_pidfd_send_signal, %rdi',
     '  je fo_test_pidfd_signal@PLT',
-    '  movq fo_test_real_syscall@GOTPCREL(%rip), %rax',
-    '  movq (%rax), %rax',
-    '  jmp *%rax',
+    '  movq fo_test_real_syscall@GOTPCREL(%rip), %r11',
+    '  movq (%r11), %r11',
+    '  jmp *%r11',
     '.size syscall, .-syscall',
     '.section .note.GNU-stack,"",@progbits', ''
   ].join('\n'));
@@ -294,7 +294,12 @@ async function cleanupOwned(owner, pid, identity, gracefulMs) {
       }
     }
   }
-  try { await waitForServerGroupGone(owner); } catch (error) { errors.push(error); }
+  try { await waitForServerGroupGone(owner, 250); } catch (_) {
+    try {
+      signalOwnedServerGroup(owner, 'SIGKILL');
+      await waitForServerGroupGone(owner);
+    } catch (error) { errors.push(error); }
+  }
   if (pid > 1 && identity) {
     try { await waitForSleepExit(pid, identity, 1000); } catch (_) {
       try {
@@ -484,8 +489,69 @@ async function main() {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
 
-main().catch(error => {
+async function verifyStubbornGroupCleanup() {
+  const stubbornCode = [
+    "const fs = require('node:fs');",
+    "process.on('SIGTERM', () => fs.writeFileSync(process.argv[2], 'TERM'));",
+    'fs.writeFileSync(process.argv[1], String(process.pid));',
+    'setInterval(() => {}, 1000);'
+  ].join(' ');
+  const leaderCode = [
+    "const { spawn } = require('node:child_process');",
+    `spawn(process.execPath, ['-e', ${JSON.stringify(stubbornCode)},`,
+    '  process.argv[1], process.argv[3]],',
+    "  { stdio: 'ignore' });",
+    "process.on('SIGTERM', () => process.exit(0));",
+    "if (process.argv[2] === 'before') process.exit(0);",
+    'setInterval(() => {}, 1000);'
+  ].join(' ');
+  for (const mode of ['after', 'before']) {
+    const marker = path.join(scratch, `stubborn-${mode}.pid`);
+    const termMarker = path.join(scratch, `stubborn-${mode}.term`);
+    const child = spawn(process.execPath, ['-e', leaderCode, marker, mode,
+      termMarker],
+      { detached: true, stdio: 'ignore' });
+    const identity = procIdentity(child.pid);
+    assert.ok(identity && identity.pgrp === child.pid &&
+      identity.session === child.pid, 'probe leader owns its process group');
+    const owner = { child, identity, waitForExit(timeoutMs) {
+      if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('probe leader did not exit')),
+          timeoutMs);
+        child.once('exit', () => { clearTimeout(timer); resolve(); });
+      });
+    } };
+    let stubbornPid = 0;
+    let stubbornIdentity = null;
+    try {
+      const deadline = Date.now() + 5000;
+      while (!fs.existsSync(marker) && Date.now() < deadline) await delay(25);
+      assert.ok(fs.existsSync(marker), 'stubborn group member started');
+      stubbornPid = Number(fs.readFileSync(marker, 'utf8'));
+      stubbornIdentity = procIdentity(stubbornPid);
+      assert.ok(isLiveIdentity(stubbornPid, stubbornIdentity) &&
+        stubbornIdentity.pgrp === child.pid &&
+        stubbornIdentity.session === child.pid,
+      'stubborn member belongs to the recorded group');
+      if (mode === 'before') await owner.waitForExit(3000);
+      await cleanupOwned(owner, 0, null, 50);
+      await waitForSleepExit(stubbornPid, stubbornIdentity, 3000);
+      assert.equal(fs.existsSync(termMarker), mode === 'after',
+        'the stubborn member received TERM only while its leader was alive');
+      console.log(`mcp-cancel-error: stubborn group member cleaned after ${mode}`);
+    } finally {
+      try { signalOwnedServerGroup(owner, 'SIGKILL'); } catch (_) { /* report above */ }
+      try { signalTrackedSleeper(stubbornPid, stubbornIdentity, 'SIGKILL'); }
+      catch (_) { /* report above */ }
+    }
+  }
+  fs.rmSync(scratch, { recursive: true, force: true });
+}
+
+(process.argv[3] === '--cleanup-probe' ? verifyStubbornGroupCleanup() : main())
+  .catch(error => {
   console.error(error);
   fs.rmSync(scratch, { recursive: true, force: true });
   process.exitCode = 1;
-});
+  });
