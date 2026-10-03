@@ -197,7 +197,9 @@ contains
             context%toolchain = 'gfortran-unresolved'
         else
             call make_tmpfile('fo-gremlin-compiler', log_file)
+            packed = ''
             n_args = 0
+            output_line = ''
             call argv_push(packed, n_args, trim(compiler_path))
             call argv_push(packed, n_args, '--version')
             call process_start_argv_logged(project_dir, packed, n_args, log_file, i, exitcode)
@@ -222,7 +224,9 @@ contains
         call fs_find_executable('git', command_path, found)
         git_found = found
         if (found) then
+            packed = ''
             n_args = 0
+            output_line = ''
             call argv_push(packed, n_args, trim(command_path))
             call argv_push(packed, n_args, 'rev-parse')
             call argv_push(packed, n_args, 'HEAD')
@@ -246,9 +250,12 @@ contains
         else
             fingerprint = 'fingerprint-unavailable'
         end if
+        git_status = ''
         call make_tmpfile('fo-gremlin-git-diff', log_file)
         if (git_found) then
+            packed = ''
             n_args = 0
+            output_line = ''
             call argv_push(packed, n_args, trim(command_path))
             call argv_push(packed, n_args, 'diff')
             call argv_push(packed, n_args, '--binary')

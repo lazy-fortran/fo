@@ -195,6 +195,9 @@ async function main() {
     const activeGeneration = status(lane, session).active_generation;
     assert.equal(activeGeneration?.length, 64, 'test runs on a built generation');
     fs.writeFileSync(versionHold, 'hold the next synchronous capture');
+    // Directory timestamps are watched metadata without changing input files.
+    const metadataTime = new Date();
+    fs.utimesSync(project, metadataTime, metadataTime);
     await waitFor(() => versionWaitsForOwner(owner),
       'owner capture to wait on gfortran --version', 5000);
     assert.ok(Date.now() - startedAt < (timeoutSeconds - 1) * 1000,

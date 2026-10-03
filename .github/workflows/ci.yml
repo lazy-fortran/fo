@@ -90,6 +90,9 @@ jobs:
       - name: Test Gremlin campaign history
         run: node test/test_gremlin_campaign_history.js "$(command -v fo)"
 
+      - name: Test Gremlin context provenance
+        run: node test/test_gremlin_context_provenance.js "$(command -v fo)"
+
       - name: Test Gremlin timeout ordering
         run: node test/test_gremlin_timeout_order.js "$(command -v fo)"
 
