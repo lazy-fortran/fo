@@ -911,27 +911,37 @@ contains
         character(len=128), intent(out) :: names(:)
         integer, intent(out) :: n_names
 
-        integer :: p, q, len_line
+        character(len=MAX_LINE) :: args_json, name
+        integer :: p, args_count, ierr, name_length, i
 
         n_names = 0
-        len_line = len(line)
-        p = index(line, '"args"')
-        if (p == 0) return
-        q = index(line(p:len_line), '[')
-        if (q == 0) return
-        p = p + q - 1
+        call extract_json_member(line, 'args', args_json, args_count, ierr)
+        if (ierr /= 0 .or. args_count /= 1) return
+        p = 1
+        call skip_json_space(args_json, p)
+        if (p > len_trim(args_json)) return
+        if (args_json(p:p) /= '[') return
+        p = p + 1
 
-        do while (p <= len_line)
-            q = index(line(p:len_line), '"')
-            if (q == 0) exit
-            p = p + q
-            q = index(line(p:len_line), '"')
-            if (q == 0) exit
+        do while (p <= len_trim(args_json))
+            call skip_json_space(args_json, p)
+            if (p > len_trim(args_json)) exit
+            if (args_json(p:p) == ']') exit
+            if (args_json(p:p) /= '"') exit
+            call read_json_string(args_json, p, name, ierr, name_length)
+            if (ierr /= 0) exit
             if (n_names < size(names)) then
                 n_names = n_names + 1
-                names(n_names) = line(p:p + q - 2)
+                names(n_names) = ''
+                do i = 1, min(name_length, len(names))
+                    names(n_names)(i:i) = name(i:i)
+                end do
             end if
-            p = p + q
+            call skip_json_space(args_json, p)
+            if (p > len_trim(args_json)) exit
+            if (args_json(p:p) == ']') exit
+            if (args_json(p:p) /= ',') exit
+            p = p + 1
         end do
     end subroutine extract_test_names_from_params
 

@@ -48,8 +48,7 @@ function callNamedTest(name) {
       protocolVersion: '2025-11-25', capabilities: {},
     } },
     { jsonrpc: '2.0', id: 2, method: 'tools/call', params: {
-      // Current extraction scans quoted values after args, so keep it last.
-      name: 'fo', arguments: { action: 'test', dir: project, json: 'full', args: [name] },
+      name: 'fo', arguments: { action: 'test', dir: project, args: [name], json: 'full' },
     } },
     { jsonrpc: '2.0', id: 3, method: 'shutdown' },
   ];
