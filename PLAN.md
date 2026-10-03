@@ -226,6 +226,36 @@ Root/controller remains responsible for integration, main commits and pushes.
 
 ## Cache, concurrent starts and disk budget
 
+Use one storage architecture for ordinary fo and Gremlin:
+
+```text
+immutable fx store: blobs + tree manifests + action-result manifests
+                              │
+                              ▼
+compact fo input generation → lane-private transactional build session
+                              │
+                 ┌────────────┴────────────┐
+                 ▼                         ▼
+        one-shot fo build/test      Gremlin supervisor loop
+```
+
+Ordinary fo and Gremlin call the same one-generation build/test engine. Gremlin
+adds watching, last-compilable activation, coverage and ownership policy; it
+does not own another cache or recursively run a public fo build inside a shared
+writable generation directory. Generation identity is a compact manifest over
+shared immutable source/dependency blobs. Mutable object/module/link output
+lives in a lane/session-owned working directory and becomes usable only through
+an atomic successful-session commit.
+
+The shared store uses raw content IDs for bytes and canonical manifests for
+roles, modes, names and tree/action structure. Publishing an existing verified
+blob performs no rewrite. Equal action/result publication is idempotent; one
+action ID producing different result IDs is durable nondeterminism or an
+incomplete-key error, never last-writer-wins. Optional Linux reflink and macOS
+clone materialization are optimizations with byte-copy fallback. No database,
+cache daemon or application-level bulk RAM cache is introduced; the filesystem
+and OS page cache remain the storage substrate.
+
 Canonicalize project/worktree identity and lane/config namespace. One native
 supervisor owns the worktree session and lane registry. Two starts in the same
 namespace must acquire-or-attach **one** owner atomically, returning its stable
@@ -261,6 +291,29 @@ configured disk budget reports pinned usage and coverage/retention debt rather
 than deleting valuable uncommitted work, active artifacts or unique evidence.
 Test repeated no-op starts and many short generations for bounded disk growth;
 measure bytes rather than asserting that cleanup probably works.
+
+fx owns immutable-store publication, action results and rooted collection. fo
+owns semantic roots and private build-session lifetimes. Replace the global
+Boolean generation pin with independently releasable owner/reason roots before
+automatic collection. Maintain the store through infrequent thresholded bounded
+sweeps; unchanged reads and idle Gremlin status do not rewrite access metadata
+or scan the store. Legacy store/v1 and copied generations are lazily validated
+and imported while live old owners remain protected.
+
+## Test implementation language
+
+All fo test programs, orchestration and assertions are Fortran. Small C shims
+may expose OS process, signal, FIFO, symlink and monotonic-clock facilities that
+Fortran does not portably provide. End-to-end tests remain separate processes
+driving the public CLI/MCP boundary; process-boundary independence does not
+require JavaScript. A test-only Fortran JSON parser validates protocol output
+without sharing the production parser.
+
+Issues #158--#163 migrate every current JavaScript fixture in behavior-preserving
+slices, then remove Node from CI. Each old fixture is deleted only after its
+Fortran replacement preserves or strengthens the crash, concurrency, JSON,
+filesystem and execution oracle. Production code never depends on the test
+harness.
 
 ## Ordered implementation and independent verifiers
 
@@ -537,6 +590,9 @@ are:
    full green and wake only on relevant shared change events.
 9. Register every late behavioral oracle in the post-submit workflow and keep
    the complete matrix as provider-completion/milestone evidence.
+10. [#158](https://github.com/lazy-fortran/fo/issues/158)--[#163](https://github.com/lazy-fortran/fo/issues/163): replace all Node fixtures with standalone Fortran process drivers and remove Node from the test contract.
+11. [#164](https://github.com/lazy-fortran/fo/issues/164): make stat-memo publication cross-process safe.
+12. [fx #42](https://github.com/lazy-fortran/fx/issues/42), [fx #43](https://github.com/lazy-fortran/fx/issues/43), [fo #165](https://github.com/lazy-fortran/fo/issues/165)--[#168](https://github.com/lazy-fortran/fo/issues/168), and [fx #44](https://github.com/lazy-fortran/fx/issues/44): converge generation capture, action outputs, private build sessions, ordinary fo and Gremlin on one immutable store and engine with rooted low-churn collection.
 
 Experimental agent scheduler PR #147 is closed without merge; #143 and #152 are
 closed as not planned. External controllers own worker DAGs, worktrees, model
