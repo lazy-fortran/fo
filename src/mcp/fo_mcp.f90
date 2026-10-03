@@ -834,7 +834,9 @@ contains
 
     subroutine handle_backend_test_named(line, id_str, dir, tmpfile, response)
         use fo_build_backend, only: backend_t, detect_backend, backend_test, &
-            backend_test_names, BACKEND_NONE
+            backend_test_names, BACKEND_NONE, BACKEND_NATIVE
+        use fo_gfortran_build, only: gfortran_named_test_exists
+        use fo_scan, only: is_slow_test
         use fx_dag, only: MAX_NODES
         use fo_test_results, only: test_result_entry_t, parse_test_results, &
             format_test_results_human, format_test_results_json
@@ -849,7 +851,7 @@ contains
         character(len=128) :: test_names(MAX_NODES)
         integer :: n_names
         type(test_result_entry_t), allocatable :: entries(:)
-        integer :: n_entries, ierr
+        integer :: n_entries, ierr, i
 
         b = detect_backend(trim(dir))
         if (b%kind == BACKEND_NONE) then
@@ -863,6 +865,24 @@ contains
         call extract_test_names_from_params(line, test_names, n_names)
 
         if (n_names > 0) then
+            do i = 1, n_names
+                if (b%kind == BACKEND_NATIVE) then
+                    if (.not. gfortran_named_test_exists(b%project_dir, &
+                        test_names(i))) then
+                        output_text = 'fo: unknown test: '//trim(test_names(i))
+                        call delete_tmpfile(tmpfile)
+                        call make_tool_text_response(id_str, output_text, 1, response)
+                        return
+                    end if
+                end if
+                if (is_slow_test(test_names(i))) then
+                    output_text = 'fo: slow test '//trim(test_names(i))// &
+                        ' requires --all'
+                    call delete_tmpfile(tmpfile)
+                    call make_tool_text_response(id_str, output_text, 1, response)
+                    return
+                end if
+            end do
             call backend_test_names(b, test_names, n_names, exitcode, &
                 log_file=tmpfile)
         else
