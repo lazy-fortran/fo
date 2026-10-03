@@ -26,6 +26,7 @@ const denyKillFile = path.join(scratch, 'deny-kill');
 const killLog = path.join(scratch, 'kill-attempts.log');
 let server;
 let sleepPid = 0;
+let sleepIdentity = null;
 
 function prepare() {
   fs.mkdirSync(path.join(project, 'test'), { recursive: true });
@@ -50,8 +51,7 @@ function prepare() {
   const cSource = path.join(scratch, 'fail_kill.c');
   fs.writeFileSync(cSource, [
     '#define _GNU_SOURCE', '#include <dlfcn.h>', '#include <errno.h>',
-    '#include <fcntl.h>', '#include <signal.h>', '#include <stdarg.h>',
-    '#include <stdio.h>', '#include <sys/syscall.h>',
+    '#include <fcntl.h>', '#include <signal.h>', '#include <stdio.h>',
     '#include <stdlib.h>', '#include <time.h>',
     '#include <sys/types.h>', '#include <unistd.h>',
     'typedef int (*kill_fn)(pid_t, int);',
@@ -88,39 +88,15 @@ function prepare() {
     '  }',
     '  return 0;',
     '}',
-    'long syscall(long number, ...) {',
-    '  static long (*real_syscall)(long, ...) = NULL;',
-    '  va_list args;',
-    '  long result;',
-    '  va_start(args, number);',
-    '#if defined(SYS_pidfd_send_signal)',
-    '  if (number == SYS_pidfd_send_signal) {',
-    '    int fd = va_arg(args, int);',
-    '    int sig = va_arg(args, int);',
-    '    void *info = va_arg(args, void *);',
-    '    unsigned int flags = va_arg(args, unsigned int);',
-    '    va_end(args);',
-    '    if (deny_signal(sig)) return -1;',
-    '    if (real_syscall == NULL) real_syscall = dlsym(RTLD_NEXT, "syscall");',
-    '    return real_syscall(number, fd, sig, info, flags);',
-    '  }',
-    '#endif',
-    '#if defined(SYS_pidfd_open)',
-    '  if (number == SYS_pidfd_open) {',
-    '    pid_t pid = va_arg(args, pid_t);',
-    '    unsigned int flags = va_arg(args, unsigned int);',
-    '    va_end(args);',
-    '    if (real_syscall == NULL) real_syscall = dlsym(RTLD_NEXT, "syscall");',
-    '    return real_syscall(number, pid, flags);',
-    '  }',
-    '#endif',
-    '  long a1 = va_arg(args, long), a2 = va_arg(args, long);',
-    '  long a3 = va_arg(args, long), a4 = va_arg(args, long);',
-    '  long a5 = va_arg(args, long), a6 = va_arg(args, long);',
-    '  va_end(args);',
-    '  if (real_syscall == NULL) real_syscall = dlsym(RTLD_NEXT, "syscall");',
-    '  result = real_syscall(number, a1, a2, a3, a4, a5, a6);',
-    '  return result;',
+    'long (*fo_test_real_syscall)(long, ...) = NULL;',
+    '__attribute__((constructor)) static void resolve_syscall(void) {',
+    '  fo_test_real_syscall = dlsym(RTLD_NEXT, "syscall");',
+    '  if (fo_test_real_syscall == NULL) abort();',
+    '}',
+    'long fo_test_pidfd_signal(long number, int fd, int sig,',
+    '                          void *info, unsigned int flags) {',
+    '  if (deny_signal(sig)) return -1;',
+    '  return fo_test_real_syscall(number, fd, sig, info, flags);',
     '}',
     'int kill(pid_t pid, int sig) {',
     '  static kill_fn real_kill = NULL;',
@@ -131,7 +107,24 @@ function prepare() {
     '}',
     'int killpg(pid_t pgrp, int sig) { return kill(-pgrp, sig); }', ''
   ].join('\n'));
-  const compiled = spawnSync('cc', ['-shared', '-fPIC', '-o', shim, cSource, '-ldl'],
+  const asmSource = path.join(scratch, 'forward_syscall.S');
+  fs.writeFileSync(asmSource, [
+    '#include <sys/syscall.h>',
+    '#if !defined(__linux__) || !defined(__x86_64__) || !defined(SYS_pidfd_send_signal)',
+    '#error "this cancellation fixture requires Linux x86-64 pidfds"',
+    '#endif',
+    '.text', '.globl syscall', '.type syscall, @function',
+    'syscall:',
+    '  cmpq $SYS_pidfd_send_signal, %rdi',
+    '  je fo_test_pidfd_signal@PLT',
+    '  movq fo_test_real_syscall@GOTPCREL(%rip), %rax',
+    '  movq (%rax), %rax',
+    '  jmp *%rax',
+    '.size syscall, .-syscall',
+    '.section .note.GNU-stack,"",@progbits', ''
+  ].join('\n'));
+  const compiled = spawnSync('cc',
+    ['-shared', '-fPIC', '-o', shim, cSource, asmSource, '-ldl'],
     { encoding: 'utf8', maxBuffer: 1024 * 1024 });
   assert.equal(compiled.status, 0, compiled.stdout + compiled.stderr);
   env.PATH = `${bin}:${env.PATH || process.env.PATH}`;
@@ -142,7 +135,10 @@ function prepare() {
 
 function startServer() {
   const child = spawn(executable, ['mcp-server'], { cwd: project, env,
-    stdio: ['pipe', 'pipe', 'pipe'] });
+    stdio: ['pipe', 'pipe', 'pipe'], detached: true });
+  const identity = procIdentity(child.pid);
+  assert.ok(identity && identity.pgrp === child.pid && identity.session === child.pid,
+    'MCP server owns its separate process group');
   let buffer = '';
   let stderr = '';
   const pending = [];
@@ -182,7 +178,7 @@ function startServer() {
       child.once('exit', onExit);
     });
   }
-  return { child, request, rpc, waitForExit };
+  return { child, identity, request, rpc, waitForExit };
 }
 
 function body(response) {
@@ -197,7 +193,10 @@ async function waitForSleepPid(timeoutMs = 20000) {
   while (Date.now() < deadline) {
     if (fs.existsSync(sleepPidFile)) {
       const pid = Number(fs.readFileSync(sleepPidFile, 'utf8').trim());
-      if (Number.isInteger(pid) && pid > 1) return pid;
+      const identity = procIdentity(pid);
+      if (Number.isInteger(pid) && pid > 1 && isLiveIdentity(pid, identity)) {
+        return { pid, identity };
+      }
     }
     await new Promise(resolve => setTimeout(resolve, 25));
   }
@@ -211,24 +210,105 @@ async function waitForSleepPid(timeoutMs = 20000) {
   throw new Error(`fixture sleep child did not start: ${detail}`);
 }
 
-function pidState(pid) {
+function procIdentity(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
   try {
     const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
     const end = stat.lastIndexOf(')');
-    return end >= 0 ? stat.slice(end + 1).trimStart()[0] : null;
+    if (end < 0) return null;
+    const fields = stat.slice(end + 1).trim().split(/\s+/);
+    if (fields.length < 20) return null;
+    return { state: fields[0], pgrp: Number(fields[2]),
+      session: Number(fields[3]), startTime: fields[19] };
   } catch (_) {
     return null;
   }
 }
 
-async function waitForSleepExit(pid, timeoutMs = 5000) {
+function isLiveIdentity(pid, identity) {
+  const current = procIdentity(pid);
+  return identity && current && current.startTime === identity.startTime &&
+    current.state !== 'Z' && current.state !== 'X';
+}
+
+async function waitForSleepExit(pid, identity, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const state = pidState(pid);
-    if (state === null || state === 'Z' || state === 'X') return;
+    const current = procIdentity(pid);
+    if (!current || current.startTime !== identity.startTime) return;
     await new Promise(resolve => setTimeout(resolve, 25));
   }
-  throw new Error(`fixture sleep child ${pid} remained alive after retry`);
+  throw new Error(`fixture sleep child ${pid} remained in /proc after retry`);
+}
+
+function ownedServerGroupMembers(owner) {
+  const leader = procIdentity(owner.child.pid);
+  if (leader && leader.startTime !== owner.identity.startTime) return [];
+  return fs.readdirSync('/proc').filter(name => /^\d+$/.test(name))
+    .map(name => ({ pid: Number(name), identity: procIdentity(Number(name)) }))
+    .filter(({ identity }) => identity && identity.pgrp === owner.child.pid);
+}
+
+function signalOwnedServerGroup(owner, signal) {
+  const members = ownedServerGroupMembers(owner);
+  if (members.length === 0) return;
+  assert.ok(members.every(({ identity }) =>
+    identity.session === owner.child.pid &&
+    BigInt(identity.startTime) >= BigInt(owner.identity.startTime)),
+  'server process group still has the recorded owner identity');
+  try { process.kill(-owner.child.pid, signal); } catch (error) {
+    if (error.code !== 'ESRCH') throw error;
+  }
+}
+
+function signalTrackedSleeper(pid, identity, signal) {
+  if (!isLiveIdentity(pid, identity)) return;
+  try { process.kill(pid, signal); } catch (error) {
+    if (error.code !== 'ESRCH') throw error;
+  }
+}
+
+async function waitForServerGroupGone(owner, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (ownedServerGroupMembers(owner).length === 0) return;
+    await delay(25);
+  }
+  throw new Error(`MCP server group ${owner.child.pid} remained in /proc`);
+}
+
+async function cleanupOwned(owner, pid, identity, gracefulMs) {
+  const errors = [];
+  if (owner.child.exitCode === null && owner.child.signalCode === null) {
+    try { await owner.waitForExit(gracefulMs); } catch (_) {
+      try {
+        signalTrackedSleeper(pid, identity, 'SIGTERM');
+        signalOwnedServerGroup(owner, 'SIGTERM');
+        try { await owner.waitForExit(3000); } catch (_) {
+          signalTrackedSleeper(pid, identity, 'SIGKILL');
+          signalOwnedServerGroup(owner, 'SIGKILL');
+          await owner.waitForExit(3000);
+        }
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+  }
+  try { await waitForServerGroupGone(owner); } catch (error) { errors.push(error); }
+  if (pid > 1 && identity) {
+    try { await waitForSleepExit(pid, identity, 1000); } catch (_) {
+      try {
+        signalTrackedSleeper(pid, identity, 'SIGTERM');
+        try { await waitForSleepExit(pid, identity, 1000); } catch (_) {
+          signalTrackedSleeper(pid, identity, 'SIGKILL');
+          await waitForSleepExit(pid, identity, 1000);
+        }
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+  }
+  if (errors.length) throw new AggregateError(errors, 'owned fixture cleanup failed');
 }
 
 function deniedAttemptsFor(callerPid) {
@@ -245,6 +325,7 @@ function delay(milliseconds) {
 
 async function verifyEofRetryBackoff() {
   let persistentSleepPid = 0;
+  let persistentSleepIdentity = null;
   let persistentRunId = 0;
   env.FO_TEST_CANCEL_FAIL_COUNT = '0';
   fs.writeFileSync(denyKillFile, 'deny SIGTERM until this file is removed\n');
@@ -262,8 +343,9 @@ async function verifyEofRetryBackoff() {
       { action: 'check', mode: 'start', root: project }));
     persistentRunId = start.json.run_id;
     assert.ok(persistentRunId > 0, 'persistent-denial check started');
-    persistentSleepPid = await waitForSleepPid();
-    assert.ok(pidState(persistentSleepPid) !== null,
+    ({ pid: persistentSleepPid, identity: persistentSleepIdentity } =
+      await waitForSleepPid());
+    assert.ok(isLiveIdentity(persistentSleepPid, persistentSleepIdentity),
       'owned sleeper is live before EOF');
 
     const deniedCancel = await server.rpc(12,
@@ -290,7 +372,7 @@ async function verifyEofRetryBackoff() {
     assert.equal(server.child.exitCode, null,
       'EOF does not let the server exit while cancellation is denied');
     assert.equal(server.child.signalCode, null);
-    assert.ok(pidState(persistentSleepPid) !== null,
+    assert.ok(isLiveIdentity(persistentSleepPid, persistentSleepIdentity),
       'owned sleeper remains live while cancellation is denied');
     assert.ok(eofAttempts.length >= requiredAttempts,
       `EOF retry loop made only ${eofAttempts.length} denied attempts`);
@@ -308,7 +390,7 @@ async function verifyEofRetryBackoff() {
 
     fs.unlinkSync(denyKillFile);
     await server.waitForExit(10000);
-    await waitForSleepExit(persistentSleepPid, 5000);
+    await waitForSleepExit(persistentSleepPid, persistentSleepIdentity, 5000);
     assert.equal(server.child.exitCode, 0,
       'server exits normally after cancellation succeeds');
     console.log('mcp-cancel-error: EOF keeps ownership through persistent EPERM, '
@@ -325,24 +407,8 @@ async function verifyEofRetryBackoff() {
       if (!server.child.stdin.destroyed && !server.child.stdin.writableEnded) {
         server.child.stdin.end();
       }
-      try { await server.waitForExit(10000); } catch (_) {
-        server.child.kill('SIGTERM');
-        try { await server.waitForExit(3000); } catch (_) {
-          server.child.kill('SIGKILL');
-          await server.waitForExit(3000);
-        }
-      }
     }
-    if (persistentSleepPid > 1) {
-      const state = pidState(persistentSleepPid);
-      if (state !== null && state !== 'Z' && state !== 'X') {
-        try { process.kill(persistentSleepPid, 'SIGTERM'); } catch (_) { /* gone */ }
-        try { await waitForSleepExit(persistentSleepPid, 1000); } catch (_) {
-          try { process.kill(persistentSleepPid, 'SIGKILL'); } catch (_) { /* gone */ }
-          await waitForSleepExit(persistentSleepPid, 1000);
-        }
-      }
-    }
+    await cleanupOwned(server, persistentSleepPid, persistentSleepIdentity, 10000);
   }
 }
 
@@ -361,8 +427,9 @@ async function main() {
     assert.equal(start.isError, false);
     runId = start.json.run_id;
     assert.ok(runId > 0, 'async check started');
-    sleepPid = await waitForSleepPid();
-    assert.ok(pidState(sleepPid) !== null, 'fixture sleep PID is live before shutdown');
+    ({ pid: sleepPid, identity: sleepIdentity } = await waitForSleepPid());
+    assert.ok(isLiveIdentity(sleepPid, sleepIdentity),
+      'fixture sleep PID is live before shutdown');
 
     const failedCancel = await server.rpc(2, { action: 'cancel', run_id: runId });
     assert.ok(fs.existsSync(injected), 'LD_PRELOAD injected EPERM on the first SIGTERM');
@@ -374,7 +441,8 @@ async function main() {
     assert.equal(stillRunning.json.state, 'running',
       'failed cancellation preserves the active PID and run handle');
     assert.equal(stillRunning.json.run_id, runId);
-    assert.ok(pidState(sleepPid) !== null, 'sleep child remains while cancellation failed');
+    assert.ok(isLiveIdentity(sleepPid, sleepIdentity),
+      'sleep child remains live while cancellation failed');
 
     const failedShutdown = await server.request(4, 'shutdown');
     assert.equal(failedShutdown.error.code, -32603,
@@ -388,7 +456,7 @@ async function main() {
     const retried = body(await server.rpc(6, { action: 'cancel', run_id: runId }));
     assert.equal(retried.isError, false, 'a later cancellation can complete');
     assert.equal(retried.json.cancelled, true);
-    await waitForSleepExit(sleepPid);
+    await waitForSleepExit(sleepPid, sleepIdentity);
     const finished = body(await server.rpc(7, { action: 'status' }));
     assert.equal(finished.json.state, 'finished');
     const shutdown = await server.request(8, 'shutdown');
@@ -397,13 +465,6 @@ async function main() {
     console.log('mcp-cancel-error: first EPERM preserves cancellation ownership; '
       + 'shutdown failure remains active; retry exits the sleeping child and server');
   } finally {
-    if (!sleepPid) {
-      try {
-        if (fs.existsSync(sleepPidFile)) {
-          sleepPid = Number(fs.readFileSync(sleepPidFile, 'utf8').trim());
-        }
-      } catch (_) { /* no fixture PID was recorded */ }
-    }
     if (server && runId > 0 && server.child.exitCode === null &&
         server.child.signalCode === null) {
       for (let attempt = 0; attempt < 3; attempt++) {
@@ -416,24 +477,8 @@ async function main() {
     }
     if (server && server.child.exitCode === null && server.child.signalCode === null) {
       try { await server.request(99, 'shutdown'); } catch (_) { /* forced reap below */ }
-      try { await server.waitForExit(5000); } catch (_) {
-        server.child.kill('SIGTERM');
-        try { await server.waitForExit(5000); } catch (_) {
-          server.child.kill('SIGKILL');
-          await server.waitForExit(5000);
-        }
-      }
     }
-    if (sleepPid > 1) {
-      const state = pidState(sleepPid);
-      if (state !== null && state !== 'Z' && state !== 'X') {
-        try { process.kill(sleepPid, 'SIGTERM'); } catch (_) { /* already exited */ }
-        try { await waitForSleepExit(sleepPid, 1000); } catch (_) {
-          try { process.kill(sleepPid, 'SIGKILL'); } catch (_) { /* already exited */ }
-          await waitForSleepExit(sleepPid, 1000);
-        }
-      }
-    }
+    await cleanupOwned(server, sleepPid, sleepIdentity, 5000);
   }
   await verifyEofRetryBackoff();
   fs.rmSync(scratch, { recursive: true, force: true });
