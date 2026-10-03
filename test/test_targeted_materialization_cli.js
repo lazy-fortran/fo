@@ -9,9 +9,22 @@ const installed = process.argv[2];
 const driver = installed || process.env.FO || 'fo';
 const scratch = fs.mkdtempSync('/var/tmp/fo-targeted-materialization-');
 const markerPath = `${scratch}.marker`;
+const envScratch = `${scratch}.env`;
+const envPaths = {
+  HOME: path.join(envScratch, 'home'),
+  XDG_CONFIG_HOME: path.join(envScratch, 'xdg-config'),
+  XDG_CACHE_HOME: path.join(envScratch, 'xdg-cache'),
+  FO_PREFIX: path.join(envScratch, 'prefix'),
+  FO_CACHE_DIR: path.join(envScratch, 'fo-cache'),
+  FO_GREMLIN_STATE_DIR: path.join(envScratch, 'gremlin-state')
+};
+for (const dir of Object.values(envPaths)) fs.mkdirSync(dir, { recursive: true });
 const options = {
   encoding: 'utf8', maxBuffer: 8 * 1024 * 1024,
-  env: { ...process.env, TMPDIR: '/var/tmp', FO_JOBS: '2' }
+  env: {
+    ...process.env, ...envPaths, TMPDIR: '/var/tmp', FO_JOBS: '2',
+    FO_SELF_REFRESH: '0', FO_DISABLE_SELF_REFRESH: '1'
+  }
 };
 
 function run(name) {
@@ -58,4 +71,5 @@ try {
 } finally {
   fs.rmSync(markerPath, { force: true });
   fs.rmSync(scratch, { recursive: true, force: true });
+  fs.rmSync(envScratch, { recursive: true, force: true });
 }
