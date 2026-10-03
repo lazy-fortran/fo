@@ -3,7 +3,7 @@ module fo_gremlin_journal
     use, intrinsic :: iso_fortran_env, only: int64
     implicit none
     private
-    public :: journal_append, journal_read_page, journal_record_t
+    public :: journal_append, journal_read_page, journal_compact_tail, journal_record_t
     public :: JOURNAL_OK, JOURNAL_INVALID, JOURNAL_IO_ERROR
     public :: JOURNAL_CONFLICT, JOURNAL_TOO_LARGE
     public :: JOURNAL_MAX_RECORD_BYTES
@@ -35,6 +35,14 @@ module fo_gremlin_journal
             character(kind=c_char), intent(in) :: record(*)
             integer(c_int) :: status
         end function fo_c_gremlin_journal_validate_record
+
+        function fo_c_gremlin_journal_compact_tail(path, max_records) &
+                bind(C, name='fo_c_gremlin_journal_compact_tail') result(status)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: max_records
+            integer(c_int) :: status
+        end function fo_c_gremlin_journal_compact_tail
     end interface
 
 contains
@@ -72,6 +80,27 @@ contains
             message = 'journal append or durability sync failed'
         end select
     end subroutine journal_append
+
+    subroutine journal_compact_tail(path, max_records, status, message)
+        character(len=*), intent(in) :: path
+        integer, intent(in) :: max_records
+        integer, intent(out) :: status
+        character(len=*), intent(out) :: message
+        integer(c_int) :: c_status
+
+        status = JOURNAL_INVALID
+        message = 'invalid journal path or retention limit'
+        if (len_trim(path) == 0 .or. max_records < 1) return
+        c_status = fo_c_gremlin_journal_compact_tail(trim(path)//c_null_char, &
+            int(max_records, c_int))
+        status = int(c_status)
+        if (status == JOURNAL_OK) then
+            message = ''
+        else
+            status = JOURNAL_IO_ERROR
+            message = 'cannot compact bounded campaign journal'
+        end if
+    end subroutine journal_compact_tail
 
     subroutine journal_read_page(path, byte_cursor, max_records, max_bytes, &
             records, next_cursor, status, message)

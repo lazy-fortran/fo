@@ -8,7 +8,7 @@ module fo_gremlin_supervisor
     use fo_gremlin_generation, only: generation_context_t, generation_input_t, &
         generation_t, generation_capture
     use fo_gremlin_journal, only: journal_append, journal_read_page, &
-        journal_record_t, JOURNAL_OK, JOURNAL_INVALID, JOURNAL_IO_ERROR, &
+        journal_compact_tail, journal_record_t, JOURNAL_OK, JOURNAL_INVALID, JOURNAL_IO_ERROR, &
         JOURNAL_MAX_RECORD_BYTES
     use fo_gremlin_policy, only: select_gremlin_tests, shuffle_gremlin_tests, &
         GREMLIN_POLICY_OK
@@ -37,6 +37,8 @@ module fo_gremlin_supervisor
     integer, parameter :: DEFAULT_RANDOM = 32, DEFAULT_CAMPAIGN = 60
     integer, parameter :: DEFAULT_CASE_TIMEOUT = 5, MAX_CASE_TIMEOUT = 5
     integer, parameter :: MAX_LANE_LEN = 96
+    integer, parameter :: GREMLIN_HISTORY_LIMIT = 128
+    integer, parameter :: GREMLIN_POLICY_RECEIPT_LIMIT = 512
 
     interface
         function c_terminal_journal_path(project, lane, session, path, cap) &
@@ -1492,7 +1494,7 @@ contains
         selection_request%targets(1) = request%case_id
         selection_request%n_targets = 1
         selection_request%random_count = 0
-        call discover_campaign(trim(active_project), selection_request, selected, &
+        call discover_campaign(trim(active_project), session, selection_request, selected, &
             n_selected, mandatory_count, seed, ierr, message)
         if (ierr /= 0 .or. n_selected == 0) then
             call release_generation_lease(reproduction_lease, have_reproduction_lease, &
@@ -1625,6 +1627,7 @@ contains
         campaign_seed = request%seed
         if (campaign_seed == 0) then
             call system_clock(campaign_seed)
+            if (campaign_seed == 0) campaign_seed = 1
         end if
         fatal_error = .false.
         fatal_message = ''
@@ -2397,7 +2400,8 @@ contains
         logical, intent(inout) :: have_active_lease, have_candidate_lease
         logical, intent(inout) :: active_pinned, candidate_pinned
         character(len=*), intent(out) :: selected(:)
-        integer, intent(out) :: selected_count, seed
+        integer, intent(out) :: selected_count
+        integer, intent(inout) :: seed
         integer, intent(in) :: completed
         character(len=*), intent(out) :: state_name, last_failed
         integer, intent(inout) :: sequence
@@ -2405,12 +2409,15 @@ contains
         character(len=*), intent(out) :: message
 
         type(gremlin_lease_t) :: new_active_lease
+        type(gremlin_request_t) :: selection_request
         integer :: inventory_status, cancel_exit, mandatory_count, state_status
         integer :: release_status, pin_status
         character(len=PATH_LEN) :: state_message, release_message
+        logical :: was_active
 
         ierr = 0
         message = ''
+        was_active = have_active
         call record_build(session, request, candidate, build_exit, build_child%log_file, &
             sequence, ierr, message)
         if (ierr /= 0) return
@@ -2511,7 +2518,10 @@ contains
             have_candidate_lease = .false.
         end if
         last_failed = ''
-        call discover_campaign(active%project_root, request, selected, selected_count, &
+        if (was_active) seed = next_campaign_seed(seed)
+        selection_request = request
+        selection_request%seed = seed
+        call discover_campaign(active%project_root, session, selection_request, selected, selected_count, &
             mandatory_count, seed, inventory_status, message)
         if (inventory_status /= 0) then
             state_name = 'inventory_failed'
@@ -2532,9 +2542,10 @@ contains
             seed, 'NONE', 0, ierr, message)
     end subroutine complete_build
 
-    subroutine discover_campaign(project_dir, request, selected, n_selected, &
+    subroutine discover_campaign(project_dir, session, request, selected, n_selected, &
             n_mandatory_selected, seed, ierr, message)
         character(len=*), intent(in) :: project_dir
+        type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(in) :: request
         character(len=*), intent(out) :: selected(:)
         integer, intent(out) :: n_selected, n_mandatory_selected, seed, ierr
@@ -2544,10 +2555,11 @@ contains
         type(dag_t) :: dag
         integer :: changed_ids(MAX_NODES), affected_ids(MAX_NODES)
         integer :: n_changed, n_affected, n_cached, i, n_all, n_impacted
+        integer :: n_history, n_debt, debt_cursor, cursor_seed
         integer :: candidate_ids(MAX_NODES), shuffle_status
         character(len=MAX_PATH) :: filenames(MAX_NODES)
         character(len=NAME_LEN) :: all_names(MAX_NODES), impacted(MAX_NODES)
-        character(len=NAME_LEN) :: history(0), debt(0)
+        character(len=NAME_LEN) :: history(MAX_NODES), debt(MAX_NODES)
         logical :: is_test_arr(MAX_NODES)
 
         selected = ''
@@ -2556,8 +2568,8 @@ contains
         n_mandatory_selected = 0
         seed = request%seed
         if (seed == 0) then
-            call system_clock(i)
-            seed = i
+            call system_clock(seed)
+            if (seed == 0) seed = 1
         end if
         backend = detect_backend(project_dir)
         ierr = 0
@@ -2579,6 +2591,9 @@ contains
         end do
         call gfortran_selected_test_names(project_dir, filenames, candidate_ids, &
             dag%n_nodes, .false., all_names, n_all)
+        call read_campaign_history(session, all_names, n_all, history, n_history, &
+            debt, n_debt, cursor_seed, ierr, message)
+        if (ierr /= 0) return
         if (request%only_changed) then
             n_impacted = 0
             call gfortran_selected_test_names(project_dir, filenames, affected_ids, &
@@ -2586,10 +2601,12 @@ contains
         else
             n_impacted = 0
         end if
+        debt_cursor = 1
+        if (n_debt > 0) debt_cursor = modulo(cursor_seed, n_debt) + 1
         call select_gremlin_tests(all_names, n_all, request%targets, &
-            request%n_targets, impacted, n_impacted, history, 0, debt, 0, &
+            request%n_targets, impacted, n_impacted, history, n_history, debt, n_debt, &
             request%random_count, seed, selected, n_selected, ierr, &
-            n_mandatory_selected=n_mandatory_selected)
+            debt_cursor=debt_cursor, n_mandatory_selected=n_mandatory_selected)
         if (ierr /= GREMLIN_POLICY_OK) then
             message = 'Gremlin selection rejected test inventory or requested targets'
             return
@@ -2603,6 +2620,119 @@ contains
             end if
         end if
     end subroutine discover_campaign
+
+    subroutine read_campaign_history(session, inventory, n_inventory, history, &
+            n_history, debt, n_debt, cursor_seed, ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        character(len=*), intent(in) :: inventory(:)
+        integer, intent(in) :: n_inventory
+        character(len=*), intent(out) :: history(:), debt(:)
+        integer, intent(out) :: n_history, n_debt, cursor_seed, ierr
+        character(len=*), intent(out) :: message
+
+        type(journal_record_t), allocatable :: records(:)
+        character(len=NAME_LEN) :: case_name
+        character(len=16) :: status_name, seed_text
+        character(len=PATH_LEN) :: path
+        integer(int64) :: cursor, next_cursor
+        integer :: journal_status, i, seed_value, ios
+        logical :: exists
+
+        history = ''
+        debt = ''
+        n_history = 0
+        n_debt = 0
+        cursor_seed = 0
+        ierr = 0
+        message = ''
+        path = trim(session%state_dir)//'/campaign-journal.jsonl'
+        inquire(file=trim(path), exist=exists)
+        if (.not. exists) return
+        cursor = 0_int64
+        do
+            call journal_read_page(trim(path), cursor, 64, &
+                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, &
+                next_cursor, journal_status, message)
+            if (journal_status /= JOURNAL_OK) then
+                ierr = journal_status
+                return
+            end if
+            if (size(records) == 0) exit
+            do i = 1, size(records)
+                case_name = ''
+                status_name = ''
+                seed_text = ''
+                call extract_json_field(records(i)%json, 'case_id', case_name)
+                call extract_json_field(records(i)%json, 'status', status_name)
+                call extract_json_field(records(i)%json, 'seed', seed_text)
+                if (.not. any(inventory(:n_inventory) == case_name)) cycle
+                if (status_name /= 'PASS' .and. status_name /= 'FAIL' .and. &
+                    status_name /= 'TIMEOUT') cycle
+                read(seed_text, *, iostat=ios) seed_value
+                if (ios == 0) cursor_seed = seed_value
+                call move_to_recent(case_name, debt, n_debt)
+                if (status_name == 'FAIL' .or. status_name == 'TIMEOUT') then
+                    call move_to_priority(case_name, history, n_history)
+                end if
+            end do
+            if (next_cursor <= cursor) then
+                ierr = JOURNAL_INVALID
+                message = 'campaign journal cursor did not advance'
+                return
+            end if
+            cursor = next_cursor
+        end do
+    end subroutine read_campaign_history
+
+    subroutine move_to_recent(name, values, count_values)
+        character(len=*), intent(in) :: name
+        character(len=*), intent(inout) :: values(:)
+        integer, intent(inout) :: count_values
+        integer :: i, found
+
+        found = 0
+        do i = 1, count_values
+            if (values(i) == name) then
+                found = i
+                exit
+            end if
+        end do
+        if (found > 0) then
+            do i = found, count_values - 1
+                values(i) = values(i + 1)
+            end do
+            count_values = count_values - 1
+        else if (count_values == size(values)) then
+            values(:count_values - 1) = values(2:count_values)
+            count_values = count_values - 1
+        end if
+        if (count_values < size(values)) then
+            count_values = count_values + 1
+            values(count_values) = name
+        end if
+    end subroutine move_to_recent
+
+    subroutine move_to_priority(name, values, count_values)
+        character(len=*), intent(in) :: name
+        character(len=*), intent(inout) :: values(:)
+        integer, intent(inout) :: count_values
+        integer :: i
+
+        do i = 1, count_values
+            if (values(i) == name) then
+                if (i > 1) values(2:i) = values(1:i - 1)
+                values(1) = name
+                return
+            end if
+        end do
+        if (count_values == min(size(values), GREMLIN_HISTORY_LIMIT)) then
+            values(count_values) = ''
+            count_values = count_values - 1
+        end if
+        count_values = count_values + 1
+        if (count_values > 1) values(2:count_values) = values(1:count_values - 1)
+        values(1) = name
+    end subroutine move_to_priority
 
     subroutine launch_selected_case(session, request, generation, selected, n_selected, &
             index_case, seed, campaign, child, ierr, message, completed, sequence)
@@ -2681,7 +2811,8 @@ contains
         integer, intent(inout) :: sequence
 
         integer(int64) :: now_ms
-        integer :: status, clock_count, mandatory_count, launch_error
+        integer :: status, mandatory_count, launch_error
+        type(gremlin_request_t) :: next_request
         character(len=PATH_LEN) :: launch_message, state_message
 
         ierr = 0
@@ -2692,7 +2823,10 @@ contains
             int(request%campaign_seconds, int64)*1000_int64) then
             index_case = index_case + 1
         else
-            call discover_campaign(generation%project_root, request, selected, &
+            seed = next_campaign_seed(seed)
+            next_request = request
+            next_request%seed = seed
+            call discover_campaign(generation%project_root, session, next_request, selected, &
                 n_selected, mandatory_count, seed, ierr, message)
             if (ierr /= 0) then
                 state_name = 'inventory_failed'
@@ -2702,8 +2836,6 @@ contains
             end if
             campaign = campaign + 1
             index_case = 1
-            call system_clock(clock_count)
-            seed = ieor(seed, clock_count)
             call clock_milliseconds(campaign_started_ms)
         end if
         if (n_selected == 0) then
@@ -2730,6 +2862,16 @@ contains
             end if
         end if
     end subroutine advance_campaign
+
+    integer function next_campaign_seed(seed) result(next_seed)
+        integer, intent(in) :: seed
+        integer(int64) :: state
+
+        ! Park-Miller progression gives a reproducible positive 31-bit seed.
+        state = modulo(int(seed, int64), 2147483646_int64) + 1_int64
+        state = modulo(state*48271_int64, 2147483647_int64)
+        next_seed = int(state)
+    end function next_campaign_seed
 
     subroutine record_case(session, request, generation, child, exitcode, outcome, &
             sequence, seed, ierr, message)
@@ -2782,6 +2924,22 @@ contains
         call get_session_journal_path(session%project_key, request%lane_id, &
             session%session_id, journal_path, ierr, message)
         if (ierr /= 0) return
+        ! The lane ledger is the selection source of truth and is written first.
+        ! A restart can therefore never advance coverage from an unreceipted case.
+        if (outcome == 'PASS' .or. outcome == 'FAIL' .or. outcome == 'TIMEOUT') then
+            call journal_append(trim(session%state_dir)//'/campaign-journal.jsonl', &
+                trim(completion_id), trim(record), status, message)
+            if (status /= JOURNAL_OK) then
+                ierr = status
+                return
+            end if
+            call journal_compact_tail(trim(session%state_dir)// &
+                '/campaign-journal.jsonl', GREMLIN_POLICY_RECEIPT_LIMIT, status, message)
+            if (status /= JOURNAL_OK) then
+                ierr = status
+                return
+            end if
+        end if
         call journal_append(trim(journal_path), trim(completion_id), trim(record), &
             status, message)
         ierr = status

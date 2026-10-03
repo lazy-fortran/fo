@@ -1,6 +1,7 @@
 program test_gremlin_journal
     use, intrinsic :: iso_fortran_env, only: int64, output_unit
     use fo_gremlin_journal, only: journal_append, journal_read_page, &
+        journal_compact_tail, &
         journal_record_t, JOURNAL_OK, JOURNAL_INVALID, JOURNAL_CONFLICT, &
         JOURNAL_TOO_LARGE
     use fo_process, only: process_getpid
@@ -10,6 +11,7 @@ program test_gremlin_journal
     passed = 0
     failed = 0
     call test_durable_receipts_and_reconnect()
+    call test_bounded_lane_journal()
     write (output_unit, '(a,i0,a,i0,a)') 'gremlin journal: ', passed, &
         ' pass, ', failed, ' fail'
     if (failed > 0) stop 1
@@ -167,6 +169,40 @@ contains
             'unfinished case remains unknown after tail recovery')
         call remove_file(trim(path))
     end subroutine test_durable_receipts_and_reconnect
+
+    subroutine test_bounded_lane_journal()
+        type(journal_record_t), allocatable :: records(:)
+        character(len=256) :: path, message, completion_id, record
+        integer(int64) :: next_cursor
+        integer :: status, pid, i
+
+        pid = process_getpid()
+        write (path, '(a,i0,a)') '/var/tmp/fo-gremlin-bounded-', pid, '.jsonl'
+        call remove_file(trim(path))
+        do i = 1, 30
+            write (completion_id, '(a,i4.4)') 'bounded-', i
+            write (record, '(a,a,a,i0,a)') '{"completion_id":"', &
+                trim(completion_id), '","outcome":"pass","sequence":', i, '}'
+            call journal_append(trim(path), trim(completion_id), trim(record), &
+                status, message)
+            call assert(status == JOURNAL_OK, 'lane policy receipt is durable before trim')
+        end do
+        call journal_compact_tail(trim(path), 12, status, message)
+        call assert(status == JOURNAL_OK, 'lane journal compacts atomically to its retention bound')
+        call journal_read_page(trim(path), 0_int64, 20, 65536_int64, records, &
+            next_cursor, status, message)
+        call assert(status == JOURNAL_OK .and. size(records) == 12, &
+            'bounded journal preserves exactly its newest twelve receipts')
+        if (size(records) == 12) then
+            call assert(index(records(1)%json, 'bounded-0019') > 0, &
+                'retention keeps the oldest surviving completion')
+            call assert(index(records(12)%json, 'bounded-0030') > 0, &
+                'retention keeps the newest completion')
+            call assert(index(records_to_text(records), 'bounded-0018') == 0, &
+                'compaction drops only entries outside the configured bound')
+        end if
+        call remove_file(trim(path))
+    end subroutine test_bounded_lane_journal
 
     subroutine remove_file(path)
         character(len=*), intent(in) :: path

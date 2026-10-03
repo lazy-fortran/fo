@@ -2,6 +2,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
@@ -397,5 +399,92 @@ int fo_c_gremlin_journal_append(const char *path, const char *completion_id,
 done:
     flock(fd, LOCK_UN);
     close(fd);
+    return result;
+}
+
+/* Keep the lane policy journal bounded without rewriting it for each receipt.
+ * The append is durable before compaction begins, so a crash leaves at most
+ * twice the retention limit plus one valid receipt. */
+int fo_c_gremlin_journal_compact_tail(const char *path, int max_records) {
+    FILE *input = NULL;
+    char **records = NULL;
+    size_t *lengths = NULL;
+    char *line = NULL, temporary[PATH_MAX] = {0};
+    size_t line_capacity = 0, count = 0, total_seen = 0;
+    ssize_t length;
+    int result = 2, fd = -1;
+    receipt_fields_t fields;
+
+    if (path == NULL || path[0] == '\0' || max_records < 1 || max_records > 4096)
+        return 1;
+    records = calloc((size_t)max_records, sizeof(*records));
+    lengths = calloc((size_t)max_records, sizeof(*lengths));
+    if (records == NULL || lengths == NULL) goto done;
+    input = fopen(path, "r");
+    if (input == NULL) {
+        result = errno == ENOENT ? 0 : 2;
+        goto done;
+    }
+    while ((length = getline(&line, &line_capacity, input)) >= 0) {
+        size_t record_length = (size_t)length;
+        size_t slot;
+        if (record_length == 0 || line[record_length - 1] != '\n') goto done;
+        --record_length;
+        if (validate_receipt(line, record_length, &fields) != 0) {
+            result = 1;
+            goto done;
+        }
+        ++total_seen;
+        if (count == (size_t)max_records) {
+            free(records[0]);
+            memmove(records, records + 1, ((size_t)max_records - 1) * sizeof(*records));
+            memmove(lengths, lengths + 1, ((size_t)max_records - 1) * sizeof(*lengths));
+            --count;
+        }
+        slot = count++;
+        records[slot] = malloc(record_length + 1);
+        if (records[slot] == NULL) goto done;
+        memcpy(records[slot], line, record_length);
+        records[slot][record_length] = '\0';
+        lengths[slot] = record_length;
+    }
+    if (ferror(input)) goto done;
+    fclose(input);
+    input = NULL;
+    if (total_seen <= 2 * (size_t)max_records) {
+        result = 0;
+        goto done;
+    }
+    if (snprintf(temporary, sizeof(temporary), "%s.compact.%ld", path,
+                 (long)getpid()) >= (int)sizeof(temporary)) goto done;
+    fd = open(temporary, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+    if (fd < 0) goto done;
+    for (size_t i = 0; i < count; ++i) {
+        size_t offset = 0;
+        while (offset < lengths[i]) {
+            ssize_t written = write(fd, records[i] + offset, lengths[i] - offset);
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) goto done;
+            offset += (size_t)written;
+        }
+        if (write(fd, "\n", 1) != 1) goto done;
+    }
+    if (fsync(fd) != 0 || close(fd) != 0) {
+        fd = -1;
+        goto done;
+    }
+    fd = -1;
+    if (rename(temporary, path) != 0 || sync_parent(path) != 0) goto done;
+    result = 0;
+done:
+    if (input != NULL) fclose(input);
+    if (fd >= 0) close(fd);
+    if (result != 0 && temporary[0] != '\0') unlink(temporary);
+    free(line);
+    if (records != NULL) {
+        for (size_t i = 0; i < (size_t)max_records; ++i) free(records[i]);
+    }
+    free(records);
+    free(lengths);
     return result;
 }
