@@ -253,7 +253,7 @@ contains
         character(len=512) :: text, override
 
         call cache_schema(text)
-        call assert(trim(text) == 'action-output-v1', 'cache schema is reported')
+        call assert(trim(text) == 'action-output-v2', 'cache schema is reported')
         call cache_store_root(text)
         ! FO_CACHE_DIR overrides the root (the parallel test runner sets it so
         ! each test gets an isolated cache). Honour it; otherwise the default is

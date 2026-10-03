@@ -73,3 +73,6 @@ jobs:
           node test/test_program_names_cli.js
           node test/test_dependency_membership_cli.js
           node test/test_platform_link_cli.js
+
+      - name: Test atomic link artifact publication
+        run: node test/test_archive_publication.js

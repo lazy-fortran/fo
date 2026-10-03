@@ -21,15 +21,15 @@ module fo_gfortran_build
         cache_restore_action, cache_store_action, hash_mod_file, &
         HASH_LEN, cache_digest, cache_file_digest, &
         cache_store_binary, cache_restore_binary, cache_binary_matches
-    use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
-        clean_root_build_artifacts
+    use fo_util, only: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, &
+        read_text_file, clean_root_build_artifacts
     use fo_process, only: process_run_logged, &
         process_run_argv_logged, argv_push, argv_push_split, &
         argv_push_split_nl, process_detect_nproc, process_setenv_default
     use fo_lock, only: lock_check
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_remove_file, fs_append_file, &
         fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec, &
-        fs_find_executable
+        fs_find_executable, fs_rename, fs_mkdir_excl
     use fo_progress, only: progress_begin, progress_step, progress_end
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         selected_compiler_command, COMPILER_NVFORTRAN, COMPILER_IFX, &
@@ -2230,7 +2230,7 @@ contains
                 log_file, exitcode, link_flags, c, base_digest)
             if (exitcode /= 0) then
                 if (len_trim(base_digest) == 0 .and. len_trim(archive_path) > 0) &
-                    call fs_remove_file(archive_path)
+                    call remove_ephemeral_link_artifact(archive_path)
                 return
             end if
             app_bin_path = trim(app_bin_dir)//'/'//trim(prog_name)
@@ -2239,12 +2239,12 @@ contains
                 write (error_unit, '(a)') 'fo: failed to create '//trim(app_bin_path)
                 exitcode = 1
                 if (len_trim(base_digest) == 0 .and. len_trim(archive_path) > 0) &
-                    call fs_remove_file(archive_path)
+                    call remove_ephemeral_link_artifact(archive_path)
                 return
             end if
         end do
         if (len_trim(base_digest) == 0 .and. len_trim(archive_path) > 0) &
-            call fs_remove_file(archive_path)
+            call remove_ephemeral_link_artifact(archive_path)
     end subroutine link_app_binaries
 
     subroutine link_base_digest(project_dir, lib_objs, n_lib, dep_objs, n_dep, link_libs, &
@@ -2719,7 +2719,7 @@ contains
         !$omp end parallel do
         call progress_end()
         if (len_trim(link_base) == 0 .and. len_trim(archive_path) > 0) &
-            call fs_remove_file(archive_path)
+            call remove_ephemeral_link_artifact(archive_path)
 
         ! Flaky-test diagnosis: a test that compiled and ran but failed may have
         ! lost a race with a concurrently-running test (shared /tmp path, shared
@@ -2866,12 +2866,13 @@ contains
         character(len=*), intent(in), optional :: content_key
 
         character(len=:), allocatable :: packed
-        character(len=512) :: lib_dir, seed, proj
+        character(len=512) :: lib_dir, proj, install_name, member
         character(len=6) :: extension
         character(len=4096) :: shared_keys(5)
         character(len=HASH_LEN) :: shared_key
-        integer :: i, n_args
-        logical :: exists
+        character(len=1024) :: final_path, owner_dir, stage_so
+        integer :: i, n_args, reserve_rc, rename_rc
+        logical :: exists, valid
 
         so_path = ''
         exitcode = 0
@@ -2882,6 +2883,7 @@ contains
         call file_basename(project_dir, proj)
         extension = '.so'
         if (is_macos()) extension = '.dylib'
+        final_path = ''
         if (present(content_key)) then
             if (len_trim(content_key) > 0) then
                 shared_key = content_key
@@ -2893,16 +2895,42 @@ contains
                     shared_keys(5) = 'darwin-dylib-v1'
                     shared_key = cache_digest(shared_keys, 5)
                 end if
-                so_path = trim(lib_dir)//'/lib'//trim(proj)//'_'// &
+                final_path = trim(lib_dir)//'/lib'//trim(proj)//'_'// &
                     shared_key(1:min(32, len_trim(shared_key)))//trim(extension)
-                inquire (file=trim(so_path), exist=exists)
-                if (exists) return
+                inquire (file=trim(final_path), exist=exists)
+                if (exists) then
+                    call native_image_valid(final_path, valid)
+                    if (valid) then
+                        so_path = final_path
+                        return
+                    end if
+                end if
             end if
         end if
-        if (len_trim(so_path) == 0) then
-            call make_tmpfile('fo_shared', seed)
-            call fs_remove_file(seed)
-            so_path = trim(lib_dir)//'/lib'//trim(proj)//trim(extension)
+
+        ! Keep each linker's output private until it is complete. The marker
+        ! directory is exclusively reserved; the hidden sibling output keeps
+        ! the library directory on the consumer's existing runtime search path.
+        reserve_rc = 1
+        do i = 1, 100
+            call make_sibling_tmpfile(trim(lib_dir)//'/.fo-shared', owner_dir)
+            reserve_rc = fs_mkdir_excl(trim(owner_dir))
+            if (reserve_rc /= 0) then
+                if (reserve_rc < 0) exit
+                cycle
+            end if
+            stage_so = trim(owner_dir)//trim(extension)
+            inquire (file=trim(stage_so), exist=exists)
+            if (.not. exists) exit
+            call fs_remove_tree(trim(owner_dir))
+            reserve_rc = 1
+        end do
+        if (reserve_rc /= 0) then
+            call append_artifact_error(log_file, &
+                'fo: could not reserve shared-library staging path')
+            exitcode = 1
+            so_path = ''
+            return
         end if
 
         n_args = 0
@@ -2910,9 +2938,16 @@ contains
         if (is_macos()) then
             ! Darwin requires dependency symbols to be resolved in the dylib.
             ! The Fortran driver also supplies the selected compiler runtime.
+            if (len_trim(final_path) > 0) then
+                call archive_member_name(final_path, member)
+            else
+                call archive_member_name(stage_so, member)
+            end if
+            install_name = '@rpath/'//trim(member)
             call make_link_argv(project_dir, objects(1), objects(2:n_objects), &
                 n_objects - 1, dep_objs, n_dep_objs, link_libs, n_link_libs, &
-                so_path, trim(flags)//' -dynamiclib', .false., packed, n_args)
+                stage_so, trim(flags)//' -dynamiclib', .false., packed, n_args, &
+                install_name)
         else
             call argv_push(packed, n_args, 'gcc')
             call argv_push(packed, n_args, '-shared')
@@ -2922,15 +2957,75 @@ contains
             end do
             call argv_push(packed, n_args, '-Wl,--no-whole-archive')
             call argv_push(packed, n_args, '-o')
-            call argv_push(packed, n_args, so_path)
+            call argv_push(packed, n_args, stage_so)
         end if
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
             .true., build_timeout_seconds(), exitcode)
         if (exitcode /= 0) then
-            call fs_remove_file(so_path)
+            call remove_ephemeral_link_artifact(stage_so)
             so_path = ''
+            return
+        end if
+        call native_image_valid(stage_so, valid)
+        if (.not. valid) then
+            call append_artifact_error(log_file, &
+                'fo: linker output is not a valid shared library')
+            call remove_ephemeral_link_artifact(stage_so)
+            so_path = ''
+            exitcode = 1
+            return
+        end if
+        if (len_trim(final_path) > 0) then
+            rename_rc = fs_rename(trim(stage_so), trim(final_path))
+            if (rename_rc /= 0) then
+                call append_artifact_error(log_file, &
+                    'fo: could not atomically publish shared library')
+                call remove_ephemeral_link_artifact(stage_so)
+                so_path = ''
+                exitcode = 1
+                return
+            end if
+            call fs_remove_tree(trim(owner_dir))
+            so_path = final_path
+        else
+            ! The consumer removes this completed process-owned output after
+            ! its links and runs finish.
+            so_path = stage_so
         end if
     end subroutine shared_library
+
+    subroutine native_image_valid(path, valid)
+        character(len=*), intent(in) :: path
+        logical, intent(out) :: valid
+
+        integer(int64) :: file_size
+        integer :: u, ios
+        character(len=4) :: magic
+
+        valid = .false.
+        file_size = 0_int64
+        inquire (file=trim(path), size=file_size, iostat=ios)
+        if (ios /= 0) return
+        if (file_size < 4_int64) return
+        open (newunit=u, file=trim(path), access='stream', form='unformatted', &
+            status='old', action='read', iostat=ios)
+        if (ios /= 0) return
+        read (u, pos=1, iostat=ios) magic
+        close (u)
+        if (ios /= 0) return
+        if (is_macos()) then
+            valid = magic == achar(206)//achar(250)//achar(237)//achar(254) .or. &
+                magic == achar(207)//achar(250)//achar(237)//achar(254) .or. &
+                magic == achar(254)//achar(237)//achar(250)//achar(206) .or. &
+                magic == achar(254)//achar(237)//achar(250)//achar(207) .or. &
+                magic == achar(202)//achar(254)//achar(186)//achar(190) .or. &
+                magic == achar(190)//achar(186)//achar(254)//achar(202) .or. &
+                magic == achar(202)//achar(254)//achar(186)//achar(191) .or. &
+                magic == achar(191)//achar(186)//achar(254)//achar(202)
+        else
+            valid = magic == achar(127)//'ELF'
+        end if
+    end subroutine native_image_valid
 
     subroutine archive_objects(project_dir, objects, n_objects, archive_path, &
             log_file, exitcode, content_key)
@@ -2942,42 +3037,234 @@ contains
         character(len=*), intent(in), optional :: content_key
 
         character(len=:), allocatable :: packed
-        character(len=512) :: seed, archive_dir
-        integer :: i, n_args
-        logical :: exists
+        character(len=512) :: archive_dir, final_path
+        character(len=1024) :: stage_dir, stage_archive, ready_archive
+        integer :: i, n_args, reserve_rc, rename_rc
+        logical :: exists, members_ok
 
         archive_path = ''
         exitcode = 0
         if (n_objects < 1) return
+        archive_dir = trim(project_dir)//'/build/fo/lib'
+        call fs_make_dir(archive_dir)
+        final_path = ''
         if (present(content_key)) then
             if (len_trim(content_key) > 0) then
-                archive_dir = trim(project_dir)//'/build/fo/lib'
-                call fs_make_dir(archive_dir)
-                archive_path = trim(archive_dir)//'/objects_'// &
+                final_path = trim(archive_dir)//'/objects_'// &
                     content_key(1:min(32, len_trim(content_key)))//'.a'
-                inquire (file=trim(archive_path), exist=exists)
-                if (exists) return
+                inquire (file=trim(final_path), exist=exists)
+                if (exists) then
+                    call archive_has_expected_members(project_dir, final_path, &
+                        objects, n_objects, members_ok)
+                    if (members_ok) then
+                        archive_path = final_path
+                        return
+                    end if
+                end if
             end if
         end if
-        if (len_trim(archive_path) == 0) then
-            call make_tmpfile('fo_archive', seed)
-            call fs_remove_file(seed)
-            archive_path = trim(seed)//'.a'
+
+        ! Reserve an exclusive sibling directory so concurrent builders write
+        ! separate archives. The stage is on the destination filesystem, making
+        ! publication by rename atomic.
+        reserve_rc = 1
+        do i = 1, 100
+            call make_sibling_tmpfile(trim(archive_dir)//'/.fo-archive', stage_dir)
+            reserve_rc = fs_mkdir_excl(trim(stage_dir))
+            if (reserve_rc == 0) exit
+            if (reserve_rc < 0) exit
+        end do
+        if (reserve_rc /= 0) then
+            call append_artifact_error(log_file, &
+                'fo: could not reserve archive staging directory')
+            exitcode = 1
+            return
         end if
+        stage_archive = trim(stage_dir)//'/archive.tmp.a'
+        ready_archive = trim(stage_dir)//'/archive.a'
         n_args = 0
         call argv_push(packed, n_args, 'ar')
         call argv_push(packed, n_args, 'rcs')
-        call argv_push(packed, n_args, archive_path)
+        call argv_push(packed, n_args, trim(stage_archive))
         do i = 1, n_objects
             call argv_push(packed, n_args, objects(i))
         end do
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
             .true., build_timeout_seconds(), exitcode)
         if (exitcode /= 0) then
-            call fs_remove_file(archive_path)
+            call fs_remove_tree(trim(stage_dir))
             archive_path = ''
+            return
+        end if
+        call archive_has_expected_members(project_dir, stage_archive, objects, &
+            n_objects, members_ok)
+        if (.not. members_ok) then
+            call append_artifact_error(log_file, &
+                'fo: archiver output does not contain the expected object members')
+            call fs_remove_tree(trim(stage_dir))
+            archive_path = ''
+            exitcode = 1
+            return
+        end if
+        rename_rc = fs_rename(trim(stage_archive), trim(ready_archive))
+        if (rename_rc /= 0) then
+            call append_artifact_error(log_file, 'fo: could not publish staged archive')
+            call fs_remove_tree(trim(stage_dir))
+            archive_path = ''
+            exitcode = 1
+            return
+        end if
+        if (len_trim(final_path) > 0) then
+            rename_rc = fs_rename(trim(ready_archive), trim(final_path))
+            if (rename_rc /= 0) then
+                call append_artifact_error(log_file, &
+                    'fo: could not publish cached archive')
+                call fs_remove_tree(trim(stage_dir))
+                archive_path = ''
+                exitcode = 1
+                return
+            end if
+            call fs_remove_tree(trim(stage_dir))
+            archive_path = final_path
+        else
+            ! The caller links this completed process-owned archive and removes
+            ! its staging directory after the link finishes.
+            archive_path = ready_archive
         end if
     end subroutine archive_objects
+
+    subroutine archive_has_expected_members(project_dir, archive_path, objects, &
+            n_objects, valid)
+        character(len=*), intent(in) :: project_dir, archive_path
+        character(len=512), intent(in) :: objects(:)
+        integer, intent(in) :: n_objects
+        logical, intent(out) :: valid
+
+        character(len=:), allocatable :: packed
+        character(len=1024) :: listing_file, member_line
+        character(len=512) :: expected
+        logical, allocatable :: matched(:)
+        integer :: i, n_args, exitcode, u, ios, j
+        logical :: member_found
+
+        valid = .false.
+        if (n_objects < 1) return
+        call make_tmpfile('fo_archive_members', listing_file)
+        n_args = 0
+        call argv_push(packed, n_args, 'ar')
+        call argv_push(packed, n_args, 't')
+        call argv_push(packed, n_args, archive_path)
+        call process_run_argv_logged(project_dir, packed, n_args, listing_file, &
+            .false., build_timeout_seconds(), exitcode)
+        if (exitcode /= 0) then
+            call delete_tmpfile(listing_file)
+            return
+        end if
+
+        allocate (matched(n_objects))
+        matched = .false.
+        open (newunit=u, file=trim(listing_file), status='old', action='read', &
+            iostat=ios)
+        if (ios /= 0) then
+            call delete_tmpfile(listing_file)
+            return
+        end if
+        valid = .true.
+        do
+            read (u, '(a)', iostat=ios) member_line
+            if (ios /= 0) exit
+            if (len_trim(member_line) == 0) cycle
+            member_found = .false.
+            do i = 1, n_objects
+                if (matched(i)) cycle
+                call archive_member_name(objects(i), expected)
+                if (trim(member_line) == trim(expected)) then
+                    matched(i) = .true.
+                    member_found = .true.
+                    exit
+                end if
+            end do
+            if (.not. member_found) then
+                valid = .false.
+                exit
+            end if
+        end do
+        close (u)
+        if (valid) then
+            do j = 1, n_objects
+                if (.not. matched(j)) then
+                    valid = .false.
+                    exit
+                end if
+            end do
+        end if
+        call delete_tmpfile(listing_file)
+    end subroutine archive_has_expected_members
+
+    subroutine archive_member_name(path, member)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(out) :: member
+
+        integer :: i, n, slash
+
+        member = ''
+        n = len_trim(path)
+        slash = 0
+        do i = 1, n
+            if (path(i:i) == '/') slash = i
+        end do
+        if (slash < n) then
+            member = path(slash + 1:n)
+        else if (slash == 0) then
+            member = path(1:n)
+        end if
+    end subroutine archive_member_name
+
+    subroutine append_artifact_error(log_file, message)
+        character(len=*), intent(in) :: log_file, message
+        integer :: u, ios
+
+        if (len_trim(log_file) == 0) return
+        open (newunit=u, file=trim(log_file), position='append', status='unknown', &
+            action='write', iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a)') trim(message)
+        close (u)
+    end subroutine append_artifact_error
+
+    subroutine remove_ephemeral_link_artifact(artifact_path)
+        character(len=*), intent(in) :: artifact_path
+
+        character(len=1024) :: parent_dir, stage_dir, base
+        integer :: slash, name_start, n
+
+        if (len_trim(artifact_path) == 0) return
+        call fs_remove_file(artifact_path)
+        slash = index(trim(artifact_path), '/', back=.true.)
+        if (slash <= 1) return
+        parent_dir = artifact_path(:slash - 1)
+        if (index(trim(parent_dir), '/.fo-archive.tmp-') > 0) then
+            call fs_remove_tree(trim(parent_dir))
+            return
+        end if
+        name_start = slash + 1
+        base = artifact_path(name_start:len_trim(artifact_path))
+        if (index(trim(base), '.fo-shared.tmp-') /= 1) return
+        n = len_trim(base)
+        if (n > len('.dylib')) then
+            if (base(n - len('.dylib') + 1:n) == '.dylib') then
+                stage_dir = trim(parent_dir)//'/'//base(:n - len('.dylib'))
+                call fs_remove_tree(trim(stage_dir))
+                return
+            end if
+        end if
+        if (n > len('.so')) then
+            if (base(n - len('.so') + 1:n) == '.so') then
+                stage_dir = trim(parent_dir)//'/'//base(:n - len('.so'))
+                call fs_remove_tree(trim(stage_dir))
+            end if
+        end if
+    end subroutine remove_ephemeral_link_artifact
 
     subroutine compile_test_helpers(project_dir, obj_dir, dag, filenames, is_prog, &
             topo_order, n_order, run_nodes, n_run, incl_flag, log_file, &
@@ -3823,9 +4110,11 @@ contains
         integer :: n_args
         logical :: do_cache, restored, use_lld
         character(len=HASH_LEN) :: action_id, prog_key
-        character(len=512) :: tmp_bin, key_parts(7), lld_log
+        character(len=512) :: key_parts(7), lld_log
+        character(len=1024) :: stage_dir, staged_output, restore_bin
         character(len=:), allocatable :: flags_str
-        integer :: store_ierr
+        integer :: store_ierr, reserve_rc, copy_rc, rename_rc
+        logical :: valid_image
 
         flags_str = ''
         if (present(flags)) flags_str = trim(flags)
@@ -3850,21 +4139,50 @@ contains
             ! builds cheap when outputs are large (2.4 GB of static binaries).
             call cache_binary_matches(cache, action_id, output, restored)
             if (restored) then
-                exitcode = 0
-                return
-            end if
-            ! Output missing or stale but the binary is in the CAS: restore it
-            ! (to a temp, then copy with the execute bit) instead of relinking.
-            tmp_bin = trim(output)//'.fo-link'
-            call cache_restore_binary(cache, action_id, tmp_bin, restored)
-            if (restored) then
-                if (fs_copy_exec(trim(tmp_bin), trim(output)) == 0) then
-                    call fs_remove_file(trim(tmp_bin))
-                    call cache_store_binary(cache, action_id, output, store_ierr)
+                call native_image_valid(output, valid_image)
+                if (valid_image) then
                     exitcode = 0
                     return
                 end if
-                call fs_remove_file(trim(tmp_bin))
+            end if
+        end if
+
+        call reserve_link_stage(output, stage_dir, staged_output, reserve_rc)
+        if (reserve_rc /= 0) then
+            call append_artifact_error(log_file, &
+                'fo: could not reserve executable staging directory')
+            exitcode = 1
+            return
+        end if
+        if (do_cache) then
+            ! Restore into the owned stage, then publish it with the same atomic
+            ! rename used for a fresh linker output.
+            restore_bin = trim(stage_dir)//'/cached'
+            call cache_restore_binary(cache, action_id, restore_bin, restored)
+            if (restored) then
+                copy_rc = fs_copy_exec(trim(restore_bin), trim(staged_output))
+                call fs_remove_file(trim(restore_bin))
+                if (copy_rc == 0) then
+                    call native_image_valid(staged_output, valid_image)
+                    if (valid_image) then
+                        rename_rc = fs_rename(trim(staged_output), trim(output))
+                        if (rename_rc == 0) then
+                            call fs_remove_tree(trim(stage_dir))
+                            call cache_store_binary(cache, action_id, output, &
+                                store_ierr)
+                            exitcode = 0
+                            return
+                        end if
+                    end if
+                end if
+            end if
+            call fs_remove_tree(trim(stage_dir))
+            call reserve_link_stage(output, stage_dir, staged_output, reserve_rc)
+            if (reserve_rc /= 0) then
+                call append_artifact_error(log_file, &
+                    'fo: could not reserve executable staging directory')
+                exitcode = 1
+                return
             end if
         end if
 
@@ -3874,8 +4192,8 @@ contains
         call get_environment_variable('FO_DEBUG_LINKS', debug_links, &
             status=debug_status)
         call make_link_argv(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, &
-            n_dep_objs, link_libs, n_link_libs, output, flags_str, use_lld, packed, &
-            n_args)
+            n_dep_objs, link_libs, n_link_libs, staged_output, flags_str, use_lld, &
+            packed, n_args)
         if (debug_status == 0 .and. len_trim(debug_links) > 0) then
             write (error_unit, '(a)') 'fo link: '//argv_display(packed)
         end if
@@ -3886,9 +4204,10 @@ contains
             call delete_tmpfile(lld_log)
         end if
         if (.not. use_lld .or. exitcode /= 0) then
+            call fs_remove_file(trim(staged_output))
             call make_link_argv(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, &
-                n_dep_objs, link_libs, n_link_libs, output, flags_str, .false., packed, &
-                n_args)
+                n_dep_objs, link_libs, n_link_libs, staged_output, flags_str, .false., &
+                packed, n_args)
             if (use_lld .and. debug_status == 0 .and. len_trim(debug_links) > 0) &
                 write (error_unit, '(a)') 'fo link fallback: '//argv_display(packed)
             call process_run_argv_logged('', packed, n_args, log_file, .true., &
@@ -3897,12 +4216,67 @@ contains
         if (exitcode == 124) call append_build_hang_hint(log_file, &
             'link of '//trim(output), build_timeout_seconds())
 
-        if (do_cache .and. exitcode == 0) &
+        if (exitcode /= 0) then
+            call fs_remove_tree(trim(stage_dir))
+            return
+        end if
+        call native_image_valid(staged_output, valid_image)
+        if (.not. valid_image) then
+            call append_artifact_error(log_file, &
+                'fo: linker output is not a valid executable image')
+            call fs_remove_tree(trim(stage_dir))
+            exitcode = 1
+            return
+        end if
+        rename_rc = fs_rename(trim(staged_output), trim(output))
+        if (rename_rc /= 0) then
+            call append_artifact_error(log_file, &
+                'fo: could not atomically publish executable')
+            call fs_remove_tree(trim(stage_dir))
+            exitcode = 1
+            return
+        end if
+        call fs_remove_tree(trim(stage_dir))
+
+        if (do_cache) &
             call cache_store_binary(cache, action_id, output, store_ierr)
     end subroutine link_binary
 
+    subroutine reserve_link_stage(output, stage_dir, staged_output, reserve_rc)
+        character(len=*), intent(in) :: output
+        character(len=*), intent(out) :: stage_dir, staged_output
+        integer, intent(out) :: reserve_rc
+
+        character(len=1024) :: parent_dir
+        integer :: i, slash
+        logical :: exists
+
+        slash = index(trim(output), '/', back=.true.)
+        parent_dir = '.'
+        if (slash == 1) then
+            parent_dir = '/'
+        else if (slash > 1) then
+            parent_dir = output(:slash - 1)
+        end if
+        reserve_rc = 1
+        do i = 1, 100
+            call make_sibling_tmpfile(trim(parent_dir)//'/.fo-link', stage_dir)
+            reserve_rc = fs_mkdir_excl(trim(stage_dir))
+            if (reserve_rc /= 0) then
+                if (reserve_rc < 0) return
+                cycle
+            end if
+            staged_output = trim(stage_dir)//'/binary'
+            inquire (file=trim(staged_output), exist=exists)
+            if (.not. exists) return
+            call fs_remove_tree(trim(stage_dir))
+            reserve_rc = 1
+        end do
+    end subroutine reserve_link_stage
+
     subroutine make_link_argv(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, &
-            n_dep_objs, link_libs, n_link_libs, output, flags, use_lld, packed, n_args)
+            n_dep_objs, link_libs, n_link_libs, output, flags, use_lld, packed, n_args, &
+            install_name)
         character(len=*), intent(in) :: project_dir, prog_obj, output, flags
         character(len=512), intent(in) :: lib_objs(:)
         integer, intent(in) :: n_lib_objs
@@ -3913,6 +4287,7 @@ contains
         logical, intent(in) :: use_lld
         character(len=:), allocatable, intent(out) :: packed
         integer, intent(out) :: n_args
+        character(len=*), intent(in), optional :: install_name
 
         integer :: i
         character(len=512) :: policy_flag
@@ -3939,6 +4314,11 @@ contains
         if (len_trim(flags) > 0) call argv_push_split(packed, n_args, flags)
         policy_flag = fc_link_policy_flags()
         if (len_trim(policy_flag) > 0) call argv_push_split(packed, n_args, policy_flag)
+        if (present(install_name)) then
+            if (len_trim(install_name) > 0) &
+                call argv_push(packed, n_args, &
+                '-Wl,-install_name,'//trim(install_name))
+        end if
         call argv_push(packed, n_args, '-o')
         call argv_push(packed, n_args, output)
     end subroutine make_link_argv
