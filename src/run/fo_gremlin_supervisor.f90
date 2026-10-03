@@ -16,6 +16,17 @@ module fo_gremlin_supervisor
         coverage_recover_running, COVERAGE_OK
     use fo_gremlin_coverage, only: coverage_read_view_path, COVERAGE_NOT_FOUND
     use fo_gremlin_coverage_view, only: gremlin_coverage_view_t
+    use fo_gremlin_readiness, only: gremlin_readiness_input_t, gremlin_readiness_t, &
+        gremlin_readiness_compute, gremlin_wait_satisfied, gremlin_wait_code, &
+        gremlin_phase_name, gremlin_health_name, gremlin_verification_name, &
+        GREMLIN_PHASE_STARTING, GREMLIN_PHASE_BUILDING, GREMLIN_PHASE_TESTING, &
+        GREMLIN_PHASE_QUIESCENT, GREMLIN_PHASE_STOPPED, GREMLIN_PHASE_FAILED, &
+        GREMLIN_WAIT_FAILURE, GREMLIN_HEALTH_FAILURE, GREMLIN_VERIFY_ORDINARY, &
+        GREMLIN_VERIFY_FULL
+    use fo_gremlin_lifecycle, only: gremlin_lifecycle_event_t, &
+        gremlin_lifecycle_append, gremlin_lifecycle_read_page, &
+        gremlin_lifecycle_make_id, LIFECYCLE_OK, LIFECYCLE_INVALID, &
+        LIFECYCLE_MAX_EVENT
     use fo_gremlin_policy, only: shuffle_gremlin_tests, GREMLIN_POLICY_OK, &
         GREMLIN_NONMANDATORY_LIMIT
     use fo_gremlin_state, only: gremlin_session_t, gremlin_lease_t, &
@@ -27,6 +38,9 @@ module fo_gremlin_supervisor
         gremlin_generation_lease_acquire_at, gremlin_generation_pin_at, &
         gremlin_generation_root, GREMLIN_STATE_TEXT_MAX
     use fo_gfortran_build, only: gfortran_selected_test_names
+    use fo_scan, only: is_slow_test
+    use fo_test_budget, only: test_budget_seconds, test_wall_cap_seconds
+    use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_process, only: argv_push, process_cancel_pid, &
         process_poll_pid, process_start_argv_logged
     use fo_scan_types, only: MAX_PATH
@@ -53,6 +67,7 @@ module fo_gremlin_supervisor
         integer :: seed = 0
         character(len=PATH_LEN) :: log_file = ''
         character(len=NAME_LEN) :: case_name = ''
+        logical :: gate_required = .false.
         real :: started_at = 0.0
     end type child_t
 
@@ -303,11 +318,12 @@ contains
         character(len=PATH_LEN) :: message
         type(gremlin_session_t) :: session
         type(gremlin_coverage_view_t) :: coverage_view
+        type(gremlin_readiness_t) :: readiness
         character(len=HASH_LEN) :: generation_id
         character(len=PATH_LEN) :: coverage_path, coverage_state_dir
         character(len=:), allocatable :: enriched_status
         integer :: owner_pid, ierr
-        logical :: is_live
+        logical :: is_live, have_coverage
 
         exitcode = 0
         call gremlin_resolve_read_session(project_dir, request, session, status_text, &
@@ -319,8 +335,9 @@ contains
         end if
         if (is_live) call poll_launcher(owner_pid)
         generation_id = ''
+        coverage_view = gremlin_coverage_view_t()
+        have_coverage = .false.
         call extract_json_field(status_text, 'active_generation', generation_id)
-        enriched_status = trim(status_text)
         if (len_trim(generation_id) == HASH_LEN) then
             call gremlin_session_state_dir(project_dir, request%lane_id, &
                 coverage_state_dir, ierr, message)
@@ -334,13 +351,22 @@ contains
             call coverage_read_view_path(trim(coverage_path), generation_id, &
                 coverage_view, ierr, message)
             if (ierr == COVERAGE_OK) then
-                enriched_status = status_with_coverage(trim(status_text), coverage_view)
+                have_coverage = .true.
             else if (ierr /= COVERAGE_NOT_FOUND) then
                 call error_response('status', trim(message), response)
                 exitcode = 2
                 return
             end if
         end if
+        call compute_readiness(session, trim(status_text), coverage_view, &
+            have_coverage, readiness, ierr, message)
+        if (ierr /= 0) then
+            call error_response('status', trim(message), response)
+            exitcode = 2
+            return
+        end if
+        enriched_status = status_with_coverage(trim(status_text), coverage_view, &
+            readiness, have_coverage)
         call response_with_events('status', enriched_status, session, request, .false., &
             response, ierr, message)
         if (ierr /= 0) then
@@ -351,34 +377,252 @@ contains
         exitcode = 0
     end subroutine handle_status
 
-    function status_with_coverage(status_text, view) result(enriched)
+    subroutine compute_readiness(session, status_text, coverage, &
+            have_coverage, readiness, ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        character(len=*), intent(in) :: status_text
+        type(gremlin_coverage_view_t), intent(in) :: coverage
+        logical, intent(in) :: have_coverage
+        type(gremlin_readiness_t), intent(out) :: readiness
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        type(gremlin_readiness_input_t) :: input
+        type(journal_record_t), allocatable :: records(:)
+        character(len=HASH_LEN) :: active_id, candidate_id, receipt_generation
+        character(len=HASH_LEN) :: receipt_requirement
+        character(len=128) :: status_name, case_id, raw
+        character(len=NAME_LEN) :: gate_cases(MAX_NODES)
+        character(len=NAME_LEN) :: gate_pass_cases(MAX_NODES)
+        integer(int64) :: cursor, next_cursor
+        integer :: journal_status, i, ios, gate_count, gate_passed
+        logical :: build_passed, gate_failure, gate_required, passed
+
+        ierr = 0
+        message = ''
+        input = gremlin_readiness_input_t()
+        active_id = ''
+        candidate_id = ''
+        status_name = ''
+        call extract_json_field(status_text, 'active_generation', active_id)
+        call extract_json_field(status_text, 'candidate_generation', candidate_id)
+        call extract_json_field(status_text, 'state', status_name)
+        call extract_json_field(status_text, 'gate_required', raw)
+        read(raw, *, iostat=ios) input%gate_required
+        if (ios /= 0) input%gate_required = -1
+        call extract_json_field(status_text, 'input_changed', raw)
+        input%dirty = trim(raw) == 'true'
+        input%owner_session = session%session_id
+        input%generation = active_id
+        input%inventory_digest = coverage%inventory_digest
+        call extract_json_field(status_text, 'requirement_digest', &
+            input%requirement_digest)
+        call extract_json_field(status_text, 'event_epoch', raw)
+        read (raw, *, iostat=ios) input%event_epoch
+        if (ios /= 0) input%event_epoch = -1
+        input%dirty = input%dirty .or. len_trim(active_id) /= HASH_LEN .or. &
+            (len_trim(candidate_id) > 0 .and. trim(candidate_id) /= trim(active_id))
+        if (trim(status_name) == 'building' .or. trim(status_name) == 'build_failed' .or. &
+            trim(status_name) == 'capture_failed' .or. &
+            trim(status_name) == 'capture_pending') input%dirty = .true.
+        if (trim(status_name) == 'build_failed' .or. &
+            trim(status_name) == 'capture_failed' .or. trim(status_name) == 'error') &
+            input%failure_observed = .true.
+        input%exact_active_generation = len_trim(active_id) == HASH_LEN .and. &
+            input%gate_required >= 0 .and. input%event_epoch >= 0 .and. &
+            len_trim(input%requirement_digest) == HASH_LEN .and. have_coverage .and. &
+            coverage%generation_id == active_id .and. &
+            len_trim(coverage%inventory_digest) == HASH_LEN
+        input%capture_fresh = input%exact_active_generation .and. .not. input%dirty
+        if (input%gate_required < 0) input%gate_required = 0
+        if (have_coverage .and. trim(coverage%generation_id) == trim(active_id)) then
+            input%ordinary_required = coverage%ordinary_eligible_count
+            input%ordinary_passed = coverage%ordinary_pass_count
+            input%ordinary_failures = coverage%ordinary_failure_count
+            input%full_required = coverage%eligible_count
+            input%full_passed = coverage%pass_count
+            input%full_failures = coverage%fail_count + coverage%timeout_count + &
+                coverage%flaky_count + coverage%infra_count
+        end if
+        select case (trim(status_name))
+        case ('starting')
+            input%phase = GREMLIN_PHASE_STARTING
+        case ('building')
+            input%phase = GREMLIN_PHASE_BUILDING
+        case ('quiescent')
+            input%phase = GREMLIN_PHASE_QUIESCENT
+        case ('stopped')
+            input%phase = GREMLIN_PHASE_STOPPED
+        case ('error', 'inventory_failed', 'test_launch_failed', 'build_failed', &
+                'capture_failed')
+            input%phase = GREMLIN_PHASE_FAILED
+        case default
+            if (input%exact_active_generation) then
+                input%phase = GREMLIN_PHASE_TESTING
+            else
+                input%phase = GREMLIN_PHASE_FAILED
+            end if
+        end select
+
+        build_passed = .false.
+        gate_failure = .false.
+        gate_cases = ''
+        gate_pass_cases = ''
+        gate_count = 0
+        gate_passed = 0
+        cursor = 0_int64
+        do
+            call journal_read_page(session%state_dir//'/journal.jsonl', cursor, 64, &
+                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, next_cursor, &
+                journal_status, message)
+            if (journal_status /= JOURNAL_OK) then
+                ierr = journal_status
+                return
+            end if
+            if (size(records) == 0) exit
+            do i = 1, size(records)
+                receipt_generation = ''
+                case_id = ''
+                status_name = ''
+                raw = ''
+                call extract_json_field(records(i)%json, 'generation', receipt_generation)
+                call extract_json_field(records(i)%json, 'case_id', case_id)
+                call extract_json_field(records(i)%json, 'status', status_name)
+                if (trim(receipt_generation) == trim(candidate_id) .and. &
+                    trim(case_id) == '<build>' .and. &
+                    status_is_failure(trim(status_name))) input%failure_observed = .true.
+                if (trim(receipt_generation) /= trim(active_id)) cycle
+                if (trim(case_id) == '<build>' .and. trim(status_name) == 'BUILD_PASS') &
+                    build_passed = .true.
+                if (status_is_failure(trim(status_name))) then
+                    gate_failure = .true.
+                    input%failure_observed = .true.
+                end if
+                call extract_json_field(records(i)%json, 'gate_required', raw)
+                receipt_requirement = ''
+                call extract_json_field(records(i)%json, 'requirement_digest', &
+                    receipt_requirement)
+                gate_required = trim(raw) == 'true' .and. &
+                    receipt_requirement == input%requirement_digest
+                passed = trim(status_name) == 'PASS'
+                if (gate_required .and. len_trim(case_id) > 0) then
+                    if (.not. any(gate_cases(:gate_count) == trim(case_id))) then
+                        if (gate_count < size(gate_cases)) then
+                            gate_count = gate_count + 1
+                            gate_cases(gate_count) = trim(case_id)
+                        end if
+                    end if
+                    if (passed .and. .not. any( &
+                        gate_pass_cases(:gate_passed) == trim(case_id))) then
+                        if (gate_passed < size(gate_cases)) then
+                            gate_passed = gate_passed + 1
+                            gate_pass_cases(gate_passed) = trim(case_id)
+                        end if
+                    end if
+                end if
+            end do
+            if (next_cursor <= cursor) then
+                ierr = JOURNAL_INVALID
+                message = 'Gremlin receipt cursor did not advance while computing readiness'
+                return
+            end if
+            cursor = next_cursor
+        end do
+        input%exact_active_generation = input%exact_active_generation .and. build_passed
+        input%capture_fresh = input%exact_active_generation .and. .not. input%dirty
+        input%build_passed = build_passed
+        input%gate_required = max(input%gate_required, gate_count)
+        input%gate_passed = min(input%gate_required, gate_passed)
+        input%gate_failure = gate_failure
+        call gremlin_readiness_compute(input, readiness)
+    end subroutine compute_readiness
+
+    function status_with_coverage(status_text, view, readiness, have_coverage) &
+            result(enriched)
         character(len=*), intent(in) :: status_text
         type(gremlin_coverage_view_t), intent(in) :: view
+        type(gremlin_readiness_t), intent(in) :: readiness
+        logical, intent(in) :: have_coverage
         character(len=:), allocatable :: enriched
-        character(len=:), allocatable :: object
+        character(len=:), allocatable :: coverage_json
+        character(len=16) :: phase, health, verification
 
-        object = '{"generation_id":"'//trim(view%generation_id)// &
-            '","inventory_digest":"'//trim(view%inventory_digest)// &
-            '","epoch":'//trim(json_int(view%epoch))// &
-            ',"seed":'//trim(json_int(view%seed))// &
-            ',"cursor":'//trim(json_int(view%cursor))// &
-            ',"eligible":'//trim(json_int(view%eligible_count))// &
-            ',"completed":'//trim(json_int(view%completed_count))// &
-            ',"pass":'//trim(json_int(view%pass_count))// &
-            ',"fail":'//trim(json_int(view%fail_count))// &
-            ',"timeout":'//trim(json_int(view%timeout_count))// &
-            ',"flaky":'//trim(json_int(view%flaky_count))// &
-            ',"infra":'//trim(json_int(view%infra_count))// &
-            ',"running":'//trim(json_int(view%running_count))// &
-            ',"cancelled":'//trim(json_int(view%cancelled_count))// &
-            ',"unknown":'//trim(json_int(view%unknown_count))// &
-            ',"remaining":'//trim(json_int(view%remaining_count))// &
-            ',"ordinary_complete":'//trim(json_bool(view%ordinary_complete))// &
-            ',"full_coverage":'//trim(json_bool(view%full_coverage))// &
-            ',"green":'//trim(json_bool(view%green))//'}'
+        phase = gremlin_phase_name(readiness%phase)
+        health = gremlin_health_name(readiness%health)
+        verification = gremlin_verification_name(readiness%verification_level)
         enriched = status_text(:len_trim(status_text) - 1)// &
-            ',"coverage":'//object//'}'
+            ',"phase":"'//trim(phase)//'","health":"'//trim(health)// &
+            '","dirty":'//trim(json_bool(readiness%dirty))// &
+            ',"local_gate_green":'//trim(json_bool(readiness%local_gate_green))// &
+            ',"verification_level":"'//trim(verification)// &
+            '","fully_verified":'//trim(json_bool(readiness%fully_verified))// &
+            ',"gate_token_version":1,"gate_token":"'// &
+            trim(readiness%gate_token)//'","requirement_digest":"'// &
+            trim(readiness%requirement_digest)//'","event_epoch":'// &
+            trim(json_int(readiness%event_epoch))// &
+            ',"gate_required":'//trim(json_int(readiness%gate_required))// &
+            ',"gate_passed":'//trim(json_int(readiness%gate_passed))// &
+            ',"ordinary_required":'//trim(json_int(readiness%ordinary_required))// &
+            ',"ordinary_passed":'//trim(json_int(readiness%ordinary_passed))// &
+            ',"ordinary_failures":'//trim(json_int(readiness%ordinary_failures))// &
+            ',"full_required":'//trim(json_int(readiness%full_required))// &
+            ',"full_passed":'//trim(json_int(readiness%full_passed))// &
+            ',"full_failures":'//trim(json_int(readiness%full_failures))
+        if (have_coverage) then
+            coverage_json = '{"ordinary":'// &
+                verification_counts(view%ordinary_eligible_count, &
+                view%ordinary_pass_count, view%ordinary_failure_count, &
+                view%ordinary_timeout_count, view%ordinary_infra_count, &
+                view%ordinary_flaky_count)//',"full":'// &
+                verification_counts(view%eligible_count, view%pass_count, &
+                readiness%full_failures, view%timeout_count, view%infra_count, &
+                view%flaky_count)//',"generation_id":"'//trim(view%generation_id)// &
+                '","inventory_digest":"'//trim(view%inventory_digest)// &
+                '","epoch":'//trim(json_int(view%epoch))// &
+                ',"seed":'//trim(json_int(view%seed))// &
+                ',"cursor":'//trim(json_int(view%cursor))// &
+                ',"eligible":'//trim(json_int(view%eligible_count))// &
+                ',"completed":'//trim(json_int(view%completed_count))// &
+                ',"pass":'//trim(json_int(view%pass_count))// &
+                ',"fail":'//trim(json_int(view%fail_count))// &
+                ',"timeout":'//trim(json_int(view%timeout_count))// &
+                ',"flaky":'//trim(json_int(view%flaky_count))// &
+                ',"infra":'//trim(json_int(view%infra_count))// &
+                ',"running":'//trim(json_int(view%running_count))// &
+                ',"cancelled":'//trim(json_int(view%cancelled_count))// &
+                ',"unknown":'//trim(json_int(view%unknown_count))// &
+                ',"remaining":'//trim(json_int(view%remaining_count))// &
+                ',"ordinary_required":'//trim(json_int(readiness%ordinary_required))// &
+                ',"ordinary_passed":'//trim(json_int(readiness%ordinary_passed))// &
+                ',"ordinary_verified":'//trim(json_bool( &
+                readiness%verification_level >= 2))// &
+                ',"full_required":'//trim(json_int(readiness%full_required))// &
+                ',"full_passed":'//trim(json_int(readiness%full_passed))// &
+                ',"fully_verified":'//trim(json_bool(readiness%fully_verified))// &
+                ',"ordinary_complete":'//trim(json_bool(view%ordinary_complete))// &
+                ',"full_coverage":'//trim(json_bool(view%full_coverage))// &
+                ',"green":'//trim(json_bool(view%green))//'}'
+            enriched = enriched//',"coverage":'//coverage_json
+        end if
+        enriched = enriched//'}'
     end function status_with_coverage
+
+    function verification_counts(eligible, passed, failures, timeouts, infra, flaky) &
+            result(json)
+        integer, intent(in) :: eligible, passed, failures, timeouts, infra, flaky
+        character(len=:), allocatable :: json
+        integer :: remaining
+
+        remaining = max(0, eligible - passed - failures)
+        json = '{"eligible":'//trim(json_int(eligible))// &
+            ',"pass":'//trim(json_int(passed))// &
+            ',"fail":'//trim(json_int(max(0, failures - timeouts - infra - flaky)))// &
+            ',"timeout":'//trim(json_int(timeouts))// &
+            ',"infra_error":'//trim(json_int(infra))// &
+            ',"flaky":'//trim(json_int(flaky))// &
+            ',"unknown":'//trim(json_int(remaining))// &
+            ',"remaining":'//trim(json_int(remaining))//'}'
+    end function verification_counts
 
     subroutine handle_events(project_dir, request, response, exitcode)
         character(len=*), intent(in) :: project_dir
@@ -396,50 +640,143 @@ contains
         character(len=:), allocatable, intent(out) :: response
         integer, intent(out) :: exitcode
 
-        character(len=65536) :: status_text
         character(len=PATH_LEN) :: message
-        type(gremlin_request_t) :: poll_request
-        type(gremlin_session_t) :: session
-        integer :: owner_pid, ierr, i
-        integer(int64) :: next_cursor
-        logical :: failed, has_events, is_live
+        character(len=32) :: state_name, health, phase_name, verification
+        character(len=:), allocatable :: status_json, wait_name, decorated
+        character(len=:), allocatable :: durable_failure_report
+        type(gremlin_readiness_t) :: readiness
+        type(gremlin_request_t) :: poll_request, failure_request
+        integer :: ierr, until_kind, elapsed, sleep_ms, failure_exitcode
+        integer(int64) :: started_ms, now_ms, next_cursor, next_lifecycle_cursor
+        logical :: satisfied, failed, timed_out, terminal, has_events
+        logical :: legacy_failure_wait
 
-        failed = .false.
         poll_request = request
-        do i = 1, max(1, (request%wait_ms + 99)/100)
-            call gremlin_resolve_read_session(project_dir, poll_request, session, status_text, &
-                owner_pid, is_live, ierr, message)
+        until_kind = gremlin_wait_code(request%wait_until)
+        wait_name = trim(request%wait_until)
+        legacy_failure_wait = until_kind == 0 .and. request%fail_on_failure
+        if (until_kind == 0) then
+            if (legacy_failure_wait) then
+                until_kind = GREMLIN_WAIT_FAILURE
+                wait_name = 'failure'
+            else
+                wait_name = 'events'
+            end if
+        end if
+        satisfied = .false.
+        failed = .false.
+        timed_out = .false.
+        terminal = .false.
+        elapsed = 0
+        call clock_milliseconds(started_ms)
+        do
+            call handle_status(project_dir, poll_request, status_json, ierr)
             if (ierr /= 0) then
-                call error_response('wait', trim(message), response)
-                exitcode = 2
+                response = status_json
+                exitcode = ierr
                 return
             end if
-            if (is_live) call poll_launcher(owner_pid)
-            call event_page_has_failure(session, poll_request, failed, has_events, &
-                next_cursor, ierr, message)
-            if (ierr /= 0) then
-                call error_response('wait', trim(message), response)
-                exitcode = 2
-                return
+            call extract_json_field(status_json, 'health', health)
+            call extract_json_field(status_json, 'phase', phase_name)
+            call extract_json_field(status_json, 'state', state_name)
+            readiness = gremlin_readiness_t()
+            if (trim(health) == 'failure') readiness%health = GREMLIN_HEALTH_FAILURE
+            select case (trim(phase_name))
+            case ('starting')
+                readiness%phase = GREMLIN_PHASE_STARTING
+            case ('building')
+                readiness%phase = GREMLIN_PHASE_BUILDING
+            case ('testing')
+                readiness%phase = GREMLIN_PHASE_TESTING
+            case ('quiescent')
+                readiness%phase = GREMLIN_PHASE_QUIESCENT
+            case ('stopped')
+                readiness%phase = GREMLIN_PHASE_STOPPED
+            case ('failed')
+                readiness%phase = GREMLIN_PHASE_FAILED
+            end select
+            readiness%local_gate_green = &
+                index(status_json, '"local_gate_green":true') > 0
+            readiness%fully_verified = index(status_json, '"fully_verified":true') > 0
+            call extract_json_field(status_json, 'verification_level', verification)
+            select case (trim(verification))
+            case ('ordinary')
+                readiness%verification_level = GREMLIN_VERIFY_ORDINARY
+            case ('full')
+                readiness%verification_level = GREMLIN_VERIFY_FULL
+            end select
+            failed = readiness%health == GREMLIN_HEALTH_FAILURE
+            call read_json_cursor(status_json, 'next_cursor', next_cursor)
+            call read_json_cursor(status_json, 'next_lifecycle_cursor', &
+                next_lifecycle_cursor)
+            has_events = next_cursor > poll_request%cursor .or. &
+                next_lifecycle_cursor > poll_request%lifecycle_cursor
+
+            if (until_kind > 0) then
+                satisfied = gremlin_wait_satisfied(until_kind, readiness)
+            else
+                satisfied = has_events
             end if
-            if ((has_events .and. .not. request%fail_on_failure) .or. &
-                (has_events .and. failed) .or. &
-                index(status_text, '"state":"stopped"') > 0) exit
-            if (.not. is_live) exit
-            if (has_events .and. request%fail_on_failure .and. &
-                next_cursor > poll_request%cursor) poll_request%cursor = next_cursor
-            if (i < max(1, (request%wait_ms + 99)/100)) call fs_sleep_ms(100)
+            terminal = trim(state_name) == 'stopped' .or. trim(state_name) == 'error'
+            if (satisfied .or. terminal) exit
+
+            call clock_milliseconds(now_ms)
+            elapsed = int(max(0_int64, now_ms - started_ms))
+            if (elapsed >= request%wait_ms) then
+                timed_out = .true.
+                exit
+            end if
+            if (legacy_failure_wait) then
+                if (next_cursor > poll_request%cursor) &
+                    poll_request%cursor = next_cursor
+                if (next_lifecycle_cursor > poll_request%lifecycle_cursor) &
+                    poll_request%lifecycle_cursor = next_lifecycle_cursor
+            end if
+            sleep_ms = min(100, request%wait_ms - elapsed)
+            if (sleep_ms > 0) call fs_sleep_ms(sleep_ms)
         end do
-        call response_with_events('wait', status_text, session, poll_request, .false., &
-            response, ierr, message)
-        if (ierr /= 0) then
-            call error_response('wait', trim(message), response)
+
+        call replace_action(status_json, 'wait')
+        if (len(status_json) < 2) then
+            call error_response('wait', 'status query returned an empty response', response)
             exitcode = 2
             return
         end if
+        durable_failure_report = ''
+        if (failed) then
+            failure_request = request
+            failure_request%cursor = 0_int64
+            failure_request%lifecycle_cursor = 0_int64
+            failure_request%max_records = 128
+            call handle_failures(project_dir, failure_request, &
+                durable_failure_report, failure_exitcode)
+            if (failure_exitcode /= 0) durable_failure_report = ''
+        end if
+        decorated = status_json(:len(status_json) - 1)// &
+            ',"wait_until":"'//trim(json_escape_string(wait_name))//'",'// &
+            '"wait_satisfied":'//trim(json_bool(satisfied))//','// &
+            '"wait_timed_out":'//trim(json_bool(timed_out))//','// &
+            '"wait_terminal":'//trim(json_bool(terminal))//','// &
+            '"failure_observed":'//trim(json_bool(failed))
+        if (len(durable_failure_report) > 1) decorated = decorated// &
+            ',"durable_failure_report":'//durable_failure_report
+        decorated = decorated//'}'
+        response = decorated
         exitcode = 0
-        if (request%fail_on_failure .and. failed) exitcode = 1
+        if (legacy_failure_wait .and. failed) exitcode = 1
     end subroutine handle_wait
+
+    subroutine read_json_cursor(json, name, value)
+        character(len=*), intent(in) :: json, name
+        integer(int64), intent(out) :: value
+        character(len=64) :: raw
+        integer :: ios
+
+        value = 0_int64
+        call extract_json_field(json, name, raw)
+        read(raw, *, iostat=ios) value
+        if (ios /= 0) value = 0_int64
+    end subroutine read_json_cursor
 
     subroutine handle_failures(project_dir, request, response, exitcode)
         character(len=*), intent(in) :: project_dir
@@ -492,6 +829,7 @@ contains
         character(len=:), allocatable :: packed
         integer :: owner_pid, ierr, n_selected, mandatory_count, seed
         integer :: n_args, spawn_exit, test_exit, sequence, release_error
+        integer :: reproduction_timeout
         logical :: executable_ok
         logical :: have_reproduction_lease
 
@@ -604,11 +942,18 @@ contains
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'test')
+        call argv_push(packed, n_args, '--json')
+        if (is_slow_test(trim(request%case_id))) then
+            call argv_push(packed, n_args, '--all')
+        end if
         call argv_push(packed, n_args, trim(request%case_id))
+        reproduction_timeout = case_wall_timeout(active_project, request%case_id, &
+            request%timeout_seconds)
         call process_start_argv_logged(trim(active_project), packed, n_args, &
-            trim(log_file), owner_pid, spawn_exit, 'FO_JOBS=1')
+            trim(log_file), owner_pid, spawn_exit, &
+            'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0')
         if (spawn_exit == 0) then
-            call process_wait_bounded(owner_pid, request%timeout_seconds, test_exit)
+            call process_wait_bounded(owner_pid, reproduction_timeout, test_exit)
             if (test_exit == 124) then
                 outcome = 'TIMEOUT'
                 test_exit = 124
@@ -616,10 +961,8 @@ contains
                 outcome = 'INFRA_ERROR'
                 call gremlin_generation_pin_at(generation%root, .true., &
                     release_error, cleanup_message)
-            else if (test_exit == 0) then
-                outcome = 'PASS'
             else
-                outcome = 'FAIL'
+                outcome = runner_case_outcome(log_file, request%case_id)
             end if
         else
             test_exit = spawn_exit
@@ -627,7 +970,7 @@ contains
         end if
         call record_immediate_case(session, request, generation, request%case_id, &
             test_exit, trim(outcome), sequence, 1, seed, trim(log_file), ierr, message, &
-            credit_coverage=.false.)
+            credit_coverage=.false., gate_required=.true.)
         call release_generation_lease(reproduction_lease, have_reproduction_lease, &
             release_error, cleanup_message)
         if (release_error /= 0) then
@@ -659,12 +1002,14 @@ contains
         integer, intent(out) :: exitcode
 
         type(gremlin_session_t) :: session
+        type(gremlin_request_t) :: owner_request
         type(gremlin_lease_t) :: active_lease, candidate_lease
         type(generation_t) :: active_generation, candidate_generation
         type(change_watch_t) :: change_watch
         type(child_t) :: build_child, test_child
         character(len=PATH_LEN) :: message, state_name, last_failed_identity
         character(len=PATH_LEN) :: fatal_message, state_message
+        character(len=16) :: observed_outcome
         character(len=PATH_LEN) :: owner_start
         character(len=NAME_LEN) :: selected(MAX_NODES)
         character(len=HASH_LEN) :: stored_policy
@@ -676,6 +1021,7 @@ contains
         integer :: owner_pid, i
         integer :: sequence, campaign_seed, campaign_number, test_index
         integer(int64) :: capture_debounce_ms, campaign_started_ms
+        real :: test_timeout
         logical :: have_active, have_candidate, stop_requested, capture_ok
         logical :: capture_failed
         logical :: have_active_lease, have_candidate_lease
@@ -685,6 +1031,7 @@ contains
         exitcode = 0
         active_generation = generation_t()
         candidate_generation = generation_t()
+        owner_request = request
         build_child = child_t()
         test_child = child_t()
         completed = 0
@@ -754,7 +1101,7 @@ contains
             return
         end if
         call fs_make_dir(session%state_dir//'/logs')
-        call publish_state(session, request, 'starting', active_generation, &
+        call publish_state(session, owner_request, 'starting', active_generation, &
             candidate_generation, '', completed, selected_count, campaign_seed, 'NONE', 0, &
             ierr, message)
         if (ierr /= 0) then
@@ -795,7 +1142,7 @@ contains
                 if (ierr /= 0) then
                     launch_error = ierr
                     fatal_message = 'cannot start initial candidate build'
-                    call publish_state(session, request, 'build_failed', active_generation, &
+                    call publish_state(session, owner_request, 'build_failed', active_generation, &
                         candidate_generation, '', completed, selected_count, campaign_seed, &
                         'INFRA_ERROR', launch_error, state_error, state_message)
                     if (state_error == 0) then
@@ -819,11 +1166,18 @@ contains
                             'cannot release failed candidate lease: '//trim(state_message)
                     end if
                 else
+                    call publish_state(session, owner_request, 'building', active_generation, &
+                        candidate_generation, '', completed, selected_count, campaign_seed, &
+                        'NONE', 0, state_error, state_message)
+                    if (state_error /= 0) then
+                        fatal_error = .true.
+                        fatal_message = trim(state_message)
+                    end if
                     state_name = 'building'
                 end if
             end if
         else if (.not. fatal_error) then
-            call publish_state(session, request, 'capture_failed', active_generation, &
+            call publish_state(session, owner_request, 'capture_failed', active_generation, &
                 candidate_generation, '', completed, selected_count, 0, 'NONE', 0, &
                 ierr, message)
             if (ierr /= 0) fatal_error = .true.
@@ -841,7 +1195,7 @@ contains
             if (build_child%pid > 0) then
                 call process_poll_pid(build_child%pid, build_done, build_exit)
                 if (build_done) then
-                    call complete_build(session, request, candidate_generation, &
+                    call complete_build(session, owner_request, candidate_generation, &
                         build_child, build_exit, active_generation, have_active, &
                         test_child, active_lease, candidate_lease, &
                         have_active_lease, have_candidate_lease, active_pinned, &
@@ -855,7 +1209,7 @@ contains
                         campaign_number = campaign_number + 1
                         test_index = 1
                         call clock_milliseconds(campaign_started_ms)
-                        call launch_selected_case(session, request, active_generation, &
+                        call launch_selected_case(session, owner_request, active_generation, &
                             selected, selected_count, test_index, campaign_seed, &
                             campaign_number, test_child, ierr, message, completed, sequence)
                         if (ierr /= 0) then
@@ -869,25 +1223,23 @@ contains
             if (fatal_error) exit
 
             if (test_child%pid > 0) then
+                test_timeout = real(case_wall_timeout(active_generation%project_root, &
+                    test_child%case_name, request%timeout_seconds))
                 call process_poll_pid(test_child%pid, test_done, test_exit)
                 if (test_done) then
-                    if (test_exit == 0) then
-                        state_name = 'testing'
-                        call record_case(session, request, active_generation, &
-                            test_child, test_exit, 'PASS', sequence, campaign_seed, &
-                            ierr, message)
-                    else
-                        call record_case(session, request, active_generation, &
-                            test_child, test_exit, 'FAIL', sequence, campaign_seed, &
-                            ierr, message)
-                    end if
+                    state_name = 'testing'
+                    observed_outcome = runner_case_outcome(test_child%log_file, &
+                        test_child%case_name)
+                    call record_case(session, owner_request, active_generation, &
+                        test_child, test_exit, observed_outcome, sequence, campaign_seed, &
+                        ierr, message)
                     test_child%pid = 0
                     completed = completed + 1
                     if (ierr /= 0) then
                         fatal_error = .true.
                         exit
                     end if
-                    call advance_campaign(session, request, active_generation, selected, &
+                    call advance_campaign(session, owner_request, active_generation, selected, &
                         selected_count, test_index, campaign_seed, campaign_number, &
                         campaign_started_ms, test_child, ierr, message, completed, &
                         state_name, sequence)
@@ -895,15 +1247,14 @@ contains
                         fatal_error = .true.
                         exit
                     end if
-                else if (elapsed_seconds(test_child%started_at) >= &
-                        real(request%timeout_seconds)) then
+                else if (elapsed_seconds(test_child%started_at) >= test_timeout) then
                     call cancel_owned_process(test_child%pid, test_exit)
                     if (test_exit /= 0) then
                         message = 'cannot cancel timed-out Gremlin test process'
                         fatal_error = .true.
                         exit
                     end if
-                    call record_case(session, request, active_generation, &
+                    call record_case(session, owner_request, active_generation, &
                         test_child, 124, 'TIMEOUT', sequence, campaign_seed, ierr, message)
                     test_child%pid = 0
                     completed = completed + 1
@@ -911,7 +1262,7 @@ contains
                         fatal_error = .true.
                         exit
                     end if
-                    call advance_campaign(session, request, active_generation, selected, &
+                    call advance_campaign(session, owner_request, active_generation, selected, &
                         selected_count, test_index, campaign_seed, campaign_number, &
                         campaign_started_ms, test_child, ierr, message, completed, &
                         state_name, sequence)
@@ -923,10 +1274,11 @@ contains
             end if
             if (fatal_error) exit
 
-            call maybe_capture_latest(project_dir, session, request, active_generation, &
+            call maybe_capture_latest(project_dir, session, owner_request, active_generation, &
                 candidate_generation, have_active, have_candidate, last_failed_identity, &
                 build_child, candidate_lease, have_candidate_lease, capture_debounce_ms, &
-                change_watch, sequence, capture_failed, ierr, message)
+                change_watch, sequence, completed, selected_count, campaign_seed, &
+                current_test_name(selected, selected_count), capture_failed, ierr, message)
             if (ierr /= 0) then
                 fatal_message = trim(message)
                 fatal_error = .true.
@@ -935,7 +1287,7 @@ contains
             if (capture_failed) then
                 state_name = 'capture_failed'
                 capture_error = 1
-                call publish_state(session, request, state_name, active_generation, &
+                call publish_state(session, owner_request, state_name, active_generation, &
                     candidate_generation, current_test_name(selected, selected_count), &
                     completed, selected_count, campaign_seed, 'NONE', capture_error, &
                     state_error, state_message)
@@ -984,7 +1336,7 @@ contains
                 call gremlin_generation_pin_at(candidate_generation%root, .true., &
                     state_error, state_message)
             end if
-            call publish_state(session, request, 'error', active_generation, &
+            call publish_state(session, owner_request, 'error', active_generation, &
                 candidate_generation, current_test_name(selected, selected_count), &
                 completed, selected_count, campaign_seed, 'INFRA_ERROR', 1, &
                 state_error, state_message)
@@ -1018,7 +1370,7 @@ contains
             if (build_exit == 0) build_child%pid = 0
         end if
         if (cancel_error /= 0) then
-            call publish_state(session, request, 'error', active_generation, &
+            call publish_state(session, owner_request, 'error', active_generation, &
                 candidate_generation, current_test_name(selected, selected_count), &
                 completed, selected_count, campaign_seed, 'INFRA_ERROR', cancel_error, &
                 state_error, state_message)
@@ -1036,7 +1388,7 @@ contains
         if (state_error == 0) call release_generation_lease(active_lease, &
             have_active_lease, state_error, state_message)
         if (state_error /= 0) then
-            call publish_state(session, request, 'error', active_generation, &
+            call publish_state(session, owner_request, 'error', active_generation, &
                 candidate_generation, '', completed, selected_count, campaign_seed, &
                 'INFRA_ERROR', state_error, release_error, message)
             if (release_error == 0) then
@@ -1052,7 +1404,7 @@ contains
         end if
         state_name = 'NONE'
         if (stop_requested) state_name = 'CANCELLED'
-        call publish_state(session, request, 'stopped', active_generation, &
+        call publish_state(session, owner_request, 'stopped', active_generation, &
             candidate_generation, '', completed, selected_count, campaign_seed, &
             state_name, 0, ierr, message, status_text_out=status_text)
         if (ierr /= 0) then
@@ -1084,10 +1436,10 @@ contains
     subroutine maybe_capture_latest(project_dir, session, request, active, candidate, &
             have_active, have_candidate, last_failed, build_child, candidate_lease, &
             have_candidate_lease, capture_debounce_ms, change_watch, sequence, &
-            capture_failed, ierr, message)
+            completed, selected_count, seed, current_case, capture_failed, ierr, message)
         character(len=*), intent(in) :: project_dir
         type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(in) :: request
+        type(gremlin_request_t), intent(inout) :: request
         type(generation_t), intent(in) :: active
         type(generation_t), intent(inout) :: candidate
         logical, intent(in) :: have_active
@@ -1099,6 +1451,8 @@ contains
         integer(int64), intent(inout) :: capture_debounce_ms
         type(change_watch_t), intent(inout) :: change_watch
         integer, intent(inout) :: sequence
+        integer, intent(in) :: completed, selected_count, seed
+        character(len=*), intent(in) :: current_case
         logical, intent(out) :: capture_failed
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
@@ -1108,6 +1462,8 @@ contains
         logical :: ok, got_event
         integer(int64) :: now_ms
         integer :: spawn_error, journal_error, release_error, event_type, watch_error
+        integer :: state_error
+        character(len=PATH_LEN) :: state_message
 
         ierr = 0
         message = ''
@@ -1121,6 +1477,11 @@ contains
         end if
         call clock_milliseconds(now_ms)
         if (got_event) then
+            request%event_epoch = request%event_epoch + 1
+            request%input_changed = .true.
+            call publish_state(session, request, 'capture_pending', active, candidate, &
+                current_case, completed, selected_count, seed, 'NONE', 0, ierr, message)
+            if (ierr /= 0) return
             capture_debounce_ms = now_ms + 250_int64
             return
         end if
@@ -1159,7 +1520,12 @@ contains
             have_candidate = .false.
         end if
         if (have_active) then
-            if (current%identity == active%identity) return
+            if (current%identity == active%identity) then
+                request%input_changed = .false.
+                call publish_state(session, request, 'testing', active, current, &
+                    current_case, completed, selected_count, seed, 'NONE', 0, ierr, message)
+                return
+            end if
         end if
         if (current%identity == last_failed) return
         candidate = current
@@ -1193,6 +1559,14 @@ contains
             end if
             ierr = spawn_error
             message = 'cannot start candidate build'
+        else
+            call publish_state(session, request, 'building', active, candidate, &
+                current_case, completed, selected_count, seed, 'NONE', 0, &
+                state_error, state_message)
+            if (state_error /= 0) then
+                ierr = state_error
+                message = 'cannot publish candidate build start: '//trim(state_message)
+            end if
         end if
     end subroutine maybe_capture_latest
 
@@ -1221,7 +1595,7 @@ contains
         call argv_push(packed, n_args, 'build')
         call process_start_argv_logged(trim(generation%project_root), packed, &
             n_args, trim(child%log_file), child%pid, spawn_exit, &
-            'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1')
+            'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0')
         ierr = spawn_exit
         if (ierr /= 0) then
             message = 'cannot start candidate build'
@@ -1238,7 +1612,7 @@ contains
             selected, selected_count, seed, completed, state_name, last_failed, &
             sequence, ierr, message)
         type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(in) :: request
+        type(gremlin_request_t), intent(inout) :: request
         type(generation_t), intent(inout) :: candidate, active
         type(child_t), intent(inout) :: build_child, test_child
         type(gremlin_lease_t), intent(inout) :: active_lease, candidate_lease
@@ -1260,6 +1634,8 @@ contains
         integer :: inventory_status, cancel_exit, mandatory_count, state_status
         integer :: release_status, pin_status
         character(len=PATH_LEN) :: state_message, release_message
+        character(len=PATH_LEN) :: coverage_path
+        type(gremlin_coverage_view_t) :: coverage_view
         character(len=NAME_LEN) :: active_case
         logical :: was_active
 
@@ -1357,8 +1733,13 @@ contains
         new_active_lease%lock_fd = -1
         new_active_lease%slot = -1
         have_active_lease = .true.
+        request%has_previous_generation = was_active
+        request%requirement_digest = ''
+        request%gate_cases = ''
         active = candidate
         have_active = .true.
+        request%input_changed = .false.
+        request%gate_required_count = 0
         active_pinned = .true.
         candidate_pinned = .false.
         if (have_candidate_lease) then
@@ -1377,6 +1758,9 @@ contains
         call discover_campaign(active%project_root, active%identity, session, &
             selection_request, selected, selected_count, mandatory_count, seed, &
             inventory_status, message)
+        request%requirement_digest = selection_request%requirement_digest
+        request%gate_cases = selection_request%gate_cases
+        request%gate_required_count = selection_request%gate_required_count
         if (inventory_status /= 0) then
             state_name = 'inventory_failed'
             selected_count = 0
@@ -1390,7 +1774,20 @@ contains
             return
         end if
         state_name = 'testing'
-        if (selected_count == 0) state_name = 'idle'
+        if (selected_count == 0) then
+            state_name = 'idle'
+            coverage_path = trim(session%state_dir)//'/coverage-'// &
+                trim(active%identity)//'.state'
+            call coverage_read_view_path(trim(coverage_path), active%identity, &
+                coverage_view, inventory_status, message)
+            if (inventory_status == COVERAGE_OK) then
+                if (coverage_view%green .and. request%gate_required_count > 0) &
+                    state_name = 'quiescent'
+            else if (inventory_status /= COVERAGE_NOT_FOUND) then
+                ierr = inventory_status
+                return
+            end if
+        end if
         call publish_state(session, request, state_name, active, candidate, &
             current_test_name(selected, selected_count), completed, selected_count, &
             seed, 'NONE', 0, ierr, message)
@@ -1402,7 +1799,7 @@ contains
         character(len=*), intent(in) :: project_dir
         character(len=*), intent(in) :: generation_id
         type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(in) :: request
+        type(gremlin_request_t), intent(inout) :: request
         character(len=*), intent(out) :: selected(:)
         integer, intent(out) :: n_selected, n_mandatory_selected, seed, ierr
         character(len=*), intent(out) :: message
@@ -1452,18 +1849,21 @@ contains
             candidate_ids(i) = i
         end do
         call gfortran_selected_test_names(project_dir, filenames, candidate_ids, &
-            dag%n_nodes, .false., all_names, n_all)
+            dag%n_nodes, .true., all_names, n_all)
         call read_campaign_history(session, all_names, n_all, history, n_history, &
             debt, n_debt, cursor_seed, ierr, message)
         if (ierr /= 0) return
-        if (request%only_changed) then
-            n_impacted = 0
+        n_impacted = 0
+        if (request%only_changed .or. request%has_previous_generation) then
             call gfortran_selected_test_names(project_dir, filenames, affected_ids, &
                 n_affected, .false., impacted, n_impacted)
-        else
-            n_impacted = 0
         end if
         n_priorities = 0
+        if (request%only_changed .or. request%has_previous_generation .or. &
+            request%n_targets > 0 .or. n_history > 0) then
+            call append_priority_names(request%gate_cases, request%gate_required_count, &
+                priorities, n_priorities)
+        end if
         call append_priority_names(request%targets, request%n_targets, priorities, &
             n_priorities)
         call append_priority_names(impacted, n_impacted, priorities, n_priorities)
@@ -1523,6 +1923,16 @@ contains
             ierr = coverage_status
             message = 'coverage scheduler rejected eligible inventory or priorities'
             return
+        end if
+        if (n_priorities == 0 .and. n_selected > 0) then
+            priorities(1) = selected(1)
+            n_priorities = 1
+        end if
+        if (len_trim(request%requirement_digest) /= HASH_LEN) then
+            request%gate_cases = ''
+            request%gate_cases(:n_priorities) = priorities(:n_priorities)
+            request%gate_required_count = n_priorities
+            request%requirement_digest = cache_digest(priorities, n_priorities)
         end if
         n_mandatory_selected = n_selected_priorities
         if (request%shuffle) then
@@ -1773,6 +2183,8 @@ contains
         ierr = 0
         message = ''
         if (index_case < 1 .or. index_case > n_selected) return
+        child%gate_required = any(request%gate_cases(:request%gate_required_count) == &
+            selected(index_case))
         call find_self_executable(executable, executable_ok)
         if (.not. executable_ok) then
             ierr = 1
@@ -1784,9 +2196,14 @@ contains
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'test')
+        call argv_push(packed, n_args, '--json')
+        if (is_slow_test(trim(selected(index_case)))) then
+            call argv_push(packed, n_args, '--all')
+        end if
         call argv_push(packed, n_args, trim(selected(index_case)))
         call process_start_argv_logged(trim(generation%project_root), packed, &
-            n_args, trim(child%log_file), child%pid, spawn_exit, 'FO_JOBS=1')
+            n_args, trim(child%log_file), child%pid, spawn_exit, &
+            'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0')
         ierr = spawn_exit
         if (spawn_exit /= 0) then
             child%pid = 0
@@ -1794,7 +2211,8 @@ contains
             sequence = sequence + 1
             call record_immediate_case(session, request, generation, &
                 selected(index_case), spawn_exit, 'INFRA_ERROR', sequence, &
-                index_case, seed, child%log_file, journal_status, message)
+                index_case, seed, child%log_file, journal_status, message, &
+                gate_required=child%gate_required)
             if (journal_status /= JOURNAL_OK) then
                 ierr = journal_status
             else
@@ -1824,7 +2242,7 @@ contains
             index_case, seed, campaign, campaign_started_ms, child, ierr, message, &
             completed, state_name, sequence)
         type(gremlin_session_t), intent(in) :: session
-        type(gremlin_request_t), intent(in) :: request
+        type(gremlin_request_t), intent(inout) :: request
         type(generation_t), intent(in) :: generation
         character(len=*), intent(inout) :: selected(:)
         integer, intent(inout) :: n_selected, index_case, seed, campaign
@@ -1838,7 +2256,9 @@ contains
         integer(int64) :: now_ms
         integer :: status, mandatory_count, launch_error
         type(gremlin_request_t) :: next_request
+        type(gremlin_coverage_view_t) :: coverage_view
         character(len=PATH_LEN) :: launch_message, state_message
+        character(len=PATH_LEN) :: coverage_path
 
         ierr = 0
         message = ''
@@ -1854,6 +2274,9 @@ contains
             call discover_campaign(generation%project_root, generation%identity, &
                 session, next_request, selected, n_selected, mandatory_count, seed, &
                 ierr, message)
+            request%requirement_digest = next_request%requirement_digest
+            request%gate_cases = next_request%gate_cases
+            request%gate_required_count = next_request%gate_required_count
             if (ierr /= 0) then
                 state_name = 'inventory_failed'
                 call publish_state(session, request, state_name, generation, generation, '', &
@@ -1866,6 +2289,17 @@ contains
         end if
         if (n_selected == 0) then
             state_name = 'idle'
+            coverage_path = trim(session%state_dir)//'/coverage-'// &
+                trim(generation%identity)//'.state'
+            call coverage_read_view_path(trim(coverage_path), generation%identity, &
+                coverage_view, status, message)
+            if (status == COVERAGE_OK) then
+                if (coverage_view%green .and. request%gate_required_count > 0) &
+                    state_name = 'quiescent'
+            else if (status /= COVERAGE_NOT_FOUND) then
+                ierr = status
+                return
+            end if
             call publish_state(session, request, state_name, generation, generation, '', &
                 completed, n_selected, seed, 'NONE', 0, ierr, message)
             return
@@ -1914,11 +2348,12 @@ contains
         sequence = sequence + 1
         call record_immediate_case(session, request, generation, child%case_name, &
             exitcode, outcome, sequence, child%case_index, seed, child%log_file, ierr, &
-            message)
+            message, gate_required=child%gate_required)
     end subroutine record_case
 
     subroutine record_immediate_case(session, request, generation, case_name, exitcode, &
-            outcome, sequence, case_index, seed, log_file, ierr, message, credit_coverage)
+            outcome, sequence, case_index, seed, log_file, ierr, message, &
+            credit_coverage, gate_required)
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(in) :: request
         type(generation_t), intent(in) :: generation
@@ -1928,7 +2363,9 @@ contains
         character(len=*), intent(out) :: message
 
         logical, intent(in), optional :: credit_coverage
-        logical :: credit
+        logical, intent(in), optional :: gate_required
+        logical :: credit, is_gate
+        character(len=160) :: gate_identity
         character(len=256) :: completion_id
         character(len=8192) :: record
         character(len=16) :: journal_outcome
@@ -1946,6 +2383,11 @@ contains
         if (outcome == 'PASS' .or. outcome == 'BUILD_PASS') journal_outcome = 'pass'
         credit = .true.
         if (present(credit_coverage)) credit = credit_coverage
+        is_gate = .false.
+        if (present(gate_required)) is_gate = gate_required
+        gate_identity = ''
+        if (is_gate) gate_identity = ',"gate_required":true,"requirement_digest":"'// &
+            request%requirement_digest//'"'
         receipt_identity = ',"evidence_kind":"reproduction"'
         if (credit) receipt_identity = ',"evidence_kind":"campaign"'
         if (credit .and. coverage_outcome(outcome)) then
@@ -1971,7 +2413,7 @@ contains
             '","outcome":"'//trim(journal_outcome)//'","status":"'// &
             trim(outcome)//'","exitcode":'// &
             trim(json_int(exitcode))//',"seed":'//trim(json_int(seed))// &
-            trim(receipt_identity)// &
+            trim(receipt_identity)//trim(gate_identity)// &
             ',"order":'//trim(json_int(case_index))//',"log_path":"'// &
             trim(json_escape_string(log_file))//'"}'
         call gremlin_get_session_journal_path(session%project_key, request%lane_id, &
@@ -2041,9 +2483,14 @@ contains
         character(len=*), intent(out), optional :: status_text_out
 
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
-        character(len=PATH_LEN) :: local_message
+        type(gremlin_session_t) :: read_session
+        type(gremlin_coverage_view_t) :: coverage_view
+        type(gremlin_readiness_t) :: readiness
+        character(len=PATH_LEN) :: local_message, lifecycle_path, event_message
+        character(len=PATH_LEN) :: coverage_path
         integer :: status
         character(len=PATH_LEN) :: active_project, candidate_project
+        logical :: have_coverage
 
         active_project = ''
         candidate_project = ''
@@ -2062,12 +2509,273 @@ contains
             ',"selected":'//trim(json_int(selected_count))// &
             ',"seed":'//trim(json_int(seed))//',"last_outcome":"'// &
             trim(last_outcome)//'","last_exitcode":'// &
-            trim(json_int(last_exitcode))//'}'
+            trim(json_int(last_exitcode))//',"gate_required":'// &
+            trim(json_int(request%gate_required_count))// &
+            ',"requirement_digest":"'//request%requirement_digest// &
+            '","event_epoch":'//trim(json_int(request%event_epoch))// &
+            ',"input_changed":'//trim(json_bool(request%input_changed))//'}'
         call gremlin_session_publish(session, trim(status_text), status, local_message)
+        if (status == 0) then
+            call lifecycle_path_for_session(session, request, lifecycle_path, &
+                status, event_message)
+            if (status == 0) then
+                read_session = session
+                read_session%state_dir = lifecycle_path(: &
+                    len_trim(lifecycle_path) - len('/lifecycle.jsonl'))
+                coverage_view = gremlin_coverage_view_t()
+                have_coverage = .false.
+                if (len_trim(active%identity) == HASH_LEN) then
+                    coverage_path = trim(session%state_dir)//'/coverage-'// &
+                        trim(active%identity)//'.state'
+                    call coverage_read_view_path(trim(coverage_path), &
+                        trim(active%identity), coverage_view, status, event_message)
+                    if (status == COVERAGE_OK) then
+                        have_coverage = .true.
+                    else if (status == COVERAGE_NOT_FOUND) then
+                        status = 0
+                        event_message = ''
+                    end if
+                end if
+            end if
+            if (status == 0) then
+                call compute_readiness(read_session, trim(status_text), coverage_view, &
+                    have_coverage, readiness, status, event_message)
+            end if
+            if (status == 0) then
+                call publish_lifecycle_transition(read_session, request, &
+                    trim(lifecycle_path), state, active, candidate, last_outcome, &
+                    readiness, coverage_view, have_coverage, status, event_message)
+            end if
+            if (status /= 0) then
+                local_message = 'cannot publish Gremlin lifecycle transition: '// &
+                    trim(event_message)
+            end if
+        end if
         if (present(ierr)) ierr = status
         if (present(message)) message = local_message
         if (present(status_text_out)) status_text_out = trim(status_text)
     end subroutine publish_state
+
+    subroutine publish_lifecycle_transition(session, request, path, state, active, &
+            candidate, last_outcome, readiness, coverage, have_coverage, ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        type(gremlin_request_t), intent(in) :: request
+        character(len=*), intent(in) :: path, state, last_outcome
+        type(generation_t), intent(in) :: active, candidate
+        type(gremlin_readiness_t), intent(in) :: readiness
+        type(gremlin_coverage_view_t), intent(in) :: coverage
+        logical, intent(in) :: have_coverage
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(gremlin_lifecycle_event_t) :: previous
+        logical :: found, changed_generation, coverage_changed
+        integer :: status
+        character(len=HASH_LEN) :: previous_generation
+
+        ierr = 0
+        message = ''
+        call read_last_lifecycle_event(path, previous, found, ierr, message)
+        if (ierr /= 0) return
+        previous_generation = ''
+        if (found) previous_generation = previous%active_generation
+        changed_generation = len_trim(active%identity) == HASH_LEN .and. &
+            trim(active%identity) /= trim(previous_generation)
+        if (trim(state) == 'starting') then
+            call append_lifecycle_event(session, request, path, 'session_started', &
+                active, candidate, active%identity, previous_generation, readiness, &
+                coverage, have_coverage, ierr, message)
+        else if (trim(state) == 'building') then
+            call append_lifecycle_event(session, request, path, &
+                'generation_started', active, candidate, candidate%identity, &
+                previous_generation, readiness, coverage, have_coverage, ierr, message)
+        else if (trim(state) == 'build_failed' .or. trim(last_outcome) == 'BUILD_FAIL') then
+            call append_lifecycle_event(session, request, path, &
+                'build_failed', active, candidate, candidate%identity, &
+                previous_generation, readiness, coverage, have_coverage, ierr, message)
+        else if (trim(state) == 'capture_failed') then
+            call append_lifecycle_event(session, request, path, 'capture_failed', &
+                active, candidate, candidate%identity, previous_generation, readiness, &
+                coverage, have_coverage, ierr, message)
+        else if (trim(state) == 'error') then
+            call append_lifecycle_event(session, request, path, 'session_failed', &
+                active, candidate, active%identity, previous_generation, readiness, &
+                coverage, have_coverage, ierr, message)
+        else if (trim(state) == 'stopped') then
+            call append_lifecycle_event(session, request, path, 'session_stopped', &
+                active, candidate, active%identity, previous_generation, readiness, &
+                coverage, have_coverage, ierr, message)
+        end if
+        if (ierr /= 0) return
+
+        if (changed_generation) then
+            call append_lifecycle_event(session, request, path, &
+                'build_passed', active, candidate, candidate%identity, &
+                previous_generation, readiness, coverage, have_coverage, ierr, message)
+            if (ierr /= 0) return
+            if (len_trim(previous_generation) > 0) then
+                call append_lifecycle_event(session, request, path, &
+                    'generation_superseded', active, candidate, candidate%identity, &
+                    previous_generation, readiness, coverage, have_coverage, ierr, message)
+            else
+                call append_lifecycle_event(session, request, path, 'generation_activated', &
+                    active, candidate, active%identity, previous_generation, readiness, &
+                    coverage, have_coverage, ierr, message)
+            end if
+            if (ierr /= 0) return
+        end if
+
+        if (found .and. (readiness%local_gate_green .neqv. &
+            previous%local_gate_green)) then
+            if (readiness%local_gate_green) then
+                call append_lifecycle_event(session, request, path, 'local_gate_green', &
+                    active, candidate, active%identity, previous_generation, readiness, &
+                    coverage, have_coverage, ierr, message)
+            else
+                call append_lifecycle_event(session, request, path, 'local_gate_changed', &
+                    active, candidate, active%identity, previous_generation, readiness, &
+                    coverage, have_coverage, ierr, message)
+            end if
+            if (ierr /= 0) return
+        else if (.not. found .and. readiness%local_gate_green) then
+            call append_lifecycle_event(session, request, path, 'local_gate_green', &
+                active, candidate, active%identity, previous_generation, readiness, &
+                coverage, have_coverage, ierr, message)
+            if (ierr /= 0) return
+        end if
+
+        if ((readiness%gate_failure .or. readiness%ordinary_failures > 0 .or. &
+            readiness%full_failures > 0) .and. &
+            (.not. found .or. previous%health /= 'failure')) then
+            call append_lifecycle_event(session, request, path, 'regression_confirmed', &
+                active, candidate, active%identity, previous_generation, readiness, &
+                coverage, have_coverage, ierr, message)
+            if (ierr /= 0) return
+        end if
+        if (readiness%verification_level >= GREMLIN_VERIFY_ORDINARY .and. &
+            (.not. found .or. (previous%verification_level /= 'ordinary' .and. &
+            previous%verification_level /= 'full'))) then
+            call append_lifecycle_event(session, request, path, 'ordinary_coverage_complete', &
+                active, candidate, active%identity, previous_generation, readiness, &
+                coverage, have_coverage, ierr, message)
+            if (ierr /= 0) return
+        end if
+        if (readiness%fully_verified .and. &
+            (.not. found .or. previous%verification_level /= 'full')) then
+            call append_lifecycle_event(session, request, path, 'full_verification_complete', &
+                active, candidate, active%identity, previous_generation, readiness, &
+                coverage, have_coverage, ierr, message)
+            if (ierr /= 0) return
+        end if
+        if (readiness%phase == GREMLIN_PHASE_QUIESCENT .and. &
+            (.not. found .or. previous%phase /= 'quiescent')) then
+            call append_lifecycle_event(session, request, path, 'session_quiescent', &
+                active, candidate, active%identity, previous_generation, readiness, &
+                coverage, have_coverage, ierr, message)
+            if (ierr /= 0) return
+        else if (found .and. previous%phase == 'quiescent' .and. &
+                readiness%phase /= GREMLIN_PHASE_QUIESCENT) then
+            call append_lifecycle_event(session, request, path, 'session_wake', &
+                active, candidate, active%identity, previous_generation, readiness, &
+                coverage, have_coverage, ierr, message)
+            if (ierr /= 0) return
+        end if
+
+        coverage_changed = have_coverage
+        if (found .and. have_coverage) then
+            coverage_changed = coverage_changed .and. &
+                (coverage%epoch /= previous%epoch .or. &
+                coverage%cursor /= previous%epoch_cursor .or. &
+                readiness%ordinary_passed /= previous%ordinary_passed .or. &
+                readiness%ordinary_required /= previous%ordinary_required .or. &
+                readiness%ordinary_failures /= previous%ordinary_failures)
+        end if
+        if (coverage_changed) then
+            call append_lifecycle_event(session, request, path, 'coverage_updated', &
+                active, candidate, active%identity, previous_generation, readiness, &
+                coverage, have_coverage, ierr, message)
+            if (ierr /= 0) return
+        end if
+    end subroutine publish_lifecycle_transition
+
+    subroutine read_last_lifecycle_event(path, event, found, ierr, message)
+        character(len=*), intent(in) :: path
+        type(gremlin_lifecycle_event_t), intent(out) :: event
+        logical, intent(out) :: found
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(gremlin_lifecycle_event_t), allocatable :: page(:)
+        integer(int64) :: cursor, next_cursor
+        integer :: n_events
+        logical :: has_more
+
+        event = gremlin_lifecycle_event_t()
+        found = .false.
+        cursor = 0_int64
+        ierr = LIFECYCLE_OK
+        message = ''
+        do
+            call gremlin_lifecycle_read_page(path, cursor, 128, &
+                int(LIFECYCLE_MAX_EVENT, int64), page, n_events, next_cursor, &
+                has_more, ierr, message)
+            if (ierr /= LIFECYCLE_OK) return
+            if (n_events > 0) then
+                event = page(n_events)
+                found = .true.
+            end if
+            if (.not. has_more) exit
+            if (next_cursor <= cursor) then
+                ierr = LIFECYCLE_INVALID
+                message = 'lifecycle event cursor did not advance'
+                return
+            end if
+            cursor = next_cursor
+        end do
+    end subroutine read_last_lifecycle_event
+
+    subroutine append_lifecycle_event(session, request, path, event_type, active, &
+            candidate, subject_generation, previous_generation, readiness, coverage, &
+            have_coverage, ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        type(gremlin_request_t), intent(in) :: request
+        character(len=*), intent(in) :: path, event_type, subject_generation
+        character(len=*), intent(in) :: previous_generation
+        type(generation_t), intent(in) :: active, candidate
+        type(gremlin_readiness_t), intent(in) :: readiness
+        type(gremlin_coverage_view_t), intent(in) :: coverage
+        logical, intent(in) :: have_coverage
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(gremlin_lifecycle_event_t) :: event
+
+        event%event_type = trim(event_type)
+        event%generation = trim(subject_generation)
+        event%active_generation = trim(active%identity)
+        event%candidate_generation = trim(candidate%identity)
+        event%previous_generation = trim(previous_generation)
+        event%phase = gremlin_phase_name(readiness%phase)
+        event%health = gremlin_health_name(readiness%health)
+        event%event_epoch = readiness%event_epoch
+        event%requirement_digest = readiness%requirement_digest
+        event%gate_token = readiness%gate_token
+        event%dirty = readiness%dirty
+        event%local_gate_green = readiness%local_gate_green
+        event%verification_level = gremlin_verification_name(readiness%verification_level)
+        event%fully_verified = readiness%fully_verified
+        event%gate_required = readiness%gate_required
+        event%gate_passed = readiness%gate_passed
+        event%ordinary_required = readiness%ordinary_required
+        event%ordinary_passed = readiness%ordinary_passed
+        event%ordinary_failures = readiness%ordinary_failures
+        event%full_required = readiness%full_required
+        event%full_passed = readiness%full_passed
+        event%full_failures = readiness%full_failures
+        if (have_coverage) then
+            event%epoch = coverage%epoch
+            event%epoch_cursor = coverage%cursor
+        end if
+        event%event_id = gremlin_lifecycle_make_id(session%session_id, event)
+        call gremlin_lifecycle_append(path, event, ierr, message)
+    end subroutine append_lifecycle_event
 
     subroutine response_with_events(action, status_text, session, request, failures_only, &
             response, ierr, message)
@@ -2080,10 +2788,14 @@ contains
         character(len=*), intent(out) :: message
 
         type(journal_record_t), allocatable :: records(:)
+        type(gremlin_lifecycle_event_t), allocatable :: lifecycle_events(:)
         integer(int64) :: next_cursor, file_size
-        integer :: journal_status, i, emitted
+        integer(int64) :: next_lifecycle_cursor
+        integer :: journal_status, i, emitted, n_lifecycle, lifecycle_status
         logical :: exists, has_more
+        logical :: lifecycle_has_more
         character(len=16) :: row_status
+        character(len=PATH_LEN) :: lifecycle_path, lifecycle_message
         character(len=:), allocatable :: base
 
         call journal_read_page(session%state_dir//'/journal.jsonl', request%cursor, &
@@ -2122,39 +2834,62 @@ contains
             emitted = emitted + 1
         end do
         response = response//'],"next_cursor":'//trim(int64_text(next_cursor))// &
-            ',"has_more":'//trim(json_bool(has_more))//'}'
+            ',"has_more":'//trim(json_bool(has_more))
+        call lifecycle_path_for_session(session, request, lifecycle_path, &
+            lifecycle_status, lifecycle_message)
+        if (lifecycle_status /= 0) then
+            ierr = lifecycle_status
+            message = trim(lifecycle_message)
+            return
+        end if
+        call gremlin_lifecycle_read_page(trim(lifecycle_path), request%lifecycle_cursor, &
+            request%max_records, request%max_bytes, lifecycle_events, n_lifecycle, &
+            next_lifecycle_cursor, lifecycle_has_more, lifecycle_status, message)
+        if (lifecycle_status /= LIFECYCLE_OK) then
+            ierr = lifecycle_status
+            return
+        end if
+        response = response//',"lifecycle_events":['
+        do i = 1, n_lifecycle
+            if (i > 1) response = response//','
+            response = response//lifecycle_events(i)%json
+        end do
+        response = response//'],"next_lifecycle_cursor":'// &
+            trim(int64_text(next_lifecycle_cursor))// &
+            ',"lifecycle_has_more":'//trim(json_bool(lifecycle_has_more))//'}'
         ierr = 0
         message = ''
     end subroutine response_with_events
 
-    subroutine event_page_has_failure(session, request, failed, has_events, &
-            next_cursor, ierr, message)
+    subroutine lifecycle_path_for_session(session, request, path, ierr, message)
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(in) :: request
-        logical, intent(out) :: failed, has_events
-        integer(int64), intent(out) :: next_cursor
+        character(len=*), intent(out) :: path, message
         integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
+        character(len=PATH_LEN) :: journal_path
+        integer :: suffix_length
 
-        type(journal_record_t), allocatable :: records(:)
-        integer :: journal_status, i
-        character(len=16) :: row_status
-
-        failed = .false.
-        has_events = .false.
-        next_cursor = request%cursor
-        call journal_read_page(session%state_dir//'/journal.jsonl', request%cursor, &
-            request%max_records, request%max_bytes, records, next_cursor, &
-            journal_status, message)
-        ierr = journal_status
-        if (ierr == JOURNAL_OK) then
-            has_events = size(records) > 0
-            do i = 1, size(records)
-                call extract_json_field(records(i)%json, 'status', row_status)
-                if (status_is_failure(trim(row_status))) failed = .true.
-            end do
+        path = ''
+        if (.not. allocated(session%project_key) .or. &
+            .not. allocated(session%session_id)) then
+            ierr = 1
+            message = 'Gremlin session has no lifecycle journal identity'
+            return
         end if
-    end subroutine event_page_has_failure
+        call gremlin_get_session_journal_path(trim(session%project_key), &
+            request%lane_id, trim(session%session_id), journal_path, ierr, message)
+        if (ierr /= 0) return
+        suffix_length = len('/journal.jsonl')
+        if (len_trim(journal_path) <= suffix_length .or. &
+            journal_path(len_trim(journal_path) - suffix_length + 1:) /= '/journal.jsonl') then
+            ierr = 1
+            message = 'Gremlin session receipt journal path is invalid'
+            return
+        end if
+        path = journal_path(:len_trim(journal_path) - suffix_length)//'/lifecycle.jsonl'
+        ierr = 0
+        message = ''
+    end subroutine lifecycle_path_for_session
 
     subroutine release_generation_lease(lease, held, ierr, message)
         type(gremlin_lease_t), intent(inout) :: lease
@@ -2175,7 +2910,7 @@ contains
         character(len=*), intent(in) :: status
 
         status_is_failure = status == 'FAIL' .or. status == 'BUILD_FAIL' .or. &
-            status == 'TIMEOUT' .or. status == 'INFRA_ERROR'
+            status == 'TIMEOUT' .or. status == 'FLAKY' .or. status == 'INFRA_ERROR'
     end function status_is_failure
 
     logical function coverage_outcome(status)
@@ -2385,6 +3120,54 @@ contains
         call system_clock(count=count)
         system_clock_count = count
     end function system_clock_count
+
+    function runner_case_outcome(log_file, case_name) result(outcome)
+        character(len=*), intent(in) :: log_file, case_name
+        character(len=16) :: outcome
+        character(len=8192) :: line
+        character(len=NAME_LEN) :: name
+        character(len=32) :: verdict
+        integer :: unit, ios
+
+        outcome = 'INFRA_ERROR'
+        open (newunit=unit, file=log_file, status='old', iostat=ios)
+        if (ios /= 0) return
+        do
+            read (unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, '{"tests":[') /= 1) cycle
+            call extract_json_field(line, 'name', name)
+            if (trim(name) /= trim(case_name)) cycle
+            call extract_json_field(line, 'status', verdict)
+            select case (trim(verdict))
+            case ('pass')
+                outcome = 'PASS'
+            case ('fail')
+                outcome = 'FAIL'
+            case ('timeout')
+                outcome = 'TIMEOUT'
+            case ('flaky')
+                outcome = 'FLAKY'
+            case default
+                outcome = 'INFRA_ERROR'
+            end select
+        end do
+        close (unit)
+    end function runner_case_outcome
+
+    integer function case_wall_timeout(project_dir, case_name, override) result(seconds)
+        character(len=*), intent(in) :: project_dir, case_name
+        integer, intent(in) :: override
+        type(fpm_config_t), allocatable :: config
+        integer :: ierr, budget
+
+        seconds = override
+        if (seconds > 0) return
+        allocate (config)
+        call fpm_config_parse(project_dir, config, ierr)
+        budget = test_budget_seconds(config, is_slow_test(case_name))
+        seconds = test_wall_cap_seconds(config, budget) + 5
+    end function case_wall_timeout
 
     subroutine process_wait_bounded(pid, timeout_seconds, exitcode)
         integer, intent(in) :: pid, timeout_seconds

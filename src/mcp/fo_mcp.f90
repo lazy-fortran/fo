@@ -1567,12 +1567,16 @@ contains
             '"random_count":{"type":"integer","minimum":1,"maximum":32},'// &
             '"seed":{"type":"integer"},'// &
             '"campaign_seconds":{"type":"integer","minimum":1,"maximum":60},'// &
-            '"timeout_seconds":{"type":"integer","minimum":1,"maximum":5},'// &
+            '"timeout_seconds":{"type":"integer","minimum":0,"maximum":86400},'// &
             '"jobs":{"type":"integer","const":1},'// &
             '"cursor":{"type":"integer","minimum":0},'// &
+            '"lifecycle_cursor":{"type":"integer","minimum":0},'// &
             '"max_records":{"type":"integer","minimum":1,"maximum":128},'// &
             '"max_bytes":{"type":"integer","minimum":1,"maximum":262144},'// &
             '"wait_ms":{"type":"integer","minimum":0,"maximum":30000},'// &
+            '"wait_until":{"type":"string","enum":['// &
+            '"local-gate-green","ordinary-verified","fully-verified",'// &
+            '"quiescent","failure"]},'// &
             '"fail_on_failure":{"type":"boolean"},'// &
             '"case_id":{"type":"string"},'// &
             '"generation_id":{"type":"string"}},'// &

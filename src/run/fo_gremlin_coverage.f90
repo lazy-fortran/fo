@@ -2,6 +2,7 @@ module fo_gremlin_coverage
     use, intrinsic :: iso_fortran_env, only: int64, iostat_end
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, c_size_t
     use fo_cache, only: HASH_LEN, cache_digest
+    use fo_scan, only: is_slow_test
     use fo_gremlin_coverage_view, only: gremlin_coverage_view_t
     implicit none
     private
@@ -551,7 +552,7 @@ contains
     subroutine coverage_view(state, view)
         type(coverage_epoch_t), intent(in) :: state
         type(gremlin_coverage_view_t), intent(out) :: view
-        integer :: i
+        integer :: i, ordinary_remaining
 
         view = gremlin_coverage_view_t()
         view%generation_id = state%generation
@@ -560,18 +561,32 @@ contains
         view%seed = state%seed
         view%cursor = state%cursor
         view%eligible_count = size(state%inventory)
+        ordinary_remaining = 0
         do i = 1, size(state%outcome)
+            if (.not. is_slow_test(trim(state%inventory(i)))) then
+                view%ordinary_eligible_count = view%ordinary_eligible_count + 1
+            end if
             select case (trim(state%outcome(i)))
             case ('PASS')
                 view%pass_count = view%pass_count + 1
+                if (.not. is_slow_test(trim(state%inventory(i)))) &
+                    view%ordinary_pass_count = view%ordinary_pass_count + 1
             case ('FAIL')
                 view%fail_count = view%fail_count + 1
+                if (.not. is_slow_test(trim(state%inventory(i)))) &
+                    view%ordinary_failure_count = view%ordinary_failure_count + 1
             case ('TIMEOUT')
                 view%timeout_count = view%timeout_count + 1
+                if (.not. is_slow_test(trim(state%inventory(i)))) &
+                    view%ordinary_timeout_count = view%ordinary_timeout_count + 1
             case ('FLAKY')
                 view%flaky_count = view%flaky_count + 1
+                if (.not. is_slow_test(trim(state%inventory(i)))) &
+                    view%ordinary_flaky_count = view%ordinary_flaky_count + 1
             case ('INFRA', 'INFRA_ERROR')
                 view%infra_count = view%infra_count + 1
+                if (.not. is_slow_test(trim(state%inventory(i)))) &
+                    view%ordinary_infra_count = view%ordinary_infra_count + 1
             case ('RUNNING')
                 view%running_count = view%running_count + 1
             case ('CANCELLED')
@@ -587,8 +602,14 @@ contains
             view%cancelled_count
         view%remaining_count = coverage_remaining(state)
         view%completed_count = view%eligible_count - view%remaining_count
-        view%ordinary_complete = view%remaining_count == 0
-        view%full_coverage = view%eligible_count > 0 .and. view%ordinary_complete
+        view%ordinary_failure_count = view%ordinary_failure_count + &
+            view%ordinary_timeout_count + view%ordinary_flaky_count + &
+            view%ordinary_infra_count
+        ordinary_remaining = view%ordinary_eligible_count - &
+            view%ordinary_pass_count - view%ordinary_failure_count
+        view%ordinary_complete = ordinary_remaining == 0
+        view%full_coverage = view%eligible_count > 0 .and. &
+            view%remaining_count == 0
         view%green = view%full_coverage .and. view%pass_count == view%eligible_count
     end subroutine coverage_view
 
