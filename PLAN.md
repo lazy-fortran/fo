@@ -359,7 +359,11 @@ require JavaScript. A test-only Fortran JSON parser validates protocol output
 without sharing the production parser.
 
 Issues #158--#163 migrate every current JavaScript fixture in behavior-preserving
-slices, then remove Node from CI. Each old fixture is deleted only after its
+slices, then remove Node from CI. Issue #176 replaces the remaining repository-
+owned shell/Python benchmark driver and reporter. Configuration/workflow files
+and documentation remain their declarative formats; executable test/benchmark
+policy, orchestration, parsing and assertions are Fortran, with only narrow C OS
+shims. Each old fixture is deleted only after its
 Fortran replacement preserves or strengthens the crash, concurrency, JSON,
 filesystem and execution oracle. Production code never depends on the test
 harness. The frozen baseline `1f8a1a3` had 31 JS fixtures, including
@@ -683,6 +687,9 @@ completed entries below are retained as prerequisites and evidence:
     [fo #166](https://github.com/lazy-fortran/fo/issues/166)/[#167](https://github.com/lazy-fortran/fo/issues/167),
     and finally [fx #44](https://github.com/lazy-fortran/fx/issues/44) plus
     [fo #168](https://github.com/lazy-fortran/fo/issues/168).
+20. [#176](https://github.com/lazy-fortran/fo/issues/176): port the benchmark
+    driver/report from shell and Python to Fortran, then remove the final
+    repository-owned executable scripting-language tools.
 
 Experimental agent scheduler PR #147 is closed without merge; #143 and #152 are
 closed as not planned. External controllers own worker DAGs, worktrees, model
