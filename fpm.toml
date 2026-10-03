@@ -36,3 +36,8 @@ source-form = "free"
 name = "test_gremlin_generation"
 source-dir = "test"
 main = "test_gremlin_generation.f90"
+
+[[test]]
+name = "test_stat_memo"
+source-dir = "test"
+main = "test_stat_memo.f90"
