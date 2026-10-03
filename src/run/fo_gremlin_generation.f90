@@ -100,9 +100,10 @@ contains
         character(len=PATH_LEN), allocatable :: manifests(:)
         character(len=HASH_LEN), allocatable :: tree_hashes(:)
         character(len=PATH_LEN) :: cache, base, capture_dir, stage, lock_path
-        character(len=PATH_LEN) :: manifest, second_manifest
+        character(len=PATH_LEN) :: verification, verify_dest
+        character(len=PATH_LEN) :: second_manifest
         character(len=PATH_LEN) :: source, dest
-        character(len=HASH_LEN) :: manifest_hash, second_hash, verify_hash
+        character(len=HASH_LEN) :: verify_hash
         character(len=PART_LEN), allocatable :: identity_parts(:)
         character(len=:), allocatable :: record
         integer :: n_roots, i, rc, fd, attempt, clock_count, clock_rate
@@ -210,55 +211,58 @@ contains
             message = 'cannot allocate unique generation capture directory'
             return
         end if
+        stage = trim(capture_dir)//'/stage'
+        rc = fs_mkdir_excl(trim(stage))
+        if (rc /= 0) then
+            message = 'cannot allocate unique generation staging directory'
+            call remove_capture(manifests, n_roots, capture_dir)
+            return
+        end if
+        verification = trim(capture_dir)//'/verify'
+        call fs_make_dir(trim(stage)//'/bundle/project')
+        call fs_make_dir(trim(verification)//'/bundle/project')
         do i = 1, n_roots
+            source = trim(roots(i)%source_root)
+            if (i == 1) then
+                dest = trim(stage)//'/bundle/project'
+                verify_dest = trim(verification)//'/bundle/project'
+            else
+                dest = trim(stage)//'/bundle/project/'//trim(roots(i)%destination)
+                verify_dest = trim(verification)//'/bundle/project/'// &
+                    trim(roots(i)%destination)
+            end if
             call temp_manifest(capture_dir, i, 'first', manifests(i))
-            rc = fo_c_generation_list_tree(trim(roots(i)%source_root)//c_null_char, &
-                trim(manifests(i))//c_null_char)
-            if (rc /= 0) then
-                message = 'cannot inventory input tree '//trim(roots(i)%label)
-                call remove_capture(manifests, i, capture_dir)
-                return
-            end if
-            call hash_tree(roots(i)%source_root, manifests(i), tree_hashes(i), &
-                rc, message)
-            if (rc /= 0) then
-                call remove_capture(manifests, i, capture_dir)
-                return
-            end if
-        end do
-
-        ! Re-read both paths and file contents. A live edit during capture makes
-        ! this request fail before it can be assigned a generation identity.
-        do i = 1, n_roots
-            call temp_manifest(capture_dir, i, 'verify', second_manifest)
-            rc = fo_c_generation_list_tree(trim(roots(i)%source_root)//c_null_char, &
-                trim(second_manifest)//c_null_char)
-            if (rc /= 0) then
-                message = 'input tree changed or became unreadable during capture'
+            crc = fo_c_generation_copy_tree(trim(source)//c_null_char, &
+                trim(dest)//c_null_char, trim(manifests(i))//c_null_char)
+            rc = 1
+            if (crc == 0) call hash_tree(trim(dest), manifests(i), &
+                tree_hashes(i), rc, message)
+            if (crc /= 0 .or. rc /= 0) then
+                message = 'cannot capture input tree '//trim(roots(i)%label)
                 call remove_capture(manifests, n_roots, capture_dir)
                 return
             end if
-            call cache_file_digest(trim(manifests(i)), manifest_hash)
-            call cache_file_digest(trim(second_manifest), second_hash)
-            matched = manifest_hash == second_hash
-            if (matched) then
-                call hash_tree(roots(i)%source_root, second_manifest, &
-                    verify_hash, rc, message)
-                if (rc /= 0) then
-                    matched = .false.
-                else
-                    matched = verify_hash == tree_hashes(i)
-                end if
-            end if
+            call temp_manifest(capture_dir, i, 'verify', second_manifest)
+            crc = fo_c_generation_copy_tree(trim(source)//c_null_char, &
+                trim(verify_dest)//c_null_char, trim(second_manifest)//c_null_char)
+            rc = 1
+            if (crc == 0) call hash_tree(trim(verify_dest), second_manifest, &
+                verify_hash, rc, message)
+            matched = crc == 0 .and. rc == 0
+            if (matched) matched = verify_hash == tree_hashes(i)
             call remove_one(second_manifest)
             if (.not. matched) then
-                if (len_trim(message) == 0) then
-                    message = 'input tree changed during generation capture; retry'
-                end if
+                message = 'input changed during descriptor-rooted capture; retry'
                 call remove_capture(manifests, n_roots, capture_dir)
                 return
             end if
         end do
+        crc = fo_c_generation_remove_stage(trim(verification)//c_null_char)
+        if (crc /= 0) then
+            message = 'cannot remove generation verification copy'
+            call remove_capture(manifests, n_roots, capture_dir)
+            return
+        end if
 
         allocate (identity_parts(6 + 3 * n_roots))
         identity_parts(1) = 'fo-gremlin-generation-v1'
@@ -303,31 +307,12 @@ contains
             return
         end if
 
-        stage = trim(capture_dir)//'/stage'
-        rc = fs_mkdir_excl(trim(stage))
-        if (rc /= 0) then
-            message = 'cannot allocate unique generation staging directory'
-            call remove_capture(manifests, n_roots, capture_dir)
-            return
-        end if
-
-        call fs_make_dir(trim(stage)//'/bundle/project')
         do i = 1, n_roots
-            source = trim(roots(i)%source_root)
             if (i == 1) then
                 dest = trim(stage)//'/bundle/project'
             else
                 dest = trim(stage)//'/bundle/project/'//trim(roots(i)%destination)
             end if
-            call temp_manifest(capture_dir, i, 'copy', manifest)
-            crc = fo_c_generation_copy_tree(trim(source)//c_null_char, &
-                trim(dest)//c_null_char, trim(manifest)//c_null_char)
-            if (crc /= 0) then
-                message = 'could not freeze input tree '//trim(roots(i)%label)
-                call remove_capture(manifests, n_roots, capture_dir)
-                return
-            end if
-            call remove_one(manifest)
             call fs_make_dir(trim(dest)//'/build')
         end do
         call freeze_generation_inputs(trim(stage), roots, crc)
@@ -337,30 +322,6 @@ contains
             return
         end if
 
-        do i = 1, n_roots
-            call temp_manifest(capture_dir, i, 'postcopy', second_manifest)
-            rc = fo_c_generation_list_tree(trim(roots(i)%source_root)//c_null_char, &
-                trim(second_manifest)//c_null_char)
-            if (rc == 0) then
-                call hash_tree(roots(i)%source_root, second_manifest, verify_hash, &
-                    rc, message)
-                if (rc == 0) then
-                    matched = verify_hash == tree_hashes(i)
-                else
-                    matched = .false.
-                end if
-            else
-                matched = .false.
-            end if
-            call remove_one(second_manifest)
-            if (.not. matched) then
-                if (len_trim(message) == 0) then
-                    message = 'input changed while frozen copy was being made; retry'
-                end if
-                call remove_capture(manifests, n_roots, capture_dir)
-                return
-            end if
-        end do
         call validate_materialized(roots, tree_hashes, trim(stage), &
             trim(capture_dir), matched, message)
         if (.not. matched) then
@@ -461,10 +422,12 @@ contains
         character(len=8) :: executable_text
         character(len=HASH_LEN) :: file_hash
         character(len=HASH_LEN) :: empty_parts(1)
+        character(len=PATH_LEN) :: link_part(1)
         character(len=PART_LEN) :: parts(HASH_BLOCK * 2)
         character(len=HASH_LEN), allocatable :: blocks(:)
         character(len=HASH_LEN), allocatable :: grown(:)
         integer :: unit, ios, n_parts, n_blocks, capacity, executable
+        integer :: path_length, target_length, record_length
 
         ierr = 1
         message = ''
@@ -487,7 +450,8 @@ contains
                 message = 'invalid path in generation inventory'
                 return
             end if
-            if (len_trim(record) < 7) then
+            record_length = len_trim(record)
+            if (record_length < 7) then
                 close (unit)
                 message = 'invalid path in generation inventory'
                 return
@@ -503,12 +467,53 @@ contains
                 message = 'invalid executable mode in generation inventory'
                 return
             end if
-            if (record(1:1) /= 'D' .and. record(1:1) /= 'F') then
+            if (record(1:1) /= 'D' .and. record(1:1) /= 'F' .and. &
+                record(1:1) /= 'L') then
                 close (unit)
                 message = 'invalid entry type in generation inventory'
                 return
             end if
-            rel = record(7:)
+            if (record(1:1) == 'L') then
+                if (executable /= 0) then
+                    close (unit)
+                    message = 'invalid symlink mode in generation inventory'
+                    return
+                end if
+                if (record_length < 24) then
+                    close (unit)
+                    message = 'invalid symlink in generation inventory'
+                    return
+                end if
+                read (record(7:14), '(i8)', iostat=ios) path_length
+                if (ios /= 0) then
+                    close (unit)
+                    message = 'invalid symlink path length in inventory'
+                    return
+                end if
+                read (record(16:23), '(i8)', iostat=ios) target_length
+                if (ios /= 0) then
+                    close (unit)
+                    message = 'invalid symlink target length in inventory'
+                    return
+                end if
+                if (path_length <= 0 .or. target_length <= 0) then
+                    close (unit)
+                    message = 'invalid symlink lengths in generation inventory'
+                    return
+                end if
+                if (24 + path_length + 2 * target_length /= record_length .or. &
+                    path_length >= PATH_LEN .or. 2 * target_length > PATH_LEN) then
+                    close (unit)
+                    message = 'invalid symlink record size in inventory'
+                    return
+                end if
+                rel = record(25:24 + path_length)
+                link_part(1) = record(25 + path_length: &
+                    24 + path_length + 2 * target_length)
+                file_hash = cache_digest(link_part, 1)
+            else
+                rel = record(7:)
+            end if
             if (len_trim(rel) >= PATH_LEN) then
                 close (unit)
                 message = 'generation input path exceeds supported length'
@@ -516,7 +521,7 @@ contains
             end if
             if (record(1:1) == 'D') then
                 file_hash = 'directory'
-            else
+            else if (record(1:1) == 'F') then
                 full = trim(root)//'/'//trim(rel)
                 call cache_file_digest(trim(full), file_hash)
                 if (len_trim(file_hash) == 0) then

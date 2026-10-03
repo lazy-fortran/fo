@@ -1,5 +1,5 @@
 program test_gremlin_generation
-    use, intrinsic :: iso_c_binding, only: c_char, c_null_char, c_int
+    use, intrinsic :: iso_c_binding, only: c_char, c_null_char, c_int, c_size_t
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
     use fo_fs, only: fs_make_dir, fs_rename, fs_write_text
     use fo_gremlin_generation, only: generation_context_t, generation_t, &
@@ -31,6 +31,24 @@ program test_gremlin_generation
             character(kind=c_char), intent(in) :: path(*)
         end function c_unlink
 
+        integer(c_int) function c_rename(oldpath, newpath) bind(C, name='rename')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: oldpath(*), newpath(*)
+        end function c_rename
+
+        integer(c_int) function c_usleep(usec) bind(C, name='usleep')
+            import :: c_int
+            integer(c_int), value :: usec
+        end function c_usleep
+
+        integer(c_size_t) function c_readlink(path, buffer, buffer_size) &
+                bind(C, name='readlink')
+            import :: c_char, c_size_t
+            character(kind=c_char), intent(in) :: path(*)
+            character(kind=c_char), intent(out) :: buffer(*)
+            integer(c_size_t), value :: buffer_size
+        end function c_readlink
+
         integer(c_int) function c_access(path, mode) bind(C, name='access')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
@@ -50,7 +68,10 @@ program test_gremlin_generation
     integer(c_int), parameter :: MODE_NONEXEC = 420_c_int, MODE_EXEC = 493_c_int
     character(len=512) :: root, project, project_link, dependency, cache
     character(len=512) :: source_link, escaping_link, external_target
+    character(len=512) :: excluded_link
+    character(len=512) :: alternate_source
     character(len=512) :: concurrent_cache, race_project, source_file
+    character(len=512) :: link_race_project, outside_source, link_race_cache
     character(len=256) :: message
     type(generation_context_t) :: context, race_context
     type(generation_t) :: first, reused, source_changed, include_changed
@@ -58,8 +79,9 @@ program test_gremlin_generation
     type(generation_t) :: metadata_changed, race_generation
     type(generation_t) :: mode_changed, mode_restored
     type(generation_t) :: parallel_one, parallel_two
-    logical :: exists
+    logical :: exists, atomic_edit_observed
     integer :: parallel_ierr_one, parallel_ierr_two
+    integer :: parent_swap_count
     character(len=256) :: parallel_message_one, parallel_message_two
     integer(c_int) :: remove_rc, symlink_rc, escaping_rc, chmod_rc
 
@@ -82,6 +104,8 @@ program test_gremlin_generation
     call fs_make_dir(trim(project)//'/.bzr')
     call fs_make_dir(trim(dependency)//'/src')
     call fs_write_text(trim(project)//'/src/main.f90', 'program version_one')
+    alternate_source = trim(project)//'/src/alternate.f90'
+    call fs_write_text(trim(alternate_source), 'program version_one')
     call fs_write_text(trim(project)//'/src/build/fo_gremlin_provider.f90', &
         'module generation_provider_v1')
     call fs_write_text(trim(project)//'/include/config.inc', 'include_one')
@@ -92,8 +116,8 @@ program test_gremlin_generation
     call fs_write_text(trim(project)//'/.svn/wc.db', 'metadata')
     call fs_write_text(trim(project)//'/.bzr/branch', 'metadata')
     call fs_write_text(trim(dependency)//'/src/runtime.f90', 'runtime_one')
-    source_link = trim(project)//'/source-alias.f90'
-    symlink_rc = c_symlink('src/main.f90'//c_null_char, &
+    source_link = trim(project)//'/src/source-alias.f90'
+    symlink_rc = c_symlink('main.f90'//c_null_char, &
         trim(source_link)//c_null_char)
     call check(symlink_rc == 0, 'in-tree relative file link fixture is created')
 
@@ -141,12 +165,13 @@ program test_gremlin_generation
             'published project inputs are read-only')
         call check(file_equals(trim(first%project_root)//'/src/main.f90', &
             'program version_one'), 'snapshot preserves original source')
-        call check(file_equals(trim(first%project_root)//'/source-alias.f90', &
+        call check(file_equals(trim(first%project_root)// &
+            '/src/source-alias.f90', &
             'program version_one'), &
-            'snapshot materializes a relative file link as captured content')
-        call check(c_access(trim(first%project_root)//'/source-alias.f90'// &
-            c_null_char, WRITE_ACCESS) /= 0, &
-            'materialized file-link content is read-only')
+            'snapshot resolves a relative sibling link to its captured target')
+        call check(link_target_equals(trim(first%project_root)// &
+            '/src/source-alias.f90', 'main.f90'), &
+            'snapshot preserves the raw relative link target')
         call check(file_equals(trim(first%project_root)// &
             '/src/build/fo_gremlin_provider.f90', &
             'module generation_provider_v1'), &
@@ -185,6 +210,24 @@ program test_gremlin_generation
     call check(generation_count == 1, &
         'unchanged recapture does not grow the generation store')
 
+    remove_rc = c_unlink(trim(source_link)//c_null_char)
+    call check(remove_rc == 0, 'original relative link is removed')
+    symlink_rc = c_symlink('alternate.f90'//c_null_char, &
+        trim(source_link)//c_null_char)
+    call check(symlink_rc == 0, 'same-content alternate link is created')
+    call generation_capture(trim(project), trim(cache), context, reused, &
+        race_ierr, message)
+    call check(race_ierr == 0 .and. reused%identity /= first%identity, &
+        'changing raw link text changes generation identity for equal content')
+    call check(link_target_equals(trim(reused%project_root)// &
+        '/src/source-alias.f90', 'alternate.f90'), &
+        'snapshot retains the changed raw link text')
+    remove_rc = c_unlink(trim(source_link)//c_null_char)
+    call check(remove_rc == 0, 'alternate relative link is removed')
+    symlink_rc = c_symlink('main.f90'//c_null_char, &
+        trim(source_link)//c_null_char)
+    call check(symlink_rc == 0, 'original relative link is restored')
+
     call fs_write_text(trim(project)//'/src/main.f90', 'program version_two')
     call generation_capture(trim(project), trim(cache), context, source_changed, &
         race_ierr, message)
@@ -192,11 +235,11 @@ program test_gremlin_generation
         'source changes invalidate generation identity')
     call check(file_equals(trim(first%project_root)//'/src/main.f90', &
         'program version_one'), 'live source edit leaves old snapshot unchanged')
-    call check(file_equals(trim(first%project_root)//'/source-alias.f90', &
+    call check(file_equals(trim(first%project_root)//'/src/source-alias.f90', &
         'program version_one'), &
         'changing the link target leaves captured link content unchanged')
     call check(file_equals(trim(source_changed%project_root)// &
-        '/source-alias.f90', 'program version_two'), &
+        '/src/source-alias.f90', 'program version_two'), &
         'new generation captures the current relative-link target')
 
     external_target = trim(root)//'/outside-input.txt'
@@ -211,6 +254,20 @@ program test_gremlin_generation
         'relative file link resolving outside the input root is rejected')
     remove_rc = c_unlink(trim(escaping_link)//c_null_char)
     call check(remove_rc == 0, 'escaping link fixture is removed')
+
+    excluded_link = trim(project)//'/build-alias'
+    escaping_rc = c_symlink('build/old.o'//c_null_char, &
+        trim(excluded_link)//c_null_char)
+    call check(escaping_rc == 0, 'excluded-output link fixture is created')
+    generation_count = count_generation_roots(trim(cache))
+    call generation_capture(trim(project), trim(cache), context, reused, &
+        race_ierr, message)
+    call check(race_ierr /= 0, &
+        'a link to an excluded root build output is rejected')
+    call check(count_generation_roots(trim(cache)) == generation_count, &
+        'rejecting an excluded-output link publishes no generation')
+    remove_rc = c_unlink(trim(excluded_link)//c_null_char)
+    call check(remove_rc == 0, 'excluded-output link fixture is removed')
 
     call fs_write_text(trim(project)//'/include/config.inc', 'include_two')
     call generation_capture(trim(project), trim(cache), context, include_changed, &
@@ -307,14 +364,19 @@ program test_gremlin_generation
 
     race_project = trim(root)//'/race-project'
     call fs_make_dir(trim(race_project)//'/src')
-    call write_version_file(trim(race_project)//'/src/value.dat', 'A')
+    call write_version_file(trim(race_project)//'/src/value.dat', 'A', &
+        32 * 1024 * 1024)
     race_context%toolchain = 'gfortran race fixture'
     race_context%flags = '-O0'
     race_context%base_commit = 'race-base'
     race_context%patch_digest = 'race-patch'
     call run_capture_during_atomic_edits(trim(race_project), trim(cache), &
-        race_context, race_generation, race_ierr, message)
-    call check(file_is_byte_value(trim(race_project)//'/src/value.dat', 'H'), &
+        race_context, race_generation, race_ierr, message, &
+        atomic_edit_observed)
+    call check(atomic_edit_observed, &
+        'atomic source edit followed the completed first staged copy')
+    call check(file_is_byte_value(trim(race_project)//'/src/value.dat', 'H', &
+        32 * 1024 * 1024), &
         'concurrent editor completed all atomic source revisions')
     call check(race_ierr /= 0, &
         'capture rejects input that changes during concurrent atomic edits')
@@ -322,10 +384,43 @@ program test_gremlin_generation
     call check(.not. exists, &
         'unstable input capture does not publish a generation')
 
+    link_race_project = trim(root)//'/link-race-project'
+    outside_source = trim(root)//'/outside-source'
+    link_race_cache = trim(root)//'/link-race-cache'
+    call fs_make_dir(trim(link_race_project)//'/src')
+    call fs_make_dir(trim(outside_source))
+    call write_version_file(trim(link_race_project)//'/src/value.dat', 'I')
+    call write_version_file(trim(outside_source)//'/value.dat', 'X')
+    call write_version_file(trim(outside_source)//'/alias.dat', 'X')
+    symlink_rc = c_symlink('value.dat'//c_null_char, &
+        (trim(link_race_project)//'/src/alias.dat')//c_null_char)
+    call check(symlink_rc == 0, 'descriptor race link fixture is created')
+    race_context%toolchain = 'gfortran descriptor race fixture'
+    race_context%flags = '-O0'
+    race_context%base_commit = 'descriptor-race-base'
+    race_context%patch_digest = 'descriptor-race-patch'
+    call run_capture_during_parent_swaps(trim(link_race_project), &
+        trim(link_race_cache), race_context, &
+        race_generation, race_ierr, message, parent_swap_count)
+    call check(parent_swap_count > 0, &
+        'source parent was replaced by an escaping symlink during capture')
+    if (race_ierr == 0) then
+        call check(file_is_byte_value(trim(race_generation%project_root)// &
+            '/src/value.dat', 'I'), &
+            'descriptor-rooted capture never copies external replacement data')
+        call check(link_target_equals(trim(race_generation%project_root)// &
+            '/src/alias.dat', 'value.dat'), &
+            'descriptor-rooted snapshot preserves the in-tree link')
+    else
+        inquire (file=trim(race_generation%root), exist=exists)
+        call check(.not. exists, &
+            'rejected parent-swap capture publishes no generation')
+    end if
+
     call check(.not. has_staging_entries(trim(cache)), &
         'successful and rejected captures leave no staging artifacts')
     generation_count = count_generation_roots(trim(cache))
-    call check(generation_count <= 11, &
+    call check(generation_count <= 12, &
         'disk use tracks unique input generations rather than capture attempts')
     remove_rc = fo_c_generation_remove_stage(trim(root)//c_null_char)
     call check(remove_rc == 0, 'fixture data and generation CAS are cleaned up')
@@ -350,14 +445,15 @@ contains
     end subroutine check
 
     subroutine run_capture_during_atomic_edits(project_path, cache_path, &
-            capture_context, generation, ierr, error_message)
+            capture_context, generation, ierr, error_message, edit_observed)
         character(len=*), intent(in) :: project_path, cache_path
         type(generation_context_t), intent(in) :: capture_context
         type(generation_t), intent(out) :: generation
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: error_message
+        logical, intent(out) :: edit_observed
         character(len=512) :: data_path
-        integer :: iteration
+        integer(c_int) :: ignored_wait
 
         data_path = trim(project_path)//'/src/value.dat'
         !$omp parallel sections num_threads(2) shared(generation, ierr, error_message)
@@ -365,11 +461,89 @@ contains
         call generation_capture(project_path, cache_path, capture_context, &
             generation, ierr, error_message)
         !$omp section
-        do iteration = 1, 8
-            call write_version_file(data_path, achar(64 + iteration))
-        end do
+        edit_observed = wait_for_completed_stage_copy(cache_path, &
+            'src/value.dat', 'A', 32 * 1024 * 1024)
+        if (edit_observed) call write_version_file(data_path, 'H', &
+            32 * 1024 * 1024)
         !$omp end parallel sections
     end subroutine run_capture_during_atomic_edits
+
+    logical function wait_for_completed_stage_copy(cache_path, relative_file, &
+            expected, n_bytes)
+        character(len=*), intent(in) :: cache_path, relative_file, expected
+        integer, intent(in) :: n_bytes
+        character(len=512) :: manifest, record, staged_file
+        integer :: attempt, unit, ios
+        integer(c_int) :: rc, ignored_wait
+        wait_for_completed_stage_copy = .false.
+        manifest = trim(root)//'/atomic-stage.list'
+        do attempt = 1, 5000
+            rc = fo_c_generation_list_tree(trim(cache_path)// &
+                '/gremlin/generations/.capture'//c_null_char, &
+                trim(manifest)//c_null_char)
+            if (rc == 0) then
+                open (newunit=unit, file=trim(manifest), status='old', &
+                    action='read', iostat=ios)
+                if (ios == 0) then
+                    do
+                        read (unit, '(a)', iostat=ios) record
+                        if (ios /= 0) exit
+                        if (index(trim(record), &
+                                '/stage/bundle/project/'//trim(relative_file)) == 0) &
+                            cycle
+                        staged_file = trim(cache_path)// &
+                            '/gremlin/generations/.capture/'//trim(record(7:))
+                        if (file_is_byte_value(trim(staged_file), expected, &
+                                n_bytes)) then
+                            wait_for_completed_stage_copy = .true.
+                            exit
+                        end if
+                    end do
+                    close (unit, status='delete')
+                end if
+            end if
+            if (wait_for_completed_stage_copy) return
+            ignored_wait = c_usleep(1000_c_int)
+        end do
+    end function wait_for_completed_stage_copy
+
+    subroutine run_capture_during_parent_swaps(project_path, cache_path, &
+            capture_context, generation, ierr, error_message, &
+            swap_count)
+        character(len=*), intent(in) :: project_path, cache_path
+        type(generation_context_t), intent(in) :: capture_context
+        type(generation_t), intent(out) :: generation
+        integer, intent(out) :: ierr, swap_count
+        character(len=*), intent(out) :: error_message
+        character(len=512) :: source_dir, parked_dir
+        integer :: iteration, rename_rc, link_rc, ignored
+
+        source_dir = trim(project_path)//'/src'
+        parked_dir = trim(project_path)//'/src-parked'
+        swap_count = 0
+        !$omp parallel sections num_threads(2) &
+        !$omp& shared(generation, ierr, error_message, swap_count)
+        !$omp section
+        call generation_capture(project_path, cache_path, capture_context, &
+            generation, ierr, error_message)
+        !$omp section
+        do iteration = 1, 100
+            rename_rc = c_rename(trim(source_dir)//c_null_char, &
+                trim(parked_dir)//c_null_char)
+            if (rename_rc /= 0) cycle
+            link_rc = c_symlink('../outside-source'//c_null_char, &
+                trim(source_dir)//c_null_char)
+            if (link_rc == 0) then
+                swap_count = swap_count + 1
+                ignored = c_usleep(1000_c_int)
+                ignored = c_unlink(trim(source_dir)//c_null_char)
+            end if
+            rename_rc = c_rename(trim(parked_dir)//c_null_char, &
+                trim(source_dir)//c_null_char)
+            if (rename_rc /= 0) exit
+        end do
+        !$omp end parallel sections
+    end subroutine run_capture_during_parent_swaps
 
     subroutine run_parallel_captures(project_path, cache_path, capture_context, &
             first_generation, first_ierr, first_message, second_generation, &
@@ -392,15 +566,18 @@ contains
         !$omp end parallel sections
     end subroutine run_parallel_captures
 
-    subroutine write_version_file(path, value)
+    subroutine write_version_file(path, value, n_bytes)
         character(len=*), intent(in) :: path, value
+        integer, intent(in), optional :: n_bytes
         character(len=512) :: temporary
-        integer :: unit, ios, rename_rc
+        integer :: unit, ios, rename_rc, nbytes
+        nbytes = 2 * 1024 * 1024
+        if (present(n_bytes)) nbytes = n_bytes
         temporary = trim(path)//'.tmp'
         open (newunit=unit, file=trim(temporary), status='replace', &
             access='stream', form='unformatted', action='write', iostat=ios)
         if (ios /= 0) return
-        write (unit, iostat=ios) repeat(value, 2 * 1024 * 1024)
+        write (unit, iostat=ios) repeat(value, nbytes)
         close (unit)
         if (ios == 0) rename_rc = fs_rename(trim(temporary), trim(path))
     end subroutine write_version_file
@@ -418,13 +595,33 @@ contains
         if (ios == 0) file_equals = trim(contents) == trim(expected)
     end function file_equals
 
-    logical function file_is_byte_value(path, expected)
+    logical function link_target_equals(path, expected)
+        character(len=*), intent(in) :: path, expected
+        character(kind=c_char) :: buffer(512)
+        integer(c_size_t) :: n
+        integer :: i
+        link_target_equals = .false.
+        n = c_readlink(trim(path)//c_null_char, buffer, &
+            int(size(buffer), c_size_t))
+        if (n /= len(expected)) return
+        do i = 1, len(expected)
+            if (buffer(i) /= expected(i:i)) return
+        end do
+        link_target_equals = .true.
+    end function link_target_equals
+
+    logical function file_is_byte_value(path, expected, n_bytes)
         character(len=*), intent(in) :: path
         character(len=*), intent(in), optional :: expected
+        integer, intent(in), optional :: n_bytes
         character(len=1), allocatable :: bytes(:)
-        integer :: unit, ios, i
+        integer :: unit, ios, i, nbytes, file_size
         file_is_byte_value = .false.
-        allocate (bytes(2 * 1024 * 1024))
+        nbytes = 2 * 1024 * 1024
+        if (present(n_bytes)) nbytes = n_bytes
+        inquire (file=trim(path), size=file_size, iostat=ios)
+        if (ios /= 0 .or. file_size < nbytes) return
+        allocate (bytes(nbytes))
         open (newunit=unit, file=trim(path), status='old', action='read', &
             access='stream', form='unformatted', iostat=ios)
         if (ios /= 0) return

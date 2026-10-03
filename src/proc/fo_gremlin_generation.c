@@ -104,201 +104,357 @@ static int make_parent(const char *path) {
     return rc;
 }
 
-static int resolve_in_tree_file_link(const char *root, const char *path,
-                                     char **resolved, struct stat *target_st) {
-    char link_target[8192];
-    char *canonical_root = NULL, *canonical_target = NULL;
-    ssize_t target_len;
-    size_t root_len;
-    int rc = -1;
+static int normalize_link_target(const char *link_rel, const char *raw,
+                                 char *normalized, size_t capacity) {
+    char combined[8192];
+    const char *slash = strrchr(link_rel, '/');
+    size_t parent_len = slash == NULL ? 0 : (size_t)(slash - link_rel);
+    size_t used = 0;
+    int n;
 
-    target_len = readlink(path, link_target, sizeof(link_target) - 1);
-    if (target_len < 0) return -1;
-    if (target_len == 0 || (size_t)target_len >= sizeof(link_target) - 1 ||
-        link_target[0] == '/') {
+    if (raw[0] == '/') {
+        errno = EXDEV;
+        return -1;
+    }
+    n = snprintf(combined, sizeof(combined), "%.*s/%s", (int)parent_len,
+                 link_rel, raw);
+    if (n < 0 || (size_t)n >= sizeof(combined)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    for (const char *p = combined; *p != '\0';) {
+        size_t len;
+        while (*p == '/') ++p;
+        if (*p == '\0') break;
+        len = strcspn(p, "/");
+        if (len == 1 && p[0] == '.') {
+            p += len;
+            continue;
+        }
+        if (len == 2 && p[0] == '.' && p[1] == '.') {
+            if (used == 0) {
+                errno = EXDEV;
+                return -1;
+            }
+            while (used > 0 && normalized[used - 1] != '/') --used;
+            if (used > 0) --used;
+            normalized[used] = '\0';
+            p += len;
+            continue;
+        }
+        if (used + len + (used == 0 ? 0 : 1) >= capacity) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        if (used != 0) normalized[used++] = '/';
+        memcpy(normalized + used, p, len);
+        used += len;
+        normalized[used] = '\0';
+        p += len;
+    }
+    if (used == 0) {
         errno = EINVAL;
         return -1;
     }
-    link_target[target_len] = '\0';
-    canonical_root = realpath(root, NULL);
-    canonical_target = realpath(path, NULL);
-    if (canonical_root == NULL || canonical_target == NULL) goto done;
-    root_len = strlen(canonical_root);
-    if (!(root_len == 1 && canonical_root[0] == '/') &&
-        (strncmp(canonical_target, canonical_root, root_len) != 0 ||
-         (canonical_target[root_len] != '/' &&
-          canonical_target[root_len] != '\0'))) {
-        errno = EXDEV;
-        goto done;
-    }
-    if (stat(canonical_target, target_st) != 0) goto done;
-    if (!S_ISREG(target_st->st_mode)) {
-        errno = EINVAL;
-        goto done;
-    }
-    *resolved = canonical_target;
-    canonical_target = NULL;
-    rc = 0;
-done:
-    free(canonical_root);
-    free(canonical_target);
-    return rc;
+    return 0;
 }
 
-static int walk_tree(const char *root, const char *rel, const char *dest,
-                     FILE *manifest, int copy_files) {
-    char path[8192], target[8192];
-    char *source_path = path, *resolved_link = NULL;
-    struct stat st;
-    size_t root_len = strlen(root), rel_len = strlen(rel);
-    if (root_len + (rel_len == 0 ? 0 : rel_len + 1) >=
-        FO_GENERATION_FORTRAN_PATH_LEN) {
+static int relative_path_is_excluded(const char *rel) {
+    char parent[8192] = "";
+    const char *p = rel;
+    size_t parent_len = 0;
+    while (*p != '\0') {
+        char name[8192];
+        size_t len = strcspn(p, "/");
+        if (len >= sizeof(name)) return 1;
+        memcpy(name, p, len);
+        name[len] = '\0';
+        if (excluded_entry(parent, name)) return 1;
+        if (parent_len + len + (parent_len == 0 ? 0 : 1) >= sizeof(parent)) {
+            return 1;
+        }
+        if (parent_len != 0) parent[parent_len++] = '/';
+        memcpy(parent + parent_len, name, len + 1);
+        parent_len += len;
+        p += len;
+        if (*p == '/') ++p;
+    }
+    return 0;
+}
+
+static int open_regular_at(int root_fd, const char *rel, struct stat *st) {
+    char copy[8192];
+    char *part, *next;
+    int dir_fd = dup(root_fd), file_fd = -1;
+    if (dir_fd < 0) return -1;
+    if (strlen(rel) >= sizeof(copy)) {
+        close(dir_fd);
         errno = ENAMETOOLONG;
         return -1;
     }
-    if (rel_len == 0) {
-        if (snprintf(path, sizeof(path), "%s", root) >= (int)sizeof(path)) {
-            errno = ENAMETOOLONG;
-            return -1;
-        }
-    } else if (snprintf(path, sizeof(path), "%s/%s", root, rel) >=
-               (int)sizeof(path)) {
-        errno = ENAMETOOLONG;
-        return -1;
+    strcpy(copy, rel);
+    part = copy;
+    while ((next = strchr(part, '/')) != NULL) {
+        *next = '\0';
+        file_fd = openat(dir_fd, part,
+                         O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        close(dir_fd);
+        if (file_fd < 0) return -1;
+        dir_fd = file_fd;
+        part = next + 1;
     }
-    if (lstat(path, &st) != 0) return -1;
-    if (S_ISLNK(st.st_mode)) {
-        if (resolve_in_tree_file_link(root, path, &resolved_link, &st) != 0) {
-            return -1;
-        }
-        source_path = resolved_link;
-    }
-    if (S_ISDIR(st.st_mode)) {
-        struct dirent **entries = NULL;
-        int count, i;
-        if (copy_files) {
-            if (snprintf(target, sizeof(target), "%s/%s", dest, rel) >=
-                (int)sizeof(target)) {
-                errno = ENAMETOOLONG;
-                return -1;
-            }
-            if (make_dirs(target) != 0) return -1;
-        }
-        if (rel[0] != '\0' && write_path(manifest, 'D', 0, rel) != 0) {
-            return -1;
-        }
-        count = scandir(path, &entries, NULL, compare_names);
-        if (count < 0) return -1;
-        for (i = 0; i < count; ++i) {
-            char child[8192];
-            int rc;
-            const char *name = entries[i]->d_name;
-            if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0 ||
-                excluded_entry(rel, name)) {
-                free(entries[i]);
-                continue;
-            }
-            if (snprintf(child, sizeof(child), "%s%s%s", rel,
-                         rel[0] == '\0' ? "" : "/", name) >=
-                (int)sizeof(child)) {
-                free(entries[i]);
-                while (++i < count) free(entries[i]);
-                free(entries);
-                errno = ENAMETOOLONG;
-                return -1;
-            }
-            rc = walk_tree(root, child, dest, manifest, copy_files);
-            free(entries[i]);
-            if (rc != 0) {
-                while (++i < count) free(entries[i]);
-                free(entries);
-                return rc;
-            }
-        }
-        free(entries);
-        return 0;
-    }
-    if (!S_ISREG(st.st_mode)) {
-        free(resolved_link);
+    file_fd = openat(dir_fd, part, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    close(dir_fd);
+    if (file_fd < 0) return -1;
+    if (fstat(file_fd, st) != 0 || !S_ISREG(st->st_mode)) {
+        close(file_fd);
         errno = EINVAL;
         return -1;
     }
-    if (write_path(manifest, 'F', (st.st_mode & 0111) != 0, rel) != 0) {
-        free(resolved_link);
+    close(file_fd);
+    return 0;
+}
+
+static int write_link_path(FILE *manifest, const char *rel,
+                           const char *target, size_t target_len) {
+    static const char hex[] = "0123456789abcdef";
+    size_t path_len = strlen(rel), i;
+    if (path_len >= FO_GENERATION_FORTRAN_PATH_LEN - 25 ||
+        target_len > (FO_GENERATION_FORTRAN_PATH_LEN - 25 - path_len) / 2 ||
+        strchr(rel, '\n') != NULL || strchr(rel, '\r') != NULL) {
+        errno = ENAMETOOLONG;
         return -1;
     }
-    if (!copy_files) {
-        free(resolved_link);
-        return 0;
+    if (fprintf(manifest, "L 000 %08zu %08zu %s", path_len, target_len,
+                rel) < 0) return -1;
+    for (i = 0; i < target_len; ++i) {
+        unsigned char c = (unsigned char)target[i];
+        if (fputc(hex[c >> 4], manifest) == EOF ||
+            fputc(hex[c & 15], manifest) == EOF) return -1;
     }
+    return fputc('\n', manifest) == EOF ? -1 : 0;
+}
+
+struct name_list {
+    char **items;
+    size_t count;
+};
+
+static int compare_name_strings(const void *lhs, const void *rhs) {
+    return strcmp(*(char *const *)lhs, *(char *const *)rhs);
+}
+
+static void free_names(struct name_list *names) {
+    size_t i;
+    for (i = 0; i < names->count; ++i) free(names->items[i]);
+    free(names->items);
+    names->items = NULL;
+    names->count = 0;
+}
+
+static int list_names(int dir_fd, struct name_list *names) {
+    DIR *dir;
+    struct dirent *entry;
+    size_t capacity = 0;
+    int scan_fd = dup(dir_fd);
+    names->items = NULL;
+    names->count = 0;
+    if (scan_fd < 0) return -1;
+    dir = fdopendir(scan_fd);
+    if (dir == NULL) {
+        close(scan_fd);
+        return -1;
+    }
+    while ((entry = readdir(dir)) != NULL) {
+        char **grown;
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0) continue;
+        if (names->count == capacity) {
+            capacity = capacity == 0 ? 16 : capacity * 2;
+            grown = realloc(names->items, capacity * sizeof(*grown));
+            if (grown == NULL) {
+                closedir(dir);
+                free_names(names);
+                return -1;
+            }
+            names->items = grown;
+        }
+        names->items[names->count] = strdup(entry->d_name);
+        if (names->items[names->count] == NULL) {
+            closedir(dir);
+            free_names(names);
+            return -1;
+        }
+        ++names->count;
+    }
+    closedir(dir);
+    if (names->count > 1) {
+        qsort(names->items, names->count, sizeof(*names->items),
+              compare_name_strings);
+    }
+    return 0;
+}
+
+static int copy_regular_file(int input, const char *target,
+                             const struct stat *before) {
+    int output;
+    char buffer[65536];
+    ssize_t n;
+    struct stat after;
+    output = open(target, O_WRONLY | O_CREAT | O_EXCL, before->st_mode & 0777);
+    if (output < 0) return -1;
+    while ((n = read(input, buffer, sizeof(buffer))) > 0) {
+        ssize_t at = 0;
+        while (at < n) {
+            ssize_t written = write(output, buffer + at, (size_t)(n - at));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) goto fail;
+            at += written;
+        }
+    }
+    if (n < 0 || fstat(input, &after) != 0 ||
+        before->st_size != after.st_size || before->st_mtime != after.st_mtime ||
+        before->st_ctime != after.st_ctime ||
+        before->st_ino != after.st_ino || before->st_dev != after.st_dev) {
+        errno = EAGAIN;
+        goto fail;
+    }
+    if (fchmod(output, before->st_mode & 0777) != 0) goto fail;
+    if (fsync(output) != 0) {
+        int saved = errno;
+        close(output);
+        errno = saved;
+        return -1;
+    }
+    return close(output);
+fail:
     {
-        int input, output;
-        char buffer[65536];
-        ssize_t n;
-        struct stat after;
+        int saved = errno;
+        close(output);
+        errno = saved;
+        return -1;
+    }
+}
+
+static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
+                              const char *dest, FILE *manifest,
+                              int copy_files) {
+    struct name_list names;
+    size_t i;
+    if (rel[0] != '\0' && write_path(manifest, 'D', 0, rel) != 0) return -1;
+    if (copy_files && rel[0] != '\0') {
+        char target[8192];
         if (snprintf(target, sizeof(target), "%s/%s", dest, rel) >=
             (int)sizeof(target)) {
-            free(resolved_link);
             errno = ENAMETOOLONG;
             return -1;
         }
-        if (make_parent(target) != 0) {
-            free(resolved_link);
-            return -1;
-        }
-        input = open(source_path, O_RDONLY | O_NOFOLLOW);
-        free(resolved_link);
-        resolved_link = NULL;
-        if (input < 0) return -1;
-        if (fstat(input, &st) != 0 || !S_ISREG(st.st_mode)) {
-            close(input);
-            free(resolved_link);
-            errno = EINVAL;
-            return -1;
-        }
-        output = open(target, O_WRONLY | O_CREAT | O_EXCL, st.st_mode & 0777);
-        if (output < 0) {
-            close(input);
-            free(resolved_link);
-            return -1;
-        }
-        while ((n = read(input, buffer, sizeof(buffer))) > 0) {
-            ssize_t at = 0;
-            while (at < n) {
-                ssize_t written = write(output, buffer + at, (size_t)(n - at));
-                if (written < 0 && errno == EINTR) continue;
-                if (written <= 0) {
-                    close(input);
-                    close(output);
-                    free(resolved_link);
-                    return -1;
-                }
-                at += written;
+        if (make_dirs(target) != 0) return -1;
+    }
+    if (list_names(dir_fd, &names) != 0) return -1;
+    for (i = 0; i < names.count; ++i) {
+        const char *name = names.items[i];
+        char child[8192], target[8192], link_target[8192];
+        struct stat st;
+        int rc = 0;
+        if (excluded_entry(rel, name)) continue;
+        if (snprintf(child, sizeof(child), "%s%s%s", rel,
+                     rel[0] == '\0' ? "" : "/", name) >=
+            (int)sizeof(child)) {
+            errno = ENAMETOOLONG;
+            rc = -1;
+        } else if (fstatat(dir_fd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+            rc = -1;
+        } else if (S_ISDIR(st.st_mode)) {
+            int child_fd = openat(dir_fd, name,
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (child_fd < 0) {
+                rc = -1;
+            } else {
+                rc = walk_directory_at(root_fd, child_fd, child, dest,
+                                       manifest, copy_files);
+                close(child_fd);
             }
+        } else if (S_ISLNK(st.st_mode)) {
+            ssize_t n = readlinkat(dir_fd, name, link_target,
+                                   sizeof(link_target) - 1);
+            char resolved[8192];
+            if (n < 0 || (size_t)n >= sizeof(link_target) - 1) {
+                errno = n < 0 ? errno : ENAMETOOLONG;
+                rc = -1;
+            } else {
+                link_target[n] = '\0';
+                if (normalize_link_target(child, link_target, resolved,
+                                          sizeof(resolved)) != 0) {
+                    rc = -1;
+                } else if (relative_path_is_excluded(resolved)) {
+                    errno = EPERM;
+                    rc = -1;
+                } else if (strchr(link_target, '/') != NULL ||
+                           strcmp(link_target, ".") == 0 ||
+                           strcmp(link_target, "..") == 0) {
+                    errno = EINVAL;
+                    rc = -1;
+                } else if (open_regular_at(root_fd, resolved, &st) != 0) {
+                    rc = -1;
+                } else if (write_link_path(manifest, child, link_target,
+                                           (size_t)n) != 0) {
+                    rc = -1;
+                } else if (copy_files) {
+                    if (snprintf(target, sizeof(target), "%s/%s", dest,
+                                 child) >= (int)sizeof(target)) {
+                        errno = ENAMETOOLONG;
+                        rc = -1;
+                    } else if (make_parent(target) != 0 ||
+                               symlink(link_target, target) != 0) {
+                        rc = -1;
+                    }
+                }
+            }
+        } else if (S_ISREG(st.st_mode)) {
+            int input = openat(dir_fd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+            if (input < 0 || fstat(input, &st) != 0 || !S_ISREG(st.st_mode)) {
+                if (input >= 0) close(input);
+                errno = EINVAL;
+                rc = -1;
+            } else if (write_path(manifest, 'F',
+                                  (st.st_mode & 0111) != 0, child) != 0) {
+                close(input);
+                rc = -1;
+            } else if (copy_files) {
+                if (snprintf(target, sizeof(target), "%s/%s", dest, child) >=
+                    (int)sizeof(target)) {
+                    errno = ENAMETOOLONG;
+                    rc = -1;
+                } else if (make_parent(target) != 0 ||
+                           copy_regular_file(input, target, &st) != 0) {
+                    rc = -1;
+                }
+                close(input);
+            } else {
+                close(input);
+            }
+        } else {
+            errno = EINVAL;
+            rc = -1;
         }
-        if (n < 0 || fstat(input, &after) != 0 ||
-            st.st_size != after.st_size || st.st_mtime != after.st_mtime ||
-            st.st_ino != after.st_ino || st.st_dev != after.st_dev) {
-            close(input);
-            close(output);
-            free(resolved_link);
-            errno = EAGAIN;
-            return -1;
-        }
-        if (fchmod(output, st.st_mode & 0777) != 0) {
-            close(input);
-            close(output);
-            free(resolved_link);
-            return -1;
-        }
-        close(input);
-        if (fsync(output) != 0 || close(output) != 0) {
-            free(resolved_link);
-            return -1;
+        if (rc != 0) {
+            free_names(&names);
+            return rc;
         }
     }
-    free(resolved_link);
+    free_names(&names);
     return 0;
+}
+
+static int walk_tree(const char *root, const char *dest, FILE *manifest,
+                     int copy_files) {
+    int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int rc;
+    if (root_fd < 0) return -1;
+    rc = walk_directory_at(root_fd, root_fd, "", dest, manifest, copy_files);
+    close(root_fd);
+    return rc;
 }
 
 int fo_c_generation_list_tree(const char *root, const char *manifest) {
@@ -307,7 +463,7 @@ int fo_c_generation_list_tree(const char *root, const char *manifest) {
     if (validate_tree_root(root) != 0) return errno == 0 ? 1 : errno;
     out = fopen(manifest, "w");
     if (out == NULL) return errno == 0 ? 1 : errno;
-    rc = walk_tree(root, "", "", out, 0);
+    rc = walk_tree(root, "", out, 0);
     if (fclose(out) != 0 && rc == 0) rc = -1;
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
@@ -320,7 +476,7 @@ int fo_c_generation_copy_tree(const char *root, const char *dest,
     if (make_dirs(dest) != 0) return errno == 0 ? 1 : errno;
     out = fopen(manifest, "w");
     if (out == NULL) return errno == 0 ? 1 : errno;
-    rc = walk_tree(root, "", dest, out, 1);
+    rc = walk_tree(root, dest, out, 1);
     if (fclose(out) != 0 && rc == 0) rc = -1;
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
@@ -371,6 +527,7 @@ static int freeze_tree_at(const char *root, const char *rel) {
         free(entries);
         return chmod(path, 0555);
     }
+    if (S_ISLNK(st.st_mode)) return 0;
     if (!S_ISREG(st.st_mode)) {
         errno = EINVAL;
         return -1;
