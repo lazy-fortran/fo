@@ -56,22 +56,18 @@ fo gremlin failures --json
 fo gremlin reproduce ID
 fo gremlin stop
 fo test --continuous                # alias into the same engine
-fo work --mode serial                # register main-session editor; no workers
-fo work --mode parallel --max-workers N
 ```
 
 The start policy accepts explicit targeted tests, affected-test selection,
 `--random N`, `--seed S`, a distinct `--shuffle`, campaign/per-case budgets,
 lane identity and build/test capacity. `--jobs` controls process capacity, not
-model-worker count. Parallel `fo work` consumes this engine through an argv-based
-worker adapter; serial mode registers the main-session editor and test campaign
-without spawning coding workers. The controller supplies task semantics and
-decides integration.
+model-worker count. External agent controllers supply task semantics, worktrees,
+model selection and integration; fo supplies build, test and Gremlin feedback.
 CLI capability discovery must distinguish currently implemented and proposed
 controls and reject unsupported parameters.
 
 Extend the existing **single fo MCP tool** with equivalent start, status,
-wait/events, failures, reproduce, stop and work-mode actions/fields. CLI and MCP
+wait/events, failures, reproduce and stop actions/fields. CLI and MCP
 must call the same request validator, scheduling policy, generation handling,
 receipt reader and process lifecycle. All capabilities, cancellation semantics,
 errors and JSON/event schemas must match; do not put essential logic in MCP.
@@ -190,7 +186,7 @@ Never broad-pkill, remove another process's lock, reuse a live build directory,
 or assume a PID alone proves ownership. Preserve proven-owned lock/cache
 invariants through crash recovery. Cache cleanup cannot race active leases.
 
-## Serial and parallel work modes
+## External controller orchestration
 
 Use one controller, a protected integration worktree and one writable Git
 worktree per implementation/fix worker. Read-only investigators need no extra
@@ -200,13 +196,9 @@ share Git objects and valid fo CAS actions, with private mutable build trees.
 Keep path dependencies intentionally bundled rather than accidentally using an
 unpublished sibling checkout.
 
-Serial mode executes only in the main session, without subagents, with its
-Gremlin campaign; a configured local model may be that main session. Parallel
-mode uses a luna coordinator and fills configured capacity with independent ready
-luna workers; no fixed team size or simultaneous overlapping writers. The controller
-selects max reasoning effort for luna implementation workers where available and
-records runtime-resolved model/effort per task. The controller
-owns file/API/ABI/registry ownership and task dependencies. Distinct worktrees
+Serial or parallel coding modes belong to the external controller. It owns
+file/API/ABI/registry conflicts, task dependencies, model selection, worktree
+creation and escalation. Distinct worktrees
 also isolate alternative approaches; overlapping results still integrate in an
 explicit order. Worker capacity and total compiler/test resource capacity are
 separate budgets. Use shared admission/leases across nested pools so N workers
@@ -279,13 +271,12 @@ measure bytes rather than asserting that cleanup probably works.
 | Durable completion | [#140](https://github.com/lazy-fortran/fo/issues/140) | Pass/fail receipts survive crash/cancel; interrupted test stays unknown. |
 | Generation supervisor | [#141](https://github.com/lazy-fortran/fo/issues/141) | A keeps testing during failed B build; successful C preempts A; frozen A never reads changing C inputs. |
 | CLI/MCP/background | [#142](https://github.com/lazy-fortran/fo/issues/142) | Idle client needs no polling; reconnect resumes events; new CLI works with stale MCP. |
-| Work modes/capacity | [#143](https://github.com/lazy-fortran/fo/issues/143) | Serial spawns zero coding workers; independent parallel tasks use capacity; conflicts/nested pools remain bounded; duplicate start attaches. |
 | Compiler adapter | [ffc #798](https://github.com/lazy-fortran/ffc/issues/798) | ffc dispatcher/corpus runs use this engine, frozen dependency bundles and partial-result rules. |
 
 Provider selection, process and journal slices can be implemented independently
 with explicit ownership; supervisor consumes their APIs. Integrate the smallest
 working Gremlin CLI first, with shared-core MCP access, then use **Gremlin itself**
-to finish coverage, recovery, performance and worker controls. Do not claim the
+to finish coverage, recovery and performance controls. Do not claim the
 initial version satisfies an unimplemented mode or option. ffc semantic work
 begins after the enabling contract needed for parallel Gremlin work is verified.
 
@@ -411,8 +402,8 @@ when observations exist, never invented benchmark claims.
 
 ## Final continuous-verification contract
 
-Gremlin is a deterministic continuous-verification state machine. It never
-merges or pushes. The controller remains the sole promotion authority.
+Gremlin is a deterministic continuous-verification state machine. It reports
+facts and never encodes repository governance, merges or pushes.
 
 For one immutable execution generation, keep these milestones distinct:
 
@@ -427,18 +418,18 @@ For one immutable execution generation, keep these milestones distinct:
    reproducer exists, so no tests, builds, captures, hashes or compiler probes
    run until a relevant filesystem event wakes the owner.
 
-`promotion_ready=true` at the gate. Promotion may occur before ordinary/full
-coverage completes; requiring every slow case before each small integration
-would recreate a blocking full-suite workflow. A later reproducible failure on
-the integrated generation makes Gremlin red, clears readiness for subsequent
-promotions and prioritizes repair or revert. Focused receipts support iteration
-but never manufacture a complete green.
+`local_gate_green=true` at the gate. What happens next belongs to the external
+repository policy. Lazy-fortran controllers push the exact integrated generation
+to `main` immediately when this gate is green and no known current regression
+exists; they do not wait for ordinary/full coverage or GitHub CI. A later
+reproducible failure makes the gate red and gets repair/revert priority. Focused
+receipts support iteration but never manufacture a complete green.
 
 Expose orthogonal `phase`, `health`, `dirty`, active-generation identity,
-`promotion_ready`, `verification_level`, `fully_verified`, per-level coverage
+`local_gate_green`, `verification_level`, `fully_verified`, per-level coverage
 counts, and epoch identity/cursor. Emit durable typed transitions for generation,
-build, readiness, regression, coverage completion, quiescence, wake and
-supersession. CLI and MCP share typed waits for promotion-ready, ordinary-
+build, local-gate, regression, coverage completion, quiescence, wake and
+supersession. CLI and MCP share typed waits for local-gate-green, ordinary-
 verified, fully-verified, quiescent and failure. Lifecycle events use a versioned
 event envelope; never encode them as fake pass/fail case receipts.
 
@@ -484,11 +475,9 @@ The target module boundaries are `fo_change_watch`, `fo_gremlin_types`,
 Progress is published continuously even when it is not ready for `main`:
 
 - [draft core PR #146](https://github.com/lazy-fortran/fo/pull/146) targets
-  `main` from `gremlin/core-review`; draft pushes publish progress without CI;
-- [stacked work-mode PR #147](https://github.com/lazy-fortran/fo/pull/147)
-  targets the core branch from `gremlin/work-modes-review`;
-- `gremlin/integration-provisional-20261003` records the latest combined
-  controller milestone. It is evidence, not a promotion claim.
+  `main` from `gremlin/core-review`; draft pushes publish progress without CI.
+  Historical work-mode and combined branches remain immutable evidence only;
+  they are not integration candidates.
 
 Push each integrated milestone and exact verifier state. Focused receipts permit
 the next repair but do not redefine the merge gate. `main` advances only after
@@ -497,14 +486,15 @@ matrix dispositions pass. Never accumulate unpublished controller commits merely
 because a continuous campaign is partial.
 
 **Never wait for GitHub CI while implementation work is available. GitHub CI is
-a final promotion gate, not part of the development loop. Use Gremlin and
-focused local oracles while developing.** Workers reuse one exact built driver
-and run only their owned independent oracle while iterating. Draft PR pushes run
-no CI. Once Gremlin's promotion gate, review and project matrix are complete,
-mark the PR ready and require one exact-head independent CI audit before merge.
-Gremlin and `fo work` never model, poll or schedule GitHub Actions, refs or
-external CI receipts. #156 confirmed existing CI already builds once and routes
-named fixtures through the exact candidate.
+post-submit evidence, not part of the development loop. Use Gremlin and focused
+local oracles while developing.** Workers reuse one exact built driver and run
+their owned independent oracle while iterating. For lazy-fortran, push an exact
+integrated generation to `main` immediately when `local_gate_green` is true and
+no known current regression exists. Do not wait for ordinary/full coverage,
+remote CI or unrelated review. CI audits current `main` asynchronously and may
+cancel superseded runs. A confirmed real regression gets immediate repair or
+revert priority; unrelated work may continue, but unrelated main pushes normally
+pause. Gremlin never models, polls or schedules CI, refs or external receipts.
 
 Dogfooding begins during implementation. Keep one named resident `fo gremlin`
 integration lane per active repository and rotate task-worktree lanes for
@@ -530,26 +520,26 @@ are:
    driver used by a live session and expose it in reproducible receipts.
 5. [#153](https://github.com/lazy-fortran/fo/issues/153): finite deterministic
    randomized coverage epochs with crash-safe current-generation accounting.
-6. [#154](https://github.com/lazy-fortran/fo/issues/154): promotion readiness,
+6. [#154](https://github.com/lazy-fortran/fo/issues/154): local-gate facts,
    ordinary/full verification, semantic events and typed waits.
 7. [#155](https://github.com/lazy-fortran/fo/issues/155): enter quiescence after
    full green and wake only on relevant shared change events.
-8. Register every late behavioral oracle in the final workflow. Keep PR #146
-   draft through development, then mark it ready and obtain one green exact-head
-   CI audit before merge.
+8. Register every late behavioral oracle in the post-submit workflow and keep
+   the complete matrix as provider-completion/milestone evidence.
 
-Work modes are frozen at their current published head until the core merges.
-Then rebase the stack onto new `main` and complete
-[#152](https://github.com/lazy-fortran/fo/issues/152) to split request/schema,
-task graph, state and scheduling responsibilities before merge. Legacy MCP async
-queue consolidation and the C process-file split follow the core merge unless a
-behavioral verifier proves that they block current correctness.
+Experimental agent scheduler PR #147 is closed without merge; #143 and #152 are
+closed as not planned. External controllers own worker DAGs, worktrees, model
+adapters and integration. Generic aggregate build/test/I/O admission remains a
+fo core requirement. Legacy MCP async queue consolidation and the C process-file
+split follow the core merge unless a behavioral verifier proves that they block
+current correctness.
 
 ## Active delivery state
 
 **Execution is user-authorized in parallel mode.** The controller started from
-fo main `e4fc193`. Draft core PR #146 is advancing through `b987338`; frozen stacked work-mode
-PR #147 and the combined integration branch are at `86870cf`.
+fo main started this delivery at `e4fc193`. Draft discussion PR #146 now includes
+the reviewed dependency-shadow repair at `1787f64`; this exact integrated code
+passed its focused local gate and is the next direct-main increment.
 
 The `a0d3515` candidate passed the isolated full fo pipeline: static 109/109,
 build 62/62, test build/run 48/48, lint and format check, in 26.6 s. The same
@@ -559,16 +549,13 @@ reproduction logs, atomic link/run publication, Gremlin bootstrap, MCP named
 eligibility, stale-MCP/new-CLI behavior, lossless 300-receipt pagination and the
 then-current work-mode fixture. Four existing array-temporary warnings remain.
 
-The reviewed #143 startup/cancellation/lease retry repair is integrated at
-`e48c91e`. Independent review found no blocker and recorded two low-severity
-follow-ups for alias retargeting and deferred-campaign observation. `86870cf`
-also fixes generic CMake named-test routing and passes its exact real-case oracle.
-The installed fo is the reviewed `e48c91e` candidate, SHA256
-`ae35436a2c6f8fbdbfcc83691a62db4fb2ccf284104970a0fb94b639a994e5cc`; its full
+The abandoned work-mode stack ended at `86870cf`; its generic CMake named-test
+routing fix and identical oracle already exist in core. The installed fo now
+comes from the locally gated `1787f64` source, SHA256
+`f6d0d66ed041b5046d7b3ad790ffb450b29eb62ce194d4c4d946b5eeb9a16f64`; the earlier full
 pipeline passed 109/109 static, 62/62 build, 48/48 test, and lint in 19.0 seconds,
-followed by the work-mode fixture and MCP system test (79/79). The later CMake
-commit has focused and worker-pipeline evidence but still needs exact combined-
-head verification.
+followed by its historical work-mode fixture and MCP system test (79/79). It is
+used only as the current bootstrap CLI and will be replaced by the accepted core.
 
 Implemented issue state:
 
@@ -576,8 +563,9 @@ Implemented issue state:
   timeout ordering, #140 durable receipts/recovery, #141 generation replacement,
   #142 CLI/MCP lifecycle and pagination, and #144 atomic artifact publication
   have passing focused behavior on the published candidate. Keep them open
-  through architecture consolidation and exact-head CI/promotion.
-- #143 is implemented but under final correctness repair and modularization.
+  through architecture consolidation and current-generation local gates.
+- #143/#152 and PR #147 are closed without merge after the KISS review assigned
+  agent scheduling to the external controller; no work-mode code enters core.
 - #145 has one bounded fpm row passing on the exact candidate, one independent
   CMake/CTest row passing while exposing a fo CTest-name discovery defect, and
   one row correctly blocked by a missing private path dependency. This is early
@@ -603,6 +591,10 @@ Implemented issue state:
   bytes rather than the running image, and the recorded compiler digest is not
   bound to the compiler actually executed. Its frozen reproducer is in a
   task-specific Sol escalation after two substantive Luna attempts.
+- The dogfood-discovered mixed native/fpm dependency collision is repaired at
+  `1787f64`: distinct path/Git providers prove root-provider precedence and the
+  duplicate-object link failure no longer reproduces. Exact integrated focused
+  build, `test_dep_resolve` and the behavioral CLI fixture passed.
 - Resident dogfood lanes now run on the core, fx and active task worktrees.
   They already exposed the hard five-second case budget, a missing diagnostic
   on initial capture failure, and cold-start resource contention; these are live

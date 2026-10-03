@@ -28,7 +28,7 @@ freshness/result/process behavior before consumers can rely on it.
 | [#131](https://github.com/lazy-fortran/fo/issues/131), [#132](https://github.com/lazy-fortran/fo/issues/132) | Shared test binary/case dispatch; verify existing behavior before closing stale reports. |
 | [#134](https://github.com/lazy-fortran/fo/issues/134) | Truthful timeout/hang status rather than confusing low CPU with deadlock. |
 | [#135](https://github.com/lazy-fortran/fo/issues/135) | Path-dependency freshness and valid recompilation/link reuse. |
-| [#138](https://github.com/lazy-fortran/fo/issues/138), [#139](https://github.com/lazy-fortran/fo/issues/139), [#140](https://github.com/lazy-fortran/fo/issues/140), [#141](https://github.com/lazy-fortran/fo/issues/141), [#142](https://github.com/lazy-fortran/fo/issues/142), [#143](https://github.com/lazy-fortran/fo/issues/143), [#144](https://github.com/lazy-fortran/fo/issues/144), [#145](https://github.com/lazy-fortran/fo/issues/145) | Gremlin enabling stages, atomic link publication and maintained/external project matrix; exact sequence in PLAN. |
+| [#138](https://github.com/lazy-fortran/fo/issues/138), [#139](https://github.com/lazy-fortran/fo/issues/139), [#140](https://github.com/lazy-fortran/fo/issues/140), [#141](https://github.com/lazy-fortran/fo/issues/141), [#142](https://github.com/lazy-fortran/fo/issues/142), [#144](https://github.com/lazy-fortran/fo/issues/144), [#145](https://github.com/lazy-fortran/fo/issues/145) | Gremlin enabling stages, atomic link publication and maintained/external project matrix; exact sequence in PLAN. |
 
 Adjacent scope is [#56](https://github.com/lazy-fortran/fo/issues/56) LSP,
 [#59](https://github.com/lazy-fortran/fo/issues/59) deep-lint provider,
@@ -47,13 +47,13 @@ matrix evidence remains completion criteria. CLI and MCP have one shared engine
 and feature set; use current CLI after fixes when MCP cannot reload.
 
 Past snapshots remain in Git history. Gremlin progress is now published through
-draft core PR #146 and stacked work-mode PR #147; `main` remains at the last
-accepted release until the architecture and exact-head verification gates pass.
+draft discussion PR #146 while reviewed locally green increments advance
+`main`; GitHub CI audits the latest main asynchronously.
 Issues #148--#151 own the core change-event, supervisor, JSON and execution-
 identity consolidation. #153--#155 add finite coverage epochs, explicit
-promotion/full-verification state and event-driven quiescence. #152 owns the
-work-mode modularization after core merges. Early matrix evidence includes
+local-gate/full-verification facts and event-driven quiescence. Early matrix evidence includes
 one bounded fpm pass, one independent CMake/CTest pass with a fo discovery defect,
 and one honest missing-dependency block. Controller alone promotes reviewed
 paths to main and pushes every integrated milestone while it is under review.
-The work-mode stack stays frozen while core semantics change.
+Agent scheduler PR #147 and issues #143/#152 are closed without merge; external
+controllers own worker/task orchestration.
