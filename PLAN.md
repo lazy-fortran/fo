@@ -600,7 +600,9 @@ completed entries below are retained as prerequisites and evidence:
 12. [#169](https://github.com/lazy-fortran/fo/issues/169): keep worktree
     self-refresh private; only explicit controller installation publishes the
     global driver.
-13. [fx #42](https://github.com/lazy-fortran/fx/issues/42), [fx #43](https://github.com/lazy-fortran/fx/issues/43), [fo #165](https://github.com/lazy-fortran/fo/issues/165)--[#168](https://github.com/lazy-fortran/fo/issues/168), and [fx #44](https://github.com/lazy-fortran/fx/issues/44): converge generation capture, action outputs, private build sessions, ordinary fo and Gremlin on one immutable store and engine with rooted low-churn collection.
+13. [#170](https://github.com/lazy-fortran/fo/issues/170): give current Gremlin
+    tests/runs unique writable execution views without weakening frozen sources.
+14. [fx #42](https://github.com/lazy-fortran/fx/issues/42), [fx #43](https://github.com/lazy-fortran/fx/issues/43), [fo #165](https://github.com/lazy-fortran/fo/issues/165)--[#168](https://github.com/lazy-fortran/fo/issues/168), and [fx #44](https://github.com/lazy-fortran/fx/issues/44): converge generation capture, action outputs, private build sessions, ordinary fo and Gremlin on one immutable store and engine with rooted low-churn collection.
 
 Experimental agent scheduler PR #147 is closed without merge; #143 and #152 are
 closed as not planned. External controllers own worker DAGs, worktrees, model
