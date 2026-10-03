@@ -7,12 +7,17 @@
 #include <poll.h>
 #include <signal.h>
 #include <spawn.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #ifdef __linux__
 #include <sys/syscall.h>
+#include <sys/prctl.h>
+#endif
+#ifdef __APPLE__
+#include <libproc.h>
 #endif
 #include <sys/resource.h>
 #include <sys/time.h>
@@ -20,6 +25,16 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+struct async_process {
+    pid_t pid;
+    uint64_t start_identity;
+    int leader_done;
+    int exitcode;
+    struct async_process *next;
+};
+
+static struct async_process *async_processes = NULL;
 
 static int heartbeats_suppressed = 0;
 
@@ -268,6 +283,104 @@ static void free_env_with_extra(char **env) {
     if (!env) return;
     while (environ[n]) n++;
     for (i = n; env[i]; i++) free(env[i]);
+    free(env);
+}
+
+static int env_name_matches(const char *entry, const char *key, size_t key_len) {
+    const char *equals = strchr(entry, '=');
+    return equals != NULL && (size_t)(equals - entry) == key_len &&
+           memcmp(entry, key, key_len) == 0;
+}
+
+static int env_extra_has_key(const char *extra, const char *entry) {
+    const char *cursor = extra;
+    const char *entry_equals = strchr(entry, '=');
+    size_t entry_key_len;
+
+    if (entry_equals == NULL) return 0;
+    entry_key_len = (size_t)(entry_equals - entry);
+    while (cursor != NULL && *cursor != '\0') {
+        const char *end = strchr(cursor, ';');
+        const char *equals = strchr(cursor, '=');
+        size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
+        if (length == 0) {
+            cursor = end ? end + 1 : NULL;
+            continue;
+        }
+        if (equals != NULL && equals < cursor + length &&
+            (size_t)(equals - cursor) == entry_key_len &&
+            memcmp(cursor, entry, entry_key_len) == 0) return 1;
+        cursor = end ? end + 1 : NULL;
+    }
+    return 0;
+}
+
+/* Async jobs need true KEY=VALUE replacement when the caller overrides an
+   inherited setting. All strings are copied before fork, so the child only
+   swaps environ and execs. */
+static char **env_with_overrides(const char *extra) {
+    size_t n = 0, capacity, used = 0, extras_start, i;
+    const char *cursor;
+    char **env;
+
+    while (environ[n] != NULL) n++;
+    capacity = n + 1;
+    for (cursor = extra; cursor != NULL && *cursor != '\0'; ) {
+        const char *end = strchr(cursor, ';');
+        const char *equals = strchr(cursor, '=');
+        size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
+        if (length == 0) {
+            cursor = end ? end + 1 : NULL;
+            continue;
+        }
+        if (equals == NULL || equals == cursor || equals >= cursor + length) {
+            errno = EINVAL;
+            return NULL;
+        }
+        capacity++;
+        cursor = end ? end + 1 : NULL;
+    }
+    env = calloc(capacity + 1, sizeof(char *));
+    if (env == NULL) return NULL;
+    for (i = 0; i < n; i++) {
+        if (env_extra_has_key(extra, environ[i])) continue;
+        env[used] = strdup(environ[i]);
+        if (env[used] == NULL) goto allocation_failed;
+        used++;
+    }
+    extras_start = used;
+    for (cursor = extra; cursor != NULL && *cursor != '\0'; ) {
+        const char *end = strchr(cursor, ';');
+        const char *equals = strchr(cursor, '=');
+        size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
+        size_t key_len, j;
+        if (length == 0) {
+            cursor = end ? end + 1 : NULL;
+            continue;
+        }
+        key_len = (size_t)(equals - cursor);
+        for (j = extras_start; j < used; j++) {
+            if (env_name_matches(env[j], cursor, key_len)) break;
+        }
+        if (j == used) used++;
+        else free(env[j]);
+        env[j] = strndup(cursor, length);
+        if (env[j] == NULL) goto allocation_failed;
+        cursor = end ? end + 1 : NULL;
+    }
+    return env;
+
+allocation_failed:
+    while (used > 0) free(env[--used]);
+    free(env);
+    errno = ENOMEM;
+    return NULL;
+}
+
+static void free_env_copy(char **env) {
+    size_t i;
+    if (env == NULL) return;
+    for (i = 0; env[i] != NULL; i++) free(env[i]);
     free(env);
 }
 
@@ -720,88 +833,469 @@ void fo_c_run_argv_budget(const char *cwd, const char *args, int args_len,
     *wall_ms = budget.wall_ms;
 }
 
-void fo_c_start_fo_check(const char *project_dir, const char *mode,
-                         const char *output_file, int *pid_out,
-                         int *exitcode) {
+/* Linux's subreaper setting lets this owner reap orphaned grandchildren after
+   their parent exits. It is process-wide, but waitpid below is always scoped
+   to the session created for one async job. */
+static int ensure_async_subreaper(void) {
+#ifdef __linux__
+    if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) return errno;
+#endif
+    return 0;
+}
+
+/* Start ticks on Linux and start time on macOS protect against signalling a
+   reused leader PID. A surviving process group keeps its group ID allocated. */
+static uint64_t process_start_identity(pid_t pid) {
+#ifdef __linux__
+    char path[64], buf[4096], *close, *p, *end;
+    FILE *file;
+    int field;
+    unsigned long long value = 0;
+
+    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
+    file = fopen(path, "r");
+    if (file == NULL) return 0;
+    if (fgets(buf, sizeof(buf), file) == NULL) {
+        fclose(file);
+        return 0;
+    }
+    fclose(file);
+    close = strrchr(buf, ')');
+    if (close == NULL) return 0;
+    p = close + 1;
+    for (field = 3; field <= 22; field++) {
+        while (*p == ' ') p++;
+        if (*p == '\0') return 0;
+        end = p;
+        while (*end != '\0' && *end != ' ') end++;
+        if (field == 22) {
+            char saved = *end;
+            *end = '\0';
+            value = strtoull(p, NULL, 10);
+            *end = saved;
+            break;
+        }
+        p = end;
+    }
+    return (uint64_t)value;
+#elif defined(__APPLE__)
+    struct proc_bsdinfo info;
+    int bytes = proc_pidinfo((int)pid, PROC_PIDTBSDINFO, 0, &info,
+                             (int)sizeof(info));
+    if (bytes != (int)sizeof(info)) return 0;
+    return (uint64_t)info.pbi_start_tvsec * 1000000ULL +
+           (uint64_t)info.pbi_start_tvusec;
+#else
+    (void)pid;
+    return 0;
+#endif
+}
+
+static int read_exact(int fd, void *buffer, size_t size) {
+    char *p = buffer;
+    size_t used = 0;
+    while (used < size) {
+        ssize_t n = read(fd, p + used, size - used);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return -1;
+        used += (size_t)n;
+    }
+    return 0;
+}
+
+static int write_exact(int fd, const void *buffer, size_t size) {
+    const char *p = buffer;
+    size_t used = 0;
+    while (used < size) {
+        ssize_t n = write(fd, p + used, size - used);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return -1;
+        used += (size_t)n;
+    }
+    return 0;
+}
+
+static int async_group_exists(pid_t pid) {
+    if (kill(-pid, 0) == 0) return 1;
+    return errno == EPERM;
+}
+
+static struct async_process *find_async_process(pid_t pid) {
+    struct async_process *item;
+    for (item = async_processes; item != NULL; item = item->next) {
+        if (item->pid == pid) return item;
+    }
+    return NULL;
+}
+
+static void forget_async_process(struct async_process *item) {
+    struct async_process **link = &async_processes;
+    while (*link != NULL) {
+        if (*link == item) {
+            *link = item->next;
+            free(item);
+            return;
+        }
+        link = &(*link)->next;
+    }
+}
+
+static int async_identity_matches(const struct async_process *item) {
+    pid_t group = getpgid(item->pid);
+    if (group >= 0) {
+        uint64_t current;
+        if (group != item->pid || getsid(item->pid) != item->pid) return 0;
+        current = process_start_identity(item->pid);
+        if (item->start_identity != 0 && current != item->start_identity) return 0;
+        return 1;
+    }
+    /* A dead leader can leave ordinary descendants in its original group. */
+    return errno == ESRCH && async_group_exists(item->pid);
+}
+
+static int observe_async_leader(struct async_process *item) {
+    int status;
+    pid_t got;
+
+    if (item->leader_done) return 0;
+    do {
+        got = waitpid(item->pid, &status, WNOHANG);
+    } while (got < 0 && errno == EINTR);
+    if (got == 0) return 0;
+    if (got < 0) {
+        if (errno != ECHILD) return errno;
+        item->exitcode = ESRCH;
+    } else if (WIFEXITED(status)) {
+        item->exitcode = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        item->exitcode = 128 + WTERMSIG(status);
+    } else {
+        item->exitcode = 1;
+    }
+    item->leader_done = 1;
+    return 0;
+}
+
+static int reap_async_group_children(pid_t pid) {
+    int status;
+    pid_t got;
+    for (;;) {
+        got = waitpid(-pid, &status, WNOHANG);
+        if (got > 0) continue;
+        if (got == 0 || (got < 0 && errno == ECHILD)) return 0;
+        if (got < 0 && errno == EINTR) continue;
+        return errno;
+    }
+}
+
+static int terminate_async_group(struct async_process *item) {
+    struct timespec now, deadline;
+    int error;
+
+    if (!item->leader_done && !async_identity_matches(item)) return ESRCH;
+    if (!async_group_exists(item->pid)) return 0;
+    if (kill(-item->pid, SIGTERM) != 0 && errno != ESRCH) return errno;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    add_seconds(&deadline, 2);
+    for (;;) {
+        error = observe_async_leader(item);
+        if (error != 0) return error;
+        if (item->leader_done) {
+            error = reap_async_group_children(item->pid);
+            if (error != 0) return error;
+        }
+        if (!async_group_exists(item->pid)) return 0;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (timespec_at_or_after(&now, &deadline)) break;
+        sleep_ms(25);
+    }
+
+    if (async_group_exists(item->pid) && kill(-item->pid, SIGKILL) != 0 &&
+        errno != ESRCH) return errno;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    add_seconds(&deadline, 1);
+    for (;;) {
+        error = observe_async_leader(item);
+        if (error != 0) return error;
+        if (item->leader_done) {
+            error = reap_async_group_children(item->pid);
+            if (error != 0) return error;
+        }
+        if (!async_group_exists(item->pid)) return 0;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (timespec_at_or_after(&now, &deadline)) return ETIMEDOUT;
+        sleep_ms(10);
+    }
+}
+
+static void start_argv_session(const char *cwd, const char *args, int args_len,
+                               int n_args, const char *log_file,
+                               const char *env_extra, int *pid_out,
+                               int *exitcode) {
+    char **argv = NULL;
+    char **child_env = NULL;
+    const char *p, *end;
+    int index, ready_pipe[2], gate_pipe[2], child_error = 0, reaper_error;
     pid_t pid;
+    uint64_t identity;
+    struct async_process *item;
 
     *pid_out = 0;
     *exitcode = 0;
-    if (!has_text(project_dir) || !has_text(output_file)) {
-        *exitcode = 1;
+    if (n_args <= 0 || args == NULL || args_len <= 0 || !has_text(log_file)) {
+        *exitcode = EINVAL;
         return;
     }
-
+    argv = calloc((size_t)n_args + 1, sizeof(char *));
+    if (argv == NULL) {
+        *exitcode = ENOMEM;
+        return;
+    }
+    p = args;
+    end = args + args_len;
+    for (index = 0; index < n_args && p < end; index++) {
+        size_t remaining = (size_t)(end - p);
+        size_t token_len = strnlen(p, remaining);
+        if (token_len == remaining) break;
+        argv[index] = (char *)p;
+        p += token_len + 1;
+    }
+    if (index != n_args) {
+        free(argv);
+        *exitcode = EINVAL;
+        return;
+    }
+    if (has_text(env_extra)) {
+        child_env = env_with_overrides(env_extra);
+        if (child_env == NULL) {
+            free(argv);
+            *exitcode = errno != 0 ? errno : ENOMEM;
+            return;
+        }
+    }
+    reaper_error = ensure_async_subreaper();
+    if (reaper_error != 0) {
+        free_env_copy(child_env);
+        free(argv);
+        *exitcode = reaper_error;
+        return;
+    }
+    if (pipe(ready_pipe) != 0) {
+        free_env_copy(child_env);
+        free(argv);
+        *exitcode = errno;
+        return;
+    }
+    if (pipe(gate_pipe) != 0) {
+        *exitcode = errno;
+        close(ready_pipe[0]);
+        close(ready_pipe[1]);
+        free_env_copy(child_env);
+        free(argv);
+        return;
+    }
     pid = fork();
     if (pid < 0) {
-        *exitcode = 1;
+        *exitcode = errno;
+        close(ready_pipe[0]); close(ready_pipe[1]);
+        close(gate_pipe[0]); close(gate_pipe[1]);
+        free_env_copy(child_env);
+        free(argv);
         return;
     }
-
     if (pid == 0) {
-        int fd;
-        char *argv_agent[] = {"fo", "check", "--agent", NULL};
-        char *argv_full[] = {"fo", "check", "--json=full", NULL};
-        char *argv_json[] = {"fo", "check", "--json", NULL};
-        char **argv = argv_agent;
-
-        if (chdir(project_dir) != 0) _exit(127);
-        fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-        if (fd < 0) _exit(126);
-        if (dup2(fd, STDOUT_FILENO) < 0) _exit(126);
-        if (dup2(fd, STDERR_FILENO) < 0) _exit(126);
-        close(fd);
-
-        if (strcmp(mode, "full") == 0 || strcmp(mode, "json=full") == 0) {
-            argv = argv_full;
-        } else if (strcmp(mode, "json") == 0) {
-            argv = argv_json;
+        int fd, release;
+        close(ready_pipe[0]);
+        close(gate_pipe[1]);
+        if (setsid() < 0) child_error = errno;
+        if (child_error == 0 && has_text(cwd) && chdir(cwd) != 0) {
+            child_error = errno;
         }
+        if (child_error == 0 && has_text(log_file)) {
+            fd = open(log_file, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            if (fd < 0) child_error = errno;
+            else {
+                if (dup2(fd, STDOUT_FILENO) < 0 ||
+                    dup2(fd, STDERR_FILENO) < 0) child_error = errno;
+                close(fd);
+            }
+        }
+        if (write_exact(ready_pipe[1], &child_error, sizeof(child_error)) != 0) {
+            _exit(126);
+        }
+        close(ready_pipe[1]);
+        if (child_error != 0) _exit(126);
+        if (read_exact(gate_pipe[0], &release, sizeof(release)) != 0) _exit(126);
+        close(gate_pipe[0]);
+        if (child_env != NULL) environ = child_env;
         execvp(argv[0], argv);
         _exit(errno == ENOENT ? 127 : 126);
     }
 
+    close(ready_pipe[1]);
+    close(gate_pipe[0]);
+    if (read_exact(ready_pipe[0], &child_error, sizeof(child_error)) != 0 ||
+        child_error != 0) {
+        close(ready_pipe[0]); close(gate_pipe[1]);
+        (void)kill(pid, SIGKILL);
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+        }
+        free_env_copy(child_env);
+        free(argv);
+        *exitcode = child_error != 0 ? child_error : EIO;
+        return;
+    }
+    close(ready_pipe[0]);
+    identity = process_start_identity(pid);
+#if defined(__linux__) || defined(__APPLE__)
+    if (identity == 0) {
+        close(gate_pipe[1]);
+        (void)kill(pid, SIGKILL);
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+        }
+        free_env_copy(child_env);
+        free(argv);
+        *exitcode = EIO;
+        return;
+    }
+#endif
+    if (getpgid(pid) != pid || getsid(pid) != pid) {
+        close(gate_pipe[1]);
+        (void)kill(pid, SIGKILL);
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+        }
+        free_env_copy(child_env);
+        free(argv);
+        *exitcode = EIO;
+        return;
+    }
+    item = calloc(1, sizeof(*item));
+    if (item == NULL) {
+        close(gate_pipe[1]);
+        (void)kill(pid, SIGKILL);
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+        }
+        free_env_copy(child_env);
+        free(argv);
+        *exitcode = ENOMEM;
+        return;
+    }
+    item->pid = pid;
+    item->start_identity = identity;
+    item->next = async_processes;
+    async_processes = item;
+    {
+        int release = 1;
+        if (write_exact(gate_pipe[1], &release, sizeof(release)) != 0) {
+            close(gate_pipe[1]);
+            forget_async_process(item);
+            (void)kill(pid, SIGKILL);
+            while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+            }
+            free_env_copy(child_env);
+            free(argv);
+            *exitcode = EIO;
+            return;
+        }
+    }
+    close(gate_pipe[1]);
+    free_env_copy(child_env);
+    free(argv);
     *pid_out = (int)pid;
 }
 
+void fo_c_start_argv_logged(const char *cwd, const char *args, int args_len,
+                            int n_args, const char *log_file,
+                            const char *env_extra, int *pid_out, int *exitcode) {
+    start_argv_session(cwd, args, args_len, n_args, log_file, env_extra,
+                       pid_out, exitcode);
+}
+
+void fo_c_start_fo_check(const char *project_dir, const char *mode,
+                         const char *output_file, int *pid_out,
+                         int *exitcode) {
+    static const char args_agent[] = "fo\0check\0--agent\0";
+    static const char args_json[] = "fo\0check\0--json\0";
+    static const char args_full[] = "fo\0check\0--json=full\0";
+    const char *packed;
+    int args_len;
+
+    if (!has_text(project_dir) || !has_text(output_file)) {
+        *pid_out = 0;
+        *exitcode = EINVAL;
+        return;
+    }
+    if (strcmp(mode, "full") == 0 || strcmp(mode, "json=full") == 0) {
+        packed = args_full;
+        args_len = (int)sizeof(args_full) - 1;
+    } else if (strcmp(mode, "json") == 0) {
+        packed = args_json;
+        args_len = (int)sizeof(args_json) - 1;
+    } else {
+        packed = args_agent;
+        args_len = (int)sizeof(args_agent) - 1;
+    }
+    fo_c_start_argv_logged(project_dir, packed, args_len, 3, output_file, NULL,
+                           pid_out, exitcode);
+}
+
 void fo_c_poll_pid(int pid, int *done, int *exitcode) {
-    int status;
-    pid_t got;
+    struct async_process *item;
+    int error;
 
     *done = 0;
     *exitcode = 0;
-    if (pid <= 0) {
+    item = pid > 0 ? find_async_process((pid_t)pid) : NULL;
+    if (item == NULL) {
         *done = 1;
-        *exitcode = 1;
+        *exitcode = ESRCH;
         return;
     }
-
-    got = waitpid((pid_t)pid, &status, WNOHANG);
-    if (got == 0) return;
-    *done = 1;
-    if (got < 0) {
-        *exitcode = 1;
-    } else if (WIFEXITED(status)) {
-        *exitcode = WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-        *exitcode = 128 + WTERMSIG(status);
-    } else {
-        *exitcode = 1;
+    if (!item->leader_done && !async_identity_matches(item)) {
+        *done = 1;
+        *exitcode = ESRCH;
+        forget_async_process(item);
+        return;
     }
+    error = observe_async_leader(item);
+    if (error != 0) {
+        *done = 1;
+        *exitcode = error;
+        forget_async_process(item);
+        return;
+    }
+    if (!item->leader_done) return;
+    error = terminate_async_group(item);
+    if (error != 0) {
+        *exitcode = error;
+        return;
+    }
+    *done = 1;
+    *exitcode = item->exitcode;
+    forget_async_process(item);
 }
 
 void fo_c_cancel_pid(int pid, int *exitcode) {
-    int status;
+    struct async_process *item;
+    int error;
 
     *exitcode = 0;
-    if (pid <= 0) return;
-    if (kill((pid_t)pid, SIGTERM) != 0 && errno != ESRCH) {
-        *exitcode = 1;
+    item = pid > 0 ? find_async_process((pid_t)pid) : NULL;
+    if (item == NULL) {
+        *exitcode = ESRCH;
         return;
     }
-    if (waitpid((pid_t)pid, &status, 0) < 0 && errno != ECHILD) {
-        *exitcode = 1;
+    if (!item->leader_done && !async_identity_matches(item)) {
+        *exitcode = ESRCH;
+        forget_async_process(item);
+        return;
     }
+    error = terminate_async_group(item);
+    if (error != 0) {
+        *exitcode = error;
+        return;
+    }
+    forget_async_process(item);
 }
 
 /* Progress output helpers. isatty(2) lets the caller pick an animated bar vs

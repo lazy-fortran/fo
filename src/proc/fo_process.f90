@@ -5,7 +5,8 @@ module fo_process
     public :: process_detect_nproc, process_configure_openmp
     public :: process_setenv_default
     public :: process_scan_sources
-    public :: process_start_fo_check, process_poll_pid, process_cancel_pid
+    public :: process_start_fo_check, process_start_argv_logged
+    public :: process_poll_pid, process_cancel_pid
     public :: process_run_logged
     public :: process_stderr_is_tty, process_write_stderr
     public :: process_getpid, process_getcwd, process_exit
@@ -79,6 +80,16 @@ module fo_process
             character(kind=c_char), intent(in) :: output_file(*)
             integer(c_int), intent(out) :: pid, exitcode
         end subroutine fo_c_start_fo_check
+
+        subroutine fo_c_start_argv_logged(cwd, args, args_len, n_args, &
+                log_file, env_extra, pid, exitcode) &
+                bind(C, name='fo_c_start_argv_logged')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: cwd(*), args(*), log_file(*)
+            character(kind=c_char), intent(in) :: env_extra(*)
+            integer(c_int), value :: args_len, n_args
+            integer(c_int), intent(out) :: pid, exitcode
+        end subroutine fo_c_start_argv_logged
 
         subroutine fo_c_run_logged(cwd, exe_path, log_file, append, timeout_s, &
                 env_extra, exitcode) bind(C, name='fo_c_run_logged')
@@ -381,6 +392,7 @@ contains
 
     subroutine process_start_fo_check(project_dir, mode, output_file, pid, &
             exitcode)
+        !! Start an asynchronous check in a process session owned by fo.
         character(len=*), intent(in) :: project_dir, mode, output_file
         integer, intent(out) :: pid, exitcode
 
@@ -395,6 +407,36 @@ contains
         pid = int(c_pid)
         exitcode = int(c_exit)
     end subroutine process_start_fo_check
+
+    subroutine process_start_argv_logged(cwd, packed_args, n_args, log_file, &
+            pid, exitcode, env_extra)
+        !! Start a quote-proof argv command in an owned process session.
+        !! packed_args uses the NUL-separated representation built by argv_push.
+        !! Optional env_extra assignments override the inherited environment.
+        character(len=*), intent(in) :: cwd, packed_args, log_file
+        integer, intent(in) :: n_args
+        integer, intent(out) :: pid, exitcode
+        character(len=*), intent(in), optional :: env_extra
+
+        integer(c_int) :: c_pid, c_exit
+        integer :: args_len
+        character(kind=c_char) :: c_env(C_PATH_LEN)
+        logical :: has_env
+
+        args_len = len_trim(packed_args)
+        has_env = present(env_extra)
+        if (has_env) has_env = len_trim(env_extra) > 0
+        if (has_env) then
+            call to_c_string(env_extra, c_env)
+        else
+            c_env(1) = c_null_char
+        end if
+        call fo_c_start_argv_logged(trim(cwd)//c_null_char, packed_args, &
+            int(args_len, c_int), int(n_args, c_int), &
+            trim(log_file)//c_null_char, c_env, c_pid, c_exit)
+        pid = int(c_pid)
+        exitcode = int(c_exit)
+    end subroutine process_start_argv_logged
 
     subroutine process_run_logged(cwd, exe_path, log_file, append, timeout_s, &
             exitcode, cache_dir)
@@ -443,6 +485,7 @@ contains
     end subroutine process_poll_pid
 
     subroutine process_cancel_pid(pid, exitcode)
+        !! Cancel only the registered session; stale or unknown pids return an error.
         integer, intent(in) :: pid
         integer, intent(out) :: exitcode
 
