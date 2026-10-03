@@ -270,6 +270,22 @@ clone materialization are optimizations with byte-copy fallback. No database,
 cache daemon or application-level bulk RAM cache is introduced; the filesystem
 and OS page cache remain the storage substrate.
 
+Keep the identities explicit and separate:
+
+| Identity | Covers | Publication rule |
+| --- | --- | --- |
+| content ID | exact immutable bytes | missing object publishes once; verified existing bytes are reused without copying |
+| tree ID | canonical path/type/mode-to-content graph | publish only after all referenced content validates |
+| action ID | complete computation inputs and environment | maps to one result ID or becomes durably quarantined on conflict |
+| result ID | canonical output roles/modes/content IDs and companions | publish only as a complete restorable result |
+
+The action index is metadata rather than the payload store. Two concurrent
+producers may write private temporaries without a global payload lock. The first
+valid publication wins; an equal later result is success, while a different
+result for the same action retains both result identities and publishes
+`NONDETERMINISTIC_ACTION`/incomplete-key evidence. No last-writer-wins repair is
+allowed.
+
 Canonicalize project/worktree identity and lane/config namespace. One native
 supervisor owns the worktree session and lane registry. Two starts in the same
 namespace must acquire-or-attach **one** owner atomically, returning its stable
@@ -315,6 +331,23 @@ or scan the store. Root acquisition, graph publication and sweep/deletion share
 an explicit synchronization protocol so a newly live graph cannot be collected
 between discovery and unlink. Legacy store/v1 and copied generations are lazily validated
 and imported while live old owners remain protected.
+
+Use a Go-like low-churn maintenance policy without copying its constants as
+unmeasured promises: record a coarse last-used/root-retention touch no more than
+once per configured interval, consider collection no more than once per longer
+interval unless a hard byte threshold is crossed, and delete only a bounded
+batch. The independent oracle controls both clocks and thresholds, proving that
+hot roots survive, idle hits cause no write storm, and the store converges under
+a small budget. `fo clean --cache` remains an explicit destructive user action;
+automatic maintenance is lease/root aware and never approximates it.
+
+Ordinary `fo build`/`test`/`run` must retain a fast one-shot path. They may avoid
+retaining a complete source materialization when the build lifetime makes that
+unnecessary, but they still produce the same canonical generation, action and
+result identities and use the same session context as Gremlin. Benchmark cold,
+warm no-op and one-file-change cases before and after each migration slice; a
+semantic unification that forces unconditional whole-tree copying into every
+ordinary command is rejected.
 
 ## Test implementation language
 
@@ -600,48 +633,51 @@ evidence alone never promotes the tested Gremlin implementation.
 The core is merged. Remaining implementation follows this dependency-aware DAG;
 completed entries below are retained as prerequisites and evidence:
 
-1. **Reopened:** [#148](https://github.com/lazy-fortran/fo/issues/148): extract one
-   declared-input inventory now, then use it for shared filesystem events and
-   dirty/debounce/fingerprint gating so idle Gremlin performs no full captures;
-   #165 later reuses the inventory for manifests. Consolidate or deprecate the
+1. [#175](https://github.com/lazy-fortran/fo/issues/175): extract one canonical
+   declared execution-input inventory. It supplies stable logical roots, paths
+   and roles to watching, compact generation manifests and later action
+   invalidation, while excluding `.git`, plans and generated session/cache data.
+2. **Reopened:** [#148](https://github.com/lazy-fortran/fo/issues/148): consume
+   #175 in the shared filesystem event provider and dirty/debounce/fingerprint
+   gate so idle Gremlin performs no full captures. Consolidate or deprecate the
    independent `fo watch` check loop.
-2. [#149](https://github.com/lazy-fortran/fo/issues/149): request, context and
+3. [#149](https://github.com/lazy-fortran/fo/issues/149): request, context and
    session extraction are delivered; campaign/history extraction may proceed now,
    while command extraction follows #154 public-semantic stabilization.
-3. **Complete:** [#150](https://github.com/lazy-fortran/fo/issues/150): converge domain JSON
+4. **Complete:** [#150](https://github.com/lazy-fortran/fo/issues/150): converge domain JSON
    on the existing typed parser and shared CLI/MCP validation.
-4. [#151](https://github.com/lazy-fortran/fo/issues/151): pin/hash the exact fo
+5. [#151](https://github.com/lazy-fortran/fo/issues/151): pin/hash the exact fo
    driver used by a live session and expose it in reproducible receipts.
-5. [#157](https://github.com/lazy-fortran/fo/issues/157): bind the complete
+6. [#157](https://github.com/lazy-fortran/fo/issues/157): bind the complete
    compiler/helper/runtime/external-dependency closure to executed bytes.
-6. **Complete:** [#153](https://github.com/lazy-fortran/fo/issues/153): finite deterministic
+7. **Complete:** [#153](https://github.com/lazy-fortran/fo/issues/153): finite deterministic
    randomized coverage epochs with crash-safe current-generation accounting.
-7. [#154](https://github.com/lazy-fortran/fo/issues/154): local-gate facts,
+8. [#154](https://github.com/lazy-fortran/fo/issues/154): local-gate facts,
    ordinary/full verification, semantic events and typed waits, including stale
    token rejection before replacement generation and after owner restart.
-8. [#155](https://github.com/lazy-fortran/fo/issues/155): land sleeping/wake mechanics,
+9. [#155](https://github.com/lazy-fortran/fo/issues/155): land sleeping/wake mechanics,
    then claim full quiescence only after #151/#157 closure is represented, pinned
    and watched through the shared declared-input inventory.
-9. Register every late behavioral oracle in the post-submit workflow and keep
+10. Register every late behavioral oracle in the post-submit workflow and keep
    the complete matrix as provider-completion/milestone evidence.
-10. [#158](https://github.com/lazy-fortran/fo/issues/158)--[#163](https://github.com/lazy-fortran/fo/issues/163): replace all Node fixtures with standalone Fortran process drivers and remove Node from the test contract.
-11. **Complete:** [#164](https://github.com/lazy-fortran/fo/issues/164): stat-memo publication is cross-process safe.
-12. **Complete:** [#169](https://github.com/lazy-fortran/fo/issues/169):
+11. [#158](https://github.com/lazy-fortran/fo/issues/158)--[#163](https://github.com/lazy-fortran/fo/issues/163): replace all Node fixtures with standalone Fortran process drivers and remove Node from the test contract.
+12. **Complete:** [#164](https://github.com/lazy-fortran/fo/issues/164): stat-memo publication is cross-process safe.
+13. **Complete:** [#169](https://github.com/lazy-fortran/fo/issues/169):
     worktree-private self-refresh is delivered and its deliberate cold
     multi-build Fortran CI oracle has an explicit 240-second wall budget.
-13. [#170](https://github.com/lazy-fortran/fo/issues/170): give current Gremlin
+14. [#170](https://github.com/lazy-fortran/fo/issues/170): give current Gremlin
     tests/runs unique writable execution views without weakening frozen sources.
     It follows #154 only to avoid overlapping supervisor writers, not semantically.
-14. **Complete:** [#171](https://github.com/lazy-fortran/fo/issues/171): Darwin
+15. **Complete:** [#171](https://github.com/lazy-fortran/fo/issues/171): Darwin
     state declarations and canonical-path portability oracles pass on Linux and
     macOS. #172 separately owns the public lifecycle gate.
-15. [#172](https://github.com/lazy-fortran/fo/issues/172): add scoped Darwin
+16. [#172](https://github.com/lazy-fortran/fo/issues/172): add scoped Darwin
     asynchronous owner/descendant containment and unblock public Gremlin lifecycle.
-16. [#173](https://github.com/lazy-fortran/fo/issues/173): accept only documented
+17. [#173](https://github.com/lazy-fortran/fo/issues/173): accept only documented
     platform archive index members while retaining exact object verification.
-17. [#174](https://github.com/lazy-fortran/fo/issues/174): initialize the shared
+18. [#174](https://github.com/lazy-fortran/fo/issues/174): initialize the shared
     change provider on Darwin with exact diagnostics and event semantics.
-18. Deliver the shared store in provider order: [fx #42](https://github.com/lazy-fortran/fx/issues/42),
+19. Deliver the shared store in provider order: [fx #42](https://github.com/lazy-fortran/fx/issues/42),
     then [fx #43](https://github.com/lazy-fortran/fx/issues/43) plus
     [fo #165](https://github.com/lazy-fortran/fo/issues/165), then
     [fo #166](https://github.com/lazy-fortran/fo/issues/166)/[#167](https://github.com/lazy-fortran/fo/issues/167),
