@@ -61,6 +61,9 @@ jobs:
       - name: Test complete JSON reports
         run: node test/test_test_results_json.js
 
+      - name: Test CMake named test routing
+        run: node test/test_cmake_named_cli.js "$(command -v fo)"
+
       - name: Test complete MCP JSON reports
         run: node test/test_mcp_test_json.js
 
