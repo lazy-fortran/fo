@@ -32,6 +32,8 @@
 
 struct async_process {
     pid_t pid;
+    pid_t session;
+    int owns_session;
     uint64_t start_identity;
     int leader_done;
     int exitcode;
@@ -847,8 +849,9 @@ static int ensure_async_subreaper(void) {
     return 0;
 }
 
-/* Linux async descendants cannot leave the owned session. Cover every known
-   syscall ABI for a supported architecture and reject unknown ABIs. */
+/* Linux async descendants cannot leave the owned session. Native setpgid is
+   allowed for provider children; cancellation covers every group in the
+   session. Cover known syscall ABIs and reject unknown ABIs. */
 #if defined(__linux__)
 #if defined(FO_ASYNC_TEST_AARCH64) || defined(__aarch64__)
 #define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_AARCH64
@@ -871,7 +874,7 @@ static int ensure_async_subreaper(void) {
 #endif
 #elif defined(FO_ASYNC_TEST_UNSUPPORTED)
 #define FO_ASYNC_AUDIT_ARCH 0
-#elif defined(__x86_64__)
+#elif defined(FO_ASYNC_TEST_X86_64) || defined(__x86_64__)
 #define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_X86_64
 #define FO_ASYNC_HAS_COMPAT_ABI 1
 #define FO_ASYNC_COMPAT_AUDIT_ARCH AUDIT_ARCH_I386
@@ -879,7 +882,12 @@ static int ensure_async_subreaper(void) {
 #define FO_ASYNC_COMPAT_SETPGID 57
 #define FO_ASYNC_HAS_X32_ABI 1
 #define FO_ASYNC_X32_SYSCALL_BIT 0x40000000U
-#define FO_ASYNC_NATIVE_MISMATCH_SKIP 7
+#define FO_ASYNC_NATIVE_SETSID 112
+#define FO_ASYNC_NATIVE_SETPGID 109
+#define FO_ASYNC_NATIVE_MISMATCH_SKIP 13
+#if defined(__x86_64__) && (__NR_setsid != 112 || __NR_setpgid != 109)
+#error "x86-64 session syscall numbers differ from the containment filter"
+#endif
 #elif defined(__i386__)
 #define FO_ASYNC_AUDIT_ARCH AUDIT_ARCH_I386
 #else
@@ -903,13 +911,22 @@ static const struct sock_filter async_group_filter[] = {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
                  (unsigned int)offsetof(struct seccomp_data, nr)),
 #ifdef FO_ASYNC_HAS_X32_ABI
-        BPF_STMT(BPF_ALU | BPF_AND | BPF_K, ~FO_ASYNC_X32_SYSCALL_BIT),
+        BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K,
+                 FO_ASYNC_X32_SYSCALL_BIT, 5, 0),
 #endif
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FO_ASYNC_NATIVE_SETSID, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FO_ASYNC_NATIVE_SETPGID, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+#ifdef FO_ASYNC_HAS_X32_ABI
+        BPF_STMT(BPF_ALU | BPF_AND | BPF_K, ~FO_ASYNC_X32_SYSCALL_BIT),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FO_ASYNC_NATIVE_SETSID, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FO_ASYNC_NATIVE_SETPGID, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+#endif
 #ifdef FO_ASYNC_HAS_COMPAT_ABI
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
                  (unsigned int)offsetof(struct seccomp_data, arch)),
@@ -933,6 +950,18 @@ static int install_async_group_containment(void) {
         (unsigned short)(sizeof(async_group_filter) / sizeof(async_group_filter[0])),
         (struct sock_filter *)async_group_filter
     };
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+    int fd = (int)syscall(SYS_pidfd_open, getpid(), 0);
+    int probe_error;
+
+    if (fd < 0) return errno;
+    probe_error = (int)syscall(SYS_pidfd_send_signal, fd, 0, NULL, 0);
+    if (probe_error != 0) probe_error = errno;
+    close(fd);
+    if (probe_error != 0) return probe_error;
+#else
+    return ENOTSUP;
+#endif
 
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return errno;
     if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) != 0) return errno;
@@ -942,6 +971,84 @@ static int install_async_group_containment(void) {
     return ENOTSUP;
 #endif
 }
+
+#ifdef __linux__
+/* Session IDs remain inherited across process groups. Read the kernel's SID
+   for each candidate before signalling it; pidfds pin the selected process
+   across a concurrent exit and PID reuse. */
+static int linux_process_session(pid_t pid, pid_t *session) {
+    char path[64], line[4096], *close, state;
+    long parent, group, sid;
+    FILE *file;
+
+    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
+    file = fopen(path, "r");
+    if (file == NULL) return -1;
+    if (fgets(line, sizeof(line), file) == NULL) {
+        fclose(file);
+        return -1;
+    }
+    fclose(file);
+    close = strrchr(line, ')');
+    if (close == NULL || sscanf(close + 1, " %c %ld %ld %ld",
+                                &state, &parent, &group, &sid) != 4)
+        return -1;
+    *session = (pid_t)sid;
+    return 0;
+}
+
+static int signal_async_session(pid_t session, int signal_number) {
+    DIR *directory = opendir("/proc");
+    struct dirent *entry;
+    int count = 0;
+
+    if (directory == NULL) return -1;
+    while ((entry = readdir(directory)) != NULL) {
+        char *end;
+        long value = strtol(entry->d_name, &end, 10);
+        pid_t candidate, current;
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+        int fd = -1;
+#endif
+
+        if (*entry->d_name == '\0' || *end != '\0' || value <= 0 ||
+            value > INT_MAX) continue;
+        candidate = (pid_t)value;
+        if (linux_process_session(candidate, &current) != 0 ||
+            current != session) continue;
+        count++;
+        if (signal_number == 0) continue;
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+        fd = (int)syscall(SYS_pidfd_open, candidate, 0);
+        if (fd >= 0) {
+            if (linux_process_session(candidate, &current) == 0 &&
+                current == session &&
+                syscall(SYS_pidfd_send_signal, fd, signal_number,
+                        NULL, 0) != 0 && errno != ESRCH) {
+                int error = errno;
+                close(fd);
+                closedir(directory);
+                errno = error;
+                return -1;
+            }
+            close(fd);
+            continue;
+        }
+        if (errno == ESRCH) continue;
+#else
+        errno = ENOTSUP;
+#endif
+        {
+            int error = errno;
+            closedir(directory);
+            errno = error;
+            return -1;
+        }
+    }
+    closedir(directory);
+    return count;
+}
+#endif
 
 /* Start ticks on Linux and start time on macOS protect against signalling a
    reused leader PID. A surviving process group keeps its group ID allocated. */
@@ -1020,6 +1127,25 @@ static int async_group_exists(pid_t pid) {
     return errno == EPERM;
 }
 
+static int async_owner_exists(const struct async_process *item) {
+#ifdef __linux__
+    if (item->owns_session) {
+        int count = signal_async_session(item->session, 0);
+        return count < 0 ? -1 : count > 0;
+    }
+#endif
+    return async_group_exists(item->pid);
+}
+
+static int signal_async_owner(const struct async_process *item, int signal_number) {
+#ifdef __linux__
+    if (item->owns_session)
+        return signal_async_session(item->session, signal_number) < 0 ? errno : 0;
+#endif
+    if (kill(-item->pid, signal_number) != 0 && errno != ESRCH) return errno;
+    return 0;
+}
+
 static struct async_process *find_async_process(pid_t pid) {
     struct async_process *item;
     for (item = async_processes; item != NULL; item = item->next) {
@@ -1044,13 +1170,13 @@ static int async_identity_matches(const struct async_process *item) {
     pid_t group = getpgid(item->pid);
     if (group >= 0) {
         uint64_t current;
-        if (group != item->pid || getsid(item->pid) != item->pid) return 0;
+        if (group != item->pid || getsid(item->pid) != item->session) return 0;
         current = process_start_identity(item->pid);
         if (item->start_identity != 0 && current != item->start_identity) return 0;
         return 1;
     }
     /* A dead leader can leave ordinary descendants in its original group. */
-    return errno == ESRCH && async_group_exists(item->pid);
+    return errno == ESRCH && async_owner_exists(item) != 0;
 }
 
 static int observe_async_leader(struct async_process *item) {
@@ -1088,40 +1214,82 @@ static int reap_async_group_children(pid_t pid) {
     }
 }
 
+#ifdef __linux__
+static void reap_async_session_children(pid_t session, pid_t leader) {
+    DIR *directory = opendir("/proc");
+    struct dirent *entry;
+
+    if (directory == NULL) return;
+    while ((entry = readdir(directory)) != NULL) {
+        char *end;
+        long value = strtol(entry->d_name, &end, 10);
+        pid_t current;
+        if (*entry->d_name == '\0' || *end != '\0' || value <= 0 ||
+            value > INT_MAX || (pid_t)value == leader) continue;
+        if (linux_process_session((pid_t)value, &current) == 0 &&
+            current == session) (void)waitpid((pid_t)value, NULL, WNOHANG);
+    }
+    closedir(directory);
+}
+#endif
+
 static int terminate_async_group(struct async_process *item) {
     struct timespec now, deadline;
-    int error;
+    int error, exists;
 
     if (!item->leader_done && !async_identity_matches(item)) return ESRCH;
-    if (!async_group_exists(item->pid)) return 0;
-    if (kill(-item->pid, SIGTERM) != 0 && errno != ESRCH) return errno;
+    exists = async_owner_exists(item);
+    if (exists < 0) return errno;
+    if (!exists) return 0;
+    error = signal_async_owner(item, SIGTERM);
+    if (error != 0) return error;
     clock_gettime(CLOCK_MONOTONIC, &deadline);
     add_seconds(&deadline, 2);
     for (;;) {
         error = observe_async_leader(item);
         if (error != 0) return error;
         if (item->leader_done) {
-            error = reap_async_group_children(item->pid);
-            if (error != 0) return error;
+            if (item->owns_session) {
+#ifdef __linux__
+                reap_async_session_children(item->session, item->pid);
+#endif
+            } else {
+                error = reap_async_group_children(item->pid);
+                if (error != 0) return error;
+            }
         }
-        if (!async_group_exists(item->pid)) return 0;
+        exists = async_owner_exists(item);
+        if (exists < 0) return errno;
+        if (!exists) return 0;
         clock_gettime(CLOCK_MONOTONIC, &now);
         if (timespec_at_or_after(&now, &deadline)) break;
         sleep_ms(25);
     }
 
-    if (async_group_exists(item->pid) && kill(-item->pid, SIGKILL) != 0 &&
-        errno != ESRCH) return errno;
+    exists = async_owner_exists(item);
+    if (exists < 0) return errno;
+    if (exists) {
+        error = signal_async_owner(item, SIGKILL);
+        if (error != 0) return error;
+    }
     clock_gettime(CLOCK_MONOTONIC, &deadline);
     add_seconds(&deadline, 1);
     for (;;) {
         error = observe_async_leader(item);
         if (error != 0) return error;
         if (item->leader_done) {
-            error = reap_async_group_children(item->pid);
-            if (error != 0) return error;
+            if (item->owns_session) {
+#ifdef __linux__
+                reap_async_session_children(item->session, item->pid);
+#endif
+            } else {
+                error = reap_async_group_children(item->pid);
+                if (error != 0) return error;
+            }
         }
-        if (!async_group_exists(item->pid)) return 0;
+        exists = async_owner_exists(item);
+        if (exists < 0) return errno;
+        if (!exists) return 0;
         clock_gettime(CLOCK_MONOTONIC, &now);
         if (timespec_at_or_after(&now, &deadline)) return ETIMEDOUT;
         sleep_ms(10);
@@ -1207,7 +1375,11 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
         int fd, release;
         close(ready_pipe[0]);
         close(gate_pipe[1]);
-        if (setsid() < 0) child_error = errno;
+        if (setsid() < 0) {
+            /* The inherited owner filter keeps this child in its session.
+               A fresh process group gives the nested job its own handle. */
+            if (errno != EPERM || setpgid(0, 0) != 0) child_error = errno;
+        }
         if (child_error == 0) child_error = install_async_group_containment();
         if (child_error == 0 && has_text(cwd) && chdir(cwd) != 0) {
             child_error = errno;
@@ -1260,7 +1432,7 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
         return;
     }
 #endif
-    if (getpgid(pid) != pid || getsid(pid) != pid) {
+    if (getpgid(pid) != pid || getsid(pid) <= 0) {
         close(gate_pipe[1]);
         (void)kill(pid, SIGKILL);
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
@@ -1282,6 +1454,8 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
         return;
     }
     item->pid = pid;
+    item->session = getsid(pid);
+    item->owns_session = item->session == pid;
     item->start_identity = identity;
     item->next = async_processes;
     async_processes = item;
