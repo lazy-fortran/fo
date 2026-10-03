@@ -11,6 +11,9 @@ const driver = process.argv[2] ? path.resolve(process.argv[2]) :
 const realAr = execFileSync('which', ['ar'], { encoding: 'utf8' }).trim();
 const realFc = execFileSync('which', ['gfortran'], { encoding: 'utf8' }).trim();
 const realGcc = execFileSync('which', ['gcc'], { encoding: 'utf8' }).trim();
+const truncatedMagic = process.platform === 'darwin'
+  ? Buffer.from([0xcf, 0xfa, 0xed, 0xfe])
+  : Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
 const scratch = fs.mkdtempSync('/var/tmp/fo-archive-publication-');
 const project = path.join(scratch, 'project');
 const localCache = path.join(scratch, 'cache');
@@ -22,6 +25,7 @@ const sharedLog = path.join(scratch, 'shared.jsonl');
 const fakeAr = path.join(fakeBin, 'ar');
 const fakeFc = path.join(fakeBin, 'gfortran');
 const fakeGcc = path.join(fakeBin, 'gcc');
+const activeFoChildren = new Map();
 const baseEnv = {
   ...process.env,
   PATH: `${fakeBin}:${process.env.PATH}`,
@@ -42,13 +46,13 @@ function write(file, contents) {
   fs.writeFileSync(file, contents);
 }
 
-function command(args, mode = 'normal', linkMode = 'normal') {
+function command(args, mode = 'normal', linkMode = 'normal', envOverrides = {}) {
   const result = spawnSync(driver, args, {
     cwd: project,
     encoding: 'utf8',
     maxBuffer: 8 * 1024 * 1024,
     env: { ...baseEnv, FO_FAKE_AR_MODE: mode, FO_FAKE_SHARED_MODE: mode,
-      FO_FAKE_TEST_LINK_MODE: linkMode },
+      FO_FAKE_TEST_LINK_MODE: linkMode, ...envOverrides },
   });
   if (result.error) throw result.error;
   return result;
@@ -81,9 +85,116 @@ function start(args, mode, linkMode = 'normal') {
   let output = '';
   child.stdout.on('data', chunk => { output += chunk; });
   child.stderr.on('data', chunk => { output += chunk; });
-  const done = new Promise(resolve => child.on('close', status =>
-    resolve({ status, output })));
+  const done = new Promise(resolve => child.on('close', (status, signal) =>
+    resolve({ status, signal, output })));
+  activeFoChildren.set(child, done);
+  child.once('close', () => activeFoChildren.delete(child));
   return { child, done };
+}
+
+function fixtureToolPids() {
+  const pids = new Set();
+  for (const log of [arLog, fcLog, exeLog, sharedLog]) {
+    if (!fs.existsSync(log)) continue;
+    for (const line of fs.readFileSync(log, 'utf8').split('\n')) {
+      if (!line) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (Number.isInteger(entry.pid) && entry.pid > 0) pids.add(entry.pid);
+      } catch {}
+    }
+  }
+  return [...pids];
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code !== 'ESRCH';
+  }
+}
+
+function fixtureToolAlive(pid) {
+  if (!pidAlive(pid)) return false;
+  try {
+    const command = process.platform === 'linux'
+      ? fs.readFileSync(`/proc/${pid}/cmdline`)
+      : execFileSync('ps', ['-ww', '-p', String(pid), '-o', 'command=']);
+    return command.includes(fakeBin);
+  } catch {
+    return false;
+  }
+}
+
+function fixtureStagePaths() {
+  const stages = [];
+  for (const dir of [path.join(project, 'build/fo/lib'),
+    path.join(project, 'build/fo/bin')]) {
+    if (!fs.existsSync(dir)) continue;
+    for (const name of fs.readdirSync(dir)) {
+      if (name.startsWith('.fo-archive.tmp-') ||
+          name.startsWith('.fo-shared.tmp-') ||
+          name.startsWith('.fo-link.tmp-')) {
+        stages.push(path.join(dir, name));
+      }
+    }
+  }
+  return stages;
+}
+
+function cleanupFixtureStages() {
+  for (const stage of fixtureStagePaths()) {
+    fs.rmSync(stage, { recursive: true, force: true });
+  }
+  assert.deepEqual(fixtureStagePaths(), [],
+    'fixture cleanup removes all remaining owned staging paths');
+}
+
+async function pause(milliseconds) {
+  await new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+async function cleanupFixtureProcesses() {
+  const owners = [...activeFoChildren.entries()];
+  for (const [child] of owners) {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+  }
+  await Promise.race([
+    Promise.all(owners.map(([, done]) => done)), pause(1000),
+  ]);
+  for (const [child] of owners) {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }
+  await Promise.race([
+    Promise.all(owners.map(([, done]) => done)), pause(1000),
+  ]);
+
+  const tools = fixtureToolPids();
+  for (const pid of tools) {
+    if (fixtureToolAlive(pid)) {
+      try { process.kill(pid, 'SIGTERM'); } catch {}
+    }
+  }
+  await pause(100);
+  for (const pid of tools) {
+    if (fixtureToolAlive(pid)) {
+      try { process.kill(pid, 'SIGKILL'); } catch {}
+    }
+  }
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (tools.every(pid => !fixtureToolAlive(pid))) {
+      cleanupFixtureStages();
+      return;
+    }
+    await pause(10);
+  }
+  try {
+    assert.fail('fixture child processes remained alive after cleanup');
+  } finally {
+    cleanupFixtureStages();
+  }
 }
 
 function archivePaths() {
@@ -220,7 +331,7 @@ const args = process.argv.slice(2);
 const archive = args[1];
 const mode = process.env.FO_FAKE_AR_MODE;
 fs.appendFileSync(process.env.FO_TEST_AR_LOG,
-  JSON.stringify({ args, mode, pid: process.pid }) + '\\n');
+  JSON.stringify({ args, mode, pid: process.pid, ppid: process.ppid }) + '\\n');
 if (args[0] === 'rcs' && mode === 'delay') {
   fs.writeFileSync(archive, 'unfinished archive');
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
@@ -250,6 +361,9 @@ const isTestLink = !args.includes('-c') && output.includes('/build/fo/bin/');
 const isSharedLink = args.includes('-dynamiclib');
 const mode = process.env.FO_FAKE_SHARED_MODE;
 const testLinkMode = process.env.FO_FAKE_TEST_LINK_MODE;
+const truncatedMagic = process.platform === 'darwin'
+  ? Buffer.from([0xcf, 0xfa, 0xed, 0xfe])
+  : Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
 if (isSharedLink) {
   fs.appendFileSync(process.env.FO_TEST_SHARED_LOG,
     JSON.stringify({ kind: 'start', output, mode, pid: process.pid }) + '\\n');
@@ -264,22 +378,34 @@ if (isSharedLink) {
       JSON.stringify({ kind: 'done', mode, pid: process.pid }) + '\\n');
     process.exit(mode === 'fail' ? 39 : 0);
   }
+  if (mode === 'truncated') {
+    fs.writeFileSync(output, truncatedMagic);
+    fs.appendFileSync(process.env.FO_TEST_SHARED_LOG,
+      JSON.stringify({ kind: 'done', mode, pid: process.pid }) + '\\n');
+    process.exit(0);
+  }
 }
 if (isTestLink) {
   if (testLinkMode === 'delay') {
     fs.appendFileSync(process.env.FO_TEST_EXE_LOG,
-      JSON.stringify({ output, mode: testLinkMode }) + '\\n');
+      JSON.stringify({ output, mode: testLinkMode, pid: process.pid }) + '\\n');
     fs.writeFileSync(output, 'unfinished executable');
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
     fs.rmSync(output, { force: true });
   }
   fs.appendFileSync(process.env.FO_TEST_FC_LOG,
-    JSON.stringify({ kind: 'start' }) + '\\n');
+    JSON.stringify({ kind: 'start', pid: process.pid }) + '\\n');
   if (testLinkMode === 'fail') {
     fs.writeFileSync(output, 'failed executable link');
     fs.appendFileSync(process.env.FO_TEST_FC_LOG,
-      JSON.stringify({ kind: 'done' }) + '\\n');
+      JSON.stringify({ kind: 'done', pid: process.pid }) + '\\n');
     process.exit(41);
+  }
+  if (testLinkMode === 'truncated') {
+    fs.writeFileSync(output, truncatedMagic);
+    fs.appendFileSync(process.env.FO_TEST_FC_LOG,
+      JSON.stringify({ kind: 'done', pid: process.pid }) + '\\n');
+    process.exit(0);
   }
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
 }
@@ -288,7 +414,7 @@ if (isSharedLink) fs.appendFileSync(process.env.FO_TEST_SHARED_LOG,
   JSON.stringify({ kind: 'done', mode, pid: process.pid }) + '\\n');
 if (isTestLink) {
   fs.appendFileSync(process.env.FO_TEST_FC_LOG,
-    JSON.stringify({ kind: 'done' }) + '\\n');
+    JSON.stringify({ kind: 'done', pid: process.pid }) + '\\n');
 }
 process.exit(result.status === null ? 1 : result.status);
 `);
@@ -301,6 +427,9 @@ const outputIndex = args.indexOf('-o');
 const output = outputIndex >= 0 ? args[outputIndex + 1] : '';
 const shared = args.includes('-shared');
 const mode = process.env.FO_FAKE_SHARED_MODE;
+const truncatedMagic = process.platform === 'darwin'
+  ? Buffer.from([0xcf, 0xfa, 0xed, 0xfe])
+  : Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
 if (shared) {
   fs.appendFileSync(process.env.FO_TEST_SHARED_LOG,
     JSON.stringify({ kind: 'start', output, mode, pid: process.pid }) + '\\n');
@@ -314,6 +443,12 @@ if (shared) {
     fs.appendFileSync(process.env.FO_TEST_SHARED_LOG,
       JSON.stringify({ kind: 'done', mode, pid: process.pid }) + '\\n');
     process.exit(mode === 'fail' ? 39 : 0);
+  }
+  if (mode === 'truncated') {
+    fs.writeFileSync(output, truncatedMagic);
+    fs.appendFileSync(process.env.FO_TEST_SHARED_LOG,
+      JSON.stringify({ kind: 'done', mode, pid: process.pid }) + '\\n');
+    process.exit(0);
   }
 }
 const result = spawnSync(process.env.FO_TEST_REAL_GCC, args, { stdio: 'inherit' });
@@ -392,6 +527,32 @@ process.exit(result.status === null ? 1 : result.status);
     .trim().split('\n');
   assert.equal(members.length, 3, 'module and submodule objects are archived');
 
+  const rightMember = members.find(member => /right/i.test(member));
+  assert(rightMember, `archive contains the right implementation member: ${members}`);
+  const staleDir = path.join(scratch, 'stale-object');
+  const staleSource = path.join(staleDir, 'right.f90');
+  const staleObject = path.join(staleDir, rightMember);
+  write(staleSource, [
+    'module archive_right', 'contains', 'integer function right_value()',
+    'right_value = 29', 'end function right_value', 'end module archive_right', '',
+  ].join('\n'));
+  fs.mkdirSync(path.join(staleDir, 'mod'), { recursive: true });
+  execFileSync(realFc, ['-c', '-fPIC', '-J', path.join(staleDir, 'mod'),
+    '-o', staleObject, staleSource]);
+  execFileSync(realAr, ['rcs', archive, staleObject]);
+  assert.deepEqual(execFileSync(realAr, ['t', archive], { encoding: 'utf8' })
+    .trim().split('\n'), members,
+  'the stale archive remains structurally valid with the expected member names');
+  const probeBinary = path.join(project, 'build/fo/bin/probe');
+  fs.rmSync(probeBinary, { force: true });
+  const beforeStaleRepair = arCalls().length;
+  const staleRun = command(['exec', 'probe']);
+  assert.equal(staleRun.status, 0, staleRun.stdout + staleRun.stderr);
+  assert.equal(staleRun.stdout, '42\n',
+    'archive reuse verifies member bytes and rebuilds stale contents');
+  assert.equal(arCalls().length, beforeStaleRepair + 1,
+    'stale archive member content triggers a rebuild');
+
   write(path.join(project, 'app/probe.f90'), [
     'program probe', 'use archive_left, only: left_value',
     'use archive_right, only: right_value', 'implicit none',
@@ -415,15 +576,25 @@ process.exit(result.status === null ? 1 : result.status);
   });
   const producer = arCalls().slice(beforeInterrupt)
     .find(entry => entry.mode === 'hold');
-  process.kill(producer.pid, 'SIGTERM');
+  assert.equal(producer.ppid, interrupted.child.pid,
+    'the fake archiver is a direct child of the fo build owner');
+  const interruptedStages = fs.readdirSync(path.join(project, 'build/fo/lib'))
+    .filter(name => name.startsWith('.fo-archive.tmp-'));
+  process.kill(interrupted.child.pid, 'SIGTERM');
   const interruptedResult = await interrupted.done;
-  assert.notEqual(interruptedResult.status, 0,
-    'cancelled archive producer fails its build');
+  assert.equal(interruptedResult.signal, 'SIGTERM',
+    'the cancellation oracle terminates the fo build owner');
   assert.equal(archivePaths().length, 0,
-    'cancelled producer leaves no reusable cache archive');
+    'terminated owner leaves no reusable cache archive');
+  if (fixtureToolAlive(producer.pid)) process.kill(producer.pid, 'SIGTERM');
+  await waitFor(() => !fixtureToolAlive(producer.pid));
+  for (const stage of interruptedStages) {
+    fs.rmSync(path.join(project, 'build/fo/lib', stage),
+      { recursive: true, force: true });
+  }
   assert.equal(fs.readdirSync(path.join(project, 'build/fo/lib'))
     .some(name => name.startsWith('.fo-archive.tmp-')), false,
-  'cancelled producer cleans its own staging directory');
+  'cancellation cleanup removes the owner stage after reaping its child');
 
   const beforeRetry = arCalls().length;
   checked(['build']);
@@ -497,6 +668,23 @@ process.exit(result.status === null ? 1 : result.status);
     .some(name => name.startsWith('.fo-link.tmp-')), false,
   'failed executable publication removes only its owned staging directory');
 
+  const binariesBeforeTruncatedLink = stableTestBinaries();
+  const digestsBeforeTruncatedLink = new Map(binariesBeforeTruncatedLink
+    .map(file => [file, fileDigest(file)]));
+  write(path.join(project, 'test/test_alpha.f90'),
+    testSource('test_alpha', 'exe-truncated'));
+  const truncatedExecutable = command(['test', '--all', '--json'],
+    'normal', 'truncated');
+  assert.notEqual(truncatedExecutable.status, 0,
+    'a linker that returns a magic-only executable is rejected');
+  for (const file of binariesBeforeTruncatedLink) {
+    assert.equal(fileDigest(file), digestsBeforeTruncatedLink.get(file),
+      'a truncated staged executable does not replace the previous binary');
+  }
+  assert.equal(fs.readdirSync(path.join(project, 'build/fo/bin'))
+    .some(name => name.startsWith('.fo-link.tmp-')), false,
+  'rejected executable publication removes its owned staging directory');
+
   write(path.join(project, 'fpm.toml'), [
     'name = "archive_publication_probe"', '[build]',
     'auto-executables = true', 'auto-tests = true', '[extra.fo]',
@@ -549,12 +737,18 @@ process.exit(result.status === null ? 1 : result.status);
     'an invalid cached shared library is rebuilt');
   assert.deepEqual(fs.readFileSync(shared), staleShared,
     'failed staged shared link preserves the previous final path');
+  assert.equal(fs.readdirSync(path.join(project, 'build/fo/lib'))
+    .some(name => name.startsWith('.fo-shared.tmp-')), false,
+  'failed shared-library publication removes its owned marker directory');
 
   const malformedShared = command(['test', '--all', '--json'], 'omit');
   assert.notEqual(malformedShared.status, 0,
     'successful linker exit with an invalid image is rejected');
   assert.deepEqual(fs.readFileSync(shared), staleShared,
     'invalid staged shared output does not replace the previous final path');
+  assert.equal(fs.readdirSync(path.join(project, 'build/fo/lib'))
+    .some(name => name.startsWith('.fo-shared.tmp-')), false,
+  'rejected shared-library publication removes its owned marker directory');
 
   const sharedRecovered = JSON.parse(checked(['test', '--all', '--json']));
   assert.deepEqual(sharedRecovered.tests.map(test => test.status), ['pass', 'pass'],
@@ -562,9 +756,57 @@ process.exit(result.status === null ? 1 : result.status);
   assertVisibleSharedLibrariesComplete();
   assert.equal(checked(['exec', 'probe']), '42\n',
     'a real executable still links and runs after shared-library recovery');
+
+  const disabledCache = path.join(scratch, 'cache-is-a-file');
+  write(disabledCache, 'cache initialization must fail');
+  write(path.join(project, 'test/test_alpha.f90'),
+    testSource('test_alpha', 'shared-no-cache-cleanup'));
+  const beforeNoCacheShared = sharedCalls().length;
+  command(['test', '--all', '--json'], 'normal', 'normal',
+    { FO_CACHE_DIR: disabledCache });
+  assert.equal(sharedCalls().length, beforeNoCacheShared + 1,
+    'cache initialization failure reaches the process-owned shared linker');
+  assert.equal(fs.readdirSync(path.join(project, 'build/fo/lib'))
+    .some(name => name.startsWith('.fo-shared.tmp-')), false,
+  'no-cache shared consumers remove their owned marker directory');
+
+  write(path.join(project, 'test/test_alpha.f90'),
+    testSource('test_alpha', 'shared-no-cache-failure'));
+  const noCacheSharedFailure = command(['test', '--all', '--json'],
+    'fail', 'normal', { FO_CACHE_DIR: disabledCache });
+  assert.notEqual(noCacheSharedFailure.status, 0,
+    'shared link failure propagates when cache initialization is unavailable');
+  assert.equal(fs.readdirSync(path.join(project, 'build/fo/lib'))
+    .some(name => name.startsWith('.fo-shared.tmp-')), false,
+  'no-cache shared link failure removes its owned marker directory');
+
+  const sharedBackup = path.join(scratch, 'saved-shared-library');
+  fs.renameSync(shared, sharedBackup);
+  try {
+    write(path.join(project, 'test/test_alpha.f90'),
+      testSource('test_alpha', 'shared-truncated'));
+    const truncatedShared = command(['test', '--all', '--json'], 'truncated');
+    assert.notEqual(truncatedShared.status, 0,
+      'a linker that returns a magic-only shared library is rejected');
+    assert.equal(sharedPaths().length, 0,
+      'a truncated shared library is never published at its content-key path');
+    assert.equal(fs.readdirSync(path.join(project, 'build/fo/lib'))
+      .some(name => name.startsWith('.fo-shared.tmp-')), false,
+    'rejected shared-library publication removes its owned marker directory');
+  } finally {
+    if (fs.existsSync(sharedBackup)) fs.renameSync(sharedBackup, shared);
+  }
+  const sharedFinalReport = JSON.parse(checked(['test', '--all', '--json']));
+  assert.deepEqual(sharedFinalReport.tests.map(test => test.status), ['pass', 'pass']);
+  assert.equal(checked(['exec', 'probe']), '42\n',
+    'archive and executable behavior remains valid after truncated image rejection');
   console.log('artifact-publication: atomic archives, shared libraries, and executables pass');
 } finally {
-  fs.rmSync(scratch, { recursive: true, force: true });
+  try {
+    await cleanupFixtureProcesses();
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
 }
 }
 

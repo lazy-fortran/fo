@@ -2998,9 +2998,10 @@ contains
         character(len=*), intent(in) :: path
         logical, intent(out) :: valid
 
-        integer(int64) :: file_size
-        integer :: u, ios
-        character(len=4) :: magic
+        integer(int64) :: file_size, arch_count, min_file_size
+        integer :: u, ios, image_class, image_data
+        character(len=4) :: magic, fat_count
+        character(len=2) :: elf_ident_tail
 
         valid = .false.
         file_size = 0_int64
@@ -3011,19 +3012,83 @@ contains
             status='old', action='read', iostat=ios)
         if (ios /= 0) return
         read (u, pos=1, iostat=ios) magic
-        close (u)
-        if (ios /= 0) return
         if (is_macos()) then
-            valid = magic == achar(206)//achar(250)//achar(237)//achar(254) .or. &
-                magic == achar(207)//achar(250)//achar(237)//achar(254) .or. &
-                magic == achar(254)//achar(237)//achar(250)//achar(206) .or. &
-                magic == achar(254)//achar(237)//achar(250)//achar(207) .or. &
-                magic == achar(202)//achar(254)//achar(186)//achar(190) .or. &
-                magic == achar(190)//achar(186)//achar(254)//achar(202) .or. &
-                magic == achar(202)//achar(254)//achar(186)//achar(191) .or. &
-                magic == achar(191)//achar(186)//achar(254)//achar(202)
+            if (ios /= 0) then
+                close (u)
+                return
+            end if
+            select case (magic)
+            case (achar(206)//achar(250)//achar(237)//achar(254), &
+                    achar(254)//achar(237)//achar(250)//achar(206))
+                min_file_size = 28_int64
+            case (achar(207)//achar(250)//achar(237)//achar(254), &
+                    achar(254)//achar(237)//achar(250)//achar(207))
+                min_file_size = 32_int64
+            case (achar(202)//achar(254)//achar(186)//achar(190), &
+                    achar(190)//achar(186)//achar(254)//achar(202), &
+                    achar(202)//achar(254)//achar(186)//achar(191), &
+                    achar(191)//achar(186)//achar(254)//achar(202))
+                if (file_size < 8_int64) then
+                    close (u)
+                    return
+                end if
+                read (u, pos=5, iostat=ios) fat_count
+                if (ios /= 0) then
+                    close (u)
+                    return
+                end if
+                if (magic == achar(202)//achar(254)//achar(186)//achar(190) .or. &
+                    magic == achar(202)//achar(254)//achar(186)//achar(191)) then
+                    arch_count = int(iachar(fat_count(1:1)), int64) * &
+                        16777216_int64 + int(iachar(fat_count(2:2)), int64) * &
+                        65536_int64 + int(iachar(fat_count(3:3)), int64) * &
+                        256_int64 + int(iachar(fat_count(4:4)), int64)
+                else
+                    arch_count = int(iachar(fat_count(4:4)), int64) * &
+                        16777216_int64 + int(iachar(fat_count(3:3)), int64) * &
+                        65536_int64 + int(iachar(fat_count(2:2)), int64) * &
+                        256_int64 + int(iachar(fat_count(1:1)), int64)
+                end if
+                if (arch_count < 1_int64) then
+                    close (u)
+                    return
+                end if
+                if (magic == achar(202)//achar(254)//achar(186)//achar(191) .or. &
+                    magic == achar(191)//achar(186)//achar(254)//achar(202)) then
+                    min_file_size = 8_int64 + arch_count * 32_int64
+                else
+                    min_file_size = 8_int64 + arch_count * 20_int64
+                end if
+            case default
+                close (u)
+                return
+            end select
+            close (u)
+            valid = file_size >= min_file_size
         else
-            valid = magic == achar(127)//'ELF'
+            if (ios /= 0) then
+                close (u)
+                return
+            end if
+            if (magic /= achar(127)//'ELF') then
+                close (u)
+                return
+            end if
+            if (file_size < 16_int64) then
+                close (u)
+                return
+            end if
+            read (u, pos=5, iostat=ios) elf_ident_tail
+            close (u)
+            if (ios /= 0) return
+            image_class = iachar(elf_ident_tail(1:1))
+            image_data = iachar(elf_ident_tail(2:2))
+            if (image_data /= 1 .and. image_data /= 2) return
+            if (image_class == 1) then
+                valid = file_size >= 52_int64
+            else if (image_class == 2) then
+                valid = file_size >= 64_int64
+            end if
         end if
     end subroutine native_image_valid
 
@@ -3145,7 +3210,7 @@ contains
         character(len=512) :: expected
         logical, allocatable :: matched(:)
         integer :: i, n_args, exitcode, u, ios, j
-        logical :: member_found
+        logical :: member_found, member_content_ok
 
         valid = .false.
         if (n_objects < 1) return
@@ -3199,7 +3264,46 @@ contains
             end do
         end if
         call delete_tmpfile(listing_file)
+        if (.not. valid) return
+        do j = 1, n_objects
+            call archive_member_content_matches(project_dir, archive_path, &
+                objects(j), member_content_ok)
+            if (.not. member_content_ok) then
+                valid = .false.
+                return
+            end if
+        end do
     end subroutine archive_has_expected_members
+
+    subroutine archive_member_content_matches(project_dir, archive_path, &
+            object_path, matches)
+        character(len=*), intent(in) :: project_dir, archive_path, object_path
+        logical, intent(out) :: matches
+
+        character(len=:), allocatable :: packed
+        character(len=1024) :: member_output
+        character(len=512) :: member_name
+        character(len=HASH_LEN) :: object_digest, member_digest
+        integer :: n_args, exitcode
+
+        matches = .false.
+        call archive_member_name(object_path, member_name)
+        if (len_trim(member_name) == 0) return
+        call make_tmpfile('fo_archive_member', member_output)
+        n_args = 0
+        call argv_push(packed, n_args, 'ar')
+        call argv_push(packed, n_args, 'p')
+        call argv_push(packed, n_args, archive_path)
+        call argv_push(packed, n_args, trim(member_name))
+        call process_run_argv_logged(project_dir, packed, n_args, member_output, &
+            .false., build_timeout_seconds(), exitcode)
+        if (exitcode == 0) then
+            call cache_file_digest(object_path, object_digest)
+            call cache_file_digest(member_output, member_digest)
+            matches = object_digest == member_digest
+        end if
+        call delete_tmpfile(member_output)
+    end subroutine archive_member_content_matches
 
     subroutine archive_member_name(path, member)
         character(len=*), intent(in) :: path
