@@ -16,9 +16,12 @@ const options = {
   env: { ...process.env, TMPDIR: '/var/tmp', FO_JOBS: '4' }
 };
 
-function run(args) {
+function run(args, environment = {}) {
   const command = installed ? args : ['exec', '--no-build', '--cwd', scratch, 'fo', ...args];
-  const result = spawnSync(driver, command, { ...options, cwd: installed ? scratch : project });
+  const result = spawnSync(driver, command, {
+    ...options, env: { ...options.env, ...environment },
+    cwd: installed ? scratch : project
+  });
   if (result.error) throw result.error;
   assert.equal(result.signal, null, result.stderr);
   return result;
@@ -40,11 +43,11 @@ function caseSource(name, value) {
   ].join('\n');
 }
 
-function expectCases(args, names, receipts) {
+function expectCases(args, names, receipts, environment = {}) {
   for (const name of allCases) {
     fs.rmSync(path.join(scratch, `${name}.receipt`), { force: true });
   }
-  const result = run([...args, '--json']);
+  const result = run([...args, '--json'], environment);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const report = JSON.parse(result.stdout);
   assert.deepEqual(report.tests.map(entry => entry.name).sort(), [...names].sort());
@@ -58,8 +61,8 @@ function expectCases(args, names, receipts) {
   }
 }
 
-function expectRejected(name) {
-  const result = run(['test', name, '--json']);
+function expectRejected(name, environment = {}) {
+  const result = run(['test', name, '--json'], environment);
   assert.notEqual(result.status, 0, `${name} must not succeed with zero tests`);
   assert.match(result.stderr, new RegExp(`fo: unknown test: ${name}`));
 }
@@ -131,6 +134,20 @@ try {
   expectCases(['test', '--all'], names, { ...receipts, test_alpha: 'alpha-updated' });
   const binaries = fs.readdirSync(path.join(scratch, 'build/fo/bin')).sort();
   assert.deepEqual(binaries, ['test_dispatcher', 'test_plain'], 'one routed binary, one independent binary');
+  // Regex scanning retains marker-only sources without a build-unit identity.
+  // A real dispatcher must not turn such a source into a named test target.
+  const markerAlias = [
+    '[[test]]', 'name = "test_marker_only"', 'source-dir = "test"',
+    'main = "nested/marker_only.f90"', ''
+  ].join('\n');
+  fs.appendFileSync(path.join(scratch, 'fpm.toml'), markerAlias);
+  write('test/nested/marker_only.f90', '! fo: dispatcher\n! no build unit\n');
+  const regexScan = { FO_SCAN_FALLBACK: 'regex' };
+  expectRejected('test_marker_only', regexScan);
+  expectCases(['test', '--all'], names, { ...receipts, test_alpha: 'alpha-updated' }, regexScan);
+  expectCases(['test', '--all'], names, { ...receipts, test_alpha: 'alpha-updated' }, regexScan);
+  fs.rmSync(path.join(scratch, 'test/nested/marker_only.f90'));
+
   // A custom test root must use the same manifest mapping and eligibility.
   fs.renameSync(path.join(scratch, 'test'), path.join(scratch, 'checks'));
   const manifest = fs.readFileSync(path.join(scratch, 'fpm.toml'), 'utf8')
@@ -160,7 +177,7 @@ try {
   expectRejected('test_does_not_exist');
   console.log('dispatcher-cli: shared cold/warm all, module/program cases, public aliases, ' +
     'nested/custom roots, random/changed selection, named edits, explicit self and ' +
-    'ineligible/missing-dispatcher rejection pass');
+    'ineligible/marker-only/missing-dispatcher rejection pass');
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }

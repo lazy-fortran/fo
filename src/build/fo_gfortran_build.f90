@@ -866,12 +866,15 @@ contains
             trim(unit%filename), '! fo: dispatcher')
     end function unit_has_dispatcher_marker
 
-    logical function test_source_eligible(filename, is_program, has_dispatcher) &
-            result(eligible)
-        !! Programs run independently; marked modules need a real dispatcher.
+    logical function test_source_eligible(filename, is_program, has_dispatcher, &
+            has_node) result(eligible)
+        !! Runnable sources need a build unit; marked modules also need a
+        !! real dispatcher program.
         character(len=*), intent(in) :: filename
-        logical, intent(in) :: is_program, has_dispatcher
+        logical, intent(in) :: is_program, has_dispatcher, has_node
 
+        eligible = .false.
+        if (.not. has_node) return
         eligible = .true.
         if (is_program) return
         eligible = .false.
@@ -920,7 +923,8 @@ contains
             units, n_units)
         do i = 1, n_units
             if (.not. test_source_eligible(units(i)%filename, &
-                units(i)%is_program, has_dispatcher)) cycle
+                units(i)%is_program, has_dispatcher, &
+                units(i)%is_program .or. len_trim(units(i)%module_name) > 0)) cycle
             public_name = gfortran_test_source_name(config, config%test_dir, &
                 units(i)%filename)
             if (trim(public_name) /= trim(name)) cycle
@@ -1001,7 +1005,8 @@ contains
             units, n_units)
         do i = 1, n_units
             if (.not. test_source_eligible(units(i)%filename, &
-                units(i)%is_program, has_dispatcher)) cycle
+                units(i)%is_program, has_dispatcher, &
+                units(i)%is_program .or. len_trim(units(i)%module_name) > 0)) cycle
             do j = 1, n_ids
                 if (trim(filenames(node_ids(j))) == trim(units(i)%filename)) exit
             end do
@@ -1041,7 +1046,8 @@ contains
         n_tests = 0
         do i = 1, n_units
             if (.not. test_source_eligible(units(i)%filename, &
-                units(i)%is_program, has_dispatcher)) cycle
+                units(i)%is_program, has_dispatcher, &
+                units(i)%is_program .or. len_trim(units(i)%module_name) > 0)) cycle
             name = gfortran_test_source_name(config, test_dir, units(i)%filename)
             ! The dispatcher is infrastructure, not a test: scanned as one it
             ! gets run bare and fails its own usage check, which would read as
@@ -2616,7 +2622,7 @@ contains
             node_id = topo_order(i)
             if (len_trim(filenames(node_id)) == 0) cycle
             if (.not. test_source_eligible(filenames(node_id), &
-                is_prog(node_id), dnode > 0)) cycle
+                is_prog(node_id), dnode > 0, .true.)) cycle
             tname = gfortran_test_source_name(manifest_config, test_dir, &
                 filenames(node_id))
             if (.not. include_slow .and. is_slow_name(tname)) cycle
