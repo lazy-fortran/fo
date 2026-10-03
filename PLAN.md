@@ -605,9 +605,11 @@ current correctness.
 
 **Execution is user-authorized in parallel mode.** The controller started from
 fo main at `e4fc193`. The reviewed core and dependency-shadow repair are now on
-fo `main` at `1c68c04`; PR #146 is merged. The exact integrated head passed its
-focused local gate and post-submit GitHub Actions run 37151346404. Development
-continues as small locally gated main increments without waiting for CI.
+fo `main`; PR #146 is merged. The current main head `b0a356e` adds shared
+event-driven watching, the context-provenance repair and finite crash-safe
+coverage epochs. Exact combined focused gates passed before each push;
+post-submit GitHub Actions remains asynchronous. Development continues as small
+locally gated main increments without waiting for CI.
 
 The `a0d3515` candidate passed the isolated full fo pipeline: static 109/109,
 build 62/62, test build/run 48/48, lint and format check, in 26.6 s. The same
@@ -635,6 +637,13 @@ Implemented issue state:
   that a failed intermediate build retains the active generation and running
   test, never tests the broken candidate, preserves completed receipts, and
   switches only after the repaired candidate builds.
+- #148 is complete at `48137f0`: idle capture delta is zero, relevant bursts
+  debounce to one candidate, project/path-dependency/config changes wake the
+  shared watcher, and `fo watch` uses the same provider.
+- #153 is complete at `be5aa7a` plus `b0a356e`: deterministic without-replacement
+  epochs survive stop/crash/restart, priority jumps satisfy unseen obligations,
+  reproduction does not earn coverage, and cancelled/stale RUNNING work remains
+  unknown with exact counts.
 - #143/#152 and PR #147 are closed without merge after the KISS review assigned
   agent scheduling to the external controller; no work-mode code enters core.
 - #145 has one bounded fpm row passing on the exact candidate, one independent
@@ -658,10 +667,10 @@ Implemented issue state:
   and gives CLI/MCP the same domain validation. Focused supervisor, MCP parity,
   request-structure and full-pipeline gates passed. GitHub Actions also passed
   the exact published `b73f9ac` head (`build + fpm test`, run 37148134220).
-- #151 repair attempt 2 remains rejected: argv[0] can identify replacement
-  bytes rather than the running image, and the recorded compiler digest is not
-  bound to the compiler actually executed. Its frozen reproducer is in a
-  task-specific Sol escalation after two substantive Luna attempts.
+- #151's provenance subdefect is fixed at `b2a31e1`: each compiler/Git probe has
+  fresh argv/output state, and metadata-only events preserve execution identity.
+  Exact driver-image pinning remains in task-specific Sol repair after two
+  rejected Luna attempts; complete compiler/helper closure remains #157.
 - The dogfood-discovered mixed native/fpm dependency collision is repaired at
   `1787f64`: distinct path/Git providers prove root-provider precedence and the
   duplicate-object link failure no longer reproduces. Exact integrated focused
@@ -670,6 +679,10 @@ Implemented issue state:
   They already exposed the hard five-second case budget, a missing diagnostic
   on initial capture failure, and cold-start resource contention; these are live
   evidence, not substitutes for independent task oracles.
+- The installed driver now comes from exact main `b0a356e`, SHA256
+  `b0fedbd4bd0179209ed26f20e0210cd2e37aa9e29d15a7bac18ebd0bcf33609f`.
+  One bounded resident lane each is active for fo and fx under dogfood5 state;
+  task worktrees use focused short-lived gates.
 
 After each meaningful delivery, update this plan, workspace master and affected
 issues; commit and push the controller branch immediately. Preserve exact bases,
