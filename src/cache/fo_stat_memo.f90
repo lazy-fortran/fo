@@ -12,11 +12,20 @@ module fo_stat_memo
     implicit none
     private
     public :: memo_hash_file, memo_save, memo_reset
+    public :: memo_hash_file_for_test
 
     integer, parameter :: CAP = 16384 ! power of two, >> any real build
     integer, parameter :: PATH_LEN = 512
     integer, parameter :: HASH_LEN = 64
     integer, parameter :: HASH_ATTEMPTS = 3
+
+    abstract interface
+        subroutine sha256_provider(path, hash, ierr)
+            character(len=*), intent(in) :: path
+            character(len=64), intent(out) :: hash
+            integer, intent(out) :: ierr
+        end subroutine sha256_provider
+    end interface
 
     interface
         integer(c_int) function fo_c_mkstemp(path) bind(C, name='mkstemp')
@@ -60,12 +69,32 @@ module fo_stat_memo
 contains
 
     subroutine memo_hash_file(path, hash, ierr)
+        character(len=*), intent(in) :: path
+        character(len=HASH_LEN), intent(out) :: hash
+        integer, intent(out) :: ierr
+
+        call memo_hash_file_impl(path, hash, ierr)
+    end subroutine memo_hash_file
+
+    subroutine memo_hash_file_for_test(path, hash, ierr, provider)
+        !! Test seam at the fx boundary: the provider must compute a real SHA256.
+        !! Ordinary callers cannot override memo_hash_file's fx provider.
+        character(len=*), intent(in) :: path
+        character(len=HASH_LEN), intent(out) :: hash
+        integer, intent(out) :: ierr
+        procedure(sha256_provider) :: provider
+
+        call memo_hash_file_impl(path, hash, ierr, provider)
+    end subroutine memo_hash_file_for_test
+
+    subroutine memo_hash_file_impl(path, hash, ierr, provider)
         !! sha256 of path, served from the memo when its complete stat key matches.
         !! ierr is nonzero when hashing fails or a stable snapshot cannot be
         !! established within the bounded retry count.
         character(len=*), intent(in) :: path
         character(len=HASH_LEN), intent(out) :: hash
         integer, intent(out) :: ierr
+        procedure(sha256_provider), optional :: provider
 
         integer(c_long_long) :: mt, ct, sz
         integer :: slot
@@ -94,7 +123,8 @@ contains
             if (cache_hit) then
                 hash = t_hash(slot)
             else
-                call hash_with_stable_stat(path, mt, ct, sz, hash, ierr, stable)
+                call hash_with_stable_stat(path, mt, ct, sz, hash, ierr, stable, &
+                    provider)
                 if (ierr == 0 .and. stable .and. slot > 0) then
                     t_used(slot) = .true.
                     t_path(slot) = trim(path)
@@ -107,16 +137,17 @@ contains
             end if
         end if
         !$omp end critical (fo_stat_memo)
-    end subroutine memo_hash_file
+    end subroutine memo_hash_file_impl
 
     subroutine hash_with_stable_stat(path, mtime_ns, ctime_ns, size, hash, &
-            ierr, stable)
+            ierr, stable, provider)
         !! Cache only a digest bracketed by matching pre/post stat snapshots.
         character(len=*), intent(in) :: path
         integer(c_long_long), intent(inout) :: mtime_ns, ctime_ns, size
         character(len=HASH_LEN), intent(out) :: hash
         integer, intent(out) :: ierr
         logical, intent(out) :: stable
+        procedure(sha256_provider), optional :: provider
 
         integer(c_long_long) :: after_mtime, after_ctime, after_size
         integer(c_int) :: stat_rc
@@ -126,7 +157,11 @@ contains
         ierr = 0
         hash = ''
         do attempt = 1, HASH_ATTEMPTS
-            call sha256_file(path, hash, ierr)
+            if (present(provider)) then
+                call provider(path, hash, ierr)
+            else
+                call sha256_file(path, hash, ierr)
+            end if
             if (ierr /= 0) then
                 hash = ''
                 return

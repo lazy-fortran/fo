@@ -4,7 +4,8 @@ program test_stat_memo
     !! its persisted entries after a save.
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
-    use fo_stat_memo, only: memo_hash_file, memo_save, memo_reset
+    use fo_stat_memo, only: memo_hash_file, memo_save, memo_reset, &
+        memo_hash_file_for_test
     use fx_hash, only: sha256_file
     use fo_process, only: process_getpid, process_getcwd, process_start_argv_logged, &
         process_poll_pid, process_cancel_pid, process_exit, argv_push
@@ -20,12 +21,13 @@ program test_stat_memo
     logical :: had_cache
 
     interface
+        subroutine hash_then_mutate(path, hash, ierr)
+            character(len=*), intent(in) :: path
+            character(len=64), intent(out) :: hash
+            integer, intent(out) :: ierr
+        end subroutine hash_then_mutate
         subroutine oracle_initialize() bind(C, name='stat_memo_oracle_initialize')
         end subroutine oracle_initialize
-        subroutine arm_hash_oracle(path) bind(C, name='stat_memo_oracle_hash')
-            import :: c_char
-            character(kind=c_char), intent(in) :: path(*)
-        end subroutine arm_hash_oracle
         subroutine arm_io_oracle(mode) bind(C, name='stat_memo_oracle_io')
             import :: c_int
             integer(c_int), value :: mode
@@ -295,15 +297,15 @@ contains
         source = trim(root)//'/unstable-source.dat'
         memo_path = trim(cache)//'/stat/v2/memo'
         call fs_make_dir(trim(cache))
-        call write_text(trim(source), 'stat-memo-read-oracle:'//repeat('A', 4096))
+        call write_text(trim(source), repeat('A', 4096))
         call set_cache_root(trim(cache))
         call memo_reset()
-        call arm_hash_oracle(trim(source)//c_null_char)
-        call memo_hash_file(trim(source), hash, ierr)
-        call arm_hash_oracle(c_null_char)
+        call arm_io_oracle(3_c_int)
+        call memo_hash_file_for_test(trim(source), hash, ierr, hash_then_mutate)
+        call arm_io_oracle(0_c_int)
         call assert(oracle_state(1_c_int) == 3 .and. &
             oracle_state(2_c_int) == 3 .and. oracle_state(3_c_int) == 0, &
-            'each hash retry reads bytes then mutates the source')
+            'each provider returns a real old digest after mutating the source')
         call assert(ierr /= 0 .and. len_trim(hash) == 0, &
             'unstable hash retries fail without exposing a digest')
         call memo_save()
@@ -904,21 +906,20 @@ contains
 
 end program test_stat_memo
 
-! Libc interposition belongs only to this test executable. All mutations,
-! fault selection, counters and behavioral assertions are Fortran.
+! Publication I/O interposition belongs only to this test executable.
+! Production calls these functions directly; the SHA oracle uses a provider.
 module stat_memo_io_oracle
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_size_t, c_intptr_t, &
         c_ptr, c_funptr, c_null_char, c_associated, c_f_procpointer, c_f_pointer
     implicit none
     private
-    public :: oracle_initialize, arm_hash_oracle, arm_io_oracle
-    public :: hash_reads, hash_mutations, hash_errors, io_faults
-    public :: oracle_read, oracle_write, oracle_close, oracle_mkstemp
-    integer :: hash_reads = 0, hash_mutations = 0, hash_errors = 0, io_faults = 0
+    public :: oracle_initialize, arm_io_oracle
+    public :: oracle_write, oracle_close, oracle_mkstemp
+    public :: hash_calls, hash_mutations, hash_errors
+    integer :: hash_calls = 0, hash_mutations = 0, hash_errors = 0
+    integer :: io_faults = 0
     integer :: fault_mode = 0
     integer(c_int) :: owned_fd = -1_c_int
-    character(len=512) :: source_path = ''
-    character(len=*), parameter :: MARKER = 'stat-memo-read-oracle:'
     abstract interface
         function byte_io(fd, bytes, count) bind(C) result(n)
             import :: c_int, c_ptr, c_size_t, c_intptr_t
@@ -942,7 +943,7 @@ module stat_memo_io_oracle
             type(c_ptr) :: address
         end function errno_address
     end interface
-    procedure(byte_io), pointer :: real_read => null(), real_write => null()
+    procedure(byte_io), pointer :: real_write => null()
     procedure(fd_close), pointer :: real_close => null()
     procedure(create_temp), pointer :: real_mkstemp => null()
     procedure(errno_address), pointer :: real_errno => null()
@@ -953,25 +954,6 @@ module stat_memo_io_oracle
             character(kind=c_char), intent(in) :: name(*)
             type(c_ptr) :: address
         end function c_dlsym
-        integer(c_int) function c_openat(fd, path, flags) bind(C, name='openat')
-            import :: c_int, c_char
-            integer(c_int), value :: fd, flags
-            character(kind=c_char), intent(in) :: path(*)
-        end function c_openat
-        integer(c_intptr_t) function c_lseek(fd, offset, whence) &
-                bind(C, name='lseek')
-            import :: c_int, c_intptr_t
-            integer(c_int), value :: fd, whence
-            integer(c_intptr_t), value :: offset
-        end function c_lseek
-        integer(c_intptr_t) function c_pwrite(fd, bytes, count, offset) &
-                bind(C, name='pwrite')
-            import :: c_int, c_char, c_size_t, c_intptr_t
-            integer(c_int), value :: fd
-            character(kind=c_char), intent(in) :: bytes(*)
-            integer(c_size_t), value :: count
-            integer(c_intptr_t), value :: offset
-        end function c_pwrite
     end interface
 contains
     function resolve(name) result(address)
@@ -986,8 +968,7 @@ contains
 
     subroutine oracle_initialize() bind(C, name='stat_memo_oracle_initialize')
         type(c_funptr) :: address
-        if (associated(real_read)) return
-        call c_f_procpointer(resolve('read'), real_read)
+        if (associated(real_write)) return
         call c_f_procpointer(resolve('write'), real_write)
         call c_f_procpointer(resolve('close'), real_close)
         call c_f_procpointer(resolve('mkstemp'), real_mkstemp)
@@ -1003,25 +984,16 @@ contains
         call c_f_procpointer(address, real_errno)
     end subroutine oracle_initialize
 
-    subroutine arm_hash_oracle(path) bind(C, name='stat_memo_oracle_hash')
-        character(kind=c_char), intent(in) :: path(*)
-        integer :: i
-        source_path = ''
-        do i = 1, len(source_path)
-            if (path(i) == c_null_char) exit
-            source_path(i:i) = path(i)
-        end do
-        if (len_trim(source_path) == 0) return
-        hash_reads = 0
-        hash_mutations = 0
-        hash_errors = 0
-    end subroutine arm_hash_oracle
-
     subroutine arm_io_oracle(mode) bind(C, name='stat_memo_oracle_io')
         integer(c_int), value :: mode
         fault_mode = mode
         owned_fd = -1_c_int
         if (mode /= 0) io_faults = 0
+        if (mode == 3) then
+            hash_calls = 0
+            hash_mutations = 0
+            hash_errors = 0
+        end if
     end subroutine arm_io_oracle
 
     integer(c_int) function oracle_state(which) &
@@ -1029,7 +1001,7 @@ contains
         integer(c_int), value :: which
         select case (which)
         case (1)
-            state = hash_reads
+            state = hash_calls
         case (2)
             state = hash_mutations
         case (3)
@@ -1046,41 +1018,6 @@ contains
         call c_f_pointer(real_errno(), value)
         value = 5_c_int ! POSIX EIO on the supported Linux/macOS platforms.
     end subroutine set_io_error
-
-    function oracle_read(fd, buffer, count) bind(C, name='read') result(n)
-        integer(c_int), value :: fd
-        type(c_ptr), value :: buffer
-        integer(c_size_t), value :: count
-        integer(c_intptr_t) :: n, offset, written
-        integer(c_int) :: mutation_fd, rc
-        character(kind=c_char), pointer :: bytes(:)
-        integer :: i
-        call oracle_initialize()
-        n = real_read(fd, buffer, count)
-        if (len_trim(source_path) == 0) return
-        if (n < len(MARKER)) return
-        call c_f_pointer(buffer, bytes, [len(MARKER)])
-        do i = 1, len(MARKER)
-            if (bytes(i) /= MARKER(i:i)) return
-        end do
-        hash_reads = hash_reads + 1
-        ! The real source bytes are already in SHA's input buffer. Append before
-        ! returning to SHA so its pre/post fingerprint must disagree.
-        mutation_fd = c_openat(-100_c_int, trim(source_path)//c_null_char, 1_c_int)
-        if (mutation_fd < 0) then
-            hash_errors = hash_errors + 1
-            return
-        end if
-        offset = c_lseek(mutation_fd, 0_c_intptr_t, 2_c_int)
-        written = -1_c_intptr_t
-        if (offset >= 0) written = c_pwrite(mutation_fd, 'B', 1_c_size_t, offset)
-        rc = real_close(mutation_fd)
-        if (written == 1_c_intptr_t .and. rc == 0_c_int) then
-            hash_mutations = hash_mutations + 1
-        else
-            hash_errors = hash_errors + 1
-        end if
-    end function oracle_read
 
     function oracle_mkstemp(path) bind(C, name='mkstemp') result(fd)
         character(kind=c_char), intent(inout) :: path(*)
@@ -1117,3 +1054,44 @@ contains
         end if
     end function oracle_close
 end module stat_memo_io_oracle
+
+! Standalone provider avoids internal-procedure trampolines on both platforms.
+subroutine hash_then_mutate(path, hash, ierr)
+    !! Return an actual old-version SHA digest after the source has changed.
+    !! This runs inside the production pre/post-stat bracket, with no libc
+    !! interposition or timing assumptions on either Linux or macOS.
+    use fx_hash, only: sha256_file
+    use stat_memo_io_oracle, only: hash_calls, hash_mutations, hash_errors
+    implicit none
+    character(len=*), intent(in) :: path
+    character(len=64), intent(out) :: hash
+    integer, intent(out) :: ierr
+    character(len=64) :: changed_hash
+    integer :: u, ios, close_ios, changed_ierr
+
+    hash_calls = hash_calls + 1
+    call sha256_file(path, hash, ierr)
+    if (ierr /= 0) then
+        hash_errors = hash_errors + 1
+        return
+    end if
+    open (newunit=u, file=path, status='old', access='stream', &
+        form='unformatted', action='write', position='append', iostat=ios)
+    if (ios /= 0) then
+        hash_errors = hash_errors + 1
+        ierr = 1
+        return
+    end if
+    write (u, iostat=ios) 'B'
+    close (u, iostat=close_ios)
+    if (ios /= 0 .or. close_ios /= 0) then
+        hash_errors = hash_errors + 1
+        ierr = 1
+        return
+    end if
+    hash_mutations = hash_mutations + 1
+    call sha256_file(path, changed_hash, changed_ierr)
+    if (changed_ierr /= 0 .or. changed_hash == hash) then
+        hash_errors = hash_errors + 1
+    end if
+end subroutine hash_then_mutate
