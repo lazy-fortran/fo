@@ -25,6 +25,9 @@ fx = { git = "https://github.com/lazy-fortran/fx.git", branch = "main" }
 fortfront = { git = "https://github.com/lazy-fortran/fortfront.git", branch = "main" }
 openmp = "*"
 
+[dev-dependencies]
+fo_test_os = { path = "test-support/fo_test_os" }
+
 [fortran]
 implicit-typing = false
 implicit-external = false

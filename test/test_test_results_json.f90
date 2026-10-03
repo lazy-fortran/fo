@@ -7,6 +7,7 @@ program test_test_results_json
     use fo_test_cli, only: resolve_driver, run_fo, parse_json_report
     use fo_test_json, only: json_value_t, json_number, json_member, json_element, json_size
     use fo_test_json, only: json_string_value, json_number_value
+    use fo_test_harness, only: finish_assertions
     implicit none
 
     integer, parameter :: name_count = 400
@@ -65,6 +66,7 @@ program test_test_results_json
             end if
         end do
         call assert_true(position > 0, 'every plain and escaped test name survives JSON generation')
+        if (position <= 0) cycle
         call assert_true(.not. seen(position), 'test report retains each name exactly once')
         seen(position) = .true.
         field = json_member(entry, 'status')
@@ -94,9 +96,10 @@ program test_test_results_json
     field = json_member(report, 'exit_code')
     call assert_true(nint(json_number_value(field)) /= 0, 'JSON report retains nonzero exit code')
     call assert_true(len(result%stdout) > 16384, 'report exceeds the former output limit')
+    call remove_tree(scratch)
+    call finish_assertions()
     write(*, '(a,i0,a,i0,a)') 'test-results-json: ', name_count, &
         ' complete entries, ', len(result%stdout), ' bytes; failure and escapes preserved'
-    call remove_tree(scratch)
 
 contains
 

@@ -3,6 +3,7 @@ program test_dependency_shadow_cli
     use fo_test_harness, only: make_scratch, join_path, write_text, write_lines, remove_tree
     use fo_test_harness, only: assert_file_equals, assert_process_ok
     use fo_test_cli, only: resolve_driver, run_fo, run_external
+    use fo_test_harness, only: finish_assertions
     implicit none
 
     character(:), allocatable :: driver, scratch, external, shadow, fx, consumer, git_dependency
@@ -79,8 +80,9 @@ program test_dependency_shadow_cli
     call assert_file_equals(join_path(consumer, 'consumer.receipt'), '17' // new_line('a'), &
         'root Git provider wins over its transitive path copy')
 
-    write(*, '(a)') 'dependency-shadow-cli: root Git implementation wins over path copy'
     call remove_tree(scratch)
+    call finish_assertions()
+    write(*, '(a)') 'dependency-shadow-cli: root Git implementation wins over path copy'
 
 contains
 

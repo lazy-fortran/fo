@@ -3,12 +3,13 @@ program test_dispatcher_cli
     use fo_test_harness, only: make_scratch, join_path, current_directory
     use fo_test_harness, only: write_lines, write_text, append_text, move_path
     use fo_test_harness, only: remove_path, remove_tree, assert_equal_integer
-    use fo_test_harness, only: assert_equal_string, assert_file_exists, assert_file_absent
+    use fo_test_harness, only: assert_equal_string, assert_file_absent
     use fo_test_harness, only: assert_file_equals, assert_contains, assert_not_contains
     use fo_test_harness, only: assert_true, assert_process_ok, file_exists, read_text
     use fo_test_cli, only: resolve_driver, run_fo, run_external, parse_json_report
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value, json_number_value
+    use fo_test_harness, only: finish_assertions
     implicit none
 
     character(len=32), parameter :: all_cases(5) = [character(len=32) :: &
@@ -189,6 +190,7 @@ program test_dispatcher_cli
     call expect_empty_random_rejected(.false.)
     call expect_empty_random_rejected(.true.)
     call remove_tree(scratch)
+    call finish_assertions()
     write(*, '(a)') 'dispatcher-cli: routing, warm receipts, aliases, roots, eligibility and slow gates pass'
 
 contains

@@ -1,8 +1,12 @@
 module fo_test_cli
+    use, intrinsic :: iso_c_binding, only: c_int64_t
     use fo_test_harness, only: string_list_t, process_result_t, list_add, list_extend
     use fo_test_harness, only: list_with_first, run_process, assert_true
     use fo_test_harness, only: make_scratch, join_path, make_symlink, remove_tree
-    use fo_test_harness, only: file_exists, assert_equal_string, assert_equal_integer
+    use fo_test_harness, only: file_exists, remove_path
+    use fo_test_harness, only: assert_equal_string, assert_equal_integer
+    use fo_test_harness, only: process_alive, start_sentinel, stop_sentinel
+    use fo_test_harness, only: exercise_failure_cleanup_probe, open_descriptor_count
     use fo_test_harness, only: assert_contains, assert_process_ok
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_string_value, json_number_value, json_boolean_value
@@ -107,7 +111,10 @@ contains
         type(process_result_t) :: child
         type(json_value_t) :: document, field, item
         character(:), allocatable :: scratch, print_path, large_text, error_message
+        character(:), allocatable :: cleanup_marker
         logical :: valid
+        logical :: sentinel_survived
+        integer :: sentinel_id, descriptor_count, repeat_index
 
         call make_scratch('fo harness ; $(no-shell)', scratch)
         print_path = join_path(scratch, 'printf tool ; $literal')
@@ -154,6 +161,49 @@ contains
         call assert_true(child%timed_out, 'monotonic timeout stops a live child')
 
         arguments = string_list_t()
+        call list_add(arguments, '-c')
+        call list_add(arguments, 'sleep 8 & wait')
+        call run_arguments('/bin/sh', arguments, scratch, child, timeout_ms=40)
+        call assert_true(child%timed_out, 'timeout terminates a child process group')
+        call assert_true(child%elapsed_ms < 1500, &
+            'timeout does not wait for a surviving background descendant')
+
+        ! This descendant ignores TERM and closes both captured streams. A timeout
+        ! must still kill it after its direct parent exits.
+        arguments = string_list_t()
+        call list_add(arguments, '-c')
+        call list_add(arguments, &
+            '(trap "" TERM; exec >/dev/null 2>&1; sleep 0.4; ' // &
+            'touch descendant-survived) & wait')
+        call run_arguments('/bin/sh', arguments, scratch, child, timeout_ms=40)
+        call assert_true(child%timed_out, 'timeout stops parent with silent descendant')
+        arguments = string_list_t()
+        call list_add(arguments, '0.6')
+        call run_arguments('/bin/sleep', arguments, scratch, child)
+        call assert_true(.not. file_exists(join_path(scratch, 'descendant-survived')), &
+            'timeout kills silent descendant that ignores TERM')
+
+        descriptor_count = open_descriptor_count()
+        call assert_true(descriptor_count >= 0, 'inspect process descriptors')
+        call start_sentinel(sentinel_id)
+        arguments = string_list_t()
+        call list_add(arguments, '/usr/bin/yes')
+        do repeat_index = 1, 4
+            call run_process(arguments, scratch, child, max_output_bytes=8192_c_int64_t)
+            call assert_true(child%runner_failed, 'output cap returns runner failure')
+            call assert_true(child%reaped, 'output cap reaps each owned child')
+        end do
+        sentinel_survived = process_alive(sentinel_id)
+        call stop_sentinel(sentinel_id)
+        call assert_true(child%runner_failed, 'output cap reports a structured runner failure')
+        call assert_true(child%reaped, 'output cap reaps its owned child')
+        call assert_true(.not. process_alive(child%process_id), &
+            'output cap leaves no owned child alive')
+        call assert_true(sentinel_survived, 'runner cleanup leaves unrelated child alive')
+        call assert_equal_integer(int(open_descriptor_count()), descriptor_count, &
+            'repeated runner failures close every pipe descriptor')
+
+        arguments = string_list_t()
         call list_with_first('/bin/cat', arguments, command)
         call run_process(command, scratch, child, input='stdin ; literal')
         call assert_process_ok(child, 'child stdin delivery')
@@ -164,8 +214,8 @@ contains
         call assert_true(valid, 'independent JSON parser accepts RFC 8259 escapes')
         field = json_member(document, 'text')
         call assert_equal_string(json_string_value(field), &
-            'quote=" slash=\ line=' // achar(10) // ' snowman=' // achar(226) // &
-            achar(152) // achar(131), 'JSON escapes and Unicode decode independently')
+            'quote=" slash=\ line=' // achar(10) // ' snowman=' // char(226) // &
+            char(152) // char(131), 'JSON escapes and Unicode decode independently')
         field = json_member(document, 'items')
         item = json_element(field, 4)
         call assert_equal_integer(nint(json_number_value(item)), -125, &
@@ -180,6 +230,10 @@ contains
         call assert_true(.not. valid, 'independent JSON parser rejects invalid escapes')
         call json_parse('01', document, valid, error_message)
         call assert_true(.not. valid, 'independent JSON parser rejects leading zeroes')
+
+        cleanup_marker = join_path(scratch, 'cleanup-probe-path')
+        call exercise_failure_cleanup_probe(cleanup_marker)
+        call remove_path(cleanup_marker)
         call remove_tree(scratch)
     end subroutine exercise_harness
 

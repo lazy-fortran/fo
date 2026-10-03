@@ -2,14 +2,16 @@ program test_platform_link_cli
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_scratch, join_path, write_text, write_lines, remove_tree
     use fo_test_harness, only: assert_true, assert_equal_string, assert_equal_integer
-    use fo_test_harness, only: assert_contains, assert_process_ok
+    use fo_test_harness, only: assert_process_ok, environment_value
     use fo_test_cli, only: resolve_driver, run_fo, run_external, parse_json_report
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value
+    use fo_test_harness, only: finish_assertions
     implicit none
 
     character(:), allocatable :: driver, scratch, dependency, consumer, external
     character(:), allocatable :: mode, manifest, library_dir, marker, platform
+    character(:), allocatable :: inherited_library_path, fixture_library_path
     type(string_list_t) :: arguments, environment
     type(process_result_t) :: result, tool_result
     type(json_value_t) :: report, tests, entry, field
@@ -39,7 +41,12 @@ program test_platform_link_cli
         'stored = probe_value()', 'end subroutine update', 'end module provider'])
     call write_link_program(join_path(consumer, 'app/probe.f90'), 'probe')
     call write_link_program(join_path(consumer, 'test/test_probe.f90'), 'test_probe')
-    call list_add(environment, 'LIBRARY_PATH=' // external)
+    inherited_library_path = environment_value('LIBRARY_PATH')
+    fixture_library_path = external
+    if (len(inherited_library_path) > 0) then
+        fixture_library_path = external // ':' // inherited_library_path
+    end if
+    call list_add(environment, 'LIBRARY_PATH=' // fixture_library_path)
 
     do mode_index = 1, 2
         if (mode_index == 1) then
@@ -75,6 +82,7 @@ program test_platform_link_cli
     if (platform == 'Darwin' // new_line('a')) call exercise_macos_profiles()
 
     call remove_tree(scratch)
+    call finish_assertions()
     write(*, '(a)') 'platform-link-cli: static/shared cold/warm dependency and archive links pass'
 
 contains

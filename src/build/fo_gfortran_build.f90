@@ -2081,6 +2081,44 @@ contains
         deallocate (cfiles)
     end subroutine compile_dep_c_sources
 
+    subroutine compile_test_dev_c_sources(deps, n_deps, project_dir, obj_dir, &
+            log_file, objects, n_objects, exitcode)
+        !! Compile C/C++ sources from dev-dependencies into test-only links.
+        type(resolved_src_t), intent(in) :: deps(MAX_RESOLVED)
+        integer, intent(in) :: n_deps
+        character(len=*), intent(in) :: project_dir, obj_dir, log_file
+        character(len=512), intent(inout) :: objects(MAX_DEP_OBJS)
+        integer, intent(inout) :: n_objects
+        integer, intent(inout) :: exitcode
+
+        character(len=512), allocatable :: cfiles(:)
+        character(len=512) :: source, object_path
+        integer :: d, i, n_cfiles
+
+        allocate (cfiles(MAX_SRC_OBJS))
+        do d = 1, n_deps
+            call collect_c_family(trim(deps(d)%src_dir), cfiles, n_cfiles)
+            do i = 1, n_cfiles
+                if (n_objects >= MAX_DEP_OBJS) then
+                    exitcode = 1
+                    deallocate (cfiles)
+                    return
+                end if
+                source = cfiles(i)
+                call make_obj_path(trim(source), project_dir, obj_dir, object_path)
+                call compile_c_family(trim(source), object_path, &
+                    trim(deps(d)%dir)//'/include', log_file, exitcode)
+                if (exitcode /= 0) then
+                    deallocate (cfiles)
+                    return
+                end if
+                n_objects = n_objects + 1
+                objects(n_objects) = object_path
+            end do
+        end do
+        deallocate (cfiles)
+    end subroutine compile_test_dev_c_sources
+
     subroutine add_external_dep_keys(units, n_units, dag, source_path, &
             dep_includes, n_dep_includes, dep_keys, n_dep)
         type(scan_unit_t), intent(in) :: units(:)
@@ -2583,6 +2621,8 @@ contains
         character(len=512), allocatable :: helper_objs(:)
         character(len=512), allocatable :: all_lib_objs(:), link_inputs(:)
         integer :: n_helper_objs, n_all_lib, n_link_inputs, n_link_dep_objs
+        character(len=512) :: test_dep_objs(MAX_DEP_OBJS)
+        integer :: n_test_dep_objs
         character(len=512) :: archive_path
         logical :: in_lib
         type(resolved_src_t) :: devsrcs(MAX_RESOLVED)
@@ -2698,6 +2738,12 @@ contains
             helper_objs, n_helper_objs, exitcode)
         if (exitcode /= 0) return
 
+        test_dep_objs = dep_objs
+        n_test_dep_objs = n_dep_objs
+        call compile_test_dev_c_sources(devsrcs, n_dev, project_dir, obj_dir, &
+            log_file, test_dep_objs, n_test_dep_objs, exitcode)
+        if (exitcode /= 0) return
+
         allocate (all_lib_objs(MAX_SRC_OBJS))
         n_all_lib = 0
         do i = 1, n_lib_objs
@@ -2735,11 +2781,11 @@ contains
         call hash_lib_objs(all_lib_objs, n_all_lib, lib_hash)
         link_base = ''
         if (cache_ierr == 0) call link_base_digest(project_dir, all_lib_objs, n_all_lib, &
-            dep_objs, n_dep_objs, link_libs, n_link_libs, link_base)
+            test_dep_objs, n_test_dep_objs, link_libs, n_link_libs, link_base)
         allocate (link_inputs(MAX_SRC_OBJS))
         link_inputs = ''
         n_link_inputs = 0
-        n_link_dep_objs = n_dep_objs
+        n_link_dep_objs = n_test_dep_objs
         archive_path = ''
         if (n_all_lib > 0) then
             ! `link = "shared"` folds the library once into a .so and lets
@@ -2749,7 +2795,7 @@ contains
             ! test against the .so links in 0.109 s at 2.1 MB, and runs.
             if (manifest_config%link_shared) then
                 call shared_library(project_dir, all_lib_objs, n_all_lib, &
-                    archive_path, log_file, exitcode, dep_objs, n_dep_objs, &
+                    archive_path, log_file, exitcode, test_dep_objs, n_test_dep_objs, &
                     link_libs, n_link_libs, test_flags, link_base)
                 if (is_macos()) n_link_dep_objs = 0
             else
@@ -2781,6 +2827,8 @@ contains
                 dep_keys(n_dep) = lib_hash
             end if
             test_key_flags = compile_key_flags(test_flags)
+            if (len_trim(link_base) > 0) test_key_flags = &
+                trim(test_key_flags)//new_line('a')//'test-link:'//trim(link_base)
             if (len_trim(run_args(i)) > 0) then
                 test_key_flags = trim(test_key_flags)//new_line('a')// &
                     'test-args:'//trim(run_args(i))
@@ -2820,7 +2868,7 @@ contains
             if (run_exits(i) == 0) then
                 bin_path = run_bins(i)
                 call link_binary(project_dir, obj_path, link_inputs, n_link_inputs, &
-                    dep_objs, n_link_dep_objs, link_libs, n_link_libs, bin_path, &
+                    test_dep_objs, n_link_dep_objs, link_libs, n_link_libs, bin_path, &
                     log_local, run_exits(i), test_flags, c, link_base)
             end if
         end do

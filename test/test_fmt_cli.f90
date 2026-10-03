@@ -1,9 +1,10 @@
 program test_fmt_cli
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_scratch, join_path, write_text, read_text, remove_tree
-    use fo_test_harness, only: assert_true, assert_equal_string, assert_equal_integer
+    use fo_test_harness, only: assert_equal_string
     use fo_test_harness, only: assert_contains, assert_process_ok
     use fo_test_cli, only: resolve_driver, run_fo
+    use fo_test_harness, only: finish_assertions
     implicit none
 
     type :: source_case_t
@@ -121,6 +122,7 @@ program test_fmt_cli
     end do
 
     call remove_tree(scratch)
+    call finish_assertions()
     write(*, '(a)') 'fmt-cli: executable outputs, scope placement and byte idempotence pass for 41 programs'
 
 contains

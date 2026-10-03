@@ -12,7 +12,10 @@ module fo_test_harness
     public :: file_exists, environment_value, run_process, assert_true, assert_equal_string
     public :: assert_equal_integer, assert_contains, assert_not_contains
     public :: assert_file_exists, assert_file_absent, assert_file_equals
-    public :: assert_process_ok
+    public :: assert_process_ok, finish_assertions, register_scratch
+    public :: process_alive, start_sentinel, stop_sentinel
+    public :: reset_assertions_for_probe
+    public :: exercise_failure_cleanup_probe, open_descriptor_count
 
     type :: string_t
         character(:), allocatable :: value
@@ -28,7 +31,15 @@ module fo_test_harness
         integer :: exit_code = -1
         integer :: term_signal = 0
         logical :: timed_out = .false.
+        logical :: runner_failed = .false.
+        logical :: reaped = .false.
+        integer :: process_id = -1
+        integer(c_int64_t) :: elapsed_ms = 0
+        character(:), allocatable :: runner_error
     end type process_result_t
+
+    type(string_t), allocatable, save :: failures(:)
+    type(string_t), allocatable, save :: scratch_paths(:)
 
     type, bind(C) :: pollfd_t
         integer(c_int) :: descriptor
@@ -42,6 +53,10 @@ module fo_test_harness
     end type byte_buffer_t
 
     interface
+        integer(c_int) function open_descriptor_count() bind(C, name='fo_test_open_fds')
+            import :: c_int
+        end function open_descriptor_count
+
         integer(c_int) function c_mkdtemp(pattern) bind(C, name='fo_test_mkdtemp')
             import :: c_char, c_int
             character(kind=c_char), intent(inout) :: pattern(*)
@@ -129,11 +144,12 @@ module fo_test_harness
             integer(c_int), value :: process, signal_number
         end function c_kill
 
-        integer(c_int) function c_waitpid(process, status, options) bind(C, name='waitpid')
+        integer(c_int) function c_waitpid_retry(process, status, options) &
+                bind(C, name='fo_test_waitpid')
             import :: c_int
             integer(c_int), value :: process, options
             integer(c_int), intent(out) :: status
-        end function c_waitpid
+        end function c_waitpid_retry
 
         integer(c_int) function c_set_nonblocking(descriptor) bind(C, name='fo_test_set_nonblocking')
             import :: c_int
@@ -147,6 +163,10 @@ module fo_test_harness
         integer(c_int) function c_default_sigpipe() bind(C, name='fo_test_default_sigpipe')
             import :: c_int
         end function c_default_sigpipe
+
+        integer(c_int) function c_silence_output() bind(C, name='fo_test_silence_output')
+            import :: c_int
+        end function c_silence_output
 
         integer(c_int64_t) function c_read(descriptor, buffer, capacity) bind(C, name='fo_test_read')
             import :: c_char, c_int, c_int64_t, c_size_t
@@ -248,13 +268,15 @@ contains
         pointers(count + 1) = c_null_ptr
     end subroutine make_c_vector
 
-    subroutine run_process(arguments, cwd, result, environment, input, timeout_ms)
+    subroutine run_process(arguments, cwd, result, environment, input, timeout_ms, &
+            max_output_bytes)
         type(string_list_t), intent(in) :: arguments
         character(len=*), intent(in) :: cwd
         type(process_result_t), intent(out) :: result
         type(string_list_t), optional, intent(in) :: environment
         character(len=*), optional, intent(in) :: input
         integer, optional, intent(in) :: timeout_ms
+        integer(c_int64_t), optional, intent(in) :: max_output_bytes
         type(string_list_t) :: empty_environment
         type(c_ptr), allocatable, target :: argument_pointers(:), env_pointers(:)
         character(kind=c_char), allocatable, target :: argument_storage(:, :)
@@ -268,10 +290,33 @@ contains
         integer(c_int) :: timeout_value, poll_count, poll_slot(3), poll_ready
         integer(c_int64_t) :: input_length, input_offset, amount, now_ms
         integer(c_int64_t) :: deadline_ms, kill_deadline_ms, write_amount
-        integer :: i, env_count, equals_at, wait_ms
-        logical :: child_done
+        integer(c_int64_t) :: output_limit, started_ms
+        integer :: i, env_count, wait_ms
+        logical :: child_done, read_ok
+        character(:), allocatable :: pipe_error
         type(byte_buffer_t) :: captured_stdout, captured_stderr
 
+        result = process_result_t()
+        result%stdout = ''
+        result%stderr = ''
+        input_pipe = -1
+        output_pipe = -1
+        error_pipe = -1
+        child = -1
+        input_descriptor = -1
+        output_descriptor = -1
+        error_descriptor = -1
+        started_ms = -1
+        output_limit = 64_c_int64_t * 1024_c_int64_t * 1024_c_int64_t
+        if (present(max_output_bytes)) output_limit = max_output_bytes
+        if (output_limit < 0) then
+            call set_runner_error(result, 'negative process output limit')
+            return
+        end if
+        if (output_limit > int(huge(0), c_int64_t)) then
+            call set_runner_error(result, 'process output limit exceeds addressable buffer')
+            return
+        end if
         if (present(environment)) then
             call make_c_vector(environment, env_pointers, env_storage)
         else
@@ -279,6 +324,10 @@ contains
         end if
         env_count = size(env_pointers) - 1
         call make_c_vector(arguments, argument_pointers, argument_storage)
+        if (size(argument_pointers) <= 1) then
+            call set_runner_error(result, 'empty process argument vector')
+            return
+        end if
         call encode_c_string(cwd, cwd_bytes)
         input_length = 0
         if (present(input)) input_length = len(input)
@@ -291,46 +340,97 @@ contains
         end if
 
         rc = c_pipe(input_pipe)
-        call assert_equal_integer(int(rc), 0, 'create child stdin pipe')
+        if (rc /= 0) then
+            call set_runner_error(result, 'create child stdin pipe')
+            goto 800
+        end if
         rc = c_pipe(output_pipe)
-        call assert_equal_integer(int(rc), 0, 'create child stdout pipe')
+        if (rc /= 0) then
+            call set_runner_error(result, 'create child stdout pipe')
+            goto 800
+        end if
         rc = c_pipe(error_pipe)
-        call assert_equal_integer(int(rc), 0, 'create child stderr pipe')
+        if (rc /= 0) then
+            call set_runner_error(result, 'create child stderr pipe')
+            goto 800
+        end if
         rc = c_ignore_sigpipe()
-        call assert_equal_integer(int(rc), 0, 'ignore parent SIGPIPE while writing stdin')
+        if (rc /= 0) then
+            call set_runner_error(result, 'ignore parent SIGPIPE while writing stdin')
+            goto 800
+        end if
 
         child = c_fork()
-        call assert_true(child >= 0, 'fork external process')
+        if (child < 0) then
+            call set_runner_error(result, 'fork external process')
+            goto 800
+        end if
         if (child == 0) then
             call execute_child(argument_pointers, argument_storage, env_storage, cwd_bytes, &
                 env_count, input_pipe, output_pipe, error_pipe)
             call c_exit(127_c_int)
         end if
 
+        result%process_id = int(child)
         rc = c_setpgid(child, child)
         input_descriptor = input_pipe(2)
+        input_pipe(2) = -1
         output_descriptor = output_pipe(1)
+        output_pipe(1) = -1
         error_descriptor = error_pipe(1)
+        error_pipe(1) = -1
         rc = c_close(input_pipe(1))
+        if (rc /= 0) then
+            call set_runner_error(result, 'close parent child-stdin pipe end')
+            goto 700
+        end if
+        input_pipe(1) = -1
         rc = c_close(output_pipe(2))
+        if (rc /= 0) then
+            call set_runner_error(result, 'close parent child-stdout pipe end')
+            goto 700
+        end if
+        output_pipe(2) = -1
         rc = c_close(error_pipe(2))
+        if (rc /= 0) then
+            call set_runner_error(result, 'close parent child-stderr pipe end')
+            goto 700
+        end if
+        error_pipe(2) = -1
         if (input_length == 0) then
             rc = c_close(input_descriptor)
+            if (rc /= 0) then
+                call set_runner_error(result, 'close unused child-stdin pipe end')
+                goto 700
+            end if
             input_descriptor = -1
         end if
         rc = c_set_nonblocking(output_descriptor)
-        call assert_equal_integer(int(rc), 0, 'make stdout pipe nonblocking')
+        if (rc /= 0) then
+            call set_runner_error(result, 'make stdout pipe nonblocking')
+            goto 700
+        end if
         rc = c_set_nonblocking(error_descriptor)
-        call assert_equal_integer(int(rc), 0, 'make stderr pipe nonblocking')
+        if (rc /= 0) then
+            call set_runner_error(result, 'make stderr pipe nonblocking')
+            goto 700
+        end if
         if (input_descriptor >= 0) then
             rc = c_set_nonblocking(input_descriptor)
-            call assert_equal_integer(int(rc), 0, 'make stdin pipe nonblocking')
+            if (rc /= 0) then
+                call set_runner_error(result, 'make stdin pipe nonblocking')
+                goto 700
+            end if
         end if
 
         timeout_value = 120000_c_int
         if (present(timeout_ms)) timeout_value = int(timeout_ms, c_int)
         now_ms = c_monotonic_ms()
-        call assert_true(now_ms >= 0, 'read monotonic process clock')
+        if (now_ms < 0) then
+            call set_runner_error(result, 'read monotonic process clock')
+            goto 700
+        end if
+        started_ms = now_ms
         deadline_ms = huge(deadline_ms)
         if (timeout_value >= 0) deadline_ms = now_ms + timeout_value
         kill_deadline_ms = huge(kill_deadline_ms)
@@ -340,11 +440,21 @@ contains
 
         do
             if (.not. child_done) then
-                waited = c_waitpid(child, wait_status, 1_c_int)
-                if (waited == child) child_done = .true.
+                waited = c_waitpid_retry(child, wait_status, 1_c_int)
+                if (waited < 0) then
+                    call set_runner_error(result, 'poll child process status')
+                    goto 700
+                end if
+                if (waited == child) then
+                    child_done = .true.
+                    result%reaped = .true.
+                end if
             end if
             now_ms = c_monotonic_ms()
-            call assert_true(now_ms >= 0, 'read monotonic process clock')
+            if (now_ms < 0) then
+                call set_runner_error(result, 'read monotonic process clock')
+                goto 700
+            end if
             if (.not. result%timed_out .and. now_ms >= deadline_ms) then
                 result%timed_out = .true.
                 rc = c_kill(-child, 15_c_int)
@@ -384,14 +494,27 @@ contains
             if (result%timed_out .and. kill_deadline_ms /= huge(kill_deadline_ms)) &
                 wait_ms = min(wait_ms, max(0, int(kill_deadline_ms - now_ms)))
             poll_ready = c_poll(poll_descriptors, int(poll_count, c_size_t), int(wait_ms, c_int))
-            call assert_true(poll_ready >= 0, 'poll child process pipes')
+            if (poll_ready < 0) then
+                call set_runner_error(result, 'poll child process pipes')
+                goto 700
+            end if
             do i = 1, poll_count
                 if (poll_descriptors(i)%returned_events == 0) cycle
                 select case (poll_slot(i))
                 case (1)
-                    call read_pipe(output_descriptor, captured_stdout, read_chunk)
+                    call read_pipe(output_descriptor, captured_stdout, read_chunk, &
+                        output_limit, read_ok, pipe_error)
+                    if (.not. read_ok) then
+                        call set_runner_error(result, pipe_error)
+                        goto 700
+                    end if
                 case (2)
-                    call read_pipe(error_descriptor, captured_stderr, read_chunk)
+                    call read_pipe(error_descriptor, captured_stderr, read_chunk, &
+                        output_limit, read_ok, pipe_error)
+                    if (.not. read_ok) then
+                        call set_runner_error(result, pipe_error)
+                        goto 700
+                    end if
                 case (3)
                     if (child_done) then
                         rc = c_close(input_descriptor)
@@ -411,8 +534,11 @@ contains
                     else if (amount == -3_c_int64_t) then
                         rc = c_close(input_descriptor)
                         input_descriptor = -1
+                    else if (amount == -2_c_int64_t) then
+                        cycle
                     else
-                        call assert_true(amount == -2_c_int64_t, 'write child stdin')
+                        call set_runner_error(result, 'write child stdin')
+                        goto 700
                     end if
                     if (input_descriptor >= 0 .and. input_offset >= input_length) then
                         rc = c_close(input_descriptor)
@@ -426,6 +552,15 @@ contains
             end if
         end do
 
+        call close_open_descriptors(input_pipe, output_pipe, error_pipe, &
+            input_descriptor, output_descriptor, error_descriptor, rc)
+        if (rc /= 0) then
+            call set_runner_error(result, 'close child process pipes')
+            goto 700
+        end if
+        ! A child can close its pipes before its descendants exit. The process
+        ! group belongs to this invocation even after the direct child is reaped.
+        call stop_owned_process(child, result%reaped)
         result%exit_code = -1
         result%term_signal = 0
         if (iand(wait_status, 127_c_int) == 0) then
@@ -435,21 +570,129 @@ contains
         end if
         call buffer_to_text(captured_stdout, result%stdout)
         call buffer_to_text(captured_stderr, result%stderr)
+        now_ms = c_monotonic_ms()
+        if (now_ms >= started_ms .and. started_ms >= 0) result%elapsed_ms = now_ms - started_ms
+        return
+
+        700     continue
+        result%runner_failed = .true.
+        call stop_owned_process(child, result%reaped)
+        call close_open_descriptors(input_pipe, output_pipe, error_pipe, &
+            input_descriptor, output_descriptor, error_descriptor, rc)
+        call buffer_to_text(captured_stdout, result%stdout)
+        call buffer_to_text(captured_stderr, result%stderr)
+        now_ms = c_monotonic_ms()
+        if (now_ms >= started_ms .and. started_ms >= 0) result%elapsed_ms = now_ms - started_ms
+        return
+
+        800     continue
+        call close_open_descriptors(input_pipe, output_pipe, error_pipe, &
+            input_descriptor, output_descriptor, error_descriptor, rc)
+        result%stdout = ''
+        result%stderr = ''
     end subroutine run_process
+
+    subroutine set_runner_error(result, message)
+        type(process_result_t), intent(inout) :: result
+        character(len=*), intent(in) :: message
+
+        result%runner_failed = .true.
+        if (.not. allocated(result%runner_error)) result%runner_error = trim(message)
+    end subroutine set_runner_error
+
+    subroutine close_open_descriptors(input_pipe, output_pipe, error_pipe, &
+            input_descriptor, output_descriptor, error_descriptor, close_status)
+        integer(c_int), intent(inout) :: input_pipe(2), output_pipe(2), error_pipe(2)
+        integer(c_int), intent(inout) :: input_descriptor, output_descriptor
+        integer(c_int), intent(inout) :: error_descriptor
+        integer(c_int), intent(out) :: close_status
+        integer :: i
+
+        close_status = 0
+        do i = 1, 2
+            if (input_pipe(i) >= 0) then
+                if (c_close(input_pipe(i)) /= 0) close_status = -1
+                input_pipe(i) = -1
+            end if
+            if (output_pipe(i) >= 0) then
+                if (c_close(output_pipe(i)) /= 0) close_status = -1
+                output_pipe(i) = -1
+            end if
+            if (error_pipe(i) >= 0) then
+                if (c_close(error_pipe(i)) /= 0) close_status = -1
+                error_pipe(i) = -1
+            end if
+        end do
+        if (input_descriptor >= 0) then
+            if (c_close(input_descriptor) /= 0) close_status = -1
+            input_descriptor = -1
+        end if
+        if (output_descriptor >= 0) then
+            if (c_close(output_descriptor) /= 0) close_status = -1
+            output_descriptor = -1
+        end if
+        if (error_descriptor >= 0) then
+            if (c_close(error_descriptor) /= 0) close_status = -1
+            error_descriptor = -1
+        end if
+    end subroutine close_open_descriptors
+
+    subroutine stop_owned_process(child, reaped)
+        integer(c_int), intent(in) :: child
+        logical, intent(inout) :: reaped
+        integer(c_int) :: rc, wait_status, waited
+        integer(c_int64_t) :: deadline, now_ms
+        integer :: attempts
+        type(pollfd_t) :: no_descriptors(1)
+
+        if (child < 0) return
+        rc = c_kill(-child, 15_c_int)
+        if (.not. reaped) rc = c_kill(child, 15_c_int)
+        now_ms = c_monotonic_ms()
+        deadline = huge(deadline)
+        if (now_ms >= 0) deadline = now_ms + 1000_c_int64_t
+        attempts = 0
+        do while (.not. reaped .and. attempts < 60)
+            waited = c_waitpid_retry(child, wait_status, 1_c_int)
+            if (waited == child) then
+                reaped = .true.
+                exit
+            end if
+            if (waited < 0) exit
+            now_ms = c_monotonic_ms()
+            if (now_ms >= deadline .or. now_ms < 0) exit
+            rc = c_poll(no_descriptors, 0_c_size_t, 20_c_int)
+            attempts = attempts + 1
+        end do
+        rc = c_kill(-child, 9_c_int)
+        if (.not. reaped) rc = c_kill(child, 9_c_int)
+        if (.not. reaped) then
+            do
+                waited = c_waitpid_retry(child, wait_status, 0_c_int)
+                if (waited == child) then
+                    reaped = .true.
+                    exit
+                end if
+                if (waited < 0) exit
+            end do
+        end if
+    end subroutine stop_owned_process
 
     subroutine execute_child(argument_pointers, argument_storage, env_storage, cwd_bytes, &
             env_count, input_pipe, output_pipe, error_pipe)
-        type(c_ptr), intent(in) :: argument_pointers(:)
-        character(kind=c_char), intent(in) :: argument_storage(:, :)
-        character(kind=c_char), intent(inout) :: env_storage(:, :)
-        character(kind=c_char), intent(in) :: cwd_bytes(:)
+        type(c_ptr), contiguous, intent(in) :: argument_pointers(:)
+        character(kind=c_char), contiguous, intent(in) :: argument_storage(:, :)
+        character(kind=c_char), contiguous, intent(inout) :: env_storage(:, :)
+        character(kind=c_char), contiguous, intent(in) :: cwd_bytes(:)
         integer, intent(in) :: env_count
         integer(c_int), intent(in) :: input_pipe(2), output_pipe(2), error_pipe(2)
         integer(c_int) :: rc
         integer :: i, j, equals_at
 
         rc = c_setpgid(0_c_int, 0_c_int)
+        if (rc /= 0) call c_exit(126_c_int)
         rc = c_default_sigpipe()
+        if (rc /= 0) call c_exit(126_c_int)
         rc = c_dup2(input_pipe(1), 0_c_int)
         if (rc < 0) call c_exit(126_c_int)
         rc = c_dup2(output_pipe(2), 1_c_int)
@@ -484,13 +727,18 @@ contains
         call c_exit(127_c_int)
     end subroutine execute_child
 
-    subroutine read_pipe(descriptor, output, chunk)
+    subroutine read_pipe(descriptor, output, chunk, output_limit, ok, message)
         integer(c_int), intent(inout) :: descriptor
         type(byte_buffer_t), intent(inout) :: output
-        character(kind=c_char), intent(out) :: chunk(:)
+        character(kind=c_char), contiguous, intent(out) :: chunk(:)
+        integer(c_int64_t), intent(in) :: output_limit
+        logical, intent(out) :: ok
+        character(:), allocatable, intent(out) :: message
         integer(c_int64_t) :: count
         integer(c_int) :: rc
 
+        ok = .true.
+        message = ''
         do
             count = c_read(descriptor, chunk, int(size(chunk), c_size_t))
             if (count == 0) then
@@ -500,32 +748,43 @@ contains
             else if (count == -2_c_int64_t) then
                 return
             else if (count < 0) then
-                call assert_true(.false., 'read child output pipe')
+                ok = .false.
+                message = 'read child output pipe'
+                return
             else
-                call append_output(output, chunk, int(count))
+                call append_output(output, chunk, int(count), output_limit, ok)
+                if (.not. ok) then
+                    message = 'captured child output exceeds configured limit'
+                    return
+                end if
             end if
         end do
     end subroutine read_pipe
 
-    subroutine append_output(output, source, count)
+    subroutine append_output(output, source, count, output_limit, ok)
         type(byte_buffer_t), intent(inout) :: output
         character(kind=c_char), intent(in) :: source(:)
         integer, intent(in) :: count
+        integer(c_int64_t), intent(in) :: output_limit
+        logical, intent(out) :: ok
         character(kind=c_char), allocatable :: grown(:)
-        integer :: required, capacity
+        integer :: required, capacity, bounded_limit
 
-        call assert_true(count >= 0 .and. output%length + count <= 64 * 1024 * 1024, &
-            'captured child output stays within 64 MiB')
+        ok = .false.
+        if (count < 0) return
+        if (int(count, c_int64_t) > output_limit - int(output%length, c_int64_t)) return
         required = output%length + count
         if (.not. allocated(output%bytes)) allocate(output%bytes(4096))
         if (required > size(output%bytes)) then
-            capacity = max(required, min(64 * 1024 * 1024, 2 * size(output%bytes)))
+            bounded_limit = int(min(output_limit, int(huge(capacity), c_int64_t)))
+            capacity = max(required, min(bounded_limit, 2 * size(output%bytes)))
             allocate(grown(capacity))
             if (output%length > 0) grown(1:output%length) = output%bytes(1:output%length)
             call move_alloc(grown, output%bytes)
         end if
         if (count > 0) output%bytes(output%length + 1:required) = source(1:count)
         output%length = required
+        ok = .true.
     end subroutine append_output
 
     subroutine buffer_to_text(buffer, text)
@@ -550,7 +809,11 @@ contains
         template = '/var/tmp/' // trim(prefix) // '-XXXXXX'
         call encode_c_string(template, pattern)
         rc = c_mkdtemp(pattern)
-        call assert_equal_integer(int(rc), 0, 'create temporary fixture directory')
+        if (rc /= 0) then
+            call record_failure('create temporary fixture directory')
+            path = ''
+            return
+        end if
         end_at = 0
         do i = 1, size(pattern)
             if (pattern(i) == c_null_char) exit
@@ -560,7 +823,22 @@ contains
         do i = 1, end_at
             path(i:i) = pattern(i)
         end do
+        call register_scratch(path)
     end subroutine make_scratch
+
+    subroutine register_scratch(path)
+        character(len=*), intent(in) :: path
+        type(string_t), allocatable :: grown(:)
+        integer :: count
+
+        if (len_trim(path) == 0) return
+        count = 0
+        if (allocated(scratch_paths)) count = size(scratch_paths)
+        allocate(grown(count + 1))
+        if (count > 0) grown(1:count) = scratch_paths
+        grown(count + 1)%value = trim(path)
+        call move_alloc(grown, scratch_paths)
+    end subroutine register_scratch
 
     subroutine current_directory(path)
         character(:), allocatable, intent(out) :: path
@@ -571,7 +849,11 @@ contains
         allocate(buffer(4096))
         buffer = c_null_char
         rc = c_getcwd(buffer, int(size(buffer), c_size_t))
-        call assert_equal_integer(int(rc), 0, 'get current working directory')
+        if (rc /= 0) then
+            call record_failure('get current working directory')
+            path = ''
+            return
+        end if
         end_at = 0
         do i = 1, size(buffer)
             if (buffer(i) == c_null_char) exit
@@ -658,7 +940,10 @@ contains
         if (slash > 1) call make_directory(path(:slash - 1))
         open(newunit=unit, file=path, access='stream', form='unformatted', &
             status='replace', action='write', iostat=io_status)
-        call assert_equal_integer(io_status, 0, 'open output file: ' // path)
+        if (io_status /= 0) then
+            call record_failure('open output file: ' // path)
+            return
+        end if
         if (len(text) > 0) write(unit, iostat=io_status) text
         if (len(text) > 0) call assert_equal_integer(io_status, 0, 'write file: ' // path)
         close(unit, iostat=io_status)
@@ -684,7 +969,10 @@ contains
 
         open(newunit=unit, file=path, access='stream', form='unformatted', &
             status='unknown', position='append', action='write', iostat=io_status)
-        call assert_equal_integer(io_status, 0, 'open append file: ' // path)
+        if (io_status /= 0) then
+            call record_failure('open append file: ' // path)
+            return
+        end if
         if (len(text) > 0) write(unit, iostat=io_status) text
         if (len(text) > 0) call assert_equal_integer(io_status, 0, 'append file: ' // path)
         close(unit, iostat=io_status)
@@ -696,12 +984,21 @@ contains
         character(:), allocatable :: text
         integer :: unit, io_status, byte_count
 
+        byte_count = 0
         inquire(file=path, size=byte_count, iostat=io_status)
-        call assert_equal_integer(io_status, 0, 'inspect input file: ' // path)
+        if (io_status /= 0 .or. byte_count < 0) then
+            call record_failure('inspect input file: ' // path)
+            text = ''
+            return
+        end if
         allocate(character(len=byte_count) :: text)
         open(newunit=unit, file=path, access='stream', form='unformatted', &
             status='old', action='read', iostat=io_status)
-        call assert_equal_integer(io_status, 0, 'open input file: ' // path)
+        if (io_status /= 0) then
+            call record_failure('open input file: ' // path)
+            text = ''
+            return
+        end if
         if (byte_count > 0) read(unit, iostat=io_status) text
         if (byte_count > 0) call assert_equal_integer(io_status, 0, 'read file: ' // path)
         close(unit, iostat=io_status)
@@ -740,18 +1037,15 @@ contains
         character(len=*), intent(in) :: message
 
         if (condition) return
-        write(error_unit, '(a)') 'FAIL: ' // trim(message)
-        error stop 1
+        call record_failure(trim(message))
     end subroutine assert_true
 
     subroutine assert_equal_string(actual, expected, message)
         character(len=*), intent(in) :: actual, expected, message
 
         if (actual == expected) return
-        write(error_unit, '(a)') 'FAIL: ' // trim(message)
-        write(error_unit, '(a,i0,a,i0)') 'actual bytes=', len(actual), &
-            ', expected bytes=', len(expected)
-        error stop 1
+        call record_failure(trim(message) // ': string lengths ' // integer_text(len(actual)) // &
+            ' and ' // integer_text(len(expected)))
     end subroutine assert_equal_string
 
     subroutine assert_equal_integer(actual, expected, message)
@@ -759,9 +1053,8 @@ contains
         character(len=*), intent(in) :: message
 
         if (actual == expected) return
-        write(error_unit, '(a)') 'FAIL: ' // trim(message)
-        write(error_unit, '(a,i0,a,i0)') 'actual=', actual, ', expected=', expected
-        error stop 1
+        call record_failure(trim(message) // ': got ' // integer_text(actual) // &
+            ', expected ' // integer_text(expected))
     end subroutine assert_equal_integer
 
     subroutine assert_contains(actual, fragment, message)
@@ -798,9 +1091,170 @@ contains
         type(process_result_t), intent(in) :: result
         character(len=*), intent(in) :: message
 
+        if (result%runner_failed) then
+            if (allocated(result%runner_error)) then
+                call assert_true(.false., message // ': process runner failed: ' // &
+                    result%runner_error)
+            else
+                call assert_true(.false., message // ': process runner failed')
+            end if
+        end if
         call assert_true(.not. result%timed_out, message // ': child timed out')
         call assert_equal_integer(result%term_signal, 0, message // ': child signal')
         call assert_equal_integer(result%exit_code, 0, message // ': child status')
     end subroutine assert_process_ok
+
+    subroutine record_failure(message)
+        character(len=*), intent(in) :: message
+        type(string_t), allocatable :: grown(:)
+        integer :: count
+
+        count = 0
+        if (allocated(failures)) count = size(failures)
+        allocate(grown(count + 1))
+        if (count > 0) grown(1:count) = failures
+        grown(count + 1)%value = trim(message)
+        call move_alloc(grown, failures)
+    end subroutine record_failure
+
+    subroutine finish_assertions()
+        type(string_t), allocatable :: pending_failures(:)
+        character(kind=c_char), allocatable, target :: path_bytes(:)
+        integer(c_int) :: rc
+        integer :: i, failure_count
+
+        failure_count = 0
+        if (allocated(failures)) then
+            failure_count = size(failures)
+            pending_failures = failures
+            deallocate(failures)
+        end if
+        if (allocated(scratch_paths)) then
+            do i = 1, size(scratch_paths)
+                if (.not. allocated(scratch_paths(i)%value)) cycle
+                call encode_c_string(scratch_paths(i)%value, path_bytes)
+                rc = c_remove_tree(path_bytes)
+                if (rc /= 0) call record_failure(&
+                    'remove fixture scratch directory: ' // scratch_paths(i)%value)
+            end do
+            deallocate(scratch_paths)
+        end if
+        if (allocated(failures)) failure_count = failure_count + size(failures)
+        if (failure_count > 0) then
+            if (allocated(pending_failures)) then
+                do i = 1, size(pending_failures)
+                    write(error_unit, '(a)') 'FAIL: ' // pending_failures(i)%value
+                end do
+            end if
+        end if
+        if (allocated(failures)) then
+            do i = 1, size(failures)
+                write(error_unit, '(a)') 'FAIL: ' // failures(i)%value
+            end do
+        end if
+        if (failure_count > 0) then
+            error stop 1
+        end if
+    end subroutine finish_assertions
+
+    subroutine reset_assertions_for_probe()
+        if (allocated(failures)) deallocate(failures)
+        if (allocated(scratch_paths)) deallocate(scratch_paths)
+    end subroutine reset_assertions_for_probe
+
+    subroutine exercise_failure_cleanup_probe(marker)
+        character(len=*), intent(in) :: marker
+        character(:), allocatable :: scratch
+        integer(c_int) :: child, waited, wait_status, rc
+        integer :: status
+
+        child = c_fork()
+        if (child == 0) then
+            call reset_assertions_for_probe()
+            rc = c_silence_output()
+            call make_scratch('fo-cleanup-failure-probe', scratch)
+            call write_text(marker, scratch)
+            call assert_true(.false., 'intentional scratch cleanup failure probe')
+            call assert_file_equals(join_path(scratch, 'missing-receipt'), 'receipt', &
+                'missing fixture output records a failure before cleanup')
+            call finish_assertions()
+            call c_exit(0_c_int)
+        end if
+        call assert_true(child > 0, 'fork assertion cleanup probe')
+        if (child <= 0) return
+        do
+            waited = c_waitpid_retry(child, wait_status, 0_c_int)
+            if (waited == child) exit
+            if (waited < 0) then
+                call assert_true(.false., 'wait for assertion cleanup probe')
+                return
+            end if
+        end do
+        call assert_equal_integer(iand(wait_status, 127_c_int), 0, &
+            'assertion cleanup probe exits normally')
+        status = iand(ishft(wait_status, -8), 255_c_int)
+        call assert_equal_integer(status, 1, 'assertion failure remains a failing test')
+        scratch = read_text(marker)
+        call assert_true(len(scratch) > 0, 'cleanup probe reports its scratch path')
+        call assert_true(.not. file_exists(scratch), &
+            'assertion failure cleans registered scratch before exiting')
+    end subroutine exercise_failure_cleanup_probe
+
+    subroutine start_sentinel(process_id)
+        integer, intent(out) :: process_id
+        character(kind=c_char), allocatable, target :: executable(:), duration(:)
+        type(c_ptr), allocatable, target :: arguments(:)
+        integer(c_int) :: child, rc
+
+        call encode_c_string('/bin/sleep', executable)
+        call encode_c_string('30', duration)
+        allocate(arguments(3))
+        arguments(1) = c_loc(executable(1))
+        arguments(2) = c_loc(duration(1))
+        arguments(3) = c_null_ptr
+        child = c_fork()
+        if (child == 0) then
+            rc = c_execvp(executable, arguments)
+            call c_exit(127_c_int)
+        end if
+        process_id = int(child)
+        call assert_true(child > 0, 'start unrelated sentinel child')
+    end subroutine start_sentinel
+
+    logical function process_alive(process_id)
+        integer, intent(in) :: process_id
+
+        process_alive = .false.
+        if (process_id <= 0) return
+        process_alive = c_kill(int(process_id, c_int), 0_c_int) == 0
+    end function process_alive
+
+    subroutine stop_sentinel(process_id)
+        integer, intent(in) :: process_id
+        integer(c_int) :: rc, waited, wait_status
+        integer :: attempts
+        type(pollfd_t) :: no_descriptors(1)
+
+        if (process_id <= 0) return
+        rc = c_kill(int(process_id, c_int), 15_c_int)
+        do attempts = 1, 50
+            waited = c_waitpid_retry(int(process_id, c_int), wait_status, 1_c_int)
+            if (waited == process_id) return
+            if (waited < 0) exit
+            rc = c_poll(no_descriptors, 0_c_size_t, 20_c_int)
+        end do
+        rc = c_kill(int(process_id, c_int), 9_c_int)
+        waited = c_waitpid_retry(int(process_id, c_int), wait_status, 0_c_int)
+        call assert_equal_integer(int(waited), process_id, 'reap unrelated sentinel child')
+    end subroutine stop_sentinel
+
+    function integer_text(value) result(text)
+        integer, intent(in) :: value
+        character(:), allocatable :: text
+        character(len=32) :: buffer
+
+        write(buffer, '(i0)') value
+        text = trim(buffer)
+    end function integer_text
 
 end module fo_test_harness

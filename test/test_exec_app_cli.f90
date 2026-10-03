@@ -4,6 +4,7 @@ program test_exec_app_cli
     use fo_test_harness, only: assert_true, assert_equal_string, assert_equal_integer
     use fo_test_harness, only: assert_contains, assert_not_contains, assert_process_ok
     use fo_test_cli, only: resolve_driver, run_fo
+    use fo_test_harness, only: finish_assertions
     implicit none
 
     character(:), allocatable :: driver, scratch, broken, flavours, unformatted
@@ -57,6 +58,7 @@ program test_exec_app_cli
     call assert_equal_integer(result%term_signal, 0, 'broken test reports status, not a signal')
 
     call remove_tree(scratch)
+    call finish_assertions()
     write(*, '(a)') 'exec-app-cli: target kinds, cache updates, flags, argv and diagnostics pass'
 
 contains
