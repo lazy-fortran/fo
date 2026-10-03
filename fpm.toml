@@ -41,3 +41,55 @@ main = "test_gremlin_generation.f90"
 name = "test_stat_memo"
 source-dir = "test"
 main = "test_stat_memo.f90"
+
+[[test]]
+name = "test_cmake_named_cli"
+source-dir = "test"
+main = "test_cmake_named_cli.f90"
+
+# The standalone CLI fixtures share their process and JSON support modules.
+# Explicit mains keep those support modules from becoming test programs.
+[[test]]
+name = "test_dependency_membership_cli"
+source-dir = "test"
+main = "test_dependency_membership_cli.f90"
+
+[[test]]
+name = "test_dependency_shadow_cli"
+source-dir = "test"
+main = "test_dependency_shadow_cli.f90"
+
+[[test]]
+name = "test_dispatcher_cli"
+source-dir = "test"
+main = "test_dispatcher_cli.f90"
+
+[[test]]
+name = "test_exec_app_cli"
+source-dir = "test"
+main = "test_exec_app_cli.f90"
+
+[[test]]
+name = "test_fmt_cli"
+source-dir = "test"
+main = "test_fmt_cli.f90"
+
+[[test]]
+name = "test_platform_link_cli"
+source-dir = "test"
+main = "test_platform_link_cli.f90"
+
+[[test]]
+name = "test_program_names_cli"
+source-dir = "test"
+main = "test_program_names_cli.f90"
+
+[[test]]
+name = "test_targeted_materialization_cli"
+source-dir = "test"
+main = "test_targeted_materialization_cli.f90"
+
+[[test]]
+name = "test_test_results_json"
+source-dir = "test"
+main = "test_test_results_json.f90"

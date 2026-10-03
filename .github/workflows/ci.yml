@@ -60,23 +60,19 @@ jobs:
       - name: Test
         run: fpm test
 
-      - name: Test complete JSON reports
-        run: node test/test_test_results_json.js
-
-      - name: Test CMake named test routing
-        run: node test/test_cmake_named_cli.js "$(command -v fo)"
+      - name: Test standalone Fortran CLI fixtures
+        run: |
+          export FO="$(command -v fo)"
+          export FO_DISABLE_SELF_REFRESH=1
+          export FO_SELF_REFRESH=0
+          export FO_CACHE_DIR="$RUNNER_TEMP/fo-cli-tests"
+          fo test test_cmake_named_cli test_dependency_membership_cli \
+            test_dependency_shadow_cli test_dispatcher_cli test_exec_app_cli \
+            test_fmt_cli test_platform_link_cli test_program_names_cli \
+            test_targeted_materialization_cli test_test_results_json
 
       - name: Test complete MCP JSON reports
         run: node test/test_mcp_test_json.js
-
-      - name: Test application exec build scope
-        run: node test/test_exec_app.js
-
-      - name: Test consolidated test routing
-        run: node test/test_dispatcher_cli.js
-
-      - name: Test targeted executable materialization
-        run: node test/test_targeted_materialization_cli.js
 
       - name: Test Gremlin bootstrap lifecycle
         run: node test/test_gremlin_bootstrap.js "$(command -v fo)"
@@ -169,14 +165,6 @@ jobs:
             "$fixture_dir/async_process_nested_cancel.c" \
             -o "$verifier_dir/nested-cancel"
           "$verifier_dir/nested-cancel"
-
-      - name: Test formatter executable behavior
-        run: |
-          node test/test_fmt_cli.js
-          node test/test_program_names_cli.js
-          node test/test_dependency_membership_cli.js
-          node test/test_dependency_shadow_cli.js
-          node test/test_platform_link_cli.js
 
       - name: Test atomic link artifact publication
         run: node test/test_archive_publication.js
