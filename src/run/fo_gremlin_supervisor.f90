@@ -1784,7 +1784,34 @@ contains
             if (fatal_error) exit
 
             if (test_child%pid > 0) then
-                if (elapsed_seconds(test_child%started_at) >= real(request%timeout_seconds)) then
+                call process_poll_pid(test_child%pid, test_done, test_exit)
+                if (test_done) then
+                    if (test_exit == 0) then
+                        state_name = 'testing'
+                        call record_case(session, request, active_generation, &
+                            test_child, test_exit, 'PASS', sequence, campaign_seed, &
+                            ierr, message)
+                    else
+                        call record_case(session, request, active_generation, &
+                            test_child, test_exit, 'FAIL', sequence, campaign_seed, &
+                            ierr, message)
+                    end if
+                    test_child%pid = 0
+                    completed = completed + 1
+                    if (ierr /= 0) then
+                        fatal_error = .true.
+                        exit
+                    end if
+                    call advance_campaign(session, request, active_generation, selected, &
+                        selected_count, test_index, campaign_seed, campaign_number, &
+                        campaign_started_ms, test_child, ierr, message, completed, &
+                        state_name, sequence)
+                    if (ierr /= 0) then
+                        fatal_error = .true.
+                        exit
+                    end if
+                else if (elapsed_seconds(test_child%started_at) >= &
+                        real(request%timeout_seconds)) then
                     call cancel_owned_process(test_child%pid, test_exit)
                     if (test_exit /= 0) then
                         message = 'cannot cancel timed-out Gremlin test process'
@@ -1806,34 +1833,6 @@ contains
                     if (ierr /= 0) then
                         fatal_error = .true.
                         exit
-                    end if
-                else
-                    call process_poll_pid(test_child%pid, test_done, test_exit)
-                    if (test_done) then
-                        if (test_exit == 0) then
-                            state_name = 'testing'
-                            call record_case(session, request, active_generation, &
-                                test_child, test_exit, 'PASS', sequence, campaign_seed, &
-                                ierr, message)
-                        else
-                            call record_case(session, request, active_generation, &
-                                test_child, test_exit, 'FAIL', sequence, campaign_seed, &
-                                ierr, message)
-                        end if
-                        test_child%pid = 0
-                        completed = completed + 1
-                        if (ierr /= 0) then
-                            fatal_error = .true.
-                            exit
-                        end if
-                        call advance_campaign(session, request, active_generation, selected, &
-                            selected_count, test_index, campaign_seed, campaign_number, &
-                            campaign_started_ms, test_child, ierr, message, completed, &
-                            state_name, sequence)
-                        if (ierr /= 0) then
-                            fatal_error = .true.
-                            exit
-                        end if
                     end if
                 end if
             end if
@@ -2413,6 +2412,7 @@ contains
         integer :: inventory_status, cancel_exit, mandatory_count, state_status
         integer :: release_status, pin_status
         character(len=PATH_LEN) :: state_message, release_message
+        character(len=NAME_LEN) :: active_case
         logical :: was_active
 
         ierr = 0
@@ -2425,7 +2425,12 @@ contains
         if (build_exit /= 0) then
             last_failed = candidate%identity
             state_name = 'build_failed'
-            call publish_state(session, request, state_name, active, candidate, '', &
+            active_case = ''
+            if (test_child%pid > 0) then
+                active_case = test_child%case_name
+            end if
+            call publish_state(session, request, state_name, active, candidate, &
+                trim(active_case), &
                 completed, selected_count, seed, 'BUILD_FAIL', build_exit, ierr, message)
             if (ierr /= 0) return
             if (have_candidate_lease) then
