@@ -15,7 +15,8 @@ program fo_main
         array_temporary_warnings_from_log, frontend_diagnostics_from_file, &
         FO_DIAG_SEVERITY_ERROR
     use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds
-    use fo_fs, only: fs_collect_files, fs_stat
+    use fo_fs, only: fs_stat
+    use fo_build_tree, only: native_output_dir
     use fo_check_output, only: check_result_json, check_result_compact_json, &
         check_result_full_json
     use fo_test_results, only: test_result_entry_t, &
@@ -881,42 +882,32 @@ contains
         end if
         call report_array_temporary_warnings(build_log)
         call delete_tmpfile(build_log)
-        call report_private_fo_driver(b)
+        call report_private_fo_driver(b, all_flags)
     end subroutine cmd_build
 
-    subroutine report_private_fo_driver(b)
+    subroutine report_private_fo_driver(b, request_flags)
         ! A self-build already creates its current driver inside this
         ! worktree. Advertise that exact path so callers can run it directly;
         ! only `fo install` publishes into an installation prefix.
         type(backend_t), intent(in) :: b
+        character(len=*), intent(in) :: request_flags
         character(len=8) :: disabled
-        character(len=1024) :: candidates(256), private_driver
-        integer(c_long_long) :: mtime_ns, file_size, newest_mtime
-        integer :: env_status, n_candidates, i
+        character(len=1024) :: private_driver
+        integer(c_long_long) :: mtime_ns, file_size
+        integer :: env_status
         logical :: here
 
         call get_environment_variable('FO_DISABLE_SELF_REFRESH', disabled, &
             status=env_status)
         if (env_status == 0 .and. trim(disabled) == '1') return
-        if (b%kind == BACKEND_NONE) return
+        if (b%kind /= BACKEND_NATIVE) return
         inquire (file=trim(b%project_dir)//'/src/build/fo_build_backend.f90', &
             exist=here)
         if (.not. here) return
-        call fs_collect_files(trim(b%project_dir)//'/build', '', 'fo', '', &
-            candidates, n_candidates)
-        private_driver = ''
-        newest_mtime = -huge(newest_mtime)
-        do i = 1, n_candidates
-            if (len_trim(candidates(i)) < 7) cycle
-            if (candidates(i)(len_trim(candidates(i)) - 6:len_trim(candidates(i))) &
-                /= '/app/fo') cycle
-            call fs_stat(trim(candidates(i)), mtime_ns, file_size, here)
-            if (.not. here) cycle
-            if (mtime_ns <= newest_mtime) cycle
-            private_driver = candidates(i)
-            newest_mtime = mtime_ns
-        end do
-        if (len_trim(private_driver) > 0) write (output_unit, '(a,a)') &
+        private_driver = native_output_dir(b%project_dir, request_flags, 'app')// &
+            '/fo'
+        call fs_stat(trim(private_driver), mtime_ns, file_size, here)
+        if (here .and. file_size > 0) write (output_unit, '(a,a)') &
             'fo: worktree driver ready: ', trim(private_driver)
     end subroutine report_private_fo_driver
 

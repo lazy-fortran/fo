@@ -102,7 +102,13 @@ jobs:
           node test/test_gremlin_reproduce_concurrent_logs.js "$(command -v fo)"
 
       - name: Test Gremlin self refresh
-        run: node test/test_gremlin_self_refresh.js "$(command -v fo)"
+        run: |
+          FO_BIN="$HOME/.local/bin/fo" \
+          FO_RUN_SELF_REFRESH_ORACLE=1 \
+          FO_DISABLE_SELF_REFRESH=1 \
+          FO_SELF_REFRESH=0 \
+          FO_CACHE_DIR="$RUNNER_TEMP/fo-self-refresh-oracle-cache" \
+            "$HOME/.local/bin/fo" test test_self_refresh
 
       - name: Test Gremlin filesystem change capture
         run: node test/test_gremlin_watch.js "$(command -v fo)"
