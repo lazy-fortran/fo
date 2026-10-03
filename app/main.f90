@@ -874,7 +874,36 @@ contains
         end if
         call report_array_temporary_warnings(build_log)
         call delete_tmpfile(build_log)
+        call refresh_installed_fo(b)
     end subroutine cmd_build
+
+    subroutine refresh_installed_fo(b)
+        ! `fo build` refreshing only the build tree left ~/.local/bin/fo a
+        ! stale plain copy, so gates run through PATH verified old code
+        ! (#133). After a successful SELF build, resync the installed copy
+        ! from the freshest produced binary (native path first, then the
+        ! newest fpm backend dir). Foreign projects are untouched.
+        type(backend_t), intent(in) :: b
+        character(len=1024) :: cmd
+        integer :: st
+        logical :: here
+
+        if (b%kind == BACKEND_NONE) return
+        inquire(file='src/build/fo_build_backend.f90', exist=here)
+        if (.not. here) return
+        cmd = 'new=""; for c in build/fo/app/fo build/*/app/fo; do ' // &
+              'if [ -f "$c" ]; then if [ -z "$new" ] || ' // &
+              '[ "$c" -nt "$new" ]; then new="$c"; fi; fi; done; ' // &
+              'if [ -n "$new" ] && [ -f "$HOME/.local/bin/fo" ]; then ' // &
+              'if ! cmp -s "$new" "$HOME/.local/bin/fo"; then ' // &
+              'cp "$new" "$HOME/.local/bin/fo.new.$$" && ' // &
+              'chmod +x "$HOME/.local/bin/fo.new.$$" && ' // &
+              'mv -f "$HOME/.local/bin/fo.new.$$" "$HOME/.local/bin/fo" && ' // &
+              'echo "fo: refreshed ~/.local/bin/fo from $new"; fi; fi'
+        call execute_command_line(cmd, exitstat=st)
+        if (st /= 0) write (error_unit, '(a)') &
+            'fo: warning: could not refresh ~/.local/bin/fo'
+    end subroutine refresh_installed_fo
 
     subroutine report_array_temporary_warnings(build_log)
         character(len=*), intent(in) :: build_log
