@@ -1,4 +1,10 @@
+#if defined(__APPLE__)
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE 1
+#endif
+#else
 #define _POSIX_C_SOURCE 200809L
+#endif
 /* Test-only POSIX wrappers; process supervision and assertions live in Fortran. */
 #include <dirent.h>
 #include <errno.h>
