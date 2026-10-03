@@ -70,6 +70,21 @@ jobs:
       - name: Test targeted executable materialization
         run: node test/test_targeted_materialization_cli.js
 
+      - name: Test Gremlin bootstrap lifecycle
+        run: node test/test_gremlin_bootstrap.js "$(command -v fo)"
+
+      - name: Test MCP Gremlin parity
+        run: node test/test_mcp_gremlin.js "$(command -v fo)"
+
+      - name: Test stale MCP recovery
+        run: node test/test_mcp_gremlin_stale.js "$(command -v fo)"
+
+      - name: Test MCP cancellation backoff
+        run: node test/test_mcp_cancel_error.js "$(command -v fo)"
+
+      - name: Test MCP cancellation cleanup probe
+        run: node test/test_mcp_cancel_error.js "$(command -v fo)" --cleanup-probe
+
       - name: Test formatter executable behavior
         run: |
           node test/test_fmt_cli.js
