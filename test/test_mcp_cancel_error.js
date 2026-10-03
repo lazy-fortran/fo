@@ -15,6 +15,8 @@ const scratch = fs.mkdtempSync('/var/tmp/fo-mcp-cancel-error-');
 const project = path.join(scratch, 'project');
 const env = { ...process.env, HOME: path.join(scratch, 'home'), TMPDIR: '/var/tmp',
   FO_CACHE_DIR: path.join(scratch, 'cache'), FO_PREFIX: path.join(scratch, 'prefix'),
+  XDG_CACHE_HOME: path.join(scratch, 'xdg-cache'),
+  FO_GREMLIN_STATE_DIR: path.join(scratch, 'gremlin-state'),
   FO_SELF_REFRESH: '0', FO_DISABLE_SELF_REFRESH: '1' };
 const bin = path.join(scratch, 'bin');
 const shim = path.join(scratch, 'fail-kill.so');
@@ -32,9 +34,9 @@ function prepare() {
   fs.mkdirSync(env.FO_PREFIX, { recursive: true });
   fs.symlinkSync(executable, path.join(bin, 'fo'));
   fs.writeFileSync(path.join(project, 'fpm.toml'), 'name = "mcp_cancel_probe"\n');
-  fs.writeFileSync(path.join(project, 'test/test_cancel_slow.f90'), [
-    'program test_cancel_slow', 'implicit none',
-    "call execute_command_line('sleep 60')", 'end program test_cancel_slow', ''
+  fs.writeFileSync(path.join(project, 'test/test_cancel_hold.f90'), [
+    'program test_cancel_hold', 'implicit none',
+    "call execute_command_line('sleep 60')", 'end program test_cancel_hold', ''
   ].join('\n'));
   const fakeSleep = path.join(bin, 'sleep');
   fs.writeFileSync(fakeSleep, [
@@ -48,7 +50,8 @@ function prepare() {
   const cSource = path.join(scratch, 'fail_kill.c');
   fs.writeFileSync(cSource, [
     '#define _GNU_SOURCE', '#include <dlfcn.h>', '#include <errno.h>',
-    '#include <fcntl.h>', '#include <signal.h>', '#include <stdio.h>',
+    '#include <fcntl.h>', '#include <signal.h>', '#include <stdarg.h>',
+    '#include <stdio.h>', '#include <sys/syscall.h>',
     '#include <stdlib.h>', '#include <time.h>',
     '#include <sys/types.h>', '#include <unistd.h>',
     'typedef int (*kill_fn)(pid_t, int);',
@@ -65,27 +68,63 @@ function prepare() {
     '  fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0600);',
     '  if (fd >= 0) { write(fd, line, (size_t)length); close(fd); }',
     '}',
-    'int kill(pid_t pid, int sig) {',
-    '  static int failed = 0;',
-    '  static kill_fn real_kill = NULL;',
+    'static int failed_signals = 0;',
+    'static int deny_signal(int sig) {',
     '  const char *enabled = getenv("FO_TEST_CANCEL_FAIL_COUNT");',
     '  const char *deny_file = getenv("FO_TEST_CANCEL_DENY_FILE");',
     '  int failure_limit = enabled == NULL ? 0 : atoi(enabled);',
-    '  if (sig == SIGTERM && (pid > 1 || pid < -1) && deny_file != NULL &&',
-    '      access(deny_file, F_OK) == 0) {',
-    '    record_denied_kill(); errno = EPERM; return -1;',
+    '  if (sig != SIGTERM) return 0;',
+    '  if (deny_file != NULL && access(deny_file, F_OK) == 0) {',
+    '    record_denied_kill(); errno = EPERM; return 1;',
     '  }',
-    '  if (sig == SIGTERM && (pid > 1 || pid < -1) && enabled != NULL && ',
-    '      failed < failure_limit) {',
+    '  if (enabled != NULL && failed_signals < failure_limit) {',
     '    const char *marker = getenv("FO_TEST_CANCEL_FAIL_MARKER");',
-    '    failed++;',
-    '    if (failed == 1 && marker != NULL) {',
+    '    failed_signals++;',
+    '    if (failed_signals == 1 && marker != NULL) {',
     '      int fd = open(marker, O_WRONLY | O_CREAT | O_EXCL, 0600);',
     '      if (fd >= 0) close(fd);',
     '    }',
-    '    record_denied_kill();',
-    '    errno = EPERM; return -1;',
+    '    record_denied_kill(); errno = EPERM; return 1;',
     '  }',
+    '  return 0;',
+    '}',
+    'long syscall(long number, ...) {',
+    '  static long (*real_syscall)(long, ...) = NULL;',
+    '  va_list args;',
+    '  long result;',
+    '  va_start(args, number);',
+    '#if defined(SYS_pidfd_send_signal)',
+    '  if (number == SYS_pidfd_send_signal) {',
+    '    int fd = va_arg(args, int);',
+    '    int sig = va_arg(args, int);',
+    '    void *info = va_arg(args, void *);',
+    '    unsigned int flags = va_arg(args, unsigned int);',
+    '    va_end(args);',
+    '    if (deny_signal(sig)) return -1;',
+    '    if (real_syscall == NULL) real_syscall = dlsym(RTLD_NEXT, "syscall");',
+    '    return real_syscall(number, fd, sig, info, flags);',
+    '  }',
+    '#endif',
+    '#if defined(SYS_pidfd_open)',
+    '  if (number == SYS_pidfd_open) {',
+    '    pid_t pid = va_arg(args, pid_t);',
+    '    unsigned int flags = va_arg(args, unsigned int);',
+    '    va_end(args);',
+    '    if (real_syscall == NULL) real_syscall = dlsym(RTLD_NEXT, "syscall");',
+    '    return real_syscall(number, pid, flags);',
+    '  }',
+    '#endif',
+    '  long a1 = va_arg(args, long), a2 = va_arg(args, long);',
+    '  long a3 = va_arg(args, long), a4 = va_arg(args, long);',
+    '  long a5 = va_arg(args, long), a6 = va_arg(args, long);',
+    '  va_end(args);',
+    '  if (real_syscall == NULL) real_syscall = dlsym(RTLD_NEXT, "syscall");',
+    '  result = real_syscall(number, a1, a2, a3, a4, a5, a6);',
+    '  return result;',
+    '}',
+    'int kill(pid_t pid, int sig) {',
+    '  static kill_fn real_kill = NULL;',
+    '  if ((pid > 1 || pid < -1) && deny_signal(sig)) return -1;',
     '  if (real_kill == NULL) real_kill = (kill_fn)dlsym(RTLD_NEXT, "kill");',
     '  if (real_kill == NULL) { errno = ENOSYS; return -1; }',
     '  return real_kill(pid, sig);',
@@ -148,6 +187,7 @@ function startServer() {
 
 function body(response) {
   assert.ok(response.result, JSON.stringify(response));
+  if (!response.result.content) return { json: response.result, isError: false };
   return { json: JSON.parse(response.result.content[0].text),
     isError: response.result.isError };
 }
@@ -161,7 +201,14 @@ async function waitForSleepPid(timeoutMs = 20000) {
     }
     await new Promise(resolve => setTimeout(resolve, 25));
   }
-  throw new Error('fixture sleep child did not start');
+  let detail = '';
+  if (server && server.child.exitCode === null) {
+    try {
+      detail = JSON.stringify({ status: await server.rpc(81, { action: 'status' }),
+        diagnostics: await server.rpc(82, { action: 'diagnostics' }) });
+    } catch (error) { detail = String(error); }
+  }
+  throw new Error(`fixture sleep child did not start: ${detail}`);
 }
 
 function pidState(pid) {
@@ -202,6 +249,7 @@ async function verifyEofRetryBackoff() {
   env.FO_TEST_CANCEL_FAIL_COUNT = '0';
   fs.writeFileSync(denyKillFile, 'deny SIGTERM until this file is removed\n');
   fs.writeFileSync(killLog, '');
+  fs.rmSync(sleepPidFile, { force: true });
   server = startServer();
   try {
     await new Promise((resolve, reject) => {
@@ -229,19 +277,34 @@ async function verifyEofRetryBackoff() {
 
     const beforeEofCount = deniedAttemptsFor(server.child.pid).length;
     server.child.stdin.end();
-    await delay(1800);
-    const eofAttempts = deniedAttemptsFor(server.child.pid).slice(beforeEofCount);
+    const expectedGaps = [100, 200, 400, 800, 1600, 3200, 5000, 5000];
+    const attemptsPerCancel = 3;
+    const requiredAttempts = attemptsPerCancel * (expectedGaps.length + 1);
+    const deadline = Date.now() + 22000;
+    let eofAttempts = [];
+    while (Date.now() < deadline) {
+      eofAttempts = deniedAttemptsFor(server.child.pid).slice(beforeEofCount);
+      if (eofAttempts.length >= requiredAttempts) break;
+      await delay(25);
+    }
     assert.equal(server.child.exitCode, null,
       'EOF does not let the server exit while cancellation is denied');
     assert.equal(server.child.signalCode, null);
     assert.ok(pidState(persistentSleepPid) !== null,
       'owned sleeper remains live while cancellation is denied');
-    assert.ok(eofAttempts.length >= 3,
-      `EOF retry loop made ${eofAttempts.length} attempts while denied`);
-    assert.ok(
-      eofAttempts.length <= 18,
-      'EOF retry loop made ' + eofAttempts.length +
-        ' kill attempts; expected capped backoff');
+    assert.ok(eofAttempts.length >= requiredAttempts,
+      `EOF retry loop made only ${eofAttempts.length} denied attempts`);
+    for (let i = 0; i < expectedGaps.length; i++) {
+      const endOfCancel = eofAttempts[attemptsPerCancel * (i + 1) - 1];
+      const startOfNextCancel = eofAttempts[attemptsPerCancel * (i + 1)];
+      const gap = startOfNextCancel - endOfCancel;
+      const expected = expectedGaps[i];
+      const early = Math.max(75, expected * 0.2);
+      const late = Math.max(250, expected * 0.2);
+      assert.ok(gap >= expected - early && gap <= expected + late,
+        `EOF retry gap ${i + 1} was ${gap} ms; expected ${expected} ms ` +
+          `within -${early}/+${late} ms`);
+    }
 
     fs.unlinkSync(denyKillFile);
     await server.waitForExit(10000);
