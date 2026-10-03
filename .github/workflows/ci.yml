@@ -79,6 +79,26 @@ jobs:
       - name: Test Gremlin journal owner recovery
         run: node test/test_gremlin_journal_recovery.js "$(command -v fo)"
 
+      - name: Test continuous generation preemption
+        run: node test/test_continuous_preemption.js "$(command -v fo)"
+
+      - name: Test Gremlin campaign history
+        run: node test/test_gremlin_campaign_history.js "$(command -v fo)"
+
+      - name: Test Gremlin timeout ordering
+        run: node test/test_gremlin_timeout_order.js "$(command -v fo)"
+
+      - name: Test Gremlin reproduction logs
+        run: |
+          node test/test_gremlin_reproduce_logs.js "$(command -v fo)"
+          node test/test_gremlin_reproduce_concurrent_logs.js "$(command -v fo)"
+
+      - name: Test Gremlin self refresh
+        run: node test/test_gremlin_self_refresh.js "$(command -v fo)"
+
+      - name: Test atomic link artifacts
+        run: FO="$(command -v fo)" node test/test_atomic_link_artifacts.js
+
       - name: Test MCP Gremlin parity
         run: node test/test_mcp_gremlin.js "$(command -v fo)"
 
@@ -87,6 +107,9 @@ jobs:
 
       - name: Test stale MCP recovery
         run: node test/test_mcp_gremlin_stale.js "$(command -v fo)"
+
+      - name: Test MCP request structure
+        run: node test/test_mcp_request_structure.js "$(command -v fo)"
 
       - name: Test shared work modes
         run: node test/test_work_modes.js "$(command -v fo)"

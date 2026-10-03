@@ -388,8 +388,8 @@ read-only; identify real fo users from manifests/workflows and fpm projects as
 additional candidates. Every maintained fo-using repository eventually receives
 a measured row/disposition. Keep private repo names and evidence out of public
 plans/issues. Selected external fpm projects are pinned capability examples,
-not uncontrolled unbounded cloning. Inventory is a planning input, not a command
-to run all repositories during this plans-only delivery.
+not uncontrolled unbounded cloning. Execution is authorized; each row still
+uses a frozen revision, bounded command and independent project oracle.
 
 Start with fo, a small library, FortFront and focused ffc cases, then cover all
 maintained fo projects and representative external fpm projects. Exercise native,
@@ -409,28 +409,83 @@ while development continues; complete fixed-version matrix coverage is a final
 provider-completion gate. Store compact receipts and replayable public summary
 when observations exist, never invented benchmark claims.
 
+## Delivery and architecture consolidation
+
+Progress is published continuously even when it is not ready for `main`:
+
+- [draft core PR #146](https://github.com/lazy-fortran/fo/pull/146) targets
+  `main` from `gremlin/core-review` and receives the core CI/review signal;
+- [stacked work-mode PR #147](https://github.com/lazy-fortran/fo/pull/147)
+  targets the core branch from `gremlin/work-modes-review`;
+- `gremlin/integration-provisional-20261003` records the latest combined
+  controller milestone. It is evidence, not a promotion claim.
+
+Push each integrated milestone and exact verifier state. Focused receipts permit
+the next repair but do not redefine the merge gate. `main` advances only after
+the current-head full pipeline, required behavioral fixtures, CI, review and
+matrix dispositions pass. Never accumulate unpublished controller commits merely
+because a continuous campaign is partial.
+
+The implemented core is mature enough to pause feature growth for an architecture
+pass. Ordered blockers before core merge are:
+
+1. [#148](https://github.com/lazy-fortran/fo/issues/148): shared filesystem
+   events and dirty/debounce/fingerprint gating so idle Gremlin performs no full
+   captures; consolidate or deprecate the independent `fo watch` check loop.
+2. [#149](https://github.com/lazy-fortran/fo/issues/149): extract request,
+   context, campaign/history and session services from the supervisor.
+3. [#150](https://github.com/lazy-fortran/fo/issues/150): converge domain JSON
+   on the existing typed parser and shared CLI/MCP validation.
+4. [#151](https://github.com/lazy-fortran/fo/issues/151): pin/hash the exact fo
+   driver used by a live session and expose it in reproducible receipts.
+5. Register every late behavioral oracle in CI and obtain a green exact-head run.
+
+Work modes remain stacked until the core is reviewable. Finish their current
+startup/cancellation/lease repairs, then complete
+[#152](https://github.com/lazy-fortran/fo/issues/152) to split request/schema,
+task graph, state and scheduling responsibilities before merge. Legacy MCP async
+queue consolidation and the C process-file split follow the core merge unless a
+behavioral verifier proves that they block current correctness.
+
 ## Active delivery state
 
-**Execution is user-authorized in parallel mode:** complete the fo Gremlin bootstrap and continue through the fo Gremlin roadmap. ffc implementation is outside this objective. The controller candidate starts at fo main `e4fc193` and its code HEAD is `0e7f32c`; the committed base-to-head source diff SHA256 is `0aa8de6cbf67508feec0d2865e83bcbacb7e34c3893c87b9d607c822535c2d0a`. It includes the reviewed generation/symlink capture and shared CLI/MCP engine, the CLI empty-random and MCP named-test fixes (`81f3770`, `f8b7e63`, `5fec063`), the nested compiler-spawn containment oracle (`22d089d`), lossless event pagination coverage (`56e6525`), and owner journal crash recovery with session-qualified log paths (`0e7f32c`). The integration worktree also has uncommitted plan and CI edits; code workers use separate task worktrees.
+**Execution is user-authorized in parallel mode.** The controller started from
+fo main `e4fc193`. The latest published combined milestone is `a0d3515`; its
+exact binary was `1bf5be5f1c546bf58addaf91f3e2ad73432acef16c69464e0bc705aafbee46ca`.
+The core review boundary is `1c89146`; work-mode commits follow it.
 
-**Verified:** the combined candidate at `0e7f32c` passed the isolated full fo pipeline: Static 107/107, Build 59/59, Tests 48/48, Lint OK (41.3s). On that same binary the live journal-recovery fixture, MCP named eligibility, >256-receipt CLI/MCP pagination, Gremlin bootstrap, stale-MCP recovery, and strict-filter nested compiler-spawn fixtures passed. Obtain another full combined pipeline and live Gremlin receipt after the pending supervisor fixes. Three existing array-temporary warnings remain in diagnostics/scanning code.
+The `a0d3515` candidate passed the isolated full fo pipeline: static 109/109,
+build 62/62, test build/run 48/48, lint and format check, in 26.6 s. The same
+binary passed campaign history/seed replay, both owner-recovery crash barriers,
+timeout ordering, continuous generation preemption, sequential and overlapping
+reproduction logs, atomic link/run publication, Gremlin bootstrap, MCP named
+eligibility, stale-MCP/new-CLI behavior, lossless 300-receipt pagination and the
+then-current work-mode fixture. Four existing array-temporary warnings remain.
 
-A full MCP `check` under the account HOME failed only in `test_lock`: nested Git commits inherited the user's SSH signing configuration and had no matching private key. The isolated task-HOME full pipeline passed. The earlier live `test_scaffold` PATH mismatch was a stale global CLI in the nested fixture; candidate-first PATH recorded repeated PASS receipts for `test_scaffold` and `test_util` on generation `d3a36c...` (32 completed events, then a scoped stop). That live receipt predates #140 and is not final acceptance.
+Independent review then found more #143 startup/cancellation/lease retry edges.
+Their Sol repair is not yet on the controller branch, so the published combined
+milestone is not merge-ready. The installed global fo remains the known baseline
+with SHA256 `8d5dd29dbb5bb41752e4e712a95ae300a38d99bc1777b96445ab56baf139a4c3`.
+Do not replace it until the final reviewed combined head passes installation
+smoke and MCP system checks with all Gremlin owners stopped.
 
-Independent Sol review of code through `5fec063` found three supervisor defects. The #140 repair fixes restart overwrites by qualifying case/reproduction logs with session identity; its real-owner SIGKILL fixture verifies receipts appear once with unchanged artifact paths/bytes and that blocked work remains untested. The #138 Luna worker is implementing bounded durable lane history/debt and deterministic per-campaign seeds; the original supervisor selected with the request seed and then advertised a different seed. After #138 releases the supervisor files, fix the timeout-before-poll defect under #139: poll for completion before cancelling and recording TIMEOUT, with a synchronized capture-delay oracle and a genuine-timeout control. Sol also noted that replacing the CLI pathname during a live supervisor changes its runtime under the same generation ID. Keep all supervisors stopped during final installation; track driver identity in the future generation-closure audit.
+Implemented issue state:
 
-Current ordered work:
+- #138 selection/history and seed replay, #139 owned-tree cancellation and
+  timeout ordering, #140 durable receipts/recovery, #141 generation replacement,
+  #142 CLI/MCP lifecycle and pagination, and #144 atomic artifact publication
+  have passing focused behavior on the published candidate. Keep them open
+  through architecture consolidation and exact-head CI/promotion.
+- #143 is implemented but under final correctness repair and modularization.
+- #145 has one bounded fpm row passing on the exact candidate, one independent
+  CMake/CTest row passing while exposing a fo CTest-name discovery defect, and
+  one row correctly blocked by a missing private path dependency. This is early
+  matrix evidence, not complete coverage.
 
-1. #138: persistent completed-failure priority, least-recently-completed debt/cursor, unknown-case exclusion, and truthful deterministic campaign seeds. The lane receipt ledger must remain crash-safe and bounded.
-2. #139: preserve an already-completed child's real result when owner capture delays polling beyond its deadline; retain the existing process-tree cancellation verifier.
-3. #141: after #138/#140, prove an old failure survives successful generation replacement and reruns on the newest compatible generation without combining versions into a false green.
-4. #142 pagination verifier is implemented in `test/test_mcp_gremlin.js`; 300 receipts traverse bounded CLI/MCP pages exactly once in order. Keep the issue open through candidate promotion.
-5. #143 shared serial/parallel work-mode admission and #145 bounded non-ffc project matrix follow lifecycle and history acceptance.
-6. Re-run #139 and #144 independent process/artifact verifiers on final combined code; close or narrow issues only against their stated acceptance scope.
-
-The integration documentation commit adds CI steps for the new owner-recovery and MCP named-eligibility scripts. The installed `/home/ert/.local/bin/fo` is the restored baseline, SHA256 `8d5dd29dbb5bb41752e4e712a95ae300a38d99bc1777b96445ab56baf139a4c3`. An accidental earlier refresh is preserved separately. Do not install or push the integrated code until the final combined pipeline, live receipt, and independent review pass.
-
-After each meaningful delivery, update this plan, the workspace master, and affected issues. Keep one controller responsible for integration, promotion and regular main commits/pushes. Preserve exact bases, patch digests and independent behavioral evidence. Root `PLAN.md`/`AGENTS.md` are outside Git; fo repository plans are committed.
+After each meaningful delivery, update this plan, workspace master and affected
+issues; commit and push the controller branch immediately. Preserve exact bases,
+patch digests and independent behavioral evidence. Root `PLAN.md`/`AGENTS.md`
+are outside Git; repository plans are committed.
 
 ## Research basis
 

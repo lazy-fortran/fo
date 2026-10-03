@@ -46,8 +46,11 @@ background bounded tests while implementation proceeds; full fixed-version
 matrix evidence remains completion criteria. CLI and MCP have one shared engine
 and feature set; use current CLI after fixes when MCP cannot reload.
 
-Past August snapshots and pipeline narratives remain in Git history. The
-planning input is fo main `2e781fd`; no integrated Gremlin runtime or new matrix
-has been verified on main. Paused worker candidates remain unpromoted. Rewrite
-PLAN state and modify/close issues with exact evidence after execution is later
-authorized. Controller alone promotes explicit reviewed paths to main.
+Past snapshots remain in Git history. Gremlin progress is now published through
+draft core PR #146 and stacked work-mode PR #147; `main` remains at the last
+accepted release until the architecture and exact-head verification gates pass.
+Issues #148--#151 own the core change-event, supervisor, JSON and driver-identity
+consolidation; #152 owns work-mode modularization. Early matrix evidence includes
+one bounded fpm pass, one independent CMake/CTest pass with a fo discovery defect,
+and one honest missing-dependency block. Controller alone promotes reviewed
+paths to main and pushes every integrated milestone while it is under review.
