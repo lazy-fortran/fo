@@ -172,3 +172,21 @@ int fo_test_wait_nonblocking(int process, int *status) {
     if (WIFSIGNALED(*status)) return -WTERMSIG(*status);
     return -998;
 }
+
+int fo_test_spawn_heartbeat(const char *path, const char *directory) {
+    pid_t child = fork();
+    if (child < 0) return -1;
+    if (child == 0) {
+        (void)setpgid(0, 0);
+        if (chdir(directory) != 0) _exit(126);
+        int output = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+        if (output < 0) _exit(126);
+        const struct timespec interval = {0, 20000000};
+        for (;;) {
+            if (write(output, ".", 1) != 1) _exit(126);
+            (void)nanosleep(&interval, NULL);
+        }
+    }
+    (void)setpgid(child, child);
+    return (int)child;
+}

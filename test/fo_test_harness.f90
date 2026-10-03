@@ -16,6 +16,7 @@ module fo_test_harness
     public :: assert_process_ok, finish_assertions, register_scratch
     public :: process_alive, start_sentinel, stop_sentinel
     public :: spawn_process, poll_process, signal_process_group
+    public :: terminate_process_group, spawn_heartbeat_process
     public :: reset_assertions_for_probe
     public :: exercise_failure_cleanup_probe, open_descriptor_count
 
@@ -214,6 +215,12 @@ module fo_test_harness
             integer(c_int), value :: process
             integer(c_int), intent(out) :: status
         end function c_wait_nonblocking
+
+        integer(c_int) function c_spawn_heartbeat(path, directory) &
+                bind(C, name='fo_test_spawn_heartbeat')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*), directory(*)
+        end function c_spawn_heartbeat
     end interface
 
 contains
@@ -259,6 +266,41 @@ contains
         rc = c_signal_group(int(process_id, c_int), int(signal_number, c_int))
         call assert_true(rc == 0, 'signal fixture process group')
     end subroutine signal_process_group
+
+    subroutine terminate_process_group(process_id, status)
+        integer, intent(in) :: process_id
+        integer, intent(out) :: status
+        integer(c_int) :: rc
+        integer :: attempt
+        type(pollfd_t) :: no_descriptors(1)
+
+        status = 999
+        if (process_id <= 0) return
+        rc = c_signal_group(int(process_id, c_int), 15_c_int)
+        do attempt = 1, 50
+            rc = c_poll(no_descriptors, 0_c_size_t, 20_c_int)
+        end do
+        rc = c_signal_group(int(process_id, c_int), 9_c_int)
+        do attempt = 1, 100
+            call poll_process(process_id, status)
+            if (status /= 999) exit
+            rc = c_poll(no_descriptors, 0_c_size_t, 20_c_int)
+        end do
+        call assert_true(status /= 999, 'terminate and reap owned process group')
+    end subroutine terminate_process_group
+
+    subroutine spawn_heartbeat_process(path, directory, process_id)
+        character(len=*), intent(in) :: path, directory
+        integer, intent(out) :: process_id
+        character(kind=c_char), allocatable, target :: path_bytes(:), directory_bytes(:)
+        integer(c_int) :: child
+
+        call encode_c_string(path, path_bytes)
+        call encode_c_string(directory, directory_bytes)
+        child = c_spawn_heartbeat(path_bytes, directory_bytes)
+        process_id = int(child)
+        call assert_true(process_id > 0, 'start test heartbeat process')
+    end subroutine spawn_heartbeat_process
 
     subroutine list_add(list, value)
         type(string_list_t), intent(inout) :: list
