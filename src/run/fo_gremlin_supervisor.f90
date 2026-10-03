@@ -17,7 +17,7 @@ module fo_gremlin_supervisor
         gremlin_session_publish, gremlin_session_read, gremlin_session_release, &
         gremlin_session_recovery_complete, &
         gremlin_session_request_stop, gremlin_session_stop_requested, &
-        gremlin_lease_release, gremlin_generation_register_at, &
+        gremlin_lease_release, &
         gremlin_generation_lease_acquire_at, gremlin_generation_pin_at, &
         gremlin_generation_root, &
         GREMLIN_STATE_TEXT_MAX
