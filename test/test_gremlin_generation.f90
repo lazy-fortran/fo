@@ -15,12 +15,6 @@ program test_gremlin_generation
             import :: c_int
             integer(c_int), intent(in), value :: mode
         end subroutine arm_directory_oracle
-        subroutine set_directory_oracle_target(path, pid) &
-                bind(C, name='generation_oracle_target')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: path(*)
-            integer(c_int), intent(in), value :: pid
-        end subroutine set_directory_oracle_target
         integer(c_int) function directory_oracle_state(which) &
                 bind(C, name='generation_oracle_state')
             import :: c_int
@@ -420,6 +414,12 @@ program test_gremlin_generation
     call write_version_file(trim(link_race_project)//'/src/value.dat', 'I')
     call write_version_file(trim(outside_source)//'/value.dat', 'X')
     call write_version_file(trim(outside_source)//'/alias.dat', 'X')
+    call write_version_file(trim(link_race_project)// &
+        '/src/.directory-oracle-marker', 'P', 32)
+    call write_version_file(trim(link_race_project)// &
+        '/.directory-oracle-marker', 'R', 32)
+    call write_version_file(trim(outside_source)// &
+        '/.directory-oracle-marker', 'X', 32)
     symlink_rc = c_symlink('value.dat'//c_null_char, &
         (trim(link_race_project)//'/src/alias.dat')//c_null_char)
     call check(symlink_rc == 0, 'descriptor race link fixture is created')
@@ -433,7 +433,7 @@ program test_gremlin_generation
     call check(parent_swap_count > 0, &
         'source parent was replaced by an escaping symlink during capture')
     call check(directory_oracle_state(4_c_int) == 1, &
-        'pause matched the inode of the already-open src directory')
+        'pause matched the unique marker through the already-open src descriptor')
     call check(directory_oracle_state(2_c_int) == 1, &
         'src traversal pause was observed within the bounded wait')
     call check(directory_oracle_state(3_c_int) == 1, &
@@ -631,8 +631,6 @@ contains
         source_dir = trim(project_path)//'/src'
         parked_dir = trim(project_path)//'/src-parked'
         swap_count = 0
-        call set_directory_oracle_target(trim(source_dir)//c_null_char, &
-            int(process_getpid(), c_int))
         call arm_directory_oracle(2_c_int)
         !$omp parallel sections num_threads(2) &
         !$omp& shared(generation, ierr, error_message, swap_count)
@@ -816,17 +814,17 @@ end program test_gremlin_generation
 ! Interpose only in this test executable; production has no fault/pause hooks.
 module generation_directory_oracle
     use, intrinsic :: iso_c_binding, only: c_ptr, c_funptr, c_int, c_intptr_t, &
-        c_char, c_null_char, c_null_ptr, c_associated, c_f_pointer, c_f_procpointer
+        c_char, c_size_t, c_null_char, c_null_ptr, c_associated, c_f_pointer, &
+        c_f_procpointer
     implicit none
     private
     integer :: directory_fault_mode = 0, entry_count = 0
     logical :: directory_paused = .false., directory_release = .false.
     logical :: directory_fault_observed = .false.
     logical :: directory_pause_completed = .false.
-    logical :: directory_inode_matched = .false., directory_pause_timed_out = .false.
+    logical :: directory_descriptor_matched = .false.
+    logical :: directory_pause_timed_out = .false.
     logical :: directory_swap_completed = .false.
-    character(len=512) :: directory_target = ''
-    integer(c_int) :: directory_owner_pid = 0
     abstract interface
         function directory_reader(dir) bind(C) result(entry)
             import :: c_ptr
@@ -855,6 +853,23 @@ module generation_directory_oracle
             import :: c_int, c_ptr
             type(c_ptr), intent(in), value :: dir
         end function oracle_dirfd
+        integer(c_int) function oracle_openat(fd, path, flags) &
+                bind(C, name='openat')
+            import :: c_char, c_int
+            integer(c_int), intent(in), value :: fd, flags
+            character(kind=c_char), intent(in) :: path(*)
+        end function oracle_openat
+        integer(c_intptr_t) function oracle_read(fd, bytes, count) &
+                bind(C, name='read')
+            import :: c_char, c_int, c_intptr_t, c_size_t
+            integer(c_int), intent(in), value :: fd
+            character(kind=c_char), intent(out) :: bytes(*)
+            integer(c_size_t), intent(in), value :: count
+        end function oracle_read
+        integer(c_int) function oracle_close(fd) bind(C, name='close')
+            import :: c_int
+            integer(c_int), intent(in), value :: fd
+        end function oracle_close
     end interface
 contains
     subroutine initialize_directory_oracle() &
@@ -883,41 +898,33 @@ contains
         directory_paused = .false.
         directory_release = .false.
         directory_pause_completed = .false.
-        directory_inode_matched = .false.
+        directory_descriptor_matched = .false.
         directory_pause_timed_out = .false.
         directory_swap_completed = .false.
     end subroutine arm_directory_oracle
 
-    subroutine set_directory_oracle_target(path, pid) &
-            bind(C, name='generation_oracle_target')
-        character(kind=c_char), intent(in) :: path(*)
-        integer(c_int), intent(in), value :: pid
-        integer :: i
-        directory_target = ''
-        do i = 1, len(directory_target)
-            if (path(i) == c_null_char) exit
-            directory_target(i:i) = path(i)
-        end do
-        directory_owner_pid = pid
-    end subroutine set_directory_oracle_target
-
     logical function directory_descriptor_matches(dir) result(matches)
         type(c_ptr), intent(in), value :: dir
-        character(len=128) :: descriptor_path
-        integer :: rc, command_status
-        integer(c_int) :: fd
+        character(kind=c_char) :: bytes(33)
+        integer :: i
+        integer(c_int) :: fd, marker_fd, close_rc
+        integer(c_intptr_t) :: n
         matches = .false.
         fd = oracle_dirfd(dir)
         if (fd < 0) return
-        write (descriptor_path, '(a,i0,a,i0)') '/proc/', directory_owner_pid, &
-            '/fd/', fd
-        ! The shell's -ef compares device/inode after following the descriptor
-        ! path in this process, independently of the production traversal.
-        call execute_command_line('test "'//trim(descriptor_path)// &
-            '" -ef "'//trim(directory_target)//'"', exitstat=rc, &
-            cmdstat=command_status)
-        if (command_status /= 0) return
-        matches = rc == 0
+        ! Only original src has exactly 32 P bytes at this fixture-only name.
+        ! Root has R bytes and outside has X bytes, so neither can match.
+        marker_fd = oracle_openat(fd, '.directory-oracle-marker'//c_null_char, &
+            0_c_int) ! POSIX O_RDONLY.
+        if (marker_fd < 0) return
+        n = oracle_read(marker_fd, bytes, int(size(bytes), c_size_t))
+        close_rc = oracle_close(marker_fd)
+        if (close_rc /= 0) return
+        if (n /= 32) return
+        do i = 1, 32
+            if (bytes(i) /= 'P') return
+        end do
+        matches = .true.
     end function directory_descriptor_matches
 
     integer(c_int) function directory_oracle_state(which) &
@@ -934,7 +941,7 @@ contains
         case (3)
             observed = directory_pause_completed
         case (4)
-            observed = directory_inode_matched
+            observed = directory_descriptor_matched
         case (5)
             observed = directory_pause_timed_out
         end select
@@ -979,7 +986,7 @@ contains
                 errno_value = saved_errno
                 return
             end if
-            directory_inode_matched = .true.
+            directory_descriptor_matched = .true.
             directory_fault_mode = 0
             !$omp atomic write
             directory_paused = .true.
