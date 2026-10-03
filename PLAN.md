@@ -333,8 +333,8 @@ harness. The frozen baseline `1f8a1a3` had 31 JS fixtures, including
 context-provenance and coverage-restart tests omitted from the earlier count.
 Issue #158 is complete through `6eb8045`: ten CLI fixtures are Fortran, the
 recursive test JSON ownership repair passes the full gfortran-13 FPM suite and
-the test-only C shim is Darwin-portable. Nineteen JS fixtures remain for
-#159--#163 after the earlier campaign-history and self-refresh migrations.
+the test-only C shim is Darwin-portable. #159 is complete through `346b4ff`,
+replacing four MCP fixtures; 15 JS fixtures remain for #160--#163.
 
 ## Ordered implementation and independent verifiers
 
@@ -703,6 +703,9 @@ Implemented issue state:
   oracles plus an independent recursive ownership stress test pass. The original
   parser fails that oracle on Ubuntu gfortran 13 with exit 139; the repaired full
   FPM and 65-test native pipelines pass. The harness/C shim remain test-only.
+- #159 is complete at `346b4ff`: four MCP protocol fixtures are standalone
+  Fortran clients covering both framings, lifecycle/discovery, malformed/error
+  handling, 400-entry escaped reports, request shape and named eligibility.
 - #160's campaign-history slice is delivered at `361d1ca`: the stale
   per-campaign JavaScript sampler is replaced by an independent Fortran oracle
   for finite epoch order, restart/replay, markers, failure priority and cancelled
