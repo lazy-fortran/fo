@@ -83,7 +83,7 @@ module fo_gfortran_build
     public :: config_flags_str
     public :: gfortran_app_source_name, gfortran_test_source_name
     public :: source_has_marker, dispatch_target
-    public :: gfortran_selected_test_names
+    public :: gfortran_selected_test_names, gfortran_named_test_exists
 
 contains
 
@@ -748,9 +748,8 @@ contains
             result(node)
         !! The DAG node that builds the consolidated dispatcher program, found
         !! by its public manifest name. 0 when a project declares a dispatcher it
-        !! does not ship: the caller keeps the test's own node, so a missing
-        !! dispatcher degrades to the old behaviour instead of failing every
-        !! routed test.
+        !! does not ship: marked modules then have no runnable target, while
+        !! programs can still run through their own node.
         character(len=*), intent(in) :: filenames(:), test_dir
         logical, intent(in) :: is_prog(:)
         type(fpm_config_t), intent(in) :: config
@@ -867,6 +866,69 @@ contains
             trim(unit%filename), '! fo: dispatcher')
     end function unit_has_dispatcher_marker
 
+    logical function test_source_eligible(filename, is_program, has_dispatcher) &
+            result(eligible)
+        !! Programs run independently; marked modules need a real dispatcher.
+        character(len=*), intent(in) :: filename
+        logical, intent(in) :: is_program, has_dispatcher
+
+        eligible = .true.
+        if (is_program) return
+        eligible = .false.
+        if (.not. has_dispatcher) return
+        eligible = source_has_marker(filename, '! fo: dispatcher')
+    end function test_source_eligible
+
+    logical function scanned_dispatcher_available(config, test_dir, units, &
+            n_units) result(available)
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: test_dir
+        type(scan_unit_t), intent(in) :: units(:)
+        integer, intent(in) :: n_units
+        character(len=128) :: name
+        integer :: i
+
+        available = .false.
+        if (len_trim(config%dispatcher) == 0) return
+        do i = 1, n_units
+            if (.not. units(i)%is_program) cycle
+            name = gfortran_test_source_name(config, test_dir, units(i)%filename)
+            if (trim(name) /= trim(config%dispatcher)) cycle
+            available = .true.
+            return
+        end do
+    end function scanned_dispatcher_available
+
+    logical function gfortran_named_test_exists(project_dir, name) result(exists)
+        !! Validate public manifest names against runnable sources, including
+        !! the dispatcher itself when explicitly requested.
+        character(len=*), intent(in) :: project_dir, name
+        type(fpm_config_t), allocatable :: config
+        type(scan_unit_t), allocatable :: units(:)
+        character(len=128) :: public_name
+        integer :: i, n_units, ierr
+        logical :: has_dispatcher
+
+        exists = .false.
+        allocate (config)
+        call fpm_config_parse(project_dir, config, ierr)
+        if (ierr /= 0) return
+        call scan_dir(trim(project_dir)//'/'//trim(config%test_dir), &
+            units, n_units, ierr)
+        if (ierr /= 0) return
+        has_dispatcher = scanned_dispatcher_available(config, config%test_dir, &
+            units, n_units)
+        do i = 1, n_units
+            if (.not. test_source_eligible(units(i)%filename, &
+                units(i)%is_program, has_dispatcher)) cycle
+            public_name = gfortran_test_source_name(config, config%test_dir, &
+                units(i)%filename)
+            if (trim(public_name) /= trim(name)) cycle
+            exists = .true.
+            return
+        end do
+    end function gfortran_named_test_exists
+
     subroutine dispatch_target(bin_dir, dispatcher, name, bin, args)
         !! Where a marked test actually runs: inside the consolidated binary,
         !! with its own name as argv, instead of linking a fresh copy of the
@@ -925,21 +987,21 @@ contains
         type(scan_unit_t), allocatable :: units(:)
         character(len=128) :: name
         integer :: i, j, n_units, ierr
+        logical :: has_dispatcher
 
         names = ''
         n_names = 0
         allocate (config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) return
-        call scan_dir_cached(trim(project_dir)//'/'//trim(config%test_dir), &
+        call scan_dir(trim(project_dir)//'/'//trim(config%test_dir), &
             units, n_units, ierr)
         if (ierr /= 0) return
+        has_dispatcher = scanned_dispatcher_available(config, config%test_dir, &
+            units, n_units)
         do i = 1, n_units
-            if (.not. units(i)%is_program) then
-                if (len_trim(config%dispatcher) == 0) cycle
-                if (.not. unit_has_dispatcher_marker(units(i), project_dir, &
-                    config%test_dir)) cycle
-            end if
+            if (.not. test_source_eligible(units(i)%filename, &
+                units(i)%is_program, has_dispatcher)) cycle
             do j = 1, n_ids
                 if (trim(filenames(node_ids(j))) == trim(units(i)%filename)) exit
             end do
@@ -971,15 +1033,15 @@ contains
 
         character(len=128) :: name
         integer :: i
+        logical :: has_dispatcher
 
+        has_dispatcher = scanned_dispatcher_available(config, test_dir, units, &
+            n_units)
         allocate (tests(max(1, n_units)))
         n_tests = 0
         do i = 1, n_units
-            if (.not. units(i)%is_program) then
-                if (len_trim(config%dispatcher) == 0) cycle
-                if (.not. unit_has_dispatcher_marker(units(i), project_dir, &
-                    test_dir)) cycle
-            end if
+            if (.not. test_source_eligible(units(i)%filename, &
+                units(i)%is_program, has_dispatcher)) cycle
             name = gfortran_test_source_name(config, test_dir, units(i)%filename)
             ! The dispatcher is infrastructure, not a test: scanned as one it
             ! gets run bare and fails its own usage check, which would read as
@@ -997,7 +1059,7 @@ contains
             tests(n_tests)%name = name
             tests(n_tests)%bin = trim(bin_dir)//'/'//trim(name)
             tests(n_tests)%args = manifest_test_args(config, name)
-            if (len_trim(config%dispatcher) > 0 .and. &
+            if (has_dispatcher .and. &
                 unit_has_dispatcher_marker(units(i), project_dir, test_dir) &
                 ) then
                 call dispatch_target(bin_dir, config%dispatcher, name, &
@@ -2553,11 +2615,8 @@ contains
         do i = 1, n_order
             node_id = topo_order(i)
             if (len_trim(filenames(node_id)) == 0) cycle
-            if (.not. is_prog(node_id)) then
-                if (dnode == 0) cycle
-                if (.not. source_has_marker(filenames(node_id), &
-                    '! fo: dispatcher')) cycle
-            end if
+            if (.not. test_source_eligible(filenames(node_id), &
+                is_prog(node_id), dnode > 0)) cycle
             tname = gfortran_test_source_name(manifest_config, test_dir, &
                 filenames(node_id))
             if (.not. include_slow .and. is_slow_name(tname)) cycle

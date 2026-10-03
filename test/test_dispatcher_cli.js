@@ -58,6 +58,12 @@ function expectCases(args, names, receipts) {
   }
 }
 
+function expectRejected(name) {
+  const result = run(['test', name, '--json']);
+  assert.notEqual(result.status, 0, `${name} must not succeed with zero tests`);
+  assert.match(result.stderr, new RegExp(`fo: unknown test: ${name}`));
+}
+
 try {
   if (!installed) {
     const built = spawnSync(driver, ['build'], { ...options, cwd: project });
@@ -68,12 +74,16 @@ try {
     'link = "shared"', 'pic = "true"',
     '[[test]]', 'name = "test_dispatcher"', 'source-dir = "test"',
     'main = "suite_entry.f90"', '[[test]]', 'name = "test_beta"',
-    'source-dir = "test"', 'main = "nested/beta_source.f90"', ''
+    'source-dir = "test"', 'main = "nested/beta_source.f90"',
+    '[[test]]', 'name = "test_module_only"', 'source-dir = "test"',
+    'main = "support.f90"', ''
   ].join('\n'));
   write('test/test_alpha.f90', caseSource('test_alpha', 'alpha-original'));
   write('test/nested/beta_source.f90', caseSource('test_beta', 'beta-original'));
   write('test/support.f90', caseSource('test_legacy', 'legacy-dispatched')
     .replace('! fo: dispatcher\n', ''));
+  write('test/test_flat_module.f90', 'module test_flat_module\nend module\n');
+  write('test/test_flat_source.f90', 'module flat_helper\nend module\n');
   write('test/test_legacy.f90', [
     '! fo: dispatcher', 'program test_legacy', 'implicit none',
     'stop 89', 'end program test_legacy', ''
@@ -106,6 +116,10 @@ try {
   expectCases(['test', '--only-changed'], names, receipts);
   expectCases(['test', 'test_alpha'], ['test_alpha'], { test_alpha: 'alpha-original' });
   expectCases(['test', 'test_beta'], ['test_beta'], { test_beta: 'beta-original' });
+  expectRejected('test_module_only');
+  expectRejected('test_flat_module');
+  expectRejected('test_flat_source');
+  expectRejected('test_does_not_exist');
   const explicit = run(['test', 'test_dispatcher', '--json']);
   assert.notEqual(explicit.status, 0, 'explicit dispatcher runs with no implicit self argument');
   const explicitReport = JSON.parse(explicit.stdout);
@@ -117,8 +131,36 @@ try {
   expectCases(['test', '--all'], names, { ...receipts, test_alpha: 'alpha-updated' });
   const binaries = fs.readdirSync(path.join(scratch, 'build/fo/bin')).sort();
   assert.deepEqual(binaries, ['test_dispatcher', 'test_plain'], 'one routed binary, one independent binary');
+  // A custom test root must use the same manifest mapping and eligibility.
+  fs.renameSync(path.join(scratch, 'test'), path.join(scratch, 'checks'));
+  const manifest = fs.readFileSync(path.join(scratch, 'fpm.toml'), 'utf8')
+    .replaceAll('source-dir = "test"', 'source-dir = "checks"');
+  write('fpm.toml', `${manifest}\n[build]\ntest-dir = "checks"\n`);
+  expectCases(['test', 'test_beta'], ['test_beta'], { test_beta: 'beta-original' });
+  expectCases(['test', '--all'], names, { ...receipts, test_alpha: 'alpha-updated' });
+  expectRejected('test_module_only');
+  expectRejected('test_flat_module');
+  expectRejected('test_flat_source');
+
+  // The configured dispatcher source now exists only as a module. Its name
+  // and marker cannot substitute for an actual dispatcher program.
+  write('checks/suite_entry.f90', '! fo: dispatcher\nmodule suite_entry\nend module\n');
+  fs.rmSync(path.join(scratch, 'checks/test_legacy.f90'));
+  expectRejected('test_beta');
+  expectRejected('test_alpha');
+  expectRejected('test_dispatcher');
+  expectCases(['test', '--all'], ['test_plain'], { test_plain: 'plain-original' });
+  expectCases(['test', '--all'], ['test_plain'], { test_plain: 'plain-original' });
+  expectCases(['test', '--random', '1', '--seed', '42'], ['test_plain'],
+    { test_plain: 'plain-original' });
+  expectCases(['test', '--only-changed'], ['test_plain'], { test_plain: 'plain-original' });
+  // Also exercise an absent source, with the manifest string still configured.
+  fs.rmSync(path.join(scratch, 'checks/suite_entry.f90'));
+  expectRejected('test_beta');
+  expectRejected('test_does_not_exist');
   console.log('dispatcher-cli: shared cold/warm all, module/program cases, public aliases, ' +
-    'nested cases, random/changed selection, named edits and explicit self pass');
+    'nested/custom roots, random/changed selection, named edits, explicit self and ' +
+    'ineligible/missing-dispatcher rejection pass');
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }

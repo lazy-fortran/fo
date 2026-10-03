@@ -19,7 +19,8 @@ program fo_main
     use fo_test_results, only: test_result_entry_t, &
         parse_test_results, format_test_results_human, format_test_results_json
     use fo_test_random, only: select_random_tests
-    use fo_gfortran_build, only: gfortran_selected_test_names
+    use fo_gfortran_build, only: gfortran_selected_test_names, &
+        gfortran_named_test_exists
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
     use fo_fmt, only: fo_fmt_run, fo_fmt_files, fo_fmt_changed_run, &
@@ -1196,8 +1197,11 @@ contains
             ! dispatch: an unknown name must fail loudly with exit 1,
             ! not run nothing and exit 0 (#137) nor crash downstream.
             do i = 1, n_arg_names
-                if (dag_find_test_index(dag, test_names(i)) /= 0) cycle
-                if (fpm_test_source_exists(b%project_dir, test_names(i))) cycle
+                if (b%kind == BACKEND_NATIVE) then
+                    if (gfortran_named_test_exists(b%project_dir, test_names(i))) cycle
+                else
+                    if (dag_find_test_index(dag, test_names(i)) /= 0) cycle
+                end if
                 write (error_unit, '(a,a)') &
                     'fo: unknown test: '//trim(test_names(i))
                 stop 1
@@ -1254,18 +1258,6 @@ contains
             call delete_tmpfile(test_log)
         end if
     end subroutine cmd_test
-
-    logical function fpm_test_source_exists(project_dir, name) result(ok)
-        ! fpm names test targets by test/<name>.<suffix>; accept the same
-        ! convention when the source file exists in the project.
-        character(len=*), intent(in) :: project_dir, name
-        character(len=512) :: path
-        inquire(file=trim(project_dir)//'/test/'//trim(name)//'.f90', &
-               exist=ok)
-        if (ok) return
-        inquire(file=trim(project_dir)//'/test/'//trim(name)//'.F90', &
-               exist=ok)
-    end function fpm_test_source_exists
 
     integer function dag_find_test_index(dag, name) result(index)
         ! First test-node whose label matches NAME exactly or whose path
