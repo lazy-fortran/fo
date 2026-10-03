@@ -623,8 +623,9 @@ completed entries below are retained as prerequisites and evidence:
     multi-build Fortran CI oracle has an explicit 240-second wall budget.
 13. [#170](https://github.com/lazy-fortran/fo/issues/170): give current Gremlin
     tests/runs unique writable execution views without weakening frozen sources.
-14. [#171](https://github.com/lazy-fortran/fo/issues/171): restore Darwin feature
-    declarations in the Gremlin state provider, then use macOS as a provider gate.
+14. **Provider complete:** [#171](https://github.com/lazy-fortran/fo/issues/171):
+    Darwin state declarations and canonical-path portability oracles pass on
+    Linux and macOS; #172 still blocks the public lifecycle gate.
 15. [#172](https://github.com/lazy-fortran/fo/issues/172): add scoped Darwin
     asynchronous owner/descendant containment and unblock public Gremlin lifecycle.
 16. Deliver the shared store in provider order: [fx #42](https://github.com/lazy-fortran/fx/issues/42),
@@ -700,8 +701,10 @@ Implemented issue state:
   exact selected profiles survive cache hits, explicit install is the only global
   publication path, the inverse Node oracle is replaced by Fortran, and its cold
   CI invocation has an explicit 240-second wall budget.
-- #171 owns the faepmac1 compile failure caused by strict POSIX/XOPEN feature
-  macros hiding Darwin/libproc declarations in `fo_gremlin_state.c`.
+- #171 provider work is delivered through `9331c04`: Darwin selects its native
+  feature declarations before headers, the negative compile oracle proves the
+  former macro defect, and state/portability/supervisor tests pass on Linux and
+  macOS. Keep the issue open until #172 lets the public lifecycle gate run.
 - #172 owns the subsequently exposed `ENOTSUP` from Linux-only asynchronous
   descendant containment; macOS state/supervisor providers pass, while public
   Gremlin start/status/stop remains blocked until scoped Darwin ownership lands.

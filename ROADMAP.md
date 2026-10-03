@@ -34,7 +34,7 @@ freshness/result/process behavior before consumers can rely on it.
 | [#158](https://github.com/lazy-fortran/fo/issues/158)--[#163](https://github.com/lazy-fortran/fo/issues/163) | Replace all JavaScript test drivers with standalone Fortran process-boundary oracles, then remove Node from CI. |
 | [#164](https://github.com/lazy-fortran/fo/issues/164) | Complete cross-process stat-memo publication and recovery at `d482807`. |
 | [#165](https://github.com/lazy-fortran/fo/issues/165)--[#170](https://github.com/lazy-fortran/fo/issues/170), [fx #42](https://github.com/lazy-fortran/fx/issues/42)--[#44](https://github.com/lazy-fortran/fx/issues/44) | Writable execution views, one immutable blob/action store, compact generations, private transactional build sessions, one ordinary/Gremlin engine and rooted low-churn collection. |
-| [#171](https://github.com/lazy-fortran/fo/issues/171) | Restore Darwin feature declarations in the Gremlin state provider and unblock faepmac1 gates. |
+| [#171](https://github.com/lazy-fortran/fo/issues/171) | State-provider declarations and portability oracles pass on Linux/macOS through `9331c04`; public lifecycle still depends on #172. |
 | [#172](https://github.com/lazy-fortran/fo/issues/172) | Add scoped Darwin asynchronous owner/descendant containment for public Gremlin lifecycle. |
 
 Adjacent scope is [#56](https://github.com/lazy-fortran/fo/issues/56) LSP,
