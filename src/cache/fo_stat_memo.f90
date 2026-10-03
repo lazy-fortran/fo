@@ -7,7 +7,8 @@ module fo_stat_memo
     !! `fo clean` and is reused across builds. Access is guarded by a named
     !! critical so the parallel link loop can hash program objects safely.
     use fx_hash, only: sha256_file, fnv1a_string
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char, &
+        c_size_t, c_intptr_t
     implicit none
     private
     public :: memo_hash_file, memo_save, memo_reset
@@ -27,6 +28,14 @@ module fo_stat_memo
             import :: c_int
             integer(c_int), value :: fd
         end function fo_c_close
+
+        integer(c_intptr_t) function fo_c_write(fd, bytes, count) &
+                bind(C, name='write')
+            import :: c_int, c_char, c_size_t, c_intptr_t
+            integer(c_int), value :: fd
+            character(kind=c_char), intent(in) :: bytes(*)
+            integer(c_size_t), value :: count
+        end function fo_c_write
     end interface
 
     interface
@@ -176,8 +185,9 @@ contains
         character(len=PATH_LEN) :: file
         character(len=PATH_LEN + 32) :: tmp
         character(len=PATH_LEN * 2 + 2) :: quoted_path
+        character(len=PATH_LEN * 2 + 256) :: line
         character(kind=c_char) :: ctmp(PATH_LEN + 32)
-        integer :: u, ios, close_ios, i
+        integer :: ios, i
         integer(c_int) :: fd, close_rc
         logical :: ok
 
@@ -193,44 +203,55 @@ contains
                     fd = -1_c_int
                 end if
                 if (fd >= 0_c_int) then
+                    call temp_path_string(ctmp, tmp)
+                    ios = 0
+                    do i = 1, CAP
+                        if (.not. t_used(i)) cycle
+                        quoted_path = quote_path(trim(t_path(i)))
+                        write (line, '(i0,1x,i0,1x,i0,1x,a,1x,a)', &
+                            iostat=ios) t_mtime(i), t_ctime(i), &
+                            t_size(i), trim(t_hash(i)), trim(quoted_path)
+                        if (ios /= 0) exit
+                        call write_record(fd, trim(line)//achar(10), ios)
+                        if (ios /= 0) exit
+                    end do
                     close_rc = fo_c_close(fd)
-                    if (close_rc /= 0_c_int) then
-                        call temp_path_string(ctmp, tmp)
-                        call remove_temp(tmp)
-                    else
-                        call temp_path_string(ctmp, tmp)
-                        open (newunit=u, file=trim(tmp), status='old', &
-                            action='write', access='sequential', &
-                            form='formatted', position='rewind', iostat=ios)
-                        if (ios == 0) then
-                            close_ios = 0
-                            do i = 1, CAP
-                                if (.not. t_used(i)) cycle
-                                quoted_path = quote_path(trim(t_path(i)))
-                                write (u, '(i0,1x,i0,1x,i0,1x,a,1x,a)', &
-                                    iostat=ios) t_mtime(i), t_ctime(i), &
-                                    t_size(i), trim(t_hash(i)), trim(quoted_path)
-                                if (ios /= 0) exit
-                            end do
-                            close (u, iostat=close_ios)
-                            if (ios == 0 .and. close_ios == 0) then
-                                if (rename_file(tmp, file)) then
-                                    dirty = .false.
-                                else
-                                    call remove_temp(tmp)
-                                end if
-                            else
-                                call remove_temp(tmp)
-                            end if
+                    if (ios == 0 .and. close_rc == 0_c_int) then
+                        if (rename_file(tmp, file)) then
+                            dirty = .false.
                         else
                             call remove_temp(tmp)
                         end if
+                    else
+                        call remove_temp(tmp)
                     end if
                 end if
             end if
         end if
         !$omp end critical (fo_stat_memo)
     end subroutine memo_save
+
+    subroutine write_record(fd, line, ios)
+        !! Keep the exclusively created descriptor open through all writes;
+        !! short writes resume at the first unwritten byte.
+        integer(c_int), intent(in) :: fd
+        character(len=*), intent(in) :: line
+        integer, intent(out) :: ios
+        integer :: offset
+        integer(c_intptr_t) :: written
+
+        ios = 0
+        offset = 1
+        do while (offset <= len(line))
+            written = fo_c_write(fd, line(offset:), &
+                int(len(line) - offset + 1, c_size_t))
+            if (written <= 0_c_intptr_t) then
+                ios = 1
+                return
+            end if
+            offset = offset + int(written)
+        end do
+    end subroutine write_record
 
     subroutine memo_reset()
         !! Drop in-memory state (tests use this to force a reload).
