@@ -72,7 +72,21 @@ jobs:
             test_targeted_materialization_cli test_test_results_json
 
       - name: Test complete MCP JSON reports
-        run: node test/test_mcp_test_json.js
+        run: FO="$(command -v fo)" fo test test_mcp_test_json
+        env:
+          FO_DISABLE_SELF_REFRESH: "1"
+          FO_SELF_REFRESH: "0"
+          FO_CACHE_DIR: ${{ runner.temp }}/fo-mcp-json
+
+      - name: Test MCP protocol and named eligibility in Fortran
+        run: |
+          export FO="$(command -v fo)"
+          export FO_DISABLE_SELF_REFRESH=1
+          export FO_SELF_REFRESH=0
+          FO_TEST_WALL_TIMEOUT=180 FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-system" \
+            fo test test_mcp_system
+          FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-named" fo test test_mcp_named_eligibility
+          FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-request" fo test test_mcp_request_structure
 
       - name: Test Gremlin bootstrap lifecycle
         run: node test/test_gremlin_bootstrap.js "$(command -v fo)"
@@ -116,14 +130,9 @@ jobs:
       - name: Test MCP Gremlin parity
         run: node test/test_mcp_gremlin.js "$(command -v fo)"
 
-      - name: Test MCP named-test eligibility
-        run: node test/test_mcp_named_eligibility.js "$(command -v fo)"
-
       - name: Test stale MCP recovery
         run: node test/test_mcp_gremlin_stale.js "$(command -v fo)"
 
-      - name: Test MCP request structure
-        run: node test/test_mcp_request_structure.js "$(command -v fo)"
       - name: Test MCP cancellation backoff
         run: node test/test_mcp_cancel_error.js "$(command -v fo)"
 

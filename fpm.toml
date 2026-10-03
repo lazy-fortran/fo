@@ -96,3 +96,23 @@ main = "test_targeted_materialization_cli.f90"
 name = "test_test_results_json"
 source-dir = "test"
 main = "test_test_results_json.f90"
+
+[[test]]
+name = "test_mcp_system"
+source-dir = "test"
+main = "test_mcp_system.f90"
+
+[[test]]
+name = "test_mcp_test_json"
+source-dir = "test"
+main = "test_mcp_test_json.f90"
+
+[[test]]
+name = "test_mcp_named_eligibility"
+source-dir = "test"
+main = "test_mcp_named_eligibility.f90"
+
+[[test]]
+name = "test_mcp_request_structure"
+source-dir = "test"
+main = "test_mcp_request_structure.f90"
