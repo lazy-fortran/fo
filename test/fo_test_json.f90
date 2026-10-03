@@ -15,6 +15,9 @@ module fo_test_json
         character(:), allocatable :: text
         character(:), allocatable :: name
         type(json_value_t), allocatable :: children(:)
+    contains
+        procedure, private :: assign_value
+        generic, public :: assignment(=) => assign_value
     end type json_value_t
 
 contains
@@ -199,16 +202,59 @@ contains
 
     subroutine append_child(parent, child)
         type(json_value_t), intent(inout) :: parent
-        type(json_value_t), intent(in) :: child
+        type(json_value_t), intent(inout) :: child
         type(json_value_t), allocatable :: grown(:)
-        integer :: count
+        integer :: count, index
 
         count = size(parent%children)
         allocate(grown(count + 1))
-        if (count > 0) grown(1:count) = parent%children
-        grown(count + 1) = child
+        ! Each parsed node has one owner. Move its allocatable components rather
+        ! than copying recursive arrays while growing the sibling collection.
+        do index = 1, count
+            call move_value(parent%children(index), grown(index))
+        end do
+        call move_value(child, grown(count + 1))
         call move_alloc(grown, parent%children)
     end subroutine append_child
+
+    subroutine assign_value(target, source)
+        class(json_value_t), intent(inout) :: target
+        type(json_value_t), intent(in) :: source
+        type(json_value_t) :: owned_copy
+
+        call copy_value(source, owned_copy)
+        call move_value(owned_copy, target)
+    end subroutine assign_value
+
+    recursive subroutine copy_value(source, target)
+        type(json_value_t), intent(in) :: source
+        type(json_value_t), intent(out) :: target
+        integer :: index
+
+        target%kind = source%kind
+        target%boolean = source%boolean
+        if (allocated(source%text)) target%text = source%text
+        if (allocated(source%name)) target%name = source%name
+        if (allocated(source%children)) then
+            allocate(target%children(size(source%children)))
+            do index = 1, size(source%children)
+                call copy_value(source%children(index), target%children(index))
+            end do
+        end if
+    end subroutine copy_value
+
+    subroutine move_value(source, target)
+        type(json_value_t), intent(inout) :: source
+        type(json_value_t), intent(out) :: target
+
+        target%kind = source%kind
+        target%boolean = source%boolean
+        call move_alloc(source%text, target%text)
+        call move_alloc(source%name, target%name)
+        call move_alloc(source%children, target%children)
+        source%kind = json_invalid
+        source%boolean = .false.
+    end subroutine move_value
 
     subroutine parse_literal(source, position, expected, kind, value, valid, error_message)
         character(len=*), intent(in) :: source, expected
