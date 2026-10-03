@@ -15,6 +15,7 @@ program test_dep_resolve
     call test_normalize()
     call test_join()
     call test_transitive_and_dedup()
+    call test_root_external_dep_shadows_transitive_path()
     call test_registry_counted_unresolved()
     call test_linked_worktree_fallback()
     call test_direct_path_wins_in_worktree()
@@ -86,6 +87,31 @@ contains
         end do
         call assert(n_b == 1, 'shared dep b compiled once')
     end subroutine test_transitive_and_dedup
+
+    subroutine test_root_external_dep_shadows_transitive_path()
+        !! fpm resolves a same-named transitive path provider through the
+        !! root's direct Git provider, so fo must compile that provider once.
+        character(len=512) :: base, root, da, shadow
+        type(resolved_src_t) :: out(MAX_RESOLVED)
+        integer :: n_out, n_unres, ierr
+
+        call make_tmp('fo_test_resolve_shadow', base)
+        root = trim(base)//'/root'
+        da = trim(base)//'/a'
+        shadow = trim(base)//'/shadow'
+        call mkproj(root, '[dependencies]'//new_line('a')// &
+            'a = { path = "../a" }'//new_line('a')// &
+            'shadow = { git = "https://example.invalid/shadow" }')
+        call mkproj(da, '[dependencies]'//new_line('a')// &
+            'shadow = { path = "../shadow" }')
+        call mkproj(shadow, '')
+
+        call resolve_dep_srcs(trim(root), out, n_out, n_unres, ierr)
+        call assert(ierr == 0, 'overlapping dependency closure resolves')
+        call assert(n_out == 1, 'root external dep suppresses transitive path copy')
+        call assert(trim(out(1)%name) == 'a', 'unshadowed path dependency remains')
+        call assert(n_unres == 1, 'root external dep remains unresolved once')
+    end subroutine test_root_external_dep_shadows_transitive_path
 
     subroutine test_registry_counted_unresolved()
         !! A registry/version dep is not a path dep: it is counted as unresolved

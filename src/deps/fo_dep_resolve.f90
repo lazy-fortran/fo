@@ -35,13 +35,17 @@ contains
         type(resolved_src_t), intent(out) :: out(MAX_RESOLVED)
         integer, intent(out) :: n_out, n_unresolved, ierr
 
+        type(fpm_config_t), allocatable :: root_config
         character(len=512) :: root
 
         n_out = 0
         n_unresolved = 0
         ierr = 0
         call normalize_path(project_dir, root)
-        call walk(root, out, n_out, n_unresolved, ierr, 0)
+        allocate (root_config)
+        call fpm_config_parse(root, root_config, ierr)
+        if (ierr /= 0) return
+        call walk(root, out, n_out, n_unresolved, ierr, 0, root_config)
     end subroutine resolve_dep_srcs
 
     subroutine resolve_dev_dep_srcs(project_dir, out, n_out, ierr)
@@ -130,17 +134,19 @@ contains
         end do
     end subroutine merge_dep_link_libs
 
-    recursive subroutine walk(dir, out, n_out, n_unresolved, ierr, depth)
+    recursive subroutine walk(dir, out, n_out, n_unresolved, ierr, depth, &
+            root_config)
         character(len=*), intent(in) :: dir
         type(resolved_src_t), intent(inout) :: out(MAX_RESOLVED)
         integer, intent(inout) :: n_out, n_unresolved
         integer, intent(out) :: ierr
         integer, intent(in) :: depth
+        type(fpm_config_t), intent(in) :: root_config
 
         type(fpm_config_t), allocatable :: cfg
         integer :: i, k, kind
         character(len=512) :: dep_dir, dep_src
-        logical :: seen
+        logical :: seen, shadowed
 
         ierr = 0
         if (depth > 64) return
@@ -154,6 +160,18 @@ contains
                 n_unresolved = n_unresolved + 1
                 cycle
             end if
+            ! If the root names this package as Git/registry, use that
+            ! immutable provider for every edge rather than compile a second
+            ! path copy reached through another dependency.
+            shadowed = .false.
+            do k = 1, root_config%n_deps
+                if (trim(root_config%deps(k)%name) /= &
+                        trim(cfg%deps(i)%name)) cycle
+                if (dep_kind(root_config%deps(k)) == DEP_PATH) cycle
+                shadowed = .true.
+                exit
+            end do
+            if (shadowed) cycle
             call resolve_path_dep(dir, trim(cfg%deps(i)%path), dep_dir)
             seen = .false.
             do k = 1, n_out
@@ -167,7 +185,8 @@ contains
             ! on the resolved dep dir so a diamond is compiled once.
             if (.not. seen) then
                 call record_dep_src(cfg%deps(i)%name, dep_dir, out, n_out)
-                call walk(dep_dir, out, n_out, n_unresolved, ierr, depth + 1)
+                call walk(dep_dir, out, n_out, n_unresolved, ierr, depth + 1, &
+                    root_config)
                 ierr = 0
             end if
         end do

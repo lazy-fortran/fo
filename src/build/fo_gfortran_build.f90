@@ -1289,17 +1289,22 @@ contains
         character(len=512), intent(inout) :: obj_basenames(MAX_DEP_OBJS)
         integer, intent(inout) :: n_obj_seen
         character(len=512), allocatable :: found(:)
+        character(len=512) :: found_mod_dirs(MAX_DEP_DIRS)
         character(len=8) :: suffixes(4)
-        integer :: i, j, n_found
+        integer :: i, j, n_found, n_found_mod_dirs
 
         allocate (found(MAX_DEP_OBJS))
 
         ! Every directory holding a .mod under build/ is an include candidate:
         ! the project's own gfortran_* profile dir and each dependency's mod
         ! dir. Replaces grep over compile_commands.json plus find -printf %h.
-        call fs_collect_mod_dirs(trim(project_dir)//'/build', dep_includes, &
+        ! fs_collect_mod_dirs replaces its output, so gather privately and append;
+        ! each path dependency must not erase root/external provider directories.
+        call fs_collect_mod_dirs(trim(project_dir)//'/build', found_mod_dirs, &
+            n_found_mod_dirs)
+        call filter_module_dirs_for_compiler(found_mod_dirs, n_found_mod_dirs)
+        call append_module_dirs(found_mod_dirs, n_found_mod_dirs, dep_includes, &
             n_dep_includes)
-        call filter_module_dirs_for_compiler(dep_includes, n_dep_includes)
 
         ! Modules the manifest declares as external live outside build/, in a
         ! system package.  gfortran will not look in /usr/include for them on
@@ -1353,6 +1358,30 @@ contains
         end do
         n_directories = kept
     end subroutine filter_module_dirs_for_compiler
+
+    subroutine append_module_dirs(found, n_found, directories, n_directories)
+        character(len=512), intent(in) :: found(:)
+        integer, intent(in) :: n_found
+        character(len=512), intent(inout) :: directories(MAX_DEP_DIRS)
+        integer, intent(inout) :: n_directories
+
+        integer :: i, j
+        logical :: duplicate
+
+        do i = 1, n_found
+            if (len_trim(found(i)) == 0) cycle
+            duplicate = .false.
+            do j = 1, n_directories
+                if (trim(directories(j)) /= trim(found(i))) cycle
+                duplicate = .true.
+                exit
+            end do
+            if (duplicate) cycle
+            if (n_directories >= MAX_DEP_DIRS) exit
+            n_directories = n_directories + 1
+            directories(n_directories) = found(i)
+        end do
+    end subroutine append_module_dirs
 
     function compiler_profile_prefix() result(prefix)
         !! Compiler-family token in an fpm profile directory.  fpm may wrap

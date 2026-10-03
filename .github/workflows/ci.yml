@@ -162,6 +162,7 @@ jobs:
           node test/test_fmt_cli.js
           node test/test_program_names_cli.js
           node test/test_dependency_membership_cli.js
+          node test/test_dependency_shadow_cli.js
           node test/test_platform_link_cli.js
 
       - name: Test atomic link artifact publication
