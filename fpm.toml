@@ -29,3 +29,10 @@ openmp = "*"
 implicit-typing = false
 implicit-external = false
 source-form = "free"
+
+# This test includes its interposition module in the program's compilation unit.
+# Explicit registration keeps fpm from linking that unit into other test mains.
+[[test]]
+name = "test_gremlin_generation"
+source-dir = "test"
+main = "test_gremlin_generation.f90"

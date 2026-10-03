@@ -1,8 +1,9 @@
 /* Direct process-provider regression: a filtered async owner starts commands
    through the same provider, and cancellation reaches its nested children.
    Build: cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function -o
-   /var/tmp/fo-nested-process-regression test/test_async_process_nested.c */
-#include "../src/proc/fo_process.c"
+   /var/tmp/fo-nested-process-regression \
+   test-fixtures/c/async_process_nested.c */
+#include "../../src/proc/fo_process.c"
 
 static void append_text(const char *path, const char *text) {
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0666);

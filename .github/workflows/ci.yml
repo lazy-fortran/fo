@@ -132,12 +132,26 @@ jobs:
           TMPDIR: /var/tmp
         run: node test/test_async_process_lifecycle.js "$(command -v fo)"
 
-      - name: Test nested process timeout containment
+      - name: Test standalone asynchronous process C fixtures
         run: |
           verifier_dir="$(mktemp -d)"
           trap 'rm -rf "$verifier_dir"' EXIT
+          fixture_dir=test-fixtures/c
           cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
-            test/test_async_process_nested_cancel.c \
+            "$fixture_dir/async_filter.c" -o "$verifier_dir/filter-native"
+          "$verifier_dir/filter-native"
+          for target in AARCH64 ARM X86_64 UNSUPPORTED; do
+            cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
+              "-DFO_ASYNC_TEST_$target" "$fixture_dir/async_filter.c" \
+              -o "$verifier_dir/filter-$target"
+            "$verifier_dir/filter-$target"
+          done
+          cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
+            "$fixture_dir/async_process_nested.c" \
+            -o "$verifier_dir/nested"
+          "$verifier_dir/nested"
+          cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
+            "$fixture_dir/async_process_nested_cancel.c" \
             -o "$verifier_dir/nested-cancel"
           "$verifier_dir/nested-cancel"
 

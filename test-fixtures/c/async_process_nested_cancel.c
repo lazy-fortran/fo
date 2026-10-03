@@ -1,6 +1,6 @@
 /* A filtered owner times out a double-forked command, then cancels one handle.
    Build with cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function. */
-#include "../src/proc/fo_process.c"
+#include "../../src/proc/fo_process.c"
 
 static void write_line(const char *path, const char *line) {
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0666);

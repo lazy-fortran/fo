@@ -1,6 +1,6 @@
 /* Evaluate the installed classic-BPF program against syscall records.
    Without a synthetic target, use the current Linux host architecture. */
-#include "../src/proc/fo_process.c"
+#include "../../src/proc/fo_process.c"
 
 #if !defined(FO_ASYNC_TEST_AARCH64) && !defined(FO_ASYNC_TEST_ARM) && \
     !defined(FO_ASYNC_TEST_X86_64) && !defined(FO_ASYNC_TEST_UNSUPPORTED)
