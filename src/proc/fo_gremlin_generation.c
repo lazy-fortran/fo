@@ -13,10 +13,14 @@
 
 #define FO_GENERATION_FORTRAN_PATH_LEN 4096
 
-static int excluded_name(const char *name) {
-    return strcmp(name, ".git") == 0 || strcmp(name, "build") == 0 ||
-           strcmp(name, ".hg") == 0 || strcmp(name, ".svn") == 0 ||
-           strcmp(name, ".bzr") == 0 || strcmp(name, ".gremlin") == 0;
+static int excluded_entry(const char *parent_rel, const char *name) {
+    if (strcmp(name, ".git") == 0 || strcmp(name, ".hg") == 0 ||
+        strcmp(name, ".svn") == 0 || strcmp(name, ".bzr") == 0 ||
+        strcmp(name, ".gremlin") == 0) {
+        return 1;
+    }
+    /* A build directory is an output only at the root of an input tree. */
+    return parent_rel[0] == '\0' && strcmp(name, "build") == 0;
 }
 
 static int validate_tree_root(const char *root) {
@@ -146,7 +150,7 @@ static int walk_tree(const char *root, const char *rel, const char *dest,
             int rc;
             const char *name = entries[i]->d_name;
             if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0 ||
-                excluded_name(name)) {
+                excluded_entry(rel, name)) {
                 free(entries[i]);
                 continue;
             }
@@ -281,7 +285,7 @@ static int freeze_tree_at(const char *root, const char *rel) {
             const char *name = entries[i]->d_name;
             int rc = 0;
             if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0 ||
-                excluded_name(name)) {
+                excluded_entry(rel, name)) {
                 free(entries[i]);
                 continue;
             }
@@ -312,6 +316,16 @@ static int freeze_tree_at(const char *root, const char *rel) {
 
 int fo_c_generation_freeze_tree(const char *root) {
     return freeze_tree_at(root, "") == 0 ? 0 : (errno == 0 ? 1 : errno);
+}
+
+int fo_c_generation_freeze_directory(const char *path) {
+    struct stat st;
+    if (lstat(path, &st) != 0) return errno == 0 ? 1 : errno;
+    if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) {
+        errno = ENOTDIR;
+        return errno;
+    }
+    return chmod(path, 0555) == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
 
 int fo_c_generation_lock(const char *path) {

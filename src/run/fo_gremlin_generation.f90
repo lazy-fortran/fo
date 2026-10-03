@@ -55,6 +55,12 @@ module fo_gremlin_generation
             character(kind=c_char), intent(in) :: root(*)
         end function fo_c_generation_freeze_tree
 
+        integer(c_int) function fo_c_generation_freeze_directory(path) &
+                bind(C, name='fo_c_generation_freeze_directory')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+        end function fo_c_generation_freeze_directory
+
         integer(c_int) function fo_c_generation_lock(path) &
                 bind(C, name='fo_c_generation_lock')
             import :: c_char, c_int
@@ -278,7 +284,11 @@ contains
             call validate_materialized(roots, tree_hashes, trim(cache), &
                 trim(capture_dir), matched, message)
             if (matched) then
-                crc = fo_c_generation_freeze_tree(trim(cache)//c_null_char)
+                call freeze_generation_inputs(trim(cache), roots, crc)
+                if (crc == 0) crc = fo_c_generation_freeze_tree( &
+                    trim(cache)//'/identity.txt'//c_null_char)
+                if (crc == 0) crc = fo_c_generation_freeze_directory( &
+                    trim(cache)//c_null_char)
                 if (crc == 0) then
                     ierr = 0
                     call remove_capture(manifests, n_roots, capture_dir)
@@ -320,7 +330,7 @@ contains
             call remove_one(manifest)
             call fs_make_dir(trim(dest)//'/build')
         end do
-        crc = fo_c_generation_freeze_tree(trim(stage)//'/bundle'//c_null_char)
+        call freeze_generation_inputs(trim(stage), roots, crc)
         if (crc /= 0) then
             message = 'could not make frozen input bundle immutable'
             call remove_capture(manifests, n_roots, capture_dir)
@@ -388,7 +398,11 @@ contains
             call validate_materialized(roots, tree_hashes, trim(cache), &
                 trim(capture_dir), matched, message)
             if (matched) then
-                crc = fo_c_generation_freeze_tree(trim(cache)//c_null_char)
+                call freeze_generation_inputs(trim(cache), roots, crc)
+                if (crc == 0) crc = fo_c_generation_freeze_tree( &
+                    trim(cache)//'/identity.txt'//c_null_char)
+                if (crc == 0) crc = fo_c_generation_freeze_directory( &
+                    trim(cache)//c_null_char)
                 if (crc == 0) then
                     ierr = 0
                 else
@@ -413,6 +427,29 @@ contains
         call fo_c_generation_unlock(int(fd, c_int))
         call remove_capture(manifests, n_roots, capture_dir)
     end subroutine generation_capture
+
+    subroutine freeze_generation_inputs(generation_root, roots, ierr)
+        character(len=*), intent(in) :: generation_root
+        type(generation_input_t), intent(in) :: roots(:)
+        integer(c_int), intent(out) :: ierr
+
+        character(len=PATH_LEN) :: input_root
+        integer :: i
+
+        ierr = 0
+        do i = 1, size(roots)
+            if (i == 1) then
+                input_root = trim(generation_root)//'/bundle/project'
+            else
+                input_root = trim(generation_root)//'/bundle/project/'// &
+                    trim(roots(i)%destination)
+            end if
+            ierr = fo_c_generation_freeze_tree(trim(input_root)//c_null_char)
+            if (ierr /= 0) return
+        end do
+        ierr = fo_c_generation_freeze_directory( &
+            trim(generation_root)//'/bundle'//c_null_char)
+    end subroutine freeze_generation_inputs
 
     subroutine hash_tree(root, manifest, digest, ierr, message)
         character(len=*), intent(in) :: root, manifest

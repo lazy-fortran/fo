@@ -48,7 +48,8 @@ program test_gremlin_generation
     character(len=256) :: message
     type(generation_context_t) :: context, race_context
     type(generation_t) :: first, reused, source_changed, include_changed
-    type(generation_t) :: dependency_changed, metadata_changed, race_generation
+    type(generation_t) :: dependency_changed, build_source_changed
+    type(generation_t) :: metadata_changed, race_generation
     type(generation_t) :: mode_changed, mode_restored
     type(generation_t) :: parallel_one, parallel_two
     logical :: exists
@@ -65,6 +66,7 @@ program test_gremlin_generation
     remove_rc = fo_c_generation_remove_stage(trim(root)//c_null_char)
     call check(remove_rc == 0, 'previous read-only fixture was removed')
     call fs_make_dir(trim(project)//'/src')
+    call fs_make_dir(trim(project)//'/src/build')
     call fs_make_dir(trim(project)//'/include')
     call fs_make_dir(trim(project)//'/build')
     call fs_make_dir(trim(project)//'/.gremlin')
@@ -74,6 +76,8 @@ program test_gremlin_generation
     call fs_make_dir(trim(project)//'/.bzr')
     call fs_make_dir(trim(dependency)//'/src')
     call fs_write_text(trim(project)//'/src/main.f90', 'program version_one')
+    call fs_write_text(trim(project)//'/src/build/fo_gremlin_provider.f90', &
+        'module generation_provider_v1')
     call fs_write_text(trim(project)//'/include/config.inc', 'include_one')
     call fs_write_text(trim(project)//'/build/old.o', 'transient')
     call fs_write_text(trim(project)//'/.gremlin/state', 'transient')
@@ -126,6 +130,13 @@ program test_gremlin_generation
             'published project inputs are read-only')
         call check(file_equals(trim(first%project_root)//'/src/main.f90', &
             'program version_one'), 'snapshot preserves original source')
+        call check(file_equals(trim(first%project_root)// &
+            '/src/build/fo_gremlin_provider.f90', &
+            'module generation_provider_v1'), &
+            'snapshot preserves source below src/build')
+        call check(c_access(trim(first%project_root)// &
+            '/src/build/fo_gremlin_provider.f90'//c_null_char, &
+            WRITE_ACCESS) /= 0, 'captured src/build source is read-only')
         call check(file_equals(trim(first%project_root)//'/include/config.inc', &
             'include_one'), 'snapshot preserves included input')
         call check(file_equals(trim(first%project_root)// &
@@ -179,13 +190,29 @@ program test_gremlin_generation
         dependency_changed%identity /= include_changed%identity, &
         'path dependency changes invalidate generation identity')
 
+    call fs_write_text(trim(project)//'/src/build/fo_gremlin_provider.f90', &
+        'module generation_provider_v2')
+    call generation_capture(trim(project), trim(cache), context, &
+        build_source_changed, race_ierr, message)
+    call check(race_ierr == 0 .and. &
+        build_source_changed%identity /= dependency_changed%identity, &
+        'src/build source changes invalidate generation identity')
+    call check(file_equals(trim(build_source_changed%project_root)// &
+        '/src/build/fo_gremlin_provider.f90', &
+        'module generation_provider_v2'), &
+        'new generation contains the edited src/build source')
+    call check(file_equals(trim(first%project_root)// &
+        '/src/build/fo_gremlin_provider.f90', &
+        'module generation_provider_v1'), &
+        'src/build edit leaves the older snapshot unchanged')
+
     source_file = trim(project)//'/src/main.f90'
     chmod_rc = c_chmod(trim(source_file)//c_null_char, MODE_EXEC)
     call check(chmod_rc == 0, 'source executable mode is set')
     call generation_capture(trim(project), trim(cache), context, mode_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
-        mode_changed%identity /= dependency_changed%identity, &
+        mode_changed%identity /= build_source_changed%identity, &
         'source executable mode changes invalidate generation identity')
     call check(c_access(trim(mode_changed%project_root)//'/src/main.f90'// &
         c_null_char, EXEC_ACCESS) == 0, &
@@ -198,7 +225,7 @@ program test_gremlin_generation
     call generation_capture(trim(project), trim(cache), context, mode_restored, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
-        mode_restored%identity == dependency_changed%identity, &
+        mode_restored%identity == build_source_changed%identity, &
         'restored file mode reuses its unchanged generation')
 
     context%inputs(1)%source_root = ''
@@ -211,35 +238,35 @@ program test_gremlin_generation
     call generation_capture(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
-        metadata_changed%identity /= dependency_changed%identity, &
+        metadata_changed%identity /= build_source_changed%identity, &
         'toolchain changes invalidate generation identity')
     context%toolchain = 'gfortran 14 test'
     context%flags = '-O2 -g'
     call generation_capture(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
-        metadata_changed%identity /= dependency_changed%identity, &
+        metadata_changed%identity /= build_source_changed%identity, &
         'compiler flag changes invalidate generation identity')
     context%flags = '-O0 -g'
     context%environment = 'OMP_NUM_THREADS=2'
     call generation_capture(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
-        metadata_changed%identity /= dependency_changed%identity, &
+        metadata_changed%identity /= build_source_changed%identity, &
         'environment changes invalidate generation identity')
     context%environment = 'OMP_NUM_THREADS=1'
     context%base_commit = 'different-base'
     call generation_capture(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
-        metadata_changed%identity /= dependency_changed%identity, &
+        metadata_changed%identity /= build_source_changed%identity, &
         'base commit changes invalidate generation identity')
     context%base_commit = 'base-commit'
     context%patch_digest = 'different-patch-digest'
     call generation_capture(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
-        metadata_changed%identity /= dependency_changed%identity, &
+        metadata_changed%identity /= build_source_changed%identity, &
         'patch digest changes invalidate generation identity')
 
     race_project = trim(root)//'/race-project'
@@ -262,7 +289,7 @@ program test_gremlin_generation
     call check(.not. has_staging_entries(trim(cache)), &
         'successful and rejected captures leave no staging artifacts')
     generation_count = count_generation_roots(trim(cache))
-    call check(generation_count <= 10, &
+    call check(generation_count <= 11, &
         'disk use tracks unique input generations rather than capture attempts')
     remove_rc = fo_c_generation_remove_stage(trim(root)//c_null_char)
     call check(remove_rc == 0, 'fixture data and generation CAS are cleaned up')
