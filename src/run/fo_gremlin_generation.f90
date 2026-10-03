@@ -23,6 +23,7 @@ module fo_gremlin_generation
         character(len=:), allocatable :: environment
         character(len=:), allocatable :: base_commit
         character(len=:), allocatable :: patch_digest
+        character(len=:), allocatable :: driver_digest
         type(generation_input_t), allocatable :: inputs(:)
     end type generation_context_t
 
@@ -30,6 +31,8 @@ module fo_gremlin_generation
         character(len=HASH_LEN) :: identity = ''
         character(len=PATH_LEN) :: root = ''
         character(len=PATH_LEN) :: project_root = ''
+        character(len=PATH_LEN) :: driver_path = ''
+        character(len=HASH_LEN) :: driver_digest = ''
         character(len=:), allocatable :: base_commit
         character(len=:), allocatable :: patch_digest
     end type generation_t
@@ -131,6 +134,7 @@ contains
         if (.not. identity_field_fits(context%toolchain) .or. &
             .not. identity_field_fits(context%flags) .or. &
             .not. identity_field_fits(context%environment) .or. &
+            .not. identity_field_fits(context%driver_digest) .or. &
             .not. identity_field_fits(context%base_commit) .or. &
             .not. identity_field_fits(context%patch_digest)) then
             message = 'generation identity field exceeds the supported length'
@@ -264,22 +268,26 @@ contains
             return
         end if
 
-        allocate (identity_parts(6 + 3 * n_roots))
+        allocate (identity_parts(5 + 3 * n_roots))
         identity_parts(1) = 'fo-gremlin-generation-v1'
         identity_parts(2) = value_or_empty(context%toolchain)
         identity_parts(3) = value_or_empty(context%flags)
         identity_parts(4) = value_or_empty(context%environment)
-        identity_parts(5) = value_or_empty(context%base_commit)
-        identity_parts(6) = value_or_empty(context%patch_digest)
+        identity_parts(5) = value_or_empty(context%driver_digest)
         do i = 1, n_roots
-            identity_parts(6 + 3 * i - 2) = trim(roots(i)%label)
-            identity_parts(6 + 3 * i - 1) = trim(roots(i)%destination)
-            identity_parts(6 + 3 * i) = tree_hashes(i)
+            identity_parts(5 + 3 * i - 2) = trim(roots(i)%label)
+            identity_parts(5 + 3 * i - 1) = trim(roots(i)%destination)
+            identity_parts(5 + 3 * i) = tree_hashes(i)
         end do
         generation%identity = cache_digest(identity_parts, size(identity_parts))
         cache = trim(base)//'/'//generation%identity
         generation%root = cache
         generation%project_root = trim(cache)//'/bundle/project'
+        generation%driver_digest = value_or_empty(context%driver_digest)
+        if (len_trim(generation%driver_digest) == HASH_LEN) then
+            generation%driver_path = trim(generation%project_root)// &
+                '/build/fo-gremlin-driver/fo'
+        end if
         generation%base_commit = value_or_empty(context%base_commit)
         generation%patch_digest = value_or_empty(context%patch_digest)
 
@@ -623,6 +631,7 @@ contains
             'toolchain='//value_or_empty(context%toolchain)//new_line('a')// &
             'flags='//value_or_empty(context%flags)//new_line('a')// &
             'environment='//value_or_empty(context%environment)//new_line('a')// &
+            'driver_digest='//value_or_empty(context%driver_digest)//new_line('a')// &
             'base_commit='//value_or_empty(context%base_commit)//new_line('a')// &
             'patch_digest='//value_or_empty(context%patch_digest)//new_line('a')
         do i = 1, size(roots)
