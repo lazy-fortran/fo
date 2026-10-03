@@ -5,7 +5,7 @@ program test_atomic_link_artifacts
     use fo_test_harness, only: assert_true, assert_equal_integer, assert_equal_string
     use fo_test_harness, only: assert_file_exists
     use fo_test_harness, only: finish_assertions, spawn_process, poll_process
-    use fo_test_harness, only: signal_process_group
+    use fo_test_harness, only: terminate_process_group
     use fo_test_cli, only: resolve_driver, run_fo, run_external
     implicit none
 
@@ -14,7 +14,8 @@ program test_atomic_link_artifacts
     character(:), allocatable :: path_value
     type(string_list_t) :: args, env
     type(process_result_t) :: result, external
-    integer :: child, status, archive_count
+    integer :: child = -1, status, archive_count
+    logical :: found
 
     call resolve_driver(driver)
     call make_scratch('fo-atomic-link-fortran', scratch)
@@ -55,7 +56,8 @@ program test_atomic_link_artifacts
     args = words(['build'])
     env = build_environment('delay')
     call spawn_process(command(driver, args), project, child, env)
-    call wait_for(marker, 100)
+    call wait_for(marker, 100, child, found)
+    call assert_true(found, 'archiver reached partial-output point')
     call assert_file_exists(marker, 'archiver reached partial-output point')
     call run_build('normal', result)
     call assert_process_ok(result, 'concurrent build consumer succeeds')
@@ -74,10 +76,11 @@ program test_atomic_link_artifacts
     args = words(['build'])
     env = build_environment('hold')
     call spawn_process(command(driver, args), project, child, env)
-    call wait_for(marker, 100)
+    call wait_for(marker, 100, child, found)
+    call assert_true(found, 'partial archiver entered hold mode')
     call assert_file_exists(marker, 'partial archiver entered hold mode')
-    call signal_process_group(child, 15)
-    call poll_until(child, status)
+    call terminate_process_group(child, status)
+    child = -1
     call assert_true(status < 0, 'interrupted producer exits by signal')
     call find_archive(archive, archive_count)
     call assert_equal_integer(archive_count, 2, &
@@ -88,6 +91,7 @@ program test_atomic_link_artifacts
     call assert_equal_string(result%stdout, '42' // new_line('a'), &
         'recovered archive links and runs')
 
+    if (child > 0) call cleanup_child()
     call remove_tree(scratch)
     call finish_assertions()
     write(*, '(a)') 'atomic-link-artifacts: warm, corrupt, concurrent and interrupted paths pass'
@@ -254,15 +258,23 @@ contains
         end if
     end function command
 
-    subroutine wait_for(path, limit)
+    subroutine wait_for(path, limit, process_id, found)
         character(len=*), intent(in) :: path
         integer, intent(in) :: limit
-        integer :: i
+        integer, intent(inout) :: process_id
+        logical, intent(out) :: found
+        integer :: i, ignored_status
 
+        found = .false.
         do i = 1, limit
-            if (file_exists(path)) return
+            if (file_exists(path)) then
+                found = .true.
+                return
+            end if
             call pause_briefly()
         end do
+        call terminate_process_group(process_id, ignored_status)
+        process_id = -1
     end subroutine wait_for
 
     subroutine pause_briefly()
@@ -272,17 +284,29 @@ contains
         call run_external('/bin/sleep', command, scratch, external)
     end subroutine pause_briefly
 
+    subroutine cleanup_child()
+        integer :: ignored_status
+
+        call terminate_process_group(child, ignored_status)
+        child = -1
+    end subroutine cleanup_child
+
     subroutine poll_until(process_id, exit_status)
-        integer, intent(in) :: process_id
+        integer, intent(inout) :: process_id
         integer, intent(out) :: exit_status
         integer :: i
 
         exit_status = 999
         do i = 1, 300
             call poll_process(process_id, exit_status)
-            if (exit_status /= 999) return
+            if (exit_status /= 999) then
+                process_id = -1
+                return
+            end if
             call pause_briefly()
         end do
+        call terminate_process_group(process_id, exit_status)
+        process_id = -1
         call assert_true(.false., 'fixture process completes before timeout')
     end subroutine poll_until
 

@@ -5,6 +5,9 @@ program test_archive_publication
     use fo_test_harness, only: assert_true, assert_equal_integer, assert_equal_string
     use fo_test_harness, only: assert_file_exists, finish_assertions
     use fo_test_harness, only: spawn_process, poll_process
+    use fo_test_harness, only: terminate_process_group
+    use fo_test_harness, only: read_text, process_alive, start_sentinel, stop_sentinel
+    use fo_test_harness, only: spawn_heartbeat_process
     use fo_test_cli, only: resolve_driver, run_fo, run_external, parse_json_report
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value
@@ -13,10 +16,12 @@ program test_archive_publication
     character(:), allocatable :: driver, scratch, project, cache, fake_bin, real_ar
     character(:), allocatable :: real_fc, real_gcc, archive, old_archive, marker, lib_dir, bin_dir
     character(:), allocatable :: digest_before
+    character(:), allocatable :: timeout_scratch, heartbeat, baseline
     type(string_list_t) :: args, env
     type(process_result_t) :: result, child_result, external
     type(json_value_t) :: report
-    integer :: child, status, count, before_calls
+    integer :: child = -1, status, count, before_calls, timed_child, sentinel
+    logical :: found
 
     call resolve_driver(driver)
     call make_scratch('fo-archive-publication-fortran', scratch)
@@ -115,7 +120,8 @@ program test_archive_publication
     call list_add(args, driver)
     call list_add(args, 'build')
     call spawn_process(args, project, child, env)
-    call wait_for(marker, 100)
+    call wait_for(marker, 100, child, found)
+    call assert_true(found, 'fake archiver holds a partial staged archive')
     call assert_file_exists(marker, 'fake archiver holds a partial staged archive')
     call find_output(lib_dir, 'objects_', '.a', archive, count)
     call assert_equal_integer(count, 0, 'partial bytes are hidden during publication')
@@ -160,7 +166,8 @@ program test_archive_publication
     call list_add(args, '--all')
     call list_add(args, '--json')
     call spawn_process(args, project, child, env)
-    call wait_for(marker, 150)
+    call wait_for(marker, 150, child, found)
+    call assert_true(found, 'shared linker pauses inside private stage')
     call assert_file_exists(marker, 'shared linker pauses inside private stage')
     call find_output(lib_dir, 'libproject_', '.so', archive, count)
     call assert_equal_integer(count, 0, 'partial shared library is not published')
@@ -220,6 +227,27 @@ program test_archive_publication
     call assert_true(log_lines(join_path(scratch, 'gcc.log')) > 0, &
         'native shared-link wrapper log records independent observations')
 
+    call make_scratch('fo-archive-timeout-cleanup', timeout_scratch)
+    heartbeat = join_path(timeout_scratch, 'heartbeat')
+    call start_sentinel(sentinel)
+    call spawn_heartbeat_process('heartbeat', timeout_scratch, child)
+    timed_child = child
+    call wait_for('never-created', 5, child, found)
+    call assert_true(.not. found, 'forced publication marker timeout is observed')
+    call assert_true(.not. process_alive(timed_child), &
+        'timed-out publication child is reaped')
+    baseline = read_text(heartbeat)
+    call pause()
+    call assert_equal_string(read_text(heartbeat), baseline, &
+        'publication heartbeat stops after timeout cleanup')
+    call assert_true(process_alive(sentinel), &
+        'unrelated sentinel survives publication group cleanup')
+    call stop_sentinel(sentinel)
+    call remove_tree(timeout_scratch)
+    call assert_true(.not. file_exists(timeout_scratch), &
+        'forced-timeout scratch is removed after child cleanup')
+
+    if (child > 0) call cleanup_child()
     call remove_tree(scratch)
     call finish_assertions()
     write(*, '(a)') 'archive-publication: archive, executable and shared output checks pass'
@@ -584,28 +612,49 @@ contains
         call assert_equal_integer(count, 0, 'owned temporary output directory is removed')
     end subroutine assert_no_stages
 
-    subroutine wait_for(path, limit)
+    subroutine wait_for(path, limit, process_id, found)
         character(len=*), intent(in) :: path
         integer, intent(in) :: limit
-        integer :: i
+        integer, intent(inout) :: process_id
+        logical, intent(out) :: found
+        integer :: i, ignored_status
+
+        found = .false.
         do i = 1, limit
-            if (file_exists(path)) return
+            if (file_exists(path)) then
+                found = .true.
+                return
+            end if
             call pause()
         end do
+        call terminate_process_group(process_id, ignored_status)
+        process_id = -1
     end subroutine wait_for
 
     subroutine poll_until(process_id, exit_status)
-        integer, intent(in) :: process_id
+        integer, intent(inout) :: process_id
         integer, intent(out) :: exit_status
         integer :: i
         exit_status = 999
         do i = 1, 300
             call poll_process(process_id, exit_status)
-            if (exit_status /= 999) return
+            if (exit_status /= 999) then
+                process_id = -1
+                return
+            end if
             call pause()
         end do
+        call terminate_process_group(process_id, exit_status)
+        process_id = -1
         call assert_true(.false., 'background publication process completes')
     end subroutine poll_until
+
+    subroutine cleanup_child()
+        integer :: ignored_status
+
+        call terminate_process_group(child, ignored_status)
+        child = -1
+    end subroutine cleanup_child
 
     subroutine pause()
         call run_external('/bin/sleep', words([character(len=16) :: '0.02']), scratch, external)
