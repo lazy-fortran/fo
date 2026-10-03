@@ -7,7 +7,8 @@ program test_gremlin_supervisor
     use fo_gremlin_state, only: gremlin_session_t, gremlin_session_acquire, &
         gremlin_session_publish, gremlin_session_read, gremlin_session_release, &
         gremlin_session_stop_requested
-    use fo_gremlin_supervisor, only: gremlin_handle, gremlin_release_stopped_session
+    use fo_gremlin_supervisor, only: gremlin_handle
+    use fo_gremlin_session, only: gremlin_release_stopped_session
     use fo_gremlin_request, only: gremlin_request_t, parse_request
     use fo_util, only: extract_json_field, make_tmpfile
     implicit none
