@@ -52,7 +52,8 @@ contains
 
     subroutine memo_hash_file(path, hash, ierr)
         !! sha256 of path, served from the memo when its complete stat key matches.
-        !! ierr is nonzero only when the file cannot be hashed at all.
+        !! ierr is nonzero when hashing fails or a stable snapshot cannot be
+        !! established within the bounded retry count.
         character(len=*), intent(in) :: path
         character(len=HASH_LEN), intent(out) :: hash
         integer, intent(out) :: ierr
@@ -70,7 +71,8 @@ contains
         stat_rc = fo_c_stat_change_fingerprint( &
             trim(path)//c_null_char, mt, ct, sz)
         if (stat_rc /= 0) then
-            call sha256_file(path, hash, ierr)
+            ierr = 1
+            hash = ''
         else
             slot = find_slot(path)
             cache_hit = .false.
@@ -116,11 +118,18 @@ contains
         hash = ''
         do attempt = 1, HASH_ATTEMPTS
             call sha256_file(path, hash, ierr)
-            if (ierr /= 0) return
+            if (ierr /= 0) then
+                hash = ''
+                return
+            end if
 
             stat_rc = fo_c_stat_change_fingerprint( &
                 trim(path)//c_null_char, after_mtime, after_ctime, after_size)
-            if (stat_rc /= 0) return
+            if (stat_rc /= 0) then
+                ierr = 1
+                hash = ''
+                return
+            end if
             if (mtime_ns == after_mtime .and. ctime_ns == after_ctime .and. &
                 size == after_size) then
                 stable = .true.
@@ -131,6 +140,8 @@ contains
             ctime_ns = after_ctime
             size = after_size
         end do
+        ierr = 1
+        hash = ''
     end subroutine hash_with_stable_stat
 
     integer function find_slot(path) result(slot)
@@ -234,8 +245,9 @@ contains
         !! Load persisted entries into the table. Caller holds the critical.
         character(len=PATH_LEN) :: file, path
         character(len=HASH_LEN) :: h
+        character(len=PATH_LEN * 2 + 256) :: line
         integer(c_long_long) :: mt, ct, sz
-        integer :: u, ios, slot
+        integer :: u, ios, line_ios, slot
 
         loaded = .true.
         call memo_file(file)
@@ -243,10 +255,14 @@ contains
         open (newunit=u, file=trim(file), status='old', iostat=ios)
         if (ios /= 0) return
         do
+            line = ''
+            read (u, '(a)', iostat=ios) line
+            if (ios < 0) exit
+            if (ios /= 0) exit
             h = ''
             path = ''
-            read (u, *, iostat=ios) mt, ct, sz, h, path
-            if (ios /= 0) exit
+            read (line, *, iostat=line_ios) mt, ct, sz, h, path
+            if (line_ios /= 0) cycle
             if (len_trim(h) /= HASH_LEN) cycle
             if (verify(trim(h), '0123456789abcdefABCDEF') /= 0) cycle
             if (len_trim(path) == 0) cycle
@@ -350,8 +366,20 @@ contains
     logical function rename_file(src, dst)
         use fo_fs, only: fs_rename
         character(len=*), intent(in) :: src, dst
-        integer :: rc
+        character(len=8) :: fail_publish
+        integer :: rc, env_status
 
+        !! Narrow fault-injection seam used by test_stat_memo to verify that a
+        !! fully written temporary is discarded while dirty state is retained.
+        fail_publish = ''
+        call get_environment_variable('FO_STAT_MEMO_TEST_FAIL_RENAME', &
+            fail_publish, status=env_status)
+        if (env_status == 0) then
+            if (trim(fail_publish) == '1') then
+                rename_file = .false.
+                return
+            end if
+        end if
         rc = fs_rename(src, dst)
         rename_file = rc == 0
     end function rename_file

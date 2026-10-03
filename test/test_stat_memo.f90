@@ -9,10 +9,12 @@ program test_stat_memo
     use fo_process, only: process_getpid, process_getcwd, process_start_argv_logged, &
         process_poll_pid, process_cancel_pid, process_exit, argv_push
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_sleep_ms, &
-        fs_stat, fs_collect_files
+        fs_stat, fs_collect_files, fs_rename
     implicit none
     integer, parameter :: CROSS_FILES = 1024
     integer, parameter :: CRASH_FILES = 16383
+    integer, parameter :: MUTATE_BYTES = 64 * 1024 * 1024
+    integer, parameter :: MUTATE_CHUNK = 4096
     integer :: n_pass, n_fail
     character(len=512) :: temp_root, cache_root, arg
     character(len=:), allocatable :: prior_cache
@@ -51,6 +53,10 @@ program test_stat_memo
         call run_crash_worker(worker_status)
         call process_exit(worker_status)
     end if
+    if (trim(arg) == '--mutate-worker') then
+        call run_mutate_worker(worker_status)
+        call process_exit(worker_status)
+    end if
 
     call get_environment_variable('FO_CACHE_DIR', length=env_len, &
         status=env_status)
@@ -71,6 +77,8 @@ program test_stat_memo
     call test_recomputes_on_change()
     call test_recomputes_after_same_size_restored_mtime()
     call test_persists_across_reset()
+    call test_malformed_rows_and_quoted_paths(trim(temp_root))
+    call test_unstable_mutation(trim(temp_root))
     call test_cross_process_publication(trim(temp_root))
     call test_killed_writer_recovery(trim(temp_root))
     call test_failed_publication_retry(trim(temp_root))
@@ -184,6 +192,167 @@ contains
         call assert(trim(h1) == trim(h2), 'reloaded hash matches pre-save')
         call fs_remove_file(trim(f))
     end subroutine test_persists_across_reset
+
+    subroutine test_malformed_rows_and_quoted_paths(root)
+        character(len=*), intent(in) :: root
+        character(len=512) :: cache, directory, memo_path, quoted_path
+        character(len=512) :: second_path, scratch, line, stored_path
+        character(len=64) :: memo_h, direct, stored_hash
+        integer :: ierr, direct_ierr, u, v, ios, count
+        integer(c_long_long) :: mt, ct, sz
+
+        cache = trim(root)//'/quoted-cache'
+        directory = trim(cache)//'/stat/v2'
+        memo_path = trim(directory)//'/memo'
+        quoted_path = trim(root)//"/it's a quoted path.dat"
+        second_path = trim(root)//'/second-source.dat'
+        scratch = trim(root)//'/memo-with-malformed-row'
+        call fs_make_dir(trim(cache))
+        call write_text(trim(quoted_path), 'quoted path payload')
+        call write_text(trim(second_path), 'second path payload')
+        call set_cache_root(trim(cache))
+        call memo_reset()
+        call memo_hash_file(trim(quoted_path), memo_h, ierr)
+        call assert(ierr == 0, 'hash path with spaces and apostrophe')
+        call memo_save()
+
+        open (newunit=u, file=trim(memo_path), status='old', iostat=ios)
+        open (newunit=v, file=trim(scratch), status='replace', &
+            action='write', iostat=direct_ierr)
+        call assert(ios == 0 .and. direct_ierr == 0, &
+            'open memo files to insert malformed numeric row')
+        if (ios == 0 .and. direct_ierr == 0) then
+            write (v, '(a)', iostat=direct_ierr) &
+                'bad-number 1 2 '//repeat('0', 64)//" 'malformed path'"
+            do
+                read (u, '(a)', iostat=ios) line
+                if (ios /= 0) exit
+                write (v, '(a)', iostat=direct_ierr) trim(line)
+                if (direct_ierr /= 0) exit
+            end do
+            close (u)
+            close (v)
+            call assert(ios < 0 .and. direct_ierr == 0, &
+                'write malformed row before the preserved valid row')
+            ios = fs_rename(trim(scratch), trim(memo_path))
+            call assert(ios == 0, 'replace memo with malformed-row fixture')
+        else
+            if (ios == 0) close (u)
+            if (direct_ierr == 0) close (v)
+        end if
+
+        call memo_reset()
+        call memo_hash_file(trim(second_path), memo_h, ierr)
+        call assert(ierr == 0, 'hash another entry after malformed row')
+        call memo_save()
+        count = 0
+        open (newunit=u, file=trim(memo_path), status='old', iostat=ios)
+        if (ios == 0) then
+            do
+                read (u, *, iostat=ios) mt, ct, sz, stored_hash, stored_path
+                if (ios /= 0) exit
+                count = count + 1
+                if (trim(stored_path) == trim(quoted_path)) then
+                    call sha256_file(trim(quoted_path), direct, direct_ierr)
+                    call assert(direct_ierr == 0 .and. &
+                        trim(stored_hash) == trim(direct), &
+                        'quoted path survives reload with known digest')
+                end if
+            end do
+            close (u)
+        end if
+        call assert(ios < 0 .and. count == 2, &
+            'malformed numeric row does not discard later valid rows')
+
+        call memo_reset()
+        call memo_hash_file(trim(quoted_path), memo_h, ierr)
+        call sha256_file(trim(quoted_path), direct, direct_ierr)
+        call assert(ierr == 0 .and. direct_ierr == 0 .and. &
+            trim(memo_h) == trim(direct), 'quoted path reload remains correct')
+        call set_cache_root(trim(root)//'/cache')
+        call memo_reset()
+    end subroutine test_malformed_rows_and_quoted_paths
+
+    subroutine test_unstable_mutation(root)
+        character(len=*), intent(in) :: root
+        character(len=512) :: cache, source, ready, stop_path, count_path
+        character(len=512) :: executable, cwd, log_file, memo_path
+        character(len=:), allocatable :: packed
+        character(len=64) :: expected_a, expected_b, hash, direct
+        integer :: pid, start_status, n_args, status, exitcode, ierr
+        integer :: direct_ierr, count_before, count_after, io_status
+        logical :: exists, done
+
+        cache = trim(root)//'/unstable-cache'
+        source = trim(root)//'/unstable-source.dat'
+        ready = trim(root)//'/mutator.ready'
+        stop_path = trim(root)//'/mutator.stop'
+        count_path = trim(root)//'/mutator.count'
+        log_file = trim(root)//'/mutator.log'
+        memo_path = trim(cache)//'/stat/v2/memo'
+        call fs_make_dir(trim(cache))
+        call write_sized_file(trim(source), MUTATE_BYTES, 'A')
+        call sha256_file(trim(source), expected_a, direct_ierr)
+        call write_block(trim(source), 'B')
+        call sha256_file(trim(source), expected_b, status)
+        call write_block(trim(source), 'A')
+        call assert(direct_ierr == 0 .and. status == 0, &
+            'prepare two known large-file digests')
+
+        call set_cache_root(trim(cache))
+        call memo_reset()
+        call get_command_argument(0, executable)
+        call process_getcwd(cwd, status)
+        packed = ''
+        n_args = 0
+        call argv_push(packed, n_args, trim(executable))
+        call argv_push(packed, n_args, '--mutate-worker')
+        call argv_push(packed, n_args, trim(source))
+        call argv_push(packed, n_args, trim(ready))
+        call argv_push(packed, n_args, trim(stop_path))
+        call argv_push(packed, n_args, trim(count_path))
+        call process_start_argv_logged(trim(cwd), packed, n_args, &
+            trim(log_file), pid, start_status)
+        call assert(status == 0 .and. start_status == 0 .and. pid > 0, &
+            'start concurrent large-file mutator')
+        if (pid <= 0 .or. start_status /= 0) then
+            call set_cache_root(trim(root)//'/cache')
+            call memo_reset()
+            return
+        end if
+
+        call wait_for_file(trim(ready), exists)
+        call assert(exists, 'large-file mutator reaches hashing barrier')
+        if (.not. exists) then
+            call process_cancel_pid(pid, status)
+            call set_cache_root(trim(root)//'/cache')
+            call memo_reset()
+            return
+        end if
+        call read_integer_file(trim(count_path), count_before, io_status)
+        call assert(io_status == 0, 'read initial mutation count')
+
+        call memo_hash_file(trim(source), hash, ierr)
+        call read_integer_file(trim(count_path), count_after, io_status)
+        call write_text(trim(stop_path), 'stop')
+        call wait_for_child(pid, done, exitcode)
+        call assert(ierr /= 0 .and. len_trim(hash) == 0, &
+            'unstable hash retries fail without exposing a digest')
+        call assert(io_status == 0 .and. count_after > count_before, &
+            'file changed repeatedly while bounded hashing ran')
+        call assert(done .and. exitcode == 0, 'mutator exits cleanly')
+
+        call sha256_file(trim(source), direct, direct_ierr)
+        call assert(direct_ierr == 0 .and. &
+            (trim(direct) == trim(expected_a) .or. &
+            trim(direct) == trim(expected_b)), &
+            'mutator leaves one of the two complete known file versions')
+        call memo_save()
+        inquire (file=trim(memo_path), exist=exists)
+        call assert(.not. exists, 'unstable digest was not persisted as an action')
+        call set_cache_root(trim(root)//'/cache')
+        call memo_reset()
+    end subroutine test_unstable_mutation
 
     subroutine test_cross_process_publication(root)
         character(len=*), intent(in) :: root
@@ -396,37 +565,158 @@ contains
 
     subroutine test_failed_publication_retry(root)
         character(len=*), intent(in) :: root
-        character(len=512) :: cache, blocker, source, memo_path
-        character(len=64) :: memo_h, direct
-        integer :: ierr
-        logical :: exists
+        character(len=512) :: cache, blocker, prior, source, later, memo_path
+        character(len=512) :: directory, stored_path, paths(8)
+        character(len=64) :: memo_h, direct, stored_hash
+        integer :: ierr, direct_ierr, env_status, u, ios, count, n_paths
+        integer(c_long_long) :: mt, ct, sz
+        logical :: exists, found_prior
 
         cache = trim(root)//'/retry-cache'
         blocker = trim(root)//'/not-a-directory'
+        prior = trim(root)//'/retry-prior.dat'
         source = trim(root)//'/retry-source.dat'
+        later = trim(root)//'/retry-later.dat'
+        directory = trim(cache)//'/stat/v2'
+        memo_path = trim(directory)//'/memo'
         call fs_make_dir(trim(cache))
         call write_text(trim(blocker), 'blocks parent directory creation')
+        call write_text(trim(prior), 'prior complete memo snapshot')
         call write_text(trim(source), 'retry after failed memo publication')
+        call write_text(trim(later), 'retry after directory failure')
         call set_cache_root(trim(cache))
         call memo_reset()
+        call memo_hash_file(trim(prior), memo_h, ierr)
+        call assert(ierr == 0, 'hash entry for prior snapshot')
+        call memo_save()
+
         call memo_hash_file(trim(source), memo_h, ierr)
         call assert(ierr == 0, 'hash entry before failed publication')
+        env_status = c_setenv('FO_STAT_MEMO_TEST_FAIL_RENAME'//c_null_char, &
+            '1'//c_null_char, 1_c_int)
+        call assert(env_status == 0, 'enable post-write rename failure')
+        call memo_save()
+        env_status = c_unsetenv('FO_STAT_MEMO_TEST_FAIL_RENAME'//c_null_char)
+        call assert(env_status == 0, 'disable post-write rename failure')
+
+        inquire (file=trim(memo_path), exist=exists)
+        call assert(exists, 'failed rename leaves prior memo file present')
+        count = 0
+        found_prior = .false.
+        if (exists) then
+            open (newunit=u, file=trim(memo_path), status='old', iostat=ios)
+            if (ios == 0) then
+                do
+                    read (u, *, iostat=ios) mt, ct, sz, stored_hash, stored_path
+                    if (ios /= 0) exit
+                    count = count + 1
+                    if (trim(stored_path) == trim(prior)) then
+                        found_prior = .true.
+                        call sha256_file(trim(prior), direct, direct_ierr)
+                        call assert(direct_ierr == 0 .and. &
+                            trim(stored_hash) == trim(direct), &
+                            'failed rename preserves prior snapshot digest')
+                    end if
+                end do
+                close (u)
+            end if
+        end if
+        call assert(ios < 0 .and. count == 1 .and. found_prior, &
+            'post-write rename failure preserves complete old snapshot')
+        call fs_collect_files(trim(directory), 'memo.tmp.', '', '', paths, &
+            n_paths, recursive=.false.)
+        call assert(n_paths == 0, 'failed rename removes its completed temporary')
+
+        call memo_save()
+        call memo_hash_file(trim(later), memo_h, ierr)
+        call assert(ierr == 0, 'hash another entry before parent-path failure')
         call set_cache_root(trim(blocker))
         call memo_save()
         call set_cache_root(trim(cache))
         call memo_save()
 
-        memo_path = trim(cache)//'/stat/v2/memo'
         inquire (file=trim(memo_path), exist=exists)
-        call assert(exists, 'dirty memo retries after failed publication')
+        call assert(exists, 'dirty memo retries after publication failures')
+        count = 0
+        if (exists) then
+            open (newunit=u, file=trim(memo_path), status='old', iostat=ios)
+            if (ios == 0) then
+                do
+                    read (u, *, iostat=ios) mt, ct, sz, stored_hash, stored_path
+                    if (ios /= 0) exit
+                    count = count + 1
+                end do
+                close (u)
+            end if
+        end if
+        call assert(ios < 0 .and. count == 3, &
+            'retries publish all entries after post-write and pre-open failures')
         call memo_reset()
+        call memo_hash_file(trim(prior), memo_h, ierr)
+        call sha256_file(trim(prior), direct, direct_ierr)
+        call assert(ierr == 0 .and. direct_ierr == 0 .and. &
+            trim(memo_h) == trim(direct), 'prior entry remains readable')
         call memo_hash_file(trim(source), memo_h, ierr)
-        call sha256_file(trim(source), direct, ierr)
-        call assert(ierr == 0 .and. trim(memo_h) == trim(direct), &
-            'memo remains readable after failed-writer recovery')
+        call sha256_file(trim(source), direct, direct_ierr)
+        call assert(ierr == 0 .and. direct_ierr == 0 .and. &
+            trim(memo_h) == trim(direct), 'first dirty entry survives retry')
+        call memo_hash_file(trim(later), memo_h, ierr)
+        call sha256_file(trim(later), direct, direct_ierr)
+        call assert(ierr == 0 .and. direct_ierr == 0 .and. &
+            trim(memo_h) == trim(direct), 'later dirty entry survives retry')
         call set_cache_root(trim(root)//'/cache')
         call memo_reset()
     end subroutine test_failed_publication_retry
+
+    subroutine run_mutate_worker(exitcode)
+        integer, intent(out) :: exitcode
+        character(len=512) :: source, ready, stop_path, count_path
+        character(len=MUTATE_CHUNK) :: chunk
+        integer :: u, ios, count
+        logical :: stop
+
+        exitcode = 1
+        call get_command_argument(2, source)
+        call get_command_argument(3, ready)
+        call get_command_argument(4, stop_path)
+        call get_command_argument(5, count_path)
+        open (newunit=u, file=trim(source), status='old', action='write', &
+            access='stream', form='unformatted', iostat=ios)
+        if (ios /= 0) return
+        chunk = repeat('B', MUTATE_CHUNK)
+        write (u, pos=1, iostat=ios) chunk
+        if (ios /= 0) then
+            close (u)
+            return
+        end if
+        flush (u, iostat=ios)
+        if (ios /= 0) then
+            close (u)
+            return
+        end if
+        count = 1
+        call write_integer_file(trim(count_path), count)
+        call write_text(trim(ready), 'ready')
+        do
+            inquire (file=trim(stop_path), exist=stop)
+            if (stop) exit
+            if (mod(count, 2) == 0) then
+                chunk = repeat('A', MUTATE_CHUNK)
+            else
+                chunk = repeat('B', MUTATE_CHUNK)
+            end if
+            write (u, pos=1, iostat=ios) chunk
+            if (ios /= 0) exit
+            flush (u, iostat=ios)
+            if (ios /= 0) exit
+            count = count + 1
+            call write_integer_file(trim(count_path), count)
+            call fs_sleep_ms(1)
+        end do
+        close (u, iostat=ios)
+        call write_integer_file(trim(count_path), count)
+        if (ios == 0) exitcode = 0
+    end subroutine run_mutate_worker
 
     subroutine run_concurrent_worker(exitcode)
         integer, intent(out) :: exitcode
@@ -589,6 +879,78 @@ contains
             trim(path)//c_null_char, 1_c_int)
         call assert(status == 0, 'set isolated FO_CACHE_DIR')
     end subroutine set_cache_root
+
+    subroutine write_sized_file(path, bytes, fill)
+        character(len=*), intent(in) :: path
+        integer, intent(in) :: bytes
+        character(len=1), intent(in) :: fill
+        character(len=:), allocatable :: contents
+        integer :: u, ios, close_ios
+
+        allocate (character(len=bytes) :: contents)
+        contents = repeat(fill, bytes)
+        open (newunit=u, file=trim(path), status='replace', action='write', &
+            access='stream', form='unformatted', iostat=ios)
+        if (ios /= 0) then
+            call assert(.false., 'open large test file for writing')
+            deallocate (contents)
+            return
+        end if
+        write (u, iostat=ios) contents
+        close (u, iostat=close_ios)
+        call assert(ios == 0 .and. close_ios == 0, &
+            'write large test file')
+        deallocate (contents)
+    end subroutine write_sized_file
+
+    subroutine write_block(path, fill)
+        character(len=*), intent(in) :: path
+        character(len=1), intent(in) :: fill
+        character(len=MUTATE_CHUNK) :: chunk
+        integer :: u, ios, close_ios
+
+        chunk = repeat(fill, MUTATE_CHUNK)
+        open (newunit=u, file=trim(path), status='old', action='write', &
+            access='stream', form='unformatted', iostat=ios)
+        if (ios /= 0) then
+            call assert(.false., 'open large test file to write one block')
+            return
+        end if
+        write (u, pos=1, iostat=ios) chunk
+        close (u, iostat=close_ios)
+        call assert(ios == 0 .and. close_ios == 0, &
+            'write known version of large test file')
+    end subroutine write_block
+
+    subroutine write_integer_file(path, value)
+        character(len=*), intent(in) :: path
+        integer, intent(in) :: value
+        integer :: u, ios
+
+        open (newunit=u, file=trim(path), status='replace', action='write', &
+            iostat=ios)
+        if (ios /= 0) return
+        write (u, '(i0)', iostat=ios) value
+        close (u, iostat=ios)
+    end subroutine write_integer_file
+
+    subroutine read_integer_file(path, value, status)
+        character(len=*), intent(in) :: path
+        integer, intent(out) :: value, status
+        integer :: u, attempt
+
+        value = -1
+        status = 1
+        do attempt = 1, 100
+            open (newunit=u, file=trim(path), status='old', iostat=status)
+            if (status == 0) then
+                read (u, *, iostat=status) value
+                close (u)
+                if (status == 0) return
+            end if
+            call fs_sleep_ms(1)
+        end do
+    end subroutine read_integer_file
 
     subroutine make_tmp_path(path, suffix)
         character(len=*), intent(out) :: path
