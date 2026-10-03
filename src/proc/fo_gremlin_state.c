@@ -42,7 +42,8 @@ static uint64_t hash_bytes(uint64_t h, const unsigned char *s) {
 int fo_gremlin_process_matches(int pid, const char *start);
 
 static int state_path(const char *project, const char *lane, char *out,
-                      size_t cap, char *canonical, size_t canonical_cap) {
+                      size_t cap, char *canonical, size_t canonical_cap,
+                      int create_dirs) {
     char resolved[PATH_MAX];
     const char *base = getenv("FO_GREMLIN_STATE_DIR");
     if (!base || !*base) base = getenv("XDG_CACHE_HOME");
@@ -62,7 +63,7 @@ static int state_path(const char *project, const char *lane, char *out,
     if (snprintf(out, cap, "%s/fo/gremlin/projects/%016llx/%016llx",
                  base, (unsigned long long)hp, (unsigned long long)hl) >= (int)cap)
         return ENAMETOOLONG;
-    return make_dirs(out);
+    return create_dirs ? make_dirs(out) : 0;
 }
 
 static int write_all(int fd, const char *s, size_t n) {
@@ -194,7 +195,8 @@ int fo_gremlin_session_acquire(const char *project, const char *lane,
         char *dir, int dircap, char *session, int sessioncap,
         int *lockfd, int *owner, int *pid, char *start, int startcap) {
     char canonical[PATH_MAX], lockpath[PATH_MAX];
-    int e = state_path(project, lane, dir, (size_t)dircap, canonical, sizeof(canonical));
+    int e = state_path(project, lane, dir, (size_t)dircap, canonical,
+                       sizeof(canonical), 1);
     if (e) return e;
     if (snprintf(lockpath, sizeof(lockpath), "%s/owner.lock", dir) >= (int)sizeof(lockpath))
         return ENAMETOOLONG;
@@ -274,7 +276,8 @@ int fo_gremlin_session_read(const char *project, const char *lane,
         char *dir, int dircap, char *session, int sessioncap,
         int *pid, char *start, int startcap, char *status, int statuscap) {
     char canonical[PATH_MAX], owner[128], ownerstart[64];
-    int e = state_path(project, lane, dir, (size_t)dircap, canonical, sizeof(canonical));
+    int e = state_path(project, lane, dir, (size_t)dircap, canonical,
+                       sizeof(canonical), 0);
     if (e) return e;
     e = read_owner(dir, owner, sizeof(owner), pid, ownerstart, sizeof(ownerstart));
     if (e) return e;
@@ -309,7 +312,8 @@ int fo_gremlin_session_request_stop(const char *project, const char *lane,
         const char *session) {
     char dir[PATH_MAX], canonical[PATH_MAX], id[128], start[64];
     int pid = 0;
-    int e = state_path(project, lane, dir, sizeof(dir), canonical, sizeof(canonical));
+    int e = state_path(project, lane, dir, sizeof(dir), canonical,
+                       sizeof(canonical), 0);
     if (e) return e;
     e = read_owner(dir, id, sizeof(id), &pid, start, sizeof(start));
     if (e) return e;

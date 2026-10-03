@@ -109,10 +109,13 @@ contains
     end subroutine test_strict_request_validation
 
     subroutine test_unknown_terminal_read_is_side_effect_free()
-        character(len=512) :: state_root, project_dir
+        type(gremlin_session_t) :: session
+        character(len=512) :: state_root, project_dir, message
+        character(len=2048) :: live_status
         character(kind=c_char) :: status(65536), journal(4097)
         integer(c_int) :: c_error
-        integer :: ierr
+        character(len=:), allocatable :: response_json
+        integer :: ierr, exitcode, release_error
         logical :: directory_exists
 
         call make_tmpfile('fo-gremlin-unknown-state', state_root)
@@ -124,6 +127,15 @@ contains
         inquire (file=trim(state_root)//'/fo/gremlin/.', exist=directory_exists)
         call check(.not. directory_exists, 'starts with no Gremlin state directories')
 
+        call gremlin_handle('status', trim(project_dir), &
+            '{"lane_id":"unknown","session_id":"unknown-session"}', &
+            response_json, exitcode)
+        call check(exitcode /= 0 .and. index(response_json, 'error') > 0, &
+            'public status reports an unknown session as missing')
+        inquire (file=trim(state_root)//'/fo/gremlin/.', exist=directory_exists)
+        call check(.not. directory_exists, &
+            'public unknown-session status leaves the state tree absent')
+
         status = c_null_char
         journal = c_null_char
         c_error = c_terminal_read(trim(project_dir)//c_null_char, 'unknown'//c_null_char, &
@@ -133,6 +145,26 @@ contains
         inquire (file=trim(state_root)//'/fo/gremlin/.', exist=directory_exists)
         call check(.not. directory_exists, &
             'unknown terminal read leaves the state tree absent')
+
+        call gremlin_session_acquire(trim(project_dir), 'unknown', session, &
+            ierr, message)
+        call check(ierr == 0 .and. session%owner, &
+            'creates a real session after the missing lookup')
+        if (ierr == 0) then
+            live_status = '{"protocol":1,"session_id":"'// &
+                trim(session%session_id)//'","lane_id":"unknown","state":"testing"}'
+            call gremlin_session_publish(session, trim(live_status), ierr, message)
+            call check(ierr == 0, 'publishes real session status')
+            call gremlin_handle('status', trim(project_dir), &
+                '{"lane_id":"unknown","session_id":"'// &
+                trim(session%session_id)//'"}', response_json, exitcode)
+            call check(exitcode == 0 .and. &
+                index(response_json, trim(session%session_id)) > 0 .and. &
+                index(response_json, '"state":"testing"') > 0, &
+                'public status reads the existing session')
+            call gremlin_session_release(session, release_error, message)
+            call check(release_error == 0, 'releases real session after status read')
+        end if
         call fs_remove_tree(trim(state_root))
         call fs_remove_tree(trim(project_dir))
     end subroutine test_unknown_terminal_read_is_side_effect_free
@@ -423,7 +455,11 @@ contains
         call gremlin_session_acquire(trim(project_dir), 'final-write', session, &
             ierr, message)
         call check(ierr == 0 .and. session%owner, 'creates owner for final publication')
-        if (ierr /= 0) return
+        if (ierr /= 0) then
+            call fs_remove_tree(trim(state_root))
+            call fs_remove_tree(trim(project_dir))
+            return
+        end if
         prior_status = '{"protocol":1,"session_id":"'//trim(session%session_id)// &
             '","lane_id":"final-write","state":"testing"}'
         call gremlin_session_publish(session, trim(prior_status), ierr, message)
