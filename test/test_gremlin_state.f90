@@ -1,8 +1,19 @@
 program test_gremlin_state
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: output_unit
     use fo_gremlin_state
+    use fo_gremlin_generation, only: generation_context_t, generation_t, &
+        generation_capture
     use fo_process, only: process_getpid
     implicit none
+
+    interface
+        integer(c_int) function fo_c_generation_list_tree(root, manifest) &
+                bind(C, name='fo_c_generation_list_tree')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: root(*), manifest(*)
+        end function fo_c_generation_list_tree
+    end interface
 
     integer :: n_pass = 0, n_fail = 0
     character(len=4096) :: arg, executable
@@ -41,13 +52,21 @@ program test_gremlin_state
         call lease_child(trim(lane), trim(ready), trim(gate), trim(result), &
             trim(done))
         stop
+    case ('--generation-lease-child')
+        call get_command_argument(2, lane)
+        call get_command_argument(3, ready)
+        call get_command_argument(4, gate)
+        call get_command_argument(5, result)
+        call generation_lease_child(trim(lane), trim(ready), trim(gate), &
+            trim(result))
+        stop
     end select
 
     call get_command_argument(0, executable)
     call test_concurrent_sessions(trim(executable))
     call test_stale_owner_recovery(trim(executable))
     call test_capacity_leases(trim(executable))
-    call test_generation_pins()
+    call test_generation_pins(trim(executable))
     call test_root(root)
     call execute_command_line('rm -rf '//trim(root))
 
@@ -219,37 +238,156 @@ contains
         call wait_file(trim(root)//'/lease-4.result.released', 500)
     end subroutine test_capacity_leases
 
-    subroutine test_generation_pins()
-        character(len=128) :: root, generation_id
+    subroutine test_generation_pins(exe)
+        character(len=*), intent(in) :: exe
+        character(len=256) :: root, project, cache, source, manifest_before
+        character(len=256) :: manifest_after, actual_root, lease_ready
+        character(len=256) :: lease_gate, lease_result
         character(len=256) :: message
-        integer :: ierr
-        type(gremlin_lease_t) :: lease
+        integer :: ierr, u, child_error, ios
+        integer(c_int) :: list_rc
+        type(generation_context_t) :: context
+        type(generation_t) :: generation
+        logical :: exists
 
         call test_root(root)
-        block
-            integer :: stamp
-            call system_clock(count=stamp)
-            write (generation_id, '(a,i0,a,i0)') 'pinned-', process_getpid(), '-', stamp
-        end block
-        call gremlin_generation_register(trim(generation_id), ierr, message)
-        call assert(ierr == 0, 'generated snapshot registers')
-        call gremlin_generation_pin(trim(generation_id), .true., ierr, message)
-        call assert(ierr == 0, 'generated snapshot pins')
-        call gremlin_generation_prune(trim(generation_id), ierr, message)
-        call assert(ierr /= 0, 'pinned generation cannot be pruned')
-        call gremlin_generation_pin(trim(generation_id), .false., ierr, message)
-        call assert(ierr == 0, 'generated snapshot unpins')
-        call gremlin_generation_lease_acquire(trim(generation_id), lease, ierr, message)
-        call assert(ierr == 0, 'active generation lease is acquired')
-        call gremlin_generation_prune(trim(generation_id), ierr, message)
-        call assert(ierr /= 0, 'leased generation cannot be pruned')
-        call gremlin_lease_release(lease, ierr, message)
-        call assert(ierr == 0, 'generation lease releases')
-        call gremlin_generation_prune(trim(generation_id), ierr, message)
-        call assert(ierr == 0, 'unleased, unpinned generation prunes')
-        call gremlin_generation_lease_acquire(trim(generation_id), lease, ierr, message)
-        call assert(ierr /= 0, 'pruned generation is no longer leasable')
+        root = trim(root)//'/generation_fixture'
+        project = trim(root)//'/project'
+        cache = trim(root)//'/cache'
+        source = trim(project)//'/src/main.f90'
+        call execute_command_line('mkdir -p '//trim(project)//'/src')
+        open (newunit=u, file=trim(source), status='replace')
+        write (u, '(a)') 'program immutable_generation_fixture'
+        write (u, '(a)') 'end program immutable_generation_fixture'
+        close (u)
+        context%toolchain = 'state integration fixture'
+        context%flags = '-O0'
+        context%environment = 'test'
+        context%base_commit = 'state-fixture'
+        context%patch_digest = trim(root)
+        call generation_capture(trim(project), trim(cache), context, generation, &
+            ierr, message)
+        call assert(ierr == 0, 'actual generation provider publishes immutable snapshot')
+        if (ierr /= 0) then
+            write (output_unit, '(a)') trim(message)
+            return
+        end if
+
+        manifest_before = trim(root)//'/before.list'
+        manifest_after = trim(root)//'/after.list'
+        list_rc = fo_c_generation_list_tree(trim(generation%root)//c_null_char, &
+            trim(manifest_before)//c_null_char)
+        call assert(list_rc == 0, 'immutable snapshot manifest is captured')
+
+        call gremlin_generation_register_at(trim(generation%root), ierr, message)
+        call assert(ierr == 0, 'actual immutable snapshot registers through sidecar')
+        call gremlin_generation_root(trim(generation%identity), actual_root, ierr, message)
+        call assert(ierr == 0 .and. trim(actual_root) == trim(generation%root), &
+            'generation identity resolves to its canonical snapshot root')
+        call gremlin_generation_pin_at(trim(generation%root), .true., ierr, message)
+        call assert(ierr == 0, 'immutable generation pins outside the bundle')
+        call gremlin_generation_pin(trim(generation%identity), .true., ierr, message)
+        call assert(ierr == 0, 'generation ID pin resolves to its sidecar')
+        call gremlin_generation_prune_at(trim(generation%root), ierr, message)
+        call assert(ierr /= 0, 'pinned immutable generation cannot be pruned')
+        inquire (file=trim(generation%root), exist=exists)
+        call assert(exists, 'pinned immutable generation remains on disk')
+        call gremlin_generation_pin(trim(generation%identity), .false., ierr, message)
+        call assert(ierr == 0, 'immutable generation unpins outside the bundle')
+        lease_ready = trim(root)//'/lease.ready'
+        lease_gate = trim(root)//'/lease.go'
+        lease_result = trim(root)//'/lease.result'
+        call start_generation_lease_child(exe, trim(generation%root), &
+            trim(lease_ready), trim(lease_gate), trim(lease_result))
+        call wait_file(trim(lease_result), 500)
+        call wait_file(trim(lease_ready), 500)
+        open (newunit=u, file=trim(lease_result), status='old', iostat=ios)
+        if (ios == 0) read (u, *, iostat=ios) child_error
+        if (ios == 0) close (u)
+        if (ios /= 0) child_error = ios
+        call assert(child_error == 0, 'separate process acquires immutable generation lease')
+        if (child_error /= 0) return
+        call gremlin_generation_prune(trim(generation%identity), ierr, message)
+        call assert(ierr /= 0, 'active lease prevents immutable generation pruning')
+        inquire (file=trim(generation%root), exist=exists)
+        call assert(exists, 'leased immutable generation remains on disk')
+        call touch(trim(lease_gate))
+        call wait_file(trim(lease_result)//'.released', 500)
+
+        list_rc = fo_c_generation_list_tree(trim(generation%root)//c_null_char, &
+            trim(manifest_after)//c_null_char)
+        call assert(list_rc == 0, 'snapshot remains readable after state operations')
+        call assert(manifests_equal(trim(manifest_before), trim(manifest_after)), &
+            'registration, pinning, leasing, and unpinning leave bundle unchanged')
+
+        call gremlin_generation_prune_at(trim(generation%root), ierr, message)
+        call assert(ierr == 0, 'released immutable generation prunes successfully')
+        inquire (file=trim(generation%root), exist=exists)
+        call assert(.not. exists, 'successful prune removes sealed snapshot tree')
+        call gremlin_generation_root(trim(generation%identity), actual_root, ierr, message)
+        call assert(ierr /= 0, 'pruned generation no longer resolves from sidecar')
+        call execute_command_line('rm -rf '//trim(root))
     end subroutine test_generation_pins
+
+    subroutine generation_lease_child(snapshot_root, ready_file, gate_file, result_file)
+        character(len=*), intent(in) :: snapshot_root, ready_file, gate_file
+        character(len=*), intent(in) :: result_file
+        type(gremlin_lease_t) :: lease
+        character(len=256) :: message
+        integer :: ierr, u
+
+        call gremlin_generation_lease_acquire_at(snapshot_root, lease, ierr, message)
+        open (newunit=u, file=result_file, status='replace')
+        write (u, '(i0)') ierr
+        close (u)
+        call touch(ready_file)
+        if (ierr /= 0) return
+        call wait_file(gate_file, 1000)
+        call gremlin_lease_release(lease, ierr, message)
+        call touch(trim(result_file)//'.released')
+    end subroutine generation_lease_child
+
+    subroutine start_generation_lease_child(exe, snapshot_root, ready_file, &
+            gate_file, result_file)
+        character(len=*), intent(in) :: exe, snapshot_root, ready_file, gate_file
+        character(len=*), intent(in) :: result_file
+        character(len=2048) :: command
+        integer :: cmd_status
+
+        command = '"'//trim(exe)//'" --generation-lease-child "'// &
+            trim(snapshot_root)//'" "'//trim(ready_file)//'" "'// &
+            trim(gate_file)//'" "'//trim(result_file)// &
+            '" >/dev/null 2>&1 &'
+        call execute_command_line(trim(command), cmdstat=cmd_status)
+        call assert(cmd_status == 0, 'generation lease worker starts')
+    end subroutine start_generation_lease_child
+
+    logical function manifests_equal(first, second)
+        character(len=*), intent(in) :: first, second
+        character(len=4096) :: line_first, line_second
+        integer :: unit_first, unit_second, ios_first, ios_second
+
+        manifests_equal = .false.
+        open (newunit=unit_first, file=first, status='old', iostat=ios_first)
+        if (ios_first /= 0) return
+        open (newunit=unit_second, file=second, status='old', iostat=ios_second)
+        if (ios_second /= 0) then
+            close (unit_first)
+            return
+        end if
+        do
+            read (unit_first, '(a)', iostat=ios_first) line_first
+            read (unit_second, '(a)', iostat=ios_second) line_second
+            if (ios_first /= ios_second) exit
+            if (ios_first /= 0) then
+                manifests_equal = ios_first < 0
+                exit
+            end if
+            if (line_first /= line_second) exit
+        end do
+        close (unit_first)
+        close (unit_second)
+    end function manifests_equal
 
     subroutine session_child(lane_id, ready_file, gate_file, result_file, done_file, seen_file)
         character(len=*), intent(in) :: lane_id, ready_file, gate_file, result_file
