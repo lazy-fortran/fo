@@ -458,13 +458,14 @@ static void record_timeout(struct run_budget *budget, int kind,
         (long long)(now->tv_nsec - start->tv_nsec) / 1000000LL;
 }
 
-/* SIGTERM the child's process group, give it up to three seconds to exit,
-   then SIGKILL the group and reap the child. */
-static void kill_group_and_reap(pid_t pid, int *status) {
+/* SIGTERM the child or its isolated group, give it up to three seconds to
+   exit, then SIGKILL the same target and reap the child. */
+static void kill_group_and_reap(pid_t pid, int *status, int isolated_group) {
     int reaped = 0;
     pid_t waited;
+    pid_t target = isolated_group ? -pid : pid;
 
-    kill(-pid, SIGTERM);
+    kill(target, SIGTERM);
     for (int k = 0; k < 15; k++) {
         waited = waitpid(pid, status, WNOHANG);
         if (waited == pid) {
@@ -474,7 +475,7 @@ static void kill_group_and_reap(pid_t pid, int *status) {
         if (waited < 0 && errno != EINTR) break;
         sleep_ms(200);
     }
-    kill(-pid, SIGKILL);
+    kill(target, SIGKILL);
     if (!reaped) {
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
         }
@@ -488,6 +489,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
     int status;
     int pid_fd = -1;
     int spawn_error;
+    int isolated_group = 1;
     int attrs_ready = 0;
     char **child_env = NULL;
     posix_spawn_file_actions_t actions;
@@ -537,6 +539,21 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
         spawn_error = posix_spawnp(&pid, argv[0], &actions, &attrs, argv,
                                    child_env ? child_env : environ);
     }
+    /* A nested async job has a stricter inherited filter: its synchronous
+       children stay in that job's group so its handle can cancel the tree. */
+#ifdef __linux__
+    if (spawn_error == EPERM && prctl(PR_GET_SECCOMP, 0, 0, 0, 0) == 2) {
+        if (attrs_ready) posix_spawnattr_destroy(&attrs);
+        attrs_ready = 0;
+        spawn_error = posix_spawnattr_init(&attrs);
+        if (spawn_error == 0) {
+            attrs_ready = 1;
+            spawn_error = posix_spawnp(&pid, argv[0], &actions, &attrs, argv,
+                                       child_env ? child_env : environ);
+            if (spawn_error == 0) isolated_group = 0;
+        }
+    }
+#endif
     posix_spawn_file_actions_destroy(&actions);
     if (attrs_ready) posix_spawnattr_destroy(&attrs);
     free_env_with_extra(child_env);
@@ -614,7 +631,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
             clock_gettime(CLOCK_MONOTONIC, &now);
             if (timespec_at_or_after(&now, &deadline)) {
                 record_timeout(budget, 2, child_cpu_ms(pid), &start, &now);
-                kill_group_and_reap(pid, &status);
+                kill_group_and_reap(pid, &status, isolated_group);
                 if (pid_fd >= 0) close(pid_fd);
                 return 124;
             }
@@ -622,7 +639,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                 long long used = child_cpu_ms(pid);
                 if (used < 0 || used >= (long long)cpu_s * 1000LL) {
                     record_timeout(budget, used < 0 ? 3 : 1, used, &start, &now);
-                    kill_group_and_reap(pid, &status);
+                    kill_group_and_reap(pid, &status, isolated_group);
                     if (pid_fd >= 0) close(pid_fd);
                     return 124;
                 }
@@ -944,12 +961,15 @@ static const struct sock_filter async_group_filter[] = {
 };
 #endif
 
-static int install_async_group_containment(void) {
+static int install_async_group_containment(int strict_group) {
 #if defined(__linux__) && FO_ASYNC_AUDIT_ARCH != 0
+    struct sock_filter filter[sizeof(async_group_filter) /
+                              sizeof(async_group_filter[0])];
     struct sock_fprog program = {
         (unsigned short)(sizeof(async_group_filter) / sizeof(async_group_filter[0])),
-        (struct sock_filter *)async_group_filter
+        filter
     };
+    size_t i;
 #if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
     int fd = (int)syscall(SYS_pidfd_open, getpid(), 0);
     int probe_error;
@@ -963,11 +983,26 @@ static int install_async_group_containment(void) {
     return ENOTSUP;
 #endif
 
+    memcpy(filter, async_group_filter, sizeof(filter));
+    if (strict_group) {
+        for (i = 0; i + 1 < program.len; i++) {
+            if (filter[i].code == (BPF_JMP | BPF_JEQ | BPF_K) &&
+                filter[i].k == FO_ASYNC_NATIVE_SETPGID &&
+                filter[i + 1].k == SECCOMP_RET_ALLOW) {
+                filter[i + 1].k = SECCOMP_RET_ERRNO |
+                                  (EPERM & SECCOMP_RET_DATA);
+                break;
+            }
+        }
+        if (i + 1 >= program.len) return EINVAL;
+    }
+
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return errno;
     if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) != 0) return errno;
     return 0;
 #else
     /* Without an inherited group-escape barrier, do not claim tree ownership. */
+    (void)strict_group;
     return ENOTSUP;
 #endif
 }
@@ -1372,15 +1407,17 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
         return;
     }
     if (pid == 0) {
-        int fd, release;
+        int fd, release, nested = 0;
         close(ready_pipe[0]);
         close(gate_pipe[1]);
         if (setsid() < 0) {
             /* The inherited owner filter keeps this child in its session.
                A fresh process group gives the nested job its own handle. */
             if (errno != EPERM || setpgid(0, 0) != 0) child_error = errno;
+            else nested = 1;
         }
-        if (child_error == 0) child_error = install_async_group_containment();
+        if (child_error == 0)
+            child_error = install_async_group_containment(nested);
         if (child_error == 0 && has_text(cwd) && chdir(cwd) != 0) {
             child_error = errno;
         }

@@ -54,7 +54,7 @@ static void expect(unsigned int arch, int nr, unsigned int result) {
 
 int main(void) {
 #if defined(FO_ASYNC_TEST_UNSUPPORTED)
-    if (install_async_group_containment() != ENOTSUP) return 1;
+    if (install_async_group_containment(0) != ENOTSUP) return 1;
     puts("unsupported architecture: ENOTSUP");
 #elif defined(FO_ASYNC_TEST_AARCH64) || defined(FO_ASYNC_TEST_ARM)
     const unsigned int denied = SECCOMP_RET_ERRNO | EPERM;
