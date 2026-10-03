@@ -2,6 +2,21 @@
 
 Fortran build cache, incremental rebuild, affected-test selection, MCP server.
 
+## Gremlin mode and plans
+
+Read [PLAN.md](PLAN.md) for the complete Gremlin provider/bootstrapping plan,
+[ROADMAP.md](ROADMAP.md) for adjacent ownership, and workspace master PLAN/AGENTS
+when available. Current delivery is plans only; implementation/tests need a later
+explicit user instruction. Parallel mode uses a luna coordinator and isolated
+luna workers; serial mode stays in the main session without subagents. Repeated
+single-task escalation uses native Sol in parallel or the GPT skill in serial.
+
+Gremlin uses one shared CLI/MCP/background engine. Use the updated CLI after fixes
+if MCP cannot reload. Fix fo workflow problems rather than bypassing them. Keep
+worker worktrees/builds isolated, attach concurrent same-place starts to one owner,
+preserve complete CAS keys/atomic link artifacts and bound generated disk use.
+Only the controller promotes main or the globally installed tool.
+
 ## Build and Test
 
 Use `fo` for every edit/build/test loop. Never call `fpm`, `make`,

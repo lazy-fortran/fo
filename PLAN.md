@@ -1,0 +1,442 @@
+# fo Gremlin implementation plan
+
+Updated 2026-10-03; planning input `2e781fdf79db869470849a199fb25ba36476c7c7`.
+This is the complete provider plan for Gremlin, fo's continuous randomized
+regression-testing engine and serial/parallel worker controls. The
+[ffc roadmap](https://github.com/lazy-fortran/ffc/blob/main/PLAN.md) depends on
+this stage **before further compiler work**. This document is a plan; new
+interfaces below are proposed, not implemented by this documentation change.
+
+## Goal and smallest architecture
+
+Run useful tests continuously while humans or coding workers prepare the next
+change. Test immutable generations, keep the last compilable generation running
+through failed candidate builds, and preempt obsolete tests immediately when a
+new successfully built generation is ready. Preserve every completed observation
+and rerun old failures first against the newest generation. Editing never waits
+for a whole suite.
+
+Use **one shared engine**, one owned supervisor per project session, and thin
+CLI/MCP adapters. Reuse fo's dependency DAG, action cache, process layer, project
+locks and dispatcher. No separate ffc scheduler, provider-specific daemon,
+second test runner or model-driven per-test polling loop is needed. Gremlin is
+continuous randomized testing, not fault-injection chaos engineering or input
+fuzzing. Start with a small working serial service; add capacity using the same
+state machine rather than a parallel-only rewrite.
+
+## Project map and current mechanisms
+
+| Area | Current files and behavior |
+| --- | --- |
+| CLI | `app/main.f90`; `fo test --random N --seed S`, named/all and `--only-changed` exist; random cannot yet combine with names/affected selection. |
+| Selection | `src/check/fo_test_random.f90`; seeded sampling without replacement. Sampling membership and actual execution order are distinct. |
+| Build/test | `src/build/fo_build_backend.f90`, `fo_gfortran_build.f90`; DAG/action caches and FO_JOBS; native team verdict reporting waits for the team. |
+| Async queue | `src/run/fo_run_queue.f90`; one pending request coalesces but waits for active completion. |
+| Watch | `src/watch/fo_watch.f90`; blocks in check and watches Fortran suffixes. |
+| MCP | `src/mcp/fo_mcp.f90`; async check/status/diagnostics/cancel exists, test is synchronous, selection fields are missing, progress polling depends on new requests. |
+| Process lifecycle | `src/proc/fo_process.c` and `.f90`; asynchronous cancel signals the parent and can wait indefinitely; bounded synchronous group termination is a reusable starting point. |
+| State/output | `src/check/fo_test_results.f90`, `fo_check_output.f90`, `src/lock/fo_lock.f90`; JSON truncation and receipt durability need behavioral verification. |
+| Shared cache | `src/cache/fo_cache.f90`; FO_CACHE_DIR or the normal user cache; atomic action publication and complete action keys must remain authoritative. |
+
+Read `CLAUDE.md`, this plan, the active issue and its verifier first. Load the
+relevant portions of `doc/FO.md` when a public build/cache/process contract is
+changed. New cohesive modules may live under `src/run/`; avoid expanding
+`app/main.f90` or `fo_mcp.f90` into independent scheduler implementations.
+
+## Public interface and parity
+
+Keep the public controls small. Proposed CLI:
+
+```bash
+fo gremlin                          # start/attach; promptly return owner ID
+fo gremlin start --background        # owned detached supervisor
+fo gremlin status --json
+fo gremlin wait --failure --json     # cursor-based bounded/event wait
+fo gremlin failures --json
+fo gremlin reproduce ID
+fo gremlin stop
+fo test --continuous                # alias into the same engine
+fo work --mode serial                # register main-session editor; no workers
+fo work --mode parallel --max-workers N
+```
+
+The start policy accepts explicit targeted tests, affected-test selection,
+`--random N`, `--seed S`, a distinct `--shuffle`, campaign/per-case budgets,
+lane identity and build/test capacity. `--jobs` controls process capacity, not
+model-worker count. Parallel `fo work` consumes this engine through an argv-based
+worker adapter; serial mode registers the main-session editor and test campaign
+without spawning coding workers. The controller supplies task semantics and
+decides integration.
+CLI capability discovery must distinguish currently implemented and proposed
+controls and reject unsupported parameters.
+
+Extend the existing **single fo MCP tool** with equivalent start, status,
+wait/events, failures, reproduce, stop and work-mode actions/fields. CLI and MCP
+must call the same request validator, scheduling policy, generation handling,
+receipt reader and process lifecycle. All capabilities, cancellation semantics,
+errors and JSON/event schemas must match; do not put essential logic in MCP.
+Background execution is an engine lifecycle, not a third policy implementation.
+
+**CLI must always offer the complete feature set.** After a fo fix, use the
+newly built/refreshed CLI immediately if the attached MCP cannot reload. Do not
+wait for a new agent session or route around fo. A stale MCP can report its
+version/capabilities; it cannot advertise features it lacks. CLI can stop/restart
+or reconnect to the supervisor using a versioned state protocol, preserving
+receipts and ownership. Protocol mismatch must fail clearly and provide the
+CLI recovery path. Reload/restart never guesses that abandoned PIDs are safe to
+kill. Test the stale-MCP/new-CLI scenario explicitly.
+
+Start returns a stable run/session ID promptly. Status reports active generation,
+candidate build, lane/task, capacity leases, progress, coverage debt and
+unclassified/current failures. Wait uses event cursors, bounded client timeouts
+and cancellation rather than busy polling; no client request is necessary for
+the engine to make progress. Reproduce restores the recorded case, seed/order
+prefix, flags, environment and oracle, defaulting to the newest generation;
+allow explicit historical reproduction. Stop is scoped and bounded.
+
+## Generations and state machine
+
+A generation identifies a frozen input closure:
+`H(source, includes, manifests, tests/oracles, toolchain, flags, dependencies,
+runtime libraries, harness, relevant environment)`, plus its built artifacts.
+Freeze before building or prove the entire captured input vector stayed
+unchanged; a build that observed changing inputs cannot be published. Store exact
+base commits and patch digests, including untracked inputs. A clean commit is
+convenient, but a reproducible uncommitted hashed patch is valid evidence.
+
+Each lane keeps an editable worker checkout, a frozen candidate build and a
+last-compilable test generation. The protected integration lane has the same
+structure. Runtime/compiler libraries and sibling path dependencies are part of
+the bundle, not live symlinks into another worker's changing tree. A binary copy
+alone is insufficient. ffc's gauntlet fingerprints the checkout containing its
+harness even with `--ffc`, so freeze that harness/source/runtime together.
+
+1. Start/attach, validate inventory and resource leases, recover owned state.
+2. Coalesce edits into the newest candidate input; incrementally build it in
+   isolated materialization while tests continue on the last compilable version.
+3. If build fails, publish the build failure and retain useful testing. Never
+   relabel last-compilable as verified good, and never test an unbuilt candidate.
+4. If build succeeds, atomically publish its artifact/input identity, preserve
+   old completed receipts, cancel only this lane's obsolete test campaign, and
+   start reproducers/affected tests then a short randomized subset.
+5. On another successful generation, repeat immediately; do not drain old work.
+   If a subset finishes without a new build, start another seeded subset.
+6. Explicit stop/shutdown releases only owned processes and leases. Restart
+   recovers receipts and coverage position; partial execution remains unknown.
+
+The switch from old to new test generation is not promotion to main and does
+not mean all tests passed. Key cancellation by session/lane/generation/artifact,
+not a global timestamp. A worker update must not stop another worker or the
+integration campaign. Candidate bursts can skip intermediate unpublished builds;
+already published failures always survive.
+
+## Test policy and failure response
+
+Default campaign limit: 60 seconds, at most 32 exploratory cases, one corpus
+process per campaign and five seconds per ordinary corpus case. Mandatory
+reproducer/neighbor checks have their own small budget. These are starting
+settings to measure, not a reason to hide slow tests. A newer successful build
+preempts even a campaign with an exceptional budget. Random membership,
+shuffled dispatch order and parallel completion order are reported separately.
+
+Priority: confirmed current regressions, impacted tests, historically
+failure-prone tests, then unexplored randomized cases. Deduplicate the mandatory
+and sampled sets; never sample away a requested reproducer. Stratify suites and
+feature/negative-case families, shuffle without replacement, record the seed and
+exact selected/started order, and rotate starting strata across short campaigns.
+Reserve about a quarter of exploratory slots for least-recently completed,
+repeatedly cancelled and expensive cases. Coverage debt persists across versions;
+correctness verdicts do not automatically persist.
+
+When an old generation fails, record case, generation, action key, configuration,
+seed/order prefix, environment, exit/output and signature. Do not interrupt an
+uncommitted edit merely because the background runner went red. Rerun the exact
+reproducer first on the newest compilable version. If it passes, keep working;
+if it fails reproducibly, assign a compatible fixer ahead of feature work. In
+parallel mode unrelated workers continue; serial mode fixes it next. Flaky or
+order-dependent results get replay and an owned repair issue, never silent
+acceptance. Restore/revert a reproducibly broken integrated build before unrelated
+promotion. A failing candidate does not advance protected integration.
+
+Old failures are reproduction priorities. A successful cached action may be
+reused only when its full input/dependency/oracle closure and environment key
+remain valid. Report cache reuse distinctly; a matching test name or old PASS is
+insufficient. Missing suites, zero selected cases, dropped dependency edges and
+unavailable oracles fail inventory/evidence checks rather than creating green.
+
+## Durable observations and ownership
+
+Publish each completion to an append-only journal before waiting for another
+case. Preserve original public test names, exit status, output artifacts,
+duration, seed/order and version/action identity. Separate completed oracle
+pass, known failure, candidate/confirmed regression, cancellation/untested,
+flaky, timeout, OOM and infrastructure/build errors. Cancellation is not a
+behavioral failure or pass. Summary must expose observed/selected/untested
+counts and remain partial until the exact required set completes.
+
+Fsync/atomic publication policy must make completed receipts survive supervisor
+crash; recover a truncated tail without inventing or duplicating completions.
+Large stdout/stderr stays in referenced artifacts rather than an unbounded MCP
+response. Event cursors page losslessly beyond old 16 KB/256-entry limits.
+Compare only compatible same-case observations. Never union different compiler
+versions into a synthetic full green. The integration journal is authoritative;
+worker journals support review and triage.
+
+Give every campaign a dedicated owned process group/session, scratch directory
+and process start identity. TERM, at most two seconds grace by default, then
+KILL/reap surviving owned children; verify termination before reuse. Contain
+escaping descendants if the advertised contract promises whole-tree cleanup.
+Never broad-pkill, remove another process's lock, reuse a live build directory,
+or assume a PID alone proves ownership. Preserve proven-owned lock/cache
+invariants through crash recovery. Cache cleanup cannot race active leases.
+
+## Serial and parallel work modes
+
+Use one controller, a protected integration worktree and one writable Git
+worktree per implementation/fix worker. Read-only investigators need no extra
+checkout. Workers may commit on their task branches, returning exact commits or
+base-plus-patch digests; they never self-promote to main. Independent worktrees
+share Git objects and valid fo CAS actions, with private mutable build trees.
+Keep path dependencies intentionally bundled rather than accidentally using an
+unpublished sibling checkout.
+
+Serial mode executes only in the main session, without subagents, with its
+Gremlin campaign; a configured local model may be that main session. Parallel
+mode uses a luna coordinator and fills configured capacity with independent ready
+luna workers; no fixed team size or simultaneous overlapping writers. The controller
+selects max reasoning effort for luna implementation workers where available and
+records runtime-resolved model/effort per task. The controller
+owns file/API/ABI/registry ownership and task dependencies. Distinct worktrees
+also isolate alternative approaches; overlapping results still integrate in an
+explicit order. Worker capacity and total compiler/test resource capacity are
+separate budgets. Use shared admission/leases across nested pools so N workers
+never silently create N times FO_JOBS times sixteen corpus jobs.
+
+On worker result A, construct integration candidate D+A in a temporary worktree
+or immutable candidate commit. Run current regression reproducers and the union
+of affected tests before advancing D. Return a failing candidate to its worker;
+leave protected integration unchanged. A fast targeted pass advances integration
+and starts its randomized campaign, not a full-green claim. Integrate one
+candidate at a time; unaffected workers continue. Eventually run comprehensive
+verification on a fixed final generation without pausing useful implementation
+merely to drain an obsolete suite.
+
+After later execution authorization, use available parallel luna capacity when
+parallel mode is selected; after repeated failure
+on an **individual task**, transfer that task to sol. Record failure signatures
+and at least two substantive repair attempts, interrupt the previous writer,
+freeze its useful patch/evidence, then give sol the same task, verifier and ownership. Parallel mode uses a
+native Sol worker; serial mode uses the GPT skill for a bounded Sol task and
+returns evidence to the same main session. Do not spawn coding subagents in
+serial mode. Read the current GPT skill before that exception; no escalation
+is executed by this planning delivery. Ordinary first test failures are feedback, not immediate escalation.
+Do not change the whole team's model or give two agents the same writable branch.
+Root/controller remains responsible for integration, main commits and pushes.
+
+## Cache, concurrent starts and disk budget
+
+Canonicalize project/worktree identity and lane/config namespace. One native
+supervisor owns the worktree session and lane registry. Two starts in the same
+namespace must acquire-or-attach **one** owner atomically, returning its stable
+session ID; incompatible policies return a clear conflict, never a second owner. Distinct lanes can coexist within global leases. PID/start
+identity, state protocol and active ownership prevent stale-lock/PID accidents.
+CLI and MCP starting simultaneously use the same path. A racing start/stop/build
+publication must yield a valid owner and explicit result, not orphaned children
+or an invented pass. Current-generation pointers and CAS outputs publish atomically. Static-library
+archives, shared libraries and executable link outputs also build under owned
+temporary names, validate, then atomically publish; a racing linker sees complete
+old or complete new output. Existing keyed artifact pathname alone is insufficient.
+[fo #144](https://github.com/lazy-fortran/fo/issues/144) owns the observed unsafe
+archive publication/partial-reuse path; preserve source evidence and do not
+assume every undefined symbol has the same cause.
+
+Reuse the existing content-addressed compiler and successful-test caches with
+complete keys and atomic publication. Snapshotting must not destroy fast
+incremental reuse. Identical inputs should attach/reuse without rebuild; changed
+includes, path dependencies, compiler flags, link/runtime inputs or oracle data
+must invalidate affected actions. Avoid global tool installs/shared-library mutation inside worker tasks.
+Worker self-builds must not auto-refresh the globally installed fo candidate;
+provide an explicit opt-out and isolate linked-worktree builds from authoritative
+CLI publication. Only the controller promotes the installed tool. Concurrent independent worktrees may read shared
+immutable cache entries; publication/cleanup respects active leases.
+
+Keep source snapshots compact, share repository objects/CAS content, and avoid
+full repository clones, copies of external corpora or one fresh full build tree
+per test. Never hardlink a mutable live source file into an immutable snapshot.
+Keep current plus last compilable generations and explicitly pinned reproduction
+artifacts by default; remove only proven-inactive generated materializations.
+Retain small receipts/failure reproducer metadata with bounded/paged logs. A
+configured disk budget reports pinned usage and coverage/retention debt rather
+than deleting valuable uncommitted work, active artifacts or unique evidence.
+Test repeated no-op starts and many short generations for bounded disk growth;
+measure bytes rather than asserting that cleanup probably works.
+
+## Ordered implementation and independent verifiers
+
+| Stage | Issue | Future behavioral verifier |
+| --- | --- | --- |
+| Selection | [#138](https://github.com/lazy-fortran/fo/issues/138) | Mandatory targets execute; CLI/MCP replay the same seed/selection; sample and shuffle are separate. |
+| Process ownership | [#139](https://github.com/lazy-fortran/fo/issues/139) | Owned child/grandchild heartbeats stop within grace; unrelated sentinel survives. |
+| Durable completion | [#140](https://github.com/lazy-fortran/fo/issues/140) | Pass/fail receipts survive crash/cancel; interrupted test stays unknown. |
+| Generation supervisor | [#141](https://github.com/lazy-fortran/fo/issues/141) | A keeps testing during failed B build; successful C preempts A; frozen A never reads changing C inputs. |
+| CLI/MCP/background | [#142](https://github.com/lazy-fortran/fo/issues/142) | Idle client needs no polling; reconnect resumes events; new CLI works with stale MCP. |
+| Work modes/capacity | [#143](https://github.com/lazy-fortran/fo/issues/143) | Serial spawns zero coding workers; independent parallel tasks use capacity; conflicts/nested pools remain bounded; duplicate start attaches. |
+| Compiler adapter | [ffc #798](https://github.com/lazy-fortran/ffc/issues/798) | ffc dispatcher/corpus runs use this engine, frozen dependency bundles and partial-result rules. |
+
+Provider selection, process and journal slices can be implemented independently
+with explicit ownership; supervisor consumes their APIs. Integrate the smallest
+working Gremlin CLI first, with shared-core MCP access, then use **Gremlin itself**
+to finish coverage, recovery, performance and worker controls. Do not claim the
+initial version satisfies an unimplemented mode or option. ffc semantic work
+begins after the enabling contract needed for parallel Gremlin work is verified.
+
+Existing [#119](https://github.com/lazy-fortran/fo/issues/119) complete JSON,
+[#130](https://github.com/lazy-fortran/fo/issues/130) logs/visibility,
+[#134](https://github.com/lazy-fortran/fo/issues/134) truthful timeout reporting,
+[#135](https://github.com/lazy-fortran/fo/issues/135) dependency freshness and
+[#131](https://github.com/lazy-fortran/fo/issues/131)/[#132](https://github.com/lazy-fortran/fo/issues/132)
+dispatcher routing remain exact prerequisites where they block these verifiers.
+Verify delivered behavior before closing; no pre-existing issue disappears by
+being renamed Gremlin. Fix fo whenever its workflow misbehaves; do not add a
+private project workaround or depend on reloading MCP to make progress.
+
+Behavioral fixtures use fake compiler/worker executables with barriers, known
+outputs and exit codes. No paid model calls are needed to prove scheduling.
+Tests must cover simultaneous same-project CLI/MCP starts, two independent lanes,
+TERM-ignoring descendants, source edits during capture, crash during receipt/cache
+publication, stale ownership, large event streams, unchanged action reuse,
+changed dependency invalidation, and bounded disk growth. Preserve these oracles
+when adding features. The normal workflow is focused `fo test`/`fo exec`, then
+bare `fo` before delivery; record pre-existing failures without masking them.
+
+Performance acceptance measures no-op attach/reuse, incremental build latency,
+first useful verdict, build-ready-to-replacement-test latency, cancellation grace,
+CPU/RSS and bytes per retained generation. No-op attach must launch no duplicate
+build/test supervisor; replacement dispatch begins as soon as ownership cleanup
+and required build publication finish. Target cancellation within the two-second
+TERM grace plus measured bounded reaping, and supervisory overhead small relative
+to one targeted test. Record baseline/p95 and hardware; do not invent universal
+speedups. Continue coding while bounded background measurements run.
+
+## Bootstrap and dogfooding
+
+The first milestone is a usable **Gremlin mode**, not the entire eventual worker
+platform. Parallel mode assigns disjoint primitive providers plus thin adapters;
+serial mode implements them in the main session in dependency order. Fix the
+shared library/archive publication and freshness blockers first where needed.
+
+1. Freeze source and test inputs, derive a complete generation/action identity,
+   and run a tiny named fixture through the existing fo build/test path.
+2. Add one native owner with durable per-case receipts, status/reproduce/stop,
+   bounded owned cancellation and duplicate-start attachment. Candidate builds
+   happen in isolated materialization while last-compilable tests continue.
+3. Publish CLI `fo gremlin` and shared-core MCP parity; public start always
+   returns promptly. A stale MCP cannot prevent updated CLI use or supervisor
+   upgrade/reconnect. Advertise the exact supported initial options.
+4. Prove bootstrap with small source-level oracles: pass/fail/blocking test,
+   failed replacement build, newer successful version, source edits during
+   capture, concurrent same-place starts, another unaffected lane and crash tail.
+5. Use this initial Gremlin to develop the remaining Gremlin engine, coverage
+   ledger, worker admission, cache/performance and repository-matrix features.
+   Each fixed version supersedes its old campaign; no whole-suite drain per edit.
+6. After parallel-mode/capacity/recovery acceptance, integrate the ffc corpus
+   adapter and execute the compiler plan. Keep final comprehensive evidence
+   separate from the fast development gate.
+
+Suggested module boundaries for a luna coordinator: shared selection policy,
+process lifecycle, generation capture, ownership/capacity state, durable journal,
+small supervisor, and CLI/MCP adapters. Freeze API ownership before parallel
+edits. The provisional shared boundary is
+`gremlin_handle(action, project_dir, request_json, response_json, exitcode)` in
+`fo_gremlin_supervisor`; adapters normalize argv/transport only. The core performs
+one validated request parse and delegates mechanical tasks to providers. Use
+real typed requests internally, bounded JSON/events externally and existing
+argv helpers; avoid shell string interpolation and duplicate scheduling rules.
+Worker prompts state exact issue/base/files/API/verifier and output-size limits.
+
+## Project-specific test adapters
+
+Generic Gremlin can use a project's existing ordinary fo/fpm test inventory,
+a shared named-case dispatcher, or a narrow external-corpus adapter. Define a
+small declarative adapter schema in the provider implementation: list case IDs,
+run one named case or bounded batch, report independent oracle outcome, input
+closure, duration class, artifact ownership and cache/reproduction data. Invoke
+argv directly. The exact configuration path/schema is finalized in #142/#798
+rather than inventing an ffc-only scheduler or mandatory plugin framework.
+
+ffc has hundreds of compiler cases and several slow whole-corpus wrappers.
+Its existing dispatcher already shares statically linked code while preserving
+public case names and subprocess exit status. Keep this optimization. Gremlin
+selection must operate on cheap named/leaf cases, not repeatedly choose a giant
+wrapper and spend each generation's budget discarding unpublished observations.
+A sampled discovery adapter and complete full-verification mode share the same
+oracle/manifest semantics; leaf scheduling must not claim that a complete wrapper
+passed. Current gauntlet one-case batches are a bootstrap retention mechanism.
+
+Track per-project rebuild/link granularity, test binary count/bytes, monolithic
+wrapper cost, true nested compiler fanout and runtime/library hashes. Prefer
+shared dispatcher/prebuilt artifacts and valid reference-cache reuse. Preserve
+applicable default reduced debug payload, linker DCE, stale-profile hygiene and
+optional shared development linking when independently measured. Do not force
+ordinary external fpm projects to rewrite their tests to use Gremlin; support
+existing targets, and document efficient optional granularity improvements.
+
+## Project matrix
+
+[fo #145](https://github.com/lazy-fortran/fo/issues/145) owns generic compatibility
+and performance evidence. Inventory the user's maintained GitHub repositories
+read-only; identify real fo users from manifests/workflows and fpm projects as
+additional candidates. Every maintained fo-using repository eventually receives
+a measured row/disposition. Keep private repo names and evidence out of public
+plans/issues. Selected external fpm projects are pinned capability examples,
+not uncontrolled unbounded cloning. Inventory is a planning input, not a command
+to run all repositories during this plans-only delivery.
+
+Start with fo, a small library, FortFront and focused ffc cases, then cover all
+maintained fo projects and representative external fpm projects. Exercise native,
+fpm and CMake backends where fo promises them, modules/submodules, path/Git
+inputs, ordinary standalone and shared-dispatch tests, mixed-language/linking,
+intentional failures and external corpora. Use existing project-local contracts
+and normal supported build/test workflows as independent oracles. Do not weaken
+legitimate failures to make cross-project sampling appear green.
+
+Record repository/toolchain/dependency revisions, normal/Gremlin commands, test
+identities/dispositions, no-op and incremental latency, first useful verdict,
+cache hits, relink count, CPU/RSS and retained bytes. Repeated same-place starts,
+parallel independent worktrees, cancellation and action-cache reuse must preserve
+normal behavior. Missing/unsupported/infrastructure-failed rows remain visible
+and owned. Early representative rows gate rollout; bounded rotating subsets run
+while development continues; complete fixed-version matrix coverage is a final
+provider-completion gate. Store compact receipts and replayable public summary
+when observations exist, never invented benchmark claims.
+
+## Active delivery state
+
+**Plans only; execution is stopped pending a subsequent user instruction.**
+No new Gremlin runtime has passed integrated behavioral verification on main.
+Earlier authorized workers produced local candidates from `2e781fd`, then were
+interrupted: policy `170d5f3`, journal `1994066`, process `cd6d115`, cache-schema
+test correction `a393675`, plus incomplete/uncommitted generation/state/core/CLI/MCP
+work under `/var/tmp/fo-gremlin-workers`. Preserve them; do not automatically
+resume, integrate or promote. Reinspect after execution is explicitly triggered.
+A preserved link failure suggested incomplete archive reuse (#144); fresh serial
+linking succeeded. Existing candidates/observations do not replace final oracles.
+The workspace master PLAN/AGENTS govern explicit mode and execution authorization.
+
+After each meaningful delivery, rewrite this state and issue acceptance status,
+update the corresponding ffc stage, and close or narrow GitHub issues only when
+evidence meets their scope. Commit and push explicit reviewed paths to main
+regularly, then verify remote/local convergence. Keep implementation chronology
+in Git/receipts rather than adding competing plan files. New CLI/core capability
+and any remaining baseline failures must be stated precisely.
+
+## Research basis
+
+[Saff and Ernst, ISSRE 2003](https://homes.cs.washington.edu/~mernst/pubs/wasted-time-issre2003.pdf)
+sections 5.3–5.4 describe background testing, random priority and restarting on
+the next compilable version. [Infinitest](https://infinitest.github.io/doc/index)
+automatically selects tests affected by changes. [pytest-randomly](https://github.com/pytest-dev/pytest-randomly)
+records reproducible shuffle seeds. [Git worktrees](https://git-scm.com/docs/git-worktree)
+provide separate checkout/HEAD/index state while sharing repository objects.
+The lane protocol, resource leases, disk budget and CLI/MCP contract are fo design
+choices; published continuous-testing results do not prove ffc speed or coverage.
