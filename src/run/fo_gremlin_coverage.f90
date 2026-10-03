@@ -26,7 +26,7 @@ module fo_gremlin_coverage
 
     public :: coverage_open, coverage_next_chunk, coverage_record
     public :: coverage_remaining, coverage_view, coverage_record_path
-    public :: coverage_read_view_path, coverage_begin_epoch
+    public :: coverage_read_view_path, coverage_begin_epoch, coverage_recover_running
 
     interface
         integer(c_int) function coverage_lock(path) &
@@ -113,6 +113,26 @@ contains
             outcome, status, message)
         call coverage_unlock(fd)
     end subroutine coverage_record
+
+    ! The lane owner calls this only when no test child for this generation exists.
+    ! A persisted launch intent is an outstanding obligation after owner loss.
+    subroutine coverage_recover_running(state, status, message)
+        type(coverage_epoch_t), intent(inout) :: state
+        integer, intent(out) :: status
+        character(len=*), intent(out) :: message
+        integer(c_int) :: fd
+
+        call lock_state(state%path, fd, status, message)
+        if (status /= COVERAGE_OK) return
+        call refresh_state(state, status, message)
+        if (status == COVERAGE_OK) then
+            if (any(state%outcome == 'RUNNING')) then
+                where (state%outcome == 'RUNNING') state%outcome = 'UNKNOWN'
+                call coverage_save(state, status, message)
+            end if
+        end if
+        call coverage_unlock(fd)
+    end subroutine coverage_recover_running
 
     subroutine coverage_begin_epoch(state, seed, status, message)
         type(coverage_epoch_t), intent(inout) :: state

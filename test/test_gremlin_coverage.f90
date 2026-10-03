@@ -1,7 +1,8 @@
 program test_gremlin_coverage
     use fo_gremlin_coverage, only: coverage_epoch_t, coverage_open, &
         coverage_next_chunk, coverage_record, coverage_remaining, coverage_view, &
-        coverage_begin_epoch, coverage_read_view_path, COVERAGE_OK, COVERAGE_INVALID
+        coverage_begin_epoch, coverage_read_view_path, coverage_recover_running, &
+        COVERAGE_OK, COVERAGE_INVALID
     use fo_gremlin_coverage_view, only: gremlin_coverage_view_t
     use fo_gremlin_policy, only: shuffle_gremlin_tests, GREMLIN_POLICY_OK
     implicit none
@@ -180,6 +181,18 @@ contains
             mixed_view%cancelled_count == 1 .and. mixed_view%unknown_count == 3 .and. &
             mixed_view%remaining_count == 3 .and. &
             .not. mixed_view%full_coverage, 'outstanding statuses cannot be green')
+        ! Recovery is inspected before any selection or child launch can hide it.
+        call coverage_recover_running(mixed, status, message)
+        call check(status == COVERAGE_OK, 'recover a dead owner launch intent')
+        call coverage_read_view_path(trim(mixed_path), repeat('b', 64), mixed_view, &
+            status, message)
+        call check(status == COVERAGE_OK, 'read durable pre-relaunch recovery state')
+        call check(mixed_view%running_count == 0 .and. &
+            mixed_view%cancelled_count == 1 .and. mixed_view%unknown_count == 3 .and. &
+            mixed_view%remaining_count == 3 .and. mixed_view%completed_count == 5, &
+            'recovery removes stale running without satisfying its obligation')
+        call check(mixed_view%epoch == 1 .and. mixed_view%seed == 91, &
+            'recovery preserves the same finite epoch identity')
         call coverage_next_chunk(mixed, mixed_priorities, size(mixed_priorities), &
             size(mixed_selected), mixed_selected, selected_count, status, priority_count)
         call check(status == COVERAGE_OK .and. selected_count == 3 .and. &

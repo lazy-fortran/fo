@@ -12,7 +12,8 @@ module fo_gremlin_supervisor
         journal_compact_tail, journal_record_t, JOURNAL_OK, JOURNAL_INVALID, &
         JOURNAL_MAX_RECORD_BYTES
     use fo_gremlin_coverage, only: coverage_epoch_t, coverage_open, &
-        coverage_next_chunk, coverage_record, coverage_record_path, COVERAGE_OK
+        coverage_next_chunk, coverage_record, coverage_record_path, &
+        coverage_recover_running, COVERAGE_OK
     use fo_gremlin_coverage, only: coverage_read_view_path, COVERAGE_NOT_FOUND
     use fo_gremlin_coverage_view, only: gremlin_coverage_view_t
     use fo_gremlin_policy, only: shuffle_gremlin_tests, GREMLIN_POLICY_OK, &
@@ -955,7 +956,8 @@ contains
                 fatal_message = 'Gremlin stopped after an evidence or process error'
             cancel_error = 0
             if (test_child%pid > 0) then
-                call cancel_owned_process(test_child%pid, test_exit)
+                call cancel_test_case(session, active_generation, test_child, &
+                test_exit, state_message)
                 if (test_exit /= 0) cancel_error = test_exit
                 if (test_exit == 0) test_child%pid = 0
             end if
@@ -1005,7 +1007,8 @@ contains
         stop_requested = test_child%pid > 0 .or. build_child%pid > 0
         cancel_error = 0
         if (test_child%pid > 0) then
-            call cancel_owned_process(test_child%pid, test_exit)
+            call cancel_test_case(session, active_generation, test_child, &
+                test_exit, state_message)
             if (test_exit /= 0) cancel_error = test_exit
             if (test_exit == 0) test_child%pid = 0
         end if
@@ -1305,7 +1308,7 @@ contains
         end if
         candidate_pinned = .true.
         if (test_child%pid > 0) then
-            call cancel_owned_process(test_child%pid, cancel_exit)
+            call cancel_test_case(session, active, test_child, cancel_exit, message)
             if (cancel_exit /= 0) then
                 ierr = cancel_exit
                 message = 'cannot cancel obsolete generation test process'
@@ -1501,6 +1504,13 @@ contains
         if (coverage_status /= COVERAGE_OK) then
             ierr = coverage_status
             message = 'cannot recover current-generation coverage: '//trim(message)
+            return
+        end if
+        ! Discovery runs after the prior owned child has completed/cancelled.
+        ! Reset launch intents from a stopped or crashed owner before selection.
+        call coverage_recover_running(coverage, coverage_status, message)
+        if (coverage_status /= COVERAGE_OK) then
+            ierr = coverage_status
             return
         end if
         seed = coverage%seed
@@ -1722,6 +1732,24 @@ contains
         values(1) = name
     end subroutine move_to_priority
 
+    subroutine cancel_test_case(session, generation, child, ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        type(generation_t), intent(in) :: generation
+        type(child_t), intent(inout) :: child
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=PATH_LEN) :: coverage_path
+
+        call cancel_owned_process(child%pid, ierr)
+        message = 'cannot cancel owned test process'
+        if (ierr /= 0) return
+        child%pid = 0
+        coverage_path = trim(session%state_dir)//'/coverage-'// &
+            generation%identity//'.state'
+        call coverage_record_path(trim(coverage_path), generation%identity, &
+            child%case_name, 'CANCELLED', ierr, message)
+    end subroutine cancel_test_case
+
     subroutine launch_selected_case(session, request, generation, selected, n_selected, &
             index_case, seed, campaign, child, ierr, message, completed, sequence)
         type(gremlin_session_t), intent(in) :: session
@@ -1757,14 +1785,6 @@ contains
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'test')
         call argv_push(packed, n_args, trim(selected(index_case)))
-        coverage_path = trim(session%state_dir)//'/coverage-'// &
-            generation%identity//'.state'
-        call coverage_record_path(trim(coverage_path), generation%identity, &
-            trim(selected(index_case)), 'RUNNING', coverage_status, message)
-        if (coverage_status /= COVERAGE_OK) then
-            ierr = coverage_status
-            return
-        end if
         call process_start_argv_logged(trim(generation%project_root), packed, &
             n_args, trim(child%log_file), child%pid, spawn_exit, 'FO_JOBS=1')
         ierr = spawn_exit
@@ -1787,6 +1807,14 @@ contains
         child%campaign = campaign
         child%case_index = index_case
         child%seed = seed
+        coverage_path = trim(session%state_dir)//'/coverage-'// &
+            generation%identity//'.state'
+        call coverage_record_path(trim(coverage_path), generation%identity, &
+            trim(selected(index_case)), 'RUNNING', coverage_status, message)
+        if (coverage_status /= COVERAGE_OK) then
+            ierr = coverage_status
+            return
+        end if
         call clock_seconds(child%started_at)
         call publish_state(session, request, 'testing', generation, generation, &
             child%case_name, completed, n_selected, seed, 'RUNNING', 0, ierr, message)

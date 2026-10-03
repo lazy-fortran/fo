@@ -220,6 +220,24 @@ async function main() {
   assert.equal(unseen.status, 0, unseen.stdout + unseen.stderr);
   assert.deepEqual(fs.readFileSync(coveragePath), coverageBeforeReproduce,
     'unseen reproduction cannot satisfy an epoch obligation');
+  const priorBlockedPid = Number(fs.readFileSync(ready, 'utf8').trim());
+  const stopAtBarrier = run(['gremlin', 'stop', '--dir', project, '--lane', lane,
+    '--session', first.session_id, '--json']);
+  assert.equal(stopAtBarrier.status, 0, stopAtBarrier.stdout + stopAtBarrier.stderr);
+  await waitUntil(() => ownerPid() === 0, 'blocked owner stops before relaunch');
+  const stoppedBeforeRelaunch = json(['gremlin', 'status', '--dir', project,
+    '--lane', lane, '--session', first.session_id, '--json']);
+  assert.equal(stoppedBeforeRelaunch.coverage.running, 0,
+    'stopped status cannot claim an absent test child');
+  assert.equal(stoppedBeforeRelaunch.coverage.cancelled, 1);
+  assert.equal(stoppedBeforeRelaunch.coverage.unknown, 23);
+  assert.equal(stoppedBeforeRelaunch.coverage.remaining, 23);
+  assert.equal(stoppedBeforeRelaunch.coverage.pass, 17);
+  assert.ok(fs.readFileSync(coveragePath, 'utf8').includes(`${order[17]}|CANCELLED`),
+    'stopping durably cancels the launch intent before any restart');
+  await start();
+  await waitUntil(() => Number(fs.readFileSync(ready, 'utf8').trim()) !== priorBlockedPid,
+    'replacement leaf reaches the gate');
   const pid = ownerPid();
   assert.ok(pid > 0, 'finds the exact lane owner process');
   const blockedPid = Number(fs.readFileSync(ready, 'utf8').trim());
@@ -321,7 +339,11 @@ async function main() {
     'restart resumes the exact permutation cursor');
   assert.equal(new Set(campaignMarkers.slice(0, 40)).size, 40,
     'epoch is without replacement');
-  const allReceipts = events(second.session_id);
+  // Explicit stop archives the first session separately; crash recovery restores
+  // the intermediate session. Count only this exact generation/epoch identity.
+  const observedReceipts = [...events(first.session_id), ...events(second.session_id)];
+  const allReceipts = [...new Map(observedReceipts.map(event =>
+    [event.completion_id, event])).values()];
   const receipts = allReceipts.filter(event =>
     event.generation === latestStatus.active_generation &&
     event.coverage_epoch === latestStatus.coverage.epoch &&
