@@ -67,6 +67,20 @@ function expectRejected(name, environment = {}) {
   assert.match(result.stderr, new RegExp(`fo: unknown test: ${name}`));
 }
 
+function expectSlowRejected(names) {
+  for (const name of allCases) {
+    fs.rmSync(path.join(scratch, `${name}.receipt`), { force: true });
+  }
+  const result = run(['test', ...names, '--json']);
+  assert.notEqual(result.status, 0, 'explicit slow selection needs --all');
+  assert.match(result.stderr, /fo: slow test test_probe_slow requires --all/);
+  assert.doesNotMatch(result.stderr, /unknown test/);
+  for (const name of allCases) {
+    assert.equal(fs.existsSync(path.join(scratch, `${name}.receipt`)), false,
+      'reject the entire selection before running any case');
+  }
+}
+
 try {
   if (!installed) {
     const built = spawnSync(driver, ['build'], { ...options, cwd: project });
@@ -175,9 +189,29 @@ try {
   fs.rmSync(path.join(scratch, 'checks/suite_entry.f90'));
   expectRejected('test_beta');
   expectRejected('test_does_not_exist');
+  // Slow classification uses the public alias, not the program/source name.
+  const slow = 'test_probe_slow';
+  allCases.push(slow);
+  fs.appendFileSync(path.join(scratch, 'fpm.toml'), [
+    '[[test]]', `name = "${slow}"`, 'source-dir = "checks"',
+    'main = "nested/slow_entry.f90"', ''
+  ].join('\n'));
+  write('checks/nested/slow_entry.f90', [
+    'program slow_entry', 'implicit none', 'integer :: unit',
+    `open(newunit=unit, file='${slow}.receipt', status='replace')`,
+    "write(unit, '(a)') 'slow-executed'", 'close(unit)', 'end program', ''
+  ].join('\n'));
+  expectSlowRejected([slow]);
+  expectSlowRejected(['test_plain', slow]);
+  expectSlowRejected([slow, 'test_plain']);
+  expectCases(['test', '--all', slow], [slow], { [slow]: 'slow-executed' });
+  expectSlowRejected([slow]);
+  expectCases(['test', '--all', 'test_plain', slow], ['test_plain', slow],
+    { test_plain: 'plain-original', [slow]: 'slow-executed' });
+  expectCases(['test'], ['test_plain'], { test_plain: 'plain-original' });
   console.log('dispatcher-cli: shared cold/warm all, module/program cases, public aliases, ' +
     'nested/custom roots, random/changed selection, named edits, explicit self and ' +
-    'ineligible/marker-only/missing-dispatcher rejection pass');
+    'ineligible/marker-only/missing-dispatcher rejection and explicit slow gates pass');
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }

@@ -1206,6 +1206,14 @@ contains
                     'fo: unknown test: '//trim(test_names(i))
                 stop 1
             end do
+            if (.not. include_all) then
+                do i = 1, n_arg_names
+                    if (.not. is_slow_test(test_names(i))) cycle
+                    write (error_unit, '(a)') 'fo: slow test '// &
+                        trim(test_names(i))//' requires --all'
+                    stop 1
+                end do
+            end if
             call make_tmpfile('fo-test', test_log)
             call backend_test_names(b, test_names, n_arg_names, exitcode, &
                 include_all, test_log, flags=all_flags)
