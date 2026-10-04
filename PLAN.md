@@ -658,7 +658,7 @@ completed entries below are retained as prerequisites and evidence:
    compiler/helper/runtime/external-dependency closure to executed bytes.
 7. **Complete:** [#153](https://github.com/lazy-fortran/fo/issues/153): finite deterministic
    randomized coverage epochs with crash-safe current-generation accounting.
-8. [#154](https://github.com/lazy-fortran/fo/issues/154): local-gate facts,
+8. **Complete:** [#154](https://github.com/lazy-fortran/fo/issues/154): local-gate facts,
    ordinary/full verification, semantic events and typed waits, including stale
    token rejection before replacement generation and after owner restart.
 9. [#155](https://github.com/lazy-fortran/fo/issues/155): land sleeping/wake mechanics,
@@ -821,11 +821,11 @@ Implemented issue state:
   and gives CLI/MCP the same domain validation. Focused supervisor, MCP parity,
   request-structure and full-pipeline gates passed. GitHub Actions also passed
   the exact published `b73f9ac` head (`build + fpm test`, run 37148134220).
-- #154's task-specific Sol repair is committed at `783551f` and pushed to
-  `fo/local-gate-154-review`. Independent Luna review approved frozen diff
-  `35e243fe...`; focused change-watch/readiness/supervisor/public oracles pass
-  4/4 and the full/native evidence is green. Port it to the current integration
-  head and rerun the exact combined gate.
+- #154 is complete through `73fc19b`. Independent Luna review approved frozen
+  diff `35e243fe...`; generation/inventory/requirements/event/session-bound
+  tokens, factual failure events, typed CLI/MCP waits and conservative freshness
+  barriers pass. The exact integrated change-watch/readiness/supervisor/public
+  gate passes 4/4, including the 38-second public owner-pause/restart oracle.
 - #151's provenance subdefect is fixed at `b2a31e1`: each compiler/Git probe has
   fresh argv/output state, and metadata-only events preserve execution identity.
   Exact driver-image pinning remains in task-specific Sol repair after two
