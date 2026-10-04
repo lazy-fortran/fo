@@ -52,6 +52,7 @@ struct async_process {
     pid_t pid;
     pid_t session;
     int owns_session;
+    int owns_group;
     uint64_t start_identity;
     int leader_done;
     int exitcode;
@@ -68,6 +69,7 @@ static struct async_process *async_processes = NULL;
 
 int fo_gremlin_process_matches(int pid, const char *start);
 static uint64_t process_start_identity(pid_t pid);
+int fo_c_process_containment_required(void);
 
 static int heartbeats_suppressed = 0;
 
@@ -693,6 +695,7 @@ static int read_exact(int fd, void *buffer, size_t size);
 #ifdef __linux__
 static int start_command_monitor(const char *cwd, char *const argv[],
                                  const char *log_file, int append,
+                                 int capture_monitor,
                                  char **child_env, const char *monitor_executable,
                                  int stdin_fd, int stdout_fd, int stderr_fd,
                                  pid_t *monitor_pid,
@@ -726,7 +729,7 @@ static int start_command_monitor(const char *cwd, char *const argv[],
     monitor_argv[1] = FO_MONITOR_ARG;
     monitor_argv[2] = (char *)(cwd != NULL ? cwd : "");
     monitor_argv[3] = (char *)(log_file != NULL ? log_file : "");
-    monitor_argv[4] = append ? "1" : "0";
+    monitor_argv[4] = capture_monitor ? "C" : (append ? "1" : "0");
     for (size_t i = 0; i < count; i++) monitor_argv[i + 5] = argv[i];
     if (pipe2(pipefd, O_CLOEXEC) != 0) {
         error = errno;
@@ -1153,7 +1156,7 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
        children stay in that job's group so its handle can cancel the tree. */
 #ifdef __linux__
     if (spawn_error == EPERM && prctl(PR_GET_SECCOMP, 0, 0, 0, 0) == 2) {
-        spawn_error = start_command_monitor(cwd, argv, log_file, append,
+        spawn_error = start_command_monitor(cwd, argv, log_file, append, 0,
                                             child_env, "/proc/self/exe", -1, -1, -1,
                                             &pid, &accounted_pid,
                                             &report_fd);
@@ -2417,7 +2420,8 @@ static int async_identity_matches(const struct async_process *item) {
     pid_t group = getpgid(item->pid);
     if (group >= 0) {
         uint64_t current;
-        if (group != item->pid || getsid(item->pid) != item->session) return 0;
+        if ((item->owns_group && group != item->pid) ||
+            getsid(item->pid) != item->session) return 0;
         current = process_start_identity(item->pid);
         if (item->start_identity != 0 && current != item->start_identity) return 0;
         return 1;
@@ -2546,8 +2550,10 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
                                int *exitcode) {
     char **argv = NULL;
     char **child_env = NULL;
+    char **monitor_argv = NULL;
     const char *p, *end;
     int index, ready_pipe[2], gate_pipe[2], child_error = 0, reaper_error;
+    int containment_status, monitor_mode = 0;
     pid_t pid;
     uint64_t identity;
     struct async_process *item;
@@ -2577,9 +2583,41 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
         *exitcode = EINVAL;
         return;
     }
+    containment_status = fo_c_process_containment_required();
+    if (containment_status < 0) {
+        free(argv);
+        *exitcode = EIO;
+        return;
+    }
+    monitor_mode = containment_status > 0;
+    if (monitor_mode) {
+#ifdef __linux__
+        /* The async handle remains the gated child PID. After publication it
+           execs the existing fresh monitor, which owns only this command's
+           descendants while borrowing the caller's process group. */
+        monitor_argv = calloc((size_t)n_args + 6, sizeof(char *));
+        if (monitor_argv == NULL) {
+            free(argv);
+            *exitcode = ENOMEM;
+            return;
+        }
+        monitor_argv[0] = "/proc/self/exe";
+        monitor_argv[1] = FO_MONITOR_ARG;
+        monitor_argv[2] = "";
+        monitor_argv[3] = "";
+        monitor_argv[4] = "0";
+        for (index = 0; index < n_args; index++)
+            monitor_argv[index + 5] = argv[index];
+#else
+        free(argv);
+        *exitcode = ENOTSUP;
+        return;
+#endif
+    }
     if (has_text(env_extra)) {
         child_env = env_with_overrides(env_extra);
         if (child_env == NULL) {
+            free(monitor_argv);
             free(argv);
             *exitcode = errno != 0 ? errno : ENOMEM;
             return;
@@ -2588,12 +2626,14 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
     reaper_error = ensure_async_subreaper();
     if (reaper_error != 0) {
         free_env_copy(child_env);
+        free(monitor_argv);
         free(argv);
         *exitcode = reaper_error;
         return;
     }
     if (pipe(ready_pipe) != 0) {
         free_env_copy(child_env);
+        free(monitor_argv);
         free(argv);
         *exitcode = errno;
         return;
@@ -2603,6 +2643,7 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
         close(ready_pipe[0]);
         close(ready_pipe[1]);
         free_env_copy(child_env);
+        free(monitor_argv);
         free(argv);
         return;
     }
@@ -2612,6 +2653,7 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
         close(ready_pipe[0]); close(ready_pipe[1]);
         close(gate_pipe[0]); close(gate_pipe[1]);
         free_env_copy(child_env);
+        free(monitor_argv);
         free(argv);
         return;
     }
@@ -2619,14 +2661,15 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
         int fd, release, nested = 0;
         close(ready_pipe[0]);
         close(gate_pipe[1]);
-        if (setsid() < 0) {
+        if (!monitor_mode && setsid() < 0) {
             /* The inherited owner filter keeps this child in its session.
                A fresh process group gives the nested job its own handle. */
             if (errno != EPERM || setpgid(0, 0) != 0) child_error = errno;
             else nested = 1;
         }
-        if (child_error == 0 && nested) child_error = ensure_async_subreaper();
-        if (child_error == 0)
+        if (!monitor_mode && child_error == 0 && nested)
+            child_error = ensure_async_subreaper();
+        if (!monitor_mode && child_error == 0)
             child_error = install_async_group_containment(nested);
         if (child_error == 0 && has_text(cwd) && chdir(cwd) != 0) {
             child_error = errno;
@@ -2648,6 +2691,22 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
         if (read_exact(gate_pipe[0], &release, sizeof(release)) != 0) _exit(126);
         close(gate_pipe[0]);
         if (child_env != NULL) environ = child_env;
+        if (monitor_mode) {
+#ifdef __linux__
+            fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+            if (fd < 0) _exit(126);
+            if (fd == FO_MONITOR_FD) {
+                int moved = fcntl(fd, F_DUPFD_CLOEXEC, FO_MONITOR_FD + 1);
+                if (moved < 0) _exit(126);
+                close(fd);
+                fd = moved;
+            }
+            if (dup2(fd, FO_MONITOR_FD) < 0) _exit(126);
+            close(fd);
+            execv("/proc/self/exe", monitor_argv);
+#endif
+            _exit(errno == ENOENT ? 127 : 126);
+        }
         execvp(argv[0], argv);
         _exit(errno == ENOENT ? 127 : 126);
     }
@@ -2661,6 +2720,7 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
         }
         free_env_copy(child_env);
+        free(monitor_argv);
         free(argv);
         *exitcode = child_error != 0 ? child_error : EIO;
         return;
@@ -2674,17 +2734,19 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
         }
         free_env_copy(child_env);
+        free(monitor_argv);
         free(argv);
         *exitcode = EIO;
         return;
     }
 #endif
-    if (getpgid(pid) != pid || getsid(pid) <= 0) {
+    if ((!monitor_mode && getpgid(pid) != pid) || getsid(pid) <= 0) {
         close(gate_pipe[1]);
         (void)kill(pid, SIGKILL);
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
         }
         free_env_copy(child_env);
+        free(monitor_argv);
         free(argv);
         *exitcode = EIO;
         return;
@@ -2696,6 +2758,7 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
         }
         free_env_copy(child_env);
+        free(monitor_argv);
         free(argv);
         *exitcode = ENOMEM;
         return;
@@ -2703,6 +2766,7 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
     item->pid = pid;
     item->session = getsid(pid);
     item->owns_session = item->session == pid;
+    item->owns_group = !monitor_mode;
     item->start_identity = identity;
     item->next = async_processes;
     async_processes = item;
@@ -2714,6 +2778,7 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
         }
         free_env_copy(child_env);
+        free(monitor_argv);
         free(argv);
         *exitcode = reaper_error;
         return;
@@ -2728,6 +2793,7 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
             while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
             }
             free_env_copy(child_env);
+            free(monitor_argv);
             free(argv);
             *exitcode = EIO;
             return;
@@ -2735,6 +2801,7 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
     }
     close(gate_pipe[1]);
     free_env_copy(child_env);
+    free(monitor_argv);
     free(argv);
     *pid_out = (int)pid;
 }
@@ -2860,7 +2927,46 @@ static void monitor_term(int signal_number) {
 /* The monitor is a fresh exec and the only subreaper for this command.
    Double-forked orphans become its direct children, so no other command's
    descendants can be mistaken for this one's. */
-static int monitor_kill_children(void) {
+static int capture_handoff_child(pid_t child) {
+    char state_dir[PATH_MAX], owner_start[64], registry[PATH_MAX];
+    char current_owner_start[64];
+    pid_t owner_pid = 0, current_owner_pid = 0;
+    DIR *directory;
+    struct dirent *entry;
+    int e;
+
+    e = async_scope_owner(state_dir, sizeof(state_dir), &owner_pid,
+                          owner_start, sizeof(owner_start));
+    if (e != 0 || owner_pid == getpid()) return 0;
+    e = async_owner_registry(state_dir, owner_pid, owner_start, registry,
+                             sizeof(registry), 0);
+    if (e != 0) return 0;
+    directory = opendir(registry);
+    if (directory == NULL) return 0;
+    while ((entry = readdir(directory)) != NULL) {
+        struct recovery_session session = {0};
+        size_t length = strlen(entry->d_name);
+        if (length <= 8 || strcmp(entry->d_name + length - 8, ".session") != 0)
+            continue;
+        if (read_recovery_session(registry, entry->d_name, owner_start,
+                                  &session) != 0 ||
+            session.pid != child || process_start_identity(child) != session.identity ||
+            getsid(child) != session.session)
+            continue;
+        e = async_scope_owner(state_dir, sizeof(state_dir), &current_owner_pid,
+                              current_owner_start, sizeof(current_owner_start));
+        if (e == 0 && current_owner_pid == owner_pid &&
+            strcmp(current_owner_start, owner_start) == 0 &&
+            process_start_identity(child) == session.identity) {
+            closedir(directory);
+            return 1;
+        }
+    }
+    closedir(directory);
+    return 0;
+}
+
+static int monitor_kill_children(int preserve_registered_sessions) {
     char path[96];
     struct timespec start, now;
     int count;
@@ -2874,6 +2980,8 @@ static int monitor_kill_children(void) {
         if (file == NULL) return errno;
         while (fscanf(file, "%ld", &child) == 1) {
             if (child > 0 && child <= INT_MAX) {
+                if (preserve_registered_sessions &&
+                    capture_handoff_child((pid_t)child)) continue;
                 (void)kill((pid_t)child, SIGKILL);
                 count++;
             }
@@ -2898,9 +3006,11 @@ static int monitor_run(int argc, char **argv) {
     sigset_t default_signals;
     pid_t target = 0;
     int error, status = 1, code = 1, target_signal = 0, attrs_ready = 0;
+    int target_done = 0, capture_monitor;
     long long cpu_ms = -1;
 
     if (argc < 6 || prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) return 126;
+    capture_monitor = strcmp(argv[4], "C") == 0;
     action.sa_handler = monitor_term;
     sigemptyset(&action.sa_mask);
     if (sigaction(SIGTERM, &action, NULL) != 0) return 126;
@@ -2948,6 +3058,7 @@ static int monitor_run(int argc, char **argv) {
         if (monitor_stop) break;
         waited = wait4(target, &status, WNOHANG, &usage);
         if (waited == target) {
+            target_done = 1;
             cpu_ms = (long long)(usage.ru_utime.tv_sec +
                                  usage.ru_stime.tv_sec) * 1000LL +
                      (long long)(usage.ru_utime.tv_usec +
@@ -2963,7 +3074,9 @@ static int monitor_run(int argc, char **argv) {
         if (waited < 0 && errno != EINTR) break;
         sleep_ms(10);
     }
-    if (monitor_kill_children() != 0) code = 126;
+    if (monitor_kill_children(capture_monitor && target_done &&
+                              !monitor_stop && WIFEXITED(status) &&
+                              WEXITSTATUS(status) == 0) != 0) code = 126;
     (void)write_exact(FO_MONITOR_FD, &cpu_ms, sizeof(cpu_ms));
     close(FO_MONITOR_FD);
     if (target_signal > 0 && code != 126) {
@@ -3014,7 +3127,7 @@ int fo_c_start_capture_monitor(const char *monitor_executable, const char *cwd,
     if (access(monitor_executable, X_OK) != 0) return -errno;
     child_env = env_with_vector(overrides);
     if (child_env == NULL) return -(errno != 0 ? errno : ENOMEM);
-    error = start_command_monitor(cwd, argv, "", 0, child_env,
+    error = start_command_monitor(cwd, argv, "", 0, 1, child_env,
                                   monitor_executable, stdin_fd, stdout_fd,
                                   stderr_fd, &monitor_pid, &target_pid,
                                   &report_fd);
