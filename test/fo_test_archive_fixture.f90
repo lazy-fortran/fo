@@ -82,7 +82,7 @@ contains
             if (exit_code /= 0) return
             ! Cover member-content mismatch and archive-header truncation apart.
             if (trim(operation) == 'rcs' .and. &
-                    (trim(mode) == 'truncate' .or. trim(mode) == 'corrupt-member')) then
+                (trim(mode) == 'truncate' .or. trim(mode) == 'corrupt-member')) then
                 argument_index = 2
                 if (trim(mode) == 'corrupt-member') argument_index = 3
                 if (argument_count < argument_index) then
@@ -95,7 +95,11 @@ contains
                     exit_code = 64
                     return
                 end if
-                call write_truncated_archive(trim(archive_path), io_status)
+                if (trim(mode) == 'truncate') then
+                    call truncate_archive(trim(archive_path), io_status)
+                else
+                    call corrupt_object(trim(archive_path), io_status)
+                end if
                 exit_code = io_status
             end if
             return
@@ -136,7 +140,7 @@ contains
         integer, allocatable :: argument_lengths(:)
         integer(c_int) :: child, output_descriptor, wait_status, waited
         integer :: argument_count, maximum_length, argument_status
-        integer :: i, j, status
+        integer :: i, j, k, status
 
         exit_code = 125
         argument_count = command_argument_count()
@@ -162,7 +166,9 @@ contains
                 if (argument_status /= 0) return
                 j = argument_lengths(i)
             end if
-            if (j > 0) storage(1:j, i + 1) = argument(1:j)
+            do k = 1, j
+                storage(k, i + 1) = argument(k:k)
+            end do
             arguments(i + 1) = c_loc(storage(1, i + 1))
         end do
         arguments(argument_count + 2) = c_null_ptr
@@ -291,7 +297,29 @@ contains
         if (missing_native_index) exit_code = 73
     end subroutine emit_listing
 
-    subroutine write_truncated_archive(path, status)
+    subroutine truncate_archive(path, status)
+        character(len=*), intent(in) :: path
+        integer, intent(out) :: status
+        character(len=32) :: prefix
+        integer :: unit, io_status
+
+        status = 125
+        ! Keep the native magic and only part of the first 60-byte member header.
+        open (newunit=unit, file=trim(path), access='stream', &
+            form='unformatted', status='old', action='read', iostat=io_status)
+        if (io_status /= 0) return
+        read (unit, iostat=io_status) prefix
+        close (unit)
+        if (io_status /= 0) return
+        open (newunit=unit, file=trim(path), access='stream', &
+            form='unformatted', status='replace', action='write', iostat=io_status)
+        if (io_status /= 0) return
+        write (unit, iostat=io_status) prefix
+        close (unit, iostat=status)
+        if (io_status /= 0) status = 125
+    end subroutine truncate_archive
+
+    subroutine corrupt_object(path, status)
         character(len=*), intent(in) :: path
         integer, intent(out) :: status
         integer :: unit, io_status
@@ -303,7 +331,7 @@ contains
         write (unit, iostat=io_status) '!<arch>'//achar(10)
         close (unit, iostat=status)
         if (io_status /= 0) status = 125
-    end subroutine write_truncated_archive
+    end subroutine corrupt_object
 
     subroutine delete_file(path)
         character(len=*), intent(in) :: path
