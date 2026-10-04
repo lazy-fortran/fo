@@ -9,6 +9,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
@@ -397,4 +398,193 @@ int fo_test_spawn_heartbeat(const char *path, const char *directory) {
     }
     (void)setpgid(child, child);
     return (int)child;
+}
+
+#define FO_TEST_MCP_SESSIONS 4
+#define FO_TEST_MCP_BUFFER (1024 * 1024)
+
+typedef struct {
+    pid_t pid;
+    int input_fd;
+    int output_fd;
+    char *pending;
+    size_t pending_size;
+} fo_test_mcp_session;
+
+static fo_test_mcp_session mcp_sessions[FO_TEST_MCP_SESSIONS];
+
+static fo_test_mcp_session *mcp_session_for(int handle) {
+    if (handle < 1 || handle > FO_TEST_MCP_SESSIONS) return NULL;
+    fo_test_mcp_session *session = &mcp_sessions[handle - 1];
+    return session->pid > 0 ? session : NULL;
+}
+
+int fo_test_mcp_start(const char *driver, const char *directory, const char *cache,
+                      const char *state, const char *stderr_path) {
+    if (driver == NULL || directory == NULL || cache == NULL || state == NULL ||
+        stderr_path == NULL) return -1;
+    int slot = -1;
+    for (int i = 0; i < FO_TEST_MCP_SESSIONS; ++i) {
+        if (mcp_sessions[i].pid == 0) { slot = i; break; }
+    }
+    if (slot < 0) return -2;
+    int input_pipe[2], output_pipe[2];
+    if (pipe(input_pipe) != 0) return -3;
+    if (pipe(output_pipe) != 0) {
+        close(input_pipe[0]); close(input_pipe[1]);
+        return -3;
+    }
+    pid_t child = fork();
+    if (child < 0) {
+        close(input_pipe[0]); close(input_pipe[1]);
+        close(output_pipe[0]); close(output_pipe[1]);
+        return -4;
+    }
+    if (child == 0) {
+        (void)setpgid(0, 0);
+        if (dup2(input_pipe[0], STDIN_FILENO) < 0 ||
+            dup2(output_pipe[1], STDOUT_FILENO) < 0) _exit(126);
+        int error_fd = open(stderr_path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+        if (error_fd < 0 || dup2(error_fd, STDERR_FILENO) < 0) _exit(126);
+        close(input_pipe[0]); close(input_pipe[1]);
+        close(output_pipe[0]); close(output_pipe[1]);
+        if (error_fd > STDERR_FILENO) close(error_fd);
+        if (chdir(directory) != 0 || setenv("FO_CACHE_DIR", cache, 1) != 0 ||
+            setenv("FO_GREMLIN_STATE_DIR", state, 1) != 0 ||
+            setenv("FO_DISABLE_SELF_REFRESH", "1", 1) != 0 ||
+            setenv("FO_SELF_REFRESH", "0", 1) != 0 ||
+            setenv("FO_JOBS", "1", 1) != 0) _exit(126);
+        char *const arguments[] = {(char *)driver, "mcp-server", NULL};
+        execv(driver, arguments);
+        _exit(127);
+    }
+    (void)setpgid(child, child);
+    close(input_pipe[0]);
+    close(output_pipe[1]);
+    char *pending = calloc(FO_TEST_MCP_BUFFER + 1, 1);
+    if (pending == NULL) {
+        close(input_pipe[1]); close(output_pipe[0]);
+        (void)kill(child, SIGKILL);
+        (void)waitpid(child, NULL, 0);
+        return -5;
+    }
+    (void)fcntl(input_pipe[1], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(output_pipe[0], F_SETFD, FD_CLOEXEC);
+    int input_flags = fcntl(input_pipe[1], F_GETFL, 0);
+    if (input_flags < 0 || fcntl(input_pipe[1], F_SETFL, input_flags | O_NONBLOCK) < 0) {
+        close(input_pipe[1]); close(output_pipe[0]); free(pending);
+        (void)kill(child, SIGKILL);
+        (void)waitpid(child, NULL, 0);
+        return -6;
+    }
+    mcp_sessions[slot].pid = child;
+    mcp_sessions[slot].input_fd = input_pipe[1];
+    mcp_sessions[slot].output_fd = output_pipe[0];
+    mcp_sessions[slot].pending = pending;
+    mcp_sessions[slot].pending_size = 0;
+    return slot + 1;
+}
+
+int fo_test_mcp_pid(int handle) {
+    fo_test_mcp_session *session = mcp_session_for(handle);
+    return session == NULL ? -1 : (int)session->pid;
+}
+
+int fo_test_mcp_write(int handle, const char *message, size_t length) {
+    fo_test_mcp_session *session = mcp_session_for(handle);
+    if (session == NULL || message == NULL) return -1;
+    struct sigaction ignored = {0}, previous;
+    ignored.sa_handler = SIG_IGN;
+    sigemptyset(&ignored.sa_mask);
+    if (sigaction(SIGPIPE, &ignored, &previous) != 0) return -4;
+    int64_t deadline = fo_test_monotonic_ms() + 5000;
+    size_t offset = 0;
+    int result = 0;
+    while (offset < length) {
+        ssize_t count = write(session->input_fd, message + offset, length - offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            int64_t remaining = deadline - fo_test_monotonic_ms();
+            if (remaining <= 0) { result = -3; break; }
+            struct pollfd descriptor = {session->input_fd, POLLOUT, 0};
+            int ready = poll(&descriptor, 1,
+                remaining > INT_MAX ? INT_MAX : (int)remaining);
+            if (ready < 0 && errno == EINTR) continue;
+            if (ready <= 0) { result = -3; break; }
+            continue;
+        }
+        if (count <= 0) { result = -2; break; }
+        offset += (size_t)count;
+    }
+    if (sigaction(SIGPIPE, &previous, NULL) != 0) return -4;
+    return result;
+}
+
+int fo_test_mcp_read_line(int handle, char *output, size_t capacity, int timeout_ms) {
+    fo_test_mcp_session *session = mcp_session_for(handle);
+    if (session == NULL || output == NULL || capacity < 2 || timeout_ms < 0) return -1;
+    int64_t deadline = fo_test_monotonic_ms() + timeout_ms;
+    for (;;) {
+        char *newline = memchr(session->pending, '\n', session->pending_size);
+        if (newline != NULL) {
+            size_t length = (size_t)(newline - session->pending);
+            if (length > 0 && session->pending[length - 1] == '\r') --length;
+            if (length + 1 > capacity) return -4;
+            memcpy(output, session->pending, length);
+            output[length] = '\0';
+            size_t consumed = (size_t)(newline - session->pending) + 1;
+            memmove(session->pending, session->pending + consumed,
+                    session->pending_size - consumed);
+            session->pending_size -= consumed;
+            return (int)length;
+        }
+        int64_t remaining = deadline - fo_test_monotonic_ms();
+        if (remaining <= 0) return -2;
+        struct pollfd descriptor = {session->output_fd, POLLIN, 0};
+        int ready = poll(&descriptor, 1, remaining > INT_MAX ? INT_MAX : (int)remaining);
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready == 0) return -2;
+        if (ready < 0) return -3;
+        if (session->pending_size >= FO_TEST_MCP_BUFFER) return -4;
+        ssize_t count = read(session->output_fd,
+            session->pending + session->pending_size,
+            FO_TEST_MCP_BUFFER - session->pending_size);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) return -5;
+        session->pending_size += (size_t)count;
+    }
+}
+
+int fo_test_mcp_wait(int handle, int timeout_ms, int *exit_code) {
+    fo_test_mcp_session *session = mcp_session_for(handle);
+    if (session == NULL || exit_code == NULL || timeout_ms < 0) return -1;
+    int64_t deadline = fo_test_monotonic_ms() + timeout_ms;
+    for (;;) {
+        int status = 0;
+        pid_t waited = waitpid(session->pid, &status, WNOHANG);
+        if (waited == session->pid) {
+            *exit_code = WIFEXITED(status) ? WEXITSTATUS(status) :
+                (WIFSIGNALED(status) ? -WTERMSIG(status) : -128);
+            session->pid = 0;
+            return 0;
+        }
+        if (waited < 0 && errno != EINTR) return -2;
+        int64_t remaining = deadline - fo_test_monotonic_ms();
+        if (remaining <= 0) return 1;
+        struct timespec interval = {0, 10000000};
+        (void)nanosleep(&interval, NULL);
+    }
+}
+
+int fo_test_mcp_close(int handle) {
+    if (handle < 1 || handle > FO_TEST_MCP_SESSIONS) return -1;
+    fo_test_mcp_session *session = &mcp_sessions[handle - 1];
+    if (session->pid > 0) return -2;
+    if (session->input_fd >= 0) close(session->input_fd);
+    if (session->output_fd >= 0) close(session->output_fd);
+    free(session->pending);
+    memset(session, 0, sizeof(*session));
+    session->input_fd = -1;
+    session->output_fd = -1;
+    return 0;
 }
