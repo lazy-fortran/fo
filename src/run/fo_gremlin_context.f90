@@ -7,10 +7,11 @@ module fo_gremlin_context
         generation_t, generation_capture
     use fo_gremlin_state, only: gremlin_generation_register_at
     use fo_change_watch, only: change_watch_t, change_watch_add_context
+    use fx_hash, only: sha256_file
     use fo_process, only: argv_push, process_cancel_pid, process_poll_pid, &
         process_start_argv_logged
     use fo_util, only: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, read_text_file
-    use fo_fs, only: fs_find_executable, fs_sleep_ms, fs_tree_fingerprint, fs_rename
+    use fo_fs, only: fs_find_executable, fs_sleep_ms, fs_tree_fingerprint, fs_rename, fs_stat
     implicit none
     private
 
@@ -20,9 +21,9 @@ module fo_gremlin_context
 
 contains
 
-    subroutine capture_candidate(project_dir, generation, ok, &
+    subroutine capture_candidate(project_dir, driver_path, driver_digest, generation, ok, &
             registration_error, message, change_watch)
-        character(len=*), intent(in) :: project_dir
+        character(len=*), intent(in) :: project_dir, driver_path, driver_digest
         type(generation_t), intent(out) :: generation
         logical, intent(out) :: ok
         integer, intent(out) :: registration_error
@@ -34,7 +35,7 @@ contains
         integer :: ierr
 
         registration_error = 0
-        call capture_context(project_dir, context, ierr, message)
+        call capture_context(project_dir, driver_path, driver_digest, context, ierr, message)
         if (ierr /= 0) then
             ok = .false.
             return
@@ -57,6 +58,20 @@ contains
             ierr, message)
         ok = ierr == 0
         if (.not. ok) return
+        call validate_driver_file(trim(driver_path), trim(driver_digest), &
+            context%driver_size, ierr, message)
+        if (ierr /= 0) then
+            ok = .false.
+            return
+        end if
+        call validate_driver_file(trim(generation%driver_path), trim(driver_digest), &
+            context%driver_size, ierr, message)
+        if (ierr /= 0) then
+            ok = .false.
+            message = 'captured generation driver does not match its pinned identity: '// &
+                trim(message)
+            return
+        end if
         call gremlin_generation_register_at(generation%root, ierr, message)
         ok = ierr == 0
         if (ierr /= 0) registration_error = ierr
@@ -136,8 +151,8 @@ contains
         message = ''
     end subroutine common_generation_cas_root
 
-    subroutine capture_context(project_dir, context, ierr, message)
-        character(len=*), intent(in) :: project_dir
+    subroutine capture_context(project_dir, driver_path, driver_digest, context, ierr, message)
+        character(len=*), intent(in) :: project_dir, driver_path, driver_digest
         type(generation_context_t), intent(out) :: context
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
@@ -154,6 +169,10 @@ contains
         integer :: i, n_inputs, n_args, exitcode, git_exit
         logical :: found, git_found, fingerprint_ok
 
+        call validate_driver_file(trim(driver_path), trim(driver_digest), &
+            context%driver_size, ierr, message)
+        if (ierr /= 0) return
+
         ierr = 0
         message = ''
         context%toolchain = ''
@@ -161,6 +180,7 @@ contains
         context%environment = ''
         context%base_commit = ''
         context%patch_digest = ''
+        context%driver_digest = trim(driver_digest)
         allocate (config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) then
@@ -174,7 +194,7 @@ contains
         do i = 1, config%n_dev_deps
             if (dep_kind(config%dev_deps(i)) == DEP_PATH) n_inputs = n_inputs + 1
         end do
-        allocate (inputs(n_inputs))
+        allocate (inputs(n_inputs + 1))
         n_inputs = 0
         do i = 1, config%n_deps
             if (dep_kind(config%deps(i)) /= DEP_PATH) cycle
@@ -188,6 +208,15 @@ contains
                 config%dev_deps(i)%name, inputs, n_inputs, ierr, message)
             if (ierr /= 0) return
         end do
+        if (len_trim(driver_path) == 0 .or. len_trim(driver_digest) /= HASH_LEN) then
+            ierr = 1
+            message = 'Gremlin driver is not pinned for generation capture'
+            return
+        end if
+        n_inputs = n_inputs + 1
+        inputs(n_inputs)%label = 'fo-driver'
+        inputs(n_inputs)%source_root = directory_name(trim(driver_path))
+        inputs(n_inputs)%destination = 'build/fo-gremlin-driver'
         context%inputs = inputs
         do i = 1, config%n_flags
             context%flags = context%flags//' '//trim(config%flags(i))
@@ -274,6 +303,38 @@ contains
         end if
     end subroutine capture_context
 
+    subroutine validate_driver_file(path, expected_digest, expected_size, ierr, message)
+        character(len=*), intent(in) :: path, expected_digest
+        integer(c_long_long), intent(inout) :: expected_size
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        character(len=HASH_LEN) :: actual_digest
+        integer(c_long_long) :: mtime, actual_size
+        logical :: exists
+
+        call fs_stat(path, mtime, actual_size, exists)
+        if (.not. exists .or. actual_size <= 0_c_long_long) then
+            ierr = 1
+            message = 'driver is missing or has an invalid size'
+            return
+        end if
+        if (expected_size > 0_c_long_long .and. actual_size /= expected_size) then
+            ierr = 1
+            message = 'driver size changed during generation capture'
+            return
+        end if
+        call sha256_file(path, actual_digest, ierr)
+        if (ierr /= 0 .or. actual_digest /= expected_digest) then
+            ierr = 1
+            message = 'driver bytes changed during generation capture'
+            return
+        end if
+        expected_size = actual_size
+        ierr = 0
+        message = ''
+    end subroutine validate_driver_file
+
     subroutine append_environment_value(environment, name)
         character(len=*), intent(inout) :: environment
         character(len=*), intent(in) :: name
@@ -318,6 +379,20 @@ contains
         inputs(n_inputs)%source_root = trim(project_dir)//'/'//trim(dep_path)
         inputs(n_inputs)%destination = trim(dep_path)
     end subroutine append_path_dependency
+
+    function directory_name(path) result(parent)
+        character(len=*), intent(in) :: path
+        character(len=PATH_LEN) :: parent
+        integer :: slash
+
+        slash = index(trim(path), '/', back=.true.)
+        parent = ''
+        if (slash > 1) then
+            parent = path(:slash - 1)
+        else if (slash == 1) then
+            parent = '/'
+        end if
+    end function directory_name
 
     subroutine context_cancel_owned_process(pid, ierr)
         integer, intent(in) :: pid

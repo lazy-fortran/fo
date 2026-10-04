@@ -1,5 +1,6 @@
 program test_gremlin_generation
-    use, intrinsic :: iso_c_binding, only: c_char, c_null_char, c_int, c_size_t
+    use, intrinsic :: iso_c_binding, only: c_char, c_null_char, c_int, c_size_t, &
+        c_long_long
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
     use fo_fs, only: fs_make_dir, fs_rename, fs_write_text
     use fo_gremlin_generation, only: generation_context_t, generation_t, &
@@ -355,6 +356,15 @@ program test_gremlin_generation
     call check(race_ierr == 0 .and. &
         metadata_changed%identity /= build_source_changed%identity, &
         'toolchain changes invalidate generation identity')
+    context%toolchain = 'gfortran:/tool/bin:gcc 15:sha256=compiler-a'
+    call generation_capture(trim(project), trim(cache), context, metadata_changed, &
+        race_ierr, message)
+    context%toolchain = 'gfortran:/tool/bin:gcc 15:sha256=compiler-b'
+    call generation_capture(trim(project), trim(cache), context, mode_changed, &
+        race_ierr, message)
+    call check(race_ierr == 0 .and. &
+        metadata_changed%identity /= mode_changed%identity, &
+        'compiler executable content digest invalidates generation identity')
     context%toolchain = 'gfortran 14 test'
     context%flags = '-O2 -g'
     call generation_capture(trim(project), trim(cache), context, metadata_changed, &
@@ -369,20 +379,53 @@ program test_gremlin_generation
     call check(race_ierr == 0 .and. &
         metadata_changed%identity /= build_source_changed%identity, &
         'environment changes invalidate generation identity')
+    context%environment = 'LD_LIBRARY_PATH=/runtime/a'
+    call generation_capture(trim(project), trim(cache), context, metadata_changed, &
+        race_ierr, message)
+    context%environment = 'LD_LIBRARY_PATH=/runtime/b'
+    call generation_capture(trim(project), trim(cache), context, mode_changed, &
+        race_ierr, message)
+    call check(race_ierr == 0 .and. &
+        metadata_changed%identity /= mode_changed%identity, &
+        'runtime library search path invalidates generation identity')
+    context%environment = 'FO_MODULE_PATH=/modules/a'
+    call generation_capture(trim(project), trim(cache), context, metadata_changed, &
+        race_ierr, message)
+    context%environment = 'FO_MODULE_PATH=/modules/b'
+    call generation_capture(trim(project), trim(cache), context, mode_changed, &
+        race_ierr, message)
+    call check(race_ierr == 0 .and. &
+        metadata_changed%identity /= mode_changed%identity, &
+        'external module search path invalidates generation identity')
     context%environment = 'OMP_NUM_THREADS=1'
     context%base_commit = 'different-base'
     call generation_capture(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
-        metadata_changed%identity /= build_source_changed%identity, &
-        'base commit changes invalidate generation identity')
+        metadata_changed%identity == build_source_changed%identity, &
+        'base commit is provenance and does not change execution identity')
     context%base_commit = 'base-commit'
     context%patch_digest = 'different-patch-digest'
     call generation_capture(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
+        metadata_changed%identity == build_source_changed%identity, &
+        'patch digest is provenance and does not change execution identity')
+    context%driver_digest = repeat('a', 64)
+    call generation_capture(trim(project), trim(cache), context, metadata_changed, &
+        race_ierr, message)
+    call check(race_ierr == 0 .and. &
         metadata_changed%identity /= build_source_changed%identity, &
-        'patch digest changes invalidate generation identity')
+        'fo driver digest changes execution identity')
+    context%driver_size = 101_c_long_long
+    call generation_capture(trim(project), trim(cache), context, metadata_changed, &
+        race_ierr, message)
+    context%driver_size = 102_c_long_long
+    call generation_capture(trim(project), trim(cache), context, mode_changed, &
+        race_ierr, message)
+    call check(race_ierr == 0 .and. &
+        metadata_changed%identity /= mode_changed%identity, &
+        'fo driver size participates in execution identity')
 
     race_project = trim(root)//'/race-project'
     call fs_make_dir(trim(race_project)//'/src')
@@ -460,8 +503,8 @@ program test_gremlin_generation
     call check(.not. has_staging_entries(trim(cache)), &
         'successful and rejected captures leave no staging artifacts')
     generation_count = count_generation_roots(trim(cache))
-    call check(generation_count <= 12, &
-        'disk use tracks unique input generations rather than capture attempts')
+    call check(generation_count <= 20, &
+        'disk use tracks intentional identity controls rather than capture attempts')
     remove_rc = fo_c_generation_remove_stage(trim(root)//c_null_char)
     call check(remove_rc == 0, 'fixture data and generation CAS are cleaned up')
     write (output_unit, '(a,i0,a,i0)') 'gremlin generation: ', n_pass, &

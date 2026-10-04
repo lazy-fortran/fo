@@ -13,9 +13,16 @@ module fo_fs
     public :: fs_mkdir_excl, fs_sleep_ms, fs_pid_alive
     public :: fs_copy_exec, fs_rename, fs_stat, fs_identity
     public :: fs_tree_fingerprint
-    public :: fs_find_executable
+    public :: fs_find_executable, fs_running_executable
 
     interface
+        integer(c_int) function fo_c_running_executable(path, cap) &
+                bind(C, name='fo_c_running_executable')
+            import :: c_char, c_int
+            character(kind=c_char), intent(out) :: path(*)
+            integer(c_int), value :: cap
+        end function fo_c_running_executable
+
         integer(c_int) function fo_c_rm_rf(path) bind(C, name='fo_c_rm_rf')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
@@ -284,6 +291,21 @@ contains
         rc = fo_c_tree_fingerprint(trim(path)//c_null_char, mode, sum, mixed, count)
         ok = (rc == 0)
     end subroutine fs_tree_fingerprint
+
+    subroutine fs_running_executable(path, ok)
+        character(len=*), intent(out) :: path
+        logical, intent(out) :: ok
+        character(kind=c_char) :: buf(len(path) + 1)
+        integer :: i
+
+        path = ''
+        ok = fo_c_running_executable(buf, int(size(buf), c_int)) == 0
+        if (.not. ok) return
+        do i = 1, size(buf)
+            if (buf(i) == c_null_char) exit
+            if (i <= len(path)) path(i:i) = buf(i)
+        end do
+    end subroutine fs_running_executable
 
     subroutine fs_find_executable(command, path, ok)
         character(len=*), intent(in) :: command

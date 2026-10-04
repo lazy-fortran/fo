@@ -1,7 +1,9 @@
 module fo_gremlin_supervisor
     use, intrinsic :: iso_fortran_env, only: int64
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
     use fo_build_backend, only: BACKEND_NATIVE, backend_t, detect_backend
     use fo_cache, only: HASH_LEN, cache_digest
+    use fx_hash, only: sha256_file
     use fo_check, only: fo_changed_modules
     use fo_gremlin_context, only: capture_candidate
     use fo_gremlin_request, only: gremlin_request_t, parse_request, is_hex_digest
@@ -43,12 +45,13 @@ module fo_gremlin_supervisor
     use fo_test_budget, only: test_budget_seconds, test_wall_cap_seconds
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_process, only: argv_push, process_cancel_pid, &
-        process_poll_pid, process_start_argv_logged
+        process_getpid, process_poll_pid, process_start_argv_logged
     use fo_scan_types, only: MAX_PATH
     use fo_util, only: extract_json_field, json_bool, json_int, make_tmpfile
     use fx_dag, only: dag_t, MAX_NODES
     use fx_json_build, only: json_escape_string
-    use fo_fs, only: fs_find_executable, fs_make_dir, fs_sleep_ms
+    use fo_fs, only: fs_make_dir, fs_sleep_ms, fs_remove_file, &
+        fs_copy_exec, fs_mkdir_excl, fs_rename, fs_stat, fs_running_executable, fs_remove_tree
     use fo_gremlin_session, only: gremlin_resolve_read_session, &
         gremlin_load_terminal_session, gremlin_get_session_journal_path, &
         gremlin_stage_recovery_journal, gremlin_recover_owner_journal, &
@@ -59,6 +62,18 @@ module fo_gremlin_supervisor
     integer, parameter :: NAME_LEN = 128, PATH_LEN = 4096
     integer, parameter :: GREMLIN_HISTORY_LIMIT = 128
     integer, parameter :: GREMLIN_POLICY_RECEIPT_LIMIT = 512
+
+    character(len=PATH_LEN), save :: pinned_driver_source = ''
+    character(len=HASH_LEN), save :: pinned_driver_digest = ''
+    integer(c_long_long), save :: pinned_driver_size = 0_c_long_long
+
+    interface
+        integer(c_int) function freeze_driver(path) &
+                bind(C, name="fo_c_generation_freeze_tree")
+            import :: c_int, c_char
+            character(kind=c_char), intent(in) :: path(*)
+        end function freeze_driver
+    end interface
 
 
     type :: child_t
@@ -169,10 +184,11 @@ contains
         type(gremlin_session_t) :: session
         character(len=PATH_LEN) :: message, status_text, owner_start
         character(len=128) :: session_id
-        character(len=HASH_LEN) :: stored_policy
+        character(len=HASH_LEN) :: stored_policy, launch_digest
+        integer(c_long_long) :: launch_size
         integer :: ierr, owner_pid, pid, spawn_exit, i, n_args
         character(len=:), allocatable :: packed
-        character(len=PATH_LEN) :: executable, log_file
+        character(len=PATH_LEN) :: executable, launch_executable, log_file
         logical :: executable_ok
 
         exitcode = 0
@@ -225,22 +241,25 @@ contains
                 end if
             end if
         end if
-        call gremlin_session_release(session, ierr, message)
-        if (ierr /= 0) then
-            call error_response('start', 'cannot reserve Gremlin owner: '//trim(message), &
-                response)
+        call find_self_executable(executable, executable_ok)
+        if (.not. executable_ok) then
+            call gremlin_session_release(session, spawn_exit, owner_start)
+            call error_response('start', 'cannot locate the current fo executable', response)
             exitcode = 2
             return
         end if
-        call find_self_executable(executable, executable_ok)
-        if (.not. executable_ok) then
-            call error_response('start', 'cannot locate the current fo executable', response)
+        call pin_driver_to(session, 'launch-driver', executable, launch_executable, &
+            launch_digest, launch_size, ierr, message)
+        if (ierr /= 0) then
+            call gremlin_session_release(session, spawn_exit, owner_start)
+            call error_response('start', 'cannot pin the Gremlin driver: '//trim(message), &
+                response)
             exitcode = 2
             return
         end if
         call make_tmpfile('fo-gremlin-launch', log_file)
         n_args = 0
-        call argv_push(packed, n_args, trim(executable))
+        call argv_push(packed, n_args, trim(launch_executable))
         call argv_push(packed, n_args, 'gremlin')
         call argv_push(packed, n_args, 'run')
         call argv_push(packed, n_args, '--dir')
@@ -266,7 +285,18 @@ contains
         call process_start_argv_logged(project_dir, packed, n_args, log_file, &
             pid, spawn_exit)
         if (spawn_exit /= 0) then
+            call gremlin_session_release(session, ierr, message)
             call error_response('start', 'cannot launch the Gremlin owner', response)
+            exitcode = 2
+            return
+        end if
+        ! Keep the reservation until the child is waiting on the lane lock. This
+        ! closes the gap where two same-lane starts could both pin and launch.
+        call gremlin_session_release(session, ierr, message)
+        if (ierr /= 0) then
+            call cancel_launched_owner(pid, spawn_exit)
+            call error_response('start', 'cannot transfer the Gremlin lane reservation: '// &
+                trim(message), response)
             exitcode = 2
             return
         end if
@@ -853,7 +883,9 @@ contains
         character(len=PATH_LEN) :: generation_root
         character(len=32) :: reproduction_id
         character(len=NAME_LEN) :: selected(MAX_NODES)
-        character(len=HASH_LEN) :: active_identity
+        character(len=HASH_LEN) :: active_identity, expected_driver
+        character(len=128) :: provenance
+        integer(c_long_long) :: driver_mtime, driver_size
         character(len=16) :: outcome
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
         character(len=128) :: session_id, owner_start
@@ -861,7 +893,7 @@ contains
         integer :: owner_pid, ierr, n_selected, mandatory_count, seed
         integer :: n_args, spawn_exit, test_exit, sequence, release_error
         integer :: reproduction_timeout
-        logical :: executable_ok
+        logical :: driver_exists, executable_ok
         logical :: have_reproduction_lease
 
         exitcode = 0
@@ -918,6 +950,45 @@ contains
             return
         end if
         have_reproduction_lease = .true.
+        call read_generation_driver(generation, ierr, message)
+        if (ierr /= 0) then
+            call release_generation_lease(reproduction_lease, have_reproduction_lease, &
+                release_error, cleanup_message)
+            call release_if_owner(session, release_error, cleanup_message)
+            call error_response("reproduce", trim(message), response)
+            exitcode = 2
+            return
+        end if
+        expected_driver = generation%driver_digest
+        if (len_trim(request%generation_id) == 0) then
+            call extract_json_field(status_text, "base_commit", provenance)
+            if (len_trim(provenance) > 0) generation%base_commit = trim(provenance)
+            call extract_json_field(status_text, "patch_digest", provenance)
+            if (len_trim(provenance) > 0) generation%patch_digest = trim(provenance)
+        end if
+        generation%driver_path = trim(active_project)//'/build/fo-gremlin-driver/fo'
+        call fs_stat(trim(generation%driver_path), driver_mtime, driver_size, driver_exists)
+        if (.not. driver_exists .or. driver_size <= 0_c_long_long .or. &
+            driver_size /= generation%driver_size) then
+            call release_generation_lease(reproduction_lease, have_reproduction_lease, &
+                release_error, cleanup_message)
+            call release_if_owner(session, release_error, cleanup_message)
+            call error_response('reproduce', 'requested generation has no pinned fo driver', &
+                response)
+            exitcode = 2
+            return
+        end if
+        call sha256_file(trim(generation%driver_path), generation%driver_digest, ierr)
+        if (ierr /= 0 .or. generation%driver_digest /= expected_driver) then
+            call release_generation_lease(reproduction_lease, have_reproduction_lease, &
+                release_error, cleanup_message)
+            call release_if_owner(session, release_error, cleanup_message)
+            call error_response('reproduce', 'requested generation has no pinned fo driver', &
+                response)
+            exitcode = 2
+            return
+        end if
+        generation%driver_size = driver_size
         inquire (file=trim(active_project)//'/fpm.toml', exist=executable_ok)
         if (.not. executable_ok) then
             call release_generation_lease(reproduction_lease, have_reproduction_lease, &
@@ -954,16 +1025,6 @@ contains
             exitcode = 2
             return
         end if
-        call find_self_executable(executable, executable_ok)
-        if (.not. executable_ok) then
-            call release_generation_lease(reproduction_lease, have_reproduction_lease, &
-                release_error, cleanup_message)
-            call release_if_owner(session, ierr, message)
-            call error_response('reproduce', 'cannot locate the current fo executable', &
-                response)
-            exitcode = 2
-            return
-        end if
         ! The completion sequence is the reproduction execution ID. Allocate it
         ! before launch so its output path and durable receipt identify the same
         ! invocation, including concurrent reproductions in one live session.
@@ -971,7 +1032,7 @@ contains
         write (reproduction_id, '(i0)') sequence
         call log_path(session, 'reproduce-'//trim(reproduction_id)//'.log', log_file)
         n_args = 0
-        call argv_push(packed, n_args, trim(executable))
+        call argv_push(packed, n_args, trim(generation%driver_path))
         call argv_push(packed, n_args, 'test')
         call argv_push(packed, n_args, '--json')
         if (is_slow_test(trim(request%case_id))) then
@@ -1042,6 +1103,7 @@ contains
         character(len=PATH_LEN) :: fatal_message, state_message
         character(len=16) :: observed_outcome
         character(len=PATH_LEN) :: owner_start
+        character(len=PATH_LEN) :: executable, owner_driver
         character(len=NAME_LEN) :: selected(MAX_NODES)
         character(len=HASH_LEN) :: stored_policy
         character(len=65536) :: status_text
@@ -1058,7 +1120,7 @@ contains
         logical :: capture_failed, provider_quiet
         logical :: have_active_lease, have_candidate_lease
         logical :: active_pinned, candidate_pinned
-        logical :: build_done, test_done, fatal_error
+        logical :: build_done, test_done, fatal_error, executable_ok
 
         exitcode = 0
         active_generation = generation_t()
@@ -1124,6 +1186,24 @@ contains
                 'attached', response)
             return
         end if
+        call find_self_executable(executable, executable_ok)
+        if (.not. executable_ok) then
+            call release_if_owner(session, state_error, state_message)
+            call error_response('run', 'cannot locate the current fo executable', response)
+            exitcode = 2
+            return
+        end if
+        call pin_driver_to(session, 'pinned-driver', executable, owner_driver, &
+            pinned_driver_digest, pinned_driver_size, ierr, message)
+        if (ierr /= 0) then
+            call release_if_owner(session, state_error, state_message)
+            call error_response('run', 'cannot pin the Gremlin driver: '//trim(message), &
+                response)
+            exitcode = 2
+            return
+        end if
+        pinned_driver_source = owner_driver
+        call fs_remove_tree(trim(session%state_dir)//"/launch-driver")
         call gremlin_recover_owner_journal(project_dir, session, ierr, message)
         if (ierr /= 0) then
             call release_if_owner(session, state_error, state_message)
@@ -1153,7 +1233,8 @@ contains
             exitcode = 2
             return
         end if
-        call capture_candidate(project_dir, candidate_generation, &
+        call capture_candidate(project_dir, trim(pinned_driver_source), &
+            trim(pinned_driver_digest), candidate_generation, &
             capture_ok, registration_error, message, change_watch=change_watch)
         if (registration_error /= 0) then
             fatal_error = .true.
@@ -1502,7 +1583,7 @@ contains
         character(len=*), intent(in) :: project_dir
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(inout) :: request
-        type(generation_t), intent(in) :: active
+        type(generation_t), intent(inout) :: active
         type(generation_t), intent(inout) :: candidate
         logical, intent(in) :: have_active
         logical, intent(inout) :: have_candidate
@@ -1549,7 +1630,8 @@ contains
         end if
         if (capture_debounce_ms <= 0_int64 .or. now_ms < capture_debounce_ms) return
         capture_debounce_ms = 0_int64
-        call capture_candidate(project_dir, current, ok, &
+        call capture_candidate(project_dir, trim(pinned_driver_source), &
+            trim(pinned_driver_digest), current, ok, &
             release_error, message, change_watch)
         if (release_error /= 0) then
             ierr = release_error
@@ -1561,7 +1643,10 @@ contains
             return
         end if
         if (have_candidate) then
-            if (current%identity == candidate%identity) return
+            if (current%identity == candidate%identity) then
+                candidate = current
+                return
+            end if
             if (build_child%pid > 0) then
                 call cancel_owned_process(build_child%pid, ierr)
                 if (ierr /= 0) then
@@ -1583,6 +1668,7 @@ contains
         end if
         if (have_active) then
             if (current%identity == active%identity) then
+                active = current
                 request%input_changed = .false.
                 call publish_state(session, request, 'testing', active, current, &
                     current_case, completed, selected_count, seed, 'NONE', 0, ierr, message)
@@ -1642,13 +1728,12 @@ contains
         character(len=PATH_LEN) :: executable
         character(len=:), allocatable :: packed
         integer :: n_args, spawn_exit
-        logical :: executable_ok
 
         child = child_t()
-        call find_self_executable(executable, executable_ok)
-        if (.not. executable_ok) then
+        executable = trim(generation%driver_path)
+        if (len_trim(executable) == 0) then
             ierr = 1
-            message = 'cannot locate the current fo executable'
+            message = 'generation has no pinned fo driver'
             return
         end if
         call log_path(session, 'build-'//generation%identity(1:16), child%log_file)
@@ -2238,7 +2323,6 @@ contains
         character(len=PATH_LEN) :: journal_message
         character(len=:), allocatable :: packed
         integer :: n_args, spawn_exit, journal_status, coverage_status
-        logical :: executable_ok
         character(len=PATH_LEN) :: coverage_path
 
         child = child_t()
@@ -2247,10 +2331,10 @@ contains
         if (index_case < 1 .or. index_case > n_selected) return
         child%gate_required = any(request%gate_cases(:request%gate_required_count) == &
             selected(index_case))
-        call find_self_executable(executable, executable_ok)
-        if (.not. executable_ok) then
+        executable = trim(generation%driver_path)
+        if (len_trim(executable) == 0) then
             ierr = 1
-            message = 'cannot locate the current fo executable'
+            message = 'generation has no pinned fo driver'
             return
         end if
         write (log_name, '(a,i0,a,i0,a)') 'case-', campaign, '-', index_case, '.log'
@@ -2471,6 +2555,10 @@ contains
             '","session_id":"'//trim(json_escape_string(session%session_id))// &
             '","lane_id":"'//trim(json_escape_string(request%lane_id))// &
             '","generation":"'//generation%identity// &
+            '","driver_digest":"'//trim(generation%driver_digest)// &
+            '","driver_size":'//trim(int64_text(generation%driver_size))// &
+            ',"base_commit":"'//trim(generation_text(generation%base_commit))// &
+            '","patch_digest":"'//trim(generation_text(generation%patch_digest))// &
             '","case_id":"'//trim(json_escape_string(case_name))// &
             '","outcome":"'//trim(journal_outcome)//'","status":"'// &
             trim(outcome)//'","exitcode":'// &
@@ -2563,7 +2651,11 @@ contains
             trim(json_escape_string(request%lane_id))//'","policy_key":"'// &
             request_policy_key(request)//'","state":"'//trim(state)// &
             '","active_generation":"'//trim(active%identity)// &
-            '","candidate_generation":"'//trim(candidate%identity)// &
+            '","base_commit":"'//trim(generation_text(active%base_commit))// &
+            '","patch_digest":"'//trim(generation_text(active%patch_digest))// &
+            '","driver_digest":"'//trim(pinned_driver_digest)// &
+            '","driver_size":'//trim(int64_text(pinned_driver_size))// &
+            ',"candidate_generation":"'//trim(candidate%identity)// &
             '","active_project":"'//trim(json_escape_string(active_project))// &
             '","candidate_project":"'//trim(json_escape_string(candidate_project))// &
             '","current_test":"'//trim(json_escape_string(current_case))// &
@@ -3078,6 +3170,14 @@ contains
         digest = cache_digest(parts, 1)
     end function text_digest
 
+    function generation_text(value) result(text)
+        character(len=:), allocatable, intent(in) :: value
+        character(len=:), allocatable :: text
+
+        text = ''
+        if (allocated(value)) text = value
+    end function generation_text
+
     subroutine simple_response(action, lane_id, session_id, state, response)
         character(len=*), intent(in) :: action, lane_id, session_id, state
         character(len=:), allocatable, intent(out) :: response
@@ -3145,22 +3245,183 @@ contains
         name = selected(1)
     end function current_test_name
 
+    subroutine read_generation_driver(generation, ierr, message)
+        type(generation_t), intent(inout) :: generation
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=8192) :: line
+        integer :: unit, ios
+
+        ierr = 1
+        message = 'requested generation has no recorded driver identity'
+        open(newunit=unit, file=trim(generation%root)//'/identity.txt', &
+            status='old', action='read', iostat=ios)
+        if (ios /= 0) return
+        do
+            read(unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, 'driver_digest=') == 1) &
+                generation%driver_digest = trim(line(15:))
+            if (index(line, 'driver_size=') == 1) then
+                read(line(13:), *, iostat=ios) generation%driver_size
+                if (ios /= 0) exit
+            end if
+            if (index(line, 'base_commit=') == 1) &
+                generation%base_commit = trim(line(13:))
+            if (index(line, 'patch_digest=') == 1) &
+                generation%patch_digest = trim(line(14:))
+        end do
+        close(unit)
+        if (.not. is_hex_digest(generation%driver_digest)) return
+        if (generation%driver_size <= 0_c_long_long) return
+        ierr = 0
+        message = ''
+    end subroutine read_generation_driver
+
     subroutine find_self_executable(path, ok)
         character(len=*), intent(out) :: path
         logical, intent(out) :: ok
 
-        character(len=PATH_LEN) :: argument
-        integer :: status, length
-
-        argument = ''
-        call get_command_argument(0, argument, length, status)
-        ok = .false.
-        if (status == 0 .and. length > 0 .and. length <= len(argument)) then
-            call fs_find_executable(trim(argument), path, ok)
-            if (ok) return
-        end if
-        call fs_find_executable('fo', path, ok)
+        call fs_running_executable(path, ok)
     end subroutine find_self_executable
+
+    subroutine pin_driver_to(session, subdirectory, source, pinned, digest, byte_size, &
+            ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        character(len=*), intent(in) :: subdirectory, source
+        character(len=*), intent(out) :: pinned, digest, message
+        integer(c_long_long), intent(out) :: byte_size
+        integer, intent(out) :: ierr
+
+        character(len=HASH_LEN) :: source_digest, copy_digest, stable_digest
+        character(len=PATH_LEN) :: pin_dir, temporary
+        character(len=32) :: pid_text, clock_text
+        integer(c_long_long) :: source_size, source_size_after, copy_size, final_size
+        integer(c_long_long) :: source_mtime, source_mtime_after, copy_mtime, final_mtime
+        integer :: rc, clock_count, attempt
+        logical :: source_ok, source_after_ok, copy_ok, final_ok, exists
+
+        call system_clock(clock_count)
+        write (pid_text, '(i0)') process_getpid()
+        ! The lane lock proves previous session pins are inactive. Keep at most
+        ! one owner and one launch copy per lane; generations own their copies.
+        call fs_remove_tree(trim(session%state_dir)//'/'//trim(subdirectory))
+        call fs_make_dir(trim(session%state_dir)//'/'//trim(subdirectory))
+        do attempt = 1, 32
+            write (clock_text, '(i0)') clock_count + attempt
+            pin_dir = trim(session%state_dir)//'/'//trim(subdirectory)//'/'// &
+                'driver-'//trim(session%session_id)//'-'//trim(pid_text)//'-'// &
+                trim(clock_text)
+            if (len_trim(pin_dir) + len('/fo.tmp.') + len_trim(pid_text) + &
+                len_trim(clock_text) + 1 > len(temporary)) then
+                pinned = ''
+                digest = ''
+                byte_size = 0_c_long_long
+                ierr = 1
+                message = 'pinned fo driver path exceeds the supported length'
+                return
+            end if
+            rc = fs_mkdir_excl(trim(pin_dir))
+            if (rc == 0) exit
+        end do
+        if (attempt > 32) then
+            pinned = ''
+            digest = ''
+            byte_size = 0_c_long_long
+            ierr = 1
+            message = 'cannot allocate unique owned driver directory'
+            return
+        end if
+        pinned = trim(pin_dir)//'/fo'
+        temporary = trim(pin_dir)//'/fo.tmp.'//trim(pid_text)//'-'//trim(clock_text)
+        digest = ''
+        byte_size = 0_c_long_long
+        message = ''
+        call fs_stat(trim(source), source_mtime, source_size, source_ok)
+        if (.not. source_ok .or. source_size <= 0_c_long_long) then
+            ierr = 1
+            message = 'cannot stat the current fo driver'
+            return
+        end if
+        call sha256_file(trim(source), source_digest, rc)
+        if (rc /= 0 .or. len_trim(source_digest) /= HASH_LEN) then
+            ierr = 1
+            message = 'cannot hash the current fo driver'
+            return
+        end if
+        call fs_stat(trim(source), source_mtime_after, source_size_after, source_after_ok)
+        if (.not. source_after_ok .or. source_size_after /= source_size .or. &
+            source_mtime_after /= source_mtime) then
+            ierr = 1
+            message = 'fo driver changed while its source identity was being read'
+            return
+        end if
+        rc = fs_copy_exec(trim(source), trim(temporary))
+        if (rc /= 0) then
+            ierr = rc
+            message = 'cannot copy the fo driver into owned session storage'
+            return
+        end if
+        call fs_stat(trim(temporary), copy_mtime, copy_size, copy_ok)
+        if (.not. copy_ok .or. copy_size /= source_size) then
+            call fs_remove_file(trim(temporary))
+            ierr = 1
+            message = 'copied fo driver size does not match its source'
+            return
+        end if
+        call sha256_file(trim(temporary), copy_digest, rc)
+        if (rc /= 0 .or. copy_digest /= source_digest) then
+            call fs_remove_file(trim(temporary))
+            ierr = 1
+            message = 'copied fo driver bytes do not match their source identity'
+            return
+        end if
+        call sha256_file(trim(source), stable_digest, rc)
+        call fs_stat(trim(source), source_mtime_after, source_size_after, source_after_ok)
+        if (rc /= 0 .or. .not. source_after_ok .or. &
+            source_size_after /= source_size .or. source_mtime_after /= source_mtime .or. &
+            stable_digest /= source_digest) then
+            call fs_remove_file(trim(temporary))
+            ierr = 1
+            message = 'fo driver changed while its owned copy was being made'
+            return
+        end if
+        inquire (file=trim(pinned), exist=exists)
+        if (exists) then
+            call fs_remove_file(trim(temporary))
+            ierr = 1
+            message = 'unique fo driver pin destination already exists'
+            return
+        end if
+        rc = int(freeze_driver(trim(temporary)//c_null_char))
+        if (rc /= 0) then
+            call fs_remove_file(trim(temporary))
+            ierr = rc
+            message = "cannot make the owned driver copy read-only"
+            return
+        end if
+        rc = fs_rename(trim(temporary), trim(pinned))
+        if (rc /= 0) then
+            call fs_remove_file(trim(temporary))
+            ierr = rc
+            message = 'cannot atomically publish the owned fo driver copy'
+            return
+        end if
+        call fs_stat(trim(pinned), final_mtime, final_size, final_ok)
+        call sha256_file(trim(pinned), digest, rc)
+        if (rc /= 0 .or. .not. final_ok .or. final_size /= source_size .or. &
+            digest /= source_digest) then
+            call fs_remove_file(trim(pinned))
+            ierr = 1
+            message = 'published fo driver failed final size and digest validation'
+            return
+        end if
+        pinned_driver_source = trim(pinned)
+        pinned_driver_digest = trim(digest)
+        pinned_driver_size = final_size
+        byte_size = final_size
+        ierr = 0
+    end subroutine pin_driver_to
 
     subroutine log_path(session, filename, path)
         type(gremlin_session_t), intent(in) :: session

@@ -102,7 +102,16 @@ async function main() {
     assert.notEqual(newHead, initialHead, 'independent Git observes the new commit');
     const latest = await captureMetadata();
     const refreshed = identity(latest.generation);
-    assert.equal(refreshed.base_commit, newHead, 'fresh probe records the new Git HEAD');
+    assert.equal(latest.generation, first.generation,
+      'metadata-only Git commit preserves execution identity');
+    assert.equal(refreshed.base_commit, initialHead,
+      'immutable snapshot keeps its original capture provenance');
+    const live = await waitFor(() => {
+      const snapshot = command(['gremlin', 'status', '--dir', project, '--lane', lane,
+        '--session', session, '--json']);
+      return snapshot.base_commit === newHead ? snapshot : null;
+    }, 'refreshed live provenance');
+    assert.equal(live.base_commit, newHead, 'live provenance records the new Git HEAD');
     assert.equal(refreshed.patch_digest, original.patch_digest,
       'empty metadata commit leaves the source diff digest unchanged');
     const probes = fs.readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse)
