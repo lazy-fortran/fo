@@ -68,7 +68,7 @@ contains
         end if
         call fs_make_dir(trim(scratch_parent))
         parent = trim(scratch_parent)//'/execution-'
-        owner_digest = cache_digest([character(len=PATH_LEN) :: &
+        owner_digest = cache_digest([character(len=512) :: &
             trim(generation_id), trim(owner_key), trim(case_id)], 3)
         if (len_trim(parent) + len(owner_digest) + 4 >= PATH_LEN) then
             message = 'execution view path exceeds the supported length'
