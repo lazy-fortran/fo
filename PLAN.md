@@ -632,7 +632,15 @@ because a continuous campaign is partial.
 **Never wait for GitHub CI while implementation work is available. GitHub CI is
 post-submit evidence, not part of the development loop. Use Gremlin and focused
 local oracles while developing.** Workers reuse one exact built driver and run
-their owned independent oracle while iterating. For lazy-fortran, push an exact
+their owned independent oracle while iterating. The controller assigns a verified
+absolute driver path plus SHA256, copied read-only outside mutable build outputs.
+Verify before first launch; missing/mismatched drivers fail without PATH,
+installed-driver, wildcard or newest-mtime fallback. #151 makes this pin automatic
+for Gremlin child work. Keep warm caches; cold-cache or full-pipeline reruns need
+a specific claim, unresolved failure or milestone. Background coverage counts
+against the same host admission budget as focused verification. Until measured
+admission is delivered, use one heavy lane per host while coding stays parallel.
+For lazy-fortran, push an exact
 integrated generation to `main` immediately when `local_gate_green` is true and
 no known current regression exists. Do not wait for ordinary/full coverage,
 remote CI or unrelated review. CI audits current `main` asynchronously and may
