@@ -107,7 +107,7 @@ contains
         call assert_true(process%exit_code /= 0 .and. file_exists(b_probe), &
             'B distinctly fails and records a build invocation')
         if (file_exists(b_probe)) then
-            call assert_equal_string(trim(read_text(b_probe)), 'build', &
+            call assert_equal_string(read_text(b_probe), 'build'//new_line('a'), &
                 'B marker identifies the build command')
             call remove_path(b_probe)
         end if
@@ -118,7 +118,7 @@ contains
         call assert_true(process%exit_code /= 0 .and. file_exists(b_probe), &
             'B distinctly fails and records a test invocation')
         if (file_exists(b_probe)) then
-            call assert_equal_string(trim(read_text(b_probe)), 'test', &
+            call assert_equal_string(read_text(b_probe), 'test'//new_line('a'), &
                 'B marker identifies the test command')
             call remove_path(b_probe)
         end if
