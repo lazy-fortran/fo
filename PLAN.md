@@ -28,6 +28,33 @@ New interfaces/workflows below are planned, not claimed implemented by this edit
    `fo work` is abandoned (#143/#152, PR #147); do not recreate it or add a CI
    scheduler, promotion engine, cache daemon, database or bulk RAM cache to fo.
 
+## Product scope
+
+fo is the Fortran build/test/development driver: build, test, run, incremental
+content-addressed caching, affected/continuous testing, formatting, lint/static
+diagnostics, LSP/MCP convenience and the dependency/bootstrap work required by
+those commands. Its intended boundary is comparable to Cargo / the Go toolchain,
+not a general scientific-computing platform.
+
+Explicitly out of scope:
+- Nix/Spack-style hermetic environment management or system package management;
+- capturing/pinning complete compiler helper/sysroot/loader/system-library closures;
+- containers/sandboxing as a product feature;
+- scientific workflow/provenance/capsule/checkpoint systems;
+- symbolic derivation/proof/synthesis pipelines;
+- cluster/job, CI/promotion or coding-agent orchestration.
+
+Historical capsule/Nix/FortOS issues #1/#3/#6/#7 are already closed. #120
+(proof/synthesis) and #157 (complete host toolchain/runtime capture) are closed
+not planned under this boundary. Users needing hermetic reproducibility provide
+it externally with CI images, containers, Nix, Spack or equivalent.
+
+Inside fo, reproducibility means correct and inspectable build/test identities:
+project inputs, declared dependencies/fixtures, compiler identity/version,
+effective flags/link policy, deterministic selection/replay and exact result
+receipts. These facts are sufficient for cache invalidation and continuous
+testing; they do not claim a portable captured operating environment.
+
 ## Repository policy versus verification facts
 
 Gremlin produces exact local evidence, not permission to merge. Lazy-fortran's
@@ -66,8 +93,10 @@ Known remaining limitations at the audit snapshot:
   triggered capture; declared dependencies under build/ must not be ignored.
 - #189: `fo_changed_modules` uses compile-cache availability; Gremlin queries it
   after building. Cache state is not an execution-generation difference.
-- #151/#157: provenance repairs exist, but exact driver and complete executed
-  compiler/helper/runtime identity still need their independent acceptance.
+- #151: provenance repairs exist and exact fo-driver pinning still needs its
+  remaining platform acceptance. Complete host compiler/helper/runtime capture
+  is intentionally out of scope (#157 closed not planned); ordinary compiler
+  identity/configuration remains part of build/cache invalidation.
 - #170: tests need private writable execution views, not a read-only source
   snapshot as their working directory.
 - #165-#168: shared fx store primitives exist; compact fo manifests, private
@@ -97,8 +126,9 @@ A/B replacement oracle passes in 3.55s and generation oracle in 2.11s; #175's
 declared-input mutation oracle and state gate pass. The combined supervisor,
 MCP request-structure and public MCP gate pass 3/3 in 8.73s. Validation uses exact
 executable SHA256 `7dd3dfeedb313c04f6c8007ac4d1f6435274f13214186a532918dbe7d98c0c86`.
-Source/driver pinning is not complete toolchain closure. #175's watcher/capture/
-execution consumers and #189 campaign adoption remain separate work.
+Source/driver pinning intentionally stops at fo's own driver; complete host
+toolchain closure is out of scope. #175's watcher/capture/execution consumers
+and #189 campaign adoption remain separate work.
 
 Mac #151 is pending fx #56's public feature-declaration repair. Linux evidence
 is not a Mac receipt. Darwin startup uses public UUID/held-descriptor checks;
@@ -380,10 +410,10 @@ These are ownership/dependency edges, not a single serial mega-gate:
 
 | Work | Owner / dependencies | Small independent acceptance |
 | --- | --- | --- |
-| shared declared inputs | #175; coordinate #151/#157 | declared/ignored/root-change parity across consumers |
+| shared declared inputs | #175; coordinate #151 for fo-driver identity | declared/ignored/root-change parity across consumers |
 | conservative impact | #189 using #175; policy #138 | same selection with empty/warm/prebuilt cache; real failing delta included |
 | watcher and writable views | #148 / #170 using #175 | no idle captures; no missed declared dependency; private relative writes |
-| exact driver/tool closure | #151 / #157 | replacement uses pinned bytes or reports incomplete/unsupported honestly |
+| exact fo driver | #151 | public-path replacement cannot switch an active Gremlin session |
 | compact manifests | #165 using fx #42 and #175 | one shared payload, exact immutable restoration, no verification copy |
 | transactional sessions | #166 using #170/#165, fx #43/#44 Phase A | failed candidate retains runnable prior result; concurrent views isolated |
 | one engine | #167 using #166, #189 | ordinary/Gremlin identities, invalidation and actual outputs agree |
