@@ -112,6 +112,25 @@ int fo_test_waitpid(pid_t process, int *status, int options) {
     return waited < 0 && errno == EINTR ? 0 : (int)waited;
 }
 
+int fo_test_spawn_capture(const char *const *arguments, const char *cwd,
+        const char *stdout_path, const char *stderr_path) {
+    pid_t child = fork();
+    if (child != 0) return child < 0 ? -1 : (int)child;
+    if (setpgid(0, 0) != 0) _exit(126);
+    int out = open(stdout_path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+    int err = open(stderr_path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+    if (out < 0 || err < 0 || dup2(out, STDOUT_FILENO) < 0 ||
+            dup2(err, STDERR_FILENO) < 0 || chdir(cwd) != 0) _exit(126);
+    close(out);
+    close(err);
+    execvp(arguments[0], (char *const *)arguments);
+    _exit(127);
+}
+
+int fo_test_signal_group(int process, int signal_number) {
+    return kill(-(pid_t)process, signal_number);
+}
+
 int fo_test_silence_output(void) {
     int descriptor = open("/dev/null", O_WRONLY);
     if (descriptor < 0) return -1;
