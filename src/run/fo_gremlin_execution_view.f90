@@ -96,13 +96,22 @@ contains
             message = trim(view%diagnostic)
             return
         end if
+        if (.not. inventory%valid) then
+            if (len_trim(inventory%diagnostic) > 0) then
+                call reject_view(view, trim(inventory%diagnostic), ierr, message)
+            else
+                call reject_view(view, &
+                    'canonical input inventory has invalid declarations', &
+                    ierr, message)
+            end if
+            return
+        end if
         if (.not. inventory_complete .or. .not. inventory%complete) then
             view%complete = .false.
-            view%diagnostic = &
-                'canonical input inventory is incomplete; scratch-only view'
-            ierr = 0
-            message = trim(view%diagnostic)
-            return
+            view%diagnostic = trim(inventory%diagnostic)
+            if (len_trim(view%diagnostic) == 0) &
+                view%diagnostic = &
+                    'canonical input inventory has unmodeled ambient inputs'
         end if
 
         do i = 1, inventory%entry_count
