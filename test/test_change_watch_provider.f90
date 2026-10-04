@@ -1,6 +1,7 @@
 program test_change_watch_provider
     !! Public shared-provider behavior fixture, independent of Gremlin lifecycle.
-    use, intrinsic :: iso_c_binding, only: c_int, c_long
+    use, intrinsic :: iso_c_binding, only: c_int, c_long, c_char, c_ptr, &
+        c_null_char, c_associated
     use fo_change_watch, only: change_watch_t, change_watch_init, &
         change_watch_add_root, change_watch_poll, change_watch_close, &
         CHANGE_RECONCILE
@@ -13,6 +14,12 @@ program test_change_watch_provider
         integer(c_long) :: current, maximum
     end type rlimit_t
     interface
+        function libc_realpath(path, resolved) bind(C, name='realpath') result(pointer)
+            import :: c_char, c_ptr
+            character(c_char), intent(in) :: path(*)
+            character(c_char), intent(out) :: resolved(*)
+            type(c_ptr) :: pointer
+        end function libc_realpath
         integer(c_int) function getrlimit(resource, limits) bind(C, name='getrlimit')
             import :: c_int, rlimit_t
             integer(c_int), value :: resource
@@ -31,7 +38,7 @@ program test_change_watch_provider
     character(len=4096) :: scratch, project, dependency, ignored
     character(len=4096) :: nested, retired, changed, error_text, ignored_dir
     character(len=4096) :: latency_dir
-    character(len=4096) :: created_file, renamed_file
+    character(len=4096) :: created_file, renamed_file, deleted_file
     integer :: ierr, kind, captures, rename_error, clock_start, clock_end, clock_rate
     integer :: attempt
     logical :: got_event
@@ -50,6 +57,9 @@ program test_change_watch_provider
     end do
 
     call make_tmpfile('fo-change-provider-public', scratch)
+    scratch = '/var/tmp/'//scratch(index(trim(scratch), '/', back=.true.) + 1:)
+    call fs_make_dir(trim(scratch))
+    call canonicalize_fixture()
     project = trim(scratch)//'/project'
     dependency = trim(scratch)//'/dependency'
     ignored = trim(scratch)//'/ignored'
@@ -57,6 +67,7 @@ program test_change_watch_provider
     retired = trim(project)//'/retired'
     created_file = trim(nested)//'/created-after-start.f90'
     renamed_file = trim(nested)//'/renamed.f90'
+    deleted_file = trim(nested)//'/deleted.f90'
     call fs_make_dir(trim(nested))
     call fs_make_dir(trim(dependency))
     call fs_make_dir(trim(ignored))
@@ -67,14 +78,22 @@ program test_change_watch_provider
     call change_watch_add_root(watch, trim(dependency), ierr, error_text)
     call require(ierr == 0, 'declared dependency root: '//trim(error_text))
 
+    ! FSEvents can deliver already-generated setup events after subscribing.
+    ! Drain that startup boundary before measuring the clean idle interval.
+    captures = 0
+    call settle_events()
     captures = 0
     call system_clock(count=clock_start, count_rate=clock_rate)
     call change_watch_poll(watch, 300, changed, kind, got_event, ierr)
     call system_clock(count=clock_end)
+    print '(a,f9.2)', 'idle provider poll milliseconds: ', &
+        (clock_end - clock_start)*1000.0/real(max(1, clock_rate))
     call require(ierr == 0, 'idle poll returned an error')
     call require(.not. got_event, 'idle provider emitted a change')
     call require(captures == 0, 'idle provider caused an expensive capture')
-    call require((clock_end - clock_start)*1000.0/real(max(1, clock_rate)) < 400.0, &
+    ! CFRunLoop's positive timer wait can be coalesced by Darwin scheduling.
+    ! Keep a bounded allowance here; the zero-timeout probes below stay <50ms.
+    call require((clock_end - clock_start)*1000.0/real(max(1, clock_rate)) < 600.0, &
         'idle poll exceeded its timeout plus scheduling allowance')
 
     latency_dir = trim(project)//'/latency-probe'
@@ -110,8 +129,13 @@ program test_change_watch_provider
     call require(rename_error == 0, 'cannot rename watched file')
     call await_rename(trim(created_file), trim(renamed_file))
     call settle_events()
-    call fs_remove_file(trim(renamed_file))
-    call await_path(trim(renamed_file))
+    ! Isolate deletion from rename: FSEvents may retain a coalesced rename flag
+    ! on the same path, which legitimately requests reconciliation instead.
+    call fs_write_text(trim(deleted_file), 'program deleted')
+    call await_path(trim(deleted_file))
+    call settle_events()
+    call fs_remove_file(trim(deleted_file))
+    call await_path(trim(deleted_file))
     call settle_events()
     call fs_write_text(trim(dependency)//'/dependency.f90', 'program dependency')
     call await_path(trim(dependency)//'/dependency.f90')
@@ -168,10 +192,84 @@ program test_change_watch_provider
     call assert_idle('recovered root')
 
     call change_watch_close(watch)
+    if (.not. linux_inotify) call verify_root_diagnostic()
     call fs_remove_tree(trim(scratch))
     print '(a)', 'shared change provider: roots, events, idle and recovery passed'
 
 contains
+
+    subroutine verify_root_diagnostic()
+        character(len=4096) :: bad_root, diagnostic, recovered, event
+        integer :: status, event_kind, tries, quiet
+        logical :: observed, is_quiet
+
+        ! Darwin cannot represent byte FF in a UTF-8 CFString. This injects an
+        ! actual failing path conversion, without mocking FSEvents or errno.
+        project = trim(scratch)//'/diagnostic-root'
+        call fs_make_dir(trim(project))
+        recovered = trim(project)//'/diagnostic-recovered.f90'
+        call fs_write_text(trim(recovered), 'program recovery_before_error')
+        bad_root = trim(project)//'/invalid-'//achar(255)
+        call change_watch_init(diagnostic_watch, trim(project), status, diagnostic)
+        call require(status == 0, 'diagnostic fixture init: '//trim(diagnostic))
+        call change_watch_add_root(diagnostic_watch, trim(bad_root), status, diagnostic)
+        call require(status == 92, 'Darwin invalid root did not return EILSEQ')
+        call require(index(diagnostic, 'decode declared root') > 0, &
+            'Darwin diagnostic lost the exact operation')
+        call require(index(diagnostic, "root '"//trim(bad_root)//"':") > 0, &
+            'Darwin diagnostic lost the exact failing root')
+        call require(index(diagnostic, '(92)') > 0, &
+            'Darwin diagnostic lost the exact OS error')
+        print '(a)', 'Darwin injected diagnostic: '//trim(diagnostic)
+        call change_watch_close(diagnostic_watch)
+        call change_watch_init(diagnostic_watch, trim(project), status, diagnostic)
+        call require(status == 0, 'Darwin diagnostic recovery: '//trim(diagnostic))
+        ! Pump the restarted run loop before introducing the recovery event.
+        ! Earlier fixture-directory events may conservatively request a rescan.
+        quiet = 0
+        do tries = 1, 20
+            call change_watch_poll(diagnostic_watch, 300, event, event_kind, &
+                observed, status, is_quiet)
+            call require(status == 0, 'Darwin restarted provider poll failed')
+            if (is_quiet) then
+                quiet = quiet + 1
+            else
+                quiet = 0
+            end if
+            if (quiet == 3) exit
+            call fs_sleep_ms(50)
+        end do
+        call require(tries <= 20, 'Darwin restarted provider did not become idle')
+        call fs_write_text(trim(recovered), 'program recovered')
+        do tries = 1, 40
+            call change_watch_poll(diagnostic_watch, 100, event, event_kind, &
+                observed, status)
+            call require(status == 0, 'Darwin recovered provider poll failed')
+            if (observed) then
+                if (trim(event) == trim(recovered)) exit
+            end if
+            call fs_sleep_ms(50)
+        end do
+        call require(tries <= 40, 'Darwin diagnostic recovery lost file-change event')
+        call change_watch_close(diagnostic_watch)
+        print '(a)', 'Darwin injected root error recovered with exact file-change event'
+    end subroutine verify_root_diagnostic
+
+    subroutine canonicalize_fixture()
+        character(c_char) :: resolved(4096)
+        type(c_ptr) :: pointer
+        integer :: i
+
+        ! Compare FSEvents paths against libc's independently resolved fixture
+        ! identity: Darwin aliases /var and /tmp under /private.
+        pointer = libc_realpath(trim(scratch)//c_null_char, resolved)
+        if (.not. c_associated(pointer)) error stop 'cannot resolve fixture directory'
+        scratch = ''
+        do i = 1, size(resolved)
+            if (resolved(i) == c_null_char) exit
+            scratch(i:i) = resolved(i)
+        end do
+    end subroutine canonicalize_fixture
 
     subroutine require(ok, message)
         logical, intent(in) :: ok
@@ -282,19 +380,25 @@ contains
     end subroutine await_reconcile
 
     subroutine settle_events()
-        integer :: quiet
+        integer :: quiet, tries
 
         quiet = 0
-        do while (quiet < 3)
-            call change_watch_poll(watch, 100, changed, kind, got_event, ierr)
+        do tries = 1, 80
+            call change_watch_poll(watch, 100, changed, kind, got_event, ierr, &
+                provider_quiet)
             call require(ierr == 0, 'settle poll returned an error')
             if (got_event) then
                 captures = captures + 1
                 quiet = 0
-            else
+            else if (provider_quiet) then
                 quiet = quiet + 1
+            else
+                quiet = 0
             end if
+            if (quiet == 3) return
+            call fs_sleep_ms(50)
         end do
+        call require(.false., 'provider failed to reach a bounded quiet interval')
     end subroutine settle_events
 
     subroutine assert_idle(label)
