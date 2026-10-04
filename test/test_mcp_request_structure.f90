@@ -6,7 +6,6 @@ program test_mcp_request_structure
     use fo_test_cli, only: resolve_driver, run_fo
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_string_value, json_boolean_value, json_number_value
-    use fo_test_json, only: json_object, json_array, json_boolean, json_size
     use fo_test_mcp, only: mcp_encode, mcp_request, mcp_call, mcp_quote, mcp_exchange
     implicit none
 
@@ -14,7 +13,7 @@ program test_mcp_request_structure
     type(process_result_t) :: process
     type(json_value_t), allocatable :: responses(:)
     type(json_value_t) :: payload, result_object, field, content, first, tools, tool
-    type(json_value_t) :: schema, properties, rpc_id, nested, child, error_object
+    type(json_value_t) :: schema, properties, rpc_id, error_object
     type(string_list_t) :: arguments
 
     call resolve_driver(driver)
@@ -47,7 +46,9 @@ program test_mcp_request_structure
         ',"dot":true}'))
     call append(mcp_call(44, '{"action":"graph","dir":' // mcp_quote(project) // &
         ',"dot":"true"}'))
-    call append('{"jsonrpc":"2.0","id":{"nested":[1,true]},' // &
+    call append('{"jsonrpc":"2.0","id":"trace\u002d\"quoted",' // &
+        '"method":"unsupported/method"}')
+    call append('{"jsonrpc":"2.0","id":9007199254740993,' // &
         '"method":"unsupported/method"}')
     call append('{"jsonrpc":"2.0","id":9,"method":"tools/list"}{}')
     call append(mcp_request(6, 'shutdown'))
@@ -102,23 +103,15 @@ program test_mcp_request_structure
         'string dot option does not select Graphviz output')
 
     rpc_id = json_member(responses(10), 'id')
-    call assert_equal_integer(rpc_id%kind, json_object, &
-        'composite JSON-RPC ids are returned as JSON values')
-    nested = json_member(rpc_id, 'nested')
-    call assert_equal_integer(nested%kind, json_array, &
-        'composite JSON-RPC id keeps its array member')
-    call assert_equal_integer(json_size(nested), 2, &
-        'composite JSON-RPC id keeps every array element')
-    child = json_element(nested, 1)
-    call assert_equal_integer(int(json_number_value(child)), 1, &
-        'composite JSON-RPC id preserves its number')
-    child = json_element(nested, 2)
-    call assert_equal_integer(child%kind, json_boolean, &
-        'composite JSON-RPC id preserves its boolean type')
-    call assert_true(json_boolean_value(child), &
-        'composite JSON-RPC id preserves its boolean value')
+    call assert_equal_string(json_string_value(rpc_id), 'trace-"quoted', &
+        'legal string RPC id decodes through the independent test parser')
+    call assert_true(index(process%stdout, '"id":"trace\u002d\"quoted"') > 0, &
+        'string RPC id preserves its original escape spelling')
+    rpc_id = json_member(responses(11), 'id')
+    call assert_equal_string(rpc_id%text, '9007199254740993', &
+        'large legal integer RPC id preserves its exact digits')
 
-    error_object = json_member(responses(11), 'error')
+    error_object = json_member(responses(12), 'error')
     field = json_member(error_object, 'code')
     call assert_equal_integer(int(json_number_value(field)), -32600, &
         'trailing JSON after the RPC envelope is rejected')
