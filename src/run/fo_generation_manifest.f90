@@ -941,6 +941,7 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         character(len=:), allocatable :: value
+        character(len=PATH_LEN) :: symlink_parts(1)
         integer :: status, logical_value
 
         ierr = 1
@@ -989,8 +990,10 @@ contains
                 index(entry%link_target, '/') /= 0 .or. &
                 trim(entry%link_target) == '.' .or. &
                 trim(entry%link_target) == '..') goto 900
-            if (cache_digest([character(len=PATH_LEN) :: &
-                'symlink:'//trim(entry%link_target)], 1) /= &
+            if (len_trim(entry%link_target) > len(symlink_parts(1)) - &
+                len('symlink:')) goto 900
+            symlink_parts(1) = 'symlink:'//trim(entry%link_target)
+            if (cache_digest(symlink_parts, 1) /= &
                     entry%content_digest) goto 900
         case default
             goto 900

@@ -2,7 +2,8 @@ module fo_input_inventory
     !! Canonical, typed declaration of files and roots that can affect an fo run.
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, &
         c_long_long
-    use fo_cache, only: HASH_LEN, cache_digest, cache_file_digest
+    use fo_cache, only: HASH_LEN, cache_digest
+    use fx_immutable_store, only: immutable_store_hash_file, IMMUTABLE_OK
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_exe_t, &
         fpm_input_t, dep_kind, DEP_PATH
     use fo_dep_resolve, only: normalize_path, resolved_src_t, &
@@ -967,8 +968,10 @@ contains
                 trim(alias)//':'//trim(entry%relative_path)
             return
         end if
-        call cache_file_digest(trim(path), entry%content_digest)
-        if (len_trim(entry%content_digest) /= HASH_LEN) then
+        call immutable_store_hash_file(trim(path), entry%content_digest, &
+            mode_status)
+        if (mode_status /= IMMUTABLE_OK .or. &
+            len_trim(entry%content_digest) /= HASH_LEN) then
             ierr = 1
             message = 'cannot hash required input file: '// &
                 trim(alias)//':'//trim(entry%relative_path)
@@ -1005,6 +1008,7 @@ contains
         character(len=*), intent(out) :: message
 
         character(len=PATH_LEN) :: manifest, line, relative, target
+        character(len=PATH_LEN) :: symlink_parts(1)
         character(len=HASH_LEN) :: hash
         integer :: rc, unit, ios, kind, decode_status
         type(input_entry_t) :: entry
@@ -1077,9 +1081,10 @@ contains
                     exit
                 end if
                 entry%mode = iand(entry%mode, 511)
-                call cache_file_digest(trim(physical_root)//'/'// &
-                    trim(relative), hash)
-                if (len_trim(hash) /= HASH_LEN) then
+                call immutable_store_hash_file(trim(physical_root)//'/'// &
+                    trim(relative), hash, decode_status)
+                if (decode_status /= IMMUTABLE_OK .or. &
+                    len_trim(hash) /= HASH_LEN) then
                     ierr = 1
                     message = 'cannot hash enumerated input: '//trim(relative)
                     exit
@@ -1088,8 +1093,14 @@ contains
             case (INPUT_SYMLINK)
                 entry%mode = 0
                 entry%link_target = trim(target)
-                hash = cache_digest([character(len=PATH_LEN) :: &
-                    'symlink:'//trim(target)], 1)
+                if (len_trim(target) > len(symlink_parts(1)) - &
+                    len('symlink:')) then
+                    ierr = 1
+                    message = 'symlink target is too long: '//trim(relative)
+                    exit
+                end if
+                symlink_parts(1) = 'symlink:'//trim(target)
+                hash = cache_digest(symlink_parts, 1)
                 entry%content_digest = hash
             end select
             call append_entry(inventory, entry, ierr, message)
@@ -1118,14 +1129,16 @@ contains
         read (line(16:23), '(i8)', iostat=ios) target_length
         if (ios /= 0) return
         if (path_length < 1 .or. target_length < 1) return
+        if (path_length > len(relative) .or. &
+            target_length > len(target)) return
         start = 25
-        if (start + path_length + 2 * target_length > len_trim(line)) return
+        if (start - 1 + path_length + 2 * target_length /= len_trim(line)) return
         relative = line(start:start + path_length - 1)
         do i = 1, target_length
-            hi = hex_value(line(start + path_length + 2 * i - 1:start + &
+            hi = hex_value(line(start + path_length + 2 * i - 2:start + &
+                path_length + 2 * i - 2))
+            lo = hex_value(line(start + path_length + 2 * i - 1:start + &
                 path_length + 2 * i - 1))
-            lo = hex_value(line(start + path_length + 2 * i:start + &
-                path_length + 2 * i))
             if (hi < 0 .or. lo < 0) return
             target(i:i) = achar(16 * hi + lo)
         end do

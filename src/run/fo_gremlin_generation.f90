@@ -564,7 +564,7 @@ contains
         do attempt = 1, 32
             write (clock_text, '(i0)') clock_count + attempt
             capture_dir = trim(base)//'/.capture/manifest-'// &
-                int_text(process_getpid())//'-'//trim(clock_text)
+                trim(int_text(process_getpid()))//'-'//trim(clock_text)
             status = fs_mkdir_excl(trim(capture_dir))
             if (status == 0) exit
         end do
@@ -577,7 +577,7 @@ contains
         status = fs_mkdir_excl(trim(stage))
         if (status /= 0) then
             message = 'cannot create manifest generation stage'
-            call fo_c_generation_remove_stage(trim(capture_dir)//c_null_char)
+            crc = fo_c_generation_remove_stage(trim(capture_dir)//c_null_char)
             call fo_c_generation_unlock(int(fd, c_int))
             return
         end if
@@ -586,27 +586,52 @@ contains
             trim(stage)//'/bundle', metadata, restored_inventory, status, message)
         if (status == 0) then
             call write_manifest_id(trim(stage)//'/manifest.id', manifest_id, status)
+            if (status /= 0) message = 'cannot write generation manifest locator'
         end if
         if (status == 0) then
             call write_manifest_store(trim(stage)//'/store.root', store_root, status)
+            if (status /= 0) message = 'cannot write generation store locator'
         end if
         if (status == 0) then
             call write_manifest_identity(trim(stage)//'/identity.txt', metadata, &
                 status)
+            if (status /= 0) message = 'cannot write generation identity record'
         end if
         if (status == 0) then
-            crc = fo_c_generation_freeze_tree(trim(stage)//c_null_char)
+            ! Keep the staging directory writable until its atomic rename.
+            ! The publisher freezes that directory after publication.
+            crc = fo_c_generation_freeze_tree( &
+                trim(stage)//'/bundle'//c_null_char)
             if (crc /= 0) status = int(crc)
+            if (status == 0) then
+                crc = fo_c_generation_freeze_tree( &
+                    trim(stage)//'/manifest.id'//c_null_char)
+                if (crc /= 0) status = int(crc)
+            end if
+            if (status == 0) then
+                crc = fo_c_generation_freeze_tree( &
+                    trim(stage)//'/store.root'//c_null_char)
+                if (crc /= 0) status = int(crc)
+            end if
+            if (status == 0) then
+                crc = fo_c_generation_freeze_tree( &
+                    trim(stage)//'/identity.txt'//c_null_char)
+                if (crc /= 0) status = int(crc)
+            end if
+            if (status /= 0) message = 'cannot freeze manifest generation content'
         end if
         if (status == 0) then
             crc = fo_c_generation_publish(trim(stage)//c_null_char, &
                 trim(cache)//c_null_char)
             if (crc /= 0) status = int(crc)
+            if (status /= 0) message = &
+                'cannot publish manifest generation stage ('// &
+                trim(int_text(status))//')'
         end if
         if (status /= 0) then
             if (len_trim(message) == 0) &
                 message = 'cannot publish immutable manifest generation'
-            call fo_c_generation_remove_stage(trim(capture_dir)//c_null_char)
+            crc = fo_c_generation_remove_stage(trim(capture_dir)//c_null_char)
             call fo_c_generation_unlock(int(fd, c_int))
             return
         end if
