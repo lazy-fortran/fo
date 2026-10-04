@@ -18,7 +18,7 @@ module fo_gfortran_build
     use fx_action_cache, only: cache_set_file_hash_hook
     use fo_compdb, only: compdb_write
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
-    use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
+    use fo_cache, only: cache_t, cache_init, cache_key_for, &
         cache_restore_action, cache_store_action, hash_mod_file, &
         HASH_LEN, cache_digest, cache_file_digest, &
         cache_store_binary, cache_restore_binary, cache_binary_matches
@@ -1758,8 +1758,8 @@ contains
                         compile_key_flags(flags), dep_keys, n_dep)
 
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
-                    if (.not. source_may_emit_smod(filenames(node_id)) .and. &
-                        cache_lookup(c, source_key)) then
+                    if (cache_ierr == 0 .and. &
+                        .not. source_may_emit_smod(filenames(node_id))) then
                         if (source_defines_module(filenames(node_id))) then
                             call cache_restore_action(c, source_key, obj_path, &
                                 mod_dir, restored, required_mod_name= &
@@ -3006,7 +3006,7 @@ contains
             log_local = run_logs(i)
             call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
             restored = .false.
-            if (cache_ierr == 0 .and. cache_lookup(c, run_keys(i))) then
+            if (cache_ierr == 0) then
                 call cache_restore_action(c, run_keys(i), obj_path, mod_dir, &
                     restored)
             end if
