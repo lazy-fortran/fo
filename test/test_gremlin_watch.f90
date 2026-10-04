@@ -2,15 +2,17 @@ program test_gremlin_watch
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_directory, write_text, read_text, run_process
-    use fo_test_harness, only: make_symlink, move_path
+    use fo_test_harness, only: file_exists
+    use fo_test_harness, only: move_path
     use fo_test_harness, only: assert_true, assert_equal_integer, assert_equal_string
     use fo_test_harness, only: finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, gremlin_run
     use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_wait_ms, gremlin_wait_file
-    use fo_test_gremlin_oracle, only: gremlin_fifo, gremlin_release_fifo
+    use fo_test_gremlin_oracle, only: gremlin_fifo
     use fo_test_gremlin_oracle, only: gremlin_spawn, gremlin_stop_child
     use fo_test_json, only: json_value_t, json_member
-    use fo_test_json, only: json_string_value, json_number_value
+    use fo_test_json, only: json_string_value, json_number_value, json_parse
+    use fo_test_gremlin_oracle, only: gremlin_stop_lane
     implicit none
 
     interface
@@ -24,7 +26,7 @@ program test_gremlin_watch
     character(:), allocatable :: driver, scratch, project, cache, state, counter
     character(:), allocatable :: dependency, nested, lane, session, generation
     character(:), allocatable :: gate, entered, manifest, retired_path, failed_counter
-    character(:), allocatable :: cli_project, bin_dir, path_value
+    character(:), allocatable :: cli_project, bin_dir, path_value, check_marker
     character(:), allocatable :: temp_one, temp_two, temp_populated
     type(string_list_t) :: args, bad_observer
     type(process_result_t) :: process
@@ -91,6 +93,18 @@ program test_gremlin_watch
         read_text(dependency//'/src/depmod.f90')//'! dependency edit'//new_line('a'))
     call expect_one_capture(nested//'/src/nested.f90', &
         read_text(nested//'/src/nested.f90')//'! nested dependency edit'//new_line('a'))
+    before = capture_count()
+    call move_path(dependency, retired_path)
+    call make_directory(dependency//'/src')
+    call write_text(dependency//'/fpm.toml', 'name = "watch_dep"'//new_line('a'))
+    call write_text(dependency//'/src/depmod.f90', &
+        'module depmod'//new_line('a')//'implicit none'//new_line('a')// &
+        'integer, parameter :: dep_value = 1'//new_line('a')// &
+        'end module depmod'//new_line('a'))
+    call wait_generation_after(before, generation)
+    call assert_equal_integer(capture_count(), before + 1, &
+        'dependency root replacement recovers with one immutable capture')
+    ! Keep nested creation immediately after root replacement to exercise recovery.
     call make_directory(project//'/src/new/deep')
     call expect_one_capture(project//'/src/new/deep/input.data', 'new nested input'//new_line('a'))
     call expect_one_capture(project//'/src/new/deep/input.data', &
@@ -113,7 +127,6 @@ program test_gremlin_watch
     call gremlin_wait_ms(900)
     call assert_equal_integer(capture_count(), before, 'metadata and outside edits are ignored')
     call stop_lane(session)
-    call gremlin_release_fifo(gate)
 
     failed_counter = scratch//'/missing-observer-parent/counter.json'
     call gremlin_start_args(args, project, 'watch-observer-error', 'test_watch')
@@ -140,15 +153,26 @@ program test_gremlin_watch
         'module sample'//new_line('a')//'integer :: sample_value'//new_line('a')// &
         'end module sample'//new_line('a'))
     call write_text(cli_project//'/src/second.f90', &
-        'module second'//new_line('a')//'integer :: second_value'//new_line('a')// &
-        'end module second'//new_line('a'))
-    call make_symlink('/usr/bin/true', bin_dir//'/fo')
+        'module second'//new_line('a')//'end module second'//new_line('a'))
+    check_marker = scratch//'/watch-checks'
+    call write_text(scratch//'/check-command.c', &
+        '#include <stdio.h>'//new_line('a')// &
+        'int main(void){FILE *f=fopen("'//check_marker//'","a");'//new_line('a')// &
+        'if(!f)return 1;fputs("check",f);fputc(10,f);return fclose(f)!=0;}'//new_line('a'))
+    args = string_list_t()
+    call list_add(args, 'cc')
+    call list_add(args, '-o')
+    call list_add(args, bin_dir//'/fo')
+    call list_add(args, scratch//'/check-command.c')
+    call run_process(args, scratch, process, timeout_ms=30000)
+    call assert_equal_integer(process%exit_code, 0, 'builds the independent check recorder')
     call get_environment_variable('PATH', length=path_length)
     allocate(character(len=path_length) :: path_value)
     call get_environment_variable('PATH', path_value)
     env_result = c_setenv('PATH'//c_null_char, &
         (bin_dir//':'//trim(path_value))//c_null_char, 1_c_int)
     call assert_true(env_result == 0, 'watch fixture prepends isolated check command')
+    args = string_list_t()
     call list_add(args, 'watch')
     call list_add(args, '--fmt')
     call gremlin_spawn(driver, cli_project, args, scratch//'/watch-cli.out', &
@@ -156,8 +180,9 @@ program test_gremlin_watch
     call gremlin_wait_ms(300)
     call write_text(cli_project//'/src/sample.f90', &
         'module sample'//new_line('a')//'integer :: sample_value'//new_line('a')// &
-        'end module sample'//new_line('a'))
+        'end module sample'//new_line('a')//'! first edit'//new_line('a'))
     call wait_for_format(cli_project//'/src/sample.f90', 'sample_value')
+    call wait_for_checks(1)
     temp_one = scratch//'/sample.atomic'
     temp_two = scratch//'/second.atomic'
     call write_text(temp_one, 'module sample'//new_line('a')// &
@@ -168,17 +193,42 @@ program test_gremlin_watch
     call move_path(temp_two, cli_project//'/src/second.f90')
     call wait_for_format(cli_project//'/src/sample.f90', 'sample_value')
     call wait_for_format(cli_project//'/src/second.f90', 'second_value')
+    call wait_for_checks(2)
     call make_directory(cli_project//'/src/created/deep')
     temp_populated = scratch//'/populated.atomic'
     call write_text(temp_populated, 'module populated'//new_line('a')// &
         'integer :: populated_value'//new_line('a')//'end module populated'//new_line('a'))
     call move_path(temp_populated, cli_project//'/src/created/deep/populated.f90')
     call wait_for_format(cli_project//'/src/created/deep/populated.f90', 'populated_value')
+    call wait_for_checks(3)
     call gremlin_wait_ms(700)
+    call assert_equal_integer(check_count(), 3, 'formatting writes do not cause a check loop')
     call gremlin_stop_child(watch_pid, watch_exit)
     call finish_assertions()
 
 contains
+
+    integer function check_count() result(count)
+        character(:), allocatable :: text
+        integer :: i
+        count = 0
+        if (.not. file_exists(check_marker)) return
+        text = read_text(check_marker)
+        do i = 1, len(text)
+            if (text(i:i) == new_line('a')) count = count + 1
+        end do
+    end function check_count
+
+    subroutine wait_for_checks(expected)
+        integer, intent(in) :: expected
+        integer :: attempt
+        do attempt = 1, 100
+            if (check_count() >= expected) exit
+            call gremlin_wait_ms(50)
+        end do
+        call assert_equal_integer(check_count(), expected, &
+            'one debounced check follows each complete external edit burst')
+    end subroutine wait_for_checks
 
     function field(object, key) result(value)
         type(json_value_t), intent(in) :: object
@@ -295,18 +345,7 @@ contains
 
     subroutine stop_observer_lane(owner)
         character(len=*), intent(in) :: owner
-        type(string_list_t) :: values
-        type(process_result_t) :: result
-        call list_add(values, 'gremlin')
-        call list_add(values, 'stop')
-        call list_add(values, '--dir')
-        call list_add(values, project)
-        call list_add(values, '--lane')
-        call list_add(values, 'watch-observer-error')
-        call list_add(values, '--session')
-        call list_add(values, owner)
-        call gremlin_run(driver, project, cache, state, values, result, timeout=30000)
-        call assert_equal_integer(result%exit_code, 0, 'observer-error owner stops cleanly')
+        call gremlin_stop_lane(driver, project, cache, state, "watch-observer-error", owner)
     end subroutine stop_observer_lane
 
     subroutine wait_for_format(path, variable)
@@ -364,18 +403,7 @@ contains
 
     subroutine stop_lane(owner)
         character(len=*), intent(in) :: owner
-        type(string_list_t) :: values
-        type(process_result_t) :: result
-        call list_add(values, 'gremlin')
-        call list_add(values, 'stop')
-        call list_add(values, '--dir')
-        call list_add(values, project)
-        call list_add(values, '--lane')
-        call list_add(values, lane)
-        call list_add(values, '--session')
-        call list_add(values, owner)
-        call gremlin_run(driver, project, cache, state, values, result, timeout=30000)
-        call assert_equal_integer(result%exit_code, 0, 'watch owner stops cleanly')
+        call gremlin_stop_lane(driver, project, cache, state, lane, owner)
     end subroutine stop_lane
 
 end program test_gremlin_watch

@@ -1,4 +1,5 @@
 module fo_test_results
+    use, intrinsic :: iso_fortran_env, only: iostat_end, iostat_eor
     use fo_util, only: json_int
     use fx_json_build, only: json_escape_string
     implicit none
@@ -284,7 +285,7 @@ contains
         integer :: i, n_pass, n_fail, n_skip, n_shown
         real :: total_secs
         character(len=512) :: line
-        character(len=16384) :: captured
+        character(len=:), allocatable :: captured
 
         n_pass = 0
         n_fail = 0
@@ -385,11 +386,12 @@ contains
         !! log (TEST_RESULT summary lines are emitted separately, at the end),
         !! so scan the whole file rather than reading forward from a marker.
         character(len=*), intent(in) :: log_file, test_name
-        character(len=*), intent(out) :: captured
+        character(len=:), allocatable, intent(out) :: captured
 
-        character(len=1024) :: line
+        character(len=1024) :: chunk
+        character(len=:), allocatable :: line
         character(len=160) :: start_marker, end_marker
-        integer :: u, ios
+        integer :: u, ios, count
         logical :: in_block
 
         captured = ''
@@ -400,7 +402,16 @@ contains
         open (newunit=u, file=trim(log_file), status='old', iostat=ios)
         if (ios /= 0) return
         do
-            read (u, '(a)', iostat=ios) line
+            line = ''
+            do
+                read (u, '(a)', advance='no', size=count, iostat=ios) chunk
+                if (count > 0) line = line//chunk(:count)
+                if (ios /= 0) exit
+            end do
+            if (ios == iostat_eor) ios = 0
+            if (ios == iostat_end) then
+                if (len(line) > 0) ios = 0
+            end if
             if (ios /= 0) exit
             if (.not. in_block) then
                 if (trim(line) == trim(start_marker)) in_block = .true.
@@ -415,11 +426,13 @@ contains
         close (u)
     end subroutine extract_captured_stdout
 
-    subroutine format_test_results_json(entries, n_entries, exit_code, output)
+    subroutine format_test_results_json(entries, n_entries, exit_code, output, log_file)
         type(test_result_entry_t), intent(in) :: entries(:)
         integer, intent(in) :: n_entries
         integer, intent(in) :: exit_code
         character(len=:), allocatable, intent(out) :: output
+        character(len=*), optional, intent(in) :: log_file
+        character(len=:), allocatable :: captured
 
         integer :: i, n_pass, n_fail, n_skip
         real :: total_secs
@@ -452,6 +465,10 @@ contains
             output = trim(output)//',"seconds":'
             write (secs_str, '(f8.2)') entries(i)%seconds
             output = trim(output)//trim(adjustl(secs_str))
+            if (present(log_file)) then
+                call extract_captured_stdout(log_file, entries(i)%name, captured)
+                output = output//',"output":"'//json_escape_string(captured)//'"'
+            end if
             output = trim(output)//'}'
         end do
         output = trim(output)//'],'

@@ -7,6 +7,7 @@ program test_gremlin_reproduce_logs
     use fo_test_gremlin_oracle, only: gremlin_wait_ms
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value, json_parse
+    use fo_test_gremlin_oracle, only: gremlin_stop_lane
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state
@@ -24,7 +25,10 @@ program test_gremlin_reproduce_logs
     call gremlin_write_case(project, 'test_reproduce_anchor', &
         "print '(a)', 'FO_REPRODUCE_ANCHOR_OUTPUT'")
     call gremlin_write_case(project, 'test_reproduce_first', &
-        "print '(a)', 'FO_REPRODUCE_FIRST_OUTPUT_61c8c1'"//new_line('a')//'error stop 7')
+        "print '(a)', 'FO_REPRODUCE_FIRST_OUTPUT_61c8c1'"//new_line('a')// &
+        "print '(a)', '"//achar(34)//'quoted'//achar(34)//achar(92)//"path'"// &
+        new_line('a')//"print '(a)', repeat('q',4096)//'LONG_OUTPUT_END'"// &
+        new_line('a')//'error stop 7')
     call gremlin_write_case(project, 'test_reproduce_second', &
         "print '(a)', 'FO_REPRODUCE_SECOND_OUTPUT_9d09d2'"//new_line('a')//'error stop 7')
     call gremlin_start_args(arguments, project, lane, 'test_reproduce_anchor')
@@ -47,11 +51,35 @@ program test_gremlin_reproduce_logs
         'second test cannot overwrite the first receipt log')
     call assert_true(index(second_text, 'FO_REPRODUCE_SECOND_OUTPUT_9d09d2') > 0, &
         'second receipt log contains its independent test output')
+    call assert_true(index(second_text, 'FO_REPRODUCE_FIRST_OUTPUT_61c8c1') == 0, &
+        'second receipt log excludes first test output')
+    call assert_output_json(first_text)
 
     call stop_lane(session)
     call finish_assertions()
 
 contains
+
+    subroutine assert_output_json(text)
+        character(len=*), intent(in) :: text
+        type(json_value_t) :: report, tests, entry
+        character(:), allocatable :: message, output
+        logical :: valid
+        integer :: first
+
+        first = index(text, '{"tests":[')
+        call assert_true(first > 0, 'reproduction log preserves the runner JSON report')
+        if (first == 0) return
+        call json_parse(text(first:), report, valid, message)
+        call assert_true(valid, 'captured output remains valid JSON: '//message)
+        tests = json_member(report, 'tests')
+        entry = json_element(tests, 1)
+        output = member_text(entry, 'output')
+        call assert_true(index(output, achar(34)//'quoted'//achar(34)//achar(92)//'path') > 0, &
+            'JSON preserves independently generated quotes and backslashes in test output')
+        call assert_true(index(output, repeat('q', 4096)//'LONG_OUTPUT_END') > 0, &
+            'JSON preserves a complete captured line longer than the old fixed buffer')
+    end subroutine assert_output_json
 
     function member_text(object, key) result(value)
         type(json_value_t), intent(in) :: object
@@ -138,7 +166,8 @@ contains
                 event = json_element(events, j)
                 if (member_text(event, 'case_id') == case_id .and. &
                     member_text(event, 'generation') == generation .and. &
-                    member_text(event, 'status') == 'FAIL') then
+                    member_text(event, 'status') == 'FAIL' .and. &
+                    index(member_text(event, 'log_path'), '-reproduce-') > 0) then
                     log_path = member_text(event, 'log_path')
                     if (len(log_path) > 0) return
                 end if
@@ -151,20 +180,7 @@ contains
 
     subroutine stop_lane(owner)
         character(len=*), intent(in) :: owner
-        type(string_list_t) :: args
-        type(process_result_t) :: result
-
-        call list_add(args, 'gremlin')
-        call list_add(args, 'stop')
-        call list_add(args, '--dir')
-        call list_add(args, project)
-        call list_add(args, '--lane')
-        call list_add(args, lane)
-        call list_add(args, '--session')
-        call list_add(args, owner)
-        call list_add(args, '--json')
-        call gremlin_run(driver, project, cache, state, args, result, timeout=30000)
-        call assert_equal_integer(result%exit_code, 0, 'owner stop is bounded and succeeds')
+        call gremlin_stop_lane(driver, project, cache, state, lane, owner)
     end subroutine stop_lane
 
 end program test_gremlin_reproduce_logs
