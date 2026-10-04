@@ -16,7 +16,7 @@ program test_gremlin_coverage_restart
     use fo_test_process_identity, only: mcp_process_identity_running
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_number_value, json_boolean_value, json_string_value
-    use fo_test_json, only: json_parse
+    use fo_test_json, only: json_parse, json_invalid
     implicit none
 
     interface
@@ -44,10 +44,13 @@ program test_gremlin_coverage_restart
     character(:), allocatable :: reproduced_case, unseen_case, replay_output
     character(:), allocatable :: campaign_path, coverage_text, coverage_header
     character(:), allocatable :: inventory_digest, stale_record
+    character(:), allocatable :: coverage_before_reproduce, coverage_before_replay
+    character(:), allocatable :: priority_lane, priority_session
     character(len=256) :: local_message
     type(string_list_t) :: args
     type(process_result_t) :: process
     type(json_value_t) :: report, coverage, field, events, event, event_case, event_status
+    type(json_value_t) :: reproduction_report, event_identity
     integer :: owner_pid, child_pid, signal_status, attempt, i
     integer :: replay_child, replay_exit, replay_elapsed, markers_before
     integer :: header_end, separator, journal_unit
@@ -56,6 +59,7 @@ program test_gremlin_coverage_restart
     logical :: ready_seen, interrupted_pass
     logical :: replay_done
     logical :: replay_failed_receipt, unseen_pass_receipt, final_pass_receipt
+    logical :: replay_receipt_has_no_epoch
     logical :: has_proc
 
     inquire(file='/proc/self/stat', exist=has_proc)
@@ -116,6 +120,9 @@ program test_gremlin_coverage_restart
     field = json_member(coverage, 'unknown')
     call assert_equal_integer(int(json_number_value(field)), 23, &
         'status keeps the remaining obligations unknown')
+    field = json_member(coverage, 'remaining')
+    call assert_equal_integer(int(json_number_value(field)), 23, &
+        'status reports the exact remaining obligation count')
     field = json_member(coverage, 'pass')
     call assert_equal_integer(int(json_number_value(field)), 17, &
         'only completed behavior counts as PASS')
@@ -126,7 +133,10 @@ program test_gremlin_coverage_restart
     call assert_equal_integer(signal_status, 0, &
         'locates the exact lane state directory')
     coverage_path = trim(state_dir)//'/coverage-'//generation//'.state'
+    coverage_before_reproduce = read_text(coverage_path)
     call reproduce_case(unseen_case, '')
+    call assert_true(read_text(coverage_path) == coverage_before_reproduce, &
+        'unseen reproduction leaves the exact coverage ledger unchanged')
     call query_status(session, report)
     coverage = json_member(report, 'coverage')
     field = json_member(coverage, 'running')
@@ -182,6 +192,18 @@ program test_gremlin_coverage_restart
     field = json_member(coverage, 'unknown')
     call assert_equal_integer(int(json_number_value(field)), 23, &
         'graceful stop leaves the uncompleted coverage obligations unknown')
+    field = json_member(coverage, 'running')
+    call assert_equal_integer(int(json_number_value(field)), 0, &
+        'cancelled launch is no longer running')
+    field = json_member(coverage, 'pass')
+    call assert_equal_integer(int(json_number_value(field)), 17, &
+        'graceful stop retains the seventeen completed cases')
+    field = json_member(coverage, 'remaining')
+    call assert_equal_integer(int(json_number_value(field)), 23, &
+        'graceful stop preserves all twenty-three remaining obligations')
+    call assert_true(index(read_text(coverage_path), &
+        trim(expected(interrupted_slot))//'|CANCELLED') > 0, &
+        'coverage ledger records the interrupted launch as CANCELLED')
     call remove_path(ready)
     owner_pid = -1
     owner_start = 0_c_int64_t
@@ -250,6 +272,11 @@ program test_gremlin_coverage_restart
     call assert_equal_integer(signal_status, 0, &
         'closes the stale-generation receipt journal')
     if (signal_status /= 0) call fail_fixture()
+    call assert_true(repeat('f', 64) /= generation, &
+        'stale receipt generation differs from the active generation')
+    call assert_true(index(read_text(campaign_path), &
+        'stale-generation-pass') > 0, &
+        'stale PASS exists in the recovery journal before restart')
     owner_pid = -1
     owner_start = 0_c_int64_t
     call start_campaign()
@@ -298,6 +325,10 @@ program test_gremlin_coverage_restart
     field = json_member(coverage, 'full_coverage')
     call assert_true(.not. json_boolean_value(field), &
         'markers alone do not satisfy the 40-case oracle')
+    coverage_before_replay = read_text(coverage_path)
+    call assert_true(index(coverage_before_replay, &
+        trim(reproduced_case)//'|PASS') > 0, &
+        'epoch ledger contains the replayed case PASS before reproduction')
     call write_text(fail_flag//reproduced_case, 'fail')
     call remove_path(replay_flag//reproduced_case)
     call gremlin_release_fifo(replay_gate)
@@ -315,6 +346,8 @@ program test_gremlin_coverage_restart
         'concurrent reproduction reports its controlled failure')
     call assert_true(index(replay_output, '"state":"FAIL"') > 0, &
         'concurrent reproduction publishes a separate FAIL result')
+    call assert_true(read_text(coverage_path) == coverage_before_replay, &
+        'concurrent reproduction leaves the exact campaign ledger unchanged')
     field = json_member(coverage, 'pass')
     call assert_equal_integer(int(json_number_value(field)), n_cases - 1, &
         'reproduction failure does not overwrite campaign PASS receipts')
@@ -329,6 +362,7 @@ program test_gremlin_coverage_restart
     field = json_member(coverage, 'unknown')
     call assert_equal_integer(int(json_number_value(field)), 1, &
         'fresh status leaves only the blocked campaign case outstanding')
+    call remove_path(fail_flag//reproduced_case)
     child_text = read_text(ready_after_marker)
     read(child_text, *, iostat=signal_status) child_pid
     call assert_true(signal_status == 0 .and. child_pid > 0, &
@@ -348,17 +382,21 @@ program test_gremlin_coverage_restart
     field = json_member(coverage, 'eligible')
     call assert_equal_integer(int(json_number_value(field)), n_cases, &
         'recovered coverage retains the original eligible inventory')
-    field = json_member(coverage, 'pass')
-    call assert_equal_integer(int(json_number_value(field)), n_cases, &
-        'all forty distinct behavioral obligations pass')
+    field = json_member(coverage, 'timeout')
+    i = int(json_number_value(json_member(coverage, 'pass')))
+    j = int(json_number_value(field))
+    call assert_equal_integer(i + j, n_cases, &
+        'terminal outcomes account for all forty current epoch obligations')
     field = json_member(coverage, 'unknown')
     call assert_equal_integer(int(json_number_value(field)), 0, &
         'completed epoch has no unknown obligations')
     field = json_member(coverage, 'full_coverage')
     call assert_true(json_boolean_value(field), 'status marks exact full coverage')
+    call assert_epoch_receipts(session, replacement, coverage)
     call query_events(replacement, events)
     interrupted_pass = .false.
     replay_failed_receipt = .false.
+    replay_receipt_has_no_epoch = .false.
     final_pass_receipt = .false.
     do i = 1, json_size(events)
         event = json_element(events, i)
@@ -375,8 +413,15 @@ program test_gremlin_coverage_restart
         if (json_string_value(event_case) == reproduced_case .and. &
             json_string_value(event_status) == 'reproduction') then
             event_status = json_member(event, 'status')
-            if (json_string_value(event_status) == 'FAIL') &
+            if (json_string_value(event_status) == 'FAIL') then
                 replay_failed_receipt = .true.
+                event_identity = json_member(event, 'coverage_epoch')
+                if (event_identity%kind == json_invalid) then
+                    event_identity = json_member(event, 'inventory_digest')
+                    if (event_identity%kind == json_invalid) &
+                        replay_receipt_has_no_epoch = .true.
+                end if
+            end if
         end if
     end do
     write (*, '(a)') 'interrupted case '//trim(expected(interrupted_slot))// &
@@ -384,15 +429,35 @@ program test_gremlin_coverage_restart
     call assert_true(interrupted_pass, 'recovered interrupted case has a PASS receipt')
     call assert_true(replay_failed_receipt, &
         'concurrent failing reproduction remains separately receipted')
+    call assert_true(replay_receipt_has_no_epoch, &
+        'reproduction failure receipt has no campaign epoch or input identity')
     call assert_true(final_pass_receipt, &
         'final case has a durable campaign receipt before coverage repair')
 
-    call gremlin_stop_lane(driver, project, cache, state, lane, replacement)
+    coverage_before_replay = read_text(coverage_path)
+    call write_text(fail_flag//reproduced_case, 'fail')
+    call reproduction_args(reproduced_case, generation)
+    call gremlin_json(driver, project, cache, state, args, reproduction_report, &
+        process, 120000)
+    call assert_equal_integer(process%exit_code, 1, &
+        'completed campaign PASS can be independently reproduced as FAIL')
+    field = json_member(reproduction_report, 'state')
+    call assert_true(json_string_value(field) == 'FAIL', &
+        'post-completion reproduction reports its differing failure')
+    call remove_path(fail_flag//reproduced_case)
+    call assert_true(read_text(coverage_path) == coverage_before_replay, &
+        'post-completion reproduction leaves the exact epoch ledger unchanged')
+    call query_status(replacement, report)
+    coverage = json_member(report, 'coverage')
+    field = json_member(coverage, 'full_coverage')
+    call assert_true(json_boolean_value(field), &
+        'post-completion reproduction does not reopen the completed epoch')
     marker_text = read_text(marker)
     markers_before = line_count(marker_text)
     call gremlin_wait_ms(1500)
     call assert_equal_integer(line_count(read_text(marker)), markers_before, &
-        'a completed finite epoch does not start repeating tests')
+        'a completed epoch remains quiescent after a differing reproduction')
+    call gremlin_stop_lane(driver, project, cache, state, lane, replacement)
     call query_status(replacement, report)
     generation = gremlin_field(report, 'active_generation')
     call gremlin_session_state_dir(project, lane, state_dir, signal_status, &
@@ -421,9 +486,244 @@ program test_gremlin_coverage_restart
     call assert_equal_integer(line_count(read_text(marker)), markers_before, &
         'repaired completed epoch remains quiescent without a repeat')
     call gremlin_stop_lane(driver, project, cache, state, lane, replacement)
+    call run_priority_jump()
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
+
+    subroutine run_priority_jump()
+        type(process_result_t) :: start_result
+        type(json_value_t) :: priority_report, priority_coverage, priority_events
+        type(json_value_t) :: priority_event, value
+        character(:), allocatable :: target, active_generation, status
+        character(:), allocatable :: marker_text
+        character(len=32) :: actual(n_cases)
+        logical :: timed_out(n_cases), reached
+        integer :: i, j, target_slot, timeout_count, actual_count, markers_before
+        integer :: case_position
+
+        priority_lane = 'coverage-priority-jump'
+        target = trim(names(1))
+        target_slot = 0
+        do i = 1, n_cases
+            if (trim(expected(i)) == target) target_slot = i
+        end do
+        call assert_true(target_slot >= 5, &
+            'priority target is later than the initial four-case chunk')
+        if (target_slot < 5) call finish_assertions(retain_failed_scratch=.true.)
+
+        call write_text(marker, '')
+        call gremlin_write_case(project, trim(expected(interrupted_slot)), &
+            trim(marker_body(trim(expected(interrupted_slot)))))
+        call gremlin_write_case(project, trim(expected(n_cases)), &
+            trim(marker_body(trim(expected(n_cases)))))
+        child_pid = -1
+        child_start = 0_c_int64_t
+        call start_priority_campaign(target, priority_report, start_result)
+        priority_session = gremlin_field(priority_report, 'session_id')
+        call capture_owner(priority_session, owner_pid, owner_start)
+        if (start_result%exit_code /= 0 .or. len(priority_session) == 0) &
+            call fail_fixture()
+        call wait_for_priority_coverage(priority_session, reached, priority_report)
+        call assert_true(reached, 'priority epoch records all forty terminal outcomes')
+        if (.not. reached) call fail_fixture()
+
+        priority_coverage = json_member(priority_report, 'coverage')
+        active_generation = gremlin_field(priority_report, 'active_generation')
+        call assert_epoch_receipts(priority_session, priority_session, &
+            active_generation, priority_coverage, priority_lane)
+        value = json_member(priority_coverage, 'eligible')
+        call assert_equal_integer(int(json_number_value(value)), n_cases, &
+            'priority status retains all forty eligible cases')
+        value = json_member(priority_coverage, 'pass')
+        i = int(json_number_value(value))
+        value = json_member(priority_coverage, 'timeout')
+        j = int(json_number_value(value))
+        call assert_equal_integer(i + j, n_cases, &
+            'priority status distinguishes terminal PASS and TIMEOUT outcomes')
+        value = json_member(priority_coverage, 'unknown')
+        call assert_equal_integer(int(json_number_value(value)), 0, &
+            'priority epoch has no unknown obligations')
+        value = json_member(priority_coverage, 'remaining')
+        call assert_equal_integer(int(json_number_value(value)), 0, &
+            'priority epoch has no remaining obligations')
+        value = json_member(priority_coverage, 'full_coverage')
+        call assert_true(json_boolean_value(value), &
+            'priority epoch reaches full terminal coverage')
+
+        call query_events(priority_session, priority_events, priority_lane)
+        timed_out = .false.
+        timeout_count = 0
+        do i = 1, json_size(priority_events)
+            priority_event = json_element(priority_events, i)
+            if (.not. same_epoch_receipt(priority_event, active_generation, &
+                    priority_coverage)) cycle
+            value = json_member(priority_event, 'case_id')
+            target = json_string_value(value)
+            value = json_member(priority_event, 'status')
+            status = json_string_value(value)
+            if (status /= 'TIMEOUT') cycle
+            do j = 1, n_cases
+                if (target == trim(names(j))) then
+                    if (.not. timed_out(j)) timeout_count = timeout_count + 1
+                    timed_out(j) = .true.
+                end if
+            end do
+        end do
+        value = json_member(priority_coverage, 'green')
+        call assert_true(json_boolean_value(value) .eqv. (timeout_count == 0), &
+            'any non-PASS terminal outcome prevents a green status')
+
+        marker_text = read_text(marker)
+        actual_count = collect_marker_names(marker_text, actual)
+        call assert_equal_integer(actual_count, n_cases - timeout_count, &
+            'priority marker count excludes terminal timeout cases')
+        if (actual_count > 0) then
+            call assert_equal_string(trim(actual(1)), trim(names(1)), &
+                'configured priority target runs before its shuffled slot')
+        end if
+        j = 0
+        do i = 1, n_cases
+            if (trim(expected(i)) == trim(names(1))) cycle
+            case_position = case_index(trim(expected(i)))
+            if (case_position > 0) then
+                if (timed_out(case_position)) cycle
+            end if
+            j = j + 1
+            if (j + 1 <= actual_count) call assert_equal_string(trim(actual(j + 1)), &
+                trim(expected(i)), 'priority execution preserves remaining permutation')
+        end do
+        call assert_unique_marker_names(actual, actual_count)
+        markers_before = actual_count
+        call gremlin_wait_ms(1500)
+        call assert_equal_integer(line_count(read_text(marker)), markers_before, &
+            'priority epoch quiesces without repeating a completed case')
+        call gremlin_stop_lane(driver, project, cache, state, priority_lane, &
+            priority_session)
+    end subroutine run_priority_jump
+
+    subroutine start_priority_campaign(target, document, result)
+        character(len=*), intent(in) :: target
+        type(json_value_t), intent(out) :: document
+        type(process_result_t), intent(out) :: result
+
+        args = string_list_t()
+        call list_add(args, 'gremlin')
+        call list_add(args, 'start')
+        call list_add(args, '--dir')
+        call list_add(args, project)
+        call list_add(args, '--lane')
+        call list_add(args, priority_lane)
+        call list_add(args, '--random-count')
+        call list_add(args, '4')
+        call list_add(args, '--seed')
+        call list_add(args, '1729')
+        call list_add(args, '--campaign-seconds')
+        call list_add(args, '60')
+        call list_add(args, '--timeout-seconds')
+        call list_add(args, '5')
+        call list_add(args, '--target')
+        call list_add(args, target)
+        call list_add(args, '--json')
+        call gremlin_json(driver, project, cache, state, args, document, result, &
+            30000)
+    end subroutine start_priority_campaign
+
+    subroutine wait_for_priority_coverage(owner_id, reached, document)
+        character(len=*), intent(in) :: owner_id
+        logical, intent(out) :: reached
+        type(json_value_t), intent(out) :: document
+        type(json_value_t) :: current_coverage, passes, timeouts, eligible
+        integer :: elapsed, pass_count, timeout_count, eligible_count
+
+        reached = .false.
+        elapsed = 0
+        do while (elapsed < 180000)
+            call query_status(owner_id, document, priority_lane)
+            current_coverage = json_member(document, 'coverage')
+            passes = json_member(current_coverage, 'pass')
+            timeouts = json_member(current_coverage, 'timeout')
+            eligible = json_member(current_coverage, 'eligible')
+            pass_count = int(json_number_value(passes))
+            timeout_count = int(json_number_value(timeouts))
+            eligible_count = int(json_number_value(eligible))
+            if (eligible_count == n_cases .and. &
+                    pass_count + timeout_count == n_cases) then
+                reached = .true.
+                return
+            end if
+            call gremlin_wait_ms(100)
+            elapsed = elapsed + 100
+        end do
+    end subroutine wait_for_priority_coverage
+
+    logical function same_epoch_receipt(event, generation_id, status_coverage)
+        type(json_value_t), intent(in) :: event, status_coverage
+        character(len=*), intent(in) :: generation_id
+        type(json_value_t) :: value
+
+        same_epoch_receipt = .false.
+        value = json_member(event, 'evidence_kind')
+        if (json_string_value(value) /= 'campaign') return
+        value = json_member(event, 'generation')
+        if (json_string_value(value) /= generation_id) return
+        value = json_member(event, 'coverage_epoch')
+        if (int(json_number_value(value)) /= &
+                int(json_number_value(json_member(status_coverage, 'epoch')))) return
+        value = json_member(event, 'inventory_digest')
+        if (json_string_value(value) /= &
+                json_string_value(json_member(status_coverage, &
+                    'inventory_digest'))) return
+        value = json_member(event, 'seed')
+        if (int(json_number_value(value)) /= &
+                int(json_number_value(json_member(status_coverage, 'seed')))) return
+        same_epoch_receipt = .true.
+    end function same_epoch_receipt
+
+    integer function collect_marker_names(text, values) result(count)
+        character(len=*), intent(in) :: text
+        character(len=32), intent(out) :: values(:)
+        integer :: i, first
+
+        values = ''
+        count = 0
+        first = 1
+        do i = 1, len(text)
+            if (text(i:i) /= new_line('a')) cycle
+            if (i <= first) then
+                first = i + 1
+                cycle
+            end if
+            if (count < size(values)) then
+                count = count + 1
+                values(count) = text(first:i - 1)
+            end if
+            first = i + 1
+        end do
+    end function collect_marker_names
+
+    subroutine assert_unique_marker_names(values, count)
+        character(len=32), intent(in) :: values(:)
+        integer, intent(in) :: count
+        integer :: i, j
+
+        do i = 1, min(count, size(values))
+            do j = i + 1, min(count, size(values))
+                call assert_true(trim(values(i)) /= trim(values(j)), &
+                    'priority epoch does not repeat an executed case')
+            end do
+        end do
+    end subroutine assert_unique_marker_names
+
+    integer function case_index(case_name) result(index_case)
+        character(len=*), intent(in) :: case_name
+        integer :: i
+
+        index_case = 0
+        do i = 1, n_cases
+            if (case_name == trim(names(i))) index_case = i
+        end do
+    end function case_index
 
     subroutine fail_fixture()
         integer :: local_status
@@ -744,6 +1044,20 @@ contains
         end if
         call wait_gone(owner_pid, owner_start, 5000)
         call wait_gone(child_pid, child_start, 5000)
+        call query_receipt_status(marker_project, marker_lane, marker_session, reply)
+        coverage_view = json_member(reply, 'coverage')
+        field = json_member(coverage_view, 'pass')
+        call assert_equal_integer(int(json_number_value(field)), 0, &
+            'marker-only crash has no durable PASS')
+        field = json_member(coverage_view, 'running')
+        call assert_equal_integer(int(json_number_value(field)), 0, &
+            'crashed marker-only launch is no longer running')
+        field = json_member(coverage_view, 'unknown')
+        call assert_equal_integer(int(json_number_value(field)), 1, &
+            'marker-before-receipt crash leaves the obligation UNKNOWN')
+        field = json_member(coverage_view, 'remaining')
+        call assert_equal_integer(int(json_number_value(field)), 1, &
+            'marker-before-receipt crash preserves one remaining obligation')
         call remove_path(marker_ready)
         call start_target_owner(start_args, marker_project, marker_lane, &
             'test_marker_before_receipt', reply, start_result)
@@ -976,7 +1290,7 @@ contains
         call list_add(args, '--campaign-seconds')
         call list_add(args, '60')
         call list_add(args, '--timeout-seconds')
-        call list_add(args, '10')
+        call list_add(args, '5')
         call list_add(args, '--json')
         call gremlin_json(driver, project, cache, state, args, report, process, 30000)
         call assert_true(process%exit_code == 0, 'campaign start command returns success')
@@ -1011,9 +1325,97 @@ contains
         call list_add(args, '--json')
     end subroutine reproduction_args
 
-    subroutine query_status(owner_id, document)
+    subroutine assert_epoch_receipts(first_owner, resumed_owner, generation_id, &
+            status_coverage, lane_id)
+        character(len=*), intent(in) :: first_owner, resumed_owner, generation_id
+        type(json_value_t), intent(in) :: status_coverage
+        character(len=*), intent(in), optional :: lane_id
+        type(json_value_t) :: documents, event, value
+        character(:), allocatable :: digest, evidence, case_name, completion_id
+        character(:), allocatable :: outcome
+        character(len=128) :: completion_ids(128)
+        logical :: case_seen(n_cases), duplicate
+        integer :: epoch, seed_value, event_count, source, i, j, case_index
+
+        value = json_member(status_coverage, 'epoch')
+        epoch = int(json_number_value(value))
+        value = json_member(status_coverage, 'seed')
+        seed_value = int(json_number_value(value))
+        value = json_member(status_coverage, 'inventory_digest')
+        digest = json_string_value(value)
+        case_seen = .false.
+        completion_ids = ''
+        event_count = 0
+
+        do source = 1, 2
+            if (source == 1) then
+                call query_events(first_owner, documents, lane_id)
+            else
+                call query_events(resumed_owner, documents, lane_id)
+            end if
+            do i = 1, json_size(documents)
+                event = json_element(documents, i)
+                value = json_member(event, 'evidence_kind')
+                evidence = json_string_value(value)
+                if (evidence /= 'campaign') cycle
+                value = json_member(event, 'generation')
+                if (json_string_value(value) /= generation_id) cycle
+                value = json_member(event, 'coverage_epoch')
+                if (int(json_number_value(value)) /= epoch) cycle
+                value = json_member(event, 'inventory_digest')
+                if (json_string_value(value) /= digest) cycle
+                value = json_member(event, 'seed')
+                if (int(json_number_value(value)) /= seed_value) cycle
+
+                value = json_member(event, 'completion_id')
+                completion_id = json_string_value(value)
+                duplicate = .false.
+                do j = 1, event_count
+                    if (trim(completion_ids(j)) == completion_id) duplicate = .true.
+                end do
+                if (duplicate) cycle
+                call assert_true(len(completion_id) > 0, &
+                    'current epoch receipt has a completion identity')
+                if (event_count < size(completion_ids)) then
+                    event_count = event_count + 1
+                    completion_ids(event_count) = completion_id
+                end if
+
+                value = json_member(event, 'case_id')
+                case_name = json_string_value(value)
+                case_index = 0
+                do j = 1, n_cases
+                    if (case_name == trim(names(j))) case_index = j
+                end do
+                call assert_true(case_index > 0, &
+                    'current epoch receipt belongs to an eligible case')
+                if (case_index <= 0) cycle
+                call assert_true(.not. case_seen(case_index), &
+                    'current epoch has at most one receipt per case')
+                case_seen(case_index) = .true.
+                value = json_member(event, 'status')
+                outcome = json_string_value(value)
+                call assert_true(outcome == 'PASS' .or. outcome == 'TIMEOUT', &
+                    'current epoch receipt preserves a terminal behavior outcome')
+            end do
+        end do
+
+        call assert_equal_integer(event_count, n_cases, &
+            'receipts cover exactly forty current generation/epoch/input/seed cases')
+        do i = 1, n_cases
+            call assert_true(case_seen(i), &
+                'every declared case has one current epoch receipt')
+        end do
+    end subroutine assert_epoch_receipts
+
+    subroutine query_status(owner_id, document, lane_id)
         character(len=*), intent(in) :: owner_id
         type(json_value_t), intent(out) :: document
+        character(len=*), intent(in), optional :: lane_id
+        character(:), allocatable :: selected_lane
+
+        selected_lane = lane
+        if (present(lane_id)) selected_lane = trim(lane_id)
 
         args = string_list_t()
         call list_add(args, 'gremlin')
@@ -1021,7 +1423,7 @@ contains
         call list_add(args, '--dir')
         call list_add(args, project)
         call list_add(args, '--lane')
-        call list_add(args, lane)
+        call list_add(args, selected_lane)
         call list_add(args, '--session')
         call list_add(args, owner_id)
         call list_add(args, '--json')
@@ -1029,9 +1431,14 @@ contains
         call assert_true(process%exit_code == 0, 'status reads the selected owner session')
     end subroutine query_status
 
-    subroutine query_events(owner_id, document)
+    subroutine query_events(owner_id, document, lane_id)
         character(len=*), intent(in) :: owner_id
         type(json_value_t), intent(out) :: document
+        character(len=*), intent(in), optional :: lane_id
+        character(:), allocatable :: selected_lane
+
+        selected_lane = lane
+        if (present(lane_id)) selected_lane = trim(lane_id)
 
         args = string_list_t()
         call list_add(args, 'gremlin')
@@ -1039,7 +1446,7 @@ contains
         call list_add(args, '--dir')
         call list_add(args, project)
         call list_add(args, '--lane')
-        call list_add(args, lane)
+        call list_add(args, selected_lane)
         call list_add(args, '--session')
         call list_add(args, owner_id)
         call list_add(args, '--cursor')
