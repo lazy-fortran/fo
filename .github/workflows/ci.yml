@@ -115,14 +115,20 @@ jobs:
       - name: Test MCP Gremlin parity
         run: node test/test_mcp_gremlin.js "$HOME/.local/bin/fo"
 
+      # The retired cancellation fixture forced LD_PRELOAD EPERM/backoff; #161
+      # excludes that artificial syscall window. Its cleanup probe tested only
+      # the JS fixture's own process-group helper, not Fo behavior.
       - name: Test stale MCP recovery
-        run: node test/test_mcp_gremlin_stale.js "$HOME/.local/bin/fo"
+        run: |
+          driver="$HOME/.local/bin/fo"
+          FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
+            "$driver" test test_mcp_gremlin_stale
 
-      - name: Test MCP cancellation backoff
-        run: node test/test_mcp_cancel_error.js "$HOME/.local/bin/fo"
-
-      - name: Test MCP cancellation cleanup probe
-        run: node test/test_mcp_cancel_error.js "$HOME/.local/bin/fo" --cleanup-probe
+      - name: Test MCP cancellation and diagnostics
+        run: |
+          driver="$HOME/.local/bin/fo"
+          FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
+            "$driver" test test_mcp_cancel_error
 
       - name: Test asynchronous process lifecycle
         env:
