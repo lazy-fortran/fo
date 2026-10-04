@@ -8,7 +8,9 @@ program test_backend
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names, config_flags_str
     use fo_fpm_config, only: fpm_config_t
-    use fo_process, only: process_getpid
+    use fo_process, only: process_getpid, process_getcwd, &
+        process_run_argv_logged, argv_push
+    use fo_fs, only: fs_find_executable
     use fo_exec_target, only: resolve_exec_target
     implicit none
     integer :: n_pass, n_fail

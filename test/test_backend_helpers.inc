@@ -8,6 +8,48 @@
         if (n_fail > 0) stop 1
     end subroutine report
 
+    subroutine run_backend_argv(executable, arguments, log_file, exitcode)
+        character(len=*), intent(in) :: executable, arguments(:), log_file
+        integer, intent(out) :: exitcode
+        character(len=:), allocatable :: packed
+        integer :: n_args, i
+
+        n_args = 0
+        call argv_push(packed, n_args, trim(executable))
+        do i = 1, size(arguments)
+            call argv_push(packed, n_args, trim(arguments(i)))
+        end do
+        call process_run_argv_logged('', packed, n_args, trim(log_file), &
+            .false., 60, exitcode)
+    end subroutine run_backend_argv
+
+    subroutine set_env(name, value)
+        !! Set or clear an environment variable for this process.
+        use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+        interface
+            function c_setenv(name, value, overwrite) bind(C, name='setenv') &
+                    result(ierr)
+                import :: c_char, c_int
+                character(kind=c_char), intent(in) :: name(*), value(*)
+                integer(c_int), value :: overwrite
+                integer(c_int) :: ierr
+            end function c_setenv
+            function c_unsetenv(name) bind(C, name='unsetenv') result(ierr)
+                import :: c_char, c_int
+                character(kind=c_char), intent(in) :: name(*)
+                integer(c_int) :: ierr
+            end function c_unsetenv
+        end interface
+        character(len=*), intent(in) :: name, value
+        integer(c_int) :: ierr
+
+        if (len_trim(value) == 0) then
+            ierr = c_unsetenv(trim(name)//c_null_char)
+        else
+            ierr = c_setenv(trim(name)//c_null_char, trim(value)//c_null_char, 1_c_int)
+        end if
+    end subroutine set_env
+
     subroutine isolate_backend_cache()
         use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
         interface
@@ -328,6 +370,7 @@
     end subroutine write_cpp_runtime
 
     subroutine test_cmake_preset_external_root_hint()
+        use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
         interface
             function setenv(name, value, overwrite) bind(C, name='setenv') result(ierr)
                 import :: c_char, c_int
@@ -1270,10 +1313,11 @@
 
     subroutine test_gfortran_bootstraps_git_dependency()
         type(backend_t) :: b
-        integer :: exitcode, u, ios, path_status, compile_exit
+        integer :: exitcode, u, ios, path_status, path_length, compile_exit
         character(len=512) :: base, leafdir, libdir, appdir, log_file, outfile
         character(len=512) :: compiler, real_fpm, wrapper_dir, fpm_log
-        character(len=512) :: wrapper, compile_log, source_root, prior_path
+        character(len=512) :: wrapper, compile_log, source_root
+        character(:), allocatable :: prior_path
         character(len=512) :: line, fpm_call
         logical :: compiler_found, fpm_found, exists
 
@@ -1303,10 +1347,17 @@
         call assert(compile_exit == 0, 'native fpm argv counter compiles')
         if (compile_exit /= 0) return
 
-        call get_environment_variable('PATH', prior_path, status=path_status)
+        call get_environment_variable('PATH', length=path_length, status=path_status)
+        if (path_status == 0) then
+            allocate(character(len=path_length) :: prior_path)
+            call get_environment_variable('PATH', prior_path, status=path_status)
+        else
+            prior_path = ''
+        end if
         call set_env('FO_TEST_REAL_FPM', trim(real_fpm))
         call set_env('FO_TEST_FPM_LOG', trim(fpm_log))
-        call set_env('PATH', trim(wrapper_dir)//':'//trim(prior_path))
+        call set_env('PATH', trim(wrapper_dir)//':/usr/bin:/bin:'// &
+            trim(prior_path))
 
         call execute_command_line('mkdir -p "'//trim(leafdir)//'/src" "'// &
             trim(libdir)//'/src" "'//trim(appdir)//'/app"')
@@ -1413,6 +1464,9 @@
         call assert(trim(adjustl(line)) == '13', &
             'binary links nested Fortran and C dependency sources and prints 13')
 
+        call remove_tree(base)
+        call execute_command_line('rm -f '//trim(log_file))
+        call execute_command_line('rm -f '//trim(compile_log))
         if (path_status == 0) then
             call set_env('PATH', trim(prior_path))
         else
@@ -1420,10 +1474,6 @@
         end if
         call set_env('FO_TEST_REAL_FPM', '')
         call set_env('FO_TEST_FPM_LOG', '')
-
-        call remove_tree(base)
-        call execute_command_line('rm -f '//trim(log_file))
-        call execute_command_line('rm -f '//trim(compile_log))
     end subroutine test_gfortran_bootstraps_git_dependency
 
     subroutine commit_local_dependency(dependency_dir)
@@ -1800,10 +1850,11 @@
         !! closure, including Fortran and C sources, and invalidate its warm
         !! result when a transitive source changes.
         type(backend_t) :: b
-        integer :: exitcode, u, ios, path_status, n_calls
+        integer :: exitcode, u, ios, path_status, path_length, n_calls
         character(len=512) :: base, leafdir, gitdir, appdir, log_file
         character(len=512) :: compiler, real_fpm, wrapper_dir, fpm_log
-        character(len=512) :: wrapper, compile_log, source_root, prior_path
+        character(len=512) :: wrapper, compile_log, source_root
+        character(:), allocatable :: prior_path
         character(len=64) :: line
         logical :: compiler_found, fpm_found, fpm_exists
 
@@ -1838,10 +1889,17 @@
             compile_log, exitcode)
         call assert(exitcode == 0, 'Git dev-dependency FPM argv fixture compiles')
         if (exitcode /= 0) return
-        call get_environment_variable('PATH', prior_path, status=path_status)
+        call get_environment_variable('PATH', length=path_length, status=path_status)
+        if (path_status == 0) then
+            allocate(character(len=path_length) :: prior_path)
+            call get_environment_variable('PATH', prior_path, status=path_status)
+        else
+            prior_path = ''
+        end if
         call set_env('FO_TEST_REAL_FPM', trim(real_fpm))
         call set_env('FO_TEST_FPM_LOG', trim(fpm_log))
-        call set_env('PATH', trim(wrapper_dir)//':'//trim(prior_path))
+        call set_env('PATH', trim(wrapper_dir)//':/usr/bin:/bin:'// &
+            trim(prior_path))
 
         call make_dir(trim(leafdir)//'/src')
         call make_dir(trim(gitdir)//'/src')
@@ -1946,6 +2004,7 @@
         call remove_tree(base)
         call execute_command_line('rm -f "'//trim(log_file)//'" "'// &
             trim(compile_log)//'"')
+        call set_env('PATH', trim(prior_path))
     end subroutine test_gfortran_bootstraps_git_dev_dependency_closure
 
     subroutine read_first_line(path, value, ios)
