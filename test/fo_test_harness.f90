@@ -1238,11 +1238,13 @@ contains
         call move_alloc(grown, failures)
     end subroutine record_failure
 
-    subroutine finish_assertions()
+    subroutine finish_assertions(retain_failed_scratch)
+        logical, optional, intent(in) :: retain_failed_scratch
         type(string_t), allocatable :: pending_failures(:)
         character(kind=c_char), allocatable, target :: path_bytes(:)
         integer(c_int) :: rc
         integer :: i, failure_count
+        logical :: retain
 
         failure_count = 0
         if (allocated(failures)) then
@@ -1250,9 +1252,17 @@ contains
             pending_failures = failures
             deallocate(failures)
         end if
+        retain = .false.
+        if (present(retain_failed_scratch)) retain = retain_failed_scratch
+        retain = retain .and. failure_count > 0
         if (allocated(scratch_paths)) then
             do i = 1, size(scratch_paths)
                 if (.not. allocated(scratch_paths(i)%value)) cycle
+                if (retain) then
+                    write(error_unit, '(a)') 'Retained failed fixture scratch: '// &
+                        scratch_paths(i)%value
+                    cycle
+                end if
                 call encode_c_string(scratch_paths(i)%value, path_bytes)
                 rc = c_remove_tree(path_bytes)
                 if (rc /= 0) call record_failure(&
@@ -1283,11 +1293,16 @@ contains
         if (allocated(scratch_paths)) deallocate(scratch_paths)
     end subroutine reset_assertions_for_probe
 
-    subroutine exercise_failure_cleanup_probe(marker)
+    subroutine exercise_failure_cleanup_probe(marker, retain_failed_scratch)
         character(len=*), intent(in) :: marker
+        logical, optional, intent(in) :: retain_failed_scratch
         character(:), allocatable :: scratch
         integer(c_int) :: child, waited, wait_status, rc
         integer :: status
+        logical :: retain
+
+        retain = .false.
+        if (present(retain_failed_scratch)) retain = retain_failed_scratch
 
         child = c_fork()
         if (child == 0) then
@@ -1295,10 +1310,11 @@ contains
             rc = c_silence_output()
             call make_scratch('fo-cleanup-failure-probe', scratch)
             call write_text(marker, scratch)
+            call write_text(join_path(scratch, 'journal.jsonl'), 'unique failure receipt')
             call assert_true(.false., 'intentional scratch cleanup failure probe')
             call assert_file_equals(join_path(scratch, 'missing-receipt'), 'receipt', &
                 'missing fixture output records a failure before cleanup')
-            call finish_assertions()
+            call finish_assertions(retain_failed_scratch=retain)
             call c_exit(0_c_int)
         end if
         call assert_true(child > 0, 'fork assertion cleanup probe')
@@ -1317,8 +1333,16 @@ contains
         call assert_equal_integer(status, 1, 'assertion failure remains a failing test')
         scratch = read_text(marker)
         call assert_true(len(scratch) > 0, 'cleanup probe reports its scratch path')
-        call assert_true(.not. file_exists(scratch), &
-            'assertion failure cleans registered scratch before exiting')
+        if (retain) then
+            call assert_true(file_exists(scratch), &
+                'opt-in retains unique failure evidence after probe exits')
+            call assert_file_equals(join_path(scratch, 'journal.jsonl'), &
+                'unique failure receipt', 'retained journal keeps exact evidence bytes')
+            call remove_tree(scratch)
+        else
+            call assert_true(.not. file_exists(scratch), &
+                'assertion failure cleans registered scratch before exiting')
+        end if
     end subroutine exercise_failure_cleanup_probe
 
     subroutine start_sentinel(process_id)
