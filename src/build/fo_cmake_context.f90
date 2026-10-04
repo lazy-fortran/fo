@@ -33,6 +33,8 @@ module fo_cmake_context
 
     public :: cmake_context_init, cmake_context_query, cmake_context_read_reply
     public :: cmake_context_build_path, cmake_context_validate_hint
+    public :: cmake_context_cache_attached
+    public :: cmake_context_clear_reply
 
 contains
 
@@ -146,6 +148,37 @@ contains
         end if
     end function cmake_context_build_path
 
+    logical function cmake_context_cache_attached(context) result(attached)
+        type(cmake_context_t), intent(in) :: context
+        character(len=4096) :: line, cache_home, cache_generator
+        character(:), allocatable :: cache_file
+        integer :: unit, ios
+
+        attached = .false.
+        cache_home = ''
+        cache_generator = ''
+        cache_file = cmake_context_build_path(context)//'/CMakeCache.txt'
+        open (newunit=unit, file=cache_file, status='old', action='read', &
+            iostat=ios)
+        if (ios /= 0) return
+        do
+            read (unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, 'CMAKE_HOME_DIRECTORY:INTERNAL=') == 1) &
+                cache_home = line(len('CMAKE_HOME_DIRECTORY:INTERNAL=') + 1:)
+            if (index(line, 'CMAKE_GENERATOR:INTERNAL=') == 1) &
+                cache_generator = line(len('CMAKE_GENERATOR:INTERNAL=') + 1:)
+        end do
+        close (unit)
+
+        if (trim(cache_home) /= trim(context%source_root)) return
+        if (len_trim(cache_generator) == 0) return
+        if (len_trim(context%generator) > 0) then
+            if (trim(context%generator) /= trim(cache_generator)) return
+        end if
+        attached = .true.
+    end function cmake_context_cache_attached
+
     subroutine append_arg(values, token)
         character(len=:), allocatable, intent(inout) :: values(:)
         character(len=*), intent(in) :: token
@@ -172,12 +205,7 @@ contains
         character(:), allocatable :: input
         integer :: n_paths
 
-        context%reported_generator = ''
-        context%multi_config = .false.
-        context%has_codemodel = .false.
-        context%has_cache = .false.
-        context%has_toolchains = .false.
-        context%request_seen = .false.
+        call cmake_context_clear_reply(context)
         call fs_collect_files(cmake_context_build_path(context)// &
             '/.cmake/api/v1/reply', 'index-', '.json', &
             '', paths, n_paths, recursive=.false.)
@@ -185,6 +213,17 @@ contains
         call read_file(trim(paths(n_paths)), input)
         if (allocated(input)) call parse_reply(context, input)
     end subroutine cmake_context_read_reply
+
+    subroutine cmake_context_clear_reply(context)
+        type(cmake_context_t), intent(inout) :: context
+
+        context%reported_generator = ''
+        context%multi_config = .false.
+        context%has_codemodel = .false.
+        context%has_cache = .false.
+        context%has_toolchains = .false.
+        context%request_seen = .false.
+    end subroutine cmake_context_clear_reply
 
     subroutine parse_reply(context, input)
         type(cmake_context_t), intent(inout) :: context

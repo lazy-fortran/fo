@@ -11,7 +11,8 @@ module fo_build_backend
         selected_compiler_command
     use fo_cmake_context, only: cmake_context_t, cmake_context_init, &
         cmake_context_query, cmake_context_read_reply, &
-        cmake_context_build_path, cmake_context_validate_hint
+        cmake_context_build_path, cmake_context_validate_hint, &
+        cmake_context_cache_attached, cmake_context_clear_reply
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
@@ -414,7 +415,7 @@ contains
 
         character(len=:), allocatable :: packed, cache_file
         character(len=32) :: jobs_text
-        logical :: has_cache, hint_valid
+        logical :: has_cache, hint_valid, run_configure
         integer :: n_args, i
 
         if (.not. context%valid) then
@@ -433,53 +434,69 @@ contains
             return
         end if
 
-        write (jobs_text, '(i0)') detect_jobs()
-        if (len_trim(context%configure_preset) == 0 .or. &
-                context%build_root_hint) &
-            call cmake_context_query(context)
-        cache_file = cmake_context_build_path(context)//'/CMakeCache.txt'
-        inquire (file=cache_file, exist=has_cache)
+        call cmake_context_clear_reply(context)
 
-        n_args = 0
-        call argv_push(packed, n_args, 'cmake')
-        if (len_trim(context%configure_preset) > 0) then
-            call argv_push(packed, n_args, '--preset')
-            call argv_push(packed, n_args, context%configure_preset)
-        else
-            call argv_push(packed, n_args, '-S')
-            call argv_push(packed, n_args, context%source_root)
-            call argv_push(packed, n_args, '-B')
-            call argv_push(packed, n_args, context%build_root)
-            if (len_trim(context%generator) > 0) then
-                call argv_push(packed, n_args, '-G')
-                call argv_push(packed, n_args, context%generator)
-            else if (.not. has_cache) then
-                call argv_push(packed, n_args, '-G')
-                call argv_push(packed, n_args, 'Ninja')
-            end if
-        end if
-        if (len_trim(context%configuration) > 0 .and. &
-                .not. context%multi_config .and. &
-                .not. generator_is_multi(context)) then
-            call argv_push(packed, n_args, &
-                '-DCMAKE_BUILD_TYPE='//context%configuration)
-        end if
-        if (len_trim(flags) > 0) call argv_push(packed, n_args, &
-            '-DCMAKE_Fortran_FLAGS='//trim(flags))
+        run_configure = len_trim(context%configure_preset) > 0 .or. &
+            len_trim(context%build_preset) > 0 .or. &
+            len_trim(context%test_preset) > 0 .or. &
+            len_trim(context%generator) > 0 .or. &
+            len_trim(context%configuration) > 0 .or. len_trim(flags) > 0
         if (allocated(context%extra_args)) then
-            do i = 1, size(context%extra_args)
-                call argv_push(packed, n_args, context%extra_args(i))
-            end do
+            if (size(context%extra_args) > 0) run_configure = .true.
         end if
-        call process_run_argv_logged(context%source_root, packed, n_args, &
-            log_file, .false., environment_timeout('FO_BUILD_TIMEOUT', 300), &
-            exitcode)
-        if (exitcode /= 0) return
-        if (len_trim(context%configure_preset) > 0) then
-            if (context%build_root_hint) then
+        if (.not. run_configure) then
+            run_configure = .not. cmake_context_cache_attached(context)
+        end if
+
+        write (jobs_text, '(i0)') detect_jobs()
+        if (run_configure) then
+            if (len_trim(context%configure_preset) == 0 .or. &
+                    context%build_root_hint) &
+                call cmake_context_query(context)
+            cache_file = cmake_context_build_path(context)//'/CMakeCache.txt'
+            inquire (file=cache_file, exist=has_cache)
+
+            n_args = 0
+            call argv_push(packed, n_args, 'cmake')
+            if (len_trim(context%configure_preset) > 0) then
+                call argv_push(packed, n_args, '--preset')
+                call argv_push(packed, n_args, context%configure_preset)
+            else
+                call argv_push(packed, n_args, '-S')
+                call argv_push(packed, n_args, context%source_root)
+                call argv_push(packed, n_args, '-B')
+                call argv_push(packed, n_args, context%build_root)
+                if (len_trim(context%generator) > 0) then
+                    call argv_push(packed, n_args, '-G')
+                    call argv_push(packed, n_args, context%generator)
+                else if (.not. has_cache) then
+                    call argv_push(packed, n_args, '-G')
+                    call argv_push(packed, n_args, 'Ninja')
+                end if
+            end if
+            if (len_trim(context%configuration) > 0 .and. &
+                    .not. context%multi_config .and. &
+                    .not. generator_is_multi(context)) then
+                call argv_push(packed, n_args, &
+                    '-DCMAKE_BUILD_TYPE='//context%configuration)
+            end if
+            if (len_trim(flags) > 0) call argv_push(packed, n_args, &
+                '-DCMAKE_Fortran_FLAGS='//trim(flags))
+            if (allocated(context%extra_args)) then
+                do i = 1, size(context%extra_args)
+                    call argv_push(packed, n_args, context%extra_args(i))
+                end do
+            end if
+            call process_run_argv_logged(context%source_root, packed, n_args, &
+                log_file, .false., &
+                environment_timeout('FO_BUILD_TIMEOUT', 300), exitcode)
+            if (exitcode /= 0) return
+            if (len_trim(context%configure_preset) > 0 .and. &
+                    context%build_root_hint) then
                 call cmake_context_read_reply(context)
                 call cmake_context_validate_hint(context, hint_valid)
                 if (.not. hint_valid) then
+                    call cmake_context_clear_reply(context)
                     write (error_unit, '(a,a)') &
                         'fo: invalid CMake preset build-root hint: ', &
                         context%error
@@ -487,11 +504,9 @@ contains
                     return
                 end if
             end if
-        else
-            call cmake_context_read_reply(context)
         end if
 
-        deallocate (packed)
+        if (allocated(packed)) deallocate (packed)
         n_args = 0
         call argv_push(packed, n_args, 'cmake')
         call argv_push(packed, n_args, '--build')
@@ -517,6 +532,13 @@ contains
         call process_run_argv_logged(context%source_root, packed, n_args, &
             log_file, .true., environment_timeout('FO_BUILD_TIMEOUT', 300), &
             exitcode)
+        if (exitcode == 0) then
+            if (len_trim(context%configure_preset) == 0 .or. &
+                    context%build_root_hint) &
+                call cmake_context_read_reply(context)
+        else
+            call cmake_context_clear_reply(context)
+        end if
     end subroutine cmake_build
 
     subroutine cmake_test(context, regex, include_slow, log_file, exitcode)

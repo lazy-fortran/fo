@@ -298,6 +298,7 @@
             'a repeated CMake build leaves the up-to-date CXX target alone')
         call write_cpp_runtime(source_file, 'edited')
         call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'CMake warm build rebuilds edited source')
         n_args = 0
         call argv_push(packed, n_args, 'build dir with spaces/context_app')
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
@@ -312,6 +313,78 @@
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_cmake_context_cxx_runtime
+
+    subroutine test_cmake_warm_build_skips_configure()
+        use fo_process, only: argv_push, process_run_argv_logged
+        type(backend_t) :: b
+        character(len=512) :: project_dir, log_file, source_file, counter_file
+        character(len=:), allocatable :: packed
+        integer :: exitcode, n_args, u, configure_size, first_size, ios
+
+        call make_tmp_path('fo cmake warm build', project_dir)
+        call make_tmp_path('fo cmake warm build log', log_file)
+        call make_dir(project_dir)
+        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
+            status='replace')
+        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
+        write (u, '(a)') 'project(cxx_warm LANGUAGES CXX)'
+        write (u, '(a)') 'file(APPEND "${CMAKE_BINARY_DIR}/configure-count.txt" '// &
+            '"configured\n")'
+        write (u, '(a)') 'add_executable(context_app main.cpp)'
+        close (u)
+        source_file = trim(project_dir)//'/main.cpp'
+        counter_file = trim(project_dir)//'/build/configure-count.txt'
+        call write_cpp_runtime(source_file, 'first')
+
+        b = detect_backend(project_dir)
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'initial CMake build configures and builds')
+        configure_size = -1
+        inquire (file=trim(counter_file), size=configure_size, iostat=ios)
+        call assert(ios == 0 .and. configure_size > 0, &
+            'initial CMake configure writes an independent side-effect counter')
+        first_size = configure_size
+
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0 .and. file_contains(log_file, 'no work to do'), &
+            'warm CMake build is a quiet native build')
+        configure_size = -1
+        inquire (file=trim(counter_file), size=configure_size, iostat=ios)
+        call assert(ios == 0 .and. configure_size == first_size, &
+            'quiet CMake build skips configure')
+
+        call write_cpp_runtime(source_file, 'edited')
+        call backend_build(b, exitcode, log_file=log_file)
+        n_args = 0
+        call argv_push(packed, n_args, 'build/context_app')
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+            .true., 30, exitcode)
+        call assert(exitcode == 0 .and. &
+            file_contains(trim(project_dir)//'/runtime.txt', 'edited'), &
+            'CMake warm build applies a real source edit')
+        configure_size = -1
+        inquire (file=trim(counter_file), size=configure_size, iostat=ios)
+        call assert(ios == 0 .and. configure_size == first_size, &
+            'source-only C++ edit does not reconfigure the project')
+
+        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
+            status='old', position='append', action='write')
+        write (u, '(a)') 'message(FATAL_ERROR "intentional CMake edit failure")'
+        close (u)
+        call backend_build(b, exitcode, log_file=log_file)
+        configure_size = -1
+        inquire (file=trim(counter_file), size=configure_size, iostat=ios)
+        call assert(exitcode /= 0 .and. ios == 0 .and. &
+            configure_size > first_size, &
+            'bad CMake edit triggers and fails native regeneration')
+        call assert(.not. b%cmake%has_codemodel .and. &
+            .not. b%cmake%has_cache .and. .not. b%cmake%has_toolchains .and. &
+            len_trim(b%cmake%reported_generator) == 0, &
+            'failed CMake regeneration does not advertise stale metadata')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_cmake_warm_build_skips_configure
 
     subroutine write_cpp_runtime(path, text)
         character(len=*), intent(in) :: path, text
