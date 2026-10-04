@@ -1,133 +1,153 @@
 # fo
 
-Fortran build cache, incremental rebuild, affected-test selection, MCP server.
+Fortran build cache, incremental rebuild, affected-test selection and CLI/MCP.
 
-## Gremlin mode and plans
+## Read first and keep the development loop fast
 
-Read [PLAN.md](PLAN.md) for the complete Gremlin provider/bootstrapping plan,
-[ROADMAP.md](ROADMAP.md) for adjacent ownership, and workspace master PLAN/AGENTS
-when available. The current Gremlin/storage/test-language program is explicitly
-authorized for implementation and verification. Parallel mode uses a luna
-coordinator and isolated
-luna workers; serial mode stays in the main session without subagents. Repeated
-single-task escalation uses native Sol in parallel or the GPT skill in serial.
+[PLAN.md](PLAN.md) is the authoritative current provider and execution plan;
+[ROADMAP.md](ROADMAP.md) maps adjacent issue ownership. Read workspace master
+PLAN/AGENTS when available and preserve their host restrictions.
 
-Gremlin uses one shared CLI/MCP/background engine. Use the updated CLI after fixes
-if MCP cannot reload. Fix fo workflow problems rather than bypassing them. Keep
-worker worktrees/builds isolated, attach concurrent same-place starts to one owner,
-preserve complete CAS keys/atomic link artifacts and bound generated disk use.
-Only the controller promotes main or the globally installed tool.
+The Gremlin/storage/test-language program is authorized for implementation and
+verification. External controllers own coding agents, task DAGs, worktrees,
+model selection and integration. Parallel mode uses a luna coordinator and
+isolated luna workers; serial mode stays in the main session. After two
+substantive failed attempts on one task, freeze its evidence and transfer only
+that task to Sol, following the current workspace skill/instructions.
+`fo work` is abandoned; do not recreate an agent or CI scheduler inside fo.
 
-Dogfood one bounded resident fo gremlin integration lane when the active storage/
-execution contracts make it safe. During development, use Gremlin and focused
-local behavioral oracles; never wait for GitHub CI while independent work exists.
-CI is asynchronous post-submit evidence, not a Gremlin feature. Push each exact
-locally green integrated increment to main; pause unrelated promotions for a
-confirmed current regression.
+For lazy-fortran, push small exact integrated increments to main after their
+focused local correctness gate passes and no known current regression remains.
+Never wait for GitHub CI, a complete Gremlin epoch, a benchmark or a project
+matrix while implementation can proceed. A confirmed current correctness
+regression gets repair/revert priority; independent coding continues.
 
-All test programs, orchestration and assertions are Fortran. Small test-only C
-OS shims are allowed. Remove JavaScript fixtures only after equivalent independent
-Fortran behavioral oracles pass.
+**Benchmarks are not a development/main/merge gate.** #190 owns real-edit and
+edit-to-verdict measurements; #145 owns pinned automatic third-party acquisition.
+They run only in independent scheduled/manual CI or an explicit slow/performance
+audit, outside ordinary fo/test/default Gremlin inventories. Timing thresholds
+are advisory. Small deterministic audit-harness tests are ordinary correctness;
+large runs, hardware thresholds and downloads are not. Do not label a failed
+measurement PASS or confuse benchmark warnings with product correctness.
 
-## Build and Test
+## Build and test
 
-Use `fo` for every edit/build/test loop. Never call `fpm`, `make`,
-or compiler commands directly except to diagnose a `fo` failure.
+Use the exact controller-supplied fo candidate for the edit/build/test loop.
+Verify its immutable absolute path and SHA256 before validation; no PATH,
+installed-tool or newest-file fallback. Keep builds/caches warm and run the
+named affected correctness oracles, not a full pipeline after every edit.
 
 ```bash
-fo                # staged pipeline: static -> build -> test -> lint -> fmt --check
-fo check          # build + test, one-line status
-fo check --json   # JSON status
-fo build          # build only
-fo test           # run tests
-fo exec <t> [args] # build, then run <t> (never run build/fo/bin/* by hand: may be stale)
-fo exec --release --no-build <t> [args]  # run the fo build --release binary
-fo lint           # unused imports + gfortran warnings
-fo lint --json    # lint results as JSON
-fo fmt            # format sources (native, 88 col, 4 sp)
-fo graph --dot    # module DAG in Graphviz DOT format
-fo install        # fpm install --prefix ~/.local
-fo install --prefix /path  # install to custom prefix
+fo build                    # build applications/examples
+fo test NAME                # named focused correctness test
+fo test --only-changed      # affected selection; see #189 completeness limits
+fo test --all               # explicitly include slow correctness tests
+fo                          # broad staged pipeline; background/milestone use
+fo check --json             # structured build/test status
+fo exec TARGET [ARGS...]    # resolve/build and execute through fo
+fo exec --release --no-build TARGET [ARGS...]
+fo lint
+fo lint --json
+fo fmt                      # native formatter
+fo graph --dot
+fo install --prefix /path   # explicit controlled installation only
 ```
 
-If `fo` cannot handle the project, fix `fo` first. Do not route around it.
+Commands above use `fo` as shorthand for that selected driver. Never execute a
+wildcard/newest build artifact to bypass freshness. Use the updated CLI after a
+fix when MCP cannot reload; do not wait for a new agent session.
 
-## Structure
+Do not bypass a broken fo path with fpm/make/direct compiler calls in the normal
+development loop, except to diagnose it. Explicit bootstrap and #145 independent
+upstream reference audits are different: they may run documented pinned fpm or
+CMake/CTest/toolchain commands in owned isolated directories and record that
+route. A reference fpm binary and fpm under test must be distinct to prevent
+self-recursion. Upstream preprocessing tools such as Fypp remain declared audit
+prerequisites, not fo-owned orchestration.
 
-- `app/main.f90`: CLI entry point. Dispatches to check, build, test, lint, fmt, graph, info, install, watch, mcp-server, lsp.
-- `src/scan/`: module dependency scanner. Parses `use` and `module` statements.
-- `src/dag/`: directed acyclic graph. Topological sort, reverse-dependency closure.
-- `src/check/`: build + test runner (`fo_check`) and output formatters (`fo_check_output`).
-- `src/build/`: native build and test dispatch from `fpm.toml`. Argv execution via C shim.
-- `src/cache/`: SHA-256 content-addressed action and binary cache.
-- `src/lint/`: native linter. Unused-import detection (`fo_lint`), short-circuit
-  reliance detection (`fo_lint_shortcircuit`), test programs with no failure
-  path (`fo_lint_testfail`, over the project's failing helper procedures
-  collected by `fo_lint_failpath`), and gfortran compiler warnings (stack-size
-  filtered, deduplicated). Text-level rules match on masked code from
-  `fo_lint_lex` (comments and string literals blanked), never on raw file text.
-  See "Lint scope" below for what does *not* belong here.
-- `src/diag/`: log parser. Extracts file, line, column, target, hint from compiler and test output.
-- `src/compiler/`: compiler capability detection (identity, OpenMP, module-output-dir, depfile).
-- `src/mcp/`: MCP JSON-RPC server (`fo_mcp`), including response building.
-- `src/lsp/`: LSP server. Diagnostics on save.
-- `src/run/`: coalescing run queue for save-triggered checks.
-- `src/proc/`: C shim for fork/execvp process execution and source scanning.
-- `src/watch/`: native file watcher (inotify on Linux, kqueue on macOS).
-- `doc/FO.md`: specification.
-- `test/`: project tests.
+## Shared architecture and correctness boundaries
 
-## MCP Server
+Ordinary fo and Gremlin must use one input/session/build/test service and the
+shared fx immutable store (#165-#168). Gremlin adds watching, last-compilable
+retention, supersession and finite coverage. CLI/MCP are adapters. A one-shot
+check must not become an endless campaign. No second cache, database, bulk RAM
+cache, metrics daemon, GitHub-polling service or promotion engine.
 
-`fo mcp-server` exposes a single `fo` tool over JSON-RPC/stdio. Actions: `check`, `build`, `test`, `lint`, `fmt`, `info`, `graph`, `changed`, `clean`, `status`, `diagnostics`, `cancel`. Optional `dir` parameter targets a specific project directory.
+#175 owns canonical logical execution inputs and declarations. #189 derives
+conservative affected tests from a frozen baseline/candidate delta, never from
+post-build cache misses. Compile-interface, link-implementation and test/oracle
+inputs are distinct. A cached build is not a cached PASS. Unknown selection
+widens supported local correctness tests or reports incompleteness; it does not
+silently accept one random case or download benchmark projects.
 
-Protocol: auto-detects input framing (Content-Length headers or bare JSON lines) from the first message and mirrors it. Protocol version is echoed from the client's `initialize` request.
+Run unresolved reproducers first, then all affected/mandatory cases, then the
+finite unseen background epoch. Preserve slow affected correctness requirements
+and exact scope/counts. Do not truncate requirements to a campaign chunk.
+Current-generation observations, model completeness and reproducible-closure
+completeness are separate facts. Repository governance remains external.
 
-System test: `FO=/path/to/fo fo test test_mcp_system`. The standalone Fortran
-client tests both framing modes, protocol negotiation, tool calls, error paths,
-and clean shutdown through the public `fo mcp-server` process.
+Only successfully built immutable candidates replace the active generation.
+Failed candidates publish diagnostics and receive no tests; last-compilable
+work continues. Keep source views immutable and use private writable execution
+scratch. Each running process leases its exact build/runtime result. Cancellation
+and cleanup touch only proven-owned state; no broad pkill or shared-cache purge.
+Keep documented platform containment limits honest.
 
-Key source files:
-- `src/mcp/fo_mcp.f90`: server loop, dispatch, async state.
-- `src/proc/fo_process.c`: `fo_c_read_jsonrpc_message` (framing auto-detect), `fo_c_get_mcp_framing`.
-- `src/util/fo_util.f90`: `send_jsonrpc` (output framing follows input).
+Dogfood a bounded resident lane when supported storage/execution contracts make
+it safe. Shared admission bounds total nested work; coding-worker count must not
+multiply FO_JOBS without limit. Optional #190 measurements guide tuning, not
+admission of unrelated correct changes. Only the controller may publish main
+or deliberately replace a globally installed driver; worker self-builds stay
+private.
+
+## Code ownership
+
+- `src/build/`: backend/context/DAG/compile/link/test services; #167 consolidates.
+- `src/scan/`, `src/dag/`: discovery and dependency graph; #175/#186 unify policy.
+- `src/cache/`: thin shared-store bindings and validated metadata memoization.
+- `src/run/`: Gremlin generation, coverage, readiness, receipts and lifecycle;
+  #149 removes unrelated responsibilities from the supervisor.
+- `src/watch/`: shared event provider; #148 removes competing watch semantics.
+- `src/proc/`: narrow OS process/ownership boundary; no duplicate source policy.
+- `src/mcp/`: framing/envelopes/adapters; #185 removes transport-owned scheduling.
+- `src/lsp/`: LSP behavior; #56 unsaved diagnostics remains adjacent scope.
+- `src/check/`, `src/diag/`: public result assembly and diagnostics.
+- `src/lint/`, `src/fmt/`: cheap native lint and formatting.
+- `test/`, `test-support/`, `test-fixtures/`: independent native oracles/helpers.
+- `bench/`: explicit audit tool; #190 corrects touch-only measurement semantics.
+
+`fo mcp-server` exposes one fo tool. Query current capabilities rather than
+assuming every planned field/backend is implemented. Preserve both supported
+framing forms, request/error semantics, typed waits and lossless paged output.
+Native clients test the public process boundary; independent parsing must not
+share the production defect it is meant to detect.
 
 ## Lint scope
 
-fo and fluff split source analysis the way the Go toolchain splits `go vet`
-from staticcheck, or Rust splits cargo from clippy.
+Keep cheap text-level checks and compiler warnings available without an AST
+provider. Rules requiring type/scope/AST analysis belong in fluff/FortFront and
+are explicitly opt-in through #59; build/test never automatically invokes them.
+Do not reimplement a second AST analysis stack in fo to improve impact ranking.
+Optional runtime coverage is a later audit experiment, not default instrumentation.
 
-**fo owns the cheap always-on tier.** Text-level checks that need no frontend,
-run on every `fo` invocation, and must work when nothing else is installed:
-unused imports, short-circuit reliance, test programs that cannot fail the
-build, and gfortran's own warnings. This tier stays small deliberately. Adding a rule here is only correct if it needs no
-parse tree.
+## Implementation and test rules
 
-**fluff owns everything that needs an AST.** Type-aware rules, dead-code
-analysis, column-major access patterns, style rules over real syntax. fluff
-depends on FortFront; fo does not, and that is the point. Reaching those rules
-goes through `fo lint --deep`, which runs `fluff check --output-format json` as
-a subprocess and merges its findings into fo diagnostics (#59).
+- Fortran with narrow C OS shims; fo-owned tests, generated fixture programs,
+  assertions and benchmark orchestration remain Fortran.
+- YAML/TOML and minimal workflow command glue are declarative integration.
+  Upstream reference tools keep their documented dependencies.
+- All arguments have intent; derived types end in `_t`; use explicit imports.
+- Use `real(dp)` with `dp => real64` from iso_fortran_env where appropriate.
+- Keep modules cohesive; do not split solely to satisfy a line-count target.
+- Stage explicit paths, never `git add .`; preserve other workers' ownership.
+- Preserve useful independent negatives during #161/#163 native migration.
+  #184 removes redundant setup/meta assertions, not legitimate failures.
+- Do not add tests asserting PLAN/issue text, file counts or module layout.
+  Generated documentation delivered by a public command may be real behavior.
+- Use observable barriers and bounded safety deadlines instead of arbitrary
+  sleeps. Safety timeout bounds are not performance speed thresholds.
 
-Consequences, both directions:
-
-- Do not add an AST-based rule to fo. If a rule needs to know a type, a scope,
-  or a declaration, it belongs in fluff.
-- Do not reimplement fo's two native rules in fluff. They must keep working
-  with no fluff on the system.
-- `fo build` and `fo test` never invoke fluff. Only the quality commands do, so
-  the bootstrap path stays free of a FortFront dependency.
-
-`fo fmt` follows the same shape: fo wraps fprettify rather than implementing
-formatting, exactly as it would wrap fluff for deep lint.
-
-## Rules
-
-- Pure Fortran + C shim. No Python, no shell scripts in the build path.
-- fpm project.
-- `use ..., only:` before `implicit none`.
-- `real(dp)` with `use, intrinsic :: iso_fortran_env, only: dp => real64`.
-- All args have `intent`.
-- Derived types end in `_t`.
-- Keep new routines focused and split new subsystems into cohesive modules.
-- Stage paths explicitly. Never `git add .`.
+Update PLAN/ROADMAP and affected issues with exact source/driver identities,
+selected checks, actual outcomes and remaining limitations. Do not repeat large
+historical narratives or claim measurements from fixture constants. Code and
+focused verification proceed while optional audits run.
