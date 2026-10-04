@@ -1795,6 +1795,181 @@
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_test_builds_dev_dependency
 
+    subroutine test_gfortran_bootstraps_git_dev_dependency_closure()
+        !! A named test must compile and link a Git dev-dependency's path
+        !! closure, including Fortran and C sources, and invalidate its warm
+        !! result when a transitive source changes.
+        type(backend_t) :: b
+        integer :: exitcode, u, ios, path_status, n_calls
+        character(len=512) :: base, leafdir, gitdir, appdir, log_file
+        character(len=512) :: compiler, real_fpm, wrapper_dir, fpm_log
+        character(len=512) :: wrapper, compile_log, source_root, prior_path
+        character(len=64) :: line
+        logical :: compiler_found, fpm_found
+
+        call make_tmp_path('fo_test_git_devdep', base)
+        leafdir = trim(base)//'/leaf'
+        gitdir = trim(base)//'/gitdev'
+        appdir = trim(base)//'/app'
+        call make_tmp_path('fo_backend_git_devdep', log_file)
+        wrapper_dir = trim(base)//'/bin'
+        fpm_log = trim(base)//'/fpm.log'
+        wrapper = trim(wrapper_dir)//'/fpm'
+        compile_log = trim(base)//'/fpm-compile.log'
+
+        call fs_find_executable('gfortran', compiler, compiler_found)
+        call fs_find_executable('fpm', real_fpm, fpm_found)
+        call assert(compiler_found .and. fpm_found, &
+            'Git dev-dependency oracle has compiler and pinned FPM')
+        if (.not. compiler_found .or. .not. fpm_found) return
+        call process_getcwd(source_root, ios)
+        call assert(ios == 0, 'Git dev-dependency oracle locates fixture source')
+        if (ios /= 0) return
+        call make_dir(wrapper_dir)
+        call compile_fpm_command_fixture(wrapper, compiler, source_root, &
+            compile_log, exitcode)
+        call assert(exitcode == 0, 'Git dev-dependency FPM argv fixture compiles')
+        if (exitcode /= 0) return
+        call get_environment_variable('PATH', prior_path, status=path_status)
+        call set_env('FO_TEST_REAL_FPM', trim(real_fpm))
+        call set_env('FO_TEST_FPM_LOG', trim(fpm_log))
+        call set_env('PATH', trim(wrapper_dir)//':'//trim(prior_path))
+
+        call make_dir(trim(leafdir)//'/src')
+        call make_dir(trim(gitdir)//'/src')
+        call make_dir(trim(appdir)//'/test')
+        open (newunit=u, file=trim(leafdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "leafpath"'
+        close (u)
+        open (newunit=u, file=trim(leafdir)//'/src/leaf.f90', status='replace')
+        write (u, '(a)') 'module leaf'
+        write (u, '(a)') '  use iso_c_binding, only: c_int'
+        write (u, '(a)') '  interface'
+        write (u, '(a)') '    integer(c_int) function c_leaf() bind(C)'
+        write (u, '(a)') '      import c_int'
+        write (u, '(a)') '    end function c_leaf'
+        write (u, '(a)') '  end interface'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer function leaf_value()'
+        write (u, '(a)') '    leaf_value = 20 + c_leaf()'
+        write (u, '(a)') '  end function leaf_value'
+        write (u, '(a)') 'end module leaf'
+        close (u)
+        open (newunit=u, file=trim(leafdir)//'/src/leaf_c.c', status='replace')
+        write (u, '(a)') 'int c_leaf(void) { return 1; }'
+        close (u)
+
+        open (newunit=u, file=trim(gitdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "gitdev"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'leafpath = { path = "../../../../leaf" }'
+        close (u)
+        open (newunit=u, file=trim(gitdir)//'/src/dev.f90', status='replace')
+        write (u, '(a)') 'module dev'
+        write (u, '(a)') '  use leaf, only: leaf_value'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer function dev_value()'
+        write (u, '(a)') '    dev_value = leaf_value()'
+        write (u, '(a)') '  end function dev_value'
+        write (u, '(a)') 'end module dev'
+        close (u)
+        call commit_local_dependency(gitdir)
+
+        open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "gitdevapp"'
+        write (u, '(a)') '[dev-dependencies]'
+        write (u, '(a,a,a)') 'gitdev = { git = "file://', &
+            trim(gitdir), '" }'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/test/check.f90', status='replace')
+        write (u, '(a)') 'program check'
+        write (u, '(a)') '  use dev, only: dev_value'
+        write (u, '(a)') '  integer :: value'
+        write (u, '(a)') '  value = dev_value()'
+        write (u, '(a)') '  open(20,file="observed.txt",status="replace")'
+        write (u, '(a)') '  write(20,"(i0)") value'
+        write (u, '(a)') '  close(20)'
+        write (u, '(a)') '  if (value < 1) stop 1'
+        write (u, '(a)') 'end program check'
+        close (u)
+
+        b = detect_backend(appdir)
+        call backend_test(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, &
+            'named test builds Git dev, transitive path Fortran and C sources')
+        call read_first_line(trim(appdir)//'/observed.txt', line, ios)
+        call assert(ios == 0 .and. trim(line) == '21', &
+            'named test observes linked transitive Fortran and C result')
+        call count_file_lines(fpm_log, n_calls)
+        call read_first_line(fpm_log, line, ios)
+        call assert(n_calls == 1 .and. ios == 0 .and. &
+            trim(line) == 'fpm update --fetch-only', &
+            'cold Git dev bootstrap issues one fetch-only FPM call')
+
+        open (newunit=u, file=trim(leafdir)//'/src/leaf.f90', status='replace')
+        write (u, '(a)') 'module leaf'
+        write (u, '(a)') '  use iso_c_binding, only: c_int'
+        write (u, '(a)') '  interface'
+        write (u, '(a)') '    integer(c_int) function c_leaf() bind(C)'
+        write (u, '(a)') '      import c_int'
+        write (u, '(a)') '    end function c_leaf'
+        write (u, '(a)') '  end interface'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer function leaf_value()'
+        write (u, '(a)') '    leaf_value = 30 + c_leaf()'
+        write (u, '(a)') '  end function leaf_value'
+        write (u, '(a)') 'end module leaf'
+        close (u)
+        open (newunit=u, file=trim(leafdir)//'/src/leaf_c.c', status='replace')
+        write (u, '(a)') 'int c_leaf(void) { return 2; }'
+        close (u)
+        call backend_test(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'warm named test refreshes changed dev closure')
+        call read_first_line(trim(appdir)//'/observed.txt', line, ios)
+        call assert(ios == 0 .and. trim(line) == '32', &
+            'warm test output reflects changed transitive Fortran and C sources')
+        call count_file_lines(fpm_log, n_calls)
+        call assert(n_calls == 1, 'warm dev source edit does not refetch checkout')
+
+        call execute_command_line('rm -f "'//trim(leafdir)//'/fpm.toml"')
+        call backend_test(b, exitcode, log_file=log_file)
+        call assert(exitcode /= 0, &
+            'malformed transitive dependency cannot produce a current test pass')
+        call remove_tree(base)
+        call execute_command_line('rm -f "'//trim(log_file)//'" "'// &
+            trim(compile_log)//'"')
+    end subroutine test_gfortran_bootstraps_git_dev_dependency_closure
+
+    subroutine read_first_line(path, value, ios)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(out) :: value
+        integer, intent(out) :: ios
+        integer :: u
+
+        value = ''
+        open (newunit=u, file=trim(path), status='old', iostat=ios)
+        if (ios /= 0) return
+        read (u, '(a)', iostat=ios) value
+        close (u)
+    end subroutine read_first_line
+
+    subroutine count_file_lines(path, n_lines)
+        character(len=*), intent(in) :: path
+        integer, intent(out) :: n_lines
+        character(len=512) :: line
+        integer :: u, ios
+
+        n_lines = 0
+        open (newunit=u, file=trim(path), status='old', iostat=ios)
+        if (ios /= 0) return
+        do
+            read (u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            n_lines = n_lines + 1
+        end do
+        close (u)
+    end subroutine count_file_lines
+
     subroutine first_match(dir, infix, path)
         !! Return the first file under dir whose name contains infix. Shell-based
         !! to match the other build-test helpers and avoid extra module imports.

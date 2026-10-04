@@ -225,7 +225,7 @@ contains
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
         stamp_flags = compile_key_flags(flag_text)
-        allocate (stamp_roots(MAX_RESOLVED))
+        allocate (stamp_roots(3 * MAX_RESOLVED))
         call collect_stamp_roots(project_dir, stamp_roots, n_stamp_roots, stamp_ok)
         stamp_hit = .false.
         if (allow_cache .and. stamp_ok) then
@@ -768,8 +768,8 @@ contains
         integer, intent(out) :: n_roots
         logical, intent(out) :: ok
 
-        type(resolved_src_t) :: deps(MAX_RESOLVED)
-        integer :: n_deps, n_unresolved, ierr, i
+        type(resolved_src_t) :: deps(MAX_RESOLVED), devs(MAX_RESOLVED)
+        integer :: n_deps, n_dev, n_unresolved, ierr, i, j
 
         roots = ''
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
@@ -783,6 +783,34 @@ contains
             end if
             n_roots = n_roots + 1
             roots(n_roots) = deps(i)%src_dir
+        end do
+        call resolve_dev_dep_srcs(project_dir, devs, n_dev, ierr)
+        if (ierr /= 0) then
+            ok = .false.
+            return
+        end if
+        do i = 1, n_dev
+            do j = 1, n_roots
+                if (trim(roots(j)) == trim(devs(i)%dir)//'/fpm.toml') exit
+            end do
+            if (j > n_roots) then
+                if (n_roots >= size(roots)) then
+                    ok = .false.
+                    return
+                end if
+                n_roots = n_roots + 1
+                roots(n_roots) = trim(devs(i)%dir)//'/fpm.toml'
+            end if
+            do j = 1, n_roots
+                if (trim(roots(j)) == trim(devs(i)%src_dir)) exit
+            end do
+            if (j <= n_roots) cycle
+            if (n_roots >= size(roots)) then
+                ok = .false.
+                return
+            end if
+            n_roots = n_roots + 1
+            roots(n_roots) = devs(i)%src_dir
         end do
     end subroutine collect_stamp_roots
 
@@ -801,7 +829,7 @@ contains
         allow_cache = .true.
         if (present(use_cache)) allow_cache = use_cache
         if (.not. allow_cache) return
-        allocate (roots(MAX_RESOLVED))
+        allocate (roots(3 * MAX_RESOLVED))
         call collect_stamp_roots(project_dir, roots, n_roots, ok)
         if (.not. ok) return
         stamp_flags = flags
@@ -1346,7 +1374,7 @@ contains
         integer :: i, n_deps, n_devs, n_unresolved, n_registry, ierr
         integer :: n_obj_seen
         character(len=512), allocatable :: obj_basenames(:)
-        logical :: native_git
+        logical :: native_git, has_git
 
         n_dep_includes = 0
         n_dep_objs = 0
@@ -1356,17 +1384,19 @@ contains
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr, &
             n_registry)
         if (ierr /= 0) return
-        native_git = n_registry == 0
+        has_git = .false.
         do i = 1, n_deps
-            if (deps(i)%kind == DEP_GIT) exit
+            if (deps(i)%kind == DEP_GIT) has_git = .true.
         end do
-        native_git = native_git .and. i <= n_deps
         call resolve_dev_dep_srcs(project_dir, devs, n_devs, ierr)
         if (ierr == 0) then
             do i = 1, n_devs
-                if (devs(i)%kind == DEP_GIT) native_git = .true.
+                if (devs(i)%kind == DEP_GIT) has_git = .true.
             end do
         end if
+        ! Registry dependencies still need FPM-produced artifacts. A Git
+        ! dev-dependency must not override that regular dependency path.
+        native_git = has_git .and. n_registry == 0
 
         if (native_git) then
             call collect_external_module_dirs(config%external_modules, &
@@ -2781,13 +2811,18 @@ contains
         test_warn = test_warn_seconds(test_timeout)
 
         call resolve_dev_dep_srcs(project_dir, devsrcs, n_dev, ierr)
-        if (ierr == 0 .and. n_dev > 0) then
-            do d = 1, n_dev
-                call scan_dir(trim(devsrcs(d)%src_dir), udev, nud, ierr)
-                if (ierr /= 0) cycle
-                call append_module_units(tunits, n_tests, udev, nud)
-            end do
+        if (ierr /= 0) then
+            exitcode = 1
+            return
         end if
+        do d = 1, n_dev
+            call scan_dir(trim(devsrcs(d)%src_dir), udev, nud, ierr)
+            if (ierr /= 0) then
+                exitcode = 1
+                return
+            end if
+            call append_module_units(tunits, n_tests, udev, nud)
+        end do
 
         call build_dag_from_units(tunits, n_tests, dag, filenames, is_test_arr, is_prog)
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
