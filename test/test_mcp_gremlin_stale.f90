@@ -1,8 +1,9 @@
 program test_mcp_gremlin_stale
     use, intrinsic :: iso_c_binding, only: c_int64_t
+    use, intrinsic :: iso_fortran_env, only: input_unit, output_unit
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: write_text, read_text, assert_true
-    use fo_test_harness, only: finish_assertions
+    use fo_test_harness, only: finish_assertions, current_directory
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, gremlin_write_case
     use fo_test_gremlin_oracle, only: gremlin_wait_ms, gremlin_wait_file, gremlin_stop_lane
     use fo_test_mcp_session, only: mcp_session_t, mcp_session_start
@@ -11,31 +12,48 @@ program test_mcp_gremlin_stale
     use fo_test_mcp_session, only: mcp_session_shutdown
     use fo_test_process_identity, only: mcp_process_start_time
     use fo_test_process_identity, only: mcp_process_identity_running, mcp_kill_owned_tree
-    use fo_test_mcp, only: mcp_quote
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_size
-    use fo_test_json, only: json_string_value
+    use fo_test_json, only: json_string_value, json_number_value
     use fx_hash, only: sha256_file
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state
-    character(:), allocatable :: session_id, arguments, status_arguments
-    character(:), allocatable :: blocked_body, case_id, case_status, state_name
+    character(:), allocatable :: session_id
+    character(:), allocatable :: case_id, case_status, state_name
     character(:), allocatable :: blocked_pid_path, blocked_pid_text
-    character(:), allocatable :: stale_driver, pass_marker
-    character(len=4096) :: stale_image
+    character(:), allocatable :: stale_driver, pass_marker, peer_cwd
+    character(len=4096) :: stale_image, self_image
+    character(len=32) :: mode
     character(len=64) :: stale_digest, driver_digest
     type(mcp_session_t) :: server
     type(string_list_t) :: args
     type(process_result_t) :: process
-    type(json_value_t) :: response, payload, events, event, result
+    type(json_value_t) :: response, payload, events, event, result, actions
     integer :: exit_code, attempt, blocked_pid, status, cleanup_status, i
     character(len=16) :: exit_text
     integer(c_int64_t) :: blocked_start
-    logical :: found, pass_seen, fail_seen, blocked_seen
+    logical :: found, pass_seen, fail_seen, blocked_seen, has_gremlin, catalog_valid
+
+    call get_command_argument(1, mode, status=status)
+    if (status == 0 .and. trim(mode) == 'mcp-server') then
+        call serve_unsupported_peer()
+        stop
+    end if
 
     call gremlin_setup(driver, scratch, project, cache, state)
-    stale_driver = driver
+    ! Run this native fixture as a controlled peer, never build historical Fo.
+    call get_command_argument(0, self_image, status=status)
+    call assert_true(status == 0 .and. len_trim(self_image) > 0, &
+        'resolves the exact native peer executable')
+    if (status /= 0 .or. len_trim(self_image) == 0) then
+        call finish_assertions(retain_failed_scratch=.true.)
+    end if
+    stale_driver = trim(self_image)
+    if (stale_driver(1:1) /= '/') then
+        call current_directory(peer_cwd)
+        stale_driver = peer_cwd//'/'//stale_driver
+    end if
     call get_environment_variable('FO_MCP_STALE_DRIVER', stale_image, status=status)
     if (status == 0 .and. len_trim(stale_image) > 0) then
         stale_driver = trim(stale_image)
@@ -58,10 +76,7 @@ program test_mcp_gremlin_stale
         'print *, ''{"tests":[{"name":"test_stale_fail","status":"pass"}]}'''// &
         new_line('a')//'error stop 19')
     blocked_pid_path = scratch//'/blocked-child.pid'
-    blocked_body = 'integer :: status'//new_line('a')// &
-        'call execute_command_line("sh -c ''sleep 60 & echo $! > '// &
-        blocked_pid_path//'; wait''", exitstat=status)'
-    call gremlin_write_case(project, 'test_stale_blocked', blocked_body)
+    call write_native_blocked_case()
 
     call mcp_session_start(server, stale_driver, project, cache, state, &
         scratch//'/mcp-stale.stderr')
@@ -70,12 +85,36 @@ program test_mcp_gremlin_stale
         '"clientInfo":{"name":"fo-stale-native-test","version":"1"}}', response)
     call assert_true(len(json_string_value(json_member(&
         json_member(response, 'result'), 'protocolVersion'))) > 0, &
-        'old interactive MCP process initializes before CLI owner starts')
+        'unsupported MCP peer initializes before CLI owner starts')
     call mcp_session_notify(server, 'notifications/initialized')
     call mcp_session_request(server, 'tools/list', '', response)
     result = json_member(response, 'result')
-    call assert_true(result%kind /= 0, &
-        'persistent MCP retains a valid tool catalog')
+    event = json_element(json_member(result, 'tools'), 1)
+    actions = json_member(json_member(json_member(json_member(event, &
+        'inputSchema'), 'properties'), 'action'), 'enum')
+    call assert_true(json_size(actions) > 0, &
+        'peer advertises an explicit action catalog')
+    has_gremlin = .false.
+    catalog_valid = json_size(actions) > 0
+    do i = 1, json_size(actions)
+        case_id = json_string_value(json_element(actions, i))
+        if (len(case_id) == 0) catalog_valid = .false.
+        if (index(case_id, 'gremlin_') == 1) &
+            has_gremlin = .true.
+    end do
+    call assert_true(catalog_valid, 'peer catalog contains decoded nonempty action names')
+    call assert_true(.not. has_gremlin, 'live MCP peer has no Gremlin actions')
+    if (.not. catalog_valid .or. has_gremlin) then
+        call mcp_session_shutdown(server, exit_code)
+        call finish_assertions(retain_failed_scratch=.true.)
+    end if
+    call mcp_session_call(server, '{"action":"gremlin_status"}', response)
+    result = json_member(response, 'error')
+    status = int(json_number_value(json_member(result, 'code')))
+    call assert_true(status == -32601 .or. status == -32602, &
+        'unsupported peer explicitly rejects a Gremlin request')
+    call assert_true(mcp_process_identity_running(server%pid, server%start_time), &
+        'unsupported request leaves the recorded peer process connected')
 
     args = string_list_t()
     call list_add(args, 'gremlin')
@@ -129,15 +168,12 @@ program test_mcp_gremlin_stale
         'blocked test owns a live sleeper with its recorded start identity')
 
     do attempt = 1, 600
-        status_arguments = '{"action":"gremlin_status","dir":'//mcp_quote(project)// &
-            ',"lane_id":"new-cli-lane","session_id":'//mcp_quote(session_id)//'}'
-        call mcp_session_call(server, status_arguments, response)
-        call extract_payload(response, payload)
+        call cli_observe('status', payload)
         if (json_string_value(json_member(payload, 'session_id')) == session_id) exit
         state_name = json_string_value(json_member(payload, 'state'))
         if (state_name == 'stopped' .or. state_name == 'error') then
-            call assert_true(.false., 'persistent MCP saw terminal owner state before its ID: '// &
-                state_name)
+            call assert_true(.false., &
+                'new CLI saw terminal owner state before its ID: '//state_name)
             call stop_lane_without_owner()
             call mcp_session_shutdown(server, exit_code)
             call finish_assertions(retain_failed_scratch=.true.)
@@ -145,16 +181,12 @@ program test_mcp_gremlin_stale
         call gremlin_wait_ms(50)
     end do
     call assert_true(attempt <= 600, &
-        'already-running MCP observes a CLI lane created after its startup')
+        'new CLI observes its lane while unsupported MCP remains connected')
     pass_seen = .false.
     fail_seen = .false.
     blocked_seen = .false.
     do attempt = 1, 600
-        arguments = '{"action":"gremlin_events","dir":'//mcp_quote(project)// &
-            ',"lane_id":"new-cli-lane","session_id":'//mcp_quote(session_id)// &
-            ',"cursor":0,"max_records":128,"max_bytes":262144}'
-        call mcp_session_call(server, arguments, response)
-        call extract_payload(response, payload)
+        call cli_observe('events', payload)
         events = json_member(payload, 'events')
         pass_seen = .false.
         fail_seen = .false.
@@ -173,12 +205,11 @@ program test_mcp_gremlin_stale
         end do
         if (pass_seen .and. fail_seen) exit
         if (mod(attempt, 20) == 0) then
-            call mcp_session_call(server, status_arguments, response)
-            call extract_payload(response, payload)
+            call cli_observe('status', payload)
             state_name = json_string_value(json_member(payload, 'state'))
             if (state_name == 'stopped' .or. state_name == 'error') then
                 call assert_true(.false., &
-                    'persistent MCP reports terminal owner state before pass receipt: '// &
+                    'new CLI reports terminal owner state before pass receipt: '// &
                     state_name)
                 call stop_lane_without_owner()
                 call mcp_session_shutdown(server, exit_code)
@@ -188,13 +219,13 @@ program test_mcp_gremlin_stale
         call gremlin_wait_ms(50)
     end do
     call assert_true(pass_seen, &
-        'already-running MCP sees the CLI completion receipt')
+        'new CLI sees its completion receipt with an unsupported MCP connected')
     call assert_true(fail_seen, &
-        'MCP preserves a real FAIL despite PASS-shaped fixture output')
+        'new CLI preserves a real FAIL despite PASS-shaped fixture output')
     call assert_true(.not. blocked_seen, &
-        'MCP leaves the in-flight blocked case without a terminal event')
+        'new CLI leaves the in-flight blocked case without a terminal event')
     call assert_true(mcp_process_identity_running(blocked_pid, blocked_start), &
-        'blocked child is still running while MCP reports the pass receipt')
+        'blocked child is still running while new CLI reports the pass receipt')
     call assert_true(mcp_process_identity_running(server%pid, server%start_time), &
         'CLI lane creation and completion do not replace or terminate the MCP process')
     call gremlin_stop_lane(driver, project, cache, state, 'new-cli-lane', session_id)
@@ -218,6 +249,115 @@ program test_mcp_gremlin_stale
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
+
+    subroutine write_native_blocked_case()
+        character(:), allocatable :: source
+
+        source = 'program test_stale_blocked'//new_line('a')// &
+            'use, intrinsic :: iso_c_binding, only: c_int'//new_line('a')// &
+            'implicit none'//new_line('a')// &
+            'interface'//new_line('a')// &
+            'integer(c_int) function child_fork() bind(C, name="fork")'// &
+            new_line('a')//'import :: c_int'//new_line('a')// &
+            'end function child_fork'//new_line('a')// &
+            'integer(c_int) function child_sleep(seconds) bind(C, name="sleep")'// &
+            new_line('a')//'import :: c_int'//new_line('a')// &
+            'integer(c_int), value :: seconds'//new_line('a')// &
+            'end function child_sleep'//new_line('a')// &
+            'integer(c_int) function child_wait(pid, status, options) '// &
+            'bind(C, name="waitpid")'//new_line('a')// &
+            'import :: c_int'//new_line('a')// &
+            'integer(c_int), value :: pid, options'//new_line('a')// &
+            'integer(c_int), intent(out) :: status'//new_line('a')// &
+            'end function child_wait'//new_line('a')// &
+            'end interface'//new_line('a')// &
+            'integer(c_int) :: child, rc, wait_status'//new_line('a')// &
+            'integer :: unit'//new_line('a')// &
+            'child = child_fork()'//new_line('a')// &
+            'if (child < 0_c_int) error stop 1'//new_line('a')// &
+            'if (child == 0_c_int) then'//new_line('a')// &
+            'rc = child_sleep(60_c_int)'//new_line('a')// &
+            'stop'//new_line('a')//'end if'//new_line('a')// &
+            'open(newunit=unit, file="'//blocked_pid_path// &
+            '", status="replace", action="write")'//new_line('a')// &
+            'write(unit, "(i0)") child'//new_line('a')// &
+            'close(unit)'//new_line('a')// &
+            'rc = child_wait(child, wait_status, 0_c_int)'//new_line('a')// &
+            'if (rc /= child) error stop 2'//new_line('a')// &
+            'end program test_stale_blocked'//new_line('a')
+        call write_text(project//'/test/test_stale_blocked.f90', source)
+    end subroutine write_native_blocked_case
+
+    subroutine serve_unsupported_peer()
+        character(len=32768) :: request
+        character(len=32) :: id_text
+        character(:), allocatable :: method, body, message, response_key
+        type(json_value_t) :: document, id
+        integer :: ios
+        logical :: valid
+
+        do
+            read(input_unit, '(a)', iostat=ios) request
+            if (ios /= 0) exit
+            call json_parse(trim(request), document, valid, message)
+            if (.not. valid) error stop 2
+            id = json_member(document, 'id')
+            if (id%kind == 0) cycle
+            write(id_text, '(i0)') int(json_number_value(id))
+            method = json_string_value(json_member(document, 'method'))
+            response_key = 'result'
+            select case (method)
+            case ('initialize')
+                body = '{"protocolVersion":"2025-11-25",'// &
+                    '"capabilities":{"tools":{}},'// &
+                    '"serverInfo":{"name":"native-no-gremlin-peer","version":"1"}}'
+            case ('tools/list')
+                body = '{"tools":[{"name":"fo","inputSchema":{"type":"object",'// &
+                    '"properties":{"action":{"type":"string",'// &
+                    '"enum":["check"]}}}}]}'
+            case ('shutdown')
+                body = 'null'
+            case ('tools/call')
+                response_key = 'error'
+                body = '{"code":-32602,"message":"Gremlin actions are unavailable"}'
+            case default
+                error stop 3
+            end select
+            write(output_unit, '(a)') '{"jsonrpc":"2.0","id":'//trim(id_text)// &
+                ',"'//response_key//'":'//body//'}'
+            flush(output_unit)
+            if (method == 'shutdown') exit
+        end do
+    end subroutine serve_unsupported_peer
+
+    subroutine cli_observe(action, document)
+        character(len=*), intent(in) :: action
+        type(json_value_t), intent(out) :: document
+        type(string_list_t) :: query
+        type(process_result_t) :: observed
+
+        call list_add(query, 'gremlin')
+        call list_add(query, action)
+        call list_add(query, '--dir')
+        call list_add(query, project)
+        call list_add(query, '--lane')
+        call list_add(query, 'new-cli-lane')
+        call list_add(query, '--session')
+        call list_add(query, session_id)
+        call list_add(query, '--json')
+        if (action == 'events') then
+            call list_add(query, '--cursor')
+            call list_add(query, '0')
+            call list_add(query, '--max-records')
+            call list_add(query, '128')
+            call list_add(query, '--max-bytes')
+            call list_add(query, '262144')
+        end if
+        call gremlin_json(driver, project, cache, state, query, document, &
+            observed, 10000)
+        call assert_true(observed%exit_code == 0, &
+            'actual current CLI observes its lane without an MCP Gremlin request')
+    end subroutine cli_observe
 
     subroutine stop_lane_without_owner()
         type(string_list_t) :: stop_args
@@ -243,20 +383,5 @@ contains
                 'new-cli-lane', cleanup_owner)
         end if
     end subroutine stop_lane_without_owner
-
-    subroutine extract_payload(envelope, document)
-        type(json_value_t), intent(in) :: envelope
-        type(json_value_t), intent(out) :: document
-        type(json_value_t) :: result, content, first
-        character(:), allocatable :: raw, parse_message
-        logical :: valid
-
-        result = json_member(envelope, 'result')
-        content = json_member(result, 'content')
-        first = json_element(content, 1)
-        raw = json_string_value(json_member(first, 'text'))
-        call json_parse(raw, document, valid, parse_message)
-        call assert_true(valid, 'independent parser reads persistent MCP status')
-    end subroutine extract_payload
 
 end program test_mcp_gremlin_stale
