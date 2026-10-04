@@ -899,6 +899,8 @@ contains
         call hex_decode(trim(encoded_alias), alias, status)
         if (status == 0) call hex_decode(trim(encoded_path), bundle_path, status)
         if (status /= 0 .or. len(alias) == 0 .or. &
+            len(alias) > len(root%aliases(1)) .or. &
+            len(bundle_path) > len(root%bundle_paths(1)) .or. &
             index(alias, achar(0)) /= 0 .or. &
             .not. safe_bundle_path(bundle_path)) then
             message = 'generation manifest has an invalid logical root mapping'
@@ -947,13 +949,18 @@ contains
         entry%mode = -1
         logical_value = -1
         call hex_decode(trim(fields(2)), value, status)
-        if (status /= 0 .or. len(value) == 0) goto 900
+        if (status /= 0 .or. len(value) == 0 .or. &
+            len(value) > len(entry%root_alias) .or. &
+            index(value, achar(0)) /= 0) goto 900
         entry%root_alias = value
         call hex_decode(trim(fields(3)), value, status)
-        if (status /= 0 .or. .not. safe_entry_path(value)) goto 900
+        if (status /= 0 .or. len(value) > len(entry%relative_path) .or. &
+            .not. safe_entry_path(value)) goto 900
         entry%relative_path = value
         call hex_decode(trim(fields(4)), value, status)
-        if (status /= 0 .or. len(value) == 0) goto 900
+        if (status /= 0 .or. len(value) == 0 .or. &
+            len(value) > len(entry%role) .or. index(value, achar(0)) /= 0) &
+            goto 900
         entry%role = value
         read (fields(5), *, iostat=status) entry%kind
         if (status /= 0) goto 900
@@ -964,7 +971,7 @@ contains
             goto 900
         entry%writable_at_execution = logical_value == 1
         call hex_decode(trim(fields(8)), value, status)
-        if (status /= 0) goto 900
+        if (status /= 0 .or. len(value) > len(entry%link_target)) goto 900
         entry%link_target = value
         if (trim(fields(9)) /= '-') then
             if (len_trim(fields(9)) /= HASH_LEN) goto 900
@@ -1008,13 +1015,16 @@ contains
         logical_value = -1
         call hex_decode(trim(fields(2)), value, status)
         if (status /= 0 .or. len(value) == 0 .or. &
+            len(value) > len(declaration%root_alias) .or. &
             index(value, achar(0)) /= 0) goto 900
         declaration%root_alias = value
         call hex_decode(trim(fields(3)), value, status)
-        if (status /= 0 .or. .not. safe_entry_path(value)) goto 900
+        if (status /= 0 .or. len(value) > len(declaration%relative_path) .or. &
+            .not. safe_entry_path(value)) goto 900
         declaration%relative_path = value
         call hex_decode(trim(fields(4)), value, status)
         if (status /= 0 .or. len(value) == 0 .or. &
+            len(value) > len(declaration%role) .or. &
             index(value, achar(0)) /= 0) goto 900
         declaration%role = value
         read (fields(5), *, iostat=status) declaration%expected_kind
