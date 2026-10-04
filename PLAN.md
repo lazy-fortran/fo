@@ -15,10 +15,11 @@ its four required cases; the controller published that locally green increment.
 Background coverage found async-start, driver-input and inherited test-directory
 failures and cleared readiness. Those repairs are pushed at `318ecea`; driver
 `6e54f805` passes six focused reproducers and two existing process/session cleanup
-checks. Resident session `4014645-1791139032-043537972` is now running on the
-controller checkout with eight explicit cases including all four previous
-failures; affected/history selection currently widens its required gate to 24.
-Its new generation built and is testing; earlier receipts remain.
+checks. Resident session `4014645-1791139032-043537972` built and began its
+24-case required gate, then exited with retained error/infra state. A nested
+campaign-history owner start returned ESTALE; the cause/exit chain is under
+scoped investigation. Restoring sustained residency is the immediate task;
+earlier receipts remain and no new resident green is claimed.
 This is actual Fo
 dogfooding, not a claim of full verification or final speed.
 
