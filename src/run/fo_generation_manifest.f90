@@ -220,7 +220,7 @@ contains
         end if
         if (status == IMMUTABLE_OK) then
             call immutable_store_root_set(store, 'fo-generation', &
-                store%writer_start, &
+                trim(metadata%execution_identity), &
                 'generation-'//trim(metadata%execution_identity), &
                 kinds(:n_ids), ids(:n_ids), status)
         end if
