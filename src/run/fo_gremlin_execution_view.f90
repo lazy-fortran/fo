@@ -48,8 +48,9 @@ contains
 
         character(len=PATH_LEN) :: source, destination, alias_root
         character(len=PATH_LEN) :: candidate
-        integer :: root_index, i, attempt, copy_rc, clock_count
+        integer :: root_index, i, j, attempt, copy_rc, clock_count
         integer(c_int) :: writable
+        logical :: already_materialized
 
         view = execution_view_t()
         ierr = 1
@@ -132,6 +133,28 @@ contains
                     ierr, message)
                 return
             end if
+            already_materialized = .false.
+            do j = 1, i - 1
+                if (.not. execution_input_role(inventory%entries(j)%role)) cycle
+                if (trim(inventory%entries(j)%root_alias) /= &
+                        trim(inventory%entries(i)%root_alias)) cycle
+                if (trim(inventory%entries(j)%relative_path) /= &
+                        trim(inventory%entries(i)%relative_path)) cycle
+                if ((inventory%entries(j)%writable_at_execution .neqv. &
+                        inventory%entries(i)%writable_at_execution) .or. &
+                        inventory%entries(j)%kind /= inventory%entries(i)%kind .or. &
+                        inventory%entries(j)%mode /= inventory%entries(i)%mode .or. &
+                        inventory%entries(j)%content_digest /= &
+                        inventory%entries(i)%content_digest) then
+                    call reject_view(view, &
+                        'conflicting declarations for runtime fixture: '// &
+                        trim(inventory%entries(i)%relative_path), ierr, message)
+                    return
+                end if
+                already_materialized = .true.
+                exit
+            end do
+            if (already_materialized) cycle
             if (trim(inventory%entries(i)%root_alias) == 'project') then
                 alias_root = ''
             else
