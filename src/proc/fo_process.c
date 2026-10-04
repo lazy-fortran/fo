@@ -2977,7 +2977,24 @@ static int monitor_run(int argc, char **argv) {
 }
 
 int fo_c_process_containment_required(void) {
-    return prctl(PR_GET_SECCOMP, 0, 0, 0, 0) == 2 ? 1 : 0;
+    pid_t probe_pid;
+    pid_t waited;
+    int status = 0;
+
+    if (prctl(PR_GET_SECCOMP, 0, 0, 0, 0) != 2) return 0;
+    probe_pid = fork();
+    if (probe_pid < 0) return -1;
+    if (probe_pid == 0) {
+        if (setpgid(0, 0) == 0) _exit(0);
+        _exit(errno == EPERM ? 1 : 2);
+    }
+    do {
+        waited = waitpid(probe_pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited != probe_pid || !WIFEXITED(status)) return -1;
+    if (WEXITSTATUS(status) == 0) return 0;
+    if (WEXITSTATUS(status) == 1) return 1;
+    return -1;
 }
 
 int fo_c_start_capture_monitor(const char *monitor_executable, const char *cwd,

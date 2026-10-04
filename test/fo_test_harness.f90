@@ -419,7 +419,7 @@ contains
         character(kind=c_char), target :: read_chunk(16384)
         type(pollfd_t) :: poll_descriptors(3)
         integer(c_int) :: input_pipe(2), output_pipe(2), error_pipe(2)
-        integer(c_int) :: child, wait_status, waited, rc
+        integer(c_int) :: child, wait_status, waited, rc, containment_status
         integer(c_int) :: input_descriptor, output_descriptor, error_descriptor
         integer(c_int) :: timeout_value, poll_count, poll_slot(3), poll_ready
         integer(c_int64_t) :: input_length, input_offset, amount, now_ms
@@ -496,10 +496,20 @@ contains
             goto 800
         end if
 
-        monitor_mode = c_process_containment_required() > 0_c_int
+        containment_status = c_process_containment_required()
+        if (containment_status < 0_c_int) then
+            call set_runner_error(result, 'probe child process-group capability')
+            goto 800
+        end if
+        monitor_mode = containment_status > 0_c_int
         if (monitor_mode) then
             monitor_path = environment_value('FO_BIN')
-            if (len(monitor_path) == 0 .or. monitor_path(1:1) /= '/') then
+            if (len(monitor_path) == 0) then
+                call set_runner_error(result, &
+                    'contained process launch requires absolute pinned FO_BIN')
+                goto 800
+            end if
+            if (monitor_path(1:1) /= '/') then
                 call set_runner_error(result, &
                     'contained process launch requires absolute pinned FO_BIN')
                 goto 800
