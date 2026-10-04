@@ -1,5 +1,6 @@
 module bench_json
     use, intrinsic :: iso_fortran_env, only: real64
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
     implicit none
     private
     integer, parameter, public :: json_invalid = 0, json_object = 1, json_array = 2
@@ -165,16 +166,26 @@ contains
                             codepoint=16*codepoint+digit
                         end do
                         p=p+4
-                        if(codepoint>=55296 .and. codepoint<=57343) then
-                            message='surrogate unicode escape is unsupported'; return
-                        else if(codepoint<128) then
-                            value=value//achar(codepoint)
-                        else if(codepoint<2048) then
-                            value=value//achar(192+codepoint/64)//achar(128+mod(codepoint,64))
-                        else
-                            value=value//achar(224+codepoint/4096)// &
-                                achar(128+mod(codepoint/64,64))//achar(128+mod(codepoint,64))
+                        if(codepoint>=55296 .and. codepoint<=56319) then
+                            if(p+5>len(s)) then
+                                message='incomplete surrogate pair'; return
+                            end if
+                            if(s(p:p)/=achar(92) .or. s(p+1:p+1)/='u') then
+                                message='high surrogate without low surrogate'; return
+                            end if
+                            p=p+2
+                            call parse_hex4(s,p,digit,ok)
+                            if(.not.ok) then
+                                message='invalid low surrogate escape'; return
+                            end if
+                            if(digit<56320 .or. digit>57343) then
+                                message='high surrogate not followed by low surrogate'; return
+                            end if
+                            codepoint=65536+(codepoint-55296)*1024+digit-56320
+                        else if(codepoint>=56320 .and. codepoint<=57343) then
+                            message='low surrogate without high surrogate'; return
                         end if
+                        call append_codepoint(value,codepoint)
                     end block
                 case default; ok=.false.; message='unsupported JSON escape'; return
                 end select
@@ -197,26 +208,97 @@ contains
         end select
     end function hex_digit
 
+    subroutine parse_hex4(source,position,codepoint,valid)
+        character(len=*), intent(in) :: source
+        integer, intent(inout) :: position
+        integer, intent(out) :: codepoint
+        logical, intent(out) :: valid
+        integer :: i,digit
+        codepoint=0; valid=position+3<=len(source)
+        if(.not.valid) return
+        do i=0,3
+            digit=hex_digit(source(position+i:position+i))
+            if(digit<0) then
+                valid=.false.; return
+            end if
+            codepoint=16*codepoint+digit
+        end do
+        position=position+4
+    end subroutine parse_hex4
+
+    subroutine append_codepoint(value,codepoint)
+        character(:), allocatable, intent(inout) :: value
+        integer, intent(in) :: codepoint
+        if(codepoint<128) then
+            value=value//achar(codepoint)
+        else if(codepoint<2048) then
+            value=value//achar(192+codepoint/64)//achar(128+mod(codepoint,64))
+        else if(codepoint<65536) then
+            value=value//achar(224+codepoint/4096)// &
+                achar(128+mod(codepoint/64,64))//achar(128+mod(codepoint,64))
+        else
+            value=value//achar(240+codepoint/262144)//achar(128+mod(codepoint/4096,64))// &
+                achar(128+mod(codepoint/64,64))//achar(128+mod(codepoint,64))
+        end if
+    end subroutine append_codepoint
+
     subroutine parse_number(s,p,v,ok,message)
         character(len=*), intent(in) :: s
         integer, intent(inout) :: p
         type(json_value_t), intent(out) :: v
         logical, intent(out) :: ok
         character(:), allocatable, intent(out) :: message
-        integer :: start
-        start=p
-        do while(p<=len(s))
-            if(index('0123456789+-.eE',s(p:p))==0) exit
+        integer :: start,digit_start
+        real(real64) :: value
+        integer :: ios
+        ok=.false.; message='invalid number'; start=p
+        if(s(p:p)=='-') then
             p=p+1
-        end do
+            if(p>len(s)) return
+        end if
+        if(s(p:p)=='0') then
+            p=p+1
+            if(p<=len(s)) then
+                if(index('0123456789',s(p:p))>0) return
+            end if
+        else if(s(p:p)>='1' .and. s(p:p)<='9') then
+            p=p+1
+            do while(p<=len(s))
+                if(index('0123456789',s(p:p))==0) exit
+                p=p+1
+            end do
+        else
+            return
+        end if
+        if(p<=len(s)) then
+            if(s(p:p)=='.') then
+                p=p+1; digit_start=p
+                do while(p<=len(s))
+                    if(index('0123456789',s(p:p))==0) exit
+                    p=p+1
+                end do
+                if(p==digit_start) return
+            end if
+        end if
+        if(p<=len(s)) then
+            if(s(p:p)=='e' .or. s(p:p)=='E') then
+                p=p+1
+                if(p<=len(s)) then
+                    if(s(p:p)=='+' .or. s(p:p)=='-') p=p+1
+                end if
+                digit_start=p
+                do while(p<=len(s))
+                    if(index('0123456789',s(p:p))==0) exit
+                    p=p+1
+                end do
+                if(p==digit_start) return
+            end if
+        end if
         v%kind=json_number; v%text=s(start:p-1)
-        block
-            real(real64) :: x
-            integer :: ios
-            read(v%text,*,iostat=ios) x
-            ok=ios==0 .and. len(v%text)>0
-        end block
-        message='invalid number'
+        read(v%text,*,iostat=ios) value
+        ok=ios==0
+        if(ok) ok=ieee_is_finite(value)
+        if(ok) message=''
     end subroutine parse_number
 
     subroutine literal(s,p,word,kind,v,ok,message)
