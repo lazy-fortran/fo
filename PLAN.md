@@ -151,6 +151,14 @@ affected slow case. This is provider evidence: campaign and ordinary
 not yet been replaced. The installed Linux CLI now uses that validated pinned
 driver; older immutable bootstrap executables remain available for comparison.
 
+#190's first implementation slice is integrated through `8d073ae`: the existing
+benchmark run is removed from ordinary CI and lives in a separate weekly/manual
+audit workflow. Timing overruns are advisory; invalid evidence and failed
+commands still report errors. Touch-only metrics are labeled `metadata_touch_*`.
+The integrated native harness oracle passes 1/1 in 0.30s; no actual benchmark,
+third-party acquisition or new performance result was run or claimed. Real-edit
+workloads and broader audit instrumentation remain open under #190/#145.
+
 ## One architecture
 
 ```text
