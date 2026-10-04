@@ -58,6 +58,11 @@ source-dir = "test"
 main = "test_dependency_membership_cli.f90"
 
 [[test]]
+name = "test_dev_dependency_c_cli"
+source-dir = "test"
+main = "test_dev_dependency_c_cli.f90"
+
+[[test]]
 name = "test_dependency_shadow_cli"
 source-dir = "test"
 main = "test_dependency_shadow_cli.f90"
