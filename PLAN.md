@@ -400,9 +400,17 @@ not claim a measured end-to-end CI speedup; the eliminated executions are counte
 Never wait for CI during edits.
 
 [#187](https://github.com/lazy-fortran/fo/issues/187) fixes an observed slowdown:
-unknown `fo test` flags such as `--list` are currently ignored and can select
-the whole suite. Reject unsupported flags before discovery/build/test work.
-The accidental worker invocation was scoped-stopped and is not test evidence.
+unknown `fo test` flags such as `--list` were ignored and could select
+the whole suite. Fixed at `a8cbde3`: unsupported flags return usage failure
+before discovery/build/test work. The exact integrated native oracle passes
+in 1.80 seconds; the old pinned driver fails the same independent negative
+cases. Valid named and end-of-options commands still pass. The accidental
+worker invocation was scoped-stopped and is not test evidence.
+
+[#188](https://github.com/lazy-fortran/fo/issues/188) records the separate
+test-only Git-project bootstrap defect exposed by this oracle: plain root
+`fpm build` requires a library/application. Repair dependency bootstrap through
+#167 without building every test or adding a redundant root target.
 
 Use completion/readiness barriers and bounded deadlines instead of arbitrary
 sleeps where the same fault remains detectable. Record affected cases, concrete
@@ -614,6 +622,25 @@ For one immutable execution generation, keep these milestones distinct:
 4. **quiescent**: full is green, inputs are clean, and no candidate or pending
    reproducer exists, so no tests, builds, captures, hashes or compiler probes
    run until a relevant filesystem event wakes the owner.
+
+### Conservative affected-first feedback
+
+Known current failures/reproducers run first, followed by affected and mandatory
+cases. Passing that priority set does not stop the generation-scoped finite
+background epoch. #175 supplies the shared declared input inventory to watching,
+capture, action keys and impact analysis; separate incompatible input models
+must not silently exclude tests. New/unknown inputs, manifest/toolchain/runtime
+changes and unsupported dependencies conservatively widen selection, up to all
+ordinary cases. Expose model completeness rather than assume it.
+
+Until conservative impact accounting is demonstrated for the supported inputs,
+a reduced affected set is prioritization evidence, not sufficient proof of the
+local gate. Add runtime coverage later only to improve ordering/precision; do
+not add instrumentation or an ML system during this completion pass. A confirmed
+same-generation failure outside the selected set is evidence to inspect the
+selector; call it a selector miss only when the supported change model should
+have included that case, keeping preexisting failures, flaky outcomes and
+unclassified inputs distinct. No GitHub/merge policy belongs in this service.
 
 `local_gate_green=true` at the gate. What happens next belongs to the external
 repository policy. Lazy-fortran controllers push the exact integrated generation
