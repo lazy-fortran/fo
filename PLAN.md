@@ -1,6 +1,6 @@
 # fo Gremlin implementation plan
 
-Updated 2026-10-04; planning input `8978ab4b1f77ff8f29012d184c5a6789f46ce00b`.
+Updated 2026-10-04; planning input `eb99516fbf3d0e018fe9654f5a90a860c82a89ca`.
 This is the complete provider plan for Gremlin, fo's continuous randomized
 regression-testing engine. External controllers own coding-worker orchestration.
 The
@@ -809,6 +809,14 @@ Implemented issue state:
   crash after durable terminal receipt but before coverage update, the distinct
   marker-before-terminal recovery barrier and native stale-generation PASS
   injection; no marker may manufacture coverage credit.
+- #163 has two integrated native slices. `290a61c` replaces the generated
+  compile-database Python assertion with a strict Fortran JSON oracle. `eb99516`
+  replaces the archive-metadata shell helper with a standalone Fortran fixture,
+  real partial-header and object/archive mismatch oracles, and portable
+  index-free preflight. Exact Linux and Apple `/usr/bin/ar` focused gates, three
+  Linux behavioral mutants, zero-process audits and independent review pass.
+  Generated compiler/linker helpers and the final interpreter inventory remain
+  open in #163; this focused slice does not claim the full migration complete.
 - #164 is complete at `d482807`: unique descriptor-held temporary publication,
   unstable-hash retry and write/close/crash recovery passed independent review,
   focused current-head testing and three production mutants. Its macOS rerun is
