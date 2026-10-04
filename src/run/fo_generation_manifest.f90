@@ -19,7 +19,7 @@ module fo_generation_manifest
     private
 
     integer, parameter :: PATH_LEN = 4096
-    integer, parameter :: MANIFEST_VERSION = 1
+    integer, parameter :: MANIFEST_VERSION = 2
     character(len=*), parameter :: HEADER = 'fo-generation-manifest'
 
     type, public :: generation_manifest_metadata_t
@@ -260,7 +260,7 @@ contains
         type(input_inventory_t), intent(in) :: inventory
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-        integer :: unit, ios, i, j, canonical_count
+        integer :: unit, ios, i, j, k, canonical_count, declaration_count
         character(len=32) :: number
         character(len=32) :: driver_size
         character(len=1) :: flag, valid_flag
@@ -280,6 +280,9 @@ contains
             message = 'canonical input inventory counts are invalid'
             return
         end if
+        declaration_count = 0
+        if (allocated(inventory%declarations)) &
+            declaration_count = size(inventory%declarations)
         do i = 1, inventory%root_count
             if (inventory%roots(i)%alias_count < 1 .or. &
                 inventory%roots(i)%alias_count > &
@@ -305,6 +308,22 @@ contains
             end do
             if (canonical_count /= 1) then
                 message = 'canonical input root alias is missing or duplicated'
+                return
+            end if
+        end do
+        do i = 1, declaration_count
+            canonical_count = 0
+            do j = 1, inventory%root_count
+                do k = 1, inventory%roots(j)%alias_count
+                    if (trim(inventory%declarations(i)%root_alias) == &
+                            trim(inventory%roots(j)%aliases(k))) &
+                        canonical_count = canonical_count + 1
+                end do
+            end do
+            if (canonical_count /= 1 .or. &
+                .not. safe_entry_path( &
+                    trim(inventory%declarations(i)%relative_path))) then
+                message = 'canonical input declaration has an invalid root or path'
                 return
             end if
         end do
@@ -340,10 +359,25 @@ contains
         end if
         write (number, '(i0)') inventory%root_count
         write (unit, '(A)', iostat=ios) 'S'//achar(9)//trim(number)//achar(9)// &
-            int_text(inventory%entry_count)//achar(9)//valid_flag//achar(9)// &
+            int_text(inventory%entry_count)//achar(9)// &
+            int_text(declaration_count)//achar(9)//valid_flag//achar(9)// &
             flag//achar(9)// &
             hex_encode(trim(inventory%diagnostic))//achar(9)// &
             trim(inventory%digest)
+        end if
+        if (allocated(inventory%declarations)) then
+            do i = 1, declaration_count
+                if (ios /= 0) exit
+                write (unit, '(A)', iostat=ios) 'D'//achar(9)// &
+                    hex_encode( &
+                    trim(inventory%declarations(i)%root_alias))//achar(9)// &
+                    hex_encode( &
+                    trim(inventory%declarations(i)%relative_path))//achar(9)// &
+                    hex_encode(trim(inventory%declarations(i)%role))//achar(9)// &
+                    int_text(inventory%declarations(i)%expected_kind)//achar(9)// &
+                    int_text(inventory%declarations(i)%expected_mode)//achar(9)// &
+                    bool_text(inventory%declarations(i)%writable_at_execution)
+            end do
         end if
         do i = 1, inventory%root_count
             do j = 1, inventory%roots(i)%alias_count
@@ -433,7 +467,8 @@ contains
         character(len=32768) :: line
         character(len=32768) :: fields(10)
         integer :: status, unit, ios, n_fields
-        integer :: got_aliases, got_entries, root_index, complete, valid, i, j
+        integer :: got_aliases, got_entries, got_declarations
+        integer :: declaration_count, root_index, complete, valid, i, j
         integer(int64) :: driver_size
         character(len=:), allocatable :: decoded
         logical :: used_clone
@@ -473,7 +508,7 @@ contains
             call delete_tmpfile(trim(temp_path))
             return
         end if
-        if (trim(line) /= HEADER//achar(9)//'1') then
+        if (trim(line) /= HEADER//achar(9)//int_text(MANIFEST_VERSION)) then
             message = 'unsupported or malformed generation manifest header'
             close (unit)
             call delete_tmpfile(trim(temp_path))
@@ -537,7 +572,7 @@ contains
             return
         end if
         call split_fields(trim(line), fields, n_fields)
-        if (n_fields /= 7 .or. trim(fields(1)) /= 'S') then
+        if (n_fields /= 8 .or. trim(fields(1)) /= 'S') then
             message = 'generation manifest inventory header is malformed'
             close (unit)
             call delete_tmpfile(trim(temp_path))
@@ -545,14 +580,17 @@ contains
         end if
         inventory%root_count = 0
         inventory%entry_count = -1
+        declaration_count = -1
         valid = -1
         complete = -1
         read (fields(2), *, iostat=ios) inventory%root_count
         if (ios == 0) read (fields(3), *, iostat=ios) inventory%entry_count
-        read (fields(4), *, iostat=status) valid
-        if (status == 0) read (fields(5), *, iostat=status) complete
+        if (ios == 0) read (fields(4), *, iostat=ios) declaration_count
+        read (fields(5), *, iostat=status) valid
+        if (status == 0) read (fields(6), *, iostat=status) complete
         if (ios /= 0 .or. status /= 0 .or. inventory%root_count < 1 .or. &
             inventory%root_count > 64 .or. inventory%entry_count < 0 .or. &
+            declaration_count < 0 .or. &
             (valid /= 0 .and. valid /= 1) .or. &
             (complete /= 0 .and. complete /= 1)) then
             message = 'generation manifest inventory counts are invalid'
@@ -562,17 +600,18 @@ contains
         end if
         inventory%valid = valid == 1
         inventory%complete = complete == 1
-        call hex_decode(trim(fields(6)), decoded, status)
-        if (status /= 0 .or. len_trim(fields(7)) /= HASH_LEN) then
+        call hex_decode(trim(fields(7)), decoded, status)
+        if (status /= 0 .or. len_trim(fields(8)) /= HASH_LEN) then
             message = 'generation manifest inventory summary is malformed'
             close (unit)
             call delete_tmpfile(trim(temp_path))
             return
         end if
         inventory%diagnostic = decoded
-        inventory%digest = fields(7)(1:HASH_LEN)
+        inventory%digest = fields(8)(1:HASH_LEN)
         allocate (inventory%roots(inventory%root_count), &
-            inventory%entries(inventory%entry_count))
+            inventory%entries(inventory%entry_count), &
+            inventory%declarations(declaration_count))
         inventory%entry_capacity = inventory%entry_count
         do i = 1, inventory%root_count
             inventory%roots(i)%aliases = ''
@@ -581,6 +620,7 @@ contains
         end do
         got_aliases = 0
         got_entries = 0
+        got_declarations = 0
         do
             read (unit, '(A)', iostat=ios) line
             if (ios < 0) exit
@@ -594,6 +634,16 @@ contains
                 exit
             end if
             select case (trim(fields(1)))
+            case ('D')
+                if (n_fields /= 7 .or. &
+                    got_declarations >= declaration_count) then
+                    message = 'generation manifest declaration is malformed'
+                    exit
+                end if
+                got_declarations = got_declarations + 1
+                call decode_loaded_declaration(fields, &
+                    inventory%declarations(got_declarations), status, message)
+                if (status /= 0) exit
             case ('R')
                 if (n_fields /= 5) then
                     message = 'generation manifest root mapping is malformed'
@@ -627,7 +677,8 @@ contains
         close (unit)
         call delete_tmpfile(trim(temp_path))
         if (len_trim(message) /= 0) return
-        if (got_entries /= inventory%entry_count .or. got_aliases == 0) then
+        if (got_entries /= inventory%entry_count .or. got_aliases == 0 .or. &
+            got_declarations /= declaration_count) then
             message = 'generation manifest inventory record counts do not match'
             return
         end if
@@ -649,6 +700,21 @@ contains
                 end if
             end do
         end do
+        do i = 1, declaration_count
+            status = 0
+            do j = 1, inventory%root_count
+                do k = 1, inventory%roots(j)%alias_count
+                    if (trim(inventory%declarations(i)%root_alias) == &
+                            trim(inventory%roots(j)%aliases(k))) &
+                        status = status + 1
+                end do
+            end do
+            if (status /= 1 .or. .not. safe_entry_path( &
+                    trim(inventory%declarations(i)%relative_path))) then
+                message = 'generation manifest declaration has an unknown root or path'
+                return
+            end if
+        end do
         call validate_loaded_aliases(inventory, status, message)
         if (status /= 0) return
         if (metadata%execution_identity /= &
@@ -656,7 +722,6 @@ contains
             message = 'generation manifest execution identity does not match inventory'
             return
         end if
-        allocate (inventory%declarations(0))
         ierr = 0
     end subroutine generation_manifest_load
 
@@ -917,6 +982,47 @@ contains
 900     message = 'generation manifest contains an invalid input entry'
     end subroutine decode_loaded_entry
 
+    subroutine decode_loaded_declaration(fields, declaration, ierr, message)
+        character(len=*), intent(in) :: fields(:)
+        type(input_declaration_t), intent(out) :: declaration
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=:), allocatable :: value
+        integer :: status, logical_value
+
+        ierr = 1
+        message = ''
+        declaration%expected_kind = 0
+        declaration%expected_mode = -2
+        logical_value = -1
+        call hex_decode(trim(fields(2)), value, status)
+        if (status /= 0 .or. len(value) == 0 .or. &
+            index(value, achar(0)) /= 0) goto 900
+        declaration%root_alias = value
+        call hex_decode(trim(fields(3)), value, status)
+        if (status /= 0 .or. .not. safe_entry_path(value)) goto 900
+        declaration%relative_path = value
+        call hex_decode(trim(fields(4)), value, status)
+        if (status /= 0 .or. len(value) == 0 .or. &
+            index(value, achar(0)) /= 0) goto 900
+        declaration%role = value
+        read (fields(5), *, iostat=status) declaration%expected_kind
+        if (status /= 0) goto 900
+        read (fields(6), *, iostat=status) declaration%expected_mode
+        if (status /= 0 .or. declaration%expected_mode < -1 .or. &
+            declaration%expected_mode > 511) goto 900
+        read (fields(7), *, iostat=status) logical_value
+        if (status /= 0 .or. (logical_value /= 0 .and. logical_value /= 1)) &
+            goto 900
+        if (declaration%expected_kind /= INPUT_FILE .and. &
+            declaration%expected_kind /= INPUT_DIRECTORY .and. &
+            declaration%expected_kind /= INPUT_SYMLINK) goto 900
+        declaration%writable_at_execution = logical_value == 1
+        ierr = 0
+        return
+900     message = 'generation manifest contains an invalid declaration'
+    end subroutine decode_loaded_declaration
+
     subroutine inventory_source_path(inventory, entry, root_index, path, ierr, &
             message)
         type(input_inventory_t), intent(in) :: inventory
@@ -1063,6 +1169,24 @@ contains
             call entry_destination(inventory, inventory%entries(i), '', &
                 ignored_path, root_index, status, message)
             if (status /= 0) return
+        end do
+        do i = 1, size(inventory%declarations)
+            root_index = 0
+            do j = 1, inventory%root_count
+                do k = 1, inventory%roots(j)%alias_count
+                    if (trim(inventory%roots(j)%aliases(k)) /= &
+                        trim(inventory%declarations(i)%root_alias)) cycle
+                    root_index = j
+                    exit
+                end do
+                if (root_index /= 0) exit
+            end do
+            if (root_index == 0 .or. &
+                .not. safe_entry_path( &
+                    trim(inventory%declarations(i)%relative_path))) then
+                message = 'generation manifest declaration names an invalid root path'
+                return
+            end if
         end do
         ierr = 0
     end subroutine validate_loaded_aliases
