@@ -61,11 +61,11 @@ contains
         logical :: json_valid
 
         env_driver = ''
-        call get_environment_variable('FO_DRIVER_A', env_driver, status=env_status)
+        call get_environment_variable('FO_BIN', env_driver, status=env_status)
         if (env_status /= 0 .or. len_trim(env_driver) == 0 .or. &
             env_driver(1:1) /= '/') then
             call assert_true(.false., &
-                'FO_DRIVER_A names the controller-supplied absolute immutable fo image')
+                'FO_BIN names the controller-supplied absolute fo image')
             return
         end if
         driver_a = trim(env_driver)
