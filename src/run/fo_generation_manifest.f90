@@ -766,41 +766,52 @@ contains
             call entry_destination(inventory, inventory%entries(i), &
                 trim(bundle_root), destination, root_index, status, message)
             if (status /= 0) return
-            already_materialized = .false.
-            call duplicate_materialized_entry(inventory, i, already_materialized, &
-                status, message)
-            if (status /= 0) return
-            if (already_materialized) cycle
-            select case (inventory%entries(i)%kind)
-            case (INPUT_DIRECTORY)
-                call fs_make_dir(trim(destination))
-            case (INPUT_FILE)
-                call fs_make_dir(parent_path(trim(destination)))
-                call immutable_store_materialize_blob(store, &
-                    trim(inventory%entries(i)%content_digest), trim(destination), &
-                    inventory%entries(i)%mode, IMMUTABLE_MATERIALIZE_COPY, &
-                    used_clone, status)
-                if (status /= IMMUTABLE_OK) then
-                    message = 'cannot materialize generation input blob: '// &
-                        trim(inventory%entries(i)%root_alias)//':'// &
-                        trim(inventory%entries(i)%relative_path)
+            do j = 1, inventory%roots(root_index)%alias_count
+                destination = join_path( &
+                    join_path(trim(bundle_root), &
+                    trim(inventory%roots(root_index)%bundle_paths(j))), &
+                    trim(inventory%entries(i)%relative_path))
+                if (len_trim(destination) >= len(destination)) then
+                    message = 'generation materialization path is too long'
                     return
                 end if
-            case (INPUT_SYMLINK)
-                call fs_make_dir(parent_path(trim(destination)))
-                status = int(fo_c_generation_create_link( &
-                    trim(destination)//c_null_char, &
-                    trim(inventory%entries(i)%link_target)//c_null_char))
-                if (status /= 0) then
-                    message = 'cannot materialize literal generation symlink: '// &
-                        trim(inventory%entries(i)%root_alias)//':'// &
-                        trim(inventory%entries(i)%relative_path)
+                already_materialized = .false.
+                call duplicate_materialized_entry(inventory, i, &
+                    trim(inventory%roots(root_index)%bundle_paths(j)), &
+                    already_materialized, status, message)
+                if (status /= 0) return
+                if (already_materialized) cycle
+                select case (inventory%entries(i)%kind)
+                case (INPUT_DIRECTORY)
+                    call fs_make_dir(trim(destination))
+                case (INPUT_FILE)
+                    call fs_make_dir(parent_path(trim(destination)))
+                    call immutable_store_materialize_blob(store, &
+                        trim(inventory%entries(i)%content_digest), &
+                        trim(destination), inventory%entries(i)%mode, &
+                        IMMUTABLE_MATERIALIZE_COPY, used_clone, status)
+                    if (status /= IMMUTABLE_OK) then
+                        message = 'cannot materialize generation input blob: '// &
+                            trim(inventory%entries(i)%root_alias)//':'// &
+                            trim(inventory%entries(i)%relative_path)
+                        return
+                    end if
+                case (INPUT_SYMLINK)
+                    call fs_make_dir(parent_path(trim(destination)))
+                    status = int(fo_c_generation_create_link( &
+                        trim(destination)//c_null_char, &
+                        trim(inventory%entries(i)%link_target)//c_null_char))
+                    if (status /= 0) then
+                        message = 'cannot materialize literal generation symlink: '// &
+                            trim(inventory%entries(i)%root_alias)//':'// &
+                            trim(inventory%entries(i)%relative_path)
+                        return
+                    end if
+                case default
+                    message = 'generation manifest contains an unsupported input kind'
                     return
-                end if
-            case default
-                message = 'generation manifest contains an unsupported input kind'
-                return
-            end select
+                end select
+            end do
         end do
         ierr = 0
     end subroutine generation_manifest_materialize
@@ -1101,33 +1112,42 @@ contains
         message = ''
     end subroutine entry_destination
 
-    subroutine duplicate_materialized_entry(inventory, current, duplicate, ierr, &
-            message)
+    subroutine duplicate_materialized_entry(inventory, current, bundle_path, &
+            duplicate, ierr, message)
         type(input_inventory_t), intent(in) :: inventory
         integer, intent(in) :: current
+        character(len=*), intent(in) :: bundle_path
         logical, intent(out) :: duplicate
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-        character(len=PATH_LEN) :: current_path, prior_path
-        integer :: ignored, status, i
+        integer :: current_root, prior_root, i, j
 
         duplicate = .false.
         ierr = 0
         message = ''
-        call entry_destination(inventory, inventory%entries(current), '', &
-            current_path, ignored, status, message)
-        if (status /= 0) then
-            ierr = status
+        current_root = alias_root(inventory, &
+            trim(inventory%entries(current)%root_alias))
+        if (current_root == 0) then
+            ierr = 1
+            message = 'generation entry lost its physical root alias'
             return
         end if
         do i = 1, current - 1
-            call entry_destination(inventory, inventory%entries(i), '', &
-                prior_path, ignored, status, message)
-            if (status /= 0) then
-                ierr = status
+            if (trim(inventory%entries(i)%relative_path) /= &
+                trim(inventory%entries(current)%relative_path)) cycle
+            prior_root = alias_root(inventory, &
+                trim(inventory%entries(i)%root_alias))
+            if (prior_root == 0) then
+                ierr = 1
+                message = 'generation entry lost its physical root alias'
                 return
             end if
-            if (trim(prior_path) /= trim(current_path)) cycle
+            do j = 1, inventory%roots(prior_root)%alias_count
+                if (trim(inventory%roots(prior_root)%bundle_paths(j)) /= &
+                    trim(bundle_path)) cycle
+                exit
+            end do
+            if (j > inventory%roots(prior_root)%alias_count) cycle
             if (inventory%entries(i)%kind /= inventory%entries(current)%kind .or. &
                 inventory%entries(i)%mode /= inventory%entries(current)%mode .or. &
                 inventory%entries(i)%content_digest /= &

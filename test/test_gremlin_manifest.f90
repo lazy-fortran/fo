@@ -66,6 +66,9 @@ program test_gremlin_manifest
     call remove_fixture(trim(root))
     call fs_make_dir(trim(project)//'/src')
     call fs_make_dir(trim(dependency)//'/src')
+    status = c_symlink('shared'//c_null_char, &
+        trim(root)//'/shared-alias'//c_null_char)
+    call require(status == 0, 'fixture creates a second path to one dependency root')
     status = c_setenv('FO_CACHE_DIR'//c_null_char, &
         trim(cache)//c_null_char, 1_c_int)
     call require(status == 0, 'isolated Fx cache is configured')
@@ -73,7 +76,7 @@ program test_gremlin_manifest
         'name = "manifest-fixture"'//new_line('a')// &
         '[dependencies]'//new_line('a')// &
         'shared-one = { path = "../shared" }'//new_line('a')// &
-        'shared-two = { path = "../shared" }'//new_line('a'))
+        'shared-two = { path = "../shared-alias" }'//new_line('a'))
     call write(trim(dependency)//'/fpm.toml', 'name = "shared"')
     call write(trim(project)//'/src/main.f90', 'program main')
     call write(trim(project)//'/fixture.dat', 'source-one')
@@ -102,6 +105,9 @@ program test_gremlin_manifest
         call require(len_trim(inventory%roots(shared_root)%bundle_paths(1)) > 0 &
             .and. len_trim(inventory%roots(shared_root)%bundle_paths(2)) > 0, &
             'each logical alias has a bundle destination')
+        call require(trim(inventory%roots(shared_root)%bundle_paths(1)) /= &
+            trim(inventory%roots(shared_root)%bundle_paths(2)), &
+            'aliases preserve distinct bundle destinations for one physical root')
     end if
 
     call cache_file_digest(trim(driver), driver_digest)
