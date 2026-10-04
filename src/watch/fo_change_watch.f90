@@ -289,8 +289,7 @@ contains
         do attempts = 1, 1024
             call system_clock(count=now, count_rate=rate)
             remaining = max(0_int64, (deadline - now)*1000_int64/max(1_int64, rate))
-            call watcher_poll(watch%watcher, candidate, kind, int(remaining), received, ierr)
-            if (ierr /= 0) return
+            call watcher_poll(watch%watcher, candidate, kind, int(remaining), received)
             if (.not. received) then
                 if (present(provider_quiet)) provider_quiet = .true.
                 return
@@ -376,7 +375,7 @@ contains
             message = native_error_detail(watch%native)
             if (len_trim(message) == 0 .and. first_active > 0) &
                 message = provider_error('reconcile', &
-                    trim(watch%roots(first_active)), ierr)
+                trim(watch%roots(first_active)), ierr)
         end if
     end subroutine sync_native_roots
 
