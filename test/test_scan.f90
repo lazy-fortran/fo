@@ -5,7 +5,7 @@ program test_scan
         scan_dir_regex, is_slow_test
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_scratch, join_path, make_directory, make_symlink
-    use fo_test_harness, only: write_text, remove_path, remove_tree, current_directory
+    use fo_test_harness, only: write_text, remove_path, current_directory
     use fo_test_harness, only: finish_assertions
     use fo_test_cli, only: resolve_driver, run_fo
     implicit none
