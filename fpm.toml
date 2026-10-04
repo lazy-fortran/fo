@@ -196,3 +196,13 @@ main = "test_continuous_preemption.f90"
 name = "test_gremlin_watch"
 source-dir = "test"
 main = "test_gremlin_watch.f90"
+
+[[test]]
+name = "test_async_process_boundary"
+source-dir = "test"
+main = "test_async_process_boundary.f90"
+
+[[test]]
+name = "test_gremlin_process_boundary"
+source-dir = "test"
+main = "test_gremlin_process_boundary.f90"

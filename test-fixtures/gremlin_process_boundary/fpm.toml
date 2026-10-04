@@ -1,0 +1,10 @@
+name = "gremlin_process_boundary_probe"
+version = "0.1.0"
+
+[build]
+auto-tests = false
+
+[[test]]
+name = "test_process_boundary"
+source-dir = "test"
+main = "test_process_boundary.f90"
