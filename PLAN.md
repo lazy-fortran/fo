@@ -678,8 +678,9 @@ completed entries below are retained as prerequisites and evidence:
     macOS. #172 separately owns the public lifecycle gate.
 16. [#172](https://github.com/lazy-fortran/fo/issues/172): add scoped Darwin
     asynchronous owner/descendant containment and unblock public Gremlin lifecycle.
-17. [#173](https://github.com/lazy-fortran/fo/issues/173): accept only documented
-    platform archive index members while retaining exact object verification.
+17. **Complete:** [#173](https://github.com/lazy-fortran/fo/issues/173): accept
+    only documented platform archive index members while retaining exact object
+    verification.
 18. [#174](https://github.com/lazy-fortran/fo/issues/174): initialize the shared
     change provider on Darwin with exact diagnostics and event semantics.
 19. Deliver the shared store in provider order: [fx #42](https://github.com/lazy-fortran/fx/issues/42),
@@ -789,12 +790,11 @@ Implemented issue state:
   descendant containment; macOS state/supervisor providers pass, while public
   Gremlin start/status/stop remains blocked until scoped Darwin ownership lands.
 - #173 owns the Apple `ar` `__.SYMDEF SORTED` index-member classification defect
-  exposed by the exact #172 macOS test build. Repair `c461335` is independently
-  approved on `fo/darwin-archive-173-review`: four exact BSD/Apple index names
-  are accepted while arbitrary/duplicate/missing/corrupt members remain errors.
-  Preserved faepmac1 evidence `31031f21...` proves native `/usr/bin/ar` cold/warm
-  behavior separately from controlled mutations. Port on the repaired current
-  integration head.
+  exposed by the exact #172 macOS test build. Complete at `7f0cccc`: four exact
+  BSD/Apple index names are accepted while arbitrary/duplicate/missing/corrupt
+  members remain errors. Preserved faepmac1 evidence `31031f21...` proves native
+  `/usr/bin/ar` cold/warm behavior separately from controlled mutations;
+  independent review and the exact integrated Linux fixture pass.
 - #174 owns the separate Darwin shared-watcher initialization failure that stops
   public Gremlin before ready state even though direct `kqueue()` creation works.
 - #143/#152 and PR #147 are closed without merge after the KISS review assigned
