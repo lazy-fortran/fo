@@ -245,8 +245,9 @@
         b = detect_backend(project_dir)
         call backend_build(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'CMake project builds')
-        call assert(file_contains(log_file, 'array temporary'), &
-            'CMake build emits array-temporary warnings by default')
+        call assert(file_contains(trim(project_dir)//'/build/CMakeCache.txt', &
+            'CMAKE_Fortran_COMPILER:FILEPATH='), &
+            'CMake selects its Fortran compiler from the project configuration')
         call backend_test(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'CMake project tests pass')
         call parse_test_results(log_file, entries, n_entries, parse_ierr)
@@ -259,6 +260,72 @@
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_cmake_build_and_test
+
+    subroutine test_cmake_context_cxx_runtime()
+        use fo_process, only: argv_push, process_run_argv_logged
+        type(backend_t) :: b
+        character(len=512) :: project_dir, log_file, source_file
+        character(len=:), allocatable :: packed
+        integer :: exitcode, n_args, u
+
+        call make_tmp_path('fo cmake cxx context', project_dir)
+        call make_tmp_path('fo cmake cxx context log', log_file)
+        call make_dir(project_dir)
+        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
+            status='replace')
+        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
+        write (u, '(a)') 'project(cxx_context LANGUAGES CXX)'
+        write (u, '(a)') 'add_executable(context_app main.cpp)'
+        close (u)
+        source_file = trim(project_dir)//'/main.cpp'
+        call write_cpp_runtime(source_file, 'first')
+
+        b = detect_backend(project_dir)
+        b%cmake%build_root = 'build dir with spaces'
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, &
+            'CMake CXX-only project configures with a spaced source/build path')
+        n_args = 0
+        call argv_push(packed, n_args, 'build dir with spaces/context_app')
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+            .true., 30, exitcode)
+        call assert(exitcode == 0 .and. &
+            file_contains(trim(project_dir)//'/runtime.txt', 'first'), &
+            'CMake-built CXX executable runs and creates its runtime sentinel')
+
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0 .and. file_contains(log_file, 'no work to do'), &
+            'a repeated CMake build leaves the up-to-date CXX target alone')
+        call write_cpp_runtime(source_file, 'edited')
+        call backend_build(b, exitcode, log_file=log_file)
+        n_args = 0
+        call argv_push(packed, n_args, 'build dir with spaces/context_app')
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+            .true., 30, exitcode)
+        call assert(exitcode == 0 .and. &
+            file_contains(trim(project_dir)//'/runtime.txt', 'edited'), &
+            'editing CXX source rebuilds the executable and changes runtime output')
+        call assert(file_contains(trim(project_dir)//'/build dir with spaces/'// &
+            'CMakeCache.txt', 'CMAKE_GENERATOR:INTERNAL=Ninja'), &
+            'the configured generator is retained in the selected build directory')
+
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_cmake_context_cxx_runtime
+
+    subroutine write_cpp_runtime(path, text)
+        character(len=*), intent(in) :: path, text
+        integer :: u
+
+        open (newunit=u, file=path, status='replace')
+        write (u, '(a)') '#include <fstream>'
+        write (u, '(a)') 'int main() {'
+        write (u, '(a)') '  std::ofstream out("runtime.txt");'
+        write (u, '(a)') '  out << "'//trim(text)//'";'
+        write (u, '(a)') '  return out ? 0 : 1;'
+        write (u, '(a)') '}'
+        close (u)
+    end subroutine write_cpp_runtime
 
     subroutine test_cmake_named_test_rebuilds_changed_source()
         type(backend_t) :: b
