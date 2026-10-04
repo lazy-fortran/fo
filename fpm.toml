@@ -141,3 +141,8 @@ main = "test_archive_publication.f90"
 name = "test_test_os_link"
 source-dir = "test"
 main = "test_test_os_link.f90"
+
+[[test]]
+name = "test_install_help"
+source-dir = "test"
+main = "test_install_help.f90"
