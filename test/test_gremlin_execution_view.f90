@@ -5,7 +5,8 @@ program test_gremlin_execution_view
         execution_view_release
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, INPUT_FILE
-    use fo_util, only: make_tmpfile, read_text_file
+    use fo_process, only: argv_push, process_getcwd, process_run_argv_logged
+    use fo_util, only: delete_tmpfile, make_tmpfile, read_text_file
     implicit none
 
     type(input_declaration_t) :: declarations(1)
@@ -14,8 +15,17 @@ program test_gremlin_execution_view
     character(len=512) :: root, views, source_file, text, message
     character(len=512) :: first_fixture, second_output, source_digest
     character(len=512) :: after_digest, escape_path
+    character(len=512) :: argument, executable, current_dir, probe_log
+    character(len=:), allocatable :: packed
+    integer :: n_args, probe_exit, cwd_status
     integer :: ierr, release_status, i
     logical :: exists
+
+    call get_command_argument(1, argument)
+    if (trim(argument) == '--execution-view-probe') then
+        call runtime_probe()
+        stop
+    end if
 
     call make_tmpfile('fo-view-oracle', root)
     call fs_make_dir(trim(root)//'/fixtures')
@@ -51,6 +61,26 @@ program test_gremlin_execution_view
     call check(source_digest == after_digest, &
         'fixture writes leave source bytes unchanged')
 
+    call get_command_argument(0, executable)
+    if (len_trim(executable) > 0 .and. executable(1:1) /= '/') then
+        call process_getcwd(current_dir, cwd_status)
+        call check(cwd_status == 0, 'resolve the native test executable path')
+        executable = trim(current_dir)//'/'//trim(executable)
+    end if
+    call make_tmpfile('fo-view-probe', probe_log)
+    packed = ''
+    n_args = 0
+    call argv_push(packed, n_args, trim(executable))
+    call argv_push(packed, n_args, '--execution-view-probe')
+    call process_run_argv_logged(trim(first%cwd), packed, n_args, trim(probe_log), &
+        .false., 10, probe_exit)
+    call check(probe_exit == 0, &
+        'native test reads the declared fixture and writes relative output in its view')
+    call delete_tmpfile(trim(probe_log))
+    call read_text_file(trim(first%cwd)//'/relative-output.txt', text)
+    call check(index(text, 'written relative') > 0, &
+        'relative output is created inside the private working directory')
+
     call execution_view_create(trim(root)//'/views', repeat('a', HASH_LEN), &
         'session-case-2', 'test_case', inventory, .true., .true., second, ierr, message)
     call check(ierr == 0 .and. second%cwd /= first%cwd, &
@@ -85,6 +115,25 @@ program test_gremlin_execution_view
     print '(a)', 'Gremlin writable execution view behavioral oracle: PASS'
 
 contains
+
+    subroutine runtime_probe()
+        character(len=256) :: line
+        integer :: unit, status
+
+        open (newunit=unit, file='fixtures/input.txt', status='old', &
+            action='read', iostat=status)
+        if (status /= 0) error stop 2
+        read (unit, '(a)', iostat=status) line
+        close (unit)
+        if (status /= 0) error stop 2
+        if (trim(line) /= 'private mutation') error stop 2
+        open (newunit=unit, file='relative-output.txt', status='new', &
+            action='write', iostat=status)
+        if (status /= 0) error stop 2
+        write (unit, '(a)', iostat=status) 'written relative'
+        close (unit)
+        if (status /= 0) error stop 2
+    end subroutine runtime_probe
 
     subroutine check(condition, description)
         logical, intent(in) :: condition
