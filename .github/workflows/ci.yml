@@ -123,6 +123,20 @@ jobs:
           FO_CACHE_DIR="$RUNNER_TEMP/fo-self-refresh-oracle-cache" \
             "$HOME/.local/bin/fo" test test_self_refresh
 
+      - name: Test install help side effects
+        env:
+          FO_RUN_INSTALL_HELP_ORACLE: "1"
+          FO_DISABLE_SELF_REFRESH: "1"
+          FO_SELF_REFRESH: "0"
+          HOME: ${{ runner.temp }}/fo-install-help-home
+          FO_CACHE_DIR: ${{ runner.temp }}/fo-install-help-cache
+          FO_INSTALL_HELP_PREFIX: ${{ runner.temp }}/fo-install-help-prefix
+          TMPDIR: /var/tmp
+        run: |
+          mkdir -p "$HOME" "$FO_CACHE_DIR"
+          driver="$(command -v fo)"
+          FO_BIN="$driver" "$driver" test test_install_help
+
       - name: Test Gremlin filesystem change capture
         run: node test/test_gremlin_watch.js "$(command -v fo)"
 

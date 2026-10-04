@@ -70,6 +70,10 @@ int fo_test_unlink(const char *path) { return unlink(path) == 0 || errno == ENOE
 int fo_test_rename(const char *source, const char *target) { return rename(source, target); }
 int fo_test_symlink(const char *target, const char *link_path) { return symlink(target, link_path); }
 int fo_test_getcwd(char *buffer, size_t size) { return getcwd(buffer, size) == NULL ? -1 : 0; }
+int fo_test_mode_bits(const char *path) {
+    struct stat info;
+    return stat(path, &info) == 0 ? (int)(info.st_mode & 07777) : -1;
+}
 
 int64_t fo_test_monotonic_ms(void) {
     struct timespec now;
