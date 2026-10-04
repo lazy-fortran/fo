@@ -1374,7 +1374,7 @@ contains
         integer :: i, n_deps, n_devs, n_unresolved, n_registry, ierr
         integer :: n_obj_seen
         character(len=512), allocatable :: obj_basenames(:)
-        logical :: native_git, has_git
+        logical :: native_sources
 
         n_dep_includes = 0
         n_dep_objs = 0
@@ -1384,21 +1384,13 @@ contains
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr, &
             n_registry)
         if (ierr /= 0) return
-        has_git = .false.
-        do i = 1, n_deps
-            if (deps(i)%kind == DEP_GIT) has_git = .true.
-        end do
+        ! Native source resolution covers path and acquired external deps.
+        ! Registry dependencies still require artifacts produced by FPM.
+        native_sources = n_registry == 0
         call resolve_dev_dep_srcs(project_dir, devs, n_devs, ierr)
-        if (ierr == 0) then
-            do i = 1, n_devs
-                if (devs(i)%kind == DEP_GIT) has_git = .true.
-            end do
-        end if
-        ! Registry dependencies still need FPM-produced artifacts. A Git
-        ! dev-dependency must not override that regular dependency path.
-        native_git = has_git .and. n_registry == 0
+        if (ierr /= 0) n_devs = 0
 
-        if (native_git) then
+        if (native_sources) then
             call collect_external_module_dirs(config%external_modules, &
                 config%n_external_modules, dep_includes, n_dep_includes, &
                 MAX_DEP_DIRS)
