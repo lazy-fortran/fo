@@ -10,8 +10,8 @@ program test_gremlin_execution_view
     implicit none
 
     type(input_declaration_t) :: declarations(1)
-    type(input_inventory_t) :: inventory, escaping
-    type(execution_view_t) :: first, second, rejected
+    type(input_inventory_t) :: inventory, escaping, incomplete, invalid
+    type(execution_view_t) :: first, second, partial, rejected
     character(len=512) :: root, views, source_file, text, message
     character(len=512) :: first_fixture, second_output, escape_path
     character(len=HASH_LEN) :: source_digest, after_digest
@@ -97,6 +97,30 @@ program test_gremlin_execution_view
     call execution_view_release(second, .false., release_status, message)
     inquire(file=trim(second_output), exist=exists)
     call check(.not. exists, 'owned inactive view cleanup removes its scratch')
+
+    incomplete = inventory
+    incomplete%complete = .false.
+    incomplete%diagnostic = 'unmodeled ambient dependency'
+    call execution_view_create(trim(root)//'/views', repeat('a', HASH_LEN), &
+        'session-partial', 'test_case', incomplete, .true., .false., &
+        partial, ierr, message)
+    call check(ierr == 0 .and. partial%active .and. .not. partial%complete, &
+        'unknown ambient closure still permits a private declared fixture')
+    call read_text_file(trim(partial%cwd)//'/fixtures/input.txt', text)
+    call check(index(text, 'frozen fixture') > 0, &
+        'incomplete inventory still materializes known declared bytes')
+    call execution_view_release(partial, .false., release_status, message)
+
+    invalid = inventory
+    invalid%valid = .false.
+    invalid%diagnostic = 'invalid declared fixture'
+    call execution_view_create(trim(root)//'/views', repeat('a', HASH_LEN), &
+        'session-invalid', 'test_case', invalid, .true., .false., &
+        rejected, ierr, message)
+    call check(ierr /= 0 .and. .not. rejected%active, &
+        'invalid declaration rejects the execution before case launch')
+    call check(index(message, 'invalid declared fixture') > 0, &
+        'invalid declaration reports its discovery diagnostic')
 
     escaping = inventory
     do i = 1, escaping%entry_count
