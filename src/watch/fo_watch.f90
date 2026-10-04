@@ -18,13 +18,14 @@ contains
 
     subroutine watch_loop(dir, fmt_mode)
         !! Rebuild on every Fortran source change using the shared native
-        !! change provider (kqueue on macOS, inotify on Linux): no inotifywait,
+        !! change provider (FSEvents on macOS, inotify on Linux): no inotifywait,
         !! no mkfifo, no shell.
         character(len=*), intent(in) :: dir
         logical, intent(in), optional :: fmt_mode
 
         type(change_watch_t) :: w
         character(len=WATCH_PATH_LEN) :: changed
+        character(len=WATCH_PATH_LEN) :: watch_message
         integer :: event_type, ierr
         logical :: do_fmt, got_event
         integer(int64) :: debounce_until, now, rate
@@ -32,9 +33,10 @@ contains
         do_fmt = .false.
         if (present(fmt_mode)) do_fmt = fmt_mode
 
-        call change_watch_init(w, trim(dir), ierr)
+        call change_watch_init(w, trim(dir), ierr, watch_message)
         if (ierr /= 0) then
-            write (error_unit, '(a)') 'fo: cannot start file watcher'
+            write (error_unit, '(a)') 'fo: cannot start file watcher: '// &
+                trim(watch_message)
             call change_watch_close(w)
             return
         end if

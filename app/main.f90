@@ -378,7 +378,7 @@ contains
         write (output_unit, '(a)') '  fmt [paths...]  format sources (project fprettify config if present)'
         write (output_unit, '(a)') '  fmt --changed  format Git-dirty Fortran sources'
         write (output_unit, '(a)') '  fmt --check  check formatting without modifying files'
-        write (output_unit, '(a)') '  watch      rebuild on file change (inotify loop)'
+        write (output_unit, '(a)') '  watch      rebuild on file changes (shared provider)'
         write (output_unit, '(a)') '  watch --fmt  auto-format changed files before rebuild'
         write (output_unit, '(a)') '  lint       unused imports + gfortran warnings'
         write (output_unit, '(a)') '  lint --json  lint results as JSON'

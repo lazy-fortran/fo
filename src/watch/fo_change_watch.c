@@ -2,9 +2,21 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+
+void fo_change_watch_error_text(int error, char *buffer, int capacity) {
+    if (buffer == NULL || capacity <= 0) return;
+    snprintf(buffer, (size_t)capacity, "%s (errno %d)", strerror(error), error);
+}
+#ifndef __APPLE__
+void fo_change_native_diagnostic(void *handle, char *buffer, int capacity) {
+    (void)handle;
+    if (buffer != NULL && capacity > 0) buffer[0] = 0;
+}
+#endif
 
 int fo_change_watch_realpath(const char *path, char *resolved, int capacity) {
     char *canonical;
@@ -195,6 +207,15 @@ static int change_classify(int mask) {
     if ((unsigned)mask & (IN_MODIFY | IN_ATTRIB)) return 1;
     return 0;
 }
+static void change_discard_queued(struct change_watch *w) {
+    int batch;
+    w->pending_pos = w->pending_len;
+    for (batch = 0; batch < 8; ++batch) {
+        ssize_t count = read(w->fd, w->pending.bytes, sizeof(w->pending.bytes));
+        if (count <= 0) break;
+    }
+    w->pending_pos = w->pending_len = 0;
+}
 int fo_change_native_poll(void *handle, int timeout, char *path, int capacity, int *kind) {
     struct change_watch *w = handle;
     struct pollfd pfd;
@@ -250,6 +271,7 @@ int fo_change_native_poll(void *handle, int timeout, char *path, int capacity, i
             /* Preserve each file notification for fo watch --fmt. Gremlin's
              * shared debounce coalesces them without dropping formatter work. */
             if (structural) {
+                change_discard_queued(w);
                 rc = fo_change_native_reconcile(w);
                 if (rc) return rc;
                 *kind = 4; *path = 0;
@@ -258,6 +280,7 @@ int fo_change_native_poll(void *handle, int timeout, char *path, int capacity, i
         }
     }
     if (structural) {
+        change_discard_queued(w);
         rc = fo_change_native_reconcile(w);
         if (rc) return rc;
         /* Include files populated before the new directory subscription. */
@@ -304,7 +327,7 @@ void fo_change_native_close(void *handle) {
     for (i = 0; i < w->nself; ++i) free(w->self[i].path);
     free(w->self); free(w->entries); free(w);
 }
-#else
+#elif !defined(__APPLE__)
 void *fo_change_native_open(int *error) { *error = 0; return NULL; }
 void fo_change_native_close(void *handle) { (void)handle; }
 void fo_change_native_clear_roots(void *handle) { (void)handle; }

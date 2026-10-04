@@ -146,3 +146,8 @@ main = "test_test_os_link.f90"
 name = "test_install_help"
 source-dir = "test"
 main = "test_install_help.f90"
+
+[[test]]
+name = "test_change_watch_provider"
+source-dir = "test"
+main = "test_change_watch_provider.f90"

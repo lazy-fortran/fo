@@ -31,6 +31,7 @@ contains
 
         type(generation_context_t) :: context
         character(len=PATH_LEN) :: cas_root
+        character(len=PATH_LEN) :: watch_message
         integer :: ierr
 
         registration_error = 0
@@ -40,9 +41,10 @@ contains
             return
         end if
         if (present(change_watch)) then
-            call change_watch_add_context(change_watch, context, ierr)
+            call change_watch_add_context(change_watch, context, ierr, watch_message)
             if (ierr /= 0) then
-                message = 'cannot watch Gremlin path dependencies'
+                message = 'cannot watch Gremlin path dependencies: '// &
+                    trim(watch_message)
                 registration_error = ierr
                 ok = .false.
                 return
