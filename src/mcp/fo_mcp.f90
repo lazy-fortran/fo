@@ -1385,6 +1385,8 @@ contains
             '"description":"Project directory (default: cwd)"},'// &
             '"json":{"type":"string","enum":["compact","full"],'// &
             '"description":"check/test: structured JSON result"},'// &
+            '"dot":{"type":"boolean",'// &
+            '"description":"graph: output Graphviz DOT"},'// &
             '"cache":{"type":"boolean",'// &
             '"description":"clean: also purge the shared content store"},'// &
             '"prefix":{"type":"string",'// &
