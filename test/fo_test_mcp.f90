@@ -1,7 +1,7 @@
 module fo_test_mcp
     use fo_test_harness, only: string_list_t, process_result_t, list_add, list_with_first
     use fo_test_harness, only: run_process
-    use fo_test_json, only: json_value_t, json_parse
+    use fo_test_json, only: json_value_t, json_parse, json_move_value
     use fo_test_harness, only: assert_true, assert_equal_integer
     implicit none
     private
@@ -138,8 +138,11 @@ contains
                 position = end_position + 2
             end if
         end do
-        allocate(responses(count))
-        if (count > 0) responses = parsed
+        if (allocated(parsed)) then
+            call move_alloc(parsed, responses)
+        else
+            allocate(responses(0))
+        end if
         call assert_equal_integer(count, expected_response_count(input), &
             'response count, child status ' // integer_text(result%exit_code) // &
             ', stderr: ' // result%stderr(1:min(len(result%stderr), 240)))
@@ -167,12 +170,15 @@ contains
     subroutine append_response(items, count, value)
         type(json_value_t), allocatable, intent(inout) :: items(:)
         integer, intent(inout) :: count
-        type(json_value_t), intent(in) :: value
+        type(json_value_t), intent(inout) :: value
         type(json_value_t), allocatable :: grown(:)
+        integer :: i
 
         allocate(grown(count + 1))
-        if (count > 0) grown(1:count) = items
-        grown(count + 1) = value
+        do i = 1, count
+            call json_move_value(items(i), grown(i))
+        end do
+        call json_move_value(value, grown(count + 1))
         call move_alloc(grown, items)
         count = count + 1
     end subroutine append_response

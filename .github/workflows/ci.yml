@@ -87,6 +87,7 @@ jobs:
             fo test test_mcp_system
           FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-named" fo test test_mcp_named_eligibility
           FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-request" fo test test_mcp_request_structure
+          FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-ownership" fo test test_mcp_response_ownership
 
       - name: Test Gremlin bootstrap lifecycle
         run: node test/test_gremlin_bootstrap.js "$(command -v fo)"

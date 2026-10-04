@@ -7,7 +7,7 @@ module fo_test_json
     integer, parameter, public :: json_string = 3, json_number = 4
     integer, parameter, public :: json_boolean = 5, json_null = 6
     public :: json_value_t, json_parse, json_member, json_element, json_size
-    public :: json_string_value, json_number_value, json_boolean_value
+    public :: json_string_value, json_number_value, json_boolean_value, json_move_value
 
     type :: json_value_t
         integer :: kind = json_invalid
@@ -217,7 +217,7 @@ contains
         call move_alloc(grown, parent%children)
     end subroutine append_child
 
-    subroutine assign_value(target, source)
+    elemental subroutine assign_value(target, source)
         class(json_value_t), intent(inout) :: target
         type(json_value_t), intent(in) :: source
         type(json_value_t) :: owned_copy
@@ -226,7 +226,7 @@ contains
         call move_value(owned_copy, target)
     end subroutine assign_value
 
-    recursive subroutine copy_value(source, target)
+    recursive pure subroutine copy_value(source, target)
         type(json_value_t), intent(in) :: source
         type(json_value_t), intent(out) :: target
         integer :: index
@@ -243,7 +243,7 @@ contains
         end if
     end subroutine copy_value
 
-    subroutine move_value(source, target)
+    pure subroutine move_value(source, target)
         type(json_value_t), intent(inout) :: source
         type(json_value_t), intent(out) :: target
 
@@ -255,6 +255,13 @@ contains
         source%kind = json_invalid
         source%boolean = .false.
     end subroutine move_value
+
+    pure subroutine json_move_value(source, target)
+        type(json_value_t), intent(inout) :: source
+        type(json_value_t), intent(out) :: target
+
+        call move_value(source, target)
+    end subroutine json_move_value
 
     subroutine parse_literal(source, position, expected, kind, value, valid, error_message)
         character(len=*), intent(in) :: source, expected
