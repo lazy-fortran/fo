@@ -1,6 +1,6 @@
 # fo Gremlin implementation plan
 
-Updated 2026-10-04; planning input `a15309a`.
+Updated 2026-10-04; implementation audit checkpoint `bce5b22`.
 This is the complete provider plan for Gremlin, fo's continuous randomized
 regression-testing engine. External controllers own coding-worker orchestration.
 The
@@ -367,6 +367,41 @@ warm no-op and one-file-change cases before and after each migration slice; a
 semantic unification that forces unconditional whole-tree copying into every
 ordinary command is rejected.
 
+## Codebase and test-quality cleanup
+
+At code checkpoint `bce5b22`, tracked fo production source has 41,142 physical
+lines and tests/support/fixtures/bench have 37,843. These include blanks and
+comments; size is an inspection signal, not a defect count. The largest debt
+is concentrated in `fo_gfortran_build` (5,078), the Gremlin supervisor (3,341),
+CLI main (2,159), process C provider (1,854) and MCP adapter (1,647).
+
+Extend existing ownership rather than start a blanket rewrite: #149 finishes
+real supervisor service boundaries; #167 removes competing build/run engines;
+#165 removes duplicated snapshot storage; #148 removes the independent watch
+policy. #150 is reopened for residual strict JSON scanners in the request and
+MCP modules, with generic parsing owned by fx. #185 removes transport-owned
+async scheduling. #186 moves source-discovery policy out of C after #175/#172.
+Do not split files solely to hit a line target or block useful increments on
+unrelated architectural cleanup.
+
+[#184](https://github.com/lazy-fortran/fo/issues/184) owns test quality/cost:
+remove duplicate, tautological and repository-doc/layout conformity assertions;
+retain independent product behavior and meaningful negative cases. An emitted
+README from `fo init` and `fo doc` output are real command behavior. No repository
+documentation conformity tests were found in the initial audit; do not claim
+their removal. Review the 1,929-line backend include, 1,381-line process harness
+and large campaign/stat-memo fixtures for repeated setup/compilation and waits.
+CI currently repeats registered fixtures after `fpm test`; retain only repeats
+that exercise a distinct native-engine contract. Never wait for CI during edits.
+
+Use completion/readiness barriers and bounded deadlines instead of arbitrary
+sleeps where the same fault remains detectable. Record affected cases, concrete
+faults retained, warm elapsed time and compiler/child counts. No permanent
+meta-test suite is added to enforce this plan or a test-quality table. Luna
+workers implement isolated slices and escalate only after two substantive
+unsuccessful attempts. Preserve independent protocol-oracle parsing where sharing
+production parsing would mask a bug. Expensive full/platform gates are milestones.
+
 ## Test implementation language
 
 All fo test programs, generated fixture executables, orchestration and assertions are Fortran. Small C shims
@@ -694,8 +729,9 @@ completed entries below are retained as prerequisites and evidence:
 3. [#149](https://github.com/lazy-fortran/fo/issues/149): request, context and
    session extraction are delivered; campaign/history extraction may proceed now,
    while command extraction follows #154 public-semantic stabilization.
-4. **Complete:** [#150](https://github.com/lazy-fortran/fo/issues/150): converge domain JSON
-   on the existing typed parser and shared CLI/MCP validation.
+4. **Reopened residual cleanup:** [#150](https://github.com/lazy-fortran/fo/issues/150):
+   typed decoding is delivered, but generic strict scanners remain in request
+   and MCP adapters; converge them on fx without sharing the independent oracle.
 5. [#157](https://github.com/lazy-fortran/fo/issues/157): bind the complete
    compiler/helper/runtime/external-dependency closure to executed bytes. Expose
    factual closure completeness and forbid complete verification/cross-generation
@@ -937,12 +973,14 @@ Implemented issue state:
   fixtures outside fpm auto-discovery and explicitly registers the mixed-unit
   generation test. Clean `fpm test`, the isolated full pipeline, async lifecycle
   and all seven C variants passed; exact-head CI is live.
-- #150 is integrated at `b73f9ac` after Luna repairs and task-specific Sol
+- #150's initial typed decoder is integrated at `b73f9ac` after Luna repairs and task-specific Sol
   escalation. The shared typed decoder now enforces JSON grammar/depth, retains
   int64/raw values, decodes Unicode without key/path aliasing, rejects controls,
   and gives CLI/MCP the same domain validation. Focused supervisor, MCP parity,
   request-structure and full-pipeline gates passed. GitHub Actions also passed
   the exact published `b73f9ac` head (`build + fpm test`, run 37148134220).
+  The 2026-10-04 audit reopened residual scanner duplication; that historical
+  passing evidence does not prove the remaining architecture work complete.
 - #154 is complete through `73fc19b`. Independent Luna review approved frozen
   diff `35e243fe...`; generation/inventory/requirements/event/session-bound
   tokens, factual failure events, typed CLI/MCP waits and conservative freshness
