@@ -375,7 +375,8 @@
         configure_size = -1
         inquire (file=trim(counter_file), size=configure_size, iostat=ios)
         call assert(exitcode /= 0 .and. ios == 0 .and. &
-            configure_size > first_size, &
+            configure_size > first_size .and. &
+            file_contains(log_file, 'intentional CMake edit failure'), &
             'bad CMake edit triggers and fails native regeneration')
         call assert(.not. b%cmake%has_codemodel .and. &
             .not. b%cmake%has_cache .and. .not. b%cmake%has_toolchains .and. &
