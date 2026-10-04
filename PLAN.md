@@ -781,7 +781,11 @@ Implemented issue state:
   descendant containment; macOS state/supervisor providers pass, while public
   Gremlin start/status/stop remains blocked until scoped Darwin ownership lands.
 - #173 owns the Apple `ar` `__.SYMDEF SORTED` index-member classification defect
-  exposed by the exact #172 macOS test build; arbitrary extra objects remain errors.
+  exposed by the exact #172 macOS test build. Repair `c461335` is independently
+  approved on `fo/darwin-archive-173-review`: four exact BSD/Apple index names
+  are accepted while arbitrary/duplicate/missing/corrupt members remain errors.
+  Preserved faepmac1 evidence `31031f21...` proves native `/usr/bin/ar` cold/warm
+  behavior separately from controlled mutations. Port after the #159 repair.
 - #174 owns the separate Darwin shared-watcher initialization failure that stops
   public Gremlin before ready state even though direct `kqueue()` creation works.
 - #143/#152 and PR #147 are closed without merge after the KISS review assigned
