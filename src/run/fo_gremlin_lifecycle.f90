@@ -1,6 +1,7 @@
 module fo_gremlin_lifecycle
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_int64_t, c_null_char
     use, intrinsic :: iso_fortran_env, only: int64
+    use fo_fs, only: fs_sleep_ms
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_gremlin_request, only: gremlin_json_text_valid
     use fo_util, only: json_bool, json_int
@@ -48,8 +49,17 @@ module fo_gremlin_lifecycle
     public :: gremlin_lifecycle_encode, gremlin_lifecycle_validate
     public :: gremlin_lifecycle_append, gremlin_lifecycle_read_page
     public :: gremlin_lifecycle_make_id
+    public :: gremlin_freshness_update, gremlin_freshness_check
 
     interface
+        function c_freshness_update(path, operation, ticket) &
+                bind(C, name='fo_c_gremlin_freshness_update') result(ierr)
+            import :: c_char, c_int, c_int64_t
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: operation
+            integer(c_int64_t), intent(inout) :: ticket
+            integer(c_int) :: ierr
+        end function c_freshness_update
         function c_lifecycle_append(path, event_id, record) &
                 bind(C, name='fo_c_gremlin_lifecycle_append') result(ierr)
             import :: c_char, c_int
@@ -59,6 +69,34 @@ module fo_gremlin_lifecycle
     end interface
 
 contains
+
+    subroutine gremlin_freshness_update(path, operation, ticket, ierr)
+        character(len=*), intent(in) :: path
+        integer, intent(in) :: operation
+        integer(c_int64_t), intent(inout) :: ticket
+        integer, intent(out) :: ierr
+        ierr = c_freshness_update(trim(path)//c_null_char, int(operation, c_int), ticket)
+    end subroutine gremlin_freshness_update
+
+    subroutine gremlin_freshness_check(path, verified)
+        character(len=*), intent(in) :: path
+        logical, intent(out) :: verified
+        integer(c_int64_t) :: requested, acknowledged
+        integer :: ierr, attempt
+        verified = .false.
+        requested = 0_c_int64_t
+        call gremlin_freshness_update(path, 1, requested, ierr)
+        if (ierr /= 0) return
+        do attempt = 1, 40
+            acknowledged = 0_c_int64_t
+            call gremlin_freshness_update(path, 3, acknowledged, ierr)
+            if (ierr == 0 .and. acknowledged >= requested) then
+                verified = .true.
+                return
+            end if
+            call fs_sleep_ms(5)
+        end do
+    end subroutine gremlin_freshness_check
 
     function gremlin_lifecycle_make_id(session_id, event) result(event_id)
         character(len=*), intent(in) :: session_id
@@ -486,7 +524,8 @@ contains
                 'session_stopped', 'session_failed', 'state_changed', &
                 'generation_started', 'build_passed', 'build_failed', &
                 'regression_confirmed', 'ordinary_coverage_complete', &
-                'full_verification_complete')
+                'full_verification_complete', 'test_failed', 'test_flaky', &
+                'test_timeout', 'test_infra_error')
             valid_event_type = .true.
         case default
             valid_event_type = .false.

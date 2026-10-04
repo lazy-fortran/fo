@@ -110,6 +110,11 @@ contains
         call check(readiness%phase == GREMLIN_PHASE_QUIESCENT .and. &
             readiness%health == GREMLIN_HEALTH_FAILURE, &
             'failure health does not overwrite quiescent phase')
+        input%dirty = .true.
+        call gremlin_readiness_compute(input, readiness)
+        call check(.not. gremlin_wait_satisfied(GREMLIN_WAIT_QUIESCENT, readiness), &
+            'unobserved input changes cannot satisfy a historical quiescent wait')
+
         call exact_gate(input)
         input%full_failures = 1
         call gremlin_readiness_compute(input, readiness)

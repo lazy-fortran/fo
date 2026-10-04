@@ -168,7 +168,8 @@ contains
         case (GREMLIN_WAIT_FULLY_VERIFIED)
             gremlin_wait_satisfied = readiness%fully_verified
         case (GREMLIN_WAIT_QUIESCENT)
-            gremlin_wait_satisfied = readiness%phase == GREMLIN_PHASE_QUIESCENT
+            gremlin_wait_satisfied = readiness%phase == GREMLIN_PHASE_QUIESCENT .and. &
+                .not. readiness%dirty
         case (GREMLIN_WAIT_FAILURE)
             gremlin_wait_satisfied = readiness%health == GREMLIN_HEALTH_FAILURE
         case default

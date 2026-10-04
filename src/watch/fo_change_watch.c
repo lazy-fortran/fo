@@ -265,6 +265,15 @@ int fo_change_native_poll(void *handle, int timeout, char *path, int capacity, i
     }
     return 0;
 }
+/* A bounded poll may stop behind ignored notifications. Green consumers need
+ * proof that neither the buffered notifications nor the kernel queue remains. */
+int fo_change_native_pending(void *handle) {
+    struct change_watch *w = handle;
+    struct pollfd pfd;
+    if (!w || w->pending_pos < w->pending_len) return 1;
+    pfd.fd = w->fd; pfd.events = POLLIN; pfd.revents = 0;
+    return poll(&pfd, 1, 0) != 0;
+}
 void fo_change_native_self(void *handle, const char *path) {
     struct change_watch *w = handle;
     struct change_self *next;
@@ -304,5 +313,6 @@ int fo_change_native_reconcile(void *h) { (void)h; return ENOSYS; }
 int fo_change_native_poll(void *h, int t, char *p, int n, int *k) {
     (void)h; (void)t; (void)p; (void)n; (void)k; return ENOSYS;
 }
+int fo_change_native_pending(void *h) { (void)h; return 1; }
 void fo_change_native_self(void *h, const char *p) { (void)h; (void)p; }
 #endif

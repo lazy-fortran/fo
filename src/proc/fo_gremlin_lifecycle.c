@@ -126,3 +126,41 @@ done:
     close(fd);
     return result;
 }
+
+/* Session-private freshness barrier. The owner snapshots requests before polling
+ * its change provider and acknowledges only that snapshot after publication. */
+int fo_c_gremlin_freshness_update(const char *path, int operation, int64_t *ticket) {
+    uint64_t counters[2] = {0, 0};
+    struct stat st;
+    int fd, result = 0;
+    if (!path || !*path || !ticket || operation < 0 || operation > 3) return EINVAL;
+    fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return errno;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) { result = errno; goto done; }
+    if (fstat(fd, &st) != 0) { result = errno; goto done; }
+    if (!S_ISREG(st.st_mode) || (st.st_size != 0 && st.st_size != sizeof(counters))) {
+        result = EINVAL; goto done;
+    }
+    if (st.st_size && pread(fd, counters, sizeof(counters), 0) != sizeof(counters)) {
+        result = EIO; goto done;
+    }
+    if (counters[0] > INT64_MAX || counters[1] > counters[0]) {
+        result = EINVAL; goto done;
+    }
+    if (operation == 1) {
+        if (counters[0] == INT64_MAX) { result = EOVERFLOW; goto done; }
+        *ticket = (int64_t)++counters[0];
+    } else if (operation == 2) {
+        if (*ticket < 0 || (uint64_t)*ticket > counters[0]) {
+            result = EINVAL; goto done;
+        }
+        if ((uint64_t)*ticket > counters[1]) counters[1] = (uint64_t)*ticket;
+    } else {
+        *ticket = (int64_t)counters[operation == 3 ? 1 : 0];
+    }
+    if ((operation == 1 || operation == 2) &&
+        pwrite(fd, counters, sizeof(counters), 0) != sizeof(counters)) result = EIO;
+done:
+    close(fd);
+    return result;
+}

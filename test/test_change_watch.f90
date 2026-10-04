@@ -39,6 +39,11 @@ program test_change_watch
             character(c_char), intent(out) :: path(*)
             integer(c_int), intent(out) :: kind
         end function native_poll
+        integer(c_int) function native_pending(handle) &
+                bind(C, name='fo_change_native_pending')
+            import :: c_ptr, c_int
+            type(c_ptr), value :: handle
+        end function native_pending
         integer(c_int) function close_fd(fd) bind(C, name='close')
             import :: c_int
             integer(c_int), value :: fd
@@ -78,12 +83,21 @@ program test_change_watch
     stage = 2
     call fs_make_dir(trim(directory))
     call write_input()
+    if (native_pending(watch) /= 1) call fail()
     ierr = native_poll(watch, 100, event, len(event), kind)
     if (ierr /= 0 .or. kind /= 4) call fail()
     call write_input()
     ierr = native_poll(watch, 100, event, len(event), kind)
     if (ierr /= 0 .or. kind /= 1) call fail()
     if (event(:len_trim(file)) /= trim(file)) call fail()
+
+    ! Pending buffers and kernel notifications cannot be certified quiet.
+    do i = 1, 100
+        ierr = native_poll(watch, 0, event, len(event), kind)
+        if (ierr /= 0) call fail()
+        if (kind == 0 .and. native_pending(watch) == 0) exit
+    end do
+    if (i > 100) call fail()
 
     ! Alternate create/delete to overflow the actual kernel queue. There are
     ! no directory events here, so reconciliation can only mean queue loss.
