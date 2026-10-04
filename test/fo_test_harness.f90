@@ -96,10 +96,24 @@ module fo_test_harness
             integer(c_size_t), value :: size
         end function c_getcwd
 
-        integer(c_int) function c_pipe(descriptors) bind(C, name='pipe')
+        integer(c_int) function c_pipe(descriptors) bind(C, name='fo_test_pipe_cloexec')
             import :: c_int
             integer(c_int), intent(out) :: descriptors(2)
         end function c_pipe
+
+        integer(c_int) function c_process_containment_required() &
+                bind(C, name='fo_c_process_containment_required')
+            import :: c_int
+        end function c_process_containment_required
+
+        integer(c_int) function c_start_capture_monitor(monitor, cwd, arguments, &
+                environment, input_descriptor, output_descriptor, error_descriptor) &
+                bind(C, name='fo_c_start_capture_monitor')
+            import :: c_char, c_int, c_ptr
+            character(kind=c_char), intent(in) :: monitor(*), cwd(*)
+            type(c_ptr), intent(in) :: arguments(*), environment(*)
+            integer(c_int), value :: input_descriptor, output_descriptor, error_descriptor
+        end function c_start_capture_monitor
 
         integer(c_int) function c_fork() bind(C, name='fork')
             import :: c_int
@@ -401,7 +415,7 @@ contains
         type(c_ptr), allocatable, target :: argument_pointers(:), env_pointers(:)
         character(kind=c_char), allocatable, target :: argument_storage(:, :)
         character(kind=c_char), allocatable, target :: env_storage(:, :)
-        character(kind=c_char), allocatable, target :: cwd_bytes(:), input_storage(:)
+        character(kind=c_char), allocatable, target :: cwd_bytes(:), input_storage(:), monitor_bytes(:)
         character(kind=c_char), target :: read_chunk(16384)
         type(pollfd_t) :: poll_descriptors(3)
         integer(c_int) :: input_pipe(2), output_pipe(2), error_pipe(2)
@@ -413,6 +427,8 @@ contains
         integer(c_int64_t) :: output_limit, started_ms
         integer :: i, env_count, wait_ms
         logical :: child_done, read_ok
+        logical :: monitor_mode
+        character(:), allocatable :: monitor_path
         character(:), allocatable :: pipe_error
         type(byte_buffer_t) :: captured_stdout, captured_stderr
 
@@ -480,19 +496,37 @@ contains
             goto 800
         end if
 
-        child = c_fork()
-        if (child < 0) then
-            call set_runner_error(result, 'fork external process')
-            goto 800
-        end if
-        if (child == 0) then
-            call execute_child(argument_pointers, argument_storage, env_storage, cwd_bytes, &
-                env_count, input_pipe, output_pipe, error_pipe)
-            call c_exit(127_c_int)
+        monitor_mode = c_process_containment_required() > 0_c_int
+        if (monitor_mode) then
+            monitor_path = environment_value('FO_BIN')
+            if (len(monitor_path) == 0 .or. monitor_path(1:1) /= '/') then
+                call set_runner_error(result, &
+                    'contained process launch requires absolute pinned FO_BIN')
+                goto 800
+            end if
+            call encode_c_string(monitor_path, monitor_bytes)
+            child = c_start_capture_monitor(monitor_bytes, cwd_bytes, argument_pointers, &
+                env_pointers, input_pipe(1), output_pipe(2), error_pipe(2))
+            if (child <= 0) then
+                call set_runner_error(result, &
+                    'start contained command monitor from pinned FO_BIN: '//monitor_path)
+                goto 800
+            end if
+        else
+            child = c_fork()
+            if (child < 0) then
+                call set_runner_error(result, 'fork external process')
+                goto 800
+            end if
+            if (child == 0) then
+                call execute_child(argument_pointers, argument_storage, env_storage, cwd_bytes, &
+                    env_count, input_pipe, output_pipe, error_pipe)
+                call c_exit(127_c_int)
+            end if
         end if
 
         result%process_id = int(child)
-        rc = c_setpgid(child, child)
+        if (.not. monitor_mode) rc = c_setpgid(child, child)
         input_descriptor = input_pipe(2)
         input_pipe(2) = -1
         output_descriptor = output_pipe(1)
@@ -577,11 +611,15 @@ contains
             end if
             if (.not. result%timed_out .and. now_ms >= deadline_ms) then
                 result%timed_out = .true.
-                rc = c_kill(-child, 15_c_int)
+                if (monitor_mode) then
+                    rc = c_kill(child, 15_c_int)
+                else
+                    rc = c_kill(-child, 15_c_int)
+                end if
                 kill_deadline_ms = now_ms + 1000_c_int64_t
             end if
             if (result%timed_out .and. now_ms >= kill_deadline_ms) then
-                rc = c_kill(-child, 9_c_int)
+                if (.not. monitor_mode) rc = c_kill(-child, 9_c_int)
                 kill_deadline_ms = huge(kill_deadline_ms)
             end if
             if (child_done .and. output_descriptor < 0 .and. error_descriptor < 0) exit
@@ -678,9 +716,9 @@ contains
             call set_runner_error(result, 'close child process pipes')
             goto 700
         end if
-        ! A child can close its pipes before its descendants exit. The process
-        ! group belongs to this invocation even after the direct child is reaped.
-        call stop_owned_process(child, result%reaped)
+        ! A leader can close its pipes before descendants exit. Keep the
+        ! process group or contained monitor owned until its descendants finish.
+        call stop_owned_process(child, result%reaped, monitor_mode)
         result%exit_code = -1
         result%term_signal = 0
         if (iand(wait_status, 127_c_int) == 0) then
@@ -696,7 +734,7 @@ contains
 
         700     continue
         result%runner_failed = .true.
-        call stop_owned_process(child, result%reaped)
+        call stop_owned_process(child, result%reaped, monitor_mode)
         call close_open_descriptors(input_pipe, output_pipe, error_pipe, &
             input_descriptor, output_descriptor, error_descriptor, rc)
         call buffer_to_text(captured_stdout, result%stdout)
@@ -757,15 +795,41 @@ contains
         end if
     end subroutine close_open_descriptors
 
-    subroutine stop_owned_process(child, reaped)
+    subroutine stop_owned_process(child, reaped, monitor_mode)
         integer(c_int), intent(in) :: child
         logical, intent(inout) :: reaped
+        logical, intent(in) :: monitor_mode
         integer(c_int) :: rc, wait_status, waited
         integer(c_int64_t) :: deadline, now_ms
         integer :: attempts
         type(pollfd_t) :: no_descriptors(1)
 
         if (child < 0) return
+        if (monitor_mode) then
+            if (reaped) return
+            rc = c_kill(child, 15_c_int)
+            do attempts = 1, 200
+                waited = c_waitpid_retry(child, wait_status, 1_c_int)
+                if (waited == child) then
+                    reaped = .true.
+                    return
+                end if
+                if (waited < 0) return
+                rc = c_poll(no_descriptors, 0_c_size_t, 20_c_int)
+            end do
+            ! The fresh monitor has a bounded descendant reap path. Keep
+            ! ownership scoped to its PID and let it finish that cleanup.
+            rc = c_kill(child, 15_c_int)
+            do
+                waited = c_waitpid_retry(child, wait_status, 0_c_int)
+                if (waited == child) then
+                    reaped = .true.
+                    exit
+                end if
+                if (waited < 0) exit
+            end do
+            return
+        end if
         rc = c_kill(-child, 15_c_int)
         if (.not. reaped) rc = c_kill(child, 15_c_int)
         now_ms = c_monotonic_ms()

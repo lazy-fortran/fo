@@ -520,6 +520,71 @@ allocation_failed:
     return NULL;
 }
 
+/* Build a complete environment from individual KEY=VALUE overrides. Unlike
+   the older semicolon form, values here may contain semicolons. */
+static char **env_with_vector(char *const overrides[]) {
+    size_t base_count = 0, override_count = 0, used = 0, extras_start, i;
+    char **env;
+
+    while (environ[base_count] != NULL) base_count++;
+    if (overrides != NULL)
+        while (overrides[override_count] != NULL) override_count++;
+    env = calloc(base_count + override_count + 1, sizeof(*env));
+    if (env == NULL) return NULL;
+    for (i = 0; i < base_count; i++) {
+        size_t j;
+        int replaced = 0;
+        for (j = 0; j < override_count; j++) {
+            const char *equals = strchr(overrides[j], '=');
+            if (equals == NULL || equals == overrides[j]) goto invalid;
+            if (env_name_matches(environ[i], overrides[j],
+                                 (size_t)(equals - overrides[j]))) {
+                replaced = 1;
+                break;
+            }
+        }
+        if (!replaced) {
+            env[used] = strdup(environ[i]);
+            if (env[used] == NULL) goto allocation_failed;
+            used++;
+        }
+    }
+    extras_start = used;
+    for (i = 0; i < override_count; i++) {
+        const char *equals = strchr(overrides[i], '=');
+        size_t j, key_len;
+        if (equals == NULL || equals == overrides[i]) goto invalid;
+        key_len = (size_t)(equals - overrides[i]);
+        for (j = extras_start; j < used; j++) {
+            if (env_name_matches(env[j], overrides[i], key_len)) break;
+        }
+        if (j < used) {
+            free(env[j]);
+            env[j] = strdup(overrides[i]);
+            if (env[j] == NULL) goto allocation_failed;
+        } else {
+            env[used] = strdup(overrides[i]);
+            if (env[used] == NULL) goto allocation_failed;
+            used++;
+        }
+    }
+    return env;
+
+invalid:
+    errno = EINVAL;
+allocation_failed:
+    for (i = 0; i < used; i++) free(env[i]);
+    free(env);
+    return NULL;
+}
+
+static void free_env_vector(char **env) {
+    size_t i;
+    if (env == NULL) return;
+    for (i = 0; env[i] != NULL; i++) free(env[i]);
+    free(env);
+}
+
 static void free_env_copy(char **env) {
     size_t i;
     if (env == NULL) return;
@@ -628,18 +693,36 @@ static int read_exact(int fd, void *buffer, size_t size);
 #ifdef __linux__
 static int start_command_monitor(const char *cwd, char *const argv[],
                                  const char *log_file, int append,
-                                 char **child_env, pid_t *monitor_pid,
+                                 char **child_env, const char *monitor_executable,
+                                 int stdin_fd, int stdout_fd, int stderr_fd,
+                                 pid_t *monitor_pid,
                                  pid_t *target_pid, int *report_fd) {
     posix_spawn_file_actions_t actions;
     char **monitor_argv;
-    int pipefd[2], error, ready, actions_ready = 0;
+    int pipefd[2], stream_fd[3] = {-1, -1, -1};
+    int error, ready, actions_ready = 0;
     size_t count = 0;
 
     *target_pid = 0;
+    if (monitor_executable == NULL || monitor_executable[0] != '/') return EINVAL;
+    if (stdin_fd >= 0 || stdout_fd >= 0 || stderr_fd >= 0) {
+        if (stdin_fd < 0 || stdout_fd < 0 || stderr_fd < 0) return EINVAL;
+        stream_fd[0] = fcntl(stdin_fd, F_DUPFD_CLOEXEC, 16);
+        stream_fd[1] = fcntl(stdout_fd, F_DUPFD_CLOEXEC, 16);
+        stream_fd[2] = fcntl(stderr_fd, F_DUPFD_CLOEXEC, 16);
+        if (stream_fd[0] < 0 || stream_fd[1] < 0 || stream_fd[2] < 0) {
+            error = errno;
+            for (size_t i = 0; i < 3; i++) if (stream_fd[i] >= 0) close(stream_fd[i]);
+            return error;
+        }
+    }
     while (argv[count] != NULL) count++;
     monitor_argv = calloc(count + 6, sizeof(*monitor_argv));
-    if (monitor_argv == NULL) return ENOMEM;
-    monitor_argv[0] = "/proc/self/exe";
+    if (monitor_argv == NULL) {
+        for (size_t i = 0; i < 3; i++) if (stream_fd[i] >= 0) close(stream_fd[i]);
+        return ENOMEM;
+    }
+    monitor_argv[0] = (char *)monitor_executable;
     monitor_argv[1] = FO_MONITOR_ARG;
     monitor_argv[2] = (char *)(cwd != NULL ? cwd : "");
     monitor_argv[3] = (char *)(log_file != NULL ? log_file : "");
@@ -648,6 +731,7 @@ static int start_command_monitor(const char *cwd, char *const argv[],
     if (pipe2(pipefd, O_CLOEXEC) != 0) {
         error = errno;
         free(monitor_argv);
+        for (size_t i = 0; i < 3; i++) if (stream_fd[i] >= 0) close(stream_fd[i]);
         return error;
     }
     for (int i = 0; i < 2; i++) {
@@ -657,6 +741,7 @@ static int start_command_monitor(const char *cwd, char *const argv[],
                 error = errno;
                 close(pipefd[0]); close(pipefd[1]);
                 free(monitor_argv);
+                for (size_t j = 0; j < 3; j++) if (stream_fd[j] >= 0) close(stream_fd[j]);
                 return error;
             }
             close(pipefd[i]);
@@ -668,15 +753,24 @@ static int start_command_monitor(const char *cwd, char *const argv[],
     if (error == 0)
         error = posix_spawn_file_actions_adddup2(
             &actions, pipefd[1], FO_MONITOR_FD);
+    for (int i = 0; error == 0 && i < 3; i++) {
+        if (stream_fd[i] >= 0)
+            error = posix_spawn_file_actions_adddup2(&actions, stream_fd[i], i);
+    }
+    for (int i = 0; error == 0 && i < 3; i++) {
+        if (stream_fd[i] >= 0)
+            error = posix_spawn_file_actions_addclose(&actions, stream_fd[i]);
+    }
     if (error == 0)
         error = posix_spawn_file_actions_addclose(&actions, pipefd[0]);
     if (error == 0)
         error = posix_spawn_file_actions_addclose(&actions, pipefd[1]);
     if (error == 0)
-        error = posix_spawn(monitor_pid, "/proc/self/exe", &actions, NULL,
+        error = posix_spawn(monitor_pid, monitor_executable, &actions, NULL,
                             monitor_argv, child_env ? child_env : environ);
     if (actions_ready) posix_spawn_file_actions_destroy(&actions);
     free(monitor_argv);
+    for (size_t i = 0; i < 3; i++) if (stream_fd[i] >= 0) close(stream_fd[i]);
     close(pipefd[1]);
     if (error != 0) {
         close(pipefd[0]);
@@ -692,7 +786,7 @@ static int start_command_monitor(const char *cwd, char *const argv[],
                                  sizeof(*target_pid)) != 0 ||
         *target_pid <= 0) {
         int launch_error = *target_pid < 0 ? -*target_pid : EIO;
-        (void)kill(*monitor_pid, SIGKILL);
+        (void)kill(*monitor_pid, SIGTERM);
         while (waitpid(*monitor_pid, NULL, 0) < 0 && errno == EINTR) {
         }
         close(pipefd[0]);
@@ -1060,7 +1154,8 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
 #ifdef __linux__
     if (spawn_error == EPERM && prctl(PR_GET_SECCOMP, 0, 0, 0, 0) == 2) {
         spawn_error = start_command_monitor(cwd, argv, log_file, append,
-                                            child_env, &pid, &accounted_pid,
+                                            child_env, "/proc/self/exe", -1, -1, -1,
+                                            &pid, &accounted_pid,
                                             &report_fd);
         if (spawn_error == 0) isolated_group = 0;
     }
@@ -2796,20 +2891,35 @@ static int monitor_kill_children(void) {
 
 static int monitor_run(int argc, char **argv) {
     posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attrs;
     struct sigaction action = {0};
+    struct sigaction ignore_pipe = {0};
     struct rusage usage = {0};
+    sigset_t default_signals;
     pid_t target = 0;
-    int error, status = 1, code = 1;
+    int error, status = 1, code = 1, target_signal = 0, attrs_ready = 0;
     long long cpu_ms = -1;
 
     if (argc < 6 || prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) return 126;
     action.sa_handler = monitor_term;
     sigemptyset(&action.sa_mask);
     if (sigaction(SIGTERM, &action, NULL) != 0) return 126;
+    ignore_pipe.sa_handler = SIG_IGN;
+    sigemptyset(&ignore_pipe.sa_mask);
+    if (sigaction(SIGPIPE, &ignore_pipe, NULL) != 0) return 126;
     error = posix_spawn_file_actions_init(&actions);
     if (error != 0) return 126;
+    error = posix_spawnattr_init(&attrs);
+    if (error == 0) attrs_ready = 1;
+    if (error == 0) {
+        sigemptyset(&default_signals);
+        sigaddset(&default_signals, SIGPIPE);
+        error = posix_spawnattr_setsigdefault(&attrs, &default_signals);
+    }
+    if (error == 0)
+        error = posix_spawnattr_setflags(&attrs, POSIX_SPAWN_SETSIGDEF);
     if (has_text(argv[2]))
-        error = posix_spawn_file_actions_addchdir_np(&actions, argv[2]);
+        if (error == 0) error = posix_spawn_file_actions_addchdir_np(&actions, argv[2]);
     if (error == 0 && has_text(argv[3])) {
         int flags = O_WRONLY | O_CREAT |
                     (argv[4][0] == '1' ? O_APPEND : O_TRUNC);
@@ -2822,9 +2932,10 @@ static int monitor_run(int argc, char **argv) {
     if (error == 0)
         error = posix_spawn_file_actions_addclose(&actions, FO_MONITOR_FD);
     if (error == 0)
-        error = posix_spawnp(&target, argv[5], &actions, NULL,
+        error = posix_spawnp(&target, argv[5], &actions, &attrs,
                              argv + 5, environ);
     posix_spawn_file_actions_destroy(&actions);
+    if (attrs_ready) posix_spawnattr_destroy(&attrs);
     if (error != 0) target = -(pid_t)error;
     (void)write_exact(FO_MONITOR_FD, &target, sizeof(target));
     if (error != 0) {
@@ -2841,20 +2952,55 @@ static int monitor_run(int argc, char **argv) {
                                  usage.ru_stime.tv_sec) * 1000LL +
                      (long long)(usage.ru_utime.tv_usec +
                                  usage.ru_stime.tv_usec) / 1000LL;
-            code = WIFEXITED(status) ? WEXITSTATUS(status) :
-                   WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1;
+            if (WIFEXITED(status)) {
+                code = WEXITSTATUS(status);
+            } else if (WIFSIGNALED(status)) {
+                target_signal = WTERMSIG(status);
+                code = 128 + target_signal;
+            }
             break;
         }
         if (waited < 0 && errno != EINTR) break;
         sleep_ms(10);
     }
-    if (monitor_kill_children() != 0) {
-        if (getpgrp() == getppid()) (void)kill(-getpgrp(), SIGKILL);
-        code = 126;
-    }
+    if (monitor_kill_children() != 0) code = 126;
     (void)write_exact(FO_MONITOR_FD, &cpu_ms, sizeof(cpu_ms));
     close(FO_MONITOR_FD);
+    if (target_signal > 0 && code != 126) {
+        struct sigaction default_action = {0};
+        default_action.sa_handler = SIG_DFL;
+        sigemptyset(&default_action.sa_mask);
+        (void)sigaction(target_signal, &default_action, NULL);
+        (void)kill(getpid(), target_signal);
+    }
     return code;
+}
+
+int fo_c_process_containment_required(void) {
+    return prctl(PR_GET_SECCOMP, 0, 0, 0, 0) == 2 ? 1 : 0;
+}
+
+int fo_c_start_capture_monitor(const char *monitor_executable, const char *cwd,
+                               char *const argv[], char *const overrides[],
+                               int stdin_fd, int stdout_fd, int stderr_fd) {
+    char **child_env;
+    pid_t monitor_pid = 0, target_pid = 0;
+    int report_fd = -1;
+    int error;
+
+    if (monitor_executable == NULL || monitor_executable[0] != '/' ||
+        argv == NULL || argv[0] == NULL) return -EINVAL;
+    if (access(monitor_executable, X_OK) != 0) return -errno;
+    child_env = env_with_vector(overrides);
+    if (child_env == NULL) return -(errno != 0 ? errno : ENOMEM);
+    error = start_command_monitor(cwd, argv, "", 0, child_env,
+                                  monitor_executable, stdin_fd, stdout_fd,
+                                  stderr_fd, &monitor_pid, &target_pid,
+                                  &report_fd);
+    free_env_vector(child_env);
+    if (error != 0) return -error;
+    if (report_fd >= 0) close(report_fd);
+    return (int)monitor_pid;
 }
 
 __attribute__((constructor))
@@ -2864,5 +3010,22 @@ static void fo_process_monitor_entry(int argc, char **argv, char **envp) {
         strcmp(argv[1], FO_MONITOR_ARG) == 0 &&
         fcntl(FO_MONITOR_FD, F_GETFD) >= 0)
         _exit(monitor_run(argc, argv));
+}
+#endif
+
+#ifndef __linux__
+int fo_c_process_containment_required(void) { return 0; }
+
+int fo_c_start_capture_monitor(const char *monitor_executable, const char *cwd,
+                               char *const argv[], char *const overrides[],
+                               int stdin_fd, int stdout_fd, int stderr_fd) {
+    (void)monitor_executable;
+    (void)cwd;
+    (void)argv;
+    (void)overrides;
+    (void)stdin_fd;
+    (void)stdout_fd;
+    (void)stderr_fd;
+    return -ENOTSUP;
 }
 #endif
