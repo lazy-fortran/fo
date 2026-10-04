@@ -244,7 +244,6 @@ contains
         call write_text(trim(root)//'/sentinel.pid', trim(pid_text))
 
         args = string_list_t()
-        count = 0
         call list_add(args, trim(executable))
         call list_add(args, '--io-helper')
         call run_process(args, trim(root), result, &
@@ -265,7 +264,6 @@ contains
         call write_text(trim(root)//'/io-monitor.pid', trim(pid_text))
 
         args = string_list_t()
-        count = 0
         call list_add(args, trim(executable))
         call list_add(args, '--signal-helper')
         call run_process(args, trim(root), result, timeout_ms=5000)
@@ -278,7 +276,6 @@ contains
         call write_text(trim(root)//'/signal-monitor.pid', trim(pid_text))
 
         args = string_list_t()
-        count = 0
         call list_add(args, trim(executable))
         call list_add(args, '--timeout-helper')
         call list_add(args, trim(root)//'/target.pid')
@@ -361,10 +358,13 @@ contains
             end do
         end if
         do attempt = 1, 200
-            if (file_exists(trim(ready_path))) call process_exit(0)
+            if (file_exists(trim(ready_path))) exit
             call fs_sleep_ms(10)
         end do
-        call process_exit(85)
+        if (.not. file_exists(trim(ready_path))) call process_exit(85)
+        do
+            call fs_sleep_ms(100)
+        end do
     end subroutine timeout_helper
 
     subroutine stop_exact(pid)
