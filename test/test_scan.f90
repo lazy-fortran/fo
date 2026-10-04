@@ -629,6 +629,7 @@ contains
         integer :: n_units, ierr
         character(len=512) :: dir
         character(len=120) :: lines(9), support_lines(3)
+        character(len=120) :: short_source(1)
 
         call make_tmp_path('fo_test_scan_regex_only', dir, '')
         call remove_tree(dir)
@@ -649,10 +650,16 @@ contains
         support_lines(2) = '    integer, parameter :: value = 1'
         support_lines(3) = 'end module legacy_support'
         call write_file(trim(dir)//'/legacy_support.f90', support_lines, 3)
+        short_source(1) = 'module legacy_short_extension'
+        call write_file(trim(dir)//'/legacy_short_extension.f', short_source, 1)
+        short_source(1) = 'module legacy_upper_extension'
+        call write_file(trim(dir)//'/legacy_upper_extension.F', short_source, 1)
+        short_source(1) = 'module legacy_upper_90_extension'
+        call write_file(trim(dir)//'/legacy_upper_90_extension.F90', short_source, 1)
 
         call scan_dir_regex(dir, units, n_units, ierr)
         call assert(ierr == 0, 'scan regex-only: no error')
-        call assert(n_units == 2, 'scan regex-only: finds legacy sources')
+        call assert(n_units == 5, 'scan regex-only: finds all Fortran suffixes')
         call assert(trim(units(1)%module_name) == 'legacy_dependency', &
             'scan regex-only: preserves module name')
         call assert(units(1)%n_deps == 1 .and. &

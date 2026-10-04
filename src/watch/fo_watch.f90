@@ -5,7 +5,8 @@ module fo_watch
         change_watch_mark_self_written, change_watch_relevant, &
         CHANGE_DELETE, CHANGE_RECONCILE
     use fx_proc, only: proc_scan_files
-    use fo_process, only: process_run_argv_logged, argv_push
+    use fo_process, only: process_run_argv_logged, process_has_fortran_source_ext, &
+        argv_push
     use fo_util, only: make_tmpfile, delete_tmpfile
     use fo_format, only: format_file
     implicit none
@@ -88,18 +89,9 @@ contains
     end subroutine watch_loop
 
     logical function is_fortran_source(path) result(yes)
-        !! True for *.f90 *.F90 *.f *.F (the set the watcher cares about).
+        !! Share source membership with the native scanner.
         character(len=*), intent(in) :: path
-        integer :: n
-
-        yes = .false.
-        n = len_trim(path)
-        if (n >= 4) then
-            if (path(n - 3:n) == '.f90' .or. path(n - 3:n) == '.F90') yes = .true.
-        end if
-        if (n >= 2) then
-            if (path(n - 1:n) == '.f' .or. path(n - 1:n) == '.F') yes = .true.
-        end if
+        yes = process_has_fortran_source_ext(path)
     end function is_fortran_source
 
     subroutine format_reconciled_tree(watch)

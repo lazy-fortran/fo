@@ -5,6 +5,7 @@ module fo_process
     public :: process_detect_nproc, process_configure_openmp
     public :: process_setenv_default
     public :: process_scan_sources
+    public :: process_has_fortran_source_ext
     public :: process_start_fo_check, process_start_argv_logged
     public :: process_set_async_scope
     public :: process_poll_pid, process_cancel_pid
@@ -81,6 +82,13 @@ module fo_process
             character(kind=c_char), intent(in) :: root(*), output_file(*)
             integer(c_int), intent(out) :: exitcode
         end subroutine fo_c_scan_sources
+
+        function fo_c_has_fortran_source_ext(path) &
+                bind(C, name='fo_c_has_fortran_source_ext') result(yes)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int) :: yes
+        end function fo_c_has_fortran_source_ext
 
         subroutine fo_c_start_fo_check(project_dir, mode, output_file, pid, &
                 exitcode) bind(C, name='fo_c_start_fo_check')
@@ -410,6 +418,14 @@ contains
         call fo_c_scan_sources(c_root, c_output, c_exit)
         exitcode = int(c_exit)
     end subroutine process_scan_sources
+
+    logical function process_has_fortran_source_ext(path) result(yes)
+        character(len=*), intent(in) :: path
+        character(kind=c_char, len=:), allocatable :: c_path
+
+        c_path = trim(path)//c_null_char
+        yes = fo_c_has_fortran_source_ext(c_path) /= 0_c_int
+    end function process_has_fortran_source_ext
 
     subroutine process_start_fo_check(project_dir, mode, output_file, pid, &
             exitcode)

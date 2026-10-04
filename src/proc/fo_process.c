@@ -270,8 +270,10 @@ static int skip_dir_name(const char *name, int is_proj_root, int depth) {
     return 0;
 }
 
-static int has_fortran_ext(const char *path) {
-    size_t n = strlen(path);
+int fo_c_has_fortran_source_ext(const char *path) {
+    size_t n;
+    if (path == NULL) return 0;
+    n = strlen(path);
     if (n >= 4 && strcmp(path + n - 4, ".f90") == 0) return 1;
     if (n >= 4 && strcmp(path + n - 4, ".F90") == 0) return 1;
     if (n >= 2 && strcmp(path + n - 2, ".f") == 0) return 1;
@@ -337,7 +339,7 @@ static int scan_sources_recursive(const char *dir, struct path_list *list,
                 closedir(handle);
                 return 1;
             }
-        } else if (S_ISREG(st.st_mode) && has_fortran_ext(path)) {
+        } else if (S_ISREG(st.st_mode) && fo_c_has_fortran_source_ext(path)) {
             if (path_list_add(list, path) != 0) {
                 closedir(handle);
                 return 1;
