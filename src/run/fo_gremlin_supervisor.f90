@@ -1835,6 +1835,7 @@ contains
         integer :: inventory_status, cancel_exit, mandatory_count, state_status
         integer :: release_status, pin_status, activation_exit
         character(len=PATH_LEN) :: state_message, release_message
+        character(len=PATH_LEN) :: activation_diagnostic
         type(test_runtime_t) :: candidate_runtime
         character(len=PATH_LEN) :: coverage_path
         type(gremlin_coverage_view_t) :: coverage_view
@@ -1845,11 +1846,15 @@ contains
         message = ''
         was_active = have_active
         activation_exit = build_exit
+        activation_diagnostic = ''
         candidate_runtime = test_runtime_t()
         if (build_exit == 0) then
             call test_runtime_build(build_child%execution_view%cwd, &
                 session%state_dir, candidate%identity, candidate_runtime, ierr, message)
-            if (ierr /= 0) activation_exit = 1
+            if (ierr /= 0) then
+                activation_exit = 1
+                activation_diagnostic = trim(message)
+            end if
         end if
         call record_build(session, request, candidate, activation_exit, &
             build_child%log_file, &
@@ -1866,8 +1871,10 @@ contains
             call publish_state(session, request, state_name, active, candidate, &
                 trim(active_case), &
                 completed, selected_count, seed, 'BUILD_FAIL', activation_exit, &
-                ierr, message)
+                ierr, message, diagnostic=trim(activation_diagnostic))
             if (ierr /= 0) return
+            if (len_trim(activation_diagnostic) > 0) &
+                message = trim(activation_diagnostic)
             if (have_candidate_lease) then
                 call gremlin_lease_release(candidate_lease, release_status, release_message)
                 if (release_status /= 0) then
@@ -2731,7 +2738,7 @@ contains
         character(len=*), intent(in), optional :: test_action_key
         logical :: credit, is_gate
         character(len=160) :: gate_identity
-        character(len=1024) :: runtime_identity
+        character(len=2048) :: runtime_identity
         character(len=256) :: completion_id
         character(len=32768) :: record
         character(len=16) :: journal_outcome

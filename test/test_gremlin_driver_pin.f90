@@ -300,7 +300,7 @@ contains
         type(process_result_t) :: process
         character(len=HASH_LEN) :: action_one, action_two
         character(len=HASH_LEN) :: output_digest
-        character(len=32) :: generation_one, generation_two, generation_three
+        character(len=HASH_LEN) :: generation_one, generation_two, generation_three
         character(:), allocatable :: failed_project
         type(test_runtime_t) :: failed_runtime
         integer :: ierr
