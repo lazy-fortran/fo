@@ -31,8 +31,12 @@ integration checkout `/var/tmp/fo-dogfood-controller`. Generation
 `3b28c977643c5357b47f0d671110c7bb03089b3c7fadec14b636bcd65ad0e00b` builds,
 with all four required tests PASS: utility, input inventory, execution view and
 native contained capture. It reports `local_gate_green=true`, `dirty=false`
-and no current failure at that gate. Background coverage continues; this is not
-full verification. Keep this owned lane active and use it for subsequent work.
+and no current failure at that initial gate, so the increment was pushed to main.
+Background coverage then found failures and cleared readiness: nested async
+launches (`test_stat_memo`, stale-MCP public start), a driver-pin fixture using a
+workflow-only input, and nested test commands inheriting the outer private cwd.
+These now have separate scoped workers; unrelated source promotions pause.
+Keep this owned lane active for useful feedback. Full verification is not claimed.
 
 The earlier stopped session and completed receipts remain. Initial source
 capture writes fell after the per-blob fix, but cumulative owner/reaped-child I/O
