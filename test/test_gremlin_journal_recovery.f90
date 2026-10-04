@@ -36,13 +36,14 @@ program test_gremlin_journal_recovery
     character(:), allocatable :: second_gate, second_pid, second_done
     character(:), allocatable :: first_session, second_session, journal_path
     character(:), allocatable :: pass_log, fail_log, pass_snapshot, fail_snapshot
+    character(:), allocatable :: recovered_pass_log, recovered_fail_log
     character(:), allocatable :: barrier_library
     character(len=512) :: message
     type(string_list_t) :: args
     type(process_result_t) :: process
     type(json_value_t) :: report
-    integer :: owner_pid, child_pid, parse_status, ierr
-    integer(c_int64_t) :: owner_start, child_start
+    integer :: owner_pid, second_owner_pid, child_pid, parse_status, ierr
+    integer(c_int64_t) :: owner_start, second_owner_start, child_start
     logical :: ready_seen
 
     inquire(file='/proc/self/stat', exist=ready_seen)
@@ -73,8 +74,10 @@ program test_gremlin_journal_recovery
     first_session = gremlin_field(report, 'session_id')
     call assert_true(process%exit_code == 0 .and. len(first_session) > 0, &
         'starts owner with independent PASS, FAIL and blocked cases')
-    if (process%exit_code /= 0 .or. len(first_session) == 0) &
+    if (process%exit_code /= 0 .or. len(first_session) == 0) then
+        call cleanup_failed_start(first_session)
         call finish_assertions(retain_failed_scratch=.true.)
+    end if
     call owner_pid_from_session(first_session, owner_pid)
     owner_start = mcp_process_start_time(owner_pid)
     call assert_true(owner_start > 0_c_int64_t, &
@@ -87,6 +90,7 @@ program test_gremlin_journal_recovery
     call assert_true(ready_seen, 'third case waits at its native FIFO barrier')
     if (.not. ready_seen) then
         call gremlin_stop_lane(driver, project, cache, state, lane, first_session)
+        call wait_gone(owner_pid, owner_start, 5000)
         call finish_assertions(retain_failed_scratch=.true.)
     end if
     call read_pid_file(first_pid, child_pid, parse_status)
@@ -94,16 +98,37 @@ program test_gremlin_journal_recovery
         'blocked fixture publishes its exact child PID')
     if (parse_status /= 0 .or. child_pid <= 0) then
         call gremlin_stop_lane(driver, project, cache, state, lane, first_session)
+        call wait_gone(owner_pid, owner_start, 5000)
         call finish_assertions(retain_failed_scratch=.true.)
     end if
     child_start = mcp_process_start_time(child_pid)
     call assert_true(child_start > 0_c_int64_t, 'captures blocked child start identity')
     if (child_start <= 0_c_int64_t) then
         call gremlin_stop_lane(driver, project, cache, state, lane, first_session)
+        call wait_gone(owner_pid, owner_start, 5000)
         call finish_assertions(retain_failed_scratch=.true.)
     end if
     call wait_for_completed_prefix(first_session, report)
+    call assert_equal_integer(&
+        int(json_number_value(json_member(report, 'completed'))), 2, &
+        'the first owner has exactly two completed cases before the blocked case')
     call check_receipt_set(report, first_session, pass_log, fail_log)
+    if (.not. allocated(pass_log)) then
+        call cleanup_failed_start(first_session)
+        call finish_assertions(retain_failed_scratch=.true.)
+    end if
+    if (len(pass_log) == 0) then
+        call cleanup_failed_start(first_session)
+        call finish_assertions(retain_failed_scratch=.true.)
+    end if
+    if (.not. allocated(fail_log)) then
+        call cleanup_failed_start(first_session)
+        call finish_assertions(retain_failed_scratch=.true.)
+    end if
+    if (len(fail_log) == 0) then
+        call cleanup_failed_start(first_session)
+        call finish_assertions(retain_failed_scratch=.true.)
+    end if
     pass_snapshot = read_text(pass_log)
     fail_snapshot = read_text(fail_log)
     call assert_true(index(fail_snapshot, 'journal-recovery-fail-token-4e812a') > 0, &
@@ -113,6 +138,7 @@ program test_gremlin_journal_recovery
     call assert_true(ierr == 0, 'resolves first owner durable journal path')
     if (ierr /= 0) then
         call gremlin_stop_lane(driver, project, cache, state, lane, first_session)
+        call wait_gone(owner_pid, owner_start, 5000)
         call finish_assertions(retain_failed_scratch=.true.)
     end if
 
@@ -133,14 +159,25 @@ program test_gremlin_journal_recovery
     second_session = gremlin_field(report, 'session_id')
     call assert_true(process%exit_code == 0 .and. len(second_session) > 0, &
         'restarts the lane from durable receipts after owner death')
-    if (process%exit_code /= 0 .or. len(second_session) == 0) &
+    if (process%exit_code /= 0 .or. len(second_session) == 0) then
+        call cleanup_failed_start(second_session)
         call finish_assertions(retain_failed_scratch=.true.)
+    end if
     call assert_true(second_session /= first_session, &
         'recovery installs a distinct live owner session')
+    call owner_pid_from_session(second_session, second_owner_pid)
+    second_owner_start = mcp_process_start_time(second_owner_pid)
+    call assert_true(second_owner_start > 0_c_int64_t, &
+        'captures replacement owner PID and start identity')
+    if (second_owner_start <= 0_c_int64_t) then
+        call cleanup_failed_start(second_session)
+        call finish_assertions(retain_failed_scratch=.true.)
+    end if
     call gremlin_wait_file(second_pid, 60000, ready_seen)
     call assert_true(ready_seen, 'restarted owner reaches its sole blocked case')
     if (.not. ready_seen) then
         call gremlin_stop_lane(driver, project, cache, state, lane, second_session)
+        call wait_gone(second_owner_pid, second_owner_start, 5000)
         call finish_assertions(retain_failed_scratch=.true.)
     end if
     call read_pid_file(second_pid, child_pid, parse_status)
@@ -148,21 +185,34 @@ program test_gremlin_journal_recovery
         'restarted blocked test publishes its child identity')
     if (parse_status /= 0 .or. child_pid <= 0) then
         call gremlin_stop_lane(driver, project, cache, state, lane, second_session)
+        call wait_gone(second_owner_pid, second_owner_start, 5000)
         call finish_assertions(retain_failed_scratch=.true.)
     end if
     child_start = mcp_process_start_time(child_pid)
     if (child_start <= 0_c_int64_t) then
         call gremlin_stop_lane(driver, project, cache, state, lane, second_session)
+        call wait_gone(second_owner_pid, second_owner_start, 5000)
         call finish_assertions(retain_failed_scratch=.true.)
     end if
     call wait_for_current_block(second_session, report)
     call assert_equal_string(gremlin_field(report, 'current_test'), 'test_blocked', &
         'recovered owner is blocked on the interrupted case')
-    call check_receipt_set(report, first_session, pass_log, fail_log)
-    call assert_equal_string(read_text(pass_log), pass_snapshot, &
-        'recovery leaves the original PASS log byte-for-byte unchanged')
-    call assert_equal_string(read_text(fail_log), fail_snapshot, &
-        'recovery leaves the original FAIL log byte-for-byte unchanged')
+    recovered_pass_log = ''
+    recovered_fail_log = ''
+    call check_receipt_set(report, first_session, recovered_pass_log, &
+        recovered_fail_log)
+    call assert_equal_string(recovered_pass_log, pass_log, &
+        'recovery preserves the original PASS log path')
+    call assert_equal_string(recovered_fail_log, fail_log, &
+        'recovery preserves the original FAIL log path')
+    if (len(recovered_pass_log) > 0) then
+        call assert_equal_string(read_text(recovered_pass_log), pass_snapshot, &
+            'recovery leaves the original PASS log byte-for-byte unchanged')
+    end if
+    if (len(recovered_fail_log) > 0) then
+        call assert_equal_string(read_text(recovered_fail_log), fail_snapshot, &
+            'recovery leaves the original FAIL log byte-for-byte unchanged')
+    end if
     call assert_equal_integer(&
         int(json_number_value(json_member(report, 'completed'))), 0, &
         'the restarted case has no terminal completion receipt')
@@ -170,12 +220,42 @@ program test_gremlin_journal_recovery
         .not. file_exists(second_done), &
         'neither interrupted execution publishes its completion marker')
     call gremlin_stop_lane(driver, project, cache, state, lane, second_session)
+    call wait_gone(second_owner_pid, second_owner_start, 5000)
     call wait_gone(child_pid, child_start, 5000)
+    call assert_true(.not. mcp_process_identity_running(&
+        second_owner_pid, second_owner_start), &
+        'replacement owner process identity is gone after stop')
     call assert_true(.not. mcp_process_identity_running(owner_pid, owner_start), &
         'the killed first owner remains absent after restart cleanup')
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
+
+    subroutine cleanup_failed_start(owner_hint)
+        character(len=*), intent(in) :: owner_hint
+        character(len=128) :: owner_id, owner_start_text
+        character(len=65536) :: owner_status
+        character(len=512) :: local_message
+        integer(c_int64_t) :: owner_start
+        integer :: owner_process, ierr, parse_status
+
+        call gremlin_session_read(project, lane, owner_id, owner_process, &
+            owner_start_text, owner_status, ierr, local_message)
+        if (ierr /= 0 .or. len_trim(owner_id) == 0) then
+            if (len_trim(owner_hint) > 0) then
+                call gremlin_stop_lane(driver, project, cache, state, lane, owner_hint)
+            end if
+            return
+        end if
+        if (len_trim(owner_hint) > 0 .and. trim(owner_id) /= trim(owner_hint)) return
+
+        call gremlin_stop_lane(driver, project, cache, state, lane, trim(owner_id))
+        read(owner_start_text, *, iostat=parse_status) owner_start
+        if (parse_status == 0 .and. owner_process > 0 .and. &
+                owner_start > 0_c_int64_t) then
+            call wait_gone(owner_process, owner_start, 5000)
+        end if
+    end subroutine cleanup_failed_start
 
     function build_barrier_library() result(library)
         character(:), allocatable :: library
