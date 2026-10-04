@@ -6,6 +6,7 @@ module fo_mcp
         jsonrpc_null_fixed => jsonrpc_null
     use fx_json_build, only: json_escape_string
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
+        json_parser_next, &
         JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, &
         JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_BOOL, &
         JSON_NULL_VAL, JSON_ERROR, JSON_END_OF_INPUT
