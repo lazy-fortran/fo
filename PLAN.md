@@ -685,8 +685,9 @@ completed entries below are retained as prerequisites and evidence:
 15. **Complete:** [#173](https://github.com/lazy-fortran/fo/issues/173): accept
     only documented platform archive index members while retaining exact object
     verification.
-16. [#174](https://github.com/lazy-fortran/fo/issues/174): initialize the shared
-    change provider on Darwin with exact diagnostics and event semantics.
+16. **Complete:** [#174](https://github.com/lazy-fortran/fo/issues/174): the shared
+    change provider initializes on Darwin with exact diagnostics, nonblocking
+    pending semantics and public lifecycle evidence through the #172 boundary.
 17. Deliver the shared store without a second engine: **complete**
     [fx #42](https://github.com/lazy-fortran/fx/issues/42); deliver
     [fx #43](https://github.com/lazy-fortran/fx/issues/43) action-result manifests
@@ -828,11 +829,11 @@ Implemented issue state:
   members remain errors. Preserved faepmac1 evidence `31031f21...` proves native
   `/usr/bin/ar` cold/warm behavior separately from controlled mutations;
   independent review and the exact integrated Linux fixture pass.
-- #174 owns the separate Darwin shared-watcher initialization failure that stops
-  public Gremlin before ready state even though direct `kqueue()` creation works.
-  Candidate `b7365a2` fixes reviewed CF lifetime and zero-timeout defects, but a
-  third review rejected missing source-bound public lifecycle and Darwin error-
-  injection evidence; the exact candidate is now with task-specific Sol.
+- #174 is complete through `4c4a36e`: the shared FSEvents provider retains its
+  CF objects, filters exact relevant paths, keeps timeout-zero polls nonblocking,
+  settles dirty queued events, reports exact injected Darwin root errors and
+  recovers. Source/binary-bound faepmac1 evidence reaches the separate #172
+  `ENOTSUP` boundary; independent review and exact integrated Linux 4/4 pass.
 - #176 is complete through `8431a6d`: the shell/Python benchmark driver and
   reporter are replaced by a standalone Fortran tool with a narrow C process/
   clock shim. Independent review approved strict JSON/Unicode, CLI/environment

@@ -37,7 +37,7 @@ freshness/result/process behavior before consumers can rely on it.
 | [#171](https://github.com/lazy-fortran/fo/issues/171) | Complete through `9331c04`: state-provider declarations and portability oracles pass on Linux/macOS; #172 separately owns public lifecycle. |
 | [#172](https://github.com/lazy-fortran/fo/issues/172) | Add scoped Darwin asynchronous owner/descendant containment for public Gremlin lifecycle. |
 | [#173](https://github.com/lazy-fortran/fo/issues/173) | Complete: accept documented platform archive index metadata while preserving exact expected-object verification. |
-| [#174](https://github.com/lazy-fortran/fo/issues/174) | Initialize and diagnose the shared Darwin change provider without adding a second polling engine. |
+| [#174](https://github.com/lazy-fortran/fo/issues/174) | Complete through `4c4a36e`: initialize and diagnose the shared Darwin change provider without adding a second polling engine. |
 | [#175](https://github.com/lazy-fortran/fo/issues/175) | Own one declared execution-input inventory shared by watcher relevance, compact generation capture and later action invalidation. |
 | [#176](https://github.com/lazy-fortran/fo/issues/176) | Complete through `8431a6d`: standalone Fortran benchmark orchestration, JSONL reporting and exact inventory verification replace the shell/Python executables. |
 | [#177](https://github.com/lazy-fortran/fo/issues/177) | Complete: every command-local help path is side-effect free, including `fo install --help`. |
