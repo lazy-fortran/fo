@@ -324,6 +324,7 @@ contains
         character(len=512), allocatable :: includes(:), objects(:), object_keys(:)
         character(len=256) :: missing(MAX_UPDATE_NAMES)
         integer :: n_includes, n_objects, n_object_keys, n_missing, i
+        logical :: has_root_target
 
         n_includes = 0
         n_objects = 0
@@ -341,6 +342,15 @@ contains
             exitcode = 0
             return
         end if
+        call root_has_fpm_build_target(project_dir, config, has_root_target)
+        if (.not. has_root_target) then
+            if (n_missing == 0) then
+                exitcode = 0
+                return
+            end if
+            call run_fpm_dependency_fetch(project_dir, log_file, exitcode)
+            return
+        end if
         do i = 1, n_missing
             write (error_unit, '(a)') 'fo: re-fetching dependency '// &
                 trim(missing(i))//': its source tree is missing'
@@ -348,6 +358,85 @@ contains
         call run_fpm_bootstrap(project_dir, config, project_flags, log_file, &
             exitcode)
     end subroutine bootstrap_config_deps
+
+    subroutine root_has_fpm_build_target(project_dir, config, found)
+        !! Report whether fpm has a root library, app, or example to build.
+        !! Test-only packages still need their external sources fetched, but a
+        !! plain `fpm build` rejects them before dependency bootstrap.
+        character(len=*), intent(in) :: project_dir
+        type(fpm_config_t), intent(in) :: config
+        logical, intent(out) :: found
+
+        type(scan_unit_t), allocatable :: units(:)
+        character(len=512) :: source_dir, cfiles(MAX_SRC_OBJS)
+        integer :: n_units, n_cfiles, ierr, i
+
+        found = .true.
+        source_dir = trim(project_dir)//'/'//trim(config%source_dir)
+        call scan_root_target_sources(source_dir, units, n_units, ierr)
+        if (ierr /= 0) return
+        if (n_units > 0) return
+        call collect_c_family(trim(source_dir), cfiles, n_cfiles)
+        if (n_cfiles > 0) return
+
+        if (config%n_exes > 0) return
+        source_dir = trim(project_dir)//'/'//trim(config%app_dir)
+        call scan_root_target_sources(source_dir, units, n_units, ierr)
+        if (ierr /= 0) return
+        do i = 1, n_units
+            if (.not. units(i)%is_program) cycle
+            if (app_program_selected(units(i)%filename, project_dir, &
+                    config%app_dir, config)) return
+        end do
+
+        if (config%n_examples > 0) return
+        if (config%auto_examples) then
+            source_dir = trim(project_dir)//'/'//trim(config%example_dir)
+            call scan_root_target_sources(source_dir, units, n_units, ierr)
+            if (ierr /= 0) return
+            do i = 1, n_units
+                if (units(i)%is_program) return
+            end do
+        end if
+        found = .false.
+    end subroutine root_has_fpm_build_target
+
+    subroutine scan_root_target_sources(directory, units, n_units, ierr)
+        character(len=*), intent(in) :: directory
+        type(scan_unit_t), allocatable, intent(out) :: units(:)
+        integer, intent(out) :: n_units, ierr
+        logical :: exists
+
+        inquire (file=trim(directory), exist=exists)
+        if (.not. exists) then
+            allocate (units(0))
+            n_units = 0
+            ierr = 0
+            return
+        end if
+        call scan_dir(directory, units, n_units, ierr)
+    end subroutine scan_root_target_sources
+
+    subroutine run_fpm_dependency_fetch(project_dir, log_file, exitcode)
+        character(len=*), intent(in) :: project_dir, log_file
+        integer, intent(out) :: exitcode
+
+        character(len=:), allocatable :: packed
+        integer :: n_args
+
+        n_args = 0
+        call argv_push(packed, n_args, 'fpm')
+        call argv_push(packed, n_args, 'update')
+        call argv_push(packed, n_args, '--fetch-only')
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+            .true., build_timeout_seconds(), exitcode)
+        if (exitcode == 0) return
+
+        write (error_unit, '(a)') 'fo: fpm dependency fetch failed'
+        if (len_trim(log_file) > 0) then
+            write (error_unit, '(a)') 'fo: see '//trim(log_file)
+        end if
+    end subroutine run_fpm_dependency_fetch
 
     subroutine run_fpm_bootstrap(project_dir, config, project_flags, &
             log_file, exitcode)

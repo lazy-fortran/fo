@@ -14,6 +14,8 @@ program test_targeted_materialization_cli
     character(:), allocatable :: home_dir, config_dir, xdg_cache, prefix, state_dir
     character(:), allocatable :: source, dependency, dependency_build, probe_log
     character(:), allocatable :: compiler_path, cwd, arg0
+    character(:), allocatable :: path_value, fpm_wrapper_dir, fpm_script, fpm_binary
+    character(:), allocatable :: fpm_call_log
     character(len=32), parameter :: names(2) = &
         [character(len=32) :: 'test_mcp_pass', 'test_mcp_fail']
     character(len=32), parameter :: values(2) = &
@@ -34,6 +36,9 @@ program test_targeted_materialization_cli
     prefix = join_path(env_scratch, 'prefix')
     env_cache = join_path(env_scratch, 'fo-cache')
     state_dir = join_path(env_scratch, 'gremlin-state')
+    fpm_wrapper_dir = join_path(env_scratch, 'bin')
+    fpm_script = join_path(fpm_wrapper_dir, 'fpm')
+    fpm_call_log = join_path(env_scratch, 'fpm.calls')
     dependency = join_path(scratch, 'test-support/dependency')
     dependency_build = join_path(scratch, 'build/dependencies/probe_dependency')
     probe_log = join_path(env_scratch, 'compiler-probe.log')
@@ -43,7 +48,13 @@ program test_targeted_materialization_cli
     call make_directory(prefix)
     call make_directory(env_cache)
     call make_directory(state_dir)
+    call make_directory(fpm_wrapper_dir)
     call make_directory(join_path(dependency, 'src'))
+    call get_environment_variable('PATH', length=arg0_length, status=arg_status)
+    call assert_true(arg_status == 0 .and. arg0_length > 0, &
+        'fixture has a process PATH for dependency bootstrap')
+    allocate (character(len=arg0_length) :: path_value)
+    call get_environment_variable('PATH', path_value)
     call list_add(environment, 'HOME=' // home_dir)
     call list_add(environment, 'XDG_CONFIG_HOME=' // config_dir)
     call list_add(environment, 'XDG_CACHE_HOME=' // xdg_cache)
@@ -51,6 +62,25 @@ program test_targeted_materialization_cli
     call list_add(environment, 'FO_CACHE_DIR=' // env_cache)
     call list_add(environment, 'FO_GREMLIN_STATE_DIR=' // state_dir)
     call list_add(environment, 'FO_JOBS=2')
+    call list_add(environment, 'PATH=' // fpm_wrapper_dir // ':' // path_value)
+    call list_add(environment, 'FO_TEST_FPM_CALL_LOG=' // fpm_call_log)
+    arguments = string_list_t()
+    call list_add(arguments, '-c')
+    call list_add(arguments, 'command -v fpm')
+    call run_external('sh', arguments, scratch, result)
+    call assert_process_ok(result, 'locate fpm for the command counter')
+    fpm_binary = trim(result%stdout)
+    if (len(fpm_binary) > 0) then
+        arg0_length = index(fpm_binary, new_line('a'))
+        if (arg0_length > 0) fpm_binary = fpm_binary(:arg0_length - 1)
+    end if
+    call assert_true(len(fpm_binary) > 0, 'resolve the absolute fpm executable')
+    call list_add(environment, 'FO_TEST_REAL_FPM=' // fpm_binary)
+    call write_text(fpm_script, '#!/bin/sh' // new_line('a') // &
+        'printf "%s\\n" "$*" >> "$FO_TEST_FPM_CALL_LOG"' // new_line('a') // &
+        'exec "$FO_TEST_REAL_FPM" "$@"' // new_line('a'))
+    call run_external('chmod', [character(len=16) :: '+x', fpm_script], scratch, result)
+    call assert_process_ok(result, 'make the fpm command counter executable')
 
     call write_text(join_path(dependency, 'fpm.toml'), &
         'name = "probe_dependency"' // new_line('a'))
@@ -70,11 +100,6 @@ program test_targeted_materialization_cli
         'description = "target materialization probe"' // new_line('a') // &
         '[dependencies]' // new_line('a') // &
         'probe_dependency = { git = "file://' // dependency // '" }' // new_line('a'))
-    call write_text(join_path(scratch, 'src/fixture_library.f90'), &
-        'module fixture_library' // new_line('a') // &
-        'use probe_dependency_mod, only: dependency_value' // new_line('a') // &
-        'implicit none' // new_line('a') // &
-        'end module fixture_library' // new_line('a'))
     do i = 1, size(names)
         source = 'program ' // trim(names(i)) // new_line('a') // &
             'use probe_dependency_mod, only: dependency_value' // new_line('a') // &
@@ -125,11 +150,15 @@ program test_targeted_materialization_cli
     call assert_file_equals(marker, trim(values(1)) // new_line('a'), 'first target executes')
     call assert_file_exists(dependency_build, &
         'valid named test materializes its Git dependency')
+    call assert_file_equals(fpm_call_log, 'update --fetch-only' // new_line('a'), &
+        'test-only Git dependency fetch avoids a redundant root build')
 
     call run_named(names(2))
     call assert_file_exists(join_path(bin_dir, trim(names(2))), &
         'second selected test is materialized')
     call assert_file_equals(marker, trim(values(2)) // new_line('a'), 'second target executes')
+    call assert_file_equals(fpm_call_log, 'update --fetch-only' // new_line('a'), &
+        'warm dependency source reuse skips another fpm bootstrap')
     call remove_path(marker)
     call remove_tree(scratch)
     call remove_tree(env_scratch)
@@ -185,6 +214,7 @@ contains
 
         call remove_path(marker)
         call remove_path(probe_log)
+        call remove_path(fpm_call_log)
         call remove_tree(join_path(scratch, 'build'))
         arguments = string_list_t()
         call list_add(arguments, 'test')
@@ -198,6 +228,7 @@ contains
             'unknown option returns test usage: ' // trim(option))
         call assert_file_absent(marker, 'unknown option does not run a fixture test')
         call assert_file_absent(probe_log, 'unknown option does not invoke the compiler')
+        call assert_file_absent(fpm_call_log, 'unknown option does not invoke fpm')
         call assert_file_absent(dependency_build, &
             'unknown option does not materialize the Git dependency')
     end subroutine rejects_unknown_option
