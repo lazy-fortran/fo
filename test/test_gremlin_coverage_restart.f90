@@ -647,13 +647,13 @@ contains
         character(:), allocatable :: marker_gate, followup_gate
         character(:), allocatable :: marker_session, replacement, generation
         character(:), allocatable :: marker_state_dir, coverage_path, campaign_path
-        character(:), allocatable :: coverage_text, journal_text
+        character(:), allocatable :: journal_text
         character(len=4096) :: state_dir_buffer
         character(len=512) :: state_message
         type(string_list_t) :: start_args
         type(process_result_t) :: start_result
         type(json_value_t) :: reply, coverage_view, field
-        integer :: owner_pid, child_pid, followup_pid, owner_status, state_status, ierr
+        integer :: owner_pid, child_pid, followup_pid, owner_status, ierr
         integer(c_int) :: kill_status
         integer(c_int64_t) :: owner_start, child_start, followup_start
         logical :: ready_seen
@@ -917,21 +917,6 @@ contains
         call assert_true(status_process%exit_code == 0, &
             'public status inspects the exact receipt-barrier owner')
     end subroutine query_receipt_status
-
-    subroutine read_owner_pid(owner_id, pid)
-        character(len=*), intent(in) :: owner_id
-        integer, intent(out) :: pid
-        integer :: dash, ios
-
-        pid = -1
-        dash = index(owner_id, '-')
-        if (dash <= 1) then
-            call assert_true(.false., 'owner ID contains its exact PID prefix')
-            return
-        end if
-        read(owner_id(:dash - 1), *, iostat=ios) pid
-        call assert_true(ios == 0 .and. pid > 0, 'parses exact supervisor PID')
-    end subroutine read_owner_pid
 
     integer function receipt_pass_count(text, case_name, generation) result(count)
         character(len=*), intent(in) :: text, case_name, generation
