@@ -2931,13 +2931,18 @@ static int capture_handoff_child(pid_t child) {
     char state_dir[PATH_MAX], owner_start[64], registry[PATH_MAX];
     char current_owner_start[64];
     pid_t owner_pid = 0, current_owner_pid = 0;
+    uint64_t owner_identity = 0, child_identity = 0, observed_identity = 0;
     DIR *directory;
     struct dirent *entry;
-    int e;
+    int e, owner_alive = 0, child_alive = 0;
 
     e = async_scope_owner(state_dir, sizeof(state_dir), &owner_pid,
                           owner_start, sizeof(owner_start));
-    if (e != 0 || owner_pid == getpid()) return 0;
+    if (e != 0 || owner_pid == getpid() ||
+        parse_identity_text(owner_start, &owner_identity) != 0 ||
+        owned_process_details(owner_pid, NULL, NULL, NULL, &observed_identity,
+                              &owner_alive) != 0 || !owner_alive ||
+        observed_identity != owner_identity) return 0;
     e = async_owner_registry(state_dir, owner_pid, owner_start, registry,
                              sizeof(registry), 0);
     if (e != 0) return 0;
@@ -2950,14 +2955,22 @@ static int capture_handoff_child(pid_t child) {
             continue;
         if (read_recovery_session(registry, entry->d_name, owner_start,
                                   &session) != 0 ||
-            session.pid != child || process_start_identity(child) != session.identity ||
-            getsid(child) != session.session)
+            session.pid != child ||
+            owned_process_details(child, NULL, NULL, NULL, &child_identity,
+                                  &child_alive) != 0 || !child_alive ||
+            child_identity != session.identity || getsid(child) != session.session)
             continue;
         e = async_scope_owner(state_dir, sizeof(state_dir), &current_owner_pid,
                               current_owner_start, sizeof(current_owner_start));
         if (e == 0 && current_owner_pid == owner_pid &&
             strcmp(current_owner_start, owner_start) == 0 &&
-            process_start_identity(child) == session.identity) {
+            owned_process_details(owner_pid, NULL, NULL, NULL, &observed_identity,
+                                  &owner_alive) == 0 && owner_alive &&
+            observed_identity == owner_identity &&
+            owned_process_details(child, NULL, NULL, NULL, &child_identity,
+                                  &child_alive) == 0 && child_alive &&
+            child_identity == session.identity && getsid(child) == session.session &&
+            !monitor_stop) {
             closedir(directory);
             return 1;
         }
@@ -2980,8 +2993,8 @@ static int monitor_kill_children(int preserve_registered_sessions) {
         if (file == NULL) return errno;
         while (fscanf(file, "%ld", &child) == 1) {
             if (child > 0 && child <= INT_MAX) {
-                if (preserve_registered_sessions &&
-                    capture_handoff_child((pid_t)child)) continue;
+                if (preserve_registered_sessions && !monitor_stop &&
+                    capture_handoff_child((pid_t)child) && !monitor_stop) continue;
                 (void)kill((pid_t)child, SIGKILL);
                 count++;
             }
