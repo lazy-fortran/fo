@@ -1534,7 +1534,10 @@ contains
         ierr = 0
         message = ''
         capture_failed = .false.
-        call change_watch_poll(change_watch, 0, changed_path, event_type, &
+        ! A zero-timeout provider poll deliberately cannot finish a pending
+        ! structural reconciliation. Give the watcher a bounded tick so its
+        ! quiet deadline can expire while the owner loop remains responsive.
+        call change_watch_poll(change_watch, 1, changed_path, event_type, &
             got_event, watch_error, provider_quiet)
         if (watch_error /= 0) then
             ierr = watch_error

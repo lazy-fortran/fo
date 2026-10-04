@@ -51,7 +51,7 @@ function captureCount() {
   return fs.existsSync(captureCounter)
     ? JSON.parse(fs.readFileSync(captureCounter, 'utf8')).count : 0;
 }
-async function expectOneCapture(edit) {
+async function expectOneCapture(edit, label = 'relevant edit') {
   const before = captureCount();
   const beforeStatus = json(['gremlin', 'status', '--dir', project, '--lane', 'watch',
     '--session', session, '--json']);
@@ -70,9 +70,9 @@ async function expectOneCapture(edit) {
     await wait(50);
   } while (Date.now() < deadline);
   assert.notEqual(current.active_generation, beforeStatus.active_generation,
-    'relevant edits must publish a new immutable generation');
+    `${label} must publish a new immutable generation`);
   assert.equal(captureCount(), before + 1,
-    'one event burst must perform exactly one immutable capture');
+    `${label}: one event burst must perform exactly one immutable capture`);
   await wait(300);
 }
 function makeWritableTree(root) {
@@ -177,13 +177,17 @@ try {
     fs.writeFileSync(path.join(dependency, 'fpm.toml'), 'name = "watch_dep"\n');
     fs.writeFileSync(path.join(dependency, 'src/depmod.f90'),
       'module depmod\nimplicit none\ninteger, parameter :: dep_value = 1\nend module depmod\n');
-  });
+  }, 'dependency root replacement recovery');
+  // Keep this nested creation immediately after root replacement: the first
+  // edit must reconcile the watch tree, and the next two prove its new watches
+  // captured both pre-subscription contents and later edits.
   await expectOneCapture(() => {
     fs.mkdirSync(path.join(project, 'src/new/deep'), { recursive: true });
     fs.writeFileSync(path.join(project, 'src/new/deep/input.data'), 'before subscription\n');
-  });
+  }, 'nested src/new/deep creation after root recovery');
   await expectOneCapture(() => fs.appendFileSync(
-    path.join(project, 'src/new/deep/input.data'), 'after subscription\n'));
+    path.join(project, 'src/new/deep/input.data'), 'after subscription\n'),
+  'nested src/new/deep follow-up edit');
   await expectOneCapture(() => fs.writeFileSync(path.join(project, 'fpm.toml'),
     fs.readFileSync(path.join(project, 'fpm.toml'), 'utf8')
       .replace('nested_dep = { path = "build/nested_dependency" }\n', '')));
