@@ -52,6 +52,10 @@ program fo_main
     nargs = command_argument_count()
     action = ''
     if (nargs > 0) call get_command_argument(1, action)
+    ! Help is a parser result, not a command execution. Resolve it before the
+    ! command dispatcher configures the process environment or any handler can
+    ! acquire a project lock, build, refresh, or install.
+    if (dispatch_help(nargs, trim(action))) stop
     ! Build/test pipelines benefit from sleeping compiler workers, but an
     ! executable launched by `fo exec` (or its `fo run` alias) must inherit
     ! the caller's OpenMP policy.  Injecting OMP_WAIT_POLICY=PASSIVE here
@@ -394,6 +398,91 @@ contains
         write (output_unit, '(a)') ''
         write (output_unit, '(a)') 'fo version    print version'
     end subroutine print_usage
+
+    logical function dispatch_help(argument_count, command) result(handled)
+        integer, intent(in) :: argument_count
+        character(len=*), intent(in) :: command
+        character(len=256) :: arg
+        integer :: i
+
+        handled = .false.
+        if (command == 'help') then
+            handled = .true.
+            if (argument_count >= 2) then
+                call get_command_argument(2, arg)
+                call print_command_help(trim(arg))
+            else
+                call print_usage()
+            end if
+            return
+        end if
+        if (command == '--help' .or. command == '-h') then
+            call print_usage()
+            handled = .true.
+            return
+        end if
+        if (command == 'exec' .or. command == 'run') then
+            i = 2
+            do while (i <= argument_count)
+                call get_command_argument(i, arg)
+                if (trim(arg) == '--help' .or. trim(arg) == '-h') then
+                    call print_command_help(command)
+                    handled = .true.
+                    return
+                end if
+                if (trim(arg) == '--') exit
+                if (arg(1:1) /= '-') exit
+                if (trim(arg) == '--cwd' .or. trim(arg) == '--flag' .or. &
+                    trim(arg) == '--profile') i = i + 1
+                i = i + 1
+            end do
+            return
+        end if
+        do i = 2, argument_count
+            call get_command_argument(i, arg)
+            if (trim(arg) == '--help' .or. trim(arg) == '-h') then
+                call print_command_help(command)
+                handled = .true.
+                return
+            end if
+        end do
+    end function dispatch_help
+
+    subroutine print_command_help(command)
+        character(len=*), intent(in) :: command
+
+        select case (command)
+        case ('install')
+            call print_install_usage()
+        case ('test')
+            call print_test_usage()
+        case ('exec', 'run')
+            call print_exec_usage()
+        case ('clean')
+            write (output_unit, '(a)') 'usage: fo clean [--cache|--all|--stale] [--keep N]'
+            write (output_unit, '(a)') '  --help, -h  show this help without deleting files'
+        case ('check')
+            write (output_unit, '(a)') &
+                'usage: fo check [--json|--json=compact|--json=full|--agent]'
+        case ('fmt', 'format')
+            write (output_unit, '(a)') 'usage: fo fmt [--changed] [--check] [paths...]'
+            write (output_unit, '(a)') '  -h, --help  show this help without formatting files'
+        case default
+            write (output_unit, '(a)') 'usage: fo '//trim(command)//' [options]'
+            write (output_unit, '(a)') &
+                '  -h, --help  show this help without running the command'
+        end select
+    end subroutine print_command_help
+
+    subroutine print_install_usage()
+        write (output_unit, '(a)') 'usage: fo install [--prefix PATH]'
+        write (output_unit, '(a)') ''
+        write (output_unit, '(a)') &
+            'Install the release binary into PREFIX/bin (default: $HOME/.local/bin).'
+        write (output_unit, '(a)') 'options:'
+        write (output_unit, '(a)') '  --prefix PATH  installation prefix'
+        write (output_unit, '(a)') '  -h, --help     show this help without installing'
+    end subroutine print_install_usage
 
     subroutine print_test_usage(unit)
         integer, optional, intent(in) :: unit
@@ -1730,23 +1819,19 @@ contains
 
     subroutine cmd_install()
         type(backend_t) :: b
-        character(len=256) :: prefix, arg
-        character(len=512) :: home
+        character(len=256) :: prefix
+        character(len=512) :: home, error_message
         character(len=512) :: install_log
         character(len=:), allocatable :: packed
-        integer :: i, exitcode, status
+        integer :: exitcode, status
         integer :: n_args
 
-        call get_environment_variable('HOME', home, status=status)
-        if (status /= 0 .or. len_trim(home) == 0) home = '/usr/local'
-        prefix = trim(home)//'/.local'
-
-        do i = 2, command_argument_count()
-            call get_command_argument(i, arg)
-            if (trim(arg) == '--prefix' .and. i < command_argument_count()) then
-                call get_command_argument(i + 1, prefix)
-            end if
-        end do
+        call parse_install_args(prefix, error_message, status)
+        if (status /= 0) then
+            write (error_unit, '(a,a)') 'fo install: ', trim(error_message)
+            write (error_unit, '(a)') 'fo install: use --help for usage'
+            call process_exit(2)
+        end if
 
         b = detect_backend('.')
         if (b%kind == BACKEND_NONE) then
@@ -1771,6 +1856,64 @@ contains
         call delete_tmpfile(install_log)
         write (output_unit, '(a,a)') 'installed: ', trim(prefix)//'/bin/'
     end subroutine cmd_install
+
+    subroutine parse_install_args(prefix, error_message, exitcode)
+        character(len=*), intent(out) :: prefix, error_message
+        integer, intent(out) :: exitcode
+        character(len=256) :: arg, value
+        character(len=512) :: home
+        integer :: i, status, equals_at
+
+        call get_environment_variable('HOME', home, status=status)
+        if (status /= 0 .or. len_trim(home) == 0) home = '/usr/local'
+        prefix = trim(home)//'/.local'
+        error_message = ''
+        exitcode = 0
+
+        i = 2
+        do while (i <= command_argument_count())
+            call get_command_argument(i, arg)
+            if (trim(arg) == '--prefix') then
+                if (i == command_argument_count()) then
+                    error_message = 'missing value for --prefix'
+                    exitcode = 2
+                    return
+                end if
+                call get_command_argument(i + 1, prefix)
+                if (len_trim(prefix) == 0) then
+                    error_message = 'prefix must not be empty'
+                    exitcode = 2
+                    return
+                end if
+                if (prefix(1:1) == '-') then
+                    error_message = 'invalid value for --prefix: '//trim(prefix)
+                    exitcode = 2
+                    return
+                end if
+                i = i + 2
+                cycle
+            else if (index(trim(arg), '--prefix=') == 1) then
+                equals_at = index(trim(arg), '=')
+                value = arg(equals_at + 1:)
+                if (len_trim(value) == 0) then
+                    error_message = 'prefix must not be empty'
+                    exitcode = 2
+                    return
+                end if
+                if (value(1:1) == '-') then
+                    error_message = 'invalid value for --prefix: '//trim(value)
+                    exitcode = 2
+                    return
+                end if
+                prefix = value
+                i = i + 1
+            else
+                error_message = 'unknown option: '//trim(arg)
+                exitcode = 2
+                return
+            end if
+        end do
+    end subroutine parse_install_args
 
     subroutine cmd_clean()
         use fo_cache, only: cache_store_root
