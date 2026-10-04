@@ -1,14 +1,16 @@
 program test_mcp_gremlin_stale
+    use, intrinsic :: iso_c_binding, only: c_int64_t
     use fo_test_harness, only: string_list_t, process_result_t, list_add
-    use fo_test_harness, only: write_text, assert_true, assert_equal_integer
+    use fo_test_harness, only: write_text, read_text, assert_true, assert_equal_integer
     use fo_test_harness, only: finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, gremlin_write_case
-    use fo_test_gremlin_oracle, only: gremlin_wait_ms, gremlin_stop_lane
+    use fo_test_gremlin_oracle, only: gremlin_wait_ms, gremlin_wait_file, gremlin_stop_lane
     use fo_test_mcp_session, only: mcp_session_t, mcp_session_start
     use fo_test_mcp_session, only: mcp_session_call, mcp_session_request
     use fo_test_mcp_session, only: mcp_session_notify
     use fo_test_mcp_session, only: mcp_session_shutdown
-    use fo_test_process_identity, only: mcp_process_identity_running
+    use fo_test_process_identity, only: mcp_process_start_time
+    use fo_test_process_identity, only: mcp_process_identity_running, mcp_kill_owned_tree
     use fo_test_mcp, only: mcp_quote
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_size
@@ -16,19 +18,27 @@ program test_mcp_gremlin_stale
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state
-    character(:), allocatable :: session_id, arguments
+    character(:), allocatable :: session_id, arguments, blocked_body
+    character(:), allocatable :: blocked_pid_path, blocked_pid_text
     type(mcp_session_t) :: server
     type(string_list_t) :: args
     type(process_result_t) :: process
     type(json_value_t) :: response, payload, events, event, field, result
-    integer :: exit_code, attempt
+    integer :: exit_code, attempt, blocked_pid, status, cleanup_status
     character(len=16) :: exit_text
+    integer(c_int64_t) :: blocked_start
+    logical :: found
 
     call gremlin_setup(driver, scratch, project, cache, state)
     call write_text(project//'/fpm.toml', &
         'name = "mcp_stale_owner_probe"'//new_line('a'))
-    call gremlin_write_case(project, 'test_stale_owner', &
+    call gremlin_write_case(project, 'test_stale_pass', &
         'print *, "stale-owner-pass-token-9711"')
+    blocked_pid_path = scratch//'/blocked-child.pid'
+    blocked_body = 'integer :: status'//new_line('a')// &
+        'call execute_command_line("sh -c ''sleep 60 & echo $! > '// &
+        blocked_pid_path//'; wait''", exitstat=status)'
+    call gremlin_write_case(project, 'test_stale_blocked', blocked_body)
 
     call mcp_session_start(server, driver, project, cache, state, &
         scratch//'/mcp-stale.stderr')
@@ -52,9 +62,11 @@ program test_mcp_gremlin_stale
     call list_add(args, '--lane')
     call list_add(args, 'new-cli-lane')
     call list_add(args, '--target')
-    call list_add(args, 'test_stale_owner')
-    call list_add(args, '--random-count')
-    call list_add(args, '0')
+    call list_add(args, 'test_stale_pass')
+    call list_add(args, '--target')
+    call list_add(args, 'test_stale_blocked')
+    call list_add(args, '--timeout-seconds')
+    call list_add(args, '5')
     call list_add(args, '--json')
     call gremlin_json(driver, project, cache, state, args, payload, process, 30000)
     if (process%exit_code /= 0) then
@@ -74,6 +86,23 @@ program test_mcp_gremlin_stale
         call finish_assertions()
     end if
 
+    call gremlin_wait_file(blocked_pid_path, 30000, found)
+    call assert_true(found, 'blocked test publishes its sleeper PID before stop')
+    blocked_pid = 0
+    blocked_start = 0_c_int64_t
+    if (found) then
+        blocked_pid_text = read_text(blocked_pid_path)
+        read (blocked_pid_text, *, iostat=status) blocked_pid
+        call assert_true(status == 0 .and. blocked_pid > 0, &
+            'reads the blocked test sleeper PID')
+        if (status == 0 .and. blocked_pid > 0) then
+            blocked_start = mcp_process_start_time(blocked_pid)
+        end if
+    end if
+    call assert_true(blocked_start > 0_c_int64_t .and. &
+        mcp_process_identity_running(blocked_pid, blocked_start), &
+        'blocked test owns a live sleeper with its recorded start identity')
+
     do attempt = 1, 600
         arguments = '{"action":"gremlin_status","dir":'//mcp_quote(project)// &
             ',"lane_id":"new-cli-lane","session_id":'//mcp_quote(session_id)//'}'
@@ -91,7 +120,11 @@ program test_mcp_gremlin_stale
         call mcp_session_call(server, arguments, response)
         call extract_payload(response, payload)
         events = json_member(payload, 'events')
-        if (json_size(events) == 1) exit
+        if (json_size(events) == 1) then
+            event = json_element(events, 1)
+            if (json_string_value(json_member(event, 'case_id')) == &
+                    'test_stale_pass') exit
+        end if
         call gremlin_wait_ms(50)
     end do
     call assert_true(attempt <= 600, &
@@ -103,10 +136,27 @@ program test_mcp_gremlin_stale
         field = json_member(event, 'status')
         call assert_true(json_string_value(field) == 'PASS', &
             'cross-process receipt reports the independent passing behavior')
+        field = json_member(event, 'case_id')
+        call assert_true(json_string_value(field) == 'test_stale_pass', &
+            'in-flight blocked case remains unknown while the pass is receipted')
     end if
     call assert_true(mcp_process_identity_running(server%pid, server%start_time), &
         'CLI lane creation and completion do not replace or terminate the MCP process')
     call gremlin_stop_lane(driver, project, cache, state, 'new-cli-lane', session_id)
+    if (blocked_start > 0_c_int64_t) then
+        do attempt = 1, 250
+            if (.not. mcp_process_identity_running(blocked_pid, blocked_start)) exit
+            call gremlin_wait_ms(20)
+        end do
+        if (mcp_process_identity_running(blocked_pid, blocked_start)) then
+            call assert_true(.false., 'stopping the lane reaps its blocked test sleeper')
+            call mcp_kill_owned_tree(blocked_pid, blocked_start, cleanup_status)
+        else
+            call assert_true(.true., 'stopping the lane reaps its blocked test sleeper')
+        end if
+    end if
+    call assert_true(mcp_process_identity_running(server%pid, server%start_time), &
+        'stopping the CLI lane leaves the persistent MCP process alive')
     call mcp_session_shutdown(server, exit_code)
     call assert_true(exit_code == 0, &
         'persistent MCP exits cleanly after stale-owner check')
