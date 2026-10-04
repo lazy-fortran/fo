@@ -183,9 +183,17 @@ contains
             end do
         end if
         do i = 1, size(declarations)
+            if (declaration_has_conflicting_intent(declarations, i)) then
+                ierr = 1
+                message = 'conflicting declarations for input: '// &
+                    trim(declarations(i)%root_alias)//':'// &
+                    trim(declarations(i)%relative_path)
+                call record_failure(inventory, message)
+                return
+            end if
             if (declaration_is_duplicate(declarations, i)) then
                 ierr = 1
-                message = 'duplicate declared input: '// &
+                message = 'duplicate declared input role: '// &
                     trim(declarations(i)%root_alias)//':'// &
                     trim(declarations(i)%relative_path)
                 call record_failure(inventory, message)
@@ -217,10 +225,35 @@ contains
                     trim(declarations(current)%root_alias)) cycle
             if (trim(declarations(i)%relative_path) /= &
                     trim(declarations(current)%relative_path)) cycle
+            if (trim(declarations(i)%role) /= &
+                    trim(declarations(current)%role)) cycle
             declaration_is_duplicate = .true.
             return
         end do
     end function declaration_is_duplicate
+
+    logical function declaration_has_conflicting_intent(declarations, current)
+        type(input_declaration_t), intent(in) :: declarations(:)
+        integer, intent(in) :: current
+        integer :: i
+
+        declaration_has_conflicting_intent = .false.
+        do i = 1, current - 1
+            if (trim(declarations(i)%root_alias) /= &
+                    trim(declarations(current)%root_alias)) cycle
+            if (trim(declarations(i)%relative_path) /= &
+                    trim(declarations(current)%relative_path)) cycle
+            if ((declarations(i)%writable_at_execution .neqv. &
+                    declarations(current)%writable_at_execution) .or. &
+                    declarations(i)%expected_kind /= &
+                    declarations(current)%expected_kind .or. &
+                    declarations(i)%expected_mode /= &
+                    declarations(current)%expected_mode) then
+                declaration_has_conflicting_intent = .true.
+                return
+            end if
+        end do
+    end function declaration_has_conflicting_intent
 
     subroutine input_inventory_declarations_from_config(project_dir, declarations, &
             ierr, message)
