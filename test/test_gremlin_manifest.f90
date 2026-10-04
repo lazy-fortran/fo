@@ -80,9 +80,9 @@ program test_gremlin_manifest
     call write(trim(dependency)//'/fpm.toml', 'name = "shared"')
     call write(trim(project)//'/src/main.f90', 'program main')
     call write(trim(project)//'/fixture.dat', 'source-one')
-    call write(trim(project)//'/target.dat', 'link-target')
+    call write(trim(project)//'/src/target.dat', 'link-target')
     status = c_symlink('target.dat'//c_null_char, &
-        trim(project)//'/alias.dat'//c_null_char)
+        trim(project)//'/src/alias.dat'//c_null_char)
     call require(status == 0, 'fixture creates a contained input symlink')
     call write(trim(dependency)//'/src/shared.f90', 'module shared')
     call write(trim(driver), 'verified test driver image')
@@ -128,7 +128,7 @@ program test_gremlin_manifest
         first_file = trim(first%project_root)//'/fixture.dat'
         call require(file_equals(trim(first_file), 'source-one'), &
             'captured project file reconstructs from its blob')
-        first_file = trim(first%project_root)//'/alias.dat'
+        first_file = trim(first%project_root)//'/src/alias.dat'
         call require(link_points_to(trim(first_file), 'target.dat'), &
             'manifest preserves literal symlink target')
         call require(file_exists(trim(first%root)//'/manifest.id'), &
