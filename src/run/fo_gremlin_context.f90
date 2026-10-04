@@ -6,6 +6,7 @@ module fo_gremlin_context
     use fo_dep_resolve, only: normalize_path
     use fo_gremlin_generation, only: generation_context_t, generation_input_t, &
         generation_t, generation_capture
+    use fo_driver, only: driver_pin_t
     use fo_gremlin_state, only: gremlin_generation_register_at
     use fo_change_watch, only: change_watch_t, change_watch_add_context
     use fo_process, only: argv_push, process_cancel_pid, process_poll_pid, &
@@ -21,9 +22,10 @@ module fo_gremlin_context
 
 contains
 
-    subroutine capture_candidate(project_dir, generation, ok, &
+    subroutine capture_candidate(project_dir, driver_pin, generation, ok, &
             registration_error, message, change_watch)
         character(len=*), intent(in) :: project_dir
+        type(driver_pin_t), intent(in) :: driver_pin
         type(generation_t), intent(out) :: generation
         logical, intent(out) :: ok
         integer, intent(out) :: registration_error
@@ -41,6 +43,9 @@ contains
             ok = .false.
             return
         end if
+        context%driver_path = driver_pin%path
+        context%driver_digest = driver_pin%digest
+        context%driver_size = driver_pin%size
         if (present(change_watch)) then
             call change_watch_add_context(change_watch, context, ierr, watch_message)
             if (ierr /= 0) then

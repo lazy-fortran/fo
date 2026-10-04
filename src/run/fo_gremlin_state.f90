@@ -1,10 +1,12 @@
 module fo_gremlin_state
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, c_size_t
+    use, intrinsic :: iso_fortran_env, only: int64
     implicit none
     private
 
     integer, parameter, public :: GREMLIN_STATE_TEXT_MAX = 65536
     integer, parameter :: PATH_LEN = 4096, ID_LEN = 128, START_LEN = 64
+    integer, parameter :: DRIVER_DIGEST_LEN = 64
 
     type, public :: gremlin_session_t
         character(len=:), allocatable :: state_dir
@@ -13,6 +15,9 @@ module fo_gremlin_state
         character(len=:), allocatable :: lane_id
         character(len=:), allocatable :: owner_start
         character(len=:), allocatable :: recovered_session_id
+        character(len=PATH_LEN) :: driver_path = ''
+        character(len=DRIVER_DIGEST_LEN) :: driver_digest = ''
+        integer(int64) :: driver_size = 0_int64
         integer :: owner_pid = 0
         integer :: lock_fd = -1
         logical :: owner = .false.

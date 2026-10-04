@@ -57,6 +57,17 @@ jobs:
           command -v fo
           fo --version || true
 
+      - name: Pin exact fo image for Gremlin driver oracle
+        run: |
+          umask 077
+          driver="$HOME/.local/bin/fo"
+          digest="$(sha256sum "$driver" | cut -d' ' -f1)"
+          pinned="$RUNNER_TEMP/fo-driver-pins/$digest"
+          mkdir -p "$(dirname "$pinned")"
+          install -m 0555 "$driver" "$pinned"
+          test "$(sha256sum "$pinned" | cut -d' ' -f1)" = "$digest"
+          echo "FO_DRIVER_A=$pinned" >> "$GITHUB_ENV"
+
       - name: Test
         run: fpm test
 

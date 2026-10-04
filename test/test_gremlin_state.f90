@@ -1,7 +1,8 @@
 program test_gremlin_state
-    use, intrinsic :: iso_c_binding, only: c_associated, c_char, c_int, &
+    use, intrinsic :: iso_c_binding, only: c_associated, c_char, c_int, c_int64_t, &
         c_null_char, c_ptr
     use, intrinsic :: iso_fortran_env, only: output_unit
+    use fo_cache, only: HASH_LEN
     use fo_gremlin_state
     use fo_gremlin_generation, only: generation_context_t, generation_t, &
         generation_capture
@@ -276,6 +277,8 @@ contains
         context%environment = 'test'
         context%base_commit = 'state-fixture'
         context%patch_digest = trim(root)
+        context%driver_digest = repeat('a', HASH_LEN)
+        context%driver_size = 1234_c_int64_t
         call generation_capture(trim(project), trim(cache), context, generation, &
             ierr, message)
         call assert(ierr == 0, 'actual generation provider publishes immutable snapshot')

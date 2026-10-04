@@ -1,6 +1,7 @@
 module fo_gremlin_generation
     !! Immutable, content-addressed input snapshots for Gremlin campaigns.
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_fortran_env, only: int64
     use fo_cache, only: HASH_LEN, cache_digest, cache_file_digest
     use fo_fs, only: fs_make_dir, fs_mkdir_excl
     use fo_process, only: process_getpid
@@ -23,18 +24,24 @@ module fo_gremlin_generation
         character(len=:), allocatable :: environment
         character(len=:), allocatable :: base_commit
         character(len=:), allocatable :: patch_digest
+        character(len=PATH_LEN) :: driver_path = ''
+        character(len=HASH_LEN) :: driver_digest = ''
+        integer(int64) :: driver_size = 0_int64
         type(generation_input_t), allocatable :: inputs(:)
     end type generation_context_t
 
     type, public :: generation_t
         character(len=HASH_LEN) :: identity = ''
+        character(len=PATH_LEN) :: driver_path = ''
+        character(len=HASH_LEN) :: driver_digest = ''
+        integer(int64) :: driver_size = 0_int64
         character(len=PATH_LEN) :: root = ''
         character(len=PATH_LEN) :: project_root = ''
         character(len=:), allocatable :: base_commit
         character(len=:), allocatable :: patch_digest
     end type generation_t
 
-    public :: generation_capture
+    public :: generation_capture, generation_driver_identity
 
     interface
         integer(c_int) function fo_c_generation_list_tree(root, manifest) &
@@ -104,6 +111,7 @@ contains
         character(len=PATH_LEN) :: second_manifest
         character(len=PATH_LEN) :: source, dest
         character(len=HASH_LEN) :: verify_hash
+        character(len=32) :: driver_size_text
         character(len=PART_LEN), allocatable :: identity_parts(:)
         character(len=:), allocatable :: record
         integer :: n_roots, i, rc, fd, attempt, clock_count, clock_rate
@@ -115,6 +123,11 @@ contains
         generation = generation_t()
         if (len_trim(project_root) == 0 .or. len_trim(cas_root) == 0) then
             message = 'project_root and cas_root are required'
+            return
+        end if
+        if (.not. valid_driver_digest(context%driver_digest) .or. &
+            context%driver_size <= 0_int64) then
+            message = 'generation requires a pinned fo driver digest and size'
             return
         end if
         if (len_trim(project_root) >= PATH_LEN .or. &
@@ -264,17 +277,20 @@ contains
             return
         end if
 
-        allocate (identity_parts(6 + 3 * n_roots))
-        identity_parts(1) = 'fo-gremlin-generation-v1'
+        allocate (identity_parts(8 + 3 * n_roots))
+        identity_parts(1) = 'fo-gremlin-generation-v2'
         identity_parts(2) = value_or_empty(context%toolchain)
         identity_parts(3) = value_or_empty(context%flags)
         identity_parts(4) = value_or_empty(context%environment)
         identity_parts(5) = value_or_empty(context%base_commit)
         identity_parts(6) = value_or_empty(context%patch_digest)
+        identity_parts(7) = trim(context%driver_digest)
+        write (driver_size_text, '(i0)') context%driver_size
+        identity_parts(8) = trim(driver_size_text)
         do i = 1, n_roots
-            identity_parts(6 + 3 * i - 2) = trim(roots(i)%label)
-            identity_parts(6 + 3 * i - 1) = trim(roots(i)%destination)
-            identity_parts(6 + 3 * i) = tree_hashes(i)
+            identity_parts(8 + 3 * i - 2) = trim(roots(i)%label)
+            identity_parts(8 + 3 * i - 1) = trim(roots(i)%destination)
+            identity_parts(8 + 3 * i) = tree_hashes(i)
         end do
         generation%identity = cache_digest(identity_parts, size(identity_parts))
         cache = trim(base)//'/'//generation%identity
@@ -282,6 +298,9 @@ contains
         generation%project_root = trim(cache)//'/bundle/project'
         generation%base_commit = value_or_empty(context%base_commit)
         generation%patch_digest = value_or_empty(context%patch_digest)
+        generation%driver_path = context%driver_path
+        generation%driver_digest = context%driver_digest
+        generation%driver_size = context%driver_size
 
         inquire (file=trim(cache), exist=exists)
         if (exists) then
@@ -617,19 +636,111 @@ contains
         type(generation_input_t), intent(in) :: roots(:)
         character(len=HASH_LEN), intent(in) :: hashes(:)
         character(len=:), allocatable :: record
+        character(len=32) :: driver_size_text
         integer :: i
 
-        record = 'schema=fo-gremlin-generation-v1'//new_line('a')// &
+        write (driver_size_text, '(i0)') context%driver_size
+        record = 'schema=fo-gremlin-generation-v2'//new_line('a')// &
             'toolchain='//value_or_empty(context%toolchain)//new_line('a')// &
             'flags='//value_or_empty(context%flags)//new_line('a')// &
             'environment='//value_or_empty(context%environment)//new_line('a')// &
             'base_commit='//value_or_empty(context%base_commit)//new_line('a')// &
-            'patch_digest='//value_or_empty(context%patch_digest)//new_line('a')
+            'patch_digest='//value_or_empty(context%patch_digest)//new_line('a')// &
+            'driver_digest='//trim(context%driver_digest)//new_line('a')// &
+            'driver_size='//trim(driver_size_text)//new_line('a')
         do i = 1, size(roots)
             record = record//'input='//trim(roots(i)%label)//'|'// &
                 trim(roots(i)%destination)//'|'//trim(hashes(i))//new_line('a')
         end do
     end function identity_record
+
+    subroutine generation_driver_identity(generation_root, digest, size, ierr, message)
+        character(len=*), intent(in) :: generation_root
+        character(len=HASH_LEN), intent(out) :: digest
+        integer(int64), intent(out) :: size
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        character(len=PATH_LEN) :: identity_path
+        character(len=PATH_LEN) :: line
+        integer :: unit, io_status, parse_status
+        logical :: found_digest, found_size
+
+        digest = ''
+        size = 0_int64
+        ierr = 1
+        message = ''
+        if (len_trim(generation_root) == 0 .or. &
+            len_trim(generation_root) + len('/identity.txt') >= len(identity_path)) then
+            message = 'generation root cannot hold its identity path'
+            return
+        end if
+        identity_path = trim(generation_root)//'/identity.txt'
+        open (newunit=unit, file=trim(identity_path), status='old', action='read', &
+            iostat=io_status)
+        if (io_status /= 0) then
+            message = 'generation identity metadata is unavailable'
+            return
+        end if
+        found_digest = .false.
+        found_size = .false.
+        do
+            read (unit, '(a)', iostat=io_status) line
+            if (io_status /= 0) exit
+            if (index(line, 'driver_digest=') == 1) then
+                if (found_digest) then
+                    close (unit)
+                    message = 'generation identity repeats its driver digest'
+                    return
+                end if
+                if (len_trim(line) - len('driver_digest=') /= HASH_LEN) then
+                    close (unit)
+                    message = 'generation identity has an invalid driver digest length'
+                    return
+                end if
+                digest = line(len('driver_digest=') + 1:)
+                found_digest = .true.
+            else if (index(line, 'driver_size=') == 1) then
+                if (found_size) then
+                    close (unit)
+                    message = 'generation identity repeats its driver size'
+                    return
+                end if
+                read (line(len('driver_size=') + 1:), *, iostat=parse_status) size
+                if (parse_status /= 0) then
+                    close (unit)
+                    message = 'generation identity has an invalid driver size'
+                    return
+                end if
+                found_size = .true.
+            end if
+        end do
+        close (unit)
+        if (io_status > 0) then
+            message = 'generation identity metadata cannot be read'
+            return
+        end if
+        if (.not. found_digest .or. .not. found_size .or. size <= 0_int64 .or. &
+            .not. valid_driver_digest(digest)) then
+            message = 'generation identity has no valid pinned fo driver'
+            return
+        end if
+        ierr = 0
+    end subroutine generation_driver_identity
+
+    logical function valid_driver_digest(digest)
+        character(len=*), intent(in) :: digest
+        integer :: i, value
+
+        valid_driver_digest = .false.
+        if (len_trim(digest) /= HASH_LEN) return
+        do i = 1, HASH_LEN
+            value = iachar(digest(i:i))
+            if (.not. ((value >= iachar('0') .and. value <= iachar('9')) .or. &
+                (value >= iachar('a') .and. value <= iachar('f')))) return
+        end do
+        valid_driver_digest = .true.
+    end function valid_driver_digest
 
     subroutine write_identity(path, record, ierr)
         character(len=*), intent(in) :: path, record
