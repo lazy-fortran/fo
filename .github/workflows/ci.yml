@@ -120,13 +120,13 @@ jobs:
       # the JS fixture's own process-group helper, not Fo behavior.
       - name: Test stale MCP recovery
         run: |
-          driver="$HOME/.local/bin/fo"
+          driver="$FO_DRIVER_A"
           FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
             "$driver" test test_mcp_gremlin_stale
 
       - name: Test MCP cancellation and diagnostics
         run: |
-          driver="$HOME/.local/bin/fo"
+          driver="$FO_DRIVER_A"
           FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
             "$driver" test test_mcp_cancel_error
 
