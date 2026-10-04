@@ -1,24 +1,40 @@
 program test_archive_metadata_cli
+    use fo_test_archive_fixture, only: archive_fixture_main, archive_fixture_exit
     use fo_test_harness, only: process_result_t, string_list_t, list_add
-    use fo_test_harness, only: make_scratch, join_path, write_text, remove_tree
+    use fo_test_harness, only: make_scratch, make_directory, make_symlink
+    use fo_test_harness, only: join_path, write_text, remove_tree
+    use fo_test_harness, only: current_directory, file_exists
     use fo_test_harness, only: assert_process_ok, assert_equal_string, assert_true
     use fo_test_harness, only: assert_contains
     use fo_test_harness, only: finish_assertions
     use fo_test_cli, only: resolve_driver, run_fo, run_external
+    use fo_fs, only: fs_find_executable
     implicit none
 
     character(:), allocatable :: driver, scratch, dependency, consumer
-    character(:), allocatable :: tools, ar_path, wrapper, platform, native_path
+    character(:), allocatable :: tools, ar_path, archiver_link, platform, native_path
+    character(:), allocatable :: self_executable
+    character(len=4096) :: helper_ar
     type(process_result_t) :: result, lookup
     type(string_list_t) :: arguments, environment
-    type(string_list_t) :: native_environment
+    integer :: helper_status
+    logical :: found
+
+    helper_ar = ''
+    call get_environment_variable('FO_ARCHIVE_HELPER_REAL_AR', helper_ar, &
+        status=helper_status)
+    if (helper_status == 0 .and. len_trim(helper_ar) > 0) then
+        call archive_fixture_exit(archive_fixture_main(trim(helper_ar)))
+    end if
 
     call resolve_driver(driver)
+    call resolve_self_executable(self_executable)
     call make_scratch('fo-archive-metadata', scratch)
     tools = join_path(scratch, 'tools')
     dependency = join_path(scratch, 'dependency')
     consumer = join_path(scratch, 'consumer')
-    wrapper = join_path(tools, 'ar')
+    archiver_link = join_path(tools, 'ar')
+    call make_directory(tools)
 
     native_path = '/usr/bin:/bin:/opt/homebrew/bin'
     call list_add(arguments, '-s')
@@ -26,20 +42,12 @@ program test_archive_metadata_cli
     call assert_process_ok(lookup, 'identify host platform')
     platform = first_line(lookup%stdout)
     arguments = string_list_t()
-    call list_add(native_environment, 'PATH=' // native_path)
-    call list_add(arguments, 'ar')
-    call run_external('/usr/bin/which', arguments, scratch, lookup, native_environment)
-    call assert_process_ok(lookup, 'locate real archiver')
-    ar_path = first_line(lookup%stdout)
+    call fs_find_executable('/usr/bin/ar', helper_ar, found)
+    call assert_true(found, 'system archiver is executable at /usr/bin/ar')
+    ar_path = trim(helper_ar)
     if (platform == 'Darwin') call assert_equal_string(ar_path, '/usr/bin/ar', &
         'Darwin native archiver is Apple cctools /usr/bin/ar')
-    call write_text(wrapper, archiver_wrapper(ar_path))
-    arguments = string_list_t()
-    call list_add(arguments, '+x')
-    call list_add(arguments, wrapper)
-    call run_external('/bin/chmod', arguments, scratch, result)
-    call assert_process_ok(result, 'make controlled archiver executable')
-    arguments = string_list_t()
+    call make_symlink(self_executable, archiver_link)
 
     call write_text(join_path(dependency, 'fpm.toml'), 'name = "archive_provider"' // new_line('a'))
     call write_text(join_path(dependency, 'src/provider.f90'), provider_source(8))
@@ -59,85 +67,26 @@ program test_archive_metadata_cli
     end if
     call expect_value(8, 'native-cache', 'warm archive from the native archiver')
 
-    environment = string_list_t()
-    call list_add(environment, 'PATH=' // tools // ':' // native_path)
-    call list_add(environment, 'FO_ARCHIVE_MEMBER_MODE=apple-index')
+    call set_controlled_environment('apple-index')
     call expect_value(8, 'controlled-cache', 'cold archive with controlled Apple symbol index')
     call expect_value(8, 'controlled-cache', 'warm archive with controlled Apple symbol index')
 
     call expect_rejected('extra-object', 11, 'unexpected object member')
     call expect_rejected('extra-payload', 12, 'unexpected payload member')
     call expect_rejected('missing', 13, 'missing expected object')
-    environment = string_list_t()
-    call list_add(environment, 'PATH=' // tools // ':' // native_path)
-    call list_add(environment, 'FO_ARCHIVE_MEMBER_MODE=apple-index')
+    call set_controlled_environment('apple-index')
     call write_text(join_path(dependency, 'src/provider.f90'), provider_source(14))
     call expect_value(14, 'controlled-cache', 'build archive for duplicate-listing preflight')
     call verify_duplicate_listing(scratch)
     call expect_rejected('duplicate', 14, 'duplicate expected object')
-    call expect_rejected('truncate', 15, 'truncated archive')
+    call expect_rejected('corrupt-member', 15, 'archive member differs from its object')
+    call expect_rejected('truncate', 16, 'truncated archive is rejected')
 
     call remove_tree(scratch)
     call finish_assertions()
     write(*, '(a)') 'archive-metadata-cli: native/controlled index accepted; invalid members rejected'
 
 contains
-
-    function archiver_wrapper(real_ar) result(script)
-        character(len=*), intent(in) :: real_ar
-        character(:), allocatable :: script
-
-        script = '#!/bin/sh' // new_line('a') // &
-            'REAL_AR="' // trim(real_ar) // '"' // new_line('a') // &
-            'if [ "$1" = "t" ]; then' // new_line('a') // &
-            '  listing="$2.listing.$$"' // new_line('a') // &
-            '  "$REAL_AR" "$@" > "$listing" || exit $?' // new_line('a') // &
-            '  case "$FO_ARCHIVE_MEMBER_MODE" in' // new_line('a') // &
-            '    missing)' // new_line('a') // &
-            '      filtered="$listing.filtered"' // new_line('a') // &
-            '      if grep "^__.SYMDEF" "$listing" > "$filtered"; then' // new_line('a') // &
-            '        mv "$filtered" "$listing" || exit $?' // new_line('a') // &
-            '      else' // new_line('a') // &
-            '        status=$?' // new_line('a') // &
-            '        [ "$status" -eq 1 ] || { rm -f "$listing" "$filtered"; exit "$status"; }' // new_line('a') // &
-            '        : > "$filtered" || exit $?' // new_line('a') // &
-            '        mv "$filtered" "$listing" || exit $?' // new_line('a') // &
-            '      fi ;;' // new_line('a') // &
-            '    duplicate)' // new_line('a') // &
-            '      duplicate="$listing.duplicate"' // new_line('a') // &
-            '      awk ''NF && $0 !~ /^__\.SYMDEF/ { print; print; exit }'' "$listing" > "$duplicate" || { ' // &
-            'rm -f "$listing" "$duplicate"; exit 74; }' // new_line('a') // &
-            '      first=$(sed -n "1p" "$duplicate") || exit $?' // new_line('a') // &
-            '      second=$(sed -n "2p" "$duplicate") || exit $?' // new_line('a') // &
-            '      lines=$(wc -l < "$duplicate") || exit $?' // new_line('a') // &
-            '      if [ "$lines" -ne 2 ] || [ -z "$first" ] || [ "$first" != "$second" ]; then' // new_line('a') // &
-            '        rm -f "$listing" "$duplicate"; exit 75' // new_line('a') // &
-            '      fi' // new_line('a') // &
-            '      sed -n "1p" "$duplicate" >> "$listing" || exit $?' // new_line('a') // &
-            '      rm -f "$duplicate" || exit $?' // new_line('a') // &
-            '      ;;' // new_line('a') // &
-            '  esac' // new_line('a') // &
-            '  cat "$listing" || { status=$?; rm -f "$listing"; exit "$status"; }' // new_line('a') // &
-            '  case "$FO_ARCHIVE_MEMBER_MODE" in' // new_line('a') // &
-            '    apple-index)' // new_line('a') // &
-            '      if [ "$(uname -s)" = "Darwin" ]; then' // new_line('a') // &
-            '        grep -Fqx "__.SYMDEF SORTED" "$listing" || { rm -f "$listing"; exit 73; }' // new_line('a') // &
-            '      else' // new_line('a') // &
-            '        grep -Fqx "__.SYMDEF SORTED" "$listing" || echo "__.SYMDEF SORTED" || exit $?' // new_line('a') // &
-            '      fi ;;' // new_line('a') // &
-            '    extra-object) echo "injected-extra.o" || exit $? ;;' // new_line('a') // &
-            '    extra-payload) echo "injected-payload.dat" || exit $? ;;' // new_line('a') // &
-            '  esac' // new_line('a') // &
-            '  rm -f "$listing" || exit $?' // new_line('a') // &
-            '  exit 0' // new_line('a') // &
-            'fi' // new_line('a') // &
-            'if [ "$1" = "rcs" ] && [ "$FO_ARCHIVE_MEMBER_MODE" = "truncate" ]; then' // new_line('a') // &
-            '  "$REAL_AR" "$@" || exit $?' // new_line('a') // &
-            '  printf "!<arch>\\n" > "$3" || exit $?' // new_line('a') // &
-            '  exit 0' // new_line('a') // &
-            'fi' // new_line('a') // &
-            'exec "$REAL_AR" "$@"' // new_line('a')
-    end function archiver_wrapper
 
     function provider_source(value) result(text)
         integer, intent(in) :: value
@@ -175,9 +124,7 @@ contains
         integer, intent(in) :: value
 
         call write_text(join_path(dependency, 'src/provider.f90'), provider_source(value))
-        environment = string_list_t()
-        call list_add(environment, 'PATH=' // tools // ':' // native_path)
-        call list_add(environment, 'FO_ARCHIVE_MEMBER_MODE=' // mode)
+        call set_controlled_environment(mode)
         call list_add(arguments, 'exec')
         call list_add(arguments, 'probe')
         call run_fo(driver, arguments, consumer, join_path(scratch, 'controlled-cache'), &
@@ -208,9 +155,7 @@ contains
         arguments = string_list_t()
         call list_add(arguments, 't')
         call list_add(arguments, archive_path)
-        environment = string_list_t()
-        call list_add(environment, 'PATH=' // tools // ':' // native_path)
-        call list_add(environment, 'FO_ARCHIVE_MEMBER_MODE=duplicate')
+        call set_controlled_environment('duplicate')
         call run_external('ar', arguments, consumer, child, environment)
         call assert_process_ok(child, 'duplicate mutation emits a successful archive listing')
         call assert_true(has_duplicate_object(child%stdout), &
@@ -280,6 +225,49 @@ contains
             'real Apple archive contains its native sorted symbol index')
         arguments = string_list_t()
     end subroutine verify_native_index
+
+    subroutine set_controlled_environment(mode)
+        character(len=*), intent(in) :: mode
+
+        environment = string_list_t()
+        call list_add(environment, 'PATH=' // tools // ':' // native_path)
+        call list_add(environment, 'FO_ARCHIVE_HELPER_REAL_AR=' // ar_path)
+        call list_add(environment, 'FO_ARCHIVE_PLATFORM=' // platform)
+        call list_add(environment, 'FO_ARCHIVE_MEMBER_MODE=' // mode)
+    end subroutine set_controlled_environment
+
+    subroutine resolve_self_executable(path)
+        character(:), allocatable, intent(out) :: path
+        character(len=4096) :: executable, search_path
+        character(:), allocatable :: cwd
+        integer :: status
+        logical :: found
+
+        executable = ''
+        call get_command_argument(0, executable, status=status)
+        call assert_true(status == 0 .and. len_trim(executable) > 0, &
+            'archive fixture can read its executable path')
+        if (len_trim(executable) == 0) then
+            path = ''
+            return
+        end if
+        if (executable(1:1) == '/') then
+            path = trim(executable)
+        else if (index(trim(executable), '/') > 0) then
+            call current_directory(cwd)
+            path = join_path(cwd, trim(executable))
+        else
+            call fs_find_executable(trim(executable), search_path, found)
+            if (found) then
+                path = trim(search_path)
+            else
+                call current_directory(cwd)
+                path = join_path(cwd, trim(executable))
+            end if
+        end if
+        call assert_true(file_exists(path), &
+            'archive fixture executable path names the running test binary')
+    end subroutine resolve_self_executable
 
     function first_line(text) result(line)
         character(len=*), intent(in) :: text
