@@ -30,8 +30,6 @@ program test_gremlin_input_inventory
     call fs_make_dir(trim(leaf)//'/src')
     call write(trim(project)//'/fpm.toml', &
         'name = "inventory-fixture"'//new_line('a')// &
-        '[build]'//new_line('a')// &
-        'source-dir = "."'//new_line('a')// &
         '[dependencies]'//new_line('a')// &
         'fixture-dep = { path = "../dependency" }'//new_line('a')// &
         'dependency-copy = { path = "../dependency" }')
@@ -77,14 +75,11 @@ program test_gremlin_input_inventory
         'src/leaf.f90', 'dependency-source'), &
         'transitive path dependency source is an input')
 
-    call write(trim(project)//'/build/generated.f90', &
-        'program generated_changed')
-    call write(trim(project)//'/.cache/ignored.f90', 'changed generated')
-    call write(trim(project)//'/cache/ignored.f90', 'changed generated')
+    call write(trim(project)//'/PLAN.md', 'changed unrelated plan')
     call discover(ignored, ierr, diagnostic)
     call require(ierr == 0, 'inventory after ignored mutations: '//trim(diagnostic))
     call require(ignored%digest == initial%digest, &
-        'root generated/cache/git outputs do not affect the digest')
+        'plans and generated/cache/git outputs do not affect the digest')
 
     previous = initial
     call write(trim(project)//'/src/build/retained.f90', &
@@ -194,9 +189,51 @@ program test_gremlin_input_inventory
     call require(changed%digest /= previous%digest, &
         'acquired dependency source edit changes inventory digest')
 
+    call check_whole_root_outputs(trim(fixture))
     call fs_remove_tree(trim(fixture))
 
 contains
+
+    subroutine check_whole_root_outputs(parent)
+        character(len=*), intent(in) :: parent
+        character(len=4096) :: whole_root
+        character(len=1024) :: message
+        type(input_inventory_t) :: before, after
+        type(input_declaration_t) :: none(0)
+        integer :: status
+
+        whole_root = trim(parent)//'/whole-root-project'
+        call fs_make_dir(trim(whole_root)//'/src')
+        call fs_make_dir(trim(whole_root)//'/build')
+        call fs_make_dir(trim(whole_root)//'/cache')
+        call fs_make_dir(trim(whole_root)//'/.cache')
+        call write(trim(whole_root)//'/fpm.toml', &
+            'name = "whole-root-fixture"'//new_line('a')// &
+            '[build]'//new_line('a')// &
+            'source-dir = "."')
+        call write(trim(whole_root)//'/src/main.f90', 'program main')
+        call write(trim(whole_root)//'/build/generated.f90', &
+            'program generated')
+        call write(trim(whole_root)//'/cache/generated.dat', 'generated')
+        call write(trim(whole_root)//'/.cache/generated.dat', 'generated')
+
+        call input_inventory_discover(trim(whole_root), none, before, status, &
+            message)
+        call require(status == 0, 'whole-root inventory: '//trim(message))
+        call require(has_entry(before, 'project', 'src/main.f90', &
+            'build-source'), 'whole-root scan keeps configured source files')
+        call write(trim(whole_root)//'/build/generated.f90', &
+            'program generated_changed')
+        call write(trim(whole_root)//'/cache/generated.dat', 'changed')
+        call write(trim(whole_root)//'/.cache/generated.dat', 'changed')
+        call input_inventory_discover(trim(whole_root), none, after, status, &
+            message)
+        call require(status == 0, &
+            'whole-root inventory after output edits: '//trim(message))
+        call require(before%digest == after%digest, &
+            'whole-root generated directories do not affect inventory identity')
+        call fs_remove_tree(trim(whole_root))
+    end subroutine check_whole_root_outputs
 
     subroutine discover(inventory, status, message)
         type(input_inventory_t), intent(out) :: inventory
