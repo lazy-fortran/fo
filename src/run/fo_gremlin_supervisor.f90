@@ -266,7 +266,8 @@ contains
         call process_start_argv_logged(project_dir, packed, n_args, log_file, &
             pid, spawn_exit)
         if (spawn_exit /= 0) then
-            call error_response('start', 'cannot launch the Gremlin owner', response)
+            call error_response('start', 'cannot launch the Gremlin owner '// &
+                '(process setup error '//int_text(spawn_exit)//')', response)
             exitcode = 2
             return
         end if
@@ -1145,11 +1146,12 @@ contains
             exitcode = 2
             return
         end if
-        call change_watch_init(change_watch, project_dir, ierr)
+        call change_watch_init(change_watch, project_dir, ierr, message)
         if (ierr /= 0) then
             call change_watch_close(change_watch)
             call release_if_owner(session, state_error, state_message)
-            call error_response('run', 'cannot start Gremlin change watcher', response)
+            call error_response('run', 'cannot start Gremlin change watcher: '// &
+                trim(message), response)
             exitcode = 2
             return
         end if
@@ -1173,7 +1175,8 @@ contains
                 call start_build(session, candidate_generation, build_child, ierr, message)
                 if (ierr /= 0) then
                     launch_error = ierr
-                    fatal_message = 'cannot start initial candidate build'
+                    fatal_message = 'cannot start initial candidate build '// &
+                        '(process setup error '//int_text(ierr)//')'
                     call publish_state(session, owner_request, 'build_failed', active_generation, &
                         candidate_generation, '', completed, selected_count, campaign_seed, &
                         'INFRA_ERROR', launch_error, state_error, state_message)
@@ -1181,7 +1184,8 @@ contains
                         sequence = sequence + 1
                         call record_immediate_case(session, request, candidate_generation, &
                             '<build>', launch_error, 'INFRA_ERROR', sequence, 0, &
-                            campaign_seed, build_child%log_file, ierr, message)
+                            campaign_seed, build_child%log_file, ierr, message, &
+                            credit_coverage=.false.)
                     else
                         ierr = state_error
                         message = state_message

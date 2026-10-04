@@ -273,7 +273,16 @@ void fo_change_native_clear_roots(void *handle) {
 int fo_change_native_root(void *handle, const char *path) {
     struct change_watch *w = handle;
     char **next;
+    CFStringRef decoded;
     size_t i;
+    /* Reject an unrepresentable declared path before substituting its parent
+     * for a missing root. Otherwise FSEvents silently watches another path. */
+    decoded = w->string_create(NULL, path, kCFStringEncodingUTF8);
+    if (!decoded) {
+        apple_error(w, "decode declared root", path, EILSEQ);
+        return EILSEQ;
+    }
+    w->release(decoded);
     for (i = 0; i < w->nroots; ++i)
         if (!strcmp(w->roots[i], path)) return 0;
     next = realloc(w->roots, (w->nroots + 1) * sizeof(*next));
@@ -413,7 +422,10 @@ int fo_change_native_poll(void *handle, int timeout, char *path, int capacity,
         if (until < 0) until = 0;
         if (wait_ms > until) wait_ms = until;
     }
-    if (!w->nevents) {
+    /* Dirty structural state takes precedence over queued file events. Pump
+     * its settle deadline with the caller's budget instead of spinning on the
+     * queue that will be discarded by reconciliation. */
+    if (!w->nevents || w->dirty) {
         wait_seconds = (CFTimeInterval)wait_ms / 1000.0;
         (void)w->runloop_run(w->mode, wait_seconds, true);
     }

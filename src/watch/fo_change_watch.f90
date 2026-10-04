@@ -365,8 +365,11 @@ contains
             if (first_active == 0) first_active = i
             ierr = native_root(watch%native, trim(watch%roots(i))//c_null_char)
             if (ierr /= 0) then
-                if (present(message)) message = provider_error( &
-                    'register declared root', trim(watch%roots(i)), ierr)
+                if (present(message)) then
+                    message = native_error_detail(watch%native)
+                    if (len_trim(message) == 0) message = provider_error( &
+                        'register declared root', trim(watch%roots(i)), ierr)
+                end if
                 return
             end if
         end do
