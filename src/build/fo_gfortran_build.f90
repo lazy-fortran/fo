@@ -42,6 +42,7 @@ module fo_gfortran_build
     use fo_build_stamp, only: build_stamp_matches, build_stamp_quick_matches, &
         build_stamp_save
     use fo_compiler_memo, only: compiler_memo_load, compiler_memo_save
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: error_unit, int64
     implicit none
     private
@@ -85,6 +86,13 @@ module fo_gfortran_build
     public :: gfortran_app_source_name, gfortran_test_source_name
     public :: source_has_marker, dispatch_target
     public :: gfortran_selected_test_names, gfortran_named_test_exists
+
+    interface
+        integer(c_int) function c_unsetenv(name) bind(C, name='unsetenv')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: name(*)
+        end function c_unsetenv
+    end interface
 
 contains
 
@@ -904,6 +912,10 @@ contains
         call select_current_tests(project_dir, config, units, n_units, test_dir, &
             bin_dir, selected_names, n_selected, include_slow, tests, n_tests)
         execution_cwd = test_execution_cwd(project_dir)
+        if (len_trim(execution_cwd) == 0) then
+            exitcode = 1
+            return
+        end if
         call run_current_team(project_dir, execution_cwd, config, tests, n_tests)
         call report_current_tests(project_dir, log_file, tests, n_tests, warn_s, &
             exitcode)
@@ -915,14 +927,25 @@ contains
     function test_execution_cwd(project_dir) result(execution_cwd)
         character(len=*), intent(in) :: project_dir
         character(len=MAX_PATH) :: execution_cwd, requested_execution_cwd
+        integer(c_int) :: unset_status
         integer :: cwd_status
 
         execution_cwd = project_dir
         requested_execution_cwd = ''
         call get_environment_variable('FO_GREMLIN_EXECUTION_CWD', &
             requested_execution_cwd, status=cwd_status)
-        if (cwd_status == 0 .and. len_trim(requested_execution_cwd) > 0) &
-            execution_cwd = trim(requested_execution_cwd)
+        if (cwd_status == 0 .and. len_trim(requested_execution_cwd) > 0) then
+            ! Consume this CLI payload's private routing hint after selecting
+            ! its cwd; nested Fo commands then use their own project cwd.
+            unset_status = c_unsetenv('FO_GREMLIN_EXECUTION_CWD'//c_null_char)
+            if (unset_status /= 0_c_int) then
+                write (error_unit, '(a)') &
+                    'fo: cannot clear internal Gremlin execution cwd from test environment'
+                execution_cwd = ''
+            else
+                execution_cwd = trim(requested_execution_cwd)
+            end if
+        end if
     end function test_execution_cwd
 
     subroutine selected_test_targets_ready(project_dir, test_dir, bin_dir, &
@@ -2776,7 +2799,14 @@ contains
 
         bonly = .false.
         if (present(build_only)) bonly = build_only
-        execution_cwd = test_execution_cwd(project_dir)
+        execution_cwd = project_dir
+        if (.not. bonly) then
+            execution_cwd = test_execution_cwd(project_dir)
+            if (len_trim(execution_cwd) == 0) then
+                exitcode = 1
+                return
+            end if
+        end if
         test_flags = ''
         if (present(flags)) test_flags = flags
         call append_array_temporary_warning_flag(fc_command(), test_flags)
