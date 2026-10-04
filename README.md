@@ -5,6 +5,27 @@ module DAG with native OpenMP parallelism, caches compilation actions by
 content, and reports compact diagnostics suitable for people and coding
 agents. CMake projects use CMake and CTest directly.
 
+## Scope
+
+`fo` aims for the product boundary of a focused Fortran development tool: roughly
+the build/test/run/cache role of Cargo or the Go toolchain, plus practical
+formatting, lint/static diagnostics, LSP/MCP integration and continuous
+affected-test feedback.
+
+It deliberately does **not** replace fpm as the package manifest/registry, Nix
+or Spack as an environment manager, containers as a sandbox, CI as repository
+governance, agent frameworks as task schedulers, or FortSym/other research tools
+as proof/synthesis/workflow systems. The older capsule/provenance/Nix/FortOS
+experiments remain historical closed issues (#1, #3, #6, #7); `fo prove` /
+synthesis (#120) and complete host toolchain/runtime capture (#157) are also
+closed as out of scope.
+
+For reproducibility, fo guarantees what a build/test driver reasonably can:
+content-based cache/action identities, explicit project inputs, deterministic
+selection/replay where supported, and honest compiler/configuration reporting.
+Hermetic operating environments should be supplied externally when required.
+
+
 ## Install
 
 ```bash
