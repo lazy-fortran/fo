@@ -566,6 +566,7 @@ int fo_c_generation_capture_file(const char *root, const char *relative,
             return errno;
         }
         if (next == NULL) break;
+        *next = '/';
         part = next + 1;
     }
     root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
