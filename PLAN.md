@@ -18,27 +18,32 @@ The six near-term milestones are listed under [Revised standalone target](#revis
 Current provider targets name focused scope; they do not by themselves prove
 the exact candidate-B public behavior.
 
-Verified runtime source is on main at `4e0090d` (integrated source `71d59e1`).
-The adopted driver has SHA256
-`c3847777cfc204b7c88871b206fd51192f43e1421e36744614d82803655c1e73`.
-Seven focused native checks pass: the three initial gates, generation manifest,
-current requirement recovery, public readiness/restart, and cache behavior.
-The cached-generation gate bridge and overlapping dependency materialization
-repairs are verified. Bare `fo` now starts/attaches Gremlin; `fo verify` names
-the former staged pipeline.
+Verified runtime source is on main through `9e0ca2d`. The adopted driver is
+`a84747f49d1dd15389b68b743f89a1e11f5f1b7d31fa6be5549bb9a2ecb60c6d`.
+Its four focused gates pass: input inventory, manifest capture/reuse, execution
+view and utility behavior. Prior driver `c3847777` also passed public readiness,
+restart/requirement recovery and cache checks at source `71d59e1`. Bare `fo`
+starts/attaches the default Gremlin lane; `fo verify` names the former pipeline.
 
-Actual self-project startup exposed the next blocker: canonical input filtering
-omits legitimate `src/build` and `src/cache` directories, so the frozen Fo
-candidate cannot compile. Its owned resident was stopped and reaped; no active
-self-project generation or test receipts are claimed. Repair that generic input
-boundary with a native fixture, then restart on the main checkout. This consumer
-repair takes priority over unrelated source promotion.
+The input-boundary repair retains legitimate `src/build` and `src/cache` while
+excluding generated root outputs. Actual Fo resident session
+`3623392-1791130701-091998317` built generation `448e724e` successfully and
+recorded utility and inventory PASS. Its required execution-view case and a
+background MCP-cleanup case failed: the native harness rejects inherited process
+containment before launching its nested child. Repair the shared capture/ownership
+adapter, preserving separate streams and scoped descendant cleanup. The owner
+was stopped and reaped to admit focused dependency verification; receipts remain.
+The three-case gate is not green yet, and no full Fo verification is claimed.
 
-Fx `a89b787` is locally verified and pushed to main: warm restoration avoids a
-second matching-output hash and unnecessary transient-lock directory sync.
-Fo's duplicate lookup before restore is integrated and its cache gate passes.
-Validated result-store initialization reuse remains open in fx#57. No
-end-to-end timing improvement or reduced capture write volume is claimed yet.
+Fx `537a165` is verified and pushed to main. Single-blob materialization uses
+its verified held descriptor instead of rewriting the entire lease snapshot
+twice per file. Four focused checks pass, including unlink/corruption/destination
+behavior and multi-file graph lease lifetime. This addresses observed metadata
+amplification: an approximately 11 MB Fo bundle produced over 1 GB of lease
+metadata writes. Graph/publication leases and durable roots remain. Fo must now
+rebuild/adopt that dependency and recheck its original resident consumer.
+Validated store initialization reuse and warm local-hit lease avoidance remain
+open in fx#57; no end-to-end improvement is claimed before consumer recheck.
 
 - **Benchmarks are never the development gate.** Real timing/resource runs and
    third-party project acquisition belong to independent scheduled/manual CI or
