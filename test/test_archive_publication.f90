@@ -16,7 +16,7 @@ program test_archive_publication
     character(:), allocatable :: driver, scratch, project, cache, fake_bin, real_ar
     character(:), allocatable :: real_fc, real_gcc, archive, old_archive, marker, lib_dir, bin_dir
     character(:), allocatable :: digest_before
-    character(:), allocatable :: timeout_scratch, heartbeat, baseline
+    character(:), allocatable :: timeout_scratch, heartbeat, baseline, alive_sample
     type(string_list_t) :: args, env
     type(process_result_t) :: result, child_result, external
     type(json_value_t) :: report
@@ -232,14 +232,31 @@ program test_archive_publication
     call start_sentinel(sentinel)
     call spawn_heartbeat_process('heartbeat', timeout_scratch, child)
     timed_child = child
+    call wait_for(heartbeat, 100, child, found)
+    if (found) then
+        call assert_true(process_alive(child), 'heartbeat owner stays alive during setup')
+        baseline = read_text(heartbeat)
+        call assert_true(len(baseline) > 0, 'heartbeat has bytes before timeout')
+        call pause_repeatedly(5)
+        alive_sample = read_text(heartbeat)
+        call assert_true(len(alive_sample) > len(baseline), &
+            'heartbeat advances while its child is alive')
+        call assert_true(process_alive(child), 'heartbeat child remains alive before timeout')
+    else
+        call assert_true(.false., 'heartbeat child writes before forced timeout')
+    end if
     call wait_for('never-created', 5, child, found)
     call assert_true(.not. found, 'forced publication marker timeout is observed')
     call assert_true(.not. process_alive(timed_child), &
         'timed-out publication child is reaped')
-    baseline = read_text(heartbeat)
-    call pause()
-    call assert_equal_string(read_text(heartbeat), baseline, &
-        'publication heartbeat stops after timeout cleanup')
+    if (file_exists(heartbeat)) then
+        baseline = read_text(heartbeat)
+        call pause_repeatedly(5)
+        call assert_equal_string(read_text(heartbeat), baseline, &
+            'publication heartbeat stops after timeout cleanup')
+    else
+        call assert_true(.false., 'heartbeat file remains for post-timeout check')
+    end if
     call assert_true(process_alive(sentinel), &
         'unrelated sentinel survives publication group cleanup')
     call stop_sentinel(sentinel)
@@ -627,8 +644,7 @@ contains
             end if
             call pause()
         end do
-        call terminate_process_group(process_id, ignored_status)
-        process_id = -1
+        call terminate_owned(process_id, ignored_status)
     end subroutine wait_for
 
     subroutine poll_until(process_id, exit_status)
@@ -639,26 +655,48 @@ contains
         do i = 1, 300
             call poll_process(process_id, exit_status)
             if (exit_status /= 999) then
-                process_id = -1
+                if (exit_status == -999 .or. exit_status == -998) then
+                    call terminate_owned(process_id, exit_status)
+                    call assert_true(.false., 'poll background publication process')
+                else
+                    process_id = -1
+                end if
                 return
             end if
             call pause()
         end do
-        call terminate_process_group(process_id, exit_status)
-        process_id = -1
+        call terminate_owned(process_id, exit_status)
         call assert_true(.false., 'background publication process completes')
     end subroutine poll_until
 
     subroutine cleanup_child()
         integer :: ignored_status
 
-        call terminate_process_group(child, ignored_status)
-        child = -1
+        call terminate_owned(child, ignored_status)
     end subroutine cleanup_child
+
+    subroutine terminate_owned(process_id, exit_status)
+        integer, intent(inout) :: process_id
+        integer, intent(out) :: exit_status
+        logical :: owned_reaped
+
+        call terminate_process_group(process_id, exit_status, owned_reaped)
+        call assert_true(owned_reaped, 'owned publication process is reaped before cleanup')
+        if (.not. owned_reaped) error stop 'preserving scratch after reap failure'
+    end subroutine terminate_owned
 
     subroutine pause()
         call run_external('/bin/sleep', words([character(len=16) :: '0.02']), scratch, external)
     end subroutine pause
+
+    subroutine pause_repeatedly(count)
+        integer, intent(in) :: count
+        integer :: i
+
+        do i = 1, count
+            call pause()
+        end do
+    end subroutine pause_repeatedly
 
     integer function log_lines(path) result(count)
         character(len=*), intent(in) :: path

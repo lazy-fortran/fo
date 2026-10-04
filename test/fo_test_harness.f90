@@ -216,6 +216,11 @@ module fo_test_harness
             integer(c_int), intent(out) :: status
         end function c_wait_nonblocking
 
+        integer(c_int) function c_wait_blocking(process) bind(C, name='fo_test_wait_blocking')
+            import :: c_int
+            integer(c_int), value :: process
+        end function c_wait_blocking
+
         integer(c_int) function c_spawn_heartbeat(path, directory) &
                 bind(C, name='fo_test_spawn_heartbeat')
             import :: c_char, c_int
@@ -267,15 +272,20 @@ contains
         call assert_true(rc == 0, 'signal fixture process group')
     end subroutine signal_process_group
 
-    subroutine terminate_process_group(process_id, status)
-        integer, intent(in) :: process_id
+    subroutine terminate_process_group(process_id, status, owned_reaped)
+        integer, intent(inout) :: process_id
         integer, intent(out) :: status
+        logical, intent(out) :: owned_reaped
         integer(c_int) :: rc
         integer :: attempt
         type(pollfd_t) :: no_descriptors(1)
 
-        status = 999
-        if (process_id <= 0) return
+        status = -999
+        owned_reaped = process_id <= 0
+        if (owned_reaped) then
+            process_id = -1
+            return
+        end if
         rc = c_signal_group(int(process_id, c_int), 15_c_int)
         do attempt = 1, 50
             rc = c_poll(no_descriptors, 0_c_size_t, 20_c_int)
@@ -286,7 +296,11 @@ contains
             if (status /= 999) exit
             rc = c_poll(no_descriptors, 0_c_size_t, 20_c_int)
         end do
-        call assert_true(status /= 999, 'terminate and reap owned process group')
+        if (status == 999 .or. status == -999 .or. status == -998) then
+            status = int(c_wait_blocking(int(process_id, c_int)))
+        end if
+        owned_reaped = status /= -999 .and. status /= -998 .and. status /= 999
+        if (owned_reaped) process_id = -1
     end subroutine terminate_process_group
 
     subroutine spawn_heartbeat_process(path, directory, process_id)
