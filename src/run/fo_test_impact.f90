@@ -322,7 +322,7 @@ contains
         type(input_entry_t), intent(in) :: left, right
         entry_equal = trim(left%role) == trim(right%role) .and. &
             left%kind == right%kind .and. left%mode == right%mode .and. &
-            left%writable_at_execution .eqv. right%writable_at_execution
+            (left%writable_at_execution .eqv. right%writable_at_execution)
         if (.not. entry_equal) return
         entry_equal = trim(left%link_target) == trim(right%link_target) .and. &
             trim(left%content_digest) == trim(right%content_digest)
