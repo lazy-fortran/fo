@@ -53,17 +53,18 @@ jobs:
           "$fo_path" test test_bench_driver
 
       - name: Run optional bounded benchmark audit
+        working-directory: bench
         env:
           FO_CACHE_DIR: ${{ runner.temp }}/fo-bench-driver-cache
         run: |
           fo_path="$HOME/.local/bin/fo"
           report_dir="$RUNNER_TEMP/fo-benchmark-report"
           mkdir -p "$report_dir"
-          bench/build/fo/bin/fo-bench run \
+          "$fo_path" exec fo-bench run \
             --fo "$fo_path" --reps 1 \
             --output "$report_dir/results.jsonl" \
             --workloads "$GITHUB_WORKSPACE/bench/workloads"
-          bench/build/fo/bin/fo-bench report --complete \
+          "$fo_path" exec fo-bench report --complete \
             "$report_dir/results.jsonl"
           test "$(wc -l < "$report_dir/results.jsonl")" -eq 8
           echo "FO_AUDIT_REPORT=$report_dir/results.jsonl" >> "$GITHUB_ENV"
