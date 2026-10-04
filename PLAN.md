@@ -18,11 +18,21 @@ The six near-term milestones are listed under [Revised standalone target](#revis
 Current provider targets name focused scope; they do not by themselves prove
 the exact candidate-B public behavior.
 
-The reader/native MCP increment is pushed through `7843dc4`: `test_util`,
-`test_mcp_cancel_error`, and `test_mcp_gremlin_stale` each pass against the
-recorded new image. Combined manifest/recovery candidate `1ba4a74` passes its
-three provider gates; its public recovery gate exposed a candidate build
-failure and is under investigation. No resident Fo lane is claimed active yet.
+The reader/native MCP increment is pushed through `7843dc4`. Combined source
+`6856e19` builds candidate B (`6cb62c1e` image digest). The three named initial
+gates, manifest provider, frozen reproduction, default CLI, MCP cancellation
+and stale-peer checks pass. Corrected lifecycle fixtures also verify failed-build
+retention and successful-generation preemption. A restart/return-to-cached-input
+check still fails to obtain a fresh verification token; preserve its state and
+repair that gate-obligation bridge before claiming full readiness acceptance.
+No resident Fo lane is claimed active yet. Integration branch progress is pushed;
+the combined source has not been promoted to main.
+
+Fx `a89b787` is locally verified and pushed to main: warm restoration avoids a
+second matching-output hash and unnecessary transient-lock directory sync.
+Fo's duplicate lookup before restore is prepared in the integration branch;
+its combined consumer gate remains pending. Validated result-store initialization
+reuse remains open in fx#57. No end-to-end timing improvement is claimed yet.
 
 - **Benchmarks are never the development gate.** Real timing/resource runs and
    third-party project acquisition belong to independent scheduled/manual CI or
