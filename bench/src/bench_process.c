@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -31,6 +32,57 @@ int fo_bench_mkdir(const char *path) {
 }
 
 int fo_bench_getpid(void) { return (int)getpid(); }
+
+int fo_bench_create_temp(const char *prefix, char *output, size_t capacity) {
+    int n = snprintf(output, capacity, "%sXXXXXX", prefix);
+    if (n < 0) return errno ? errno : EINVAL;
+    if ((size_t)n >= capacity) return ENAMETOOLONG;
+    if (!mkdtemp(output)) return errno;
+    return 0;
+}
+
+static int remove_entry(const char *path) {
+    struct stat info;
+    if (lstat(path, &info) != 0) return errno;
+    if (S_ISDIR(info.st_mode)) {
+        DIR *directory = opendir(path);
+        struct dirent *entry;
+        int result = 0;
+        if (!directory) return errno;
+        while ((entry = readdir(directory)) != NULL) {
+            char child[4096];
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+                continue;
+            int n = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+            if (n < 0 || (size_t)n >= sizeof(child)) { result = ENAMETOOLONG; break; }
+            result = remove_entry(child);
+            if (result != 0) break;
+        }
+        closedir(directory);
+        if (result != 0) return result;
+        if (rmdir(path) != 0) return errno;
+        return 0;
+    }
+    if (unlink(path) != 0) return errno;
+    return 0;
+}
+
+int fo_bench_remove_owned_temp(const char *path) {
+    static const char *const prefixes[] = {
+        "/var/tmp/fo-bench-cache-", "/var/tmp/fo-bench-fixture-"
+    };
+    int allowed = 0;
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i) {
+        size_t length = strlen(prefixes[i]);
+        if (strncmp(path, prefixes[i], length) == 0 && path[length] != '\0' &&
+            strchr(path + length, '/') == NULL && strstr(path + length, "..") == NULL) {
+            allowed = 1;
+            break;
+        }
+    }
+    if (!allowed) return EPERM;
+    return remove_entry(path);
+}
 
 int fo_bench_touch(const char *path) {
     struct timespec now[2];
@@ -64,7 +116,7 @@ void fo_bench_sleep_ms(int milliseconds) {
     while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {}
 }
 
-/* argv is a sequence of NUL-terminated strings; direct children are reaped. */
+/* argv tokens use byte 1 separators; direct children are reaped. */
 int fo_bench_run_argv(const char *cwd, const char *argv_blob, int argc,
                       const char *output_path, int timeout_seconds) {
     char **argv = calloc((size_t)argc + 1, sizeof(char *));

@@ -18,8 +18,10 @@ bench/build/fo/bin/fo-bench run \
   --output /var/tmp/fo-benchmark.jsonl \
   --workloads "$PWD/bench/workloads"
 bench/build/fo/bin/fo-bench report /var/tmp/fo-benchmark.jsonl
+bench/build/fo/bin/fo-bench report --complete /var/tmp/fo-benchmark.jsonl
 ```
 
+`report --complete` also requires exactly the eight known benchmark metrics.
 `BENCH_REPS` and `BENCH_OUTPUT` provide defaults for `--reps` and `--output`.
-The runner sets self-refresh off and uses a process-specific cache under
+The runner sets self-refresh off and uses a uniquely created cache under
 `/var/tmp`; each workload keeps its own build tree for incremental measurements.

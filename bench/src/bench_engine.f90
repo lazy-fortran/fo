@@ -1,5 +1,5 @@
 module bench_engine
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_int64_t, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_int64_t, c_size_t, c_null_char
     use, intrinsic :: iso_fortran_env, only: real64, output_unit, error_unit
     use bench_json, only: json_value_t, json_object, json_array, json_number, json_string
     use bench_json, only: json_parse, json_member, json_number_value, json_string_value
@@ -15,7 +15,14 @@ module bench_engine
             import :: c_char,c_int
             character(kind=c_char), intent(in) :: name(*),value(*)
         end function
-        integer(c_int) function make_dir(path) bind(C,name='fo_bench_mkdir')
+        integer(c_int) function create_temp(prefix,path,capacity) bind(C,name='fo_bench_create_temp')
+            import :: c_char,c_int,c_size_t
+            character(kind=c_char), intent(in) :: prefix(*)
+            character(kind=c_char), intent(out) :: path(*)
+            integer(c_size_t), value :: capacity
+        end function
+        integer(c_int) function remove_owned_temp(path) &
+                bind(C,name='fo_bench_remove_owned_temp')
             import :: c_char,c_int
             character(kind=c_char), intent(in) :: path(*)
         end function
@@ -38,28 +45,30 @@ contains
         character(len=*), intent(in) :: fo,output,workloads
         integer, intent(in) :: reps
         integer, intent(out) :: exitcode
-        character(64) :: stamp
         character(:), allocatable :: cache
+        character(kind=c_char) :: cache_buffer(256)
+        character(len=4096) :: args(3)
         integer :: ios,u,failures
         integer(c_int) :: rc
         if(reps<1 .or. reps>1000) then
             write(error_unit,'(a)') 'fo bench: repetitions must be between 1 and 1000'
             exitcode=1; return
         end if
-        write(stamp,'(i0)') current_pid()
-        cache='/var/tmp/fo-bench-cache-'//trim(stamp)
-        rc=make_dir(cache//c_null_char)
+        rc=create_temp('/var/tmp/fo-bench-cache-'//c_null_char,cache_buffer, &
+            int(size(cache_buffer),c_size_t))
         if(rc/=0) then
             write(error_unit,'(a)') 'fo bench: cannot create isolated cache directory'
             exitcode=1; return
         end if
+        cache=c_string(cache_buffer)
         rc=set_env('FO_CACHE_DIR'//c_null_char,cache//c_null_char)
-        rc=set_env('FO_DISABLE_SELF_REFRESH'//c_null_char,'1'//c_null_char)
-        rc=set_env('FO_SELF_REFRESH'//c_null_char,'0'//c_null_char)
-        rc=set_env('TMPDIR'//c_null_char,'/var/tmp'//c_null_char)
+        if(rc==0) rc=set_env('FO_DISABLE_SELF_REFRESH'//c_null_char,'1'//c_null_char)
+        if(rc==0) rc=set_env('FO_SELF_REFRESH'//c_null_char,'0'//c_null_char)
+        if(rc==0) rc=set_env('TMPDIR'//c_null_char,'/var/tmp'//c_null_char)
         if(rc/=0) then
             write(error_unit,'(a)') 'fo bench: cannot set isolated fo environment'
-            exitcode=1; return
+            call discard_cache(cache,exitcode)
+            return
         end if
         if(trim(output)=='/dev/stdout') then
             u=output_unit
@@ -67,29 +76,42 @@ contains
             open(newunit=u,file=output,status='replace',action='write',iostat=ios)
             if(ios/=0) then
                 write(error_unit,'(a)') 'fo bench: cannot open JSONL output: '//trim(output)
-                exitcode=1; return
+                exitcode=1
+                call discard_cache(cache,exitcode)
+                return
             end if
         end if
         failures=0
         call warm('many_tests',workloads,fo,failures)
+        args(1)=fo; args(2)='check'; args(3)='--json'
         call measure(u,'many_tests','fo','check_json',workloads//'/many_tests', &
-            [fo,'check','--json'],reps,failures)
+            args(:3),reps,failures)
+        args(2)='test'
         call measure(u,'many_tests','fo','test',workloads//'/many_tests', &
-            [fo,'test'],reps,failures)
+            args(:2),reps,failures)
+        args(2)='check'
         call measure(u,'many_tests','fo','check',workloads//'/many_tests', &
-            [fo,'check'],reps,failures)
+            args(:2),reps,failures)
         call warm('bigmod',workloads,fo,failures)
+        args(2)='check'; args(3)='--json'
         call measure(u,'bigmod','fo','check_json',workloads//'/bigmod', &
-            [fo,'check','--json'],reps,failures)
+            args(:3),reps,failures)
+        args(2)='build'
         call measure(u,'bigmod','fo','build',workloads//'/bigmod', &
-            [fo,'build'],reps,failures)
+            args(:2),reps,failures)
         call measured_touch(u,'bigmod','incremental_leaf',workloads//'/bigmod', &
             fo,'src/leaf_1.f90',reps,failures)
         call measured_touch(u,'bigmod','incremental_core',workloads//'/bigmod', &
             fo,'src/core.f90',reps,failures)
+        args(2)='check'; args(3)='--json'
         call measure(u,'diagnostics','fo','diag_latency',workloads//'/diagnostics', &
-            [fo,'check','--json'],reps,failures,expected_exit=1)
+            args(:3),reps,failures,expected_exit=1)
         if(trim(output)/='/dev/stdout') close(u)
+        rc=remove_owned_temp(cache//c_null_char)
+        if(rc/=0) then
+            write(error_unit,'(a,i0,a)') 'fo bench: failed to remove owned cache (errno ',rc,')'
+            failures=failures+1
+        end if
         if(failures>0) then
             write(error_unit,'(a,i0,a)') 'fo bench: ',failures,' command(s) failed; see JSONL evidence'
             exitcode=1
@@ -97,6 +119,28 @@ contains
             exitcode=0
         end if
     end subroutine run_benchmarks
+
+    subroutine discard_cache(cache,exitcode)
+        character(len=*), intent(in) :: cache
+        integer, intent(inout) :: exitcode
+        integer(c_int) :: rc
+        rc=remove_owned_temp(cache//c_null_char)
+        if(rc/=0) then
+            write(error_unit,'(a,i0,a)') 'fo bench: failed to remove owned cache (errno ',rc,')'
+            exitcode=1
+        end if
+    end subroutine discard_cache
+
+    function c_string(buffer) result(value)
+        character(kind=c_char), intent(in) :: buffer(:)
+        character(:), allocatable :: value
+        integer :: i
+        value=''
+        do i=1,size(buffer)
+            if(buffer(i)==c_null_char) exit
+            value=value//buffer(i)
+        end do
+    end function c_string
 
     subroutine warm(name,root,fo,failures)
         character(len=*), intent(in) :: name,root,fo
@@ -151,10 +195,12 @@ contains
         integer, allocatable :: exits(:)
         character(512), allocatable :: logs(:)
         character(32) :: rep_text
+        character(len=len(fo)) :: args(2)
         integer :: i,pid
         integer(c_int) :: rc
         allocate(times(reps),exits(reps),logs(reps))
         pid=int(current_pid())
+        args(1)=fo; args(2)='build'
         do i=1,reps
             write(rep_text,'(i0)') i
             logs(i)='/var/tmp/fo-bench-'//integer_text(pid)//'-'//metric//'-'//trim(rep_text)//'.log'
@@ -162,7 +208,7 @@ contains
             if(rc/=0) then
                 times(i)=0.0_real64; exits(i)=rc
             else
-                call run_one(cwd,[fo,'build'],trim(logs(i)),times(i),exits(i))
+                call run_one(cwd,args,trim(logs(i)),times(i),exits(i))
             end if
             if(exits(i)/=0) failures=failures+1
             if(exits(i)==0) then
@@ -266,18 +312,21 @@ contains
         end if
     end function median_value
 
-    subroutine report_jsonl(path,exitcode)
+    subroutine report_jsonl(path,exitcode,require_complete)
         character(len=*), intent(in) :: path
         integer, intent(out) :: exitcode
+        logical, intent(in), optional :: require_complete
         character(1048576) :: line
         character(:), allocatable :: message,case_name,metric,status
         character(8) :: target_text
         type(json_value_t) :: row,case_field,metric_field,median_field,exit_field
         type(json_value_t) :: n_field,times_field,outputs_field,output_item,expected_field
         logical :: valid,all_pass,has_exit_failure,samples_valid,output_exists
-        integer :: u,ios,count,i,n_value,expected_exit
+        logical :: complete,seen(8)
+        integer :: u,ios,count,i,n_value,expected_exit,inventory_id
         real(real64) :: median,target,derived_median,n_real,expected_real
-        all_pass=.true.; count=0
+        all_pass=.true.; count=0; seen=.false.; complete=.false.
+        if(present(require_complete)) complete=require_complete
         open(newunit=u,file=path,status='old',action='read',iostat=ios)
         if(ios/=0) then
             write(*,'(a)') 'fo bench report: cannot open input: '//trim(path)
@@ -308,28 +357,40 @@ contains
             expected_field=json_member(row,'expected_exit')
             case_name=json_string_value(case_field); metric=json_string_value(metric_field)
             if(len(case_name)==0 .or. len(metric)==0 .or. exit_field%kind/=json_array .or. &
-                    times_field%kind/=json_array .or. outputs_field%kind/=json_array .or. &
-                    n_field%kind/=json_number .or. expected_field%kind/=json_number) then
+                times_field%kind/=json_array .or. outputs_field%kind/=json_array .or. &
+                n_field%kind/=json_number .or. expected_field%kind/=json_number) then
                 write(*,'(a)') 'fo bench report: missing required fields'
                 all_pass=.false.; exit
+            end if
+            if(complete) then
+                inventory_id=inventory_index(case_name,metric)
+                if(inventory_id==0) then
+                    write(*,'(a)') 'fo bench report: unexpected benchmark metric in complete inventory'
+                    all_pass=.false.; exit
+                end if
+                if(seen(inventory_id)) then
+                    write(*,'(a)') 'fo bench report: duplicate benchmark metric in complete inventory'
+                    all_pass=.false.; exit
+                end if
+                seen(inventory_id)=.true.
             end if
             n_real=json_number_value(n_field)
             expected_real=json_number_value(expected_field)
             if(n_real<1.0_real64 .or. n_real>1000.0_real64 .or. &
-                    expected_real<0.0_real64 .or. expected_real>255.0_real64) then
+                expected_real<0.0_real64 .or. expected_real>255.0_real64) then
                 write(*,'(a)') 'fo bench report: invalid repetition or expected exit count'
                 all_pass=.false.; exit
             end if
             n_value=nint(n_real); expected_exit=nint(expected_real)
             if(abs(expected_real-real(expected_exit,real64))>1.0e-12_real64 .or. &
-                    abs(n_real-real(n_value,real64))>1.0e-12_real64 .or. &
-                    .not.allocated(times_field%children) .or. &
-                    .not.allocated(exit_field%children) .or. .not.allocated(outputs_field%children)) then
+                abs(n_real-real(n_value,real64))>1.0e-12_real64 .or. &
+                .not.allocated(times_field%children) .or. &
+                .not.allocated(exit_field%children) .or. .not.allocated(outputs_field%children)) then
                 write(*,'(a)') 'fo bench report: invalid repetition evidence'
                 all_pass=.false.; exit
             end if
             if(size(times_field%children)/=n_value .or. size(exit_field%children)/=n_value .or. &
-                    size(outputs_field%children)/=n_value) then
+                size(outputs_field%children)/=n_value) then
                 write(*,'(a)') 'fo bench report: repetition count does not match evidence arrays'
                 all_pass=.false.; exit
             end if
@@ -401,6 +462,10 @@ contains
             count=count+1
         end do
         close(u)
+        if(complete .and. .not.all(seen)) then
+            write(*,'(a)') 'fo bench report: incomplete benchmark metric inventory'
+            all_pass=.false.
+        end if
         if(count==0) then
             write(*,'(a)') 'fo bench report: no results'
             exitcode=1
@@ -412,6 +477,21 @@ contains
             exitcode=1
         end if
     end subroutine report_jsonl
+
+    integer function inventory_index(case_name,metric) result(index_value)
+        character(len=*), intent(in) :: case_name,metric
+        index_value=0
+        select case(case_name//':'//metric)
+        case('many_tests:check_json'); index_value=1
+        case('many_tests:test'); index_value=2
+        case('many_tests:check'); index_value=3
+        case('bigmod:check_json'); index_value=4
+        case('bigmod:build'); index_value=5
+        case('bigmod:incremental_leaf'); index_value=6
+        case('bigmod:incremental_core'); index_value=7
+        case('diagnostics:diag_latency'); index_value=8
+        end select
+    end function inventory_index
 
     real(real64) function target_for(case_name,metric) result(target)
         character(len=*), intent(in) :: case_name,metric
