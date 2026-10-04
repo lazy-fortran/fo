@@ -226,6 +226,18 @@ Scientific repositories retain human review/required CI/golden-record policies.
 Complete project/performance audits do not gate ordinary fo main increments.
 #199 is optional and never blocks delegated CMake compatibility.
 
+Operational rollout: the shared prompts/Fortran skill defaults to resident
+Gremlin for both fpm and CMake consumers. Follow the detailed plan's delegated
+vertical slice (#193 plus bounded #194/#195) before event-driven serialized
+operation, then #196 slots and #197 precision. This work can land alongside the
+native engine migration; it does not wait for #199 or the full #198 audit.
+A serialized slot stops/reaps tests before mutation and reports unavailable
+last-compilable overlap. Keep backend capabilities separate from resident
+session lifetime (#142/#155): completed tests never expire a persistent owner.
+Consumer failures become focused upstream fo/dependency repairs and are checked
+again in the original profile. Ordinary CTest success does not establish Gremlin
+freshness, cancellation or receipt support. Shared prompts retain those limits.
+
 ## One architecture
 
 ```text
