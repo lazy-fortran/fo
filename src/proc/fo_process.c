@@ -140,6 +140,19 @@ struct path_list {
     size_t cap;
 };
 
+struct scan_directory_identity {
+    dev_t device;
+    ino_t inode;
+};
+
+struct scan_directory_set {
+    struct scan_directory_identity *items;
+    size_t n;
+    size_t cap;
+};
+
+#define FO_SCAN_PATH_CAPACITY 4096
+
 static int path_list_add(struct path_list *list, const char *path) {
     char **next;
 
@@ -172,11 +185,64 @@ static void path_list_free(struct path_list *list) {
     list->cap = 0;
 }
 
-static int is_project_root(const char *dir) {
-    char path[4096];
+static int join_scan_path(char *path, size_t capacity, const char *dir,
+                          const char *name) {
+    int length = snprintf(path, capacity, "%s/%s", dir, name);
+    if (length < 0 || (size_t)length >= capacity) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
+static void report_scan_path_too_long(void) {
+    static const char message[] =
+        "fo: source scan path exceeds supported length\n";
+    (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+}
+
+static int is_project_root(const char *dir, int *is_root) {
+    char path[FO_SCAN_PATH_CAPACITY];
     struct stat st;
-    snprintf(path, sizeof(path), "%s/fpm.toml", dir);
-    if (stat(path, &st) == 0) return 1;
+
+    if (join_scan_path(path, sizeof(path), dir, "fpm.toml") != 0) return -1;
+    if (stat(path, &st) == 0) {
+        *is_root = 1;
+        return 0;
+    }
+    if (errno == ENAMETOOLONG) return -1;
+    *is_root = 0;
+    return 0;
+}
+
+/* Returns 1 for an already visited directory, 0 for a new one, and -1 on
+   allocation failure. Device and inode identify the target reached through a
+   directory symlink, so a cycle cannot recurse indefinitely. */
+static int scan_directory_set_add(struct scan_directory_set *set,
+                                  const struct stat *info) {
+    struct scan_directory_identity *next;
+    size_t i;
+
+    for (i = 0; i < set->n; i++) {
+        if (set->items[i].device == info->st_dev &&
+            set->items[i].inode == info->st_ino) {
+            return 1;
+        }
+    }
+    if (set->n == set->cap) {
+        size_t next_cap = set->cap == 0 ? 64 : set->cap * 2;
+        if (next_cap < set->cap ||
+            next_cap > SIZE_MAX / sizeof(*set->items)) {
+            return -1;
+        }
+        next = realloc(set->items, next_cap * sizeof(*set->items));
+        if (next == NULL) return -1;
+        set->items = next;
+        set->cap = next_cap;
+    }
+    set->items[set->n].device = info->st_dev;
+    set->items[set->n].inode = info->st_ino;
+    set->n++;
     return 0;
 }
 
@@ -212,23 +278,60 @@ static int has_fortran_ext(const char *path) {
 }
 
 static int scan_sources_recursive(const char *dir, struct path_list *list,
+                                  struct scan_directory_set *visited,
                                   int required, int is_proj_root, int depth) {
     DIR *handle;
     struct dirent *entry;
+    struct stat dir_info;
+    int directory_fd, seen;
 
     handle = opendir(dir);
-    if (handle == NULL) return required ? 1 : 0;
+    if (handle == NULL) {
+        if (errno == ENAMETOOLONG) {
+            report_scan_path_too_long();
+            return 1;
+        }
+        return required ? 1 : 0;
+    }
+    directory_fd = dirfd(handle);
+    if (directory_fd < 0 || fstat(directory_fd, &dir_info) != 0) {
+        closedir(handle);
+        return 1;
+    }
+    seen = scan_directory_set_add(visited, &dir_info);
+    if (seen != 0) {
+        closedir(handle);
+        return seen < 0 ? 1 : 0;
+    }
 
     while ((entry = readdir(handle)) != NULL) {
-        char path[4096];
+        char path[FO_SCAN_PATH_CAPACITY];
         struct stat st;
 
         if (skip_dir_name(entry->d_name, is_proj_root, depth)) continue;
-        snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
-        if (stat(path, &st) != 0) continue;
+        if (join_scan_path(path, sizeof(path), dir, entry->d_name) != 0) {
+            report_scan_path_too_long();
+            closedir(handle);
+            return 1;
+        }
+        if (stat(path, &st) != 0) {
+            if (errno == ENAMETOOLONG) {
+                report_scan_path_too_long();
+                closedir(handle);
+                return 1;
+            }
+            continue;
+        }
         if (S_ISDIR(st.st_mode)) {
-            if (depth >= 0 && is_project_root(path)) continue;
-            if (scan_sources_recursive(path, list, 0, is_proj_root, depth + 1) != 0) {
+            int nested_project = 0;
+            if (depth >= 0 && is_project_root(path, &nested_project) != 0) {
+                report_scan_path_too_long();
+                closedir(handle);
+                return 1;
+            }
+            if (depth >= 0 && nested_project) continue;
+            if (scan_sources_recursive(path, list, visited, 0, is_proj_root,
+                                       depth + 1) != 0) {
                 closedir(handle);
                 return 1;
             }
@@ -246,6 +349,7 @@ static int scan_sources_recursive(const char *dir, struct path_list *list,
 
 void fo_c_scan_sources(const char *root, const char *output_file, int *exitcode) {
     struct path_list list = {0};
+    struct scan_directory_set visited = {0};
     FILE *out;
     size_t i;
     int proj_root;
@@ -255,8 +359,13 @@ void fo_c_scan_sources(const char *root, const char *output_file, int *exitcode)
         *exitcode = 1;
         return;
     }
-    proj_root = is_project_root(root);
-    if (scan_sources_recursive(root, &list, 1, proj_root, 0) != 0) {
+    if (is_project_root(root, &proj_root) != 0) {
+        report_scan_path_too_long();
+        *exitcode = 1;
+        return;
+    }
+    if (scan_sources_recursive(root, &list, &visited, 1, proj_root, 0) != 0) {
+        free(visited.items);
         path_list_free(&list);
         *exitcode = 1;
         return;
@@ -271,6 +380,7 @@ void fo_c_scan_sources(const char *root, const char *output_file, int *exitcode)
         fclose(out);
     }
 
+    free(visited.items);
     path_list_free(&list);
 }
 
