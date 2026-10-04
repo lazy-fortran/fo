@@ -1,5 +1,5 @@
-program test_async_process_boundary
-    use, intrinsic :: iso_c_binding, only: c_int, c_char, c_null_char, &
+program test_async_process_boundary_slow
+    use, intrinsic :: iso_c_binding, only: c_int, c_char, c_null_char, c_int64_t, &
         c_funptr, c_funloc, c_associated
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit, int64, real64
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_sleep_ms
@@ -8,7 +8,8 @@ program test_async_process_boundary
         process_set_async_scope
     use fo_gremlin_state, only: gremlin_session_t, gremlin_session_acquire, &
         gremlin_session_read, gremlin_session_release
-    use fo_test_harness, only: string_list_t, process_result_t, list_add, run_process
+    use fo_test_harness, only: string_list_t, process_result_t, list_add, run_process, &
+        spawn_process, poll_process
     implicit none
 
     interface
@@ -62,6 +63,26 @@ program test_async_process_boundary
             integer(c_int), value :: owner_pid
         end function c_recover_scope
 
+        integer(c_int64_t) function c_test_start(pid) &
+                bind(C, name='fo_test_process_start_time')
+            import :: c_int, c_int64_t
+            integer(c_int), value :: pid
+        end function c_test_start
+
+        integer(c_int) function c_test_signal(pid, start, number) &
+                bind(C, name='fo_test_signal_identity')
+            import :: c_int, c_int64_t
+            integer(c_int), value :: pid, number
+            integer(c_int64_t), value :: start
+        end function c_test_signal
+
+        integer(c_int) function c_private_mode(path, directory) &
+                bind(C, name='fo_test_private_mode')
+            import :: c_char, c_int
+            character(c_char), intent(in) :: path(*)
+            integer(c_int), value :: directory
+        end function c_private_mode
+
         subroutine ignore_term(signal_number) bind(C)
             import :: c_int
             integer(c_int), value :: signal_number
@@ -112,6 +133,11 @@ program test_async_process_boundary
         call get_command_argument(3, lane_id)
         call get_command_argument(4, prefix)
         call run_scope_owner(trim(project), trim(lane_id), trim(prefix))
+        call process_exit(2)
+    end if
+    if (trim(mode) == '--reuse-session') then
+        call get_command_argument(2, prefix)
+        call run_reuse_fixture(trim(prefix))
         call process_exit(2)
     end if
 
@@ -216,6 +242,10 @@ program test_async_process_boundary
         'records nested descendants before an abrupt owner exit')
     call check(wait_for_data(trim(scratch)//'/orphan.nested.heartbeat'), &
         'nested orphan fixture is observable before owner recovery')
+    call process_poll_pid(orphan_pid, done, exitcode)
+    call check(.not. done .and. exitcode == 0, &
+        'captures exact descendant identities while the orphan leader is alive')
+    call write_text_file(trim(scratch)//'/orphan.release', 'exit')
     done = .false.
     exitcode = -1
     do ignored = 1, 500
@@ -353,6 +383,8 @@ program test_async_process_boundary
         trim(scratch)//'/recovery-sentinel.sentinel.heartbeat')
     call check(scope_sentinel_quiet, 'recovery sentinel stops after exact cancellation')
 
+    call exercise_stale_session(trim(scratch)//'/reuse', darwin)
+
     call cleanup_crash_owner(scope_owner_pid, owner_start, scope_owner_reaped)
     if (len_trim(owner_start) > 0) then
         call check(c_process_matches(int(scope_owner_pid, c_int), &
@@ -379,6 +411,242 @@ program test_async_process_boundary
     if (failed > 0) stop 1
 
 contains
+
+    function birth_text(identity, macos) result(text)
+        integer(c_int64_t), intent(in) :: identity
+        logical, intent(in) :: macos
+        character(len=64) :: text
+
+        if (macos) then
+            write (text, '(i0,".",i6.6)') identity/1000000_c_int64_t, &
+                mod(identity, 1000000_c_int64_t)
+        else
+            write (text, '(i0)') identity
+        end if
+    end function birth_text
+
+    subroutine run_reuse_fixture(target)
+        character(len=*), intent(in) :: target
+        integer(c_int) :: child, descendant, sid
+        integer(c_int64_t) :: identity
+        character(len=64) :: text
+
+        previous_handler = c_signal(15_c_int, c_funloc(ignore_term))
+        child = c_fork()
+        if (child < 0_c_int) call process_exit(20)
+        if (child /= 0_c_int) then
+            call wait_for_child_file(target, 'reuse-owner')
+            call process_exit(0)
+        end if
+        sid = c_setsid()
+        if (sid <= 0_c_int) call process_exit(21)
+        call write_pid(target, 'reuse-owner')
+        identity = c_test_start(int(process_getpid(), c_int))
+        write (text, '(i0)') identity
+        call write_text_file(target//'.reuse-owner.birth', text)
+        descendant = c_fork()
+        if (descendant < 0_c_int) call process_exit(22)
+        if (descendant == 0_c_int) then
+            call write_pid(target, 'reuse-sentinel')
+            write (text, '(i0)') c_test_start(int(process_getpid(), c_int))
+            call write_text_file(target//'.reuse-sentinel.birth', text)
+            call heartbeat_loop(target, 'reuse-sentinel')
+        end if
+        descendant = c_fork()
+        if (descendant < 0_c_int) call process_exit(23)
+        if (descendant == 0_c_int) then
+            sid = c_setsid()
+            if (sid <= 0_c_int) call process_exit(24)
+            call write_pid(target, 'reuse-detached')
+            write (text, '(i0)') c_test_start(int(process_getpid(), c_int))
+            call write_text_file(target//'.reuse-detached.birth', text)
+            call heartbeat_loop(target, 'reuse-detached')
+        end if
+        call wait_for_child_file(target, 'reuse-sentinel')
+        call wait_for_child_file(target, 'reuse-detached')
+        if (.not. wait_for_data(target//'.reuse-release')) call process_exit(25)
+        call process_exit(0)
+    end subroutine run_reuse_fixture
+
+    subroutine read_birth_file(path, identity)
+        character(len=*), intent(in) :: path
+        integer(c_int64_t), intent(out) :: identity
+        character(len=64) :: text
+        integer :: io_status
+
+        call read_text_file(path, text)
+        identity = 0_c_int64_t
+        read (text, *, iostat=io_status) identity
+        if (io_status /= 0) identity = 0_c_int64_t
+    end subroutine read_birth_file
+
+    subroutine write_reuse_records(state_dir, root_pid, fake_start, member_pid, &
+            member_start, member_session, parent_start)
+        character(len=*), intent(in) :: state_dir, fake_start, member_start
+        character(len=*), intent(in) :: parent_start
+        integer, intent(in) :: root_pid, member_pid, member_session
+        character(len=4096) :: registry, path
+        character(len=32) :: root_text, member_text
+        integer :: unit, rc
+
+        write (root_text, '(i0)') root_pid
+        write (member_text, '(i0)') member_pid
+        registry = trim(state_dir)//'/async-processes/'//trim(root_text)// &
+            '-'//trim(fake_start)
+        call fs_make_dir(trim(registry))
+        rc = c_private_mode(trim(state_dir)//c_null_char, 1_c_int)
+        call check(rc == 0, 'uses a private stale-record state directory')
+        rc = c_private_mode(trim(state_dir)//'/async-processes'//c_null_char, 1_c_int)
+        call check(rc == 0, 'uses a private stale-record registry parent')
+        rc = c_private_mode(trim(registry)//c_null_char, 1_c_int)
+        call check(rc == 0, 'uses a private stale-record owner registry')
+        path = trim(registry)//'/'//trim(root_text)//'-'//trim(fake_start)//'.session'
+        open(newunit=unit, file=trim(path), status='replace', action='write')
+        write (unit, '(i0)') root_pid
+        write (unit, '(a)') trim(fake_start)
+        write (unit, '(i0)') root_pid
+        write (unit, '(a)') '1'
+        write (unit, '(a)') trim(fake_start)
+        close(unit)
+        rc = c_private_mode(trim(path)//c_null_char, 0_c_int)
+        call check(rc == 0, 'uses a private stale session record')
+        if (member_pid <= 0) return
+        path = trim(registry)//'/'//trim(root_text)//'-'//trim(fake_start)// &
+            '--member-'//trim(member_text)//'-'//trim(member_start)//'.member'
+        open(newunit=unit, file=trim(path), status='replace', action='write')
+        write (unit, '(i0)') root_pid
+        write (unit, '(a)') trim(fake_start)
+        write (unit, '(i0)') member_pid
+        write (unit, '(a)') trim(member_start)
+        write (unit, '(i0)') member_session
+        write (unit, '(i0)') root_pid
+        write (unit, '(a)') trim(parent_start)
+        write (unit, '(a)') trim(fake_start)
+        close(unit)
+        rc = c_private_mode(trim(path)//c_null_char, 0_c_int)
+        call check(rc == 0, 'uses a private stale member record')
+    end subroutine write_reuse_records
+
+    subroutine cleanup_exact_fixture(child_pid, identity)
+        integer, intent(in) :: child_pid
+        integer(c_int64_t), intent(in) :: identity
+        integer :: rc
+
+        if (identity <= 0_c_int64_t) return
+        if (c_test_start(int(child_pid, c_int)) /= identity) return
+        rc = c_test_signal(int(child_pid, c_int), identity, 15_c_int)
+        call fs_sleep_ms(100)
+        if (c_test_start(int(child_pid, c_int)) == identity) &
+            rc = c_test_signal(int(child_pid, c_int), identity, 9_c_int)
+        call poll_process(child_pid, rc)
+    end subroutine cleanup_exact_fixture
+
+    subroutine exercise_stale_session(target, macos)
+        character(len=*), intent(in) :: target
+        logical, intent(in) :: macos
+        type(string_list_t) :: command
+        integer :: helper_pid, root_pid, sentinel, detached, rc, attempt, before
+        integer(c_int64_t) :: root_birth, sentinel_birth, detached_birth
+        character(len=4096) :: state_dir
+        character(len=64) :: fake_start, real_start, parent_start, wrong_start
+
+        root_pid = 0
+        sentinel = 0
+        detached = 0
+        call list_add(command, trim(executable))
+        call list_add(command, '--reuse-session')
+        call list_add(command, target)
+        call spawn_process(command, trim(workdir), helper_pid)
+        call check(helper_pid > 0, 'starts independent unfiltered session fixture')
+        call check(wait_for_pid(target//'.reuse-owner.pid', root_pid), &
+            'records the unrelated session leader')
+        call check(wait_for_pid(target//'.reuse-sentinel.pid', sentinel), &
+            'records an unrelated same-session sentinel')
+        call check(wait_for_pid(target//'.reuse-detached.pid', detached), &
+            'records an independently detached fixture member')
+        call check(wait_for_data(target//'.reuse-sentinel.heartbeat'), &
+            'unrelated same-session sentinel is active')
+        call check(wait_for_data(target//'.reuse-detached.heartbeat'), &
+            'independently detached member is active')
+        call read_birth_file(target//'.reuse-owner.birth', root_birth)
+        call read_birth_file(target//'.reuse-sentinel.birth', sentinel_birth)
+        call read_birth_file(target//'.reuse-detached.birth', detached_birth)
+        call check(root_birth > 0_c_int64_t .and. sentinel_birth > 0_c_int64_t &
+            .and. detached_birth > 0_c_int64_t, 'reads independent OS birth identities')
+        call check(c_getsid(int(sentinel, c_int)) == int(root_pid, c_int), &
+            'unrelated sentinel belongs to the session represented by the stale SID')
+        call check(c_getsid(int(detached, c_int)) == int(detached, c_int), &
+            'registered-member fixture really escaped into another session')
+        call write_text_file(target//'.reuse-release', 'exit')
+        do attempt = 1, 500
+            call poll_process(helper_pid, rc)
+            if (rc /= 999) exit
+            call fs_sleep_ms(10)
+        end do
+        call check(rc == 0, 'reaps the independent fixture launcher')
+        do attempt = 1, 500
+            if (c_test_start(int(root_pid, c_int)) == 0_c_int64_t) exit
+            if (c_test_start(int(root_pid, c_int)) /= root_birth) exit
+            call poll_process(root_pid, rc)
+            call fs_sleep_ms(10)
+        end do
+        call check(c_test_start(int(root_pid, c_int)) == 0_c_int64_t, &
+            'stale SID fixture leader is absent before recovery')
+        call check(c_getsid(int(sentinel, c_int)) == int(root_pid, c_int), &
+            'unrelated session survives after its leader disappears')
+
+        state_dir = target//'.state'
+        fake_start = birth_text(1_c_int64_t, macos)
+        parent_start = birth_text(root_birth, macos)
+        before = line_count(target//'.reuse-sentinel.heartbeat')
+        call write_reuse_records(trim(state_dir), root_pid, trim(fake_start), &
+            0, '', 0, '')
+        rc = c_recover_scope(trim(state_dir)//c_null_char, int(root_pid, c_int), &
+            trim(fake_start)//c_null_char)
+        call check(rc == 0, 'recovery retires the absent stale leader record')
+        call fs_sleep_ms(100)
+        call check(line_count(target//'.reuse-sentinel.heartbeat') > before, &
+            'numeric stale SID alone never kills an unrelated live session')
+        call check(c_test_start(int(sentinel, c_int)) == sentinel_birth, &
+            'unrelated sentinel keeps its exact birth after stale SID recovery')
+
+        wrong_start = birth_text(detached_birth + 1_c_int64_t, macos)
+        before = line_count(target//'.reuse-detached.heartbeat')
+        call write_reuse_records(trim(state_dir), root_pid, trim(fake_start), &
+            detached, trim(wrong_start), detached, trim(fake_start))
+        rc = c_recover_scope(trim(state_dir)//c_null_char, int(root_pid, c_int), &
+            trim(fake_start)//c_null_char)
+        call check(rc == 0, 'recovery retires a member with a mismatched birth')
+        call fs_sleep_ms(100)
+        call check(line_count(target//'.reuse-detached.heartbeat') > before, &
+            'a mismatched member birth never establishes ownership')
+
+        real_start = birth_text(detached_birth, macos)
+        before = line_count(target//'.reuse-sentinel.heartbeat')
+        call write_reuse_records(trim(state_dir), root_pid, trim(parent_start), &
+            detached, trim(real_start), detached, trim(parent_start))
+        rc = c_recover_scope(trim(state_dir)//c_null_char, int(root_pid, c_int), &
+            trim(parent_start)//c_null_char)
+        call check(rc == 0, &
+            'recovers an exact registered detached member after leader exit')
+        call check(wait_for_quiet(target//'.reuse-detached.heartbeat'), &
+            'exact registered detached member stops after leader exit')
+        call check(line_count(target//'.reuse-sentinel.heartbeat') > before, &
+            'exact detached-member cleanup preserves the unrelated same-SID sentinel')
+
+        real_start = birth_text(sentinel_birth, macos)
+        call write_reuse_records(trim(state_dir), root_pid, trim(parent_start), &
+            sentinel, trim(real_start), root_pid, trim(parent_start))
+        rc = c_recover_scope(trim(state_dir)//c_null_char, int(root_pid, c_int), &
+            trim(parent_start)//c_null_char)
+        call check(rc == 0, &
+            'stops the independent sentinel only by its registered birth')
+        call check(wait_for_quiet(target//'.reuse-sentinel.heartbeat'), &
+            'independent sentinel cleanup is complete')
+        call cleanup_exact_fixture(detached, detached_birth)
+        call cleanup_exact_fixture(sentinel, sentinel_birth)
+        call cleanup_exact_fixture(root_pid, root_birth)
+    end subroutine exercise_stale_session
 
     subroutine check(condition, description)
         logical, intent(in) :: condition
@@ -515,7 +783,10 @@ contains
         end if
         call wait_for_child_file(target, 'nested')
         call wait_for_child_file(target, 'deep')
-        if (helper_mode == '--orphan') call process_exit(0)
+        if (helper_mode == '--orphan') then
+            if (.not. wait_for_data(target//'.release')) call process_exit(26)
+            call process_exit(0)
+        end if
         call heartbeat_loop(target, 'owner')
     end subroutine run_helper
 
@@ -711,7 +982,7 @@ contains
         wait_for_quiet = after == before
     end function wait_for_quiet
 
-end program test_async_process_boundary
+end program test_async_process_boundary_slow
 
 subroutine ignore_term(signal_number) bind(C)
     use, intrinsic :: iso_c_binding, only: c_int

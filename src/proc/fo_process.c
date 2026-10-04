@@ -42,6 +42,12 @@
 #define FO_MONITOR_ARG "\037fo-process-monitor-v1"
 #endif
 
+struct owned_process_identity {
+    pid_t pid;
+    uint64_t start;
+    struct owned_process_identity *next;
+};
+
 struct async_process {
     pid_t pid;
     pid_t session;
@@ -54,16 +60,14 @@ struct async_process {
     char scope_owner_start[64];
     char start_identity_text[64];
     struct timespec last_tree_scan;
+    struct owned_process_identity *members;
     struct async_process *next;
 };
 
 static struct async_process *async_processes = NULL;
 
 int fo_gremlin_process_matches(int pid, const char *start);
-#ifdef __linux__
-static void reap_async_session_children(pid_t session, pid_t leader);
-static int reap_async_group_children(pid_t pid);
-#endif
+static uint64_t process_start_identity(pid_t pid);
 
 static int heartbeats_suppressed = 0;
 
@@ -589,8 +593,8 @@ static int start_command_monitor(const char *cwd, char *const argv[],
 }
 #endif
 
-#ifdef __APPLE__
-struct darwin_process_record {
+#if defined(__APPLE__) || defined(__linux__)
+struct owned_process_record {
     pid_t pid;
     pid_t parent;
     pid_t group;
@@ -598,10 +602,12 @@ struct darwin_process_record {
     uint64_t start;
     uint64_t parent_start;
     int owned;
+    int alive;
 };
 
-static int darwin_process_details(pid_t pid, pid_t *parent, pid_t *group,
-                                  pid_t *session, uint64_t *start) {
+static int owned_process_details(pid_t pid, pid_t *parent, pid_t *group,
+                                  pid_t *session, uint64_t *start, int *alive) {
+#ifdef __APPLE__
     struct proc_bsdinfo info;
     pid_t sid;
     int bytes;
@@ -609,22 +615,62 @@ static int darwin_process_details(pid_t pid, pid_t *parent, pid_t *group,
     if (pid <= 0) return ESRCH;
     bytes = proc_pidinfo((int)pid, PROC_PIDTBSDINFO, 0, &info,
                          (int)sizeof(info));
-    if (bytes != (int)sizeof(info) || info.pbi_pid != (uint32_t)pid ||
-        info.pbi_status == SZOMB) return ESRCH;
+    if (bytes != (int)sizeof(info) || info.pbi_pid != (uint32_t)pid) return ESRCH;
     sid = getsid(pid);
-    if (sid <= 0) return errno != 0 ? errno : ESRCH;
+    if (sid <= 0 && info.pbi_status != SZOMB)
+        return errno != 0 ? errno : ESRCH;
     if (parent != NULL) *parent = (pid_t)info.pbi_ppid;
     if (group != NULL) *group = (pid_t)info.pbi_pgid;
     if (session != NULL) *session = sid;
+    if (alive != NULL) *alive = info.pbi_status != SZOMB;
     if (start != NULL) {
         *start = (uint64_t)info.pbi_start_tvsec * 1000000ULL +
                  (uint64_t)info.pbi_start_tvusec;
         if (*start == 0) return ESRCH;
     }
     return 0;
+#else
+    char path[64], line[4096], *end, *cursor;
+    char state;
+    long ppid, pgid, sid;
+    uint64_t identity = 0;
+    int field;
+    FILE *file;
+    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
+    file = fopen(path, "r");
+    if (file == NULL) return errno;
+    if (fgets(line, sizeof(line), file) == NULL) {
+        fclose(file);
+        return ESRCH;
+    }
+    fclose(file);
+    end = strrchr(line, ')');
+    if (end == NULL || sscanf(end + 1, " %c %ld %ld %ld",
+                              &state, &ppid, &pgid, &sid) != 4) return EIO;
+    cursor = end + 1;
+    for (field = 3; field <= 22; field++) {
+        while (*cursor == ' ') cursor++;
+        if (*cursor == '\0') return EIO;
+        end = cursor;
+        while (*end != '\0' && *end != ' ') end++;
+        if (field == 22) {
+            identity = strtoull(cursor, NULL, 10);
+            break;
+        }
+        cursor = end;
+    }
+    if (identity == 0) return ESRCH;
+    if (parent != NULL) *parent = (pid_t)ppid;
+    if (group != NULL) *group = (pid_t)pgid;
+    if (session != NULL) *session = (pid_t)sid;
+    if (start != NULL) *start = identity;
+    if (alive != NULL) *alive = state != 'Z' && state != 'X';
+    return 0;
+#endif
 }
 
-static int darwin_list_processes(pid_t **pids_out, size_t *count_out) {
+static int owned_list_processes(pid_t **pids_out, size_t *count_out) {
+#ifdef __APPLE__
     pid_t *pids = NULL;
     size_t capacity;
     int required, bytes;
@@ -667,14 +713,39 @@ static int darwin_list_processes(pid_t **pids_out, size_t *count_out) {
         }
         capacity *= 2;
     }
+#else
+    DIR *directory = opendir("/proc");
+    struct dirent *entry;
+    pid_t *pids = NULL;
+    size_t used = 0, capacity = 0;
+    if (directory == NULL) return errno;
+    while ((entry = readdir(directory)) != NULL) {
+        char *end;
+        long value = strtol(entry->d_name, &end, 10);
+        if (*entry->d_name == '\0' || *end != '\0' ||
+            value <= 0 || value > INT_MAX) continue;
+        if (used == capacity) {
+            size_t next_capacity = capacity == 0 ? 64 : capacity * 2;
+            pid_t *next = realloc(pids, next_capacity * sizeof(*pids));
+            if (next == NULL) { free(pids); closedir(directory); return ENOMEM; }
+            pids = next;
+            capacity = next_capacity;
+        }
+        pids[used++] = (pid_t)value;
+    }
+    closedir(directory);
+    *pids_out = pids;
+    *count_out = used;
+    return 0;
+#endif
 }
 
-static int darwin_record_compare(const void *left, const void *right) {
-    const struct darwin_process_record *a = left, *b = right;
+static int owned_record_compare(const void *left, const void *right) {
+    const struct owned_process_record *a = left, *b = right;
     return (a->pid > b->pid) - (a->pid < b->pid);
 }
 
-static size_t darwin_find_record(const struct darwin_process_record *records,
+static size_t owned_find_record(const struct owned_process_record *records,
                                  size_t count, pid_t pid) {
     size_t low = 0, high = count;
     while (low < high) {
@@ -685,90 +756,130 @@ static size_t darwin_find_record(const struct darwin_process_record *records,
     return low < count && records[low].pid == pid ? low : SIZE_MAX;
 }
 
-static int darwin_collect_owned_tree(pid_t root, uint64_t root_start,
-                                     pid_t session,
-                                     struct darwin_process_record **records_out,
+static int collect_owned_tree(pid_t root, uint64_t root_start,
+                                     pid_t session, int owns_session,
+                                     const struct owned_process_identity *seeds,
+                                     struct owned_process_record **records_out,
                                      size_t *count_out) {
     pid_t *pids = NULL;
-    struct darwin_process_record *records = NULL;
+    struct owned_process_record *records = NULL;
     size_t count = 0, used = 0, root_index, i;
-    int error = darwin_list_processes(&pids, &count);
+    int error = owned_list_processes(&pids, &count);
 
     if (error != 0) return error;
     records = calloc(count > 0 ? count : 1, sizeof(*records));
     if (records == NULL) { free(pids); return ENOMEM; }
     for (i = 0; i < count; i++) {
-        struct darwin_process_record item;
-        if (darwin_process_details(pids[i], &item.parent, &item.group,
-                                   &item.session, &item.start) != 0) continue;
+        struct owned_process_record item;
+        if (owned_process_details(pids[i], &item.parent, &item.group,
+                                   &item.session, &item.start, &item.alive) != 0) continue;
         item.pid = pids[i];
         item.owned = 0;
         records[used++] = item;
     }
     free(pids);
-    qsort(records, used, sizeof(*records), darwin_record_compare);
-    root_index = darwin_find_record(records, used, root);
-    if (root_index != SIZE_MAX &&
-        (records[root_index].start != root_start ||
-         records[root_index].group != root || records[root_index].session != session)) {
-        free(records);
-        return ESTALE;
-    }
+    qsort(records, used, sizeof(*records), owned_record_compare);
+    root_index = owned_find_record(records, used, root);
+    /* An absent or reused root never establishes numeric SID ownership. */
+    if (root_index != SIZE_MAX && records[root_index].start != root_start)
+        root_index = SIZE_MAX;
     for (i = 0; i < used; i++) {
-        size_t parent_index = darwin_find_record(records, used,
+        size_t parent_index = owned_find_record(records, used,
                                                  records[i].parent);
         records[i].parent_start = parent_index == SIZE_MAX ? 0 :
                                   records[parent_index].start;
     }
-    for (i = 0; i < used; i++) {
-        pid_t ancestor;
-        size_t depth;
-        if (records[i].session == session || i == root_index) {
-            records[i].owned = 1;
-            continue;
-        }
-        ancestor = records[i].parent;
-        for (depth = 0; ancestor > 0 && depth < used; depth++) {
-            size_t parent_index = darwin_find_record(records, used, ancestor);
-            if (parent_index == SIZE_MAX || parent_index == i) break;
-            if (parent_index == root_index) {
-                records[i].owned = 1;
-                break;
+    if (root_index != SIZE_MAX) {
+        records[root_index].owned = 1;
+        if (owns_session && records[root_index].group == root &&
+            (records[root_index].session == session ||
+             (!records[root_index].alive && session == root))) {
+            for (i = 0; i < used; i++) {
+                if (records[i].session == session) records[i].owned = 1;
             }
-            ancestor = records[parent_index].parent;
         }
+    }
+    for (; seeds != NULL; seeds = seeds->next) {
+        size_t index = owned_find_record(records, used, seeds->pid);
+        if (index != SIZE_MAX && records[index].start == seeds->start)
+            records[index].owned = 1;
+    }
+    for (size_t depth = 0; depth < used; depth++) {
+        int changed = 0;
+        for (i = 0; i < used; i++) {
+            size_t parent_index;
+            pid_t current_parent;
+            uint64_t current_start, parent_start;
+            if (records[i].owned) continue;
+            parent_index = owned_find_record(records, used, records[i].parent);
+            if (parent_index == SIZE_MAX || !records[parent_index].owned) continue;
+            if (owned_process_details(records[i].pid, &current_parent, NULL, NULL,
+                                       &current_start, NULL) != 0 ||
+                current_start != records[i].start ||
+                current_parent != records[i].parent ||
+                owned_process_details(records[i].parent, NULL, NULL, NULL,
+                                       &parent_start, NULL) != 0 ||
+                parent_start != records[i].parent_start) continue;
+            records[i].owned = 1;
+            changed = 1;
+        }
+        if (!changed) break;
     }
     *records_out = records;
     *count_out = used;
     return 0;
 }
 
-/* Darwin has no pidfd or process-tree job object. Match the exact session
-   leader birth identity, then walk current PPID ancestry so setsid descendants
-   remain in scope. Revalidate each birth time immediately before signaling. */
-static int darwin_signal_session(pid_t root, uint64_t root_start,
-                                 pid_t session, int signal_number) {
-    struct darwin_process_record *records = NULL;
+/* Only a matching birth identity seeds ownership. Session membership is an
+   additional edge while its exact leader is present; after leader exit use
+   captured member identities and current, birth-validated PPID lineage. */
+static int signal_owned_tree(pid_t root, uint64_t root_start,
+                                 pid_t session, int owns_session,
+                                 const struct owned_process_identity *seeds,
+                                 int signal_number) {
+    struct owned_process_record *records = NULL;
     size_t count = 0, i;
-    int error = darwin_collect_owned_tree(root, root_start, session,
+    int error = collect_owned_tree(root, root_start, session, owns_session, seeds,
                                          &records, &count);
     int matched = 0;
 
     if (error != 0) { errno = error; return -1; }
     for (i = 0; i < count; i++) {
         uint64_t current_start;
-        if (!records[i].owned) continue;
+        if (!records[i].owned || !records[i].alive) continue;
         matched++;
         if (signal_number == 0) continue;
-        if (darwin_process_details(records[i].pid, NULL, NULL, NULL,
-                                   &current_start) != 0 ||
+        if (owned_process_details(records[i].pid, NULL, NULL, NULL,
+                                   &current_start, NULL) != 0 ||
             current_start != records[i].start) continue;
+#ifdef __linux__
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+        {
+            int fd = (int)syscall(SYS_pidfd_open, records[i].pid, 0);
+            if (fd < 0) {
+                if (errno == ESRCH) continue;
+                error = errno; free(records); errno = error; return -1;
+            }
+            if (process_start_identity(records[i].pid) == records[i].start &&
+                syscall(SYS_pidfd_send_signal, fd, signal_number, NULL, 0) != 0 &&
+                errno != ESRCH) {
+                error = errno; close(fd); free(records); errno = error; return -1;
+            }
+            close(fd);
+        }
+#else
+        free(records);
+        errno = ENOTSUP;
+        return -1;
+#endif
+#else
         if (kill(records[i].pid, signal_number) != 0 && errno != ESRCH) {
             error = errno;
             free(records);
             errno = error;
             return -1;
         }
+#endif
     }
     free(records);
     return matched;
@@ -1324,144 +1435,6 @@ static int install_async_group_containment(int strict_group) {
 #endif
 }
 
-#ifdef __linux__
-/* Session IDs remain inherited across process groups. Read the kernel's SID
-   for each candidate before signalling it; pidfds pin the selected process
-   across a concurrent exit and PID reuse. */
-static int linux_process_session(pid_t pid, pid_t *group_out, pid_t *session,
-                                 char *state_out) {
-    char path[64], line[4096], *close, state;
-    long parent, process_group, sid;
-    FILE *file;
-
-    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
-    file = fopen(path, "r");
-    if (file == NULL) return -1;
-    if (fgets(line, sizeof(line), file) == NULL) {
-        fclose(file);
-        return -1;
-    }
-    fclose(file);
-    close = strrchr(line, ')');
-    if (close == NULL || sscanf(close + 1, " %c %ld %ld %ld",
-                                &state, &parent, &process_group, &sid) != 4)
-        return -1;
-    *session = (pid_t)sid;
-    if (group_out != NULL) *group_out = (pid_t)process_group;
-    if (state_out != NULL) *state_out = state;
-    return 0;
-}
-
-static int signal_async_session(pid_t session, int signal_number) {
-    DIR *directory = opendir("/proc");
-    struct dirent *entry;
-    int count = 0;
-
-    if (directory == NULL) return -1;
-    while ((entry = readdir(directory)) != NULL) {
-        char *end;
-        long value = strtol(entry->d_name, &end, 10);
-        pid_t candidate, current;
-        char state;
-#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
-        int fd = -1;
-#endif
-
-        if (*entry->d_name == '\0' || *end != '\0' || value <= 0 ||
-            value > INT_MAX) continue;
-        candidate = (pid_t)value;
-        if (linux_process_session(candidate, NULL, &current, &state) != 0 ||
-            state == 'Z' || state == 'X' ||
-            current != session) continue;
-        count++;
-        if (signal_number == 0) continue;
-#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
-        fd = (int)syscall(SYS_pidfd_open, candidate, 0);
-        if (fd >= 0) {
-            if (linux_process_session(candidate, NULL, &current, &state) == 0 &&
-                state != 'Z' && state != 'X' &&
-                current == session &&
-                syscall(SYS_pidfd_send_signal, fd, signal_number,
-                        NULL, 0) != 0 && errno != ESRCH) {
-                int error = errno;
-                close(fd);
-                closedir(directory);
-                errno = error;
-                return -1;
-            }
-            close(fd);
-            continue;
-        }
-        if (errno == ESRCH) continue;
-#else
-        errno = ENOTSUP;
-#endif
-        {
-            int error = errno;
-            closedir(directory);
-            errno = error;
-            return -1;
-        }
-    }
-    closedir(directory);
-    return count;
-}
-
-static int signal_async_process_group(pid_t group, pid_t session,
-                                     int signal_number) {
-    DIR *directory = opendir("/proc");
-    struct dirent *entry;
-    int count = 0;
-
-    if (directory == NULL) return -1;
-    while ((entry = readdir(directory)) != NULL) {
-        char *end;
-        long value = strtol(entry->d_name, &end, 10);
-        pid_t candidate, current_group, current_session;
-        char state;
-        if (*entry->d_name == '\0' || *end != '\0' || value <= 0 ||
-            value > INT_MAX) continue;
-        candidate = (pid_t)value;
-        if (linux_process_session(candidate, &current_group, &current_session,
-                                  &state) != 0 || state == 'Z' || state == 'X' ||
-            current_group != group || current_session != session) continue;
-        count++;
-        if (signal_number == 0) continue;
-#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
-        {
-            int fd = (int)syscall(SYS_pidfd_open, candidate, 0);
-            int error;
-            if (fd < 0) {
-                if (errno == ESRCH) continue;
-                error = errno;
-                closedir(directory);
-                errno = error;
-                return -1;
-            }
-            if (linux_process_session(candidate, &current_group, &current_session,
-                                      &state) == 0 && state != 'Z' && state != 'X' &&
-                current_group == group && current_session == session &&
-                syscall(SYS_pidfd_send_signal, fd, signal_number, NULL, 0) != 0 &&
-                errno != ESRCH) {
-                error = errno;
-                close(fd);
-                closedir(directory);
-                errno = error;
-                return -1;
-            }
-            close(fd);
-        }
-#else
-        closedir(directory);
-        errno = ENOTSUP;
-        return -1;
-#endif
-    }
-    closedir(directory);
-    return count;
-}
-#endif
-
 /* Start ticks on Linux and start time on macOS protect against signalling a
    reused leader PID. A surviving process group keeps its group ID allocated. */
 static uint64_t process_start_identity(pid_t pid) {
@@ -1729,28 +1702,44 @@ static int register_async_session(struct async_process *item) {
     return 0;
 }
 
-#ifdef __APPLE__
-static int register_darwin_descendant_sessions(struct async_process *item,
+#if defined(__APPLE__) || defined(__linux__)
+static int register_async_descendants(struct async_process *item,
                                                int force) {
-    struct darwin_process_record *records = NULL;
+    struct owned_process_record *records = NULL;
     struct timespec now;
     size_t count = 0, i;
     int e;
-    if (item->registry_dir[0] == '\0') return 0;
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return errno;
     if (!force && item->last_tree_scan.tv_sec != 0 &&
         (now.tv_sec - item->last_tree_scan.tv_sec) * 1000L +
         (now.tv_nsec - item->last_tree_scan.tv_nsec) / 1000000L < 100L)
         return 0;
-    e = darwin_collect_owned_tree(item->pid, item->start_identity,
-                                 item->session, &records, &count);
+    e = collect_owned_tree(item->pid, item->start_identity,
+                                 item->session, item->owns_session, item->members,
+                                 &records, &count);
     if (e != 0) return e;
     for (i = 0; i < count; i++) {
         char member_start[64], parent_start[64], path[PATH_MAX], record[512];
         int n;
-        if (!records[i].owned || records[i].pid == item->pid ||
-            records[i].session == item->session ||
-            records[i].pid != records[i].session) continue;
+        struct owned_process_identity *member;
+        size_t member_count = 0;
+        if (!records[i].owned || !records[i].alive ||
+            records[i].pid == item->pid) continue;
+        for (member = item->members; member != NULL; member = member->next) {
+            if (member->pid == records[i].pid && member->start == records[i].start)
+                break;
+            member_count++;
+        }
+        if (member == NULL) {
+            if (member_count == 4096) { e = EOVERFLOW; break; }
+            member = calloc(1, sizeof(*member));
+            if (member == NULL) { e = ENOMEM; break; }
+            member->pid = records[i].pid;
+            member->start = records[i].start;
+            member->next = item->members;
+            item->members = member;
+        }
+        if (item->registry_dir[0] == '\0') continue;
         e = process_identity_value_text(records[i].start, member_start,
                                         sizeof(member_start));
         if (e != 0) break;
@@ -1782,7 +1771,7 @@ static int register_darwin_descendant_sessions(struct async_process *item,
 
 static void unregister_async_session(struct async_process *item) {
     if (!item || !item->registry_path) return;
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__linux__)
     if (item->registry_dir[0] != '\0') {
         DIR *directory = opendir(item->registry_dir);
         struct dirent *entry;
@@ -1911,7 +1900,7 @@ static int read_recovery_session(const char *registry, const char *name,
     return 0;
 }
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__linux__)
 static int read_recovery_member(const char *registry, const char *name,
                                 const char *owner_start,
                                 struct recovery_session *item) {
@@ -1955,11 +1944,11 @@ static int read_recovery_member(const char *registry, const char *name,
         parse_positive_pid(session_text, &item->session) != 0 ||
         parse_positive_pid(parent_text, &item->parent_pid) != 0 ||
         parse_identity_text(parent_start, &parent_identity) != 0 ||
-        parent_identity == 0 ||
-        item->session != item->pid || strcmp(saved_owner, owner_start) != 0)
+        parent_identity == 0 || strcmp(saved_owner, owner_start) != 0 ||
+        (item->parent_pid == item->root_pid && parent_identity != item->root_identity))
         return EINVAL;
     item->is_member = 1;
-    item->owns_session = 1;
+    item->owns_session = 0;
     strcpy(item->root_start, root_start);
     strcpy(item->start, start);
     strcpy(item->path, path);
@@ -1983,45 +1972,16 @@ static int read_recovery_member(const char *registry, const char *name,
 #endif
 
 static int recovery_session_count(const struct recovery_session *item) {
-    char current[64];
-    int e = process_identity_text(item->pid, current, sizeof(current));
-    if (e == 0) {
-        if (strcmp(current, item->start) != 0 ||
-            getpgid(item->pid) != item->pid ||
-            getsid(item->pid) != item->session ||
-            (item->owns_session && item->session != item->pid)) {
-            errno = ESTALE;
-            return -1;
-        }
-    } else if (e != ESRCH) {
-        errno = e;
-        return -1;
-    }
-#ifdef __linux__
-    int count;
-    if (item->owns_session) {
-        count = signal_async_session(item->session, 0);
-    } else {
-        count = signal_async_process_group(item->pid, item->session, 0);
-    }
-    if (count == 0) {
+#if defined(__APPLE__) || defined(__linux__)
+    int count = signal_owned_tree(item->pid, item->identity, item->session,
+                                   item->owns_session, NULL, 0);
+    if (count == 0 && process_start_identity(item->pid) == item->identity) {
         int status;
         pid_t got;
         do { got = waitpid(item->pid, &status, WNOHANG); }
         while (got < 0 && errno == EINTR);
-        if (item->owns_session)
-            reap_async_session_children(item->session, item->pid);
-        else
-            (void)reap_async_group_children(item->pid);
     }
     return count;
-#elif defined(__APPLE__)
-    if (item->owns_session)
-        return darwin_signal_session(item->pid, item->identity,
-                                     item->session, 0);
-    if (kill(-item->pid, 0) == 0 || errno == EPERM) return 1;
-    if (errno == ESRCH) return 0;
-    return -1;
 #else
     errno = ENOTSUP;
     return -1;
@@ -2030,31 +1990,9 @@ static int recovery_session_count(const struct recovery_session *item) {
 
 static int signal_recovery_session(const struct recovery_session *item,
                                    int signal_number) {
-    int count = recovery_session_count(item);
-    if (count < 0) return errno;
-    if (count == 0) return 0;
-#ifdef __linux__
-    if (item->owns_session) {
-        if (signal_async_session(item->session, signal_number) < 0) return errno;
-    } else {
-        if (signal_async_process_group(item->pid, item->session,
-                                       signal_number) < 0) return errno;
-    }
-    return 0;
-#elif defined(__APPLE__)
-    if (item->owns_session) {
-        if (darwin_signal_session(item->pid, item->identity, item->session,
-                                  signal_number) < 0) return errno;
-    } else {
-        char current[64];
-        int e = process_identity_text(item->pid, current, sizeof(current));
-        if (e == 0 && (strcmp(current, item->start) != 0 ||
-                       getpgid(item->pid) != item->pid ||
-                       getsid(item->pid) != item->session)) return ESTALE;
-        if (e != 0 && e != ESRCH) return e;
-        if (kill(-item->pid, signal_number) != 0 && errno != ESRCH) return errno;
-    }
-    return 0;
+#if defined(__APPLE__) || defined(__linux__)
+    return signal_owned_tree(item->pid, item->identity, item->session,
+                               item->owns_session, NULL, signal_number) < 0 ? errno : 0;
 #else
     return ENOTSUP;
 #endif
@@ -2113,7 +2051,7 @@ int fo_c_recover_async_scope(const char *state_dir, int owner_pid,
         }
         {
             size_t suffix_len = strlen(entry->d_name);
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__linux__)
             if (suffix_len >= 7 &&
                 strcmp(entry->d_name + suffix_len - 7, ".member") == 0)
                 e = read_recovery_member(registry, entry->d_name, owner_start,
@@ -2222,90 +2160,25 @@ int fo_c_process_set_async_scope(const char *state_dir, int owner_pid,
     return 0;
 }
 
-static int async_group_exists(pid_t pid) {
-    if (kill(-pid, 0) == 0) return 1;
-    return errno == EPERM;
-}
-
-#ifdef __APPLE__
-static int darwin_signal_registered_members(const struct async_process *item,
-                                            int signal_number) {
-    DIR *directory;
-    struct dirent *entry;
-    char prefix[160];
-    uint64_t root_identity;
-    int n, total = 0;
-    if (item->registry_dir[0] == '\0') return 0;
-    if (parse_identity_text(item->start_identity_text, &root_identity) != 0 ||
-        root_identity != item->start_identity) { errno = ESTALE; return -1; }
-    n = snprintf(prefix, sizeof(prefix), "%ld-%s--member-",
-                 (long)item->pid, item->start_identity_text);
-    if (n < 0 || n >= (int)sizeof(prefix)) { errno = ENAMETOOLONG; return -1; }
-    directory = opendir(item->registry_dir);
-    if (directory == NULL) return errno == ENOENT ? 0 : -1;
-    while ((entry = readdir(directory)) != NULL) {
-        size_t name_len = strlen(entry->d_name);
-        struct recovery_session member = {0};
-        int live, e;
-        if (strncmp(entry->d_name, prefix, (size_t)n) != 0 ||
-            name_len < 7 || strcmp(entry->d_name + name_len - 7, ".member") != 0)
-            continue;
-        e = read_recovery_member(item->registry_dir, entry->d_name,
-                                 item->scope_owner_start, &member);
-        if (e != 0) { closedir(directory); errno = e; return -1; }
-        if (member.root_pid != item->pid ||
-            member.root_identity != item->start_identity) {
-            closedir(directory); errno = ESTALE; return -1;
-        }
-        live = recovery_session_count(&member);
-        if (live < 0) { e = errno; closedir(directory); errno = e; return -1; }
-        if (live == 0) continue;
-        total++;
-        if (signal_number != 0) {
-            e = signal_recovery_session(&member, signal_number);
-            if (e != 0) { closedir(directory); errno = e; return -1; }
-        }
-    }
-    if (closedir(directory) != 0) return -1;
-    return total;
-}
-#endif
-
 static int async_owner_exists(const struct async_process *item) {
-#ifdef __linux__
-    if (item->owns_session) {
-        int count = signal_async_session(item->session, 0);
-        return count < 0 ? -1 : count > 0;
-    }
-#elif defined(__APPLE__)
-    if (item->owns_session) {
-        int count = darwin_signal_session(item->pid, item->start_identity,
-                                          item->session, 0);
-        int members;
-        if (count < 0) return -1;
-        members = darwin_signal_registered_members(item, 0);
-        return members < 0 ? -1 : count > 0 || members > 0;
-    }
+#if defined(__APPLE__) || defined(__linux__)
+    int count = signal_owned_tree(item->pid, item->start_identity, item->session,
+                                   item->owns_session, item->members, 0);
+    return count < 0 ? -1 : count > 0;
+#else
+    errno = ENOTSUP;
+    return -1;
 #endif
-    return async_group_exists(item->pid);
 }
 
 static int signal_async_owner(const struct async_process *item, int signal_number) {
-#ifdef __linux__
-    if (item->owns_session)
-        return signal_async_session(item->session, signal_number) < 0 ? errno : 0;
-#elif defined(__APPLE__)
-    if (item->owns_session) {
-        int count = darwin_signal_session(item->pid, item->start_identity,
-                                          item->session, signal_number);
-        int members;
-        if (count < 0) return errno;
-        members = darwin_signal_registered_members(item, signal_number);
-        return members < 0 ? errno : 0;
-    }
+#if defined(__APPLE__) || defined(__linux__)
+    return signal_owned_tree(item->pid, item->start_identity, item->session,
+                               item->owns_session, item->members,
+                               signal_number) < 0 ? errno : 0;
+#else
+    return ENOTSUP;
 #endif
-    if (kill(-item->pid, signal_number) != 0 && errno != ESRCH) return errno;
-    return 0;
 }
 
 static struct async_process *find_async_process(pid_t pid) {
@@ -2320,7 +2193,13 @@ static void forget_async_process(struct async_process *item) {
     struct async_process **link = &async_processes;
     while (*link != NULL) {
         if (*link == item) {
+            struct owned_process_identity *member = item->members;
             *link = item->next;
+            while (member != NULL) {
+                struct owned_process_identity *next = member->next;
+                free(member);
+                member = next;
+            }
             free(item->registry_path);
             free(item);
             return;
@@ -2369,7 +2248,22 @@ static int observe_async_leader(struct async_process *item) {
    Darwin removes exited children from libproc's session scan immediately, but
    waitpid still holds their exact identity and exit status until we reap them. */
 static int verify_or_reap_async_leader(struct async_process *item) {
-    int error = observe_async_leader(item);
+    int error;
+#if defined(__APPLE__) || defined(__linux__)
+    siginfo_t info;
+    int force = 0;
+    if (!item->leader_done) {
+        memset(&info, 0, sizeof(info));
+        if (waitid(P_PID, (id_t)item->pid, &info,
+                    WEXITED | WNOHANG | WNOWAIT) == 0)
+            force = info.si_pid == item->pid;
+        else if (errno != ECHILD) return errno;
+    }
+    /* Capture exact descendants before reaping the last leader identity. */
+    error = register_async_descendants(item, force);
+    if (error != 0) return error;
+#endif
+    error = observe_async_leader(item);
     if (error != 0) return error;
     if (!item->leader_done && !async_identity_matches(item)) {
         error = observe_async_leader(item);
@@ -2379,36 +2273,13 @@ static int verify_or_reap_async_leader(struct async_process *item) {
     return 0;
 }
 
-static int reap_async_group_children(pid_t pid) {
-    int status;
-    pid_t got;
-    for (;;) {
-        got = waitpid(-pid, &status, WNOHANG);
-        if (got > 0) continue;
-        if (got == 0 || (got < 0 && errno == ECHILD)) return 0;
-        if (got < 0 && errno == EINTR) continue;
-        return errno;
+static void reap_owned_members(const struct async_process *item) {
+    const struct owned_process_identity *member;
+    for (member = item->members; member != NULL; member = member->next) {
+        if (process_start_identity(member->pid) == member->start)
+            (void)waitpid(member->pid, NULL, WNOHANG);
     }
 }
-
-#ifdef __linux__
-static void reap_async_session_children(pid_t session, pid_t leader) {
-    DIR *directory = opendir("/proc");
-    struct dirent *entry;
-
-    if (directory == NULL) return;
-    while ((entry = readdir(directory)) != NULL) {
-        char *end;
-        long value = strtol(entry->d_name, &end, 10);
-        pid_t current;
-        if (*entry->d_name == '\0' || *end != '\0' || value <= 0 ||
-            value > INT_MAX || (pid_t)value == leader) continue;
-        if (linux_process_session((pid_t)value, NULL, &current, NULL) == 0 &&
-            current == session) (void)waitpid((pid_t)value, NULL, WNOHANG);
-    }
-    closedir(directory);
-}
-#endif
 
 static int terminate_async_group(struct async_process *item) {
     struct timespec now, deadline;
@@ -2416,8 +2287,8 @@ static int terminate_async_group(struct async_process *item) {
 
     error = verify_or_reap_async_leader(item);
     if (error != 0) return error;
-#ifdef __APPLE__
-    error = register_darwin_descendant_sessions(item, 1);
+#if defined(__APPLE__) || defined(__linux__)
+    error = register_async_descendants(item, 1);
     if (error != 0) return error;
 #endif
     exists = async_owner_exists(item);
@@ -2431,14 +2302,7 @@ static int terminate_async_group(struct async_process *item) {
         error = observe_async_leader(item);
         if (error != 0) return error;
         if (item->leader_done) {
-            if (item->owns_session) {
-#ifdef __linux__
-                reap_async_session_children(item->session, item->pid);
-#endif
-            } else {
-                error = reap_async_group_children(item->pid);
-                if (error != 0) return error;
-            }
+            reap_owned_members(item);
         }
         exists = async_owner_exists(item);
         if (exists < 0) return errno;
@@ -2460,14 +2324,7 @@ static int terminate_async_group(struct async_process *item) {
         error = observe_async_leader(item);
         if (error != 0) return error;
         if (item->leader_done) {
-            if (item->owns_session) {
-#ifdef __linux__
-                reap_async_session_children(item->session, item->pid);
-#endif
-            } else {
-                error = reap_async_group_children(item->pid);
-                if (error != 0) return error;
-            }
+            reap_owned_members(item);
         }
         exists = async_owner_exists(item);
         if (exists < 0) return errno;
@@ -2726,28 +2583,10 @@ void fo_c_poll_pid(int pid, int *done, int *exitcode) {
     }
     error = verify_or_reap_async_leader(item);
     if (error != 0) {
-        *done = 1;
         *exitcode = error;
-        forget_async_process(item);
+        /* Retain exact ownership so the caller can retry or cancel safely. */
         return;
     }
-#ifdef __APPLE__
-    if (!item->leader_done) {
-        error = register_darwin_descendant_sessions(item, 0);
-        if (error != 0) {
-            int cleanup_error = terminate_async_group(item);
-            if (cleanup_error == 0) {
-                unregister_async_session(item);
-                *done = 1;
-                *exitcode = error;
-                forget_async_process(item);
-            } else {
-                *exitcode = cleanup_error;
-            }
-            return;
-        }
-    }
-#endif
     if (!item->leader_done) return;
     error = terminate_async_group(item);
     if (error != 0) {
@@ -2773,7 +2612,6 @@ void fo_c_cancel_pid(int pid, int *exitcode) {
     error = verify_or_reap_async_leader(item);
     if (error != 0) {
         *exitcode = error;
-        forget_async_process(item);
         return;
     }
     error = terminate_async_group(item);

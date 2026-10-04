@@ -19,6 +19,9 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <libproc.h>
+#endif
 
 static uint64_t process_start_time(pid_t pid) {
 #if defined(__linux__)
@@ -40,6 +43,12 @@ static uint64_t process_start_time(pid_t pid) {
     char *tail = NULL;
     unsigned long long value = strtoull(field, &tail, 10);
     return tail == field || (*tail != '\n' && *tail != '\0') ? 0 : (uint64_t)value;
+#elif defined(__APPLE__)
+    struct proc_bsdinfo info;
+    int bytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+    if (bytes != sizeof(info)) return 0;
+    return (uint64_t)info.pbi_start_tvsec * 1000000ULL +
+           (uint64_t)info.pbi_start_tvusec;
 #else
     (void)pid;
     return 0;
@@ -48,6 +57,10 @@ static uint64_t process_start_time(pid_t pid) {
 
 uint64_t fo_test_process_start_time(int pid) {
     return pid > 0 ? process_start_time((pid_t)pid) : 0;
+}
+
+int fo_test_private_mode(const char *path, int directory) {
+    return chmod(path, directory ? 0700 : 0600);
 }
 
 typedef struct {

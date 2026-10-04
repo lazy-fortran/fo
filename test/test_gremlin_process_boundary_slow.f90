@@ -1,4 +1,4 @@
-program test_gremlin_process_boundary
+program test_gremlin_process_boundary_slow
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_fs, only: fs_make_dir, fs_sleep_ms
     use fo_process, only: process_getpid
@@ -438,4 +438,4 @@ contains
         write (buffer, '(i0)') value
         text_value = trim(buffer)
     end function integer_text
-end program test_gremlin_process_boundary
+end program test_gremlin_process_boundary_slow
