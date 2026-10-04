@@ -1,9 +1,11 @@
 program test_mcp_cancel_error
-    use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_directory, write_text, start_sentinel
     use fo_test_harness, only: process_alive, stop_sentinel
+    use fo_test_harness, only: remove_path
     use fo_test_harness, only: assert_true, assert_equal_integer, finish_assertions
-    use fo_test_gremlin_oracle, only: gremlin_setup
+    use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_fifo
+    use fo_test_gremlin_oracle, only: gremlin_wait_file, gremlin_release_fifo
+    use fo_test_gremlin_oracle, only: gremlin_wait_ms, gremlin_write_case
     use fo_test_mcp_session, only: mcp_session_t, mcp_session_start
     use fo_test_mcp_session, only: mcp_session_request, mcp_session_notify
     use fo_test_mcp_session, only: mcp_session_call, mcp_session_shutdown
@@ -12,19 +14,28 @@ program test_mcp_cancel_error
     use fo_test_json, only: json_string_value, json_number_value, json_boolean_value
     implicit none
 
-    integer, parameter :: source_count = 60, comment_count = 400
     character(:), allocatable :: driver, scratch, project, cache, state
-    character(:), allocatable :: file_path, start_arguments, arguments
+    character(:), allocatable :: project_b, project_bad, ready_a, ready_b
+    character(:), allocatable :: gate_a, gate_b, done_b, start_arguments, arguments
+    character(:), allocatable :: bad_arguments, diagnostics, body
     character(len=32) :: number
-    character(len=32) :: file_number
-    type(mcp_session_t) :: server
+    type(mcp_session_t) :: server, server_b
     type(json_value_t) :: response, payload, status_payload, field
-    integer :: i, j, exit_code, sentinel, run_id, error_code
+    integer :: exit_code, sentinel, run_id, run_id_b, bad_run_id, error_code
     integer :: started_at, finished_at, clock_rate
-    logical :: valid
+    logical :: found, valid
 
     call gremlin_setup(driver, scratch, project, cache, state)
-    call prepare_check_fixture()
+    project_b = scratch//'/mcp-independent-b'
+    project_bad = scratch//'/mcp-early-output'
+    ready_a = scratch//'/cancel-a-ready'
+    ready_b = scratch//'/cancel-b-ready'
+    gate_a = scratch//'/cancel-a-release.fifo'
+    gate_b = scratch//'/cancel-b-release.fifo'
+    done_b = scratch//'/cancel-b-complete'
+    call prepare_check_fixture(project, ready_a, gate_a, 'mcp_cancel_probe')
+    call prepare_check_fixture(project_b, ready_b, gate_b, &
+        'mcp_independent_probe', done_b)
     call mcp_session_start(server, driver, project, cache, state, &
         scratch//'/mcp-cancel.stderr')
     call mcp_session_request(server, 'initialize', &
@@ -57,6 +68,34 @@ program test_mcp_cancel_error
     field = json_member(status_payload, 'run_id')
     call assert_equal_integer(int(json_number_value(field)), run_id, &
         'status associates the active process with its returned owner ID')
+    call gremlin_wait_file(ready_a, 30000, found)
+    call assert_true(found, 'first check reaches its native release barrier')
+    if (.not. found) then
+        write(number, '(i0)') run_id
+        call mcp_session_call(server, '{"action":"cancel","run_id":'// &
+            trim(number)//'}', response)
+        call mcp_session_shutdown(server, exit_code)
+        call stop_sentinel(sentinel)
+        call finish_assertions()
+    end if
+
+    call mcp_session_start(server_b, driver, project_b, cache, state, &
+        scratch//'/mcp-independent.stderr')
+    call mcp_session_request(server_b, 'initialize', &
+        '{"protocolVersion":"2025-11-25","capabilities":{},'// &
+        '"clientInfo":{"name":"fo-independent-native-test","version":"1"}}', &
+        response)
+    call mcp_session_notify(server_b, 'notifications/initialized')
+    arguments = '{"action":"check","mode":"start","root":'// &
+        mcp_quote(project_b)//'}'
+    call mcp_session_call(server_b, arguments, response)
+    call extract_payload(response, payload)
+    run_id_b = int(json_number_value(json_member(payload, 'run_id')))
+    call assert_true(run_id_b > 0, 'independent MCP server starts its own check')
+    if (run_id_b <= 0) call finish_assertions()
+    call gremlin_wait_file(ready_b, 30000, found)
+    call assert_true(found, 'second check reaches its native release barrier')
+    if (.not. found) call finish_assertions()
 
     write(number, '(i0)') run_id + 1
     arguments = '{"action":"cancel","run_id":'//trim(number)//'}'
@@ -92,6 +131,43 @@ program test_mcp_cancel_error
     call assert_equal_integer(int(json_number_value(field)), 130, &
         'terminal status records the public cancellation exit code')
 
+    call mcp_session_call(server_b, '{"action":"status"}', response)
+    call extract_payload(response, status_payload)
+    call assert_true(json_string_value(json_member(status_payload, 'state')) == &
+        'running', 'cancelling server A leaves independent server B active')
+    field = json_member(status_payload, 'run_id')
+    call assert_equal_integer(int(json_number_value(field)), run_id_b, &
+        'server B retains its distinct active run identity')
+    call gremlin_release_fifo(gate_b)
+    call gremlin_wait_file(done_b, 10000, found)
+    call assert_true(found, 'server B test progresses after server A cancellation')
+    call wait_finished(server_b, run_id_b, status_payload)
+    call assert_equal_integer(int(json_number_value( &
+        json_member(status_payload, 'exitcode'))), 0, &
+        'independent server B check completes successfully')
+
+    call prepare_failure_fixture(project_bad)
+    bad_arguments = '{"action":"check","mode":"start","root":'// &
+        mcp_quote(project_bad)//'}'
+    call mcp_session_call(server_b, bad_arguments, response)
+    call extract_payload(response, payload)
+    bad_run_id = int(json_number_value(json_member(payload, 'run_id')))
+    call assert_true(bad_run_id > 0, 'starts a naturally failing early-exit check')
+    if (bad_run_id <= 0) call finish_assertions()
+    call wait_finished(server_b, bad_run_id, status_payload)
+    field = json_member(status_payload, 'exitcode')
+    call assert_true(int(json_number_value(field)) /= 0, &
+        'invalid source check exits before diagnostics are requested')
+    write(number, '(i0)') bad_run_id
+    arguments = '{"action":"diagnostics","run_id":'//trim(number)//'}'
+    call mcp_session_call(server_b, arguments, response)
+    diagnostics = response_text(response)
+    call assert_true(index(diagnostics, 'test_mcp_failure.f90') > 0, &
+        'finished child diagnostics retain the concrete failing source path')
+    call assert_true(index(diagnostics, 'mcp_failure_probe') > 0 .or. &
+        index(diagnostics, 'syntax') > 0 .or. index(diagnostics, 'Error') > 0, &
+        'finished child diagnostics retain compiler failure output')
+
     write(number, '(i0)') run_id
     arguments = '{"action":"cancel","run_id":'//trim(number)//'}'
     call mcp_session_call(server, arguments, response)
@@ -103,31 +179,75 @@ program test_mcp_cancel_error
     call mcp_session_shutdown(server, exit_code)
     call assert_equal_integer(exit_code, 0, &
         'MCP server exits cleanly after cancellation')
+    call mcp_session_shutdown(server_b, exit_code)
+    call assert_equal_integer(exit_code, 0, &
+        'independent MCP server exits cleanly after completed checks')
+    call remove_path(gate_a)
+    call remove_path(gate_b)
     call finish_assertions()
 
 contains
 
-    subroutine prepare_check_fixture()
-        integer :: source_unit
+    subroutine prepare_check_fixture(project_dir, ready_path, gate_path, package, &
+            completed_path)
+        character(len=*), intent(in) :: project_dir, ready_path, gate_path, package
+        character(len=*), intent(in), optional :: completed_path
 
-        call write_text(project//'/fpm.toml', &
-            'name = "mcp_cancel_native_probe"'//new_line('a'))
-        call make_directory(project//'/src')
-        do i = 1, source_count
-            write(file_number, '(i3.3)') i
-            file_path = project//'/src/cancel_load_'//trim(file_number)//'.f90'
-            open(newunit=source_unit, file=file_path, status='replace', &
-                action='write')
-            write(source_unit, '(a)') 'module cancel_load_'//trim(file_number)
-            write(source_unit, '(a)') 'implicit none'
-            do j = 1, comment_count
-                write(source_unit, '(a)') &
-                    '! source scan workload for cancellation oracle'
-            end do
-            write(source_unit, '(a)') 'end module cancel_load_'//trim(file_number)
-            close(source_unit)
-        end do
+        call make_directory(project_dir)
+        call write_text(project_dir//'/fpm.toml', &
+            'name = "'//trim(package)//'"'//new_line('a'))
+        call gremlin_fifo(gate_path)
+        body = 'integer :: unit, gate_unit'//new_line('a')// &
+            'character :: token'//new_line('a')// &
+            'open(newunit=unit, file="'//ready_path// &
+                '", status="replace", action="write")'//new_line('a')// &
+            'write(unit, "(a)") "ready"'//new_line('a')//'close(unit)'// &
+            new_line('a')//'open(newunit=gate_unit, file="'//gate_path// &
+                '", status="old", access="stream", form="unformatted", '// &
+                'action="read")'//new_line('a')//'read(gate_unit) token'// &
+            new_line('a')//'close(gate_unit)'
+        if (present(completed_path)) body = body//new_line('a')// &
+            'open(newunit=unit, file="'//completed_path// &
+                '", status="replace", action="write")'//new_line('a')// &
+            'write(unit, "(a)") "completed"'//new_line('a')//'close(unit)'
+        call gremlin_write_case(project_dir, 'test_mcp_barrier', trim(body))
     end subroutine prepare_check_fixture
+
+    subroutine prepare_failure_fixture(project_dir)
+        character(len=*), intent(in) :: project_dir
+
+        call make_directory(project_dir)
+        call make_directory(project_dir//'/test')
+        call write_text(project_dir//'/fpm.toml', &
+            'name = "mcp_failure_probe"'//new_line('a'))
+        call write_text(project_dir//'/test/test_mcp_failure.f90', &
+            'program test_mcp_failure'//new_line('a')// &
+            'this source is intentionally invalid'//new_line('a')// &
+            'end program test_mcp_failure'//new_line('a'))
+    end subroutine prepare_failure_fixture
+
+    subroutine wait_finished(session, expected_run, document)
+        type(mcp_session_t), intent(inout) :: session
+        integer, intent(in) :: expected_run
+        type(json_value_t), intent(out) :: document
+        integer :: attempt
+        logical :: finished
+
+        finished = .false.
+        do attempt = 1, 400
+            call mcp_session_call(session, '{"action":"status"}', response)
+            call extract_payload(response, document)
+            field = json_member(document, 'state')
+            finished = json_string_value(field) == 'finished'
+            if (finished) exit
+            call gremlin_wait_ms(25)
+        end do
+        call assert_true(finished, &
+            'asynchronous check reaches terminal status in bound')
+        field = json_member(document, 'run_id')
+        call assert_equal_integer(int(json_number_value(field)), expected_run, &
+            'terminal check status names its exact run')
+    end subroutine wait_finished
 
     subroutine extract_payload(envelope, document)
         type(json_value_t), intent(in) :: envelope
@@ -151,5 +271,16 @@ contains
         field = json_member(error, 'code')
         code = int(json_number_value(field))
     end function rpc_error_code
+
+    function response_text(envelope) result(text)
+        type(json_value_t), intent(in) :: envelope
+        type(json_value_t) :: result, content, first
+        character(:), allocatable :: text
+
+        result = json_member(envelope, 'result')
+        content = json_member(result, 'content')
+        first = json_element(content, 1)
+        text = json_string_value(json_member(first, 'text'))
+    end function response_text
 
 end program test_mcp_cancel_error
