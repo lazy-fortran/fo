@@ -78,15 +78,22 @@ contains
     subroutine assert_output_json(text)
         character(len=*), intent(in) :: text
         type(json_value_t) :: report, tests, entry
-        character(:), allocatable :: message, output
+        character(:), allocatable :: message, output, report_line
         logical :: valid
-        integer :: first
+        integer :: first, line_end
 
         first = index(text, '{"tests":[')
         call assert_true(first > 0, 'reproduction log preserves the runner JSON report')
         if (first == 0) return
-        call json_parse(text(first:), report, valid, message)
+        line_end = index(text(first:), new_line('a'))
+        call assert_true(line_end > 0, 'runner JSON is a complete log record')
+        if (line_end == 0) return
+        report_line = text(first:first + line_end - 2)
+        call json_parse(report_line, report, valid, message)
         call assert_true(valid, 'captured output remains valid JSON: '//message)
+        if (.not. valid) return
+        call assert_true(index(text(first + line_end:), 'fo: execution cwd: ') > 0, &
+            'reproduction log also records the private execution view')
         tests = json_member(report, 'tests')
         entry = json_element(tests, 1)
         output = member_text(entry, 'output')
