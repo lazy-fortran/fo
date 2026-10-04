@@ -7,7 +7,7 @@ copyright = "Copyright 2025, Christopher Albert"
 description = "Fortran build cache, incremental rebuild, affected-test selection, MCP server"
 
 [build]
-auto-executables = true
+auto-executables = false
 auto-tests = true
 auto-examples = false
 module-naming = false
@@ -219,3 +219,11 @@ main = "test_async_process_boundary_slow.f90"
 name = "test_gremlin_process_boundary_slow"
 source-dir = "test"
 main = "test_gremlin_process_boundary_slow.f90"
+
+[[executable]]
+name = "fo"
+source-dir = "app"
+main = "main.f90"
+
+[extra.fo]
+test-driver-target = "fo"

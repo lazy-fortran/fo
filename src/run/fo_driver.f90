@@ -16,7 +16,8 @@ module fo_driver
         integer(int64) :: size = 0_int64
     end type driver_pin_t
 
-    public :: driver_image_init, driver_pin_current, driver_pin_existing
+    public :: driver_image_init, driver_pin_current, driver_pin_built_file
+    public :: driver_pin_existing
 
     interface
         integer(c_int) function c_driver_image_init() &
@@ -31,6 +32,14 @@ module fo_driver
             character(kind=c_char), intent(out) :: path(*)
             integer(c_int), value :: cap
         end function c_driver_stage_copy
+
+        integer(c_int) function c_driver_stage_file(root, source, path, cap) &
+                bind(C, name='fo_c_driver_stage_file')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: root(*), source(*)
+            character(kind=c_char), intent(out) :: path(*)
+            integer(c_int), value :: cap
+        end function c_driver_stage_file
 
         integer(c_int) function c_driver_publish(root, stage, digest, path, cap) &
                 bind(C, name='fo_c_driver_publish')
@@ -77,18 +86,12 @@ contains
 
         character(kind=c_char) :: c_stage(PATH_LEN + 1), c_final(PATH_LEN + 1)
         character(len=PATH_LEN) :: root, stage_path, final_path
-        character(len=DRIVER_DIGEST_LEN) :: digest
-        integer(c_long_long) :: file_size, mtime_ns, pin_size
-        integer(c_int) :: native_status, publish_status
+        integer(c_int) :: native_status
         integer :: hash_status
-        logical :: stat_ok
 
         pin = driver_pin_t()
         ierr = 1
         message = ''
-        digest = ''
-        file_size = 0_c_long_long
-        pin_size = 0_c_long_long
         call driver_pin_root(session_state_dir, root, hash_status, message)
         if (hash_status /= 0) return
 
@@ -106,25 +109,74 @@ contains
             return
         end if
         stage_path = c_text(c_stage)
+        call driver_pin_staged(root, stage_path, pin, ierr, message)
+    end subroutine driver_pin_current
 
+    subroutine driver_pin_built_file(session_state_dir, source_path, pin, ierr, &
+            message)
+        character(len=*), intent(in) :: session_state_dir, source_path
+        type(driver_pin_t), intent(out) :: pin
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        character(kind=c_char) :: c_stage(PATH_LEN + 1)
+        character(len=PATH_LEN) :: root, stage_path
+        integer(c_int) :: native_status
+        integer :: root_status
+
+        pin = driver_pin_t()
+        ierr = 1
+        message = ''
+        call driver_pin_root(session_state_dir, root, root_status, message)
+        if (root_status /= 0) return
+        c_stage = c_null_char
+        native_status = c_driver_stage_file(trim(root)//c_null_char, &
+            trim(source_path)//c_null_char, c_stage, int(size(c_stage), c_int))
+        if (native_status /= 0) then
+            message = 'cannot stage the built test driver in the session pin directory'
+            return
+        end if
+        stage_path = c_text(c_stage)
+        call driver_pin_staged(root, stage_path, pin, ierr, message)
+    end subroutine driver_pin_built_file
+
+    subroutine driver_pin_staged(root, stage_path, pin, ierr, message)
+        character(len=*), intent(in) :: root, stage_path
+        type(driver_pin_t), intent(out) :: pin
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        character(kind=c_char) :: c_final(PATH_LEN + 1)
+        character(len=PATH_LEN) :: final_path
+        character(len=DRIVER_DIGEST_LEN) :: digest
+        integer(c_long_long) :: file_size, mtime_ns, pin_size
+        integer(c_int) :: native_status, publish_status
+        integer :: hash_status
+        logical :: stat_ok
+
+        pin = driver_pin_t()
+        ierr = 1
+        digest = ''
+        file_size = 0_c_long_long
+        pin_size = 0_c_long_long
         call sha256_file(trim(stage_path), digest, hash_status)
         if (hash_status /= 0) then
             native_status = c_driver_remove_stage(trim(root)//c_null_char, &
                 trim(stage_path)//c_null_char)
-            message = 'cannot hash the staged native fo image'
+            message = 'cannot hash a staged fo driver image'
             return
         end if
         if (.not. valid_digest(digest)) then
             native_status = c_driver_remove_stage(trim(root)//c_null_char, &
                 trim(stage_path)//c_null_char)
-            message = 'staged native fo image returned an invalid SHA-256 digest'
+            message = 'staged fo driver image returned an invalid SHA-256 digest'
             return
         end if
         call fs_stat(trim(stage_path), mtime_ns, file_size, stat_ok)
         if (.not. stat_ok .or. file_size <= 0_c_long_long) then
             native_status = c_driver_remove_stage(trim(root)//c_null_char, &
                 trim(stage_path)//c_null_char)
-            message = 'cannot stat the staged native fo image'
+            message = 'cannot stat a staged fo driver image'
             return
         end if
 
@@ -148,7 +200,7 @@ contains
             end if
         end if
         if (len_trim(final_path) == 0) then
-            message = 'native fo driver pin publication returned no path'
+            message = 'fo driver pin publication returned no path'
             return
         end if
 
@@ -175,7 +227,7 @@ contains
         pin%path = trim(final_path)
         pin%size = int(pin_size, int64)
         ierr = 0
-    end subroutine driver_pin_current
+    end subroutine driver_pin_staged
 
     subroutine driver_pin_existing(session_state_dir, digest, expected_size, &
             pin, ierr, message)

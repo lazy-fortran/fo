@@ -236,13 +236,12 @@ static int fo_open_private_root(const char *root) {
     return fd;
 }
 
-static int fo_copy_image_fd(int out_fd) {
+static int fo_copy_fd(int in_fd, int out_fd) {
     char buffer[131072];
     off_t offset = 0;
 
-    if (fo_c_driver_image_init() != 0) return -1;
     for (;;) {
-        ssize_t nread = pread(fo_running_image_fd, buffer, sizeof(buffer), offset);
+        ssize_t nread = pread(in_fd, buffer, sizeof(buffer), offset);
         ssize_t written = 0;
         if (nread == 0) break;
         if (nread < 0) {
@@ -267,9 +266,8 @@ static int fo_copy_image_fd(int out_fd) {
     return 0;
 }
 
-/* Create a unique owner-only staging file under root, copy the retained image,
-   then make the completed bytes executable and read-only. */
-int fo_c_driver_stage_copy(const char *root, char *stage_path, int cap) {
+static int fo_stage_output(const char *root, int source_fd, char *stage_path,
+                           int cap) {
     struct timespec now;
     char leaf[96], full[PATH_MAX];
     int root_fd, out_fd = -1, attempt;
@@ -295,7 +293,7 @@ int fo_c_driver_stage_copy(const char *root, char *stage_path, int cap) {
         close(root_fd);
         return -1;
     }
-    if (fo_copy_image_fd(out_fd) != 0 || fchmod(out_fd, 0555) != 0 ||
+    if (fo_copy_fd(source_fd, out_fd) != 0 || fchmod(out_fd, 0555) != 0 ||
         fsync(out_fd) != 0) {
         int saved_errno = errno;
         close(out_fd);
@@ -328,6 +326,38 @@ int fo_c_driver_stage_copy(const char *root, char *stage_path, int cap) {
     strcpy(stage_path, full);
     close(root_fd);
     return 0;
+}
+
+/* Create a unique owner-only staging file under root, copy the retained image,
+   then make the completed bytes executable and read-only. */
+int fo_c_driver_stage_copy(const char *root, char *stage_path, int cap) {
+    if (fo_c_driver_image_init() != 0) return -1;
+    return fo_stage_output(root, fo_running_image_fd, stage_path, cap);
+}
+
+int fo_c_driver_stage_file(const char *root, const char *source,
+                           char *stage_path, int cap) {
+    struct stat st;
+    int source_fd, status;
+
+    if (source == NULL || source[0] == '\0') return -1;
+    source_fd = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (source_fd < 0) return -1;
+    if (fstat(source_fd, &st) != 0) {
+        int saved_errno = errno;
+        close(source_fd);
+        errno = saved_errno;
+        return -1;
+    }
+    if (!S_ISREG(st.st_mode) || (st.st_mode & 0111) == 0) {
+        int saved_errno = ENOEXEC;
+        close(source_fd);
+        errno = saved_errno;
+        return -1;
+    }
+    status = fo_stage_output(root, source_fd, stage_path, cap);
+    close(source_fd);
+    return status;
 }
 
 static int fo_stage_leaf(const char *root, const char *stage, char *leaf,

@@ -45,6 +45,8 @@ module fo_gremlin_supervisor
         gremlin_lease_release, &
         gremlin_generation_lease_acquire_at, gremlin_generation_pin_at, &
         gremlin_generation_root, GREMLIN_STATE_TEXT_MAX
+    use fo_gremlin_test_runtime, only: test_runtime_t, test_runtime_build, &
+        test_runtime_load, test_runtime_environment, test_runtime_action_key
     use fo_gfortran_build, only: gfortran_selected_test_names
     use fo_scan, only: is_slow_test
     use fo_test_budget, only: test_budget_seconds, test_wall_cap_seconds
@@ -76,6 +78,8 @@ module fo_gremlin_supervisor
         character(len=PATH_LEN) :: log_file = ''
         character(len=NAME_LEN) :: case_name = ''
         type(execution_view_t) :: execution_view
+        type(test_runtime_t) :: test_runtime
+        character(len=HASH_LEN) :: test_action_key = ''
         logical :: gate_required = .false.
         real :: started_at = 0.0
     end type child_t
@@ -860,10 +864,12 @@ contains
         type(gremlin_lease_t) :: reproduction_lease
         type(generation_t) :: generation
         type(execution_view_t) :: execution_view
+        type(test_runtime_t) :: reproduction_runtime
         type(driver_pin_t) :: reproduction_pin
         type(gremlin_request_t) :: selection_request
         character(len=PATH_LEN) :: message, active_project, log_file, executable
         character(len=PATH_LEN) :: cleanup_message
+        character(len=PATH_LEN*2+32) :: runtime_assignments, runtime_message
         character(len=PATH_LEN) :: generation_root
         character(len=32) :: reproduction_id
         character(len=NAME_LEN) :: selected(MAX_NODES)
@@ -875,6 +881,7 @@ contains
         integer :: owner_pid, ierr, n_selected, mandatory_count, seed
         integer :: n_args, spawn_exit, test_exit, sequence, release_error
         integer :: reproduction_timeout
+        integer :: runtime_status
         character(len=128) :: view_owner
         logical :: retain_view
         logical :: have_reproduction_lease, executable_ok
@@ -968,6 +975,16 @@ contains
             exitcode = 2
             return
         end if
+        call test_runtime_load(active_project, session%state_dir, &
+            generation%identity, reproduction_runtime, runtime_status, runtime_message)
+        if (runtime_status /= 0) then
+            call release_generation_lease(reproduction_lease, &
+                have_reproduction_lease, release_error, cleanup_message)
+            call release_if_owner(session, release_error, cleanup_message)
+            call error_response('reproduce', trim(runtime_message), response)
+            exitcode = 2
+            return
+        end if
         selection_request = request
         selection_request%targets = ''
         selection_request%targets(1) = request%case_id
@@ -1027,6 +1044,20 @@ contains
         end if
         execution_env = 'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
             'FO_GREMLIN_EXECUTION_CWD='//trim(execution_view%cwd)
+        call test_runtime_environment(reproduction_runtime, runtime_assignments, &
+            runtime_status, runtime_message)
+        if (runtime_status /= 0) then
+            call execution_view_release(execution_view, .false., release_error, &
+                cleanup_message)
+            call release_generation_lease(reproduction_lease, &
+                have_reproduction_lease, release_error, cleanup_message)
+            call release_if_owner(session, release_error, cleanup_message)
+            call error_response('reproduce', trim(runtime_message), response)
+            exitcode = 2
+            return
+        end if
+        if (len_trim(runtime_assignments) > 0) execution_env = &
+            trim(execution_env)//';'//trim(runtime_assignments)
         call process_start_argv_logged(trim(active_project), packed, n_args, &
             trim(log_file), owner_pid, spawn_exit, &
             trim(execution_env))
@@ -1052,7 +1083,10 @@ contains
             cleanup_message)
         call record_immediate_case(session, request, generation, request%case_id, &
             test_exit, trim(outcome), sequence, 1, seed, trim(log_file), ierr, message, &
-            credit_coverage=.false., gate_required=.true.)
+            credit_coverage=.false., gate_required=.true., &
+            test_runtime=reproduction_runtime, test_action_key= &
+                test_runtime_action_key(generation%identity, request%case_id, &
+                    trim(int_text(request%timeout_seconds)), reproduction_runtime))
         call release_generation_lease(reproduction_lease, have_reproduction_lease, &
             release_error, cleanup_message)
         if (release_error /= 0) then
@@ -1799,8 +1833,9 @@ contains
         type(gremlin_lease_t) :: new_active_lease
         type(gremlin_request_t) :: selection_request
         integer :: inventory_status, cancel_exit, mandatory_count, state_status
-        integer :: release_status, pin_status
+        integer :: release_status, pin_status, activation_exit
         character(len=PATH_LEN) :: state_message, release_message
+        type(test_runtime_t) :: candidate_runtime
         character(len=PATH_LEN) :: coverage_path
         type(gremlin_coverage_view_t) :: coverage_view
         character(len=NAME_LEN) :: active_case
@@ -1809,11 +1844,19 @@ contains
         ierr = 0
         message = ''
         was_active = have_active
-        call record_build(session, request, candidate, build_exit, build_child%log_file, &
+        activation_exit = build_exit
+        candidate_runtime = test_runtime_t()
+        if (build_exit == 0) then
+            call test_runtime_build(build_child%execution_view%cwd, &
+                session%state_dir, candidate%identity, candidate_runtime, ierr, message)
+            if (ierr /= 0) activation_exit = 1
+        end if
+        call record_build(session, request, candidate, activation_exit, &
+            build_child%log_file, &
             sequence, ierr, message)
         if (ierr /= 0) return
         build_child%pid = 0
-        if (build_exit /= 0) then
+        if (activation_exit /= 0) then
             last_failed = candidate%identity
             state_name = 'build_failed'
             active_case = ''
@@ -1822,7 +1865,8 @@ contains
             end if
             call publish_state(session, request, state_name, active, candidate, &
                 trim(active_case), &
-                completed, selected_count, seed, 'BUILD_FAIL', build_exit, ierr, message)
+                completed, selected_count, seed, 'BUILD_FAIL', activation_exit, &
+                ierr, message)
             if (ierr /= 0) return
             if (have_candidate_lease) then
                 call gremlin_lease_release(candidate_lease, release_status, release_message)
@@ -1984,7 +2028,10 @@ contains
         character(len=NAME_LEN) :: history(MAX_NODES), debt(MAX_NODES)
         character(len=NAME_LEN) :: priorities(MAX_NODES)
         type(coverage_epoch_t) :: coverage
+        type(test_runtime_t) :: test_runtime
         character(len=PATH_LEN) :: coverage_path
+        character(len=PATH_LEN) :: runtime_message
+        integer :: runtime_status
         logical :: is_test_arr(MAX_NODES)
         logical :: reproduce_only
 
@@ -2005,6 +2052,13 @@ contains
             message = 'Gremlin currently requires the native fpm test backend'
             return
         end if
+        call test_runtime_load(project_dir, session%state_dir, generation_id, &
+            test_runtime, runtime_status, runtime_message)
+        if (runtime_status /= 0) then
+            ierr = runtime_status
+            message = trim(runtime_message)
+            return
+        end if
         call fo_changed_modules(project_dir, dag, changed_ids, n_changed, &
             affected_ids, n_affected, n_cached, ierr, filenames=filenames, &
             is_test_arr=is_test_arr)
@@ -2017,8 +2071,9 @@ contains
         end do
         call gfortran_selected_test_names(project_dir, filenames, candidate_ids, &
             dag%n_nodes, .true., all_names, n_all)
-        call read_campaign_history(session, all_names, n_all, history, n_history, &
-            debt, n_debt, cursor_seed, ierr, message)
+        call read_campaign_history(session, all_names, n_all, generation_id, &
+            request, test_runtime, history, n_history, debt, n_debt, cursor_seed, &
+            ierr, message)
         if (ierr /= 0) return
         n_impacted = 0
         if (request%only_changed .or. request%has_previous_generation) then
@@ -2081,7 +2136,7 @@ contains
             return
         end if
         seed = coverage%seed
-        call reconcile_coverage(session, coverage, message, ierr)
+        call reconcile_coverage(session, request, test_runtime, coverage, message, ierr)
         if (ierr /= 0) return
         call coverage_next_chunk(coverage, priorities, n_priorities, min(limit, &
             size(selected)), selected, n_selected, coverage_status, &
@@ -2127,8 +2182,11 @@ contains
         end do
     end subroutine append_priority_names
 
-    subroutine reconcile_coverage(session, coverage, message, ierr)
+    subroutine reconcile_coverage(session, request, test_runtime, coverage, &
+            message, ierr)
         type(gremlin_session_t), intent(in) :: session
+        type(gremlin_request_t), intent(in) :: request
+        type(test_runtime_t), intent(in) :: test_runtime
         type(coverage_epoch_t), intent(inout) :: coverage
         character(len=*), intent(out) :: message
         integer, intent(out) :: ierr
@@ -2138,10 +2196,15 @@ contains
         character(len=HASH_LEN) :: generation
         character(len=16) :: outcome, seed_text
         character(len=HASH_LEN) :: inventory_digest
+        character(len=128) :: receipt_target
+        character(len=HASH_LEN) :: receipt_runtime_digest, receipt_action_key
+        character(len=HASH_LEN) :: expected_action_key
+        character(len=64) :: receipt_runtime_size_text
         character(len=16) :: epoch_text
         character(len=PATH_LEN) :: path
         integer(int64) :: cursor, next_cursor
         integer :: journal_status, i, status, receipt_seed, receipt_epoch, ios
+        integer(int64) :: receipt_runtime_size
         logical :: exists
 
         ierr = 0
@@ -2165,6 +2228,10 @@ contains
                 outcome = ''
                 seed_text = ''
                 inventory_digest = ''
+                receipt_target = ''
+                receipt_runtime_digest = ''
+                receipt_action_key = ''
+                receipt_runtime_size_text = ''
                 epoch_text = ''
                 call gremlin_json_field(records(i)%json, 'case_id', case_name)
                 call gremlin_json_field(records(i)%json, 'generation', generation)
@@ -2174,6 +2241,26 @@ contains
                     inventory_digest)
                 call gremlin_json_field(records(i)%json, 'coverage_epoch', epoch_text)
                 if (trim(generation) /= trim(coverage%generation)) cycle
+                if (test_runtime%enabled) then
+                    call gremlin_json_field(records(i)%json, 'test_driver_target', &
+                        receipt_target)
+                    call gremlin_json_field(records(i)%json, 'test_driver_digest', &
+                        receipt_runtime_digest)
+                    call gremlin_json_field(records(i)%json, 'test_driver_size', &
+                        receipt_runtime_size_text)
+                    call gremlin_json_field(records(i)%json, 'test_action_key', &
+                        receipt_action_key)
+                    if (trim(receipt_target) /= trim(test_runtime%target) .or. &
+                            trim(receipt_runtime_digest) /= &
+                                trim(test_runtime%pin%digest)) cycle
+                    read(receipt_runtime_size_text, *, iostat=ios) receipt_runtime_size
+                    if (ios /= 0) cycle
+                    if (receipt_runtime_size /= test_runtime%pin%size) cycle
+                    expected_action_key = test_runtime_action_key(coverage%generation, &
+                        trim(case_name), trim(int_text(request%timeout_seconds)), &
+                        test_runtime)
+                    if (trim(receipt_action_key) /= expected_action_key) cycle
+                end if
                 read(seed_text, *, iostat=ios) receipt_seed
                 if (ios /= 0) cycle
                 if (receipt_seed /= coverage%seed) cycle
@@ -2196,11 +2283,15 @@ contains
         end do
     end subroutine reconcile_coverage
 
-    subroutine read_campaign_history(session, inventory, n_inventory, history, &
-            n_history, debt, n_debt, cursor_seed, ierr, message)
+    subroutine read_campaign_history(session, inventory, n_inventory, generation, &
+            request, test_runtime, history, n_history, debt, n_debt, cursor_seed, &
+            ierr, message)
         type(gremlin_session_t), intent(in) :: session
         character(len=*), intent(in) :: inventory(:)
         integer, intent(in) :: n_inventory
+        character(len=*), intent(in) :: generation
+        type(gremlin_request_t), intent(in) :: request
+        type(test_runtime_t), intent(in) :: test_runtime
         character(len=*), intent(out) :: history(:), debt(:)
         integer, intent(out) :: n_history, n_debt, cursor_seed, ierr
         character(len=*), intent(out) :: message
@@ -2208,9 +2299,14 @@ contains
         type(journal_record_t), allocatable :: records(:)
         character(len=NAME_LEN) :: case_name
         character(len=16) :: status_name, seed_text
+        character(len=128) :: receipt_target
+        character(len=HASH_LEN) :: receipt_generation, receipt_runtime_digest
+        character(len=HASH_LEN) :: receipt_action_key, expected_action_key
+        character(len=64) :: receipt_runtime_size_text
         character(len=PATH_LEN) :: path
         integer(int64) :: cursor, next_cursor
         integer :: journal_status, i, seed_value, ios
+        integer(int64) :: receipt_runtime_size
         logical :: exists
 
         history = ''
@@ -2237,9 +2333,37 @@ contains
                 case_name = ''
                 status_name = ''
                 seed_text = ''
+                receipt_generation = ''
+                receipt_target = ''
+                receipt_runtime_digest = ''
+                receipt_action_key = ''
+                receipt_runtime_size_text = ''
                 call gremlin_json_field(records(i)%json, 'case_id', case_name)
                 call gremlin_json_field(records(i)%json, 'status', status_name)
                 call gremlin_json_field(records(i)%json, 'seed', seed_text)
+                if (test_runtime%enabled) then
+                    call gremlin_json_field(records(i)%json, 'generation', &
+                        receipt_generation)
+                    call gremlin_json_field(records(i)%json, 'test_driver_target', &
+                        receipt_target)
+                    call gremlin_json_field(records(i)%json, 'test_driver_digest', &
+                        receipt_runtime_digest)
+                    call gremlin_json_field(records(i)%json, 'test_driver_size', &
+                        receipt_runtime_size_text)
+                    call gremlin_json_field(records(i)%json, 'test_action_key', &
+                        receipt_action_key)
+                    if (trim(receipt_generation) /= trim(generation) .or. &
+                            trim(receipt_target) /= trim(test_runtime%target) .or. &
+                            trim(receipt_runtime_digest) /= &
+                                trim(test_runtime%pin%digest)) cycle
+                    read(receipt_runtime_size_text, *, iostat=ios) receipt_runtime_size
+                    if (ios /= 0) cycle
+                    if (receipt_runtime_size /= test_runtime%pin%size) cycle
+                    expected_action_key = test_runtime_action_key(generation, &
+                        trim(case_name), trim(int_text(request%timeout_seconds)), &
+                        test_runtime)
+                    if (trim(receipt_action_key) /= expected_action_key) cycle
+                end if
                 if (.not. any(inventory(:n_inventory) == case_name)) cycle
                 if (status_name /= 'PASS' .and. status_name /= 'FAIL' .and. &
                     status_name /= 'TIMEOUT') cycle
@@ -2366,9 +2490,10 @@ contains
         character(len=PATH_LEN) :: executable, log_name
         character(len=PATH_LEN) :: journal_message
         character(len=PATH_LEN) :: view_owner, view_message
+        character(len=PATH_LEN*2+32) :: runtime_assignments, runtime_message
         character(len=:), allocatable :: packed, execution_env
         integer :: n_args, spawn_exit, journal_status, coverage_status
-        integer :: view_status
+        integer :: view_status, runtime_status
         logical :: exists
         character(len=PATH_LEN) :: coverage_path
 
@@ -2391,6 +2516,18 @@ contains
             message = 'pinned fo driver is missing; refusing to launch test case'
             return
         end if
+        call test_runtime_load(generation%project_root, session%state_dir, &
+            generation%identity, child%test_runtime, runtime_status, runtime_message)
+        if (runtime_status /= 0) then
+            ierr = runtime_status
+            message = trim(runtime_message)
+            return
+        end if
+        if (child%test_runtime%enabled) then
+            child%test_action_key = test_runtime_action_key(generation%identity, &
+                trim(selected(index_case)), trim(int_text(request%timeout_seconds)), &
+                child%test_runtime)
+        end if
         executable = session%driver_path
         write (log_name, '(a,i0,a,i0,a)') 'case-', campaign, '-', index_case, '.log'
         call log_path(session, trim(log_name), child%log_file)
@@ -2403,6 +2540,17 @@ contains
         if (ierr /= 0) return
         execution_env = 'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
             'FO_GREMLIN_EXECUTION_CWD='//trim(child%execution_view%cwd)
+        call test_runtime_environment(child%test_runtime, runtime_assignments, &
+            runtime_status, runtime_message)
+        if (runtime_status /= 0) then
+            call execution_view_release(child%execution_view, .false., view_status, &
+                view_message)
+            ierr = runtime_status
+            message = trim(runtime_message)
+            return
+        end if
+        if (len_trim(runtime_assignments) > 0) execution_env = &
+            trim(execution_env)//';'//trim(runtime_assignments)
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'test')
@@ -2424,7 +2572,9 @@ contains
             call record_immediate_case(session, request, generation, &
                 selected(index_case), spawn_exit, 'INFRA_ERROR', sequence, &
                 index_case, seed, child%log_file, journal_status, message, &
-                gate_required=child%gate_required)
+                gate_required=child%gate_required, &
+                test_runtime=child%test_runtime, &
+                test_action_key=child%test_action_key)
             if (journal_status /= JOURNAL_OK) then
                 ierr = journal_status
             else
@@ -2560,12 +2710,13 @@ contains
         sequence = sequence + 1
         call record_immediate_case(session, request, generation, child%case_name, &
             exitcode, outcome, sequence, child%case_index, seed, child%log_file, ierr, &
-            message, gate_required=child%gate_required)
+            message, gate_required=child%gate_required, &
+            test_runtime=child%test_runtime, test_action_key=child%test_action_key)
     end subroutine record_case
 
     subroutine record_immediate_case(session, request, generation, case_name, exitcode, &
             outcome, sequence, case_index, seed, log_file, ierr, message, &
-            credit_coverage, gate_required)
+            credit_coverage, gate_required, test_runtime, test_action_key)
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(in) :: request
         type(generation_t), intent(in) :: generation
@@ -2576,8 +2727,11 @@ contains
 
         logical, intent(in), optional :: credit_coverage
         logical, intent(in), optional :: gate_required
+        type(test_runtime_t), intent(in), optional :: test_runtime
+        character(len=*), intent(in), optional :: test_action_key
         logical :: credit, is_gate
         character(len=160) :: gate_identity
+        character(len=1024) :: runtime_identity
         character(len=256) :: completion_id
         character(len=32768) :: record
         character(len=16) :: journal_outcome
@@ -2600,6 +2754,27 @@ contains
         gate_identity = ''
         if (is_gate) gate_identity = ',"gate_required":true,"requirement_digest":"'// &
             request%requirement_digest//'"'
+        runtime_identity = ''
+        if (present(test_runtime)) then
+            if (test_runtime%enabled) then
+                if (.not. present(test_action_key)) then
+                    ierr = JOURNAL_INVALID
+                    message = 'test driver receipt is missing its action key'
+                    return
+                end if
+                if (len_trim(test_action_key) /= HASH_LEN) then
+                    ierr = JOURNAL_INVALID
+                    message = 'test driver receipt has an invalid action key'
+                    return
+                end if
+                runtime_identity = ',"test_driver_target":"'// &
+                    trim(json_escape_string(trim(test_runtime%target)))// &
+                    '","test_driver_digest":"'//test_runtime%pin%digest// &
+                    '","test_driver_size":'// &
+                    trim(int64_text(test_runtime%pin%size))// &
+                    ',"test_action_key":"'//trim(test_action_key)//'"'
+            end if
+        end if
         receipt_identity = ',"evidence_kind":"reproduction"'
         if (credit) receipt_identity = ',"evidence_kind":"campaign"'
         if (credit .and. coverage_outcome(outcome)) then
@@ -2629,7 +2804,7 @@ contains
             '","outcome":"'//trim(journal_outcome)//'","status":"'// &
             trim(outcome)//'","exitcode":'// &
             trim(json_int(exitcode))//',"seed":'//trim(json_int(seed))// &
-            trim(receipt_identity)//trim(gate_identity)// &
+            trim(receipt_identity)//trim(runtime_identity)//trim(gate_identity)// &
             ',"order":'//trim(json_int(case_index))//',"log_path":"'// &
             trim(json_escape_string(log_file))//'"}'
         call gremlin_get_session_journal_path(session%project_key, request%lane_id, &

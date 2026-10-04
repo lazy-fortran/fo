@@ -3,6 +3,8 @@ program test_gremlin_driver_pin
     use, intrinsic :: iso_fortran_env, only: int64, real64
     use fo_cache, only: HASH_LEN
     use fo_driver, only: driver_pin_t, driver_pin_current
+    use fo_gremlin_test_runtime, only: test_runtime_t, test_runtime_build, &
+        test_runtime_load, test_runtime_action_key
     use fo_fs, only: fs_sleep_ms
     use fx_hash, only: sha256_file
     use fo_test_harness, only: string_list_t, process_result_t, list_add
@@ -50,9 +52,12 @@ contains
         character(:), allocatable :: helper_stage
         character(:), allocatable :: lane, session, generation, next_generation
         character(:), allocatable :: size_text, receipt_path, identity_text
+        character(:), allocatable :: runtime_digest, runtime_action
         type(string_list_t) :: command, args, environment
         type(process_result_t) :: process
         type(json_value_t) :: document, event, events, receipt_driver_size
+        type(json_value_t) :: receipt_runtime_size
+        type(test_runtime_t) :: runtime_one, runtime_two, frozen_runtime
         integer :: env_status, ierr, child, size_status, j
         integer(int64) :: expected_size, actual_size
         logical :: matched, equal
@@ -83,11 +88,13 @@ contains
             'name = "fo-driver-pin-b"'//new_line('a')// &
             'auto-executables = false'//new_line('a')// &
             'auto-tests = false'//new_line('a')// &
+            '[extra.fo]'//new_line('a')// &
+            'test-driver-target = "fo_driver_b"'//new_line('a')// &
             '[[executable]]'//new_line('a')// &
             'name = "fo_driver_b"'//new_line('a')// &
             'source-dir = "app"'//new_line('a')// &
-            'main = "main.f90"'//new_line('a'))
-        call write_text(b_project//'/app/main.f90', marker_driver_source())
+            'main = "runtime.f90"'//new_line('a'))
+        call write_text(b_project//'/app/runtime.f90', marker_driver_source())
         command = string_list_t()
         call list_add(command, driver_a)
         call list_add(command, 'build')
@@ -97,6 +104,8 @@ contains
         b_binary = b_project//'/build/fo/bin/fo_driver_b'
         call assert_true(file_exists(b_binary), 'native marker driver B exists')
         if (.not. file_exists(b_binary)) return
+        call test_declared_runtime_pins(driver_a, b_project, state, b_binary, &
+            runtime_one, runtime_two, frozen_runtime)
         b_probe = scratch//'/driver-b-probe'
         environment = string_list_t()
         call list_add(environment, 'FO_B_MARKER='//b_probe)
@@ -132,7 +141,15 @@ contains
         marker = scratch//'/driver-b-invoked'
         call write_text(project//'/fpm.toml', &
             'name = "fo-driver-pin-campaign"'//new_line('a')// &
-            'auto-tests = true'//new_line('a'))
+            'auto-executables = false'//new_line('a')// &
+            'auto-tests = true'//new_line('a')// &
+            '[extra.fo]'//new_line('a')// &
+            'test-driver-target = "fo_driver_b"'//new_line('a')// &
+            '[[executable]]'//new_line('a')// &
+            'name = "fo_driver_b"'//new_line('a')// &
+            'source-dir = "app"'//new_line('a')// &
+            'main = "runtime.f90"'//new_line('a'))
+        call write_runtime_driver(project, 1)
         call make_directory(project//'/test')
         call write_campaign_test(project, 1)
         lane = 'driver-pin-ab'
@@ -166,6 +183,7 @@ contains
         call chmod_executable(helper_stage)
         call move_path(helper_stage, public_driver)
         call write_campaign_test(project, 2)
+        call write_runtime_driver(project, 2)
         call wait_for_pass(driver_a, project, cache, state, lane, session, generation, &
             next_generation, document)
         if (len(next_generation) == 0) then
@@ -224,6 +242,22 @@ contains
                 'durable PASS receipt records A digest')
             call assert_true(gremlin_field(event, 'driver_path') == receipt_path, &
                 'durable PASS receipt names the same owned A pin')
+            call assert_true(gremlin_field(event, 'test_driver_target') == &
+                'fo_driver_b', 'durable PASS receipt records the declared test target')
+            runtime_digest = gremlin_field(event, 'test_driver_digest')
+            runtime_action = gremlin_field(event, 'test_action_key')
+            receipt_runtime_size = json_member(event, 'test_driver_size')
+            call assert_true(len(runtime_digest) == HASH_LEN, &
+                'durable PASS receipt records the pinned test runtime digest')
+            call assert_true(len(runtime_action) == HASH_LEN, &
+                'durable PASS receipt records the runtime-specific action key')
+            if (receipt_runtime_size%kind == json_number) then
+                call assert_true(json_number_value(receipt_runtime_size) > 0.0_real64, &
+                    'durable PASS receipt records the test runtime byte size')
+            else
+                call assert_true(.false., &
+                    'durable PASS receipt records numeric test runtime size')
+            end if
             receipt_driver_size = json_member(event, 'driver_size')
             if (receipt_driver_size%kind == json_number) then
                 call assert_true(json_number_value(receipt_driver_size) == &
@@ -234,10 +268,131 @@ contains
             matched = .true.
         end do
         call assert_true(matched, 'new generation has a durable PASS receipt')
+        args = string_list_t()
+        call list_add(args, 'gremlin')
+        call list_add(args, 'reproduce')
+        call list_add(args, 'test_driver_pin_case')
+        call list_add(args, '--dir')
+        call list_add(args, project)
+        call list_add(args, '--lane')
+        call list_add(args, lane)
+        call list_add(args, '--session')
+        call list_add(args, session)
+        call list_add(args, '--generation')
+        call list_add(args, generation)
+        call list_add(args, '--json')
+        call gremlin_run(driver_a, project, cache, state, args, process, &
+            environment=environment, timeout=120000)
+        call json_parse(process%stdout, document, json_valid, json_message)
+        call assert_true(process%exit_code == 0 .and. json_valid .and. &
+            gremlin_field(document, 'state') == 'PASS', &
+            'frozen reproduction uses generation one runtime after generation two')
         call assert_true(.not. file_exists(marker), &
             'replaced public B marker was never invoked for build or test')
         call stop_lane(driver_a, project, cache, state, lane, session)
     end subroutine run_driver_pin_oracles
+
+    subroutine test_declared_runtime_pins(driver, project, state, binary, &
+            runtime_one, runtime_two, frozen_runtime)
+        character(len=*), intent(in) :: driver, project, state, binary
+        type(test_runtime_t), intent(out) :: runtime_one, runtime_two, frozen_runtime
+        type(string_list_t) :: command
+        type(process_result_t) :: process
+        character(len=HASH_LEN) :: action_one, action_two
+        character(len=HASH_LEN) :: output_digest
+        character(len=32) :: generation_one, generation_two, generation_three
+        character(:), allocatable :: failed_project
+        type(test_runtime_t) :: failed_runtime
+        integer :: ierr
+        character(len=1024) :: message
+
+        generation_one = repeat('a', HASH_LEN)
+        generation_two = repeat('b', HASH_LEN)
+        generation_three = repeat('c', HASH_LEN)
+        call test_runtime_build(project, state, generation_one, runtime_one, &
+            ierr, message)
+        call assert_true(ierr == 0 .and. runtime_one%enabled, &
+            'declared test driver target is pinned for its generation')
+        if (ierr /= 0) return
+        call sha256_file(binary, output_digest, ierr)
+        call assert_true(ierr == 0 .and. output_digest == runtime_one%pin%digest, &
+            'generation one pin matches an independent output hash')
+        call run_runtime_version(runtime_one%pin%path, process)
+        call assert_true(process%exit_code == 0 .and. &
+            trim(process%stdout) == 'runtime-1', &
+            'generation one pin runs its independent runtime version oracle')
+
+        call write_runtime_driver(project, 2)
+        command = string_list_t()
+        call list_add(command, driver)
+        call list_add(command, 'build')
+        call run_process(command, project, process)
+        call assert_true(process%exit_code == 0 .and. .not. process%runner_failed, &
+            'owner A rebuilds the changed declared runtime as generation two')
+        if (process%exit_code /= 0 .or. process%runner_failed) return
+        call test_runtime_build(project, state, generation_two, runtime_two, &
+            ierr, message)
+        call assert_true(ierr == 0 .and. runtime_two%enabled, &
+            'declared test driver target is pinned for the next generation')
+        if (ierr /= 0) return
+        call sha256_file(binary, output_digest, ierr)
+        call assert_true(ierr == 0 .and. output_digest == runtime_two%pin%digest, &
+            'generation two pin matches the independently hashed rebuilt output')
+        call run_runtime_version(runtime_two%pin%path, process)
+        call assert_true(process%exit_code == 0 .and. &
+            trim(process%stdout) == 'runtime-2', &
+            'generation two pin runs its distinct runtime version')
+
+        call test_runtime_load(project, state, generation_one, frozen_runtime, &
+            ierr, message)
+        call assert_true(ierr == 0 .and. frozen_runtime%enabled, &
+            'old generation reloads its own immutable runtime binding')
+        if (ierr /= 0) return
+        call run_runtime_version(frozen_runtime%pin%path, process)
+        call assert_true(process%exit_code == 0 .and. &
+            trim(process%stdout) == 'runtime-1', &
+            'old generation keeps runtime one after runtime two is built')
+        action_one = test_runtime_action_key(generation_one, 'case', '30', runtime_one)
+        action_two = test_runtime_action_key(generation_two, 'case', '30', runtime_two)
+        call assert_true(action_one /= action_two, &
+            'runtime action identity changes across frozen generations')
+        failed_project = project//'/missing-runtime'
+        call make_directory(failed_project)
+        call write_text(failed_project//'/fpm.toml', &
+            'name = "missing-runtime"'//new_line('a')// &
+            '[extra.fo]'//new_line('a')// &
+            'test-driver-target = "missing_target"'//new_line('a')// &
+            '[[executable]]'//new_line('a')// &
+            'name = "missing_target"'//new_line('a'))
+        call test_runtime_build(failed_project, state, generation_three, failed_runtime, &
+            ierr, message)
+        call assert_true(ierr /= 0, 'missing candidate executable fails closed')
+        call assert_true(.not. file_exists(state//'/test-runtime-'// &
+            generation_three//'.json'), 'failed candidate publishes no runtime binding')
+        call test_runtime_load(project, state, generation_two, frozen_runtime, &
+            ierr, message)
+        call assert_true(ierr == 0 .and. &
+            frozen_runtime%pin%digest == runtime_two%pin%digest, &
+            'failed candidate leaves the last good generation runtime available')
+    end subroutine test_declared_runtime_pins
+
+    subroutine run_runtime_version(path, process)
+        character(len=*), intent(in) :: path
+        type(process_result_t), intent(out) :: process
+        type(string_list_t) :: command
+
+        command = string_list_t()
+        call list_add(command, path)
+        call list_add(command, '--version')
+        call run_process(command, '.', process)
+    end subroutine run_runtime_version
+
+    subroutine write_runtime_driver(project, version)
+        character(len=*), intent(in) :: project
+        integer, intent(in) :: version
+
+        call write_text(project//'/app/runtime.f90', marker_driver_source(version))
+    end subroutine write_runtime_driver
 
     subroutine startup_fd_oracle(scratch, b_binary)
         character(len=*), intent(in) :: scratch, b_binary
@@ -362,13 +517,41 @@ contains
         call write_text(project//'/test/test_driver_pin_case.f90', &
             'program test_driver_pin_case'//new_line('a')// &
             'implicit none'//new_line('a')// &
-            'integer, parameter :: fixture_version = '//value//new_line('a')// &
-            'if (fixture_version < 1) error stop 1'//new_line('a')// &
+            'character(len=4096) :: fo, fo_bin, command, output'//new_line('a')// &
+            'integer :: status, command_status, exit_status, unit, ios'// &
+            new_line('a')// &
+            "fo = ''"//new_line('a')// &
+            "fo_bin = ''"//new_line('a')// &
+            "call get_environment_variable('FO', fo, status=status)"//new_line('a')// &
+            "if (status /= 0 .or. len_trim(fo) == 0) error stop 1"//new_line('a')// &
+            "call get_environment_variable('FO_BIN', fo_bin, status=status)"// &
+            new_line('a')// &
+            "if (status /= 0 .or. trim(fo) /= trim(fo_bin)) error stop 2"// &
+            new_line('a')// &
+            "command = '""'//trim(fo)//'"" --version > gremlin-runtime-version.txt'"// &
+            new_line('a')// &
+            'call execute_command_line(trim(command), cmdstat=command_status, &'// &
+            new_line('a')// &
+            '    exitstat=exit_status)'//new_line('a')// &
+            'if (command_status /= 0 .or. exit_status /= 0) error stop 3'// &
+            new_line('a')// &
+            "open(newunit=unit, file='gremlin-runtime-version.txt', status='old', &"// &
+            new_line('a')// &
+            "    action='read', iostat=ios)"//new_line('a')// &
+            'if (ios /= 0) error stop 4'//new_line('a')// &
+            "read(unit, '(a)', iostat=ios) output"//new_line('a')// &
+            'close(unit)'//new_line('a')// &
+            "if (ios /= 0 .or. trim(output) /= 'runtime-"//value//"') error stop 5"// &
+            new_line('a')// &
             'end program test_driver_pin_case'//new_line('a'))
     end subroutine write_campaign_test
 
-    function marker_driver_source() result(source)
+    function marker_driver_source(version) result(source)
+        integer, intent(in), optional :: version
         character(:), allocatable :: source
+        character(len=1) :: digit
+        digit = '1'
+        if (present(version)) digit = achar(48 + version)
         source = 'program fo_driver_b'//new_line('a')// &
             'implicit none'//new_line('a')// &
             'character(len=4096) :: marker, command'//new_line('a')// &
@@ -377,6 +560,9 @@ contains
             "call get_environment_variable('FO_B_MARKER', marker)"//new_line('a')// &
             "command = ''"//new_line('a')// &
             'call get_command_argument(1, command)'//new_line('a')// &
+            "if (trim(command) == '--version') then"//new_line('a')// &
+            "write(*, '(a)') 'runtime-"//digit//"'"//new_line('a')// &
+            'stop 0'//new_line('a')//'end if'//new_line('a')// &
             'if (len_trim(marker) > 0) then'//new_line('a')// &
             "open(newunit=unit, file=trim(marker), status='replace')"//new_line('a')// &
             "write(unit, '(a)') trim(command)"//new_line('a')// &

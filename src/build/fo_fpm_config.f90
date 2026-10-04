@@ -105,6 +105,10 @@ module fo_fpm_config
         integer :: test_timeout = 0
         integer :: slow_test_timeout = 0
         integer :: test_wall_timeout = 0
+        ! [extra.fo] executable exposed as FO and FO_BIN to Gremlin test cases.
+        ! Empty preserves the process's inherited executable environment.
+        character(len=128) :: test_driver_target = ''
+        character(len=256) :: test_driver_target_error = ''
         !> [extra.fo] debug-info = "g0" | "line-tables" | "full": how much
         !> debug info the default profile emits. A project declares its own
         !> budget here so the diet is visible in the manifest, not only in fo's
@@ -194,6 +198,8 @@ contains
         c%n_test_arg_sets = 0
         c%n_fo_inputs = 0
         c%fo_input_parse_error = ''
+        c%test_driver_target = ''
+        c%test_driver_target_error = ''
     end subroutine fpm_config_init
 
     subroutine fpm_config_parse(project_dir, config, ierr)
@@ -206,7 +212,8 @@ contains
         character(len=4096) :: accum
         logical :: in_array
         character(len=1024) :: pending_key
-        integer :: u, ios
+        integer :: u, ios, i
+        logical :: target_declared
 
         call fpm_config_init(config)
         config%project_dir = trim(project_dir)
@@ -329,6 +336,19 @@ contains
         if (len_trim(config%fo_input_parse_error) > 0) then
             ierr = 1
             return
+        end if
+        if (len_trim(config%test_driver_target) > 0) then
+            target_declared = .false.
+            do i = 1, config%n_exes
+                if (trim(config%exes(i)%name) == &
+                        trim(config%test_driver_target)) target_declared = .true.
+            end do
+            if (.not. target_declared) then
+                config%test_driver_target_error = &
+                    'test-driver-target must name a declared executable'
+                ierr = 1
+                return
+            end if
         end if
         if (ierr == 0) call resolve_metapackages(config, ierr)
     end subroutine fpm_config_parse
@@ -783,7 +803,7 @@ contains
         character(len=*), intent(in) :: key, val
         type(fpm_config_t), intent(inout) :: config
 
-        character(len=64) :: str_val
+        character(len=128) :: str_val
 
         select case (trim(key))
         case ('test-timeout')
@@ -792,6 +812,9 @@ contains
             config%slow_test_timeout = positive_seconds(val, 'slow-test-timeout')
         case ('test-wall-timeout')
             config%test_wall_timeout = positive_seconds(val, 'test-wall-timeout')
+        case ('test-driver-target')
+            call extract_string(val, str_val)
+            config%test_driver_target = trim(str_val)
         case ('dispatcher')
             call extract_string(val, str_val)
             config%dispatcher = trim(str_val)
