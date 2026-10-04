@@ -8,6 +8,7 @@ module fo_dep_resolve
     !! a provider for FPM's registry cache is available.
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, dep_kind, &
         DEP_PATH, DEP_GIT, DEP_REGISTRY, add_link_lib
+    use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
     private
     public :: resolved_src_t, resolve_dep_srcs, resolve_dev_dep_srcs, MAX_RESOLVED
@@ -55,17 +56,16 @@ contains
 
     subroutine resolve_dev_dep_srcs(project_dir, out, n_out, ierr)
         !! Collect dev-dependency library source dirs for the test build.
-        !! Path dev-deps resolve to their local dir; git/registry dev-deps
+        !! Path dev-deps resolve to their local dir; acquired external deps
         !! resolve to the fpm bootstrapped layout build/dependencies/<name>.
-        !! Transitive regular deps of a dev-dep are not walked (deferred):
-        !! the test build scans direct dev-dep sources only.
+        !! Each dev-dep's regular dependency closure is included for tests.
         character(len=*), intent(in) :: project_dir
         type(resolved_src_t), intent(out) :: out(MAX_RESOLVED)
         integer, intent(out) :: n_out, ierr
 
         type(fpm_config_t), allocatable :: cfg
         character(len=512) :: root, dep_dir
-        integer :: i, k, kind
+        integer :: i, k, kind, n_unresolved, n_registry
         logical :: seen
 
         n_out = 0
@@ -75,6 +75,8 @@ contains
         call fpm_config_parse(root, cfg, ierr)
         if (ierr /= 0) return
 
+        n_unresolved = 0
+        n_registry = 0
         do i = 1, cfg%n_dev_deps
             kind = dep_kind(cfg%dev_deps(i))
             if (kind == DEP_PATH) then
@@ -92,9 +94,18 @@ contains
             end do
             if (.not. seen) then
                 call record_dep_src(cfg%dev_deps(i)%name, dep_dir, out, n_out, &
-                    kind)
+                    kind, ierr)
+                if (ierr /= 0) return
+                call walk(dep_dir, out, n_out, n_unresolved, n_registry, ierr, &
+                    1, cfg)
+                if (ierr /= 0) return
             end if
         end do
+        if (n_unresolved > 0) then
+            write (error_unit, '(a,i0,a)') 'fo: ', n_unresolved, &
+                ' dev-dependency closure entries are unresolved'
+            ierr = 1
+        end if
     end subroutine resolve_dev_dep_srcs
 
     subroutine merge_dep_link_libs(project_dir, config)
@@ -155,10 +166,19 @@ contains
         logical :: seen, shadowed
 
         ierr = 0
-        if (depth > 64) return
+        if (depth > 64) then
+            write (error_unit, '(a)') 'fo: dependency nesting exceeds 64 at '// &
+                trim(dir)
+            ierr = 1
+            return
+        end if
         allocate (cfg)
         call fpm_config_parse(dir, cfg, ierr)
-        if (ierr /= 0) return
+        if (ierr /= 0) then
+            write (error_unit, '(a)') 'fo: invalid dependency manifest '// &
+                trim(dir)//'/fpm.toml'
+            return
+        end if
 
         do i = 1, cfg%n_deps
             kind = dep_kind(cfg%deps(i))
@@ -195,6 +215,12 @@ contains
             end if
             if (.not. has_manifest(dep_dir)) then
                 if (root_kind == DEP_GIT) n_unresolved = n_unresolved + 1
+                if (root_kind == DEP_PATH) then
+                    write (error_unit, '(a)') 'fo: missing dependency manifest '// &
+                        trim(dep_dir)//'/fpm.toml'
+                    ierr = 1
+                    return
+                end if
                 cycle
             end if
             seen = .false.
@@ -209,10 +235,11 @@ contains
             ! on the resolved root so a diamond is compiled once.
             if (.not. seen) then
                 call record_dep_src(cfg%deps(i)%name, dep_dir, out, n_out, &
-                    root_kind)
+                    root_kind, ierr)
+                if (ierr /= 0) return
                 call walk(dep_dir, out, n_out, n_unresolved, n_registry, &
                     ierr, depth + 1, root_config)
-                ierr = 0
+                if (ierr /= 0) return
             end if
         end do
     end subroutine walk
@@ -234,20 +261,33 @@ contains
         n_out = n_kept
     end subroutine drop_git_sources
 
-    subroutine record_dep_src(name, dep_dir, out, n_out, kind)
+    subroutine record_dep_src(name, dep_dir, out, n_out, kind, ierr)
         character(len=*), intent(in) :: name, dep_dir
         type(resolved_src_t), intent(inout) :: out(MAX_RESOLVED)
         integer, intent(inout) :: n_out
         integer, intent(in), optional :: kind
+        integer, intent(out) :: ierr
 
         type(fpm_config_t), allocatable :: dcfg
         integer :: derr
         character(len=512) :: src
 
-        if (n_out >= MAX_RESOLVED) return
+        ierr = 0
+        if (n_out >= MAX_RESOLVED) then
+            write (error_unit, '(a)') 'fo: dependency closure exceeds '// &
+                'maximum of '//itoa(MAX_RESOLVED)//' entries'
+            ierr = 1
+            return
+        end if
         allocate (dcfg)
         call fpm_config_parse(dep_dir, dcfg, derr)
-        if (derr == 0 .and. len_trim(dcfg%source_dir) > 0) then
+        ierr = derr
+        if (ierr /= 0) then
+            write (error_unit, '(a)') 'fo: invalid dependency manifest '// &
+                trim(dep_dir)//'/fpm.toml'
+            return
+        end if
+        if (len_trim(dcfg%source_dir) > 0) then
             src = trim(dep_dir)//'/'//trim(dcfg%source_dir)
         else
             src = trim(dep_dir)//'/src'
@@ -259,6 +299,12 @@ contains
         out(n_out)%kind = DEP_PATH
         if (present(kind)) out(n_out)%kind = kind
     end subroutine record_dep_src
+
+    function itoa(value) result(text)
+        integer, intent(in) :: value
+        character(len=16) :: text
+        write (text, '(i0)') value
+    end function itoa
 
     subroutine resolve_path_dep(base, rel, out)
         character(len=*), intent(in) :: base, rel
