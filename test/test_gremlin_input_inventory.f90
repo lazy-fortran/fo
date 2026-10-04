@@ -1,6 +1,5 @@
 program test_gremlin_input_inventory
-    use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_rename, &
-        fs_write_text
+    use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_rename
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, INPUT_FILE
     use fo_util, only: make_tmpfile
@@ -8,7 +7,7 @@ program test_gremlin_input_inventory
 
     character(len=4096) :: fixture, project, dependency, leaf
     character(len=1024) :: diagnostic
-    type(input_inventory_t) :: initial, changed, ignored, runtime
+    type(input_inventory_t) :: initial, changed, ignored, runtime, previous
     type(input_declaration_t) :: declarations(2), bad_declaration(1)
     integer :: ierr
 
@@ -26,26 +25,26 @@ program test_gremlin_input_inventory
     call fs_make_dir(trim(project)//'/.cache')
     call fs_make_dir(trim(dependency)//'/src')
     call fs_make_dir(trim(leaf)//'/src')
-    call write(project//'/fpm.toml', &
+    call write(trim(project)//'/fpm.toml', &
         'name = "inventory-fixture"'//new_line('a')// &
         '[dependencies]'//new_line('a')// &
         'fixture-dep = { path = "../dependency" }'//new_line('a')// &
         'dependency-copy = { path = "../dependency" }')
-    call write(dependency//'/fpm.toml', &
+    call write(trim(dependency)//'/fpm.toml', &
         'name = "fixture-dep"'//new_line('a')// &
         '[dependencies]'//new_line('a')// &
         'fixture-leaf = { path = "../leaf" }')
-    call write(leaf//'/fpm.toml', 'name = "fixture-leaf"')
-    call write(project//'/src/main.f90', 'program main')
-    call write(project//'/test/oracle.f90', 'program oracle')
-    call write(project//'/include/runtime.inc', 'include dependency')
-    call write(dependency//'/src/dep.f90', 'module dep')
-    call write(leaf//'/src/leaf.f90', 'module leaf')
-    call write(project//'/build/generated.f90', 'program generated')
-    call write(project//'/.git/hooks/ignored.py', '#!/usr/bin/env python3')
-    call write(project//'/.gremlin/cache/ignored.f90', 'generated')
-    call write(project//'/.cache/ignored.f90', 'generated')
-    call write(project//'/PLAN.md', 'not a build input')
+    call write(trim(leaf)//'/fpm.toml', 'name = "fixture-leaf"')
+    call write(trim(project)//'/src/main.f90', 'program main')
+    call write(trim(project)//'/test/oracle.f90', 'program oracle')
+    call write(trim(project)//'/include/runtime.inc', 'include dependency')
+    call write(trim(dependency)//'/src/dep.f90', 'module dep')
+    call write(trim(leaf)//'/src/leaf.f90', 'module leaf')
+    call write(trim(project)//'/build/generated.f90', 'program generated')
+    call write(trim(project)//'/.git/hooks/ignored.py', '#!/usr/bin/env python3')
+    call write(trim(project)//'/.gremlin/cache/ignored.f90', 'generated')
+    call write(trim(project)//'/.cache/ignored.f90', 'generated')
+    call write(trim(project)//'/PLAN.md', 'not a build input')
 
     call discover(initial, ierr, diagnostic)
     call require(ierr == 0, 'initial inventory: '//trim(diagnostic))
@@ -65,36 +64,40 @@ program test_gremlin_input_inventory
         'src/leaf.f90', 'dependency-source'), &
         'transitive path dependency source is an input')
 
-    call write(project//'/PLAN.md', 'changed unrelated plan')
+    call write(trim(project)//'/PLAN.md', 'changed unrelated plan')
     call discover(ignored, ierr, diagnostic)
     call require(ierr == 0, 'inventory after ignored mutations: '//trim(diagnostic))
     call require(ignored%digest == initial%digest, &
         'plans and generated/cache/git outputs do not affect the digest')
 
-    call write(project//'/src/main.f90', 'program changed')
+    call write(trim(project)//'/src/main.f90', 'program changed')
     call discover(changed, ierr, diagnostic)
     call require(ierr == 0, 'inventory after content edit: '//trim(diagnostic))
     call require(changed%digest /= initial%digest, 'content edit changes digest')
-    call write(project//'/src/added.f90', 'module added')
+    previous = changed
+    call write(trim(project)//'/src/added.f90', 'module added')
     call discover(changed, ierr, diagnostic)
     call require(ierr == 0, 'inventory after file addition: '//trim(diagnostic))
-    call require(changed%digest /= initial%digest, 'file addition changes digest')
+    call require(changed%digest /= previous%digest, 'file addition changes digest')
+    previous = changed
     call require(fs_rename(trim(project)//'/src/added.f90', &
         trim(project)//'/src/renamed.f90') == 0, 'fixture file can be renamed')
     call discover(changed, ierr, diagnostic)
     call require(ierr == 0, 'inventory after rename: '//trim(diagnostic))
-    call require(changed%digest /= initial%digest, 'rename changes digest')
+    call require(changed%digest /= previous%digest, 'rename changes digest')
+    previous = changed
     call fs_remove_file(trim(project)//'/src/renamed.f90')
     call discover(changed, ierr, diagnostic)
     call require(ierr == 0, 'inventory after removal: '//trim(diagnostic))
-    call require(changed%digest /= initial%digest, 'file removal changes digest')
-    call write(dependency//'/src/dep.f90', 'module dep changed')
+    call require(changed%digest /= previous%digest, 'file removal changes digest')
+    previous = changed
+    call write(trim(dependency)//'/src/dep.f90', 'module dep changed')
     call discover(changed, ierr, diagnostic)
     call require(ierr == 0, 'inventory after dependency edit: '//trim(diagnostic))
-    call require(changed%digest /= initial%digest, &
+    call require(changed%digest /= previous%digest, &
         'path dependency content edit changes digest')
 
-    call write(project//'/runtime.dat', 'runtime declaration')
+    call write(trim(project)//'/runtime.dat', 'runtime declaration')
     declarations(1)%root_alias = 'project'
     declarations(1)%relative_path = 'runtime.dat'
     declarations(1)%role = 'runtime-data'
@@ -121,7 +124,7 @@ program test_gremlin_input_inventory
     bad_declaration(1)%root_alias = 'undeclared-root'
     call expect_rejected(bad_declaration, 'unknown root alias is rejected')
 
-    call write(project//'/fpm.toml', &
+    call write(trim(project)//'/fpm.toml', &
         'name = "inventory-fixture"'//new_line('a')// &
         '[dependencies]'//new_line('a')// &
         'fixture-dep = { path = "../dependency" }'//new_line('a')// &
@@ -159,11 +162,22 @@ contains
     logical function has_entry(inventory, alias, path, role)
         type(input_inventory_t), intent(in) :: inventory
         character(len=*), intent(in) :: alias, path, role
-        integer :: i
+        integer :: i, j, root_index
 
         has_entry = .false.
+        root_index = 0
+        do i = 1, inventory%root_count
+            do j = 1, inventory%roots(i)%alias_count
+                if (trim(inventory%roots(i)%aliases(j)) /= alias) cycle
+                root_index = i
+                exit
+            end do
+            if (root_index > 0) exit
+        end do
+        if (root_index == 0) return
         do i = 1, inventory%entry_count
-            if (trim(inventory%entries(i)%root_alias) /= alias) cycle
+            if (trim(inventory%entries(i)%root_alias) /= &
+                    trim(inventory%roots(root_index)%canonical_alias)) cycle
             if (trim(inventory%entries(i)%relative_path) /= path) cycle
             if (trim(inventory%entries(i)%role) /= role) cycle
             has_entry = .true.
@@ -188,7 +202,15 @@ contains
 
     subroutine write(path, contents)
         character(len=*), intent(in) :: path, contents
-        call fs_write_text(path, contents)
+        integer :: unit, status
+
+        open (newunit=unit, file=path, status='replace', action='write', &
+            iostat=status)
+        call require(status == 0, 'create fixture file: '//path)
+        write (unit, '(a)', iostat=status) contents
+        call require(status == 0, 'write fixture file: '//path)
+        close (unit, iostat=status)
+        call require(status == 0, 'close fixture file: '//path)
     end subroutine write
 
     subroutine require(condition, reason)
