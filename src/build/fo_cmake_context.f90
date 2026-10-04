@@ -298,12 +298,13 @@ contains
             return
         end if
         if (.not. context%request_seen) then
-            context%error = 'preset did not produce a current File API reply at the supplied build-root hint'
+            context%error = 'preset File API reply does not match its request '// &
+                'token'
             return
         end if
         if (len_trim(cache_generator) == 0 .or. &
                 trim(cache_generator) /= trim(context%reported_generator)) then
-            context%error = 'preset build-root hint generator does not match its File API reply'
+            context%error = 'preset build-root hint generator differs from File API'
             return
         end if
         valid = .true.

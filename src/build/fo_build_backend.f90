@@ -188,7 +188,7 @@ contains
     end function detect_jobs
 
     subroutine backend_build(self, exitcode, flags, log_file, with_tests, use_cache)
-        type(backend_t), intent(in) :: self
+        type(backend_t), intent(inout) :: self
         integer, intent(out) :: exitcode
         character(len=*), intent(in), optional :: flags
         character(len=*), intent(in), optional :: log_file
@@ -259,7 +259,7 @@ contains
     end function profile_flags
 
     subroutine backend_test(self, exitcode, include_slow, log_file, flags, use_cache)
-        type(backend_t), intent(in) :: self
+        type(backend_t), intent(inout) :: self
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
         character(len=*), intent(in), optional :: log_file
@@ -321,7 +321,7 @@ contains
     subroutine backend_test_names(self, names, n_names, exitcode, include_slow, &
             log_file, flags, use_cache)
         use fo_scan, only: is_slow_test
-        type(backend_t), intent(in) :: self
+        type(backend_t), intent(inout) :: self
         character(len=128), intent(in) :: names(:)
         integer, intent(in) :: n_names
         integer, intent(out) :: exitcode
@@ -389,7 +389,7 @@ contains
 
     subroutine backend_test_affected(self, names, n_names, exitcode, &
             include_slow, log_file, flags, use_cache)
-        type(backend_t), intent(in) :: self
+        type(backend_t), intent(inout) :: self
         character(len=128), intent(in) :: names(:)
         integer, intent(in) :: n_names
         integer, intent(out) :: exitcode
@@ -502,7 +502,7 @@ contains
             if (len_trim(context%configure_preset) > 0 .and. &
                     .not. context%build_root_hint) then
                 write (error_unit, '(a)') &
-                    'fo: cannot run CMake build without a configure-preset build-root hint or build preset'
+                    'fo: CMake build needs a preset or build-root hint'
                 exitcode = 1
                 return
             end if
