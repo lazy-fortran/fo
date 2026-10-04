@@ -96,6 +96,7 @@ program test_gremlin_coverage
 
     call check_mixed_outcomes()
     call check_stale_writers()
+    call check_cursor_rewinds_39_of_40()
 
     call execute_command_line('rm -f '//trim(path)//' '//trim(path)//'.tmp '// &
         trim(path)//'.lock gremlin-coverage-replay.state '// &
@@ -137,6 +138,69 @@ contains
         call execute_command_line('rm -f '//trim(transaction_path)//' '// &
             trim(transaction_path)//'.lock')
     end subroutine check_stale_writers
+
+    subroutine check_cursor_rewinds_39_of_40()
+        type(coverage_epoch_t) :: mutant, recovered
+        type(gremlin_coverage_view_t) :: mutant_view
+        character(len=16) :: mutant_names(n_cases), mutant_selected(n_cases)
+        character(len=16) :: no_priorities(1)
+        character(len=256) :: mutant_path
+        integer :: j, selected_count, local_status, unit
+
+        mutant_path = 'gremlin-coverage-cursor-mutant.state'
+        call execute_command_line('rm -f '//trim(mutant_path)//' '// &
+            trim(mutant_path)//'.tmp '//trim(mutant_path)//'.lock')
+        do j = 1, n_cases
+            write(mutant_names(j), '(a,i2.2)') 'mutant_', j
+        end do
+        no_priorities = ''
+        call coverage_open(trim(mutant_path), repeat('c', 64), mutant_names, &
+            n_cases, 1729, mutant, local_status, message)
+        call check(local_status == COVERAGE_OK, 'creates deterministic 40-case cursor mutant')
+        do j = 1, n_cases - 1
+            call coverage_record(mutant, trim(mutant%order(j)), 'PASS', &
+                local_status, message)
+            call check(local_status == COVERAGE_OK, 'records one independent mutant PASS')
+        end do
+        call coverage_record(mutant, trim(mutant%order(n_cases)), 'RUNNING', &
+            local_status, message)
+        call check(local_status == COVERAGE_OK, 'persists the final launch intent')
+        call coverage_recover_running(mutant, local_status, message)
+        call check(local_status == COVERAGE_OK, &
+            'crash recovery returns the final launch to UNKNOWN')
+        call coverage_view(mutant, mutant_view)
+        call check(mutant_view%pass_count == 39 .and. mutant_view%unknown_count == 1 .and. &
+            .not. mutant_view%full_coverage, 'mutant exposes the exact 39/40 state')
+
+        ! Inject the suspected persisted-cursor corruption: the final UNKNOWN
+        ! obligation lies behind a cursor that claims the epoch is exhausted.
+        mutant%cursor = n_cases + 1
+        open(newunit=unit, file=trim(mutant%path), status='replace', action='write')
+        write(unit, '(a)') trim(mutant%generation)//'|'//trim(mutant%inventory_digest)
+        write(unit, '(4(i0,1x))') mutant%epoch, mutant%seed, mutant%cursor, n_cases
+        do j = 1, n_cases
+            write(unit, '(a,"|",a)') trim(mutant%inventory(j)), trim(mutant%outcome(j))
+        end do
+        close(unit)
+        call coverage_open(trim(mutant_path), repeat('c', 64), mutant_names, &
+            n_cases, 1729, recovered, local_status, message)
+        call check(local_status == COVERAGE_OK, 'opens 39/40 state with cursor beyond its unknown')
+        call coverage_next_chunk(recovered, no_priorities, 0, chunk, &
+            mutant_selected, selected_count, local_status)
+        call check(local_status == COVERAGE_OK .and. selected_count == 1 .and. &
+            mutant_selected(1) == mutant%order(n_cases), &
+            'rewinds to and retries UNKNOWN behind a persisted cursor')
+        if (selected_count == 1) then
+            call coverage_record(recovered, trim(mutant_selected(1)), 'PASS', &
+                local_status, message)
+            call check(local_status == COVERAGE_OK, 'credits only the retried behavior')
+        end if
+        call coverage_view(recovered, mutant_view)
+        call check(mutant_view%pass_count == n_cases .and. mutant_view%unknown_count == 0 .and. &
+            mutant_view%full_coverage, 'recovered mutant reaches 40 PASS without duplicate credit')
+        call execute_command_line('rm -f '//trim(mutant_path)//' '// &
+            trim(mutant_path)//'.tmp '//trim(mutant_path)//'.lock')
+    end subroutine check_cursor_rewinds_39_of_40
 
     subroutine check_mixed_outcomes()
         character(len=16) :: mixed_names(8), mixed_selected(8), mixed_priorities(8)

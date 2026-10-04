@@ -355,6 +355,7 @@ contains
                 selected_priorities = selected_priorities + 1
             end if
         end do
+        call rewind_unseen(state)
         call skip_seen(state)
         scan_cursor = state%cursor
         do while (n_selected < limit .and. scan_cursor <= size(state%order))
@@ -370,6 +371,23 @@ contains
         call coverage_save(state, status, save_message)
         if (present(n_priorities_selected)) n_priorities_selected = selected_priorities
     end subroutine coverage_next_chunk_locked
+
+    subroutine rewind_unseen(state)
+        type(coverage_epoch_t), intent(inout) :: state
+        integer :: i, at
+
+        ! A persisted cursor is only a scan hint. Recovery may reset a launch
+        ! intent to UNKNOWN after that cursor was published, so never let the
+        ! cursor hide an outstanding obligation earlier in the permutation.
+        do i = 1, min(state%cursor - 1, size(state%order))
+            at = inventory_index(state, state%order(i))
+            if (at == 0) cycle
+            if (.not. outcome_attempted(state%outcome(at))) then
+                state%cursor = i
+                return
+            end if
+        end do
+    end subroutine rewind_unseen
 
     subroutine coverage_record_locked(state, case_name, outcome, status, message)
         type(coverage_epoch_t), intent(inout) :: state

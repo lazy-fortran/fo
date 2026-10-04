@@ -20,6 +20,129 @@
 #include <time.h>
 #include <unistd.h>
 
+static uint64_t process_start_time(pid_t pid) {
+#if defined(__linux__)
+    char path[64], line[4096];
+    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
+    FILE *stream = fopen(path, "r");
+    if (stream == NULL) return 0;
+    char *read_result = fgets(line, sizeof(line), stream);
+    fclose(stream);
+    if (read_result == NULL) return 0;
+    char *end = strrchr(line, ')');
+    if (end == NULL || end[1] != ' ') return 0;
+    char *save = NULL;
+    char *field = strtok_r(end + 2, " ", &save);
+    for (int number = 3; field != NULL && number < 22; ++number) {
+        field = strtok_r(NULL, " ", &save);
+    }
+    if (field == NULL) return 0;
+    char *tail = NULL;
+    unsigned long long value = strtoull(field, &tail, 10);
+    return tail == field || (*tail != '\n' && *tail != '\0') ? 0 : (uint64_t)value;
+#else
+    (void)pid;
+    return 0;
+#endif
+}
+
+uint64_t fo_test_process_start_time(int pid) {
+    return pid > 0 ? process_start_time((pid_t)pid) : 0;
+}
+
+typedef struct {
+    pid_t pid;
+    pid_t parent;
+    uint64_t start_time;
+} fo_test_process_record;
+
+static int read_process_record(pid_t pid, fo_test_process_record *record) {
+#if defined(__linux__)
+    char path[64], line[4096];
+    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
+    FILE *stream = fopen(path, "r");
+    if (stream == NULL) return -1;
+    char *read_result = fgets(line, sizeof(line), stream);
+    fclose(stream);
+    if (read_result == NULL) return -1;
+    char *end = strrchr(line, ')');
+    if (end == NULL || end[1] != ' ') return -1;
+    char *save = NULL;
+    char *field = strtok_r(end + 2, " ", &save);
+    long parent = -1;
+    uint64_t start_time = 0;
+    for (int number = 3; field != NULL && number <= 22; ++number) {
+        if (number == 4) parent = strtol(field, NULL, 10);
+        if (number == 22) start_time = (uint64_t)strtoull(field, NULL, 10);
+        if (number < 22) field = strtok_r(NULL, " ", &save);
+    }
+    if (parent < 0 || start_time == 0) return -1;
+    record->pid = pid;
+    record->parent = (pid_t)parent;
+    record->start_time = start_time;
+    return 0;
+#else
+    (void)pid; (void)record;
+    return -1;
+#endif
+}
+
+int fo_test_collect_descendants(int root_pid, uint64_t root_start_time,
+                                int *processes, uint64_t *start_times, int capacity) {
+#if defined(__linux__)
+    if (root_pid <= 0 || root_start_time == 0 || processes == NULL ||
+        start_times == NULL || capacity <= 0) return -1;
+    if (process_start_time((pid_t)root_pid) != root_start_time) return -2;
+    size_t allocated = 4096;
+    size_t count = 0;
+    fo_test_process_record *records = calloc(allocated, sizeof(*records));
+    if (records == NULL) return -3;
+    DIR *directory = opendir("/proc");
+    if (directory == NULL) { free(records); return -3; }
+    struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL) {
+        char *end = NULL;
+        long value = strtol(entry->d_name, &end, 10);
+        if (end == entry->d_name || *end != '\0' || value <= 0 || value > INT32_MAX) continue;
+        fo_test_process_record record;
+        if (read_process_record((pid_t)value, &record) != 0) continue;
+        if (count == allocated) {
+            allocated *= 2;
+            fo_test_process_record *grown = realloc(records, allocated * sizeof(*records));
+            if (grown == NULL) { closedir(directory); free(records); return -3; }
+            records = grown;
+        }
+        records[count++] = record;
+    }
+    closedir(directory);
+    int used = 0;
+    int frontier = 0;
+    processes[used] = root_pid;
+    start_times[used++] = root_start_time;
+    while (frontier < used) {
+        pid_t parent = (pid_t)processes[frontier++];
+        for (size_t i = 0; i < count; ++i) {
+            if (records[i].parent != parent) continue;
+            if (used >= capacity) { free(records); return -4; }
+            processes[used] = (int)records[i].pid;
+            start_times[used++] = records[i].start_time;
+        }
+    }
+    free(records);
+    return used - 1;
+#else
+    (void)root_pid; (void)root_start_time; (void)processes;
+    (void)start_times; (void)capacity;
+    return -5;
+#endif
+}
+
+int fo_test_signal_identity(int pid, uint64_t start_time, int signal_number) {
+    if (pid <= 0 || start_time == 0) return -1;
+    if (process_start_time((pid_t)pid) != start_time) return -2;
+    return kill((pid_t)pid, signal_number);
+}
+
 int fo_test_link_probe(void) { return 162; }
 
 int fo_test_mkdtemp(char *pattern) {
