@@ -2,15 +2,17 @@ program test_gremlin_bootstrap
     use, intrinsic :: iso_c_binding, only: c_int
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_directory, write_text, read_text, process_alive
+    use fo_test_harness, only: run_process
     use fo_test_harness, only: file_exists
     use fo_test_harness, only: assert_true, assert_equal_string, assert_equal_integer
     use fo_test_harness, only: finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_run, gremlin_json
-    use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_wait_file, gremlin_wait_ms
+    use fo_test_gremlin_oracle, only: gremlin_wait_file, gremlin_wait_ms
     use fo_test_gremlin_oracle, only: gremlin_spawn, gremlin_wait_child
     use fo_test_gremlin_oracle, only: gremlin_fifo, gremlin_release_fifo
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value, json_parse
+    use fo_test_gremlin_oracle, only: gremlin_stop_lane
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state, lane
@@ -63,6 +65,10 @@ program test_gremlin_bootstrap
     call assert_true(len(session) > 0, 'start returns its owner id before tests finish')
     call assert_equal_string(field(parsed_two, 'session_id'), session, &
         'same-place concurrent starts atomically attach to one owner')
+    call assert_true(field(parsed_one, 'state') == 'running' .or. &
+        field(parsed_one, 'state') == 'attached', 'first start reports its shared owner state')
+    call assert_true(field(parsed_two, 'state') == 'running' .or. &
+        field(parsed_two, 'state') == 'attached', 'second start reports its shared owner state')
     call gremlin_wait_file(marker, 30000, found)
     call assert_true(found, 'first generation test starts once')
     call status_now(lane, session, status)
@@ -70,25 +76,33 @@ program test_gremlin_bootstrap
     call assert_true(len(generation) == 64, 'status publishes an immutable generation')
 
     ! A failed candidate must not displace the exact running generation or child.
-    call write_text(project//'/src/invalid.f90', &
-        'module invalid_candidate'//new_line('a')//'integer :: broken = "x"'//new_line('a')// &
-        'end module invalid_candidate'//new_line('a'))
+    call write_generation('invalid', .true.)
     call wait_build_failure(lane, session, generation, status)
     call assert_true(.not. marker_has(marker, 'done'), &
         'last-compilable test remains blocked when replacement build fails')
     call assert_equal_string(field(status, 'active_generation'), generation, &
         'failed build retains the last-compilable generation')
+    call assert_equal_integer(marker_count(marker, 'started'), 1, &
+        'concurrent start executes the first case exactly once')
     call gremlin_release_fifo(old_gate)
     call wait_marker(generation_done, 'done', 30000, found)
     call assert_true(found, 'last-compilable test completes after gate release')
     call wait_receipt(lane, session, 'test_generation', generation, 'PASS', event)
     call assert_equal_string(field(event, 'status'), 'PASS', 'completed old case has one receipt')
+    call status_now(lane, session, status)
+    call assert_equal_integer(receipt_count(status, 'test_generation', generation, 'PASS'), 1, &
+        'concurrent start produces exactly one old-case completion receipt')
 
     ! Next case reads frozen runtime input, then is preempted only by a good build.
     call gremlin_wait_file(obsolete_read, 30000, found)
     call assert_true(found, 'second old-generation test reads its runtime snapshot')
-    call assert_equal_string(trim(read_text(obsolete_read)), 'old', &
+    call assert_equal_string(read_text(obsolete_read), 'old'//new_line('a'), &
         'runtime read came from the captured old generation')
+    call assert_equal_string(read_text(project//'/test/obsolete.version'), &
+        'invalid'//new_line('a'), &
+        'editable runtime input differs from the captured old generation')
+    call gremlin_wait_file(old_pid_file, 5000, found)
+    call assert_true(found, 'obsolete child publishes its PID after the runtime read')
     old_pid = read_integer(old_pid_file)
     call assert_true(old_pid > 0 .and. process_alive(old_pid), &
         'old-generation child is blocked in its own gate')
@@ -114,7 +128,7 @@ program test_gremlin_bootstrap
         'name = "gremlin_bootstrap_lane_b"'//new_line('a'))
     call gremlin_fifo(lane_gate)
     call write_gate_case(scratch//'/other', 'test_lane_b', lane_gate, &
-        scratch//'/lane-b.started', scratch//'/lane-b.done', '')
+        scratch//'/lane-b.started', scratch//'/lane-b.done')
     call start_other_lane(scratch//'/other', lane_session)
     call gremlin_wait_file(scratch//'/lane-b.started', 30000, found)
     call assert_true(found, 'independent lane B enters its blocking test')
@@ -201,7 +215,8 @@ contains
         call make_directory(root//'/test')
         source = 'program '//name//new_line('a')//'implicit none'//new_line('a')// &
             'integer :: unit, gate_unit'//new_line('a')//'character :: token'//new_line('a')// &
-            "open(newunit=unit,file='"//started_path//"',status='replace')"//new_line('a')// &
+            "open(newunit=unit,file='"//started_path// &
+            "',status='unknown',position='append')"//new_line('a')// &
             "write(unit,'(a)') 'started'"//new_line('a')//'close(unit)'//new_line('a')// &
             "open(newunit=gate_unit,file='"//gate_path//"',status='old',access='stream', &"//new_line('a')// &
             "    form='unformatted',action='read')"//new_line('a')// &
@@ -221,7 +236,7 @@ contains
             'import :: c_int'//new_line('a')//'end function c_getpid'//new_line('a')//'end interface'//new_line('a')// &
             'integer :: unit, gate_unit'//new_line('a')//'character :: token'//new_line('a')// &
             'character(len=32) :: value'//new_line('a')// &
-            "open(newunit=unit,file='obsolete.version',status='old')"//new_line('a')// &
+            "open(newunit=unit,file='test/obsolete.version',status='old')"//new_line('a')// &
             "read(unit,'(a)') value"//new_line('a')//'close(unit)'//new_line('a')// &
             "open(newunit=unit,file='"//scratch//"/old.obsolete.version',status='replace')"//new_line('a')// &
             "write(unit,'(a)') trim(value)"//new_line('a')//'close(unit)'//new_line('a')// &
@@ -267,6 +282,7 @@ contains
                 item = json_element(events, j)
                 if (field(item, 'case_id') == '<build>' .and. &
                     field(item, 'status') == 'BUILD_FAIL') then
+                    if (field(value, 'state') /= 'build_failed') cycle
                     call assert_equal_string(field(value, 'active_generation'), expected_generation, &
                         'failed candidate leaves last-compilable active generation')
                     return
@@ -329,6 +345,22 @@ contains
         end do
     end function has_receipt
 
+    integer function receipt_count(value, case_id, gen, verdict)
+        type(json_value_t), intent(in) :: value
+        character(len=*), intent(in) :: case_id, gen, verdict
+        type(json_value_t) :: events, item
+        integer :: j
+        receipt_count = 0
+        events = json_member(value, 'events')
+        do j = 1, json_size(events)
+            item = json_element(events, j)
+            if (field(item, 'case_id') /= case_id) cycle
+            if (field(item, 'generation') /= gen) cycle
+            if (field(item, 'status') /= verdict) cycle
+            receipt_count = receipt_count + 1
+        end do
+    end function receipt_count
+
     subroutine wait_marker(path, expected, timeout, found_value)
         character(len=*), intent(in) :: path, expected
         integer, intent(in) :: timeout
@@ -351,6 +383,21 @@ contains
         if (.not. file_exists(path)) return
         marker_has = index(read_text(path), marker_text) > 0
     end function marker_has
+
+    integer function marker_count(path, marker_text) result(count)
+        character(len=*), intent(in) :: path, marker_text
+        character(:), allocatable :: text
+        integer :: first, next
+        text = read_text(path)
+        count = 0
+        first = 1
+        do while (first <= len(text))
+            next = index(text(first:), marker_text//new_line('a'))
+            if (next == 0) exit
+            count = count + 1
+            first = first + next + len(marker_text)
+        end do
+    end function marker_count
 
     integer function read_integer(path)
         character(len=*), intent(in) :: path
@@ -390,19 +437,7 @@ contains
 
     subroutine stop_other_lane(root, owner)
         character(len=*), intent(in) :: root, owner
-        type(string_list_t) :: values
-        type(process_result_t) :: result
-        call list_add(values, 'gremlin')
-        call list_add(values, 'stop')
-        call list_add(values, '--dir')
-        call list_add(values, root)
-        call list_add(values, '--lane')
-        call list_add(values, 'lane-b')
-        call list_add(values, '--session')
-        call list_add(values, owner)
-        call list_add(values, '--json')
-        call gremlin_run(driver, root, cache, state, values, result, timeout=30000)
-        call assert_equal_integer(result%exit_code, 0, 'stops only the other lane')
+        call gremlin_stop_lane(driver, root, cache, state, "lane-b", owner)
     end subroutine stop_other_lane
 
     subroutine wait_receipt_for_project(root, lane_id, owner, case_id, verdict, found_event)
@@ -441,19 +476,7 @@ contains
 
     subroutine stop_lane(lane_id, owner)
         character(len=*), intent(in) :: lane_id, owner
-        type(string_list_t) :: values
-        type(process_result_t) :: result
-        call list_add(values, 'gremlin')
-        call list_add(values, 'stop')
-        call list_add(values, '--dir')
-        call list_add(values, project)
-        call list_add(values, '--lane')
-        call list_add(values, lane_id)
-        call list_add(values, '--session')
-        call list_add(values, owner)
-        call list_add(values, '--json')
-        call gremlin_run(driver, project, cache, state, values, result, timeout=30000)
-        call assert_equal_integer(result%exit_code, 0, 'stops only the selected Gremlin lane')
+        call gremlin_stop_lane(driver, project, cache, state, lane_id, owner)
     end subroutine stop_lane
 
     subroutine remove_file(path)

@@ -12,6 +12,8 @@ module fo_test_gremlin_oracle
     public :: gremlin_spawn, gremlin_wait_child, gremlin_poll_child
     public :: gremlin_fifo, gremlin_release_fifo
     public :: gremlin_stop_child
+    public :: gremlin_stop_lane
+    public :: gremlin_process_running
 
     interface
         integer(c_int) function c_setenv(name, value, overwrite) bind(C, name='setenv')
@@ -45,9 +47,25 @@ module fo_test_gremlin_oracle
             import :: c_int
             integer(c_int), value :: process, signal_number
         end function c_signal_group
+        integer(c_int) function c_release_fifo(path, timeout) &
+                bind(C, name='fo_test_release_fifo')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: timeout
+        end function c_release_fifo
+        integer(c_int) function c_process_running(pid) &
+                bind(C, name='fo_test_process_running')
+            import :: c_int
+            integer(c_int), value :: pid
+        end function c_process_running
     end interface
 
 contains
+
+    logical function gremlin_process_running(pid)
+        integer, intent(in) :: pid
+        gremlin_process_running = c_process_running(int(pid, c_int)) == 1
+    end function gremlin_process_running
 
     subroutine gremlin_setup(driver, scratch, project, cache, state, capture_counter)
         character(:), allocatable, intent(out) :: driver, scratch, project, cache, state
@@ -91,6 +109,11 @@ contains
         call set_env('FO_CACHE_DIR', cache)
         call set_env('FO_GREMLIN_STATE_DIR', state)
         call set_env('FO_JOBS', '1')
+        ! Outer fixture budgets must not override the fixture children's own budgets.
+        call set_env('FO_TEST_TIMEOUT', '')
+        call set_env('FO_TEST_WALL_TIMEOUT', '')
+        call set_env('FO_SLOW_TEST_TIMEOUT', '')
+        call set_env('FO_SLOW_TEST_WALL_TIMEOUT', '')
         call set_env('FO_SELF_REFRESH', '0')
         call set_env('FO_DISABLE_SELF_REFRESH', '1')
         call set_env('TMPDIR', '/var/tmp')
@@ -202,13 +225,20 @@ contains
         integer, intent(in) :: timeout_ms
         logical, intent(out) :: found
         integer :: elapsed, result
+        character(:), allocatable :: text
 
-        found = file_exists(path)
+        found = .false.
         elapsed = 0
-        do while (.not. found .and. elapsed < timeout_ms)
+        do while (elapsed < timeout_ms)
+            if (file_exists(path)) then
+                text = read_text(path)
+                if (len(text) > 0) then
+                    found = text(len(text):) == new_line('a')
+                    if (found) return
+                end if
+            end if
             result = c_usleep(20000_c_int)
             elapsed = elapsed + 20
-            found = file_exists(path)
         end do
     end subroutine gremlin_wait_file
 
@@ -306,15 +336,45 @@ contains
 
     subroutine gremlin_release_fifo(path)
         character(len=*), intent(in) :: path
-        integer :: unit, status
-
-        open(newunit=unit, file=trim(path), status='old', access='stream', &
-            form='unformatted', action='write', iostat=status)
-        call assert_true(status == 0, 'opens FIFO after its Fortran reader is blocked')
-        if (status /= 0) return
-        write(unit, iostat=status) 'x'
-        call assert_true(status == 0, 'releases FIFO process barrier')
-        close(unit)
+        integer(c_int) :: status
+        status = c_release_fifo(trim(path)//c_null_char, 5000_c_int)
+        call assert_true(status == 0, 'releases FIFO with a live reader within its bound')
     end subroutine gremlin_release_fifo
+
+    subroutine gremlin_stop_lane(driver, project, cache, state, lane, owner)
+        character(len=*), intent(in) :: driver, project, cache, state, lane, owner
+        type(string_list_t) :: args
+        type(process_result_t) :: process
+        type(json_value_t) :: reply
+        integer :: attempt, owner_pid, ios, dash
+
+        call list_add(args, 'gremlin')
+        call list_add(args, 'stop')
+        call list_add(args, '--dir')
+        call list_add(args, project)
+        call list_add(args, '--lane')
+        call list_add(args, lane)
+        call list_add(args, '--session')
+        call list_add(args, owner)
+        call list_add(args, '--json')
+        call gremlin_json(driver, project, cache, state, args, reply, process, 10000)
+        call assert_true(process%exit_code == 0, 'requests shutdown of only the owned lane')
+        args%items(2)%value = 'status'
+        owner_pid = -1
+        dash = index(owner, '-')
+        if (dash > 1) then
+            read(owner(:dash - 1), *, iostat=ios) owner_pid
+            call assert_true(ios == 0, 'owner ID exposes its process identity')
+        end if
+        do attempt = 1, 100
+            call gremlin_json(driver, project, cache, state, args, reply, process, 10000)
+            if (process%exit_code /= 0) exit
+            if (gremlin_field(reply, 'state') == 'stopped') then
+                if (.not. gremlin_process_running(owner_pid)) return
+            end if
+            call gremlin_wait_ms(50)
+        end do
+        call assert_true(.false., 'owned supervisor finishes shutdown before fixture cleanup')
+    end subroutine gremlin_stop_lane
 
 end module fo_test_gremlin_oracle

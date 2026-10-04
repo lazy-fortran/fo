@@ -1,13 +1,16 @@
 program test_continuous_preemption
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_directory, write_text, read_text, file_exists
-    use fo_test_harness, only: process_alive, assert_true, assert_equal_string
+    use fo_test_harness, only: assert_true, assert_equal_string
+    use fo_test_harness, only: spawn_heartbeat_process, terminate_process_group
     use fo_test_harness, only: assert_equal_integer, finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_run, gremlin_json
     use fo_test_gremlin_oracle, only: gremlin_wait_file, gremlin_wait_ms
     use fo_test_gremlin_oracle, only: gremlin_fifo, gremlin_release_fifo
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
-    use fo_test_json, only: json_string_value, json_number_value
+    use fo_test_json, only: json_string_value, json_number_value, json_parse
+    use fo_test_gremlin_oracle, only: gremlin_stop_lane
+    use fo_test_gremlin_oracle, only: process_alive => gremlin_process_running
     implicit none
 
     character(:), allocatable :: driver, scratch, project, other, cache, state
@@ -18,7 +21,10 @@ program test_continuous_preemption
     type(string_list_t) :: args
     type(process_result_t) :: process
     type(json_value_t) :: report, status, old_failure, item, events
-    integer :: pid_blocked, pid_other
+    integer :: pid_blocked, pid_other, pid_progress, sentinel_pid, sentinel_status
+    integer :: sentinel_bytes
+    logical :: sentinel_reaped
+    character(:), allocatable :: progress_pid, progress_child, progress_gate, progress_started
     logical :: found
 
     call gremlin_setup(driver, scratch, project, cache, state)
@@ -37,6 +43,12 @@ program test_continuous_preemption
     result_b = scratch//'/b-result'
     other_start = scratch//'/other-started'
     other_pid = scratch//'/other.pid'
+    progress_pid = scratch//'/progress.pid'
+    progress_child = scratch//'/progress.child.pid'
+    progress_gate = scratch//'/progress.fifo'
+    progress_started = scratch//'/progress.started'
+    call gremlin_fifo(progress_gate)
+    call spawn_heartbeat_process(scratch//'/sentinel.log', scratch, sentinel_pid)
     call make_project(project, 'A')
     call make_project(other, 'O')
     call gremlin_fifo(gate_a)
@@ -46,17 +58,22 @@ program test_continuous_preemption
         'program test_fail'//new_line('a')//'implicit none'//new_line('a')// &
         "print '(a)', 'CURRENT_GENERATION_FAILURE'"//new_line('a')//'error stop 7'//new_line('a')// &
         'end program test_fail'//new_line('a'))
-    call write_blocked_test('test_blocked', gate_a, start_a, pid_a, token_file, result_a, 'A')
-    call write_blocked_test('test_capture', gate_b, start_b, '', token_file, result_b, 'B')
+    call write_blocked_test('test_blocked', gate_a, start_a, pid_a, result_a, 'A')
+    call write_progress_test()
+    call write_blocked_test('test_capture', gate_b, start_b, '', result_b, 'B')
 
     call start_main_lane(session_a)
     call wait_file(start_a, 30000, found)
     call assert_true(found, 'A test reaches its real FIFO and records process identity')
+    call wait_file(pid_a, 5000, found)
+    call assert_true(found, 'blocked A child publishes a complete PID record')
     pid_blocked = read_integer(pid_a)
     call assert_true(pid_blocked > 0, 'blocked process publishes its pid')
     call wait_failure_and_blocked(lane_a, session_a, status, old_failure)
     generation_a = field(status, 'active_generation')
     call assert_true(len(generation_a) == 64, 'A test runs on a frozen generation')
+    call assert_equal_integer(int(json_number_value(json_member(status, 'selected'))), 4, &
+        'A campaign retains its four required cases')
 
     ! A compiler error in the editable tree does not interrupt the compiled A child.
     call write_text(source_file, &
@@ -66,20 +83,31 @@ program test_continuous_preemption
     call wait_build_failure(lane_a, session_a, status)
     call assert_equal_string(field(status, 'active_generation'), generation_a, &
         'failed candidate keeps exact last-compilable generation active')
+    call assert_equal_string(field(status, 'current_test'), 'test_blocked', &
+        'failed-build status retains the real running case')
+    call assert_equal_string(read_text(field(status, 'active_project')//'/token.txt'), &
+        'A'//new_line('a'), 'active runtime closure retains the captured A input')
     call assert_true(process_alive(pid_blocked), 'old test child remains alive during failed build')
     call gremlin_release_fifo(gate_a)
-    call wait_file(result_a, 10000, found)
+    call wait_file(result_a//'A', 10000, found)
     call assert_true(found, 'old test completes from its frozen runtime view')
-    call assert_equal_string(trim(read_text(result_a)), 'A:A', &
+    call assert_equal_string(read_text(result_a//'A'), 'A:A'//new_line('a'), &
         'old test sees its compiled module and matching runtime input')
 
+    call wait_file(progress_child, 5000, found)
+    call assert_true(found, 'last-compilable campaign advances to its blocked descendant')
+    pid_progress = read_integer(progress_child)
+    call assert_true(process_alive(pid_progress), 'old generation owns a live descendant')
     call start_other_lane(session_other)
     call wait_file(other_start, 30000, found)
     call assert_true(found, 'unrelated lane owns a blocked process')
+    call wait_file(other_pid, 5000, found)
+    call assert_true(found, 'unrelated child publishes a complete PID record')
     pid_other = read_integer(other_pid)
-    call assert_true(pid_other > 0 .and. process_alive(pid_other), &
+    call assert_true(process_alive(pid_other), &
         'unrelated process is alive before A replacement')
 
+    sentinel_bytes = len(read_text(scratch//'/sentinel.log'))
     call write_text(source_file, &
         'module probe'//new_line('a')// &
         'character(len=*), parameter :: probe_value = "B"'//new_line('a')// &
@@ -89,21 +117,25 @@ program test_continuous_preemption
     call wait_file(start_b, 30000, found)
     call assert_true(found, 'successful B generation starts its own capture child')
     call assert_true(generation_b /= generation_a, 'successful build switches immutable generation')
-    call wait_dead(pid_blocked)
-    call assert_true(.not. file_exists(result_b), 'B child stays behind its own gate')
+    call wait_dead(pid_progress)
+    call assert_true(process_alive(sentinel_pid), 'unrelated sentinel survives replacement')
+    call assert_true(len(read_text(scratch//'/sentinel.log')) > sentinel_bytes, &
+        'unrelated sentinel continues producing bytes through replacement')
+    sentinel_bytes = len(read_text(scratch//'/sentinel.log'))
+    call assert_true(.not. file_exists(result_b//'B'), 'B child stays behind its own gate')
     call assert_true(process_alive(pid_other), 'other lane child survives A preemption')
     call status_now(lane_a, session_a, status)
     call assert_true(has_same_receipt(status, old_failure), &
         'A generation failure receipt survives successful replacement byte-for-field')
     call assert_true(.not. has_receipt(status, 'test_capture', generation_b, 'PASS'), &
         'blocked B case has no premature receipt')
-    call assert_true(.not. has_receipt(status, 'test_capture', generation_a, 'TIMEOUT'), &
+    call assert_true(.not. has_receipt(status, 'test_progress', generation_a, 'TIMEOUT'), &
         'preempted A case stays unclassified instead of timing out')
 
     call gremlin_release_fifo(gate_b)
-    call wait_file(result_b, 10000, found)
+    call wait_file(result_b//'B', 10000, found)
     call assert_true(found, 'new B test completes after its gate release')
-    call assert_equal_string(trim(read_text(result_b)), 'B:B', &
+    call assert_equal_string(read_text(result_b//'B'), 'B:B'//new_line('a'), &
         'new test observes matching compiled and runtime B inputs')
     call wait_receipt(lane_a, session_a, 'test_capture', generation_b, 'PASS', item)
     call status_now(lane_a, session_a, status)
@@ -112,10 +144,16 @@ program test_continuous_preemption
     ! Explicit stop is bounded and scoped to lane A. Lane Other stays in its own gate.
     call stop_lane(project, lane_a, session_a)
     call assert_true(process_alive(pid_other), 'stopping lane A leaves unrelated lane live')
-    call gremlin_release_fifo(other_gate)
-    call wait_file(scratch//'/other.done', 10000, found)
-    call assert_true(found, 'unrelated lane finishes after its own FIFO release')
     call stop_lane(other, lane_other, session_other)
+    call wait_dead(pid_other)
+    call assert_true(.not. file_exists(scratch//'/other.done'), &
+        'explicit stop gives interrupted unrelated case no completion')
+    call assert_true(process_alive(sentinel_pid), 'unrelated sentinel survives both stops')
+    call assert_true(len(read_text(scratch//'/sentinel.log')) > sentinel_bytes, &
+        'unrelated sentinel continues producing bytes through explicit shutdown')
+    call terminate_process_group(sentinel_pid, sentinel_status, &
+        owned_reaped=sentinel_reaped)
+    call assert_true(sentinel_reaped, 'test reaps its own sentinel before cleanup')
     call finish_assertions()
 
 contains
@@ -141,8 +179,8 @@ contains
         call write_text(root//'/token.txt', value//new_line('a'))
     end subroutine make_project
 
-    subroutine write_blocked_test(name, fifo, started_path, pid_path, token_path, result_path, tag)
-        character(len=*), intent(in) :: name, fifo, started_path, pid_path, token_path, result_path, tag
+    subroutine write_blocked_test(name, fifo, started_path, pid_path, result_path, tag)
+        character(len=*), intent(in) :: name, fifo, started_path, pid_path, result_path, tag
         character(:), allocatable :: source, pid_declarations, pid_body, pid_use
         pid_declarations = ''
         pid_body = ''
@@ -161,18 +199,56 @@ contains
             'character(len=32) :: runtime_token'//new_line('a')// &
             "open(newunit=unit,file='"//started_path//"',status='replace')"//new_line('a')// &
             "write(unit,'(a)') 'started'"//new_line('a')//'close(unit)'//new_line('a')//pid_body// &
+            'if (probe_value == "A" .or. "'//tag//'" /= "A") then'//new_line('a')// &
             "open(newunit=gate_unit,file='"//fifo//"',status='old',access='stream', &"//new_line('a')// &
             "    form='unformatted',action='read')"//new_line('a')// &
             'read(gate_unit) gate_token'//new_line('a')//'close(gate_unit)'//new_line('a')// &
-            "open(newunit=unit,file='"//token_path//"',status='old')"//new_line('a')// &
+            'end if'//new_line('a')// &
+            "open(newunit=unit,file='token.txt',status='old')"//new_line('a')// &
             "read(unit,'(a)') runtime_token"//new_line('a')//'close(unit)'//new_line('a')// &
-            "open(newunit=unit,file='"//result_path//"',status='replace')"//new_line('a')// &
+            "open(newunit=unit,file='"//result_path//"'//probe_value,status='replace')"//new_line('a')// &
             "write(unit,'(a,a,a)') probe_value,':',trim(runtime_token)"//new_line('a')// &
             'close(unit)'//new_line('a')
         if (tag == 'B') source = source//'! replacement generation'//new_line('a')
         source = source//'end program '//name//new_line('a')
         call write_text(project//'/test/'//name//'.f90', source)
     end subroutine write_blocked_test
+
+    subroutine write_progress_test()
+        character(:), allocatable :: source
+        source = 'program test_progress'//new_line('a')// &
+            'use probe, only: probe_value'//new_line('a')// &
+            'use, intrinsic :: iso_c_binding, only: c_int'//new_line('a')// &
+            'implicit none'//new_line('a')//fork_interface()// &
+            'integer :: unit, gate_unit, child, rc'//new_line('a')// &
+            'character :: token'//new_line('a')// &
+            'if (probe_value == "A") then'//new_line('a')// &
+            'child = c_fork()'//new_line('a')// &
+            'if (child < 0) error stop 8'//new_line('a')// &
+            'if (child == 0) then'//new_line('a')// &
+            'rc = c_pause()'//new_line('a')//'error stop 9'//new_line('a')// &
+            'end if'//new_line('a')// &
+            "open(newunit=unit,file='"//progress_child//"',status='replace')"//new_line('a')// &
+            "write(unit,'(i0)') child"//new_line('a')//'close(unit)'//new_line('a')// &
+            "open(newunit=gate_unit,file='"//progress_gate// &
+            "',status='old',access='stream',form='unformatted')"//new_line('a')// &
+            'read(gate_unit) token'//new_line('a')//'close(gate_unit)'//new_line('a')// &
+            'else'//new_line('a')// &
+            "open(newunit=unit,file='"//scratch//"/b-progress',status='replace')"//new_line('a')// &
+            "write(unit,'(a)') probe_value"//new_line('a')//'close(unit)'//new_line('a')// &
+            'end if'//new_line('a')//'end program test_progress'//new_line('a')
+        call write_text(project//'/test/test_progress.f90', source)
+    end subroutine write_progress_test
+
+    function fork_interface() result(source)
+        character(:), allocatable :: source
+        source = 'interface'//new_line('a')// &
+            'integer(c_int) function c_fork() bind(C,name="fork")'//new_line('a')// &
+            'import :: c_int'//new_line('a')//'end function c_fork'//new_line('a')// &
+            'integer(c_int) function c_pause() bind(C,name="pause")'//new_line('a')// &
+            'import :: c_int'//new_line('a')//'end function c_pause'//new_line('a')// &
+            'end interface'//new_line('a')
+    end function fork_interface
 
     subroutine start_main_lane(owner)
         character(:), allocatable, intent(out) :: owner
@@ -191,6 +267,8 @@ contains
         call list_add(values, 'test_fail')
         call list_add(values, '--target')
         call list_add(values, 'test_blocked')
+        call list_add(values, '--target')
+        call list_add(values, 'test_progress')
         call list_add(values, '--target')
         call list_add(values, 'test_capture')
         call list_add(values, '--seed')
@@ -239,12 +317,18 @@ contains
             new_line('a')//'implicit none'//new_line('a')// &
             'interface'//new_line('a')//' integer(c_int) function getpid() bind(C, name="getpid")'// &
             new_line('a')//'  import :: c_int'//new_line('a')//' end function getpid'//new_line('a')// &
-            'end interface'//new_line('a')// &
+            'end interface'//new_line('a')//fork_interface()// &
+            'integer :: child, rc'//new_line('a')// &
             'integer :: unit, gate_unit'//new_line('a')//'character :: gate_token'//new_line('a')// &
+            'child = c_fork()'//new_line('a')// &
+            'if (child < 0) error stop 8'//new_line('a')// &
+            'if (child == 0) then'//new_line('a')// &
+            'rc = c_pause()'//new_line('a')//'error stop 9'//new_line('a')// &
+            'end if'//new_line('a')// &
             "open(newunit=unit,file='"//other_start//"',status='replace')"//new_line('a')// &
             "write(unit,'(a)') 'started'"//new_line('a')//'close(unit)'//new_line('a')// &
             "open(newunit=unit,file='"//other_pid//"',status='replace')"//new_line('a')// &
-            "write(unit,'(i0)') getpid()"//new_line('a')//'close(unit)'//new_line('a')// &
+            "write(unit,'(i0)') child"//new_line('a')//'close(unit)'//new_line('a')// &
             "open(newunit=gate_unit,file='"//other_gate//"',status='old',access='stream', &"//new_line('a')// &
             "    form='unformatted',action='read')"//new_line('a')// &
             'read(gate_unit) gate_token'//new_line('a')//'close(gate_unit)'//new_line('a')// &
@@ -303,7 +387,10 @@ contains
             events = json_member(value, 'events')
             do j = 1, json_size(events)
                 item = json_element(events, j)
-                if (field(item, 'case_id') == '<build>' .and. field(item, 'status') == 'BUILD_FAIL') return
+                if (field(item, 'case_id') /= '<build>') cycle
+                if (field(item, 'status') /= 'BUILD_FAIL') cycle
+                if (field(value, 'state') /= 'build_failed') cycle
+                if (field(value, 'current_test') == 'test_blocked') return
             end do
             call gremlin_wait_ms(100)
         end do
@@ -374,10 +461,34 @@ contains
             if (field(item, 'generation') /= field(expected, 'generation')) cycle
             if (field(item, 'completion_id') /= field(expected, 'completion_id')) cycle
             if (field(item, 'status') /= field(expected, 'status')) cycle
-            has_same_receipt = .true.
+            has_same_receipt = same_json(item, expected)
             return
         end do
     end function has_same_receipt
+
+    recursive logical function same_json(left, right) result(equal)
+        type(json_value_t), intent(in) :: left, right
+        integer :: i
+        equal = .false.
+        if (left%kind /= right%kind) return
+        if (allocated(left%text) .neqv. allocated(right%text)) return
+        if (allocated(left%text)) then
+            if (left%text /= right%text) return
+        end if
+        if (allocated(left%name) .neqv. allocated(right%name)) return
+        if (allocated(left%name)) then
+            if (left%name /= right%name) return
+        end if
+        if (left%boolean .neqv. right%boolean) return
+        if (allocated(left%children) .neqv. allocated(right%children)) return
+        if (allocated(left%children)) then
+            if (size(left%children) /= size(right%children)) return
+            do i = 1, size(left%children)
+                if (.not. same_json(left%children(i), right%children(i))) return
+            end do
+        end if
+        equal = .true.
+    end function same_json
 
     subroutine wait_dead(pid)
         integer, intent(in) :: pid
@@ -409,19 +520,7 @@ contains
 
     subroutine stop_lane(root, lane_id, owner)
         character(len=*), intent(in) :: root, lane_id, owner
-        type(string_list_t) :: values
-        type(process_result_t) :: result
-        call list_add(values, 'gremlin')
-        call list_add(values, 'stop')
-        call list_add(values, '--dir')
-        call list_add(values, root)
-        call list_add(values, '--lane')
-        call list_add(values, lane_id)
-        call list_add(values, '--session')
-        call list_add(values, owner)
-        call list_add(values, '--json')
-        call gremlin_run(driver, root, cache, state, values, result, timeout=30000)
-        call assert_equal_integer(result%exit_code, 0, 'stops requested lane within bound')
+        call gremlin_stop_lane(driver, root, cache, state, lane_id, owner)
     end subroutine stop_lane
 
 end program test_continuous_preemption
