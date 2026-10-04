@@ -9,7 +9,9 @@ program test_backend_gfortran
     use fo_fpm_config, only: fpm_config_t
     use fo_cache, only: cache_t, cache_init, cache_key_for, cache_store_action, &
         HASH_LEN
-    use fo_process, only: process_getpid
+    use fo_process, only: process_getpid, process_getcwd, &
+        process_run_argv_logged, argv_push
+    use fo_fs, only: fs_find_executable, fs_remove_file
     use fo_compiler_flags, only: append_array_temporary_warning_flag, append_pipe_flag
     use fo_linker_policy, only: linker_should_try_lld
     use fx_dag, only: MAX_NODES
@@ -68,6 +70,8 @@ contains
         character(len=512) :: project_dir, log_file, gnu_wrapper, flang_wrapper
         character(len=512) :: old_fc
         integer :: u, exitcode, changed_exitcode, fc_status
+        character(len=512) :: real_compiler
+        logical :: compiler_found
 
         call make_tmp_path('fo_baseline_flags_project', project_dir)
         call make_tmp_path('fo_baseline_flags_log', log_file)
@@ -84,10 +88,20 @@ contains
         write (u, '(a)') 'end module baseline_flags_fixture'
         close (u)
 
+        call fs_find_executable('gfortran', real_compiler, compiler_found)
+        call assert(compiler_found, 'baseline flags fixture locates gfortran')
+        if (.not. compiler_found) then
+            call remove_tree(project_dir)
+            call fs_remove_file(log_file)
+            return
+        end if
         gnu_wrapper = trim(project_dir)//'/fixture-gfortran'
         flang_wrapper = trim(project_dir)//'/fixture-flang'
-        call write_compiler_wrapper(gnu_wrapper)
-        call write_compiler_wrapper(flang_wrapper)
+        call compile_backend_command_fixture(gnu_wrapper, real_compiler)
+        call compile_backend_command_fixture(flang_wrapper, real_compiler)
+        call set_env('FO_TEST_BACKEND_REAL_COMPILER', trim(real_compiler))
+        call set_env('FO_TEST_BACKEND_LLD_MARKER', '')
+        call set_env('FO_TEST_BACKEND_WRAPPER_DEPTH', '')
         call get_environment_variable('FO_FC', old_fc, status=fc_status)
 
         call set_env('FO_FC', trim(gnu_wrapper))
@@ -103,6 +117,8 @@ contains
         else
             call set_env('FO_FC', '')
         end if
+        call set_env('FO_TEST_BACKEND_REAL_COMPILER', '')
+        call set_env('FO_TEST_BACKEND_WRAPPER_DEPTH', '')
         ! Reset the backend's resolved executable before later tests supply a
         ! synthetic compiler identity without asking for compiler detection.
         call gfortran_build(project_dir, log_file, exitcode, use_cache=.false.)
@@ -112,19 +128,59 @@ contains
             'changed compiler baseline flags miss stamps and action cache')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(log_file)
     end subroutine test_compiler_baseline_flags_change_action_id
 
-    subroutine write_compiler_wrapper(path)
-        character(len=*), intent(in) :: path
-        integer :: u
+    subroutine compile_backend_command_fixture(executable, compiler)
+        character(len=*), intent(in) :: executable, compiler
+        character(len=512) :: project_root, source, log_file
+        character(len=512) :: arguments(3)
+        integer :: cwd_status, run_status
+        logical :: exists
 
-        open (newunit=u, file=trim(path), status='replace')
-        write (u, '(a)') '#!/bin/sh'
-        write (u, '(a)') 'exec gfortran "$@"'
-        close (u)
-        call execute_command_line('chmod +x '//trim(path))
-    end subroutine write_compiler_wrapper
+        call process_getcwd(project_root, cwd_status)
+        if (cwd_status /= 0) error stop 'cannot locate the fo source tree'
+        source = trim(project_root)// &
+            '/test-fixtures/fortran/fo_backend_gfortran_command.f90'
+        call make_tmp_path('fo_backend_fixture_compile', log_file)
+        arguments(1) = trim(source)
+        arguments(2) = '-o'
+        arguments(3) = trim(executable)
+        call run_backend_argv(trim(compiler), arguments, log_file, run_status)
+        if (run_status /= 0) error stop 'cannot compile native backend fixture'
+        inquire (file=trim(executable), exist=exists)
+        if (.not. exists) then
+            error stop 'native backend fixture compiler made no executable'
+        end if
+        call fs_remove_file(log_file)
+    end subroutine compile_backend_command_fixture
+
+    subroutine run_backend_argv(executable, arguments, log_file, exitcode)
+        character(len=*), intent(in) :: executable, arguments(:), log_file
+        integer, intent(out) :: exitcode
+        character(len=:), allocatable :: packed
+        integer :: n_args, i
+
+        n_args = 0
+        call argv_push(packed, n_args, trim(executable))
+        do i = 1, size(arguments)
+            call argv_push(packed, n_args, trim(arguments(i)))
+        end do
+        call process_run_argv_logged('', packed, n_args, trim(log_file), &
+            .false., 60, exitcode)
+    end subroutine run_backend_argv
+
+    subroutine run_backend_program(executable, log_file, exitcode)
+        character(len=*), intent(in) :: executable, log_file
+        integer, intent(out) :: exitcode
+        character(len=:), allocatable :: packed
+        integer :: n_args
+
+        n_args = 0
+        call argv_push(packed, n_args, trim(executable))
+        call process_run_argv_logged('', packed, n_args, trim(log_file), &
+            .false., 60, exitcode)
+    end subroutine run_backend_program
 
     subroutine test_gfortran_preprocesses_lowercase_f90()
         character(len=512) :: project_dir, log_file
@@ -162,7 +218,7 @@ contains
             'lowercase .f90 preprocesses inactive branches before linking')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(log_file)
     end subroutine test_gfortran_preprocesses_lowercase_f90
 
     subroutine test_gfortran_passes_manifest_test_arguments()
@@ -198,7 +254,7 @@ contains
             'native test with manifest arguments reports its result')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(log_file)
     end subroutine test_gfortran_passes_manifest_test_arguments
 
     subroutine test_compiler_switch_clears_the_tree()
@@ -231,7 +287,7 @@ contains
             'compiler switch: the previous tree is cleared')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(log_file)
     end subroutine test_compiler_switch_clears_the_tree
 
     subroutine test_slow_test_gets_its_own_timeout()
@@ -274,7 +330,7 @@ contains
         call set_env('FO_TEST_TIMEOUT', '')
         call set_env('FO_SLOW_TEST_TIMEOUT', '')
         call remove_tree(trim(project_dir)//'-fast')
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(log_file)
     end subroutine test_slow_test_gets_its_own_timeout
 
     subroutine test_test_budget_respects_available_clock()
@@ -345,7 +401,7 @@ contains
         call set_env('FO_TEST_TIMEOUT', '')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(log_file)
     end subroutine test_test_budget_respects_available_clock
 
     logical function host_can_measure_child_cpu(project_dir) result(supported)
@@ -355,8 +411,8 @@ contains
         integer :: unit, status
 
         host_file = trim(project_dir)//'/host.txt'
-        call execute_command_line('uname -s > "'//trim(host_file)//'"', &
-            exitstat=status)
+        call run_backend_argv('uname', [character(len=2) :: '-s'], &
+            host_file, status)
         if (status /= 0) error stop 'cannot determine the host for the budget oracle'
         open (newunit=unit, file=trim(host_file), status='old', action='read')
         read (unit, '(a)') line
@@ -468,7 +524,7 @@ contains
             'manifest example builds under its public target name')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(log_file)
     end subroutine test_gfortran_builds_manifest_example
 
     subroutine test_gfortran_builds_nested_auto_example()
@@ -497,8 +553,7 @@ contains
         inquire (file=trim(binary), exist=exists)
         call assert(exitcode == 0 .and. exists, &
             'nested automatic example uses its source stem as target name')
-        call execute_command_line( &
-            trim(binary)//' > '//trim(run_output), exitstat=run_status)
+        call run_backend_program(binary, run_output, run_status)
         call assert(run_status == 0 .and. &
             file_contains(run_output, 'NESTED_EXAMPLE_OLD'), &
             'nested automatic example runs its initial program body')
@@ -510,15 +565,14 @@ contains
         write (u, '(a)') 'end program demo'
         close (u)
         call gfortran_build(project_dir, log_file, exitcode)
-        call execute_command_line( &
-            trim(binary)//' > '//trim(run_output), exitstat=run_status)
+        call run_backend_program(binary, run_output, run_status)
         call assert(exitcode == 0 .and. run_status == 0 .and. &
             file_contains(run_output, 'NESTED_EXAMPLE_NEW'), &
             'changed nested example body replaces the cached executable')
 
         call remove_tree(project_dir)
-        call execute_command_line( &
-            'rm -f '//trim(log_file)//' '//trim(run_output))
+        call fs_remove_file(log_file)
+        call fs_remove_file(run_output)
     end subroutine test_gfortran_builds_nested_auto_example
 
     subroutine test_gfortran_builds_c_source_with_public_header()
@@ -561,13 +615,13 @@ contains
         binary = trim(project_dir)//'/build/fo/bin/c-public-header'
         run_status = 1
         if (exitcode == 0) then
-            call execute_command_line(trim(binary), exitstat=run_status)
+            call run_backend_program(binary, log_file, run_status)
         end if
         call assert(exitcode == 0 .and. run_status == 0, &
             'native build passes project include directory to C compiler')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(log_file)
     end subroutine test_gfortran_builds_c_source_with_public_header
 
     subroutine test_gfortran_named_test_uses_manifest_name()
@@ -601,7 +655,7 @@ contains
             'named test uses the public name from its manifest entry')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(log_file)
     end subroutine test_gfortran_named_test_uses_manifest_name
 
     subroutine test_gfortran_app_links_only_reachable_library_objects()
@@ -647,7 +701,7 @@ contains
             'application excludes unreachable library objects from its link')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(log_file)
     end subroutine test_gfortran_app_links_only_reachable_library_objects
 
     subroutine test_gfortran_test_skips_app_but_build_restores_it()
@@ -674,13 +728,12 @@ contains
         call gfortran_build(project_dir, log_file, exitcode)
         inquire (file=trim(app_path), exist=app_exists)
         run_exit = 1
-        if (app_exists) call execute_command_line('"'//trim(app_path)//'"', &
-            exitstat=run_exit)
+        if (app_exists) call run_backend_program(app_path, log_file, run_exit)
         call assert(exitcode == 0 .and. app_exists .and. run_exit == 0, &
             'normal build after tests creates a runnable application')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(log_file)
     end subroutine test_gfortran_test_skips_app_but_build_restores_it
 
     subroutine test_array_temporary_warning_flag_policy()
@@ -733,28 +786,10 @@ contains
     end subroutine test_linker_policy
 
     subroutine test_lld_failure_falls_back_to_default_linker()
-        use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
-        use fo_fs, only: fs_find_executable
-        interface
-            function setenv(name, value, overwrite) bind(C, name='setenv') &
-                    result(ierr)
-                import :: c_char, c_int
-                character(kind=c_char), intent(in) :: name(*), value(*)
-                integer(c_int), value :: overwrite
-                integer(c_int) :: ierr
-            end function setenv
-            function unsetenv(name) bind(C, name='unsetenv') result(ierr)
-                import :: c_char, c_int
-                character(kind=c_char), intent(in) :: name(*)
-                integer(c_int) :: ierr
-            end function unsetenv
-        end interface
-
         character(len=:), allocatable :: old_path
         character(len=512) :: project_dir, log_file, fake_dir, marker
-        character(len=512) :: real_compiler, old_fc
-        integer :: u, exitcode, path_length, fc_status
-        integer(c_int) :: ierr
+        character(len=512) :: real_compiler, old_fc, old_linker
+        integer :: exitcode, path_length, fc_status, linker_status
         logical :: attempted, compiler_found
 
         call make_tmp_path('fo_lld_fallback_project', project_dir)
@@ -764,42 +799,46 @@ contains
         call make_dir(fake_dir)
         call fs_find_executable('gfortran', real_compiler, compiler_found)
         call assert(compiler_found, 'fallback fixture locates the real compiler')
+        if (.not. compiler_found) then
+            call remove_tree(project_dir)
+            call remove_tree(fake_dir)
+            call fs_remove_file(log_file)
+            return
+        end if
         marker = trim(fake_dir)//'/attempted'
-        open (newunit=u, file=trim(fake_dir)//'/ld.lld', status='replace')
-        write (u, '(a)') '#!/bin/sh'
-        write (u, '(a)') 'exit 1'
-        close (u)
-        call execute_command_line('chmod +x "'//trim(fake_dir)//'/ld.lld"')
-        open (newunit=u, file=trim(fake_dir)//'/gfortran', status='replace')
-        write (u, '(a)') '#!/bin/sh'
-        write (u, '(a)') 'for arg in "$@"; do'
-        write (u, '(a)') '  if [ "$arg" = "-fuse-ld=lld" ]; then'
-        write (u, '(a)') '    touch "'//trim(marker)//'"'
-        write (u, '(a)') '    exit 1'
-        write (u, '(a)') '  fi'
-        write (u, '(a)') 'done'
-        write (u, '(a)') 'exec "'//trim(real_compiler)//'" "$@"'
-        close (u)
-        call execute_command_line('chmod +x "'//trim(fake_dir)//'/gfortran"')
+        call compile_backend_command_fixture(trim(fake_dir)//'/ld.lld', &
+            real_compiler)
+        call compile_backend_command_fixture(trim(fake_dir)//'/gfortran', &
+            real_compiler)
 
         call get_environment_variable('PATH', length=path_length)
         allocate (character(len=max(1, path_length)) :: old_path)
         call get_environment_variable('PATH', old_path)
         old_fc = ''
         call get_environment_variable('FO_FC', old_fc, status=fc_status)
-        ierr = setenv('PATH'//c_null_char, &
-            trim(fake_dir)//':'//trim(old_path)//c_null_char, 1_c_int)
-        ierr = setenv('FO_LINKER'//c_null_char, 'lld'//c_null_char, 1_c_int)
-        ierr = setenv('FO_FC'//c_null_char, &
-            trim(fake_dir)//'/gfortran'//c_null_char, 1_c_int)
+        old_linker = ''
+        call get_environment_variable('FO_LINKER', old_linker, &
+            status=linker_status)
+        call set_env('PATH', trim(fake_dir)//':'//trim(old_path))
+        call set_env('FO_LINKER', 'lld')
+        call set_env('FO_FC', trim(fake_dir)//'/gfortran')
+        call set_env('FO_TEST_BACKEND_REAL_COMPILER', trim(real_compiler))
+        call set_env('FO_TEST_BACKEND_LLD_MARKER', trim(marker))
+        call set_env('FO_TEST_BACKEND_WRAPPER_DEPTH', '')
         call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
-        ierr = setenv('PATH'//c_null_char, trim(old_path)//c_null_char, 1_c_int)
-        ierr = unsetenv('FO_LINKER'//c_null_char)
-        if (fc_status == 0 .and. len_trim(old_fc) > 0) then
-            ierr = setenv('FO_FC'//c_null_char, trim(old_fc)//c_null_char, 1_c_int)
+        call set_env('PATH', trim(old_path))
+        if (linker_status == 0 .and. len_trim(old_linker) > 0) then
+            call set_env('FO_LINKER', trim(old_linker))
         else
-            ierr = unsetenv('FO_FC'//c_null_char)
+            call set_env('FO_LINKER', '')
         end if
+        if (fc_status == 0 .and. len_trim(old_fc) > 0) then
+            call set_env('FO_FC', trim(old_fc))
+        else
+            call set_env('FO_FC', '')
+        end if
+        call set_env('FO_TEST_BACKEND_REAL_COMPILER', '')
+        call set_env('FO_TEST_BACKEND_LLD_MARKER', '')
 
         inquire (file=trim(marker), exist=attempted)
         call assert(attempted, 'link invokes the selected LLD executable')
@@ -808,7 +847,7 @@ contains
 
         call remove_tree(project_dir)
         call remove_tree(fake_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(log_file)
     end subroutine test_lld_failure_falls_back_to_default_linker
 
     subroutine test_gfortran_warns_about_array_temporaries()
@@ -845,7 +884,7 @@ contains
             'gfortran build emits array-temporary warnings by default')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(log_file)
     end subroutine test_gfortran_warns_about_array_temporaries
     subroutine test_gfortran_named_tests_fit_default_stack()
         character(len=512), volatile :: filenames(MAX_NODES)
@@ -876,13 +915,15 @@ contains
             'named test with pipeline state fits the default stack')
         call remove_tree(project_dir)
         call remove_tree(dependency_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(log_file)
     end subroutine test_gfortran_named_tests_fit_default_stack
 
     subroutine make_linked_named_project(project_dir, dependency_dir)
         character(len=*), intent(in) :: project_dir, dependency_dir
-        character(len=1024) :: command
-        integer :: u
+        character(len=512) :: compiler, archiver
+        character(len=512) :: compile_args(6), archive_args(3)
+        integer :: u, run_status
+        logical :: found
 
         call make_named_fpm_project(project_dir)
         call make_dir(trim(dependency_dir)//'/src')
@@ -907,14 +948,25 @@ contains
         close (u)
         ! -J keeps the module file out of the working directory (the fo
         ! checkout), where it would shadow build/fo/mod on the next build.
-        command = 'gfortran -c "'//trim(dependency_dir)// &
-            '/src/marker.f90" -J "'//trim(dependency_dir)//'/build" -o "'// &
-            trim(dependency_dir)//'/build/marker.o"'
-        call execute_command_line(trim(command))
-        command = 'ar rcs "'//trim(dependency_dir)// &
-            '/build/libstack_dependency.a" "'//trim(dependency_dir)// &
-            '/build/marker.o"'
-        call execute_command_line(trim(command))
+        call fs_find_executable('gfortran', compiler, found)
+        if (.not. found) error stop 'linked fixture needs gfortran'
+        compile_args(1) = '-c'
+        compile_args(2) = trim(dependency_dir)//'/src/marker.f90'
+        compile_args(3) = '-J'
+        compile_args(4) = trim(dependency_dir)//'/build'
+        compile_args(5) = '-o'
+        compile_args(6) = trim(dependency_dir)//'/build/marker.o'
+        call run_backend_argv(trim(compiler), compile_args, '/dev/null', &
+            run_status)
+        if (run_status /= 0) error stop 'cannot compile linked fixture module'
+        call fs_find_executable('ar', archiver, found)
+        if (.not. found) error stop 'linked fixture needs ar'
+        archive_args(1) = 'rcs'
+        archive_args(2) = trim(dependency_dir)//'/build/libstack_dependency.a'
+        archive_args(3) = trim(dependency_dir)//'/build/marker.o'
+        call run_backend_argv(trim(archiver), archive_args, '/dev/null', &
+            run_status)
+        if (run_status /= 0) error stop 'cannot archive linked fixture module'
     end subroutine make_linked_named_project
 
     subroutine test_gfortran_rebuilds_cached_module_without_mod()
@@ -959,7 +1011,7 @@ contains
             'module cache hit without .mod recompiles provider')
 
         call remove_tree(project_dir)
-        call execute_command_line('rm -f '//trim(log_file))
+        call fs_remove_file(log_file)
     end subroutine test_gfortran_rebuilds_cached_module_without_mod
 
     include 'test_backend_helpers.inc'
