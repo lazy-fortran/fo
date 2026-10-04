@@ -48,6 +48,11 @@ module fo_change_watch
             character(c_char), intent(out) :: path(*)
             integer(c_int), intent(out) :: kind
         end function native_poll
+        integer(c_int) function native_pending(handle) &
+                bind(C, name='fo_change_native_pending')
+            import :: c_ptr, c_int
+            type(c_ptr), value :: handle
+        end function native_pending
         subroutine native_self(handle, path) bind(C, name='fo_change_native_self')
             import :: c_ptr, c_char
             type(c_ptr), value :: handle
@@ -202,7 +207,7 @@ contains
     end subroutine change_watch_add_root
 
     subroutine change_watch_poll(watch, timeout_ms, changed_path, event_type, &
-            got_event, ierr)
+            got_event, ierr, provider_quiet)
         type(change_watch_t), intent(inout) :: watch
         integer, intent(in) :: timeout_ms
         character(len=*), intent(out) :: changed_path
@@ -210,6 +215,7 @@ contains
         logical, intent(out) :: got_event
         integer, intent(out) :: ierr
 
+        logical, intent(out), optional :: provider_quiet
         character(len=PATH_LEN) :: candidate
         integer :: kind, nul, attempts
         integer(c_int) :: native_kind
@@ -220,6 +226,7 @@ contains
         event_type = 0
         got_event = .false.
         ierr = 0
+        if (present(provider_quiet)) provider_quiet = .false.
         if (c_associated(watch%native)) then
             ierr = native_poll(watch%native, max(0, timeout_ms), candidate, &
                 len(candidate), native_kind)
@@ -229,6 +236,9 @@ contains
             changed_path = candidate
             event_type = native_kind
             got_event = native_kind /= 0
+            if (present(provider_quiet)) then
+                if (.not. got_event) provider_quiet = native_pending(watch%native) == 0
+            end if
             return
         end if
         call system_clock(count=now, count_rate=rate)
@@ -238,7 +248,10 @@ contains
             remaining = max(0_int64, (deadline - now)*1000_int64/max(1_int64, rate))
             call watcher_poll(watch%watcher, candidate, kind, int(remaining), received, ierr)
             if (ierr /= 0) return
-            if (.not. received) return
+            if (.not. received) then
+                if (present(provider_quiet)) provider_quiet = .true.
+                return
+            end if
             call reconcile_roots(watch, ierr)
             if (ierr /= 0) return
             if (.not. change_watch_relevant(watch, trim(candidate))) cycle

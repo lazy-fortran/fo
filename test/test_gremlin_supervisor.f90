@@ -2,7 +2,8 @@ program test_gremlin_supervisor
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit, int64
     use fo_cache, only: cache_digest
-    use fo_fs, only: fs_make_dir, fs_remove_tree
+    use fo_fs, only: fs_make_dir, fs_remove_tree, fs_sleep_ms
+    use fo_gremlin_lifecycle, only: gremlin_freshness_update
     use fo_gremlin_journal, only: journal_append
     use fo_gremlin_coverage, only: coverage_epoch_t, coverage_open, &
         coverage_record, COVERAGE_OK
@@ -16,6 +17,25 @@ program test_gremlin_supervisor
     implicit none
 
     interface
+        function c_fork() bind(C, name='fork') result(pid)
+            import :: c_int
+            integer(c_int) :: pid
+        end function c_fork
+        function c_kill(pid, signal) bind(C, name='kill') result(rc)
+            import :: c_int
+            integer(c_int), value :: pid, signal
+            integer(c_int) :: rc
+        end function c_kill
+        function c_waitpid(pid, status, options) bind(C, name='waitpid') result(rc)
+            import :: c_int
+            integer(c_int), value :: pid, options
+            integer(c_int), intent(out) :: status
+            integer(c_int) :: rc
+        end function c_waitpid
+        subroutine c_exit(status) bind(C, name='_exit')
+            import :: c_int
+            integer(c_int), value :: status
+        end subroutine c_exit
         function c_setenv(name, value, overwrite) bind(C, name='setenv') result(rc)
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: name(*), value(*)
@@ -393,12 +413,14 @@ contains
         type(gremlin_session_t) :: session
         type(coverage_epoch_t) :: coverage
         character(len=512) :: state_root, project_dir, message, journal_path
-        character(len=512) :: coverage_path
+        character(len=512) :: coverage_path, freshness_path
         character(len=64) :: generation, pending_generation, cursor_text
         character(len=128) :: names(3), id
         character(len=8192) :: status_text, record
         character(len=:), allocatable :: response_json
-        integer :: ierr, exitcode, release_error, status, digest_position
+        integer :: ierr, exitcode, release_error, status, digest_position, attempt
+        integer(c_int) :: freshness_pid, child_status
+        integer(int64) :: freshness_ticket, earlier_poll, later_request
 
         call make_tmpfile('fo-gremlin-readiness-state', state_root)
         call make_tmpfile('fo-gremlin-readiness-project', project_dir)
@@ -410,6 +432,37 @@ contains
             ierr, message)
         call check(ierr == 0 .and. session%owner, 'creates readiness API session')
         if (ierr /= 0) return
+
+        ! This component fixture injects an immutable ledger and status. Its
+        ! independent Fortran provider serves the owner acknowledgment boundary.
+        ! Real filesystem watches are exercised by the public process oracle.
+        freshness_path = trim(session%state_dir)//'/freshness-'//session%session_id
+        freshness_ticket = 0_int64
+        call gremlin_freshness_update(trim(freshness_path), 1, freshness_ticket, status)
+        call gremlin_freshness_update(trim(freshness_path), 0, freshness_ticket, status)
+        earlier_poll = freshness_ticket
+        call gremlin_freshness_update(trim(freshness_path), 1, freshness_ticket, status)
+        later_request = freshness_ticket
+        call gremlin_freshness_update(trim(freshness_path), 2, earlier_poll, status)
+        call gremlin_freshness_update(trim(freshness_path), 3, freshness_ticket, status)
+        call check(status == 0 .and. freshness_ticket == earlier_poll .and. &
+            freshness_ticket < later_request, &
+            'an earlier provider poll cannot acknowledge a later consumer request')
+
+        freshness_pid = c_fork()
+        call check(freshness_pid >= 0, 'starts isolated component freshness provider')
+        if (freshness_pid == 0) then
+            do attempt = 1, 12000
+                freshness_ticket = 0_int64
+                call gremlin_freshness_update(trim(freshness_path), 0, &
+                    freshness_ticket, status)
+                if (status == 0 .and. freshness_ticket > 0_int64) &
+                    call gremlin_freshness_update(trim(freshness_path), 2, &
+                    freshness_ticket, status)
+                call fs_sleep_ms(5)
+            end do
+            call c_exit(0_c_int)
+        end if
 
         generation = repeat('c', 64)
         pending_generation = repeat('d', 64)
@@ -471,6 +524,14 @@ contains
             index(response_json, '"local_gate_green":false') > 0 .and. &
             index(response_json, '"gate_token":""') > 0, &
             'changed requirements invalidate receipts and clear the token before reuse')
+        call gremlin_handle('wait', trim(project_dir), &
+            '{"lane_id":"readiness","wait_until":"local-gate-green",'// &
+            '"wait_ms":0}', response_json, exitcode)
+        call check(exitcode == 0 .and. &
+            index(response_json, '"wait_satisfied":false') > 0 .and. &
+            index(response_json, '"gate_token":""') > 0, &
+            'changed requirements prevent typed wait from returning historical green')
+
         status_text(digest_position:digest_position + 63) = repeat('e', 64)
         call gremlin_session_publish(session, trim(status_text), ierr, message)
         call gremlin_handle('wait', trim(project_dir), &
@@ -567,6 +628,10 @@ contains
             index(response_json, 'test_fast_two') > 0, &
             'failure wait returns durable receipt even after its cursor passed it')
 
+        if (freshness_pid > 0) then
+            status = c_kill(freshness_pid, 15_c_int)
+            status = c_waitpid(freshness_pid, child_status, 0_c_int)
+        end if
         call gremlin_session_release(session, release_error, message)
         call check(release_error == 0, 'releases readiness API session')
         call fs_remove_tree(trim(state_root))
