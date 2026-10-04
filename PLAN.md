@@ -374,7 +374,10 @@ At `18b28c7`, six JS fixtures remain, all owned by #161. #160's seven fixtures
 are native Fortran public-process tests. #163 owns
 the final interpreter-free inventory, generated compile-database Python oracle
 and generated shell helpers in archive, link, compiler, FFC, benchmark and CLI
-fixtures.
+fixtures. Its first slice is complete at `290a61c`: `test_compdb` parses and
+asserts compile-database JSON entirely in Fortran, rejects malformed JSON and
+suffix impostors such as `.f90.extra`, and passes with Node/Python absent. The
+remaining generated shell helpers and final interpreter inventory stay in #163.
 Issue #158 is complete through `6eb8045`: ten CLI fixtures are Fortran, the
 recursive test JSON ownership repair passes the full gfortran-13 FPM suite and
 the test-only C shim is Darwin-portable. #159 is repaired through `6b3ac43`:
@@ -726,7 +729,7 @@ current correctness.
 ## Active delivery state
 
 **Execution is user-authorized in parallel mode.** The reviewed core is on fo
-`main`; PR #146 is merged. The current main head `d434518` includes the shared
+`main`; PR #146 is merged. The current main head `290a61c` includes the shared
 Linux event watcher, finite crash-safe coverage, factual local-gate reporting,
 GCC 13.3 ownership repairs, Darwin archive portability, thirteen removed JS
 fixtures and side-effect-free install help. Exact combined focused gates passed
