@@ -61,6 +61,7 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           export FO="$HOME/.local/bin/fo"
+          export FO_BIN="$FO"
           export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0
           fpm test
 

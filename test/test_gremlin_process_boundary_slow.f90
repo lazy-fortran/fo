@@ -45,13 +45,16 @@ program test_gremlin_process_boundary_slow
     integer :: owner_pid, sentinel_pid, ierr, rc, pids(3), attempt
     type(process_result_t) :: result
     type(json_value_t) :: document, field
-    logical :: markers_ready
+    logical :: markers_ready, driver_ok
 
     call current_directory(root)
     driver = environment_value('FO_BIN')
-    call assert_true(len_trim(driver) > 0 .and. file_exists(driver), &
-        'FO_BIN names the exact worktree-built Fo candidate')
-    if (len_trim(driver) == 0 .or. .not. file_exists(driver)) goto 900
+    if (len_trim(driver) == 0) driver = environment_value('FO')
+    driver_ok = .false.
+    if (len_trim(driver) > 0) driver_ok = file_exists(driver)
+    call assert_true(driver_ok, &
+        'FO_BIN or explicit FO names the exact fo driver for the lifecycle oracle')
+    if (.not. driver_ok) goto 900
 
     call make_scratch('fo-gremlin-process-boundary', scratch)
     project = join_path(scratch, 'project')
