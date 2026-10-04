@@ -65,7 +65,7 @@ program test_install_help
     marker = join_path(scratch, 'fpm-invocations')
     fake_fpm = join_path(shim_dir, 'fpm')
     call current_directory(cwd)
-    c_source = join_path(join_path(cwd, 'test/fixtures'), 'install_help_fpm.c')
+    c_source = join_path(join_path(cwd, 'test-fixtures/c'), 'install_help_fpm.c')
     candidate = driver
     sentinel = join_path(join_path(prefix, 'bin'), 'fo')
     installed = sentinel
