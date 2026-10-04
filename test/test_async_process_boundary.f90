@@ -8,6 +8,7 @@ program test_async_process_boundary
         process_set_async_scope
     use fo_gremlin_state, only: gremlin_session_t, gremlin_session_acquire, &
         gremlin_session_read, gremlin_session_release
+    use fo_test_harness, only: string_list_t, process_result_t, list_add, run_process
     implicit none
 
     interface
@@ -30,6 +31,11 @@ program test_async_process_boundary
         integer(c_int) function c_setsid() bind(C, name='setsid')
             import :: c_int
         end function c_setsid
+
+        integer(c_int) function c_getsid(pid) bind(C, name='getsid')
+            import :: c_int
+            integer(c_int), value :: pid
+        end function c_getsid
 
         integer(c_int) function c_kill(pid, signal_number) bind(C, name='kill')
             import :: c_int
@@ -68,6 +74,7 @@ program test_async_process_boundary
     integer :: scope_sentinel_pid, scope_sentinel_lines, scope_escaped_lines
     integer :: acquire_error, release_error, match_result, cleanup_error
     integer :: cleanup_attempt
+    integer :: setsid_result, io_status
     integer(int64) :: clock_rate
     integer(int64) :: ticks_start, ticks_finish
     real(real64) :: cancel_seconds
@@ -75,6 +82,7 @@ program test_async_process_boundary
     character(len=4096) :: project, lane_id, state_root, state_message
     character(len=4096) :: owner_state_dir
     character(len=128) :: session_id, owner_start
+    character(len=32) :: setsid_text
     character(len=65536) :: status_text
     character(len=512) :: scratch
     character(len=:), allocatable :: packed
@@ -83,7 +91,10 @@ program test_async_process_boundary
     logical :: done, scope_owner_reaped, scratch_clean
     logical :: scope_child_quiet, scope_escaped_quiet, scope_sentinel_quiet
     logical :: recovered_owner
+    logical :: darwin
     type(gremlin_session_t) :: recovered_session
+    type(string_list_t) :: platform_command
+    type(process_result_t) :: platform_result
 
     call get_command_argument(0, executable)
     call process_getcwd(workdir, exitcode)
@@ -128,6 +139,14 @@ program test_async_process_boundary
     write (scratch, '("/var/tmp/fo-async-boundary-",i0,"-",i0)') &
         pid, ticks_start
     call fs_make_dir(trim(scratch))
+
+    call list_add(platform_command, '/usr/bin/uname')
+    call list_add(platform_command, '-s')
+    call run_process(platform_command, trim(workdir), platform_result)
+    call check(platform_result%exit_code == 0, 'identifies the containment platform')
+    darwin = index(platform_result%stdout, 'Darwin') == 1
+    call check(darwin .or. index(platform_result%stdout, 'Linux') == 1, &
+        'runs the Linux or Darwin containment contract')
 
     call start_helper('--owner', trim(scratch)//'/owned', owner_pid)
     call check(wait_for_pid(trim(scratch)//'/owned.owner.pid', owner_pid), &
@@ -232,9 +251,27 @@ program test_async_process_boundary
     call check(wait_for_data(trim(prefix)//'.scope-child.heartbeat'), &
         'scoped descendant session is active before supervisor crash')
     call check(wait_for_pid(trim(prefix)//'.scope-escaped.pid', scope_escaped_pid), &
-        'records a descendant that escaped with setsid before supervisor crash')
+        'records the forked descendant before supervisor crash')
     call check(wait_for_data(trim(prefix)//'.scope-escaped.heartbeat'), &
-        'setsid descendant is active before supervisor crash')
+        'forked descendant is active before supervisor crash')
+    call check(wait_for_data(trim(prefix)//'.scope-setsid'), &
+        'records the descendant setsid result')
+    call read_text_file(trim(prefix)//'.scope-setsid', setsid_text)
+    setsid_result = 0
+    read (setsid_text, *, iostat=io_status) setsid_result
+    call check(io_status == 0, 'reads the descendant setsid result')
+    if (darwin) then
+        call check(setsid_result == scope_escaped_pid .and. setsid_result > 0, &
+            'Darwin descendant successfully escapes with setsid')
+        call check(c_getsid(int(scope_escaped_pid, c_int)) == &
+            int(scope_escaped_pid, c_int), 'Darwin descendant owns its new session')
+    else
+        call check(setsid_result == -1, 'Linux containment rejects descendant setsid')
+        call check(c_getsid(int(scope_escaped_pid, c_int)) > 0 .and. &
+            c_getsid(int(scope_escaped_pid, c_int)) == &
+            c_getsid(int(scope_child_pid, c_int)), &
+            'Linux descendant remains in the owned session')
+    end if
     scope_escaped_lines = line_count(trim(prefix)//'.scope-escaped.heartbeat')
     call check(wait_for_data(trim(prefix)//'.scope-state-dir'), &
         'records the exact owner registry location before supervisor crash')
@@ -275,7 +312,7 @@ program test_async_process_boundary
     call check(done, 'reaps the abruptly killed supervisor process')
     call fs_sleep_ms(100)
     call check(line_count(trim(prefix)//'.scope-escaped.heartbeat') > &
-        scope_escaped_lines, 'setsid descendant outlives abrupt supervisor death')
+        scope_escaped_lines, 'forked descendant outlives abrupt supervisor death')
     match_result = c_process_matches(int(scope_owner_pid, c_int), &
         trim(owner_start)//c_null_char)
     call check(match_result == 0, 'crash owner exact PID/start identity is gone')
@@ -302,7 +339,7 @@ program test_async_process_boundary
         'stale cleanup stops the exact child session heartbeat')
     scope_escaped_quiet = wait_for_quiet(trim(prefix)//'.scope-escaped.heartbeat')
     call check(scope_escaped_quiet, &
-        'stale cleanup stops the exact setsid descendant heartbeat')
+        'stale cleanup stops the exact forked descendant heartbeat')
     call fs_sleep_ms(100)
     call check(line_count(trim(scratch)//'/recovery-sentinel.sentinel.heartbeat') > &
         scope_sentinel_lines, 'unrelated sentinel survives stale-owner recovery')
@@ -327,7 +364,7 @@ program test_async_process_boundary
     end if
     scope_escaped_quiet = wait_for_quiet(trim(prefix)//'.scope-escaped.heartbeat')
     call check(scope_escaped_quiet, &
-        'confirms detached heartbeat stays stopped before scratch cleanup')
+        'confirms descendant heartbeat stays stopped before scratch cleanup')
     scratch_clean = failed == 0 .and. scope_owner_reaped .and. &
         acquire_error == 0 .and. &
         scope_child_quiet .and. scope_escaped_quiet .and. scope_sentinel_quiet
@@ -423,6 +460,7 @@ contains
         character(len=*), intent(in) :: helper_mode, target
 
         integer(c_int) :: child, grandchild, setpgid_error, escaped_sid
+        character(len=32) :: result_text
 
         previous_handler = c_signal(15_c_int, c_funloc(ignore_term))
         if (c_associated(previous_handler)) call process_exit(8)
@@ -437,7 +475,10 @@ contains
             if (child < 0_c_int) call process_exit(15)
             if (child == 0_c_int) then
                 escaped_sid = c_setsid()
-                if (escaped_sid <= 0_c_int) call process_exit(16)
+                ! Linux rejects session escape; Darwin tracks escaped descendants.
+                ! Keep the descendant alive so both platforms test stale cleanup.
+                write (result_text, '(i0)') escaped_sid
+                call write_text_file(target//'.scope-setsid', trim(result_text))
                 previous_handler = c_signal(15_c_int, c_funloc(ignore_term))
                 if (.not. c_associated(previous_handler)) call process_exit(17)
                 call write_pid(target, 'scope-escaped')
