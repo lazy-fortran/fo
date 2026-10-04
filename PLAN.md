@@ -273,6 +273,43 @@ probe, payload hashing or build/test loop. Preserve finite red/unknown outcomes
 without a busy retry loop. Git commit metadata is provenance, not a new execution
 generation when bytes/configuration are unchanged.
 
+### Resident development and temporary task lifetimes (#142/#155/#139)
+
+This is the refined target contract; task-bound cleanup is remaining acceptance,
+not a claim that every lifetime path is already implemented. Keep lifetime in
+one shared session API, independent of coverage progress and CLI/MCP transport.
+
+| Purpose | Remains alive through | Ends on |
+| --- | --- | --- |
+| Persistent development lane (normal integration use) | launching CLI exit, observer/harness disconnect, worker completion, finished tests and quiet periods | explicit stop or deliberate controller shutdown/replacement |
+| Explicit temporary task lane | task activity and completed coverage while its task supervisor still owns it | explicit task-end or loss of its owning supervisor connection, using bounded scoped cleanup |
+
+Full verification leaves the same development owner **resident and quiescent**:
+it watches for relevant edits and serves controls, with no redundant payload
+work. An edit wakes that owner without another start. Never infer abandonment
+from completed tests, no edits, no polling or an idle/heartbeat timeout.
+
+Keep one named persistent integration lane per watched integration checkout;
+compatible repeated starts attach atomically rather than spawning duplicates.
+Task-specific worktree lanes are explicitly temporary. Their ownership belongs
+to the enduring task supervisor, never the short-lived CLI command that starts
+or observes them. A held connection/pipe with EOF detection is sufficient where
+supported; no heartbeat framework or agent scheduler is needed.
+
+An attaching observer does not acquire automatic cleanup ownership. Reject an
+incompatible lifetime request clearly; a temporary task cannot silently adopt
+or downgrade the shared persistent lane. Expose created/attached, lifetime
+purpose and exact session/owner identity. MCP EOF preserves intentionally
+persistent sessions and cleans up only sessions bound to that owning connection.
+
+Task cleanup reuses #139's exact session/owner-start identity checks and bounded
+cancel/reap path. Retain completed receipts; interrupted cases stay unknown.
+Stale cleanup cannot stop a replacement owner, another lane or an unrelated
+process. #142 owns the common lifetime/adapter acceptance; #155 owns resident
+sleep/wake. Native public oracles must prove same-owner wake after completion,
+start/attach deduplication, persistent survival after launcher/observer exit,
+temporary task-end/disconnect cleanup, and unrelated/replacement owner survival.
+
 Durable JSONL receipts/events record actual outcomes before later work. Preserve
 PASS/FAIL/FLAKY/TIMEOUT/INFRA_ERROR, unknown/cancelled distinctions, original names,
 seed/order, exact driver/artifact inputs and referenced logs. Page losslessly;
@@ -419,7 +456,7 @@ These are ownership/dependency edges, not a single serial mega-gate:
 | one engine | #167 using #166, #189 | ordinary/Gremlin identities, invalidation and actual outputs agree |
 | roots then collection | #168 / fx #44 | independent roots/leases protected; collection enabled only after owner audit |
 | receipt recovery | #140/#183 and native migration #161 | receipt-before-coverage recovery; marker-before-exit never earns PASS |
-| quiescence | #155 with #148/#153/#154 | no payload work asleep; change revokes token; scope/completeness honest |
+| quiescence | #155 with #148/#153/#154 | same owner remains resident; no payload work asleep; edit wakes; scope/completeness honest |
 | decomposition | #149/#150/#185/#186 | existing behavioral parity; no new competing service or line-count gate |
 | optional audit | #190 / #145 | tiny harness/acquisition correctness now; real runs asynchronous, never blocking |
 
@@ -443,7 +480,7 @@ does not itself close or reopen implementation issues.
 | #131 / #132 | public named dispatcher routing and per-case isolation; no forced in-process batching |
 | #134 / #135 | honest timeout diagnosis and path-dependency freshness |
 | #139 / #172 | scoped process ownership and explicit platform limitations |
-| #142 / #185 | reconnectable CLI/MCP parity and removal of transport-owned execution |
+| #142 / #185 | reconnectable CLI/MCP parity, explicit persistent/task lifetimes, and removal of transport-owned execution |
 | #161 / #163 / #184 | native fixture migration, interpreter cleanup and lower test cost without weakening oracles |
 | #188 | test-only Git-dependency bootstrap without dummy root library or redundant full build |
 
