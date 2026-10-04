@@ -4,7 +4,8 @@ module fo_gremlin_supervisor
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_check, only: fo_changed_modules
     use fo_gremlin_context, only: capture_candidate
-    use fo_gremlin_request, only: gremlin_request_t, parse_request, is_hex_digest
+    use fo_gremlin_request, only: gremlin_request_t, parse_request, is_hex_digest, &
+        gremlin_json_field
     use fo_gremlin_generation, only: generation_t, generation_driver_identity
     use fo_driver, only: driver_pin_t, driver_pin_current, driver_pin_existing
     use fo_change_watch, only: change_watch_t, change_watch_init, &
@@ -46,7 +47,7 @@ module fo_gremlin_supervisor
     use fo_process, only: argv_push, process_cancel_pid, &
         process_poll_pid, process_start_argv_logged, process_set_async_scope
     use fo_scan_types, only: MAX_PATH
-    use fo_util, only: extract_json_field, json_bool, json_int, make_tmpfile
+    use fo_util, only: json_bool, json_int, make_tmpfile
     use fx_dag, only: dag_t, MAX_NODES
     use fx_json_build, only: json_escape_string
     use fo_fs, only: fs_make_dir, fs_sleep_ms
@@ -202,7 +203,7 @@ contains
                 exitcode = 2
                 return
             end if
-            call extract_json_field(status_text, 'policy_key', stored_policy)
+            call gremlin_json_field(status_text, 'policy_key', stored_policy)
             if (trim(stored_policy) /= request_policy_key(request)) then
                 call error_response('start', &
                     'an active Gremlin session has an incompatible policy', response)
@@ -283,7 +284,7 @@ contains
                 owner_pid, owner_start, status_text, ierr, message)
             if (ierr /= 0 .or. len_trim(session_id) == 0 .or. &
                 len_trim(status_text) == 0) cycle
-            call extract_json_field(status_text, 'policy_key', stored_policy)
+            call gremlin_json_field(status_text, 'policy_key', stored_policy)
             if (trim(stored_policy) /= request_policy_key(request)) then
                 call cancel_launched_owner(pid, spawn_exit)
                 if (spawn_exit /= 0) then
@@ -346,7 +347,7 @@ contains
         generation_id = ''
         coverage_view = gremlin_coverage_view_t()
         have_coverage = .false.
-        call extract_json_field(status_text, 'active_generation', generation_id)
+        call gremlin_json_field(status_text, 'active_generation', generation_id)
         if (len_trim(generation_id) == HASH_LEN) then
             call gremlin_session_state_dir(project_dir, request%lane_id, &
                 coverage_state_dir, ierr, message)
@@ -435,22 +436,22 @@ contains
         active_id = ''
         candidate_id = ''
         status_name = ''
-        call extract_json_field(status_text, 'active_generation', active_id)
-        call extract_json_field(status_text, 'candidate_generation', candidate_id)
-        call extract_json_field(status_text, 'state', status_name)
-        call extract_json_field(status_text, 'gate_required', raw)
+        call gremlin_json_field(status_text, 'active_generation', active_id)
+        call gremlin_json_field(status_text, 'candidate_generation', candidate_id)
+        call gremlin_json_field(status_text, 'state', status_name)
+        call gremlin_json_field(status_text, 'gate_required', raw)
         read(raw, *, iostat=ios) input%gate_required
         if (ios /= 0) input%gate_required = -1
-        call extract_json_field(status_text, 'input_changed', raw)
+        call gremlin_json_field(status_text, 'input_changed', raw)
         input%dirty = trim(raw) == 'true'
         if (present(freshness_verified)) &
             input%dirty = input%dirty .or. .not. freshness_verified
         input%owner_session = session%session_id
         input%generation = active_id
         input%inventory_digest = coverage%inventory_digest
-        call extract_json_field(status_text, 'requirement_digest', &
+        call gremlin_json_field(status_text, 'requirement_digest', &
             input%requirement_digest)
-        call extract_json_field(status_text, 'event_epoch', raw)
+        call gremlin_json_field(status_text, 'event_epoch', raw)
         read (raw, *, iostat=ios) input%event_epoch
         if (ios /= 0) input%event_epoch = -1
         input%dirty = input%dirty .or. len_trim(active_id) /= HASH_LEN .or. &
@@ -518,9 +519,9 @@ contains
                 case_id = ''
                 status_name = ''
                 raw = ''
-                call extract_json_field(records(i)%json, 'generation', receipt_generation)
-                call extract_json_field(records(i)%json, 'case_id', case_id)
-                call extract_json_field(records(i)%json, 'status', status_name)
+                call gremlin_json_field(records(i)%json, 'generation', receipt_generation)
+                call gremlin_json_field(records(i)%json, 'case_id', case_id)
+                call gremlin_json_field(records(i)%json, 'status', status_name)
                 if (trim(receipt_generation) == trim(candidate_id) .and. &
                     trim(case_id) == '<build>' .and. &
                     status_is_failure(trim(status_name))) input%failure_observed = .true.
@@ -531,9 +532,9 @@ contains
                     gate_failure = .true.
                     input%failure_observed = .true.
                 end if
-                call extract_json_field(records(i)%json, 'gate_required', raw)
+                call gremlin_json_field(records(i)%json, 'gate_required', raw)
                 receipt_requirement = ''
-                call extract_json_field(records(i)%json, 'requirement_digest', &
+                call gremlin_json_field(records(i)%json, 'requirement_digest', &
                     receipt_requirement)
                 gate_required = trim(raw) == 'true' .and. &
                     receipt_requirement == input%requirement_digest
@@ -709,9 +710,9 @@ contains
                 exitcode = ierr
                 return
             end if
-            call extract_json_field(status_json, 'health', health)
-            call extract_json_field(status_json, 'phase', phase_name)
-            call extract_json_field(status_json, 'state', state_name)
+            call gremlin_json_field(status_json, 'health', health)
+            call gremlin_json_field(status_json, 'phase', phase_name)
+            call gremlin_json_field(status_json, 'state', state_name)
             readiness = gremlin_readiness_t()
             if (trim(health) == 'failure') readiness%health = GREMLIN_HEALTH_FAILURE
             select case (trim(phase_name))
@@ -728,13 +729,13 @@ contains
             case ('failed')
                 readiness%phase = GREMLIN_PHASE_FAILED
             end select
-            call extract_json_field(status_json, 'local_gate_green', fact)
+            call gremlin_json_field(status_json, 'local_gate_green', fact)
             readiness%local_gate_green = trim(fact) == 'true'
-            call extract_json_field(status_json, 'fully_verified', fact)
+            call gremlin_json_field(status_json, 'fully_verified', fact)
             readiness%fully_verified = trim(fact) == 'true'
-            call extract_json_field(status_json, 'dirty', fact)
+            call gremlin_json_field(status_json, 'dirty', fact)
             readiness%dirty = trim(fact) == 'true'
-            call extract_json_field(status_json, 'verification_level', verification)
+            call gremlin_json_field(status_json, 'verification_level', verification)
             select case (trim(verification))
             case ('ordinary')
                 readiness%verification_level = GREMLIN_VERIFY_ORDINARY
@@ -809,7 +810,7 @@ contains
         integer :: ios
 
         value = 0_int64
-        call extract_json_field(json, name, raw)
+        call gremlin_json_field(json, name, raw)
         read(raw, *, iostat=ios) value
         if (ios /= 0) value = 0_int64
     end subroutine read_json_cursor
@@ -891,7 +892,7 @@ contains
             exitcode = 2
             return
         end if
-        call extract_json_field(status_text, 'active_generation', active_identity)
+        call gremlin_json_field(status_text, 'active_generation', active_identity)
         if (len_trim(request%generation_id) > 0) then
             active_identity = request%generation_id
         end if
@@ -1136,7 +1137,7 @@ contains
                 exitcode = 2
                 return
             end if
-            call extract_json_field(status_text, 'policy_key', stored_policy)
+            call gremlin_json_field(status_text, 'policy_key', stored_policy)
             if (trim(stored_policy) /= request_policy_key(request)) then
                 call error_response('run', &
                     'an active Gremlin session has an incompatible policy', response)
@@ -2126,13 +2127,13 @@ contains
                 seed_text = ''
                 inventory_digest = ''
                 epoch_text = ''
-                call extract_json_field(records(i)%json, 'case_id', case_name)
-                call extract_json_field(records(i)%json, 'generation', generation)
-                call extract_json_field(records(i)%json, 'status', outcome)
-                call extract_json_field(records(i)%json, 'seed', seed_text)
-                call extract_json_field(records(i)%json, 'inventory_digest', &
+                call gremlin_json_field(records(i)%json, 'case_id', case_name)
+                call gremlin_json_field(records(i)%json, 'generation', generation)
+                call gremlin_json_field(records(i)%json, 'status', outcome)
+                call gremlin_json_field(records(i)%json, 'seed', seed_text)
+                call gremlin_json_field(records(i)%json, 'inventory_digest', &
                     inventory_digest)
-                call extract_json_field(records(i)%json, 'coverage_epoch', epoch_text)
+                call gremlin_json_field(records(i)%json, 'coverage_epoch', epoch_text)
                 if (trim(generation) /= trim(coverage%generation)) cycle
                 read(seed_text, *, iostat=ios) receipt_seed
                 if (ios /= 0) cycle
@@ -2197,9 +2198,9 @@ contains
                 case_name = ''
                 status_name = ''
                 seed_text = ''
-                call extract_json_field(records(i)%json, 'case_id', case_name)
-                call extract_json_field(records(i)%json, 'status', status_name)
-                call extract_json_field(records(i)%json, 'seed', seed_text)
+                call gremlin_json_field(records(i)%json, 'case_id', case_name)
+                call gremlin_json_field(records(i)%json, 'status', status_name)
+                call gremlin_json_field(records(i)%json, 'seed', seed_text)
                 if (.not. any(inventory(:n_inventory) == case_name)) cycle
                 if (status_name /= 'PASS' .and. status_name /= 'FAIL' .and. &
                     status_name /= 'TIMEOUT') cycle
@@ -2894,9 +2895,9 @@ contains
             if (ierr /= JOURNAL_OK) return
             if (size(records) == 0) return
             do i = 1, size(records)
-                call extract_json_field(records(i)%json, 'generation', receipt_generation)
-                call extract_json_field(records(i)%json, 'case_id', receipt_case)
-                call extract_json_field(records(i)%json, 'status', verdict)
+                call gremlin_json_field(records(i)%json, 'generation', receipt_generation)
+                call gremlin_json_field(records(i)%json, 'case_id', receipt_case)
+                call gremlin_json_field(records(i)%json, 'status', verdict)
                 if (len_trim(receipt_generation) /= HASH_LEN) cycle
                 if (receipt_generation == generation) cycle
                 if (trim(receipt_case) /= trim(case_name)) cycle
@@ -3045,7 +3046,7 @@ contains
         emitted = 0
         do i = 1, size(records)
             if (failures_only) then
-                call extract_json_field(records(i)%json, 'status', row_status)
+                call gremlin_json_field(records(i)%json, 'status', row_status)
                 if (.not. status_is_failure(trim(row_status))) cycle
             end if
             if (emitted > 0) response = response//','
@@ -3338,9 +3339,9 @@ contains
             read (unit, '(a)', iostat=ios) line
             if (ios /= 0) exit
             if (index(line, '{"tests":[') /= 1) cycle
-            call extract_json_field(line, 'name', name)
+            call gremlin_json_field(line, 'name', name)
             if (trim(name) /= trim(case_name)) cycle
-            call extract_json_field(line, 'status', verdict)
+            call gremlin_json_field(line, 'status', verdict)
             select case (trim(verdict))
             case ('pass')
                 outcome = 'PASS'
