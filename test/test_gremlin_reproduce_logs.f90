@@ -55,13 +55,13 @@ program test_gremlin_reproduce_logs
         startup_error = start_failure(process)
         if (len(session) > 0) call stop_lane(session)
         call assert_true(.false., 'initial owner start failed: '//startup_error)
-        call finish_assertions()
+        call finish_assertions(retain_failed_scratch=.true.)
     end if
     call wait_for_anchor(session, generation, anchor_ready, startup_error)
     if (.not. anchor_ready) then
         call stop_lane(session)
         call assert_true(.false., 'initial anchor did not become ready: '//startup_error)
-        call finish_assertions()
+        call finish_assertions(retain_failed_scratch=.true.)
     end if
 
     call write_text(project//'/token.txt', 'EDITED_REPRODUCE_TOKEN'//new_line('a'))
@@ -105,7 +105,7 @@ program test_gremlin_reproduce_logs
     call assert_output_json(first_text)
 
     call stop_lane(session)
-    call finish_assertions()
+    call finish_assertions(retain_failed_scratch=.true.)
 
 contains
 
