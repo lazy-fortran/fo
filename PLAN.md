@@ -7,10 +7,10 @@ New interfaces/workflows below are planned, not claimed implemented by this edit
 
 ## Immediate controller instructions
 
-The current workspace controller is in documents/issues-only delivery under
-the latest replacement AGENTS instructions. Prepared source is parked until a
-new explicit execution trigger. The development rules below apply when execution
-is authorized; this documentation checkpoint starts no builds, tests or workers.
+Execution has resumed under the explicit continuation objective: implement and
+test Gremlin through its own bootstrap according to this plan. Continue parallel
+Luna work with scoped Sol escalation and resident Gremlin feedback; prepared
+source is promoted only after its focused integrated correctness evidence.
 
 1. Continue small, locally verified main increments. Use the exact candidate's
    focused correctness tests and known reproducers; reuse warm caches. Do not
@@ -173,22 +173,21 @@ workloads and broader audit instrumentation remain open under #190/#145.
 
 | Issue | Published task checkpoint | Evidence and remaining work |
 | --- | --- | --- |
-| #150 | `agent/150-shared-json` at `583c385` | Integrated request/structure 2/2 (0.09s), public MCP 1/1 (8.80s); code promotion parked. |
-| #191 | `agent/191-verify` at `18af66a` | Integrated scanner oracle 1/1 (0.22s); code promotion parked. |
+| #150 | `agent/150-shared-json` at `583c385` | Domain request adoption promoted; integrated request/structure 2/2 (0.09s), public MCP 1/1 (8.80s). Residual MCP lexical helpers remain the next slice. |
+| #191 | `agent/191-verify` at `18af66a` | Promoted bounded scanner fix; integrated oracle 1/1 (0.22s), controlled old-driver negative rejects the prior behavior. |
 | #170 | `agent/170-sol-repair` at `1fc8456` | Isolated provider test/build green after two failed Luna repairs; combined/public runtime integration still required. |
 | #189 | `agent/189-campaign` at `5441a03` | Campaign adoption/metadata source only; independent executed-case oracle and combined verification pending. |
 | #161 | `agent/161-native-verify` at `7eef4ef` | First native MCP replacement source repaired but unverified; all six JS fixtures remain. |
 
-The combined #150/#191 controller is frozen at `2e7c048`, not main. Its patch
-versus main `7a638e8` has SHA256
+The combined #150/#191 code checkpoint is `2e7c048`, now integrated with current
+documentation through `91c8b62`. Its code patch versus prior main `7a638e8` has SHA256
 `80180b725ab0669b302fb18a6507ad1c0687c04ba036adfbc1b3b4d67068e225`.
 The app used for public acceptance was built from `8a957c0`, with SHA256
 `206228c5ebda4fb1ca22907b13ad9dc0288b693d58795d464ad72bbe2818e839`;
 the intervening scanner fix changes only its test import. App and oracle inputs
 are recorded separately, not claimed to be a fully verified whole generation.
 
-All implementation workers and owned build/test processes have stopped. On a
-new execution trigger, resume these small prepared increments, finish #170/#189
+Implementation resumes from these small prepared increments. Finish #170/#189
 consumers and use resident Gremlin by default. Repair backend/dependency defects
 in their owning provider and recheck the original consumer; do not permanently
 work around them or exclude fpm/CMake projects. #148 and #165-#167 follow the
