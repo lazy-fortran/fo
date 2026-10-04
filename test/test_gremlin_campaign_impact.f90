@@ -330,15 +330,15 @@ contains
         prelude = ''
         if (present(extra_use)) prelude = trim(extra_use)//new_line('a')
         prelude = prelude//'use, intrinsic :: iso_c_binding, only: c_int'// &
-            new_line('a')//'interface'//new_line('a')// &
+            new_line('a')
+        source = 'program '//trim(name)//new_line('a')//prelude// &
+            'implicit none'//new_line('a')//'interface'//new_line('a')// &
             '  integer(c_int) function test_sleep(microseconds) '// &
             'bind(C,name="usleep")'//new_line('a')// &
             '    import :: c_int'//new_line('a')// &
             '    integer(c_int), value :: microseconds'//new_line('a')// &
             '  end function test_sleep'//new_line('a')//'end interface'// &
-            new_line('a')
-        source = 'program '//trim(name)//new_line('a')//prelude// &
-            'implicit none'//new_line('a')//trim(body)//new_line('a')// &
+            new_line('a')//trim(body)//new_line('a')// &
             'end program '//trim(name)//new_line('a')
     end function test_source
 
