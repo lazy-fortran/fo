@@ -102,10 +102,10 @@ program test_gremlin_campaign_impact
         'required cases continue across public campaign chunks')
 
     marker_text = read_text(marker)
-    call assert_true(index(marker_text, regression_case) > 0 .and. &
-        index(marker_text, affected_case) > 0 .and. &
-        index(marker_text, slow_affected_case) > 0 .and. &
-        index(marker_text, background_case) > 0, &
+    call assert_true(index(marker_text, trim(regression_case)) > 0 .and. &
+        index(marker_text, trim(affected_case)) > 0 .and. &
+        index(marker_text, trim(slow_affected_case)) > 0 .and. &
+        index(marker_text, trim(background_case)) > 0, &
         'case markers confirm that executables ran and emitted output')
     call gremlin_stop_lane(driver, project, cache, state, lane, session)
     call finish_assertions()
@@ -123,7 +123,7 @@ contains
         call list_add(arguments, '--lane')
         call list_add(arguments, lane)
         call list_add(arguments, '--target')
-        call list_add(arguments, regression_case)
+        call list_add(arguments, trim(regression_case))
         call list_add(arguments, '--random-count')
         call list_add(arguments, '1')
         call list_add(arguments, '--seed')
@@ -280,7 +280,7 @@ contains
             'logical :: exists'//new_line('a')// &
             'open(newunit=unit,file='//fortran_quote(marker)// &
             ',status="unknown",position="append")'//new_line('a')// &
-            'write(unit,"(a)") "'//regression_case//'"'//new_line('a')// &
+            'write(unit,"(a)") "'//trim(regression_case)//'"'//new_line('a')// &
             'close(unit)'//new_line('a')// &
             'rc = test_sleep(1500000_c_int)'//new_line('a')// &
             'inquire(file='//fortran_quote(sentinel)//',exist=exists)'// &
@@ -293,21 +293,21 @@ contains
         affected_body = 'integer :: unit, rc'//new_line('a')// &
             'open(newunit=unit,file='//fortran_quote(marker)// &
             ',status="unknown",position="append")'//new_line('a')// &
-            'write(unit,"(a)") "'//affected_case//'"'//new_line('a')// &
+            'write(unit,"(a)") "'//trim(affected_case)//'"'//new_line('a')// &
             'close(unit)'//new_line('a')// &
             'rc = test_sleep(1500000_c_int)'//new_line('a')// &
             'if (shared_value < 1) error stop 7'
         slow_body = 'integer :: unit, rc'//new_line('a')// &
             'open(newunit=unit,file='//fortran_quote(marker)// &
             ',status="unknown",position="append")'//new_line('a')// &
-            'write(unit,"(a)") "'//slow_affected_case//'"'//new_line('a')// &
+            'write(unit,"(a)") "'//trim(slow_affected_case)//'"'//new_line('a')// &
             'close(unit)'//new_line('a')// &
             'rc = test_sleep(1500000_c_int)'//new_line('a')// &
             'if (shared_value < 1) error stop 8'
         background_body = 'integer :: unit, rc'//new_line('a')// &
             'open(newunit=unit,file='//fortran_quote(marker)// &
             ',status="unknown",position="append")'//new_line('a')// &
-            'write(unit,"(a)") "'//background_case//'"'//new_line('a')// &
+            'write(unit,"(a)") "'//trim(background_case)//'"'//new_line('a')// &
             'close(unit)'//new_line('a')// &
             'rc = test_sleep(1500000_c_int)'
         regression = test_source(regression_case, regression_body)
@@ -316,10 +316,10 @@ contains
         slow_affected = test_source(slow_affected_case, slow_body, &
             'use shared_mod, only: shared_value'//new_line('a'))
         background = test_source(background_case, background_body)
-        call write_text(project//'/test/'//regression_case//'.f90', regression)
-        call write_text(project//'/test/'//affected_case//'.f90', affected)
-        call write_text(project//'/test/'//slow_affected_case//'.f90', slow_affected)
-        call write_text(project//'/test/'//background_case//'.f90', background)
+        call write_text(project//'/test/'//trim(regression_case)//'.f90', regression)
+        call write_text(project//'/test/'//trim(affected_case)//'.f90', affected)
+        call write_text(project//'/test/'//trim(slow_affected_case)//'.f90', slow_affected)
+        call write_text(project//'/test/'//trim(background_case)//'.f90', background)
     end subroutine write_probe_cases
 
     function test_source(name, body, extra_use) result(source)
