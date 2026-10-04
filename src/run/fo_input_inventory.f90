@@ -4,8 +4,9 @@ module fo_input_inventory
         c_long_long
     use fo_cache, only: HASH_LEN, cache_digest, cache_file_digest
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_exe_t, &
-        dep_kind, DEP_PATH
-    use fo_dep_resolve, only: normalize_path
+        fpm_input_t, dep_kind, DEP_PATH
+    use fo_dep_resolve, only: normalize_path, resolved_src_t, &
+        resolve_dev_dep_srcs, MAX_RESOLVED
     use fo_fs, only: fs_identity
     use fo_util, only: make_tmpfile, delete_tmpfile
     use fx_action_result_store, only: action_result_file_mode, ACTION_RESULT_OK
@@ -24,10 +25,12 @@ module fo_input_inventory
     type, public :: input_root_t
         character(len=ALIAS_LEN) :: canonical_alias = ''
         character(len=PATH_LEN) :: physical_path = ''
+        character(len=PATH_LEN) :: bundle_path = ''
         integer(c_long_long) :: device = 0_c_long_long
         integer(c_long_long) :: inode = 0_c_long_long
         integer :: alias_count = 0
         character(len=ALIAS_LEN) :: aliases(MAX_ALIASES) = ''
+        character(len=PATH_LEN) :: bundle_paths(MAX_ALIASES) = ''
     end type input_root_t
 
     type, public :: input_declaration_t
@@ -53,15 +56,18 @@ module fo_input_inventory
     type, public :: input_inventory_t
         type(input_root_t), allocatable :: roots(:)
         type(input_entry_t), allocatable :: entries(:)
+        type(input_declaration_t), allocatable :: declarations(:)
         integer :: root_count = 0
         integer :: entry_count = 0
         integer :: entry_capacity = 0
         character(len=HASH_LEN) :: digest = ''
         character(len=1024) :: diagnostic = ''
+        logical :: valid = .true.
         logical :: complete = .false.
     end type input_inventory_t
 
-    public :: input_inventory_discover
+    public :: input_inventory_discover, input_inventory_declarations_from_config
+    public :: input_inventory_revalidate
 
     interface
         integer(c_int) function c_list_tree(root, manifest) &
@@ -82,10 +88,13 @@ contains
         character(len=*), intent(out) :: message
 
         type(fpm_config_t) :: config
+        type(resolved_src_t) :: resolved_dev_deps(MAX_RESOLVED)
         character(len=PATH_LEN) :: project_root
-        integer :: project_index, i, status
+        integer :: project_index, i, j, status, n_resolved_dev
+        logical :: is_local
 
         inventory = input_inventory_t()
+        inventory%declarations = declarations
         allocate(inventory%roots(MAX_ROOTS), inventory%entries(64))
         inventory%entry_capacity = 64
         inventory%complete = .true.
@@ -105,7 +114,7 @@ contains
         end if
         call mark_unmodeled_config(config, 'project', inventory)
         call add_root(inventory, 'project', trim(project_root), project_index, &
-            ierr, message)
+            ierr, message, 'project')
         if (ierr /= 0) then
             call record_failure(inventory, message)
             return
@@ -132,7 +141,7 @@ contains
             if (dep_kind(config%deps(i)) /= DEP_PATH) cycle
             call discover_path_dependency(trim(project_root), config%deps(i)%path, &
                 'dependency:'//trim(config%deps(i)%name), .true., inventory, &
-                ierr, message, 0)
+                ierr, message, 0, 'project')
             if (ierr /= 0) then
                 call record_failure(inventory, message)
                 return
@@ -143,13 +152,45 @@ contains
             call discover_path_dependency(trim(project_root), &
                 config%dev_deps(i)%path, &
                 'dependency:'//trim(config%dev_deps(i)%name), .true., inventory, &
-                ierr, message, 0)
+                ierr, message, 0, 'project')
             if (ierr /= 0) then
                 call record_failure(inventory, message)
                 return
             end if
         end do
+        call resolve_dev_dep_srcs(trim(project_root), resolved_dev_deps, &
+            n_resolved_dev, status)
+        if (status /= 0) then
+            call mark_incomplete(inventory, &
+                'cannot resolve configured development dependency roots')
+        else
+            do i = 1, n_resolved_dev
+                is_local = .false.
+                do j = 1, config%n_dev_deps
+                    if (trim(config%dev_deps(j)%name) /= &
+                            trim(resolved_dev_deps(i)%name)) cycle
+                    is_local = dep_kind(config%dev_deps(j)) == DEP_PATH
+                    exit
+                end do
+                if (is_local) cycle
+                call discover_resolved_dev_dependency(trim(resolved_dev_deps(i)%dir), &
+                    'dependency:'//trim(resolved_dev_deps(i)%name), inventory, &
+                    ierr, message)
+                if (ierr /= 0) then
+                    call record_failure(inventory, message)
+                    return
+                end if
+            end do
+        end if
         do i = 1, size(declarations)
+            if (declaration_is_duplicate(declarations, i)) then
+                ierr = 1
+                message = 'duplicate declared input: '// &
+                    trim(declarations(i)%root_alias)//':'// &
+                    trim(declarations(i)%relative_path)
+                call record_failure(inventory, message)
+                return
+            end if
             call add_declared_entry(inventory, declarations(i), ierr, message)
             if (ierr /= 0) then
                 call record_failure(inventory, message)
@@ -165,11 +206,183 @@ contains
         ierr = 0
     end subroutine input_inventory_discover
 
+    logical function declaration_is_duplicate(declarations, current)
+        type(input_declaration_t), intent(in) :: declarations(:)
+        integer, intent(in) :: current
+        integer :: i
+
+        declaration_is_duplicate = .false.
+        do i = 1, current - 1
+            if (trim(declarations(i)%root_alias) /= &
+                    trim(declarations(current)%root_alias)) cycle
+            if (trim(declarations(i)%relative_path) /= &
+                    trim(declarations(current)%relative_path)) cycle
+            declaration_is_duplicate = .true.
+            return
+        end do
+    end function declaration_is_duplicate
+
+    subroutine input_inventory_declarations_from_config(project_dir, declarations, &
+            ierr, message)
+        character(len=*), intent(in) :: project_dir
+        type(input_declaration_t), allocatable, intent(out) :: declarations(:)
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(fpm_config_t) :: config
+        integer :: i
+
+        call fpm_config_parse(project_dir, config, ierr)
+        if (ierr /= 0) then
+            message = 'cannot parse fixture declarations from fpm.toml'
+            return
+        end if
+        allocate(declarations(config%n_fo_inputs))
+        do i = 1, config%n_fo_inputs
+            if (.not. config%fo_inputs(i)%path_seen .or. &
+                    .not. config%fo_inputs(i)%role_seen) then
+                ierr = 1
+                message = 'each [[extra.fo.inputs]] row requires path and role'
+                return
+            end if
+            select case (trim(config%fo_inputs(i)%role))
+            case ('test-fixture', 'runtime-fixture')
+            case default
+                ierr = 1
+                message = 'unsupported fixture role in [[extra.fo.inputs]]: '// &
+                    trim(config%fo_inputs(i)%role)
+                return
+            end select
+            declarations(i)%root_alias = 'project'
+            declarations(i)%relative_path = trim(config%fo_inputs(i)%path)
+            declarations(i)%role = trim(config%fo_inputs(i)%role)
+            declarations(i)%expected_kind = INPUT_FILE
+            declarations(i)%writable_at_execution = &
+                config%fo_inputs(i)%writable_at_execution
+        end do
+        ierr = 0
+        message = ''
+    end subroutine input_inventory_declarations_from_config
+
+    subroutine input_inventory_revalidate(project_dir, declarations, expected, &
+            ierr, message)
+        character(len=*), intent(in) :: project_dir
+        type(input_declaration_t), intent(in) :: declarations(:)
+        type(input_inventory_t), intent(in) :: expected
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(input_inventory_t) :: observed
+        integer :: i, j, observed_root
+
+        call input_inventory_discover(project_dir, declarations, observed, ierr, &
+            message)
+        if (ierr /= 0) return
+        if (.not. expected%valid) then
+            ierr = 1
+            message = 'cannot revalidate an invalid expected input inventory'
+            return
+        end if
+        if (observed%digest /= expected%digest .or. &
+                observed%root_count /= expected%root_count .or. &
+                (observed%complete .neqv. expected%complete) .or. &
+                (observed%valid .neqv. expected%valid)) then
+            ierr = 1
+            message = 'input inventory changed during generation capture'
+            return
+        end if
+        do i = 1, expected%root_count
+            observed_root = alias_root(observed, &
+                trim(expected%roots(i)%canonical_alias))
+            if (observed_root == 0) then
+                ierr = 1
+                message = 'input root alias changed during generation capture: '// &
+                    trim(expected%roots(i)%canonical_alias)
+                return
+            end if
+            if (observed%roots(observed_root)%device /= &
+                    expected%roots(i)%device .or. &
+                    observed%roots(observed_root)%inode /= expected%roots(i)%inode) then
+                ierr = 1
+                message = 'input root identity changed during generation capture: '// &
+                    trim(expected%roots(i)%canonical_alias)
+                return
+            end if
+            do j = 1, expected%roots(i)%alias_count
+                observed_root = alias_root(observed, &
+                    trim(expected%roots(i)%aliases(j)))
+                if (observed_root == 0) then
+                    ierr = 1
+                    message = 'input root alias mapping changed during capture'
+                    return
+                end if
+                if (bundle_path_for_alias(observed%roots(observed_root), &
+                        trim(expected%roots(i)%aliases(j))) /= &
+                        bundle_path_for_alias(expected%roots(i), &
+                        trim(expected%roots(i)%aliases(j)))) then
+                    ierr = 1
+                    message = 'input root bundle mapping changed during capture'
+                    return
+                end if
+            end do
+        end do
+        ierr = 0
+        message = ''
+    end subroutine input_inventory_revalidate
+
+    subroutine discover_resolved_dev_dependency(dependency_root, alias, &
+            inventory, ierr, message)
+        character(len=*), intent(in) :: dependency_root, alias
+        type(input_inventory_t), intent(inout) :: inventory
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(fpm_config_t) :: config
+        character(len=PATH_LEN) :: manifest, bundle_path
+        integer :: root_index, i, status
+        logical :: exists
+
+        ierr = 0
+        message = ''
+        manifest = trim(dependency_root)//'/fpm.toml'
+        inquire(file=trim(manifest), exist=exists)
+        if (.not. exists) then
+            call mark_incomplete(inventory, trim(alias)// &
+                ' is not present in the existing FPM resolved-dependency tree')
+            return
+        end if
+        call fpm_config_parse(trim(dependency_root), config, status)
+        if (status /= 0) then
+            call mark_incomplete(inventory, trim(alias)// &
+                ' has an unreadable resolved FPM manifest')
+            return
+        end if
+        bundle_path = 'project/build/dependencies/'//alias(index(alias, ':', back=.true.) + 1:)
+        call mark_unmodeled_config(config, alias, inventory)
+        call add_root(inventory, alias, dependency_root, root_index, ierr, message, &
+            trim(bundle_path))
+        if (ierr /= 0) return
+        call add_file_entry(inventory, root_index, alias, 'fpm.toml', &
+            'dependency-manifest', .false., ierr, message)
+        if (ierr /= 0) return
+        call scan_configured_dir(trim(dependency_root), alias, config%source_dir, &
+            'dependency-source', .false., root_index, inventory, ierr, message)
+        if (ierr /= 0) return
+        call scan_configured_dir(trim(dependency_root), alias, 'include', &
+            'include', .false., root_index, inventory, ierr, message)
+        if (ierr /= 0) return
+        do i = 1, config%n_deps
+            if (dep_kind(config%deps(i)) /= DEP_PATH) cycle
+            call discover_path_dependency(trim(dependency_root), &
+                config%deps(i)%path, trim(alias)//'/'//trim(config%deps(i)%name), &
+                .true., inventory, ierr, message, 1, trim(bundle_path))
+            if (ierr /= 0) return
+        end do
+    end subroutine discover_resolved_dev_dependency
+
     subroutine record_failure(inventory, message)
         type(input_inventory_t), intent(inout) :: inventory
         character(len=*), intent(in) :: message
 
         inventory%complete = .false.
+        inventory%valid = .false.
         inventory%diagnostic = trim(message)
     end subroutine record_failure
 
@@ -286,8 +499,9 @@ contains
     end subroutine add_target_main
 
     subroutine discover_path_dependency(parent_root, dependency_path, alias, &
-            follow_regular_deps, inventory, ierr, message, depth)
+            follow_regular_deps, inventory, ierr, message, depth, parent_bundle)
         character(len=*), intent(in) :: parent_root, dependency_path, alias
+        character(len=*), intent(in) :: parent_bundle
         logical, intent(in) :: follow_regular_deps
         type(input_inventory_t), intent(inout) :: inventory
         integer, intent(out) :: ierr
@@ -295,7 +509,7 @@ contains
         integer, intent(in) :: depth
 
         type(fpm_config_t) :: config
-        character(len=PATH_LEN) :: dependency_root
+        character(len=PATH_LEN) :: dependency_root, bundle_path
         integer :: root_index, i, status
         logical :: exists
 
@@ -313,6 +527,9 @@ contains
         end if
         call validate_relative_path(dependency_path, dependency_root, ierr, message, &
             allow_parent=.true.)
+        if (ierr /= 0) return
+        call bundle_destination(parent_bundle, dependency_path, bundle_path, &
+            ierr, message)
         if (ierr /= 0) return
         if (dependency_root(1:1) /= '/') then
             dependency_root = trim(parent_root)//'/'//trim(dependency_root)
@@ -332,7 +549,7 @@ contains
         end if
         call mark_unmodeled_config(config, alias, inventory)
         call add_root(inventory, alias, trim(dependency_root), root_index, &
-            ierr, message)
+            ierr, message, trim(bundle_path))
         if (ierr /= 0) return
         call add_file_entry(inventory, root_index, alias, 'fpm.toml', &
             'dependency-manifest', .false., ierr, message)
@@ -349,7 +566,7 @@ contains
             call discover_path_dependency(trim(dependency_root), &
                 config%deps(i)%path, &
                 trim(alias)//'/'//trim(config%deps(i)%name), .true., &
-                inventory, ierr, message, depth + 1)
+                inventory, ierr, message, depth + 1, trim(bundle_path))
             if (ierr /= 0) return
         end do
         ierr = 0
@@ -368,6 +585,9 @@ contains
         end do
         do i = 1, config%n_dev_deps
             if (dep_kind(config%dev_deps(i)) == DEP_PATH) cycle
+            if (trim(alias) == 'project') then
+                cycle
+            end if
             call mark_incomplete(inventory, trim(alias)//' dev-dependency '// &
                 trim(config%dev_deps(i)%name)//' is not a local path dependency')
         end do
@@ -405,12 +625,14 @@ contains
         end if
     end subroutine mark_incomplete
 
-    subroutine add_root(inventory, alias, physical_path, root_index, ierr, message)
+    subroutine add_root(inventory, alias, physical_path, root_index, ierr, message, &
+            bundle_path)
         type(input_inventory_t), intent(inout) :: inventory
         character(len=*), intent(in) :: alias, physical_path
         integer, intent(out) :: root_index, ierr
         character(len=*), intent(out) :: message
-        character(len=PATH_LEN) :: normalized
+        character(len=*), intent(in) :: bundle_path
+        character(len=PATH_LEN) :: normalized, checked_bundle_path
         integer(c_long_long) :: device, inode
         integer :: i
         logical :: ok
@@ -420,6 +642,12 @@ contains
         message = ''
         if (.not. valid_alias(alias)) then
             message = 'invalid logical input-root alias: '//trim(alias)
+            return
+        end if
+        call validate_relative_path(bundle_path, checked_bundle_path, ierr, message)
+        if (ierr /= 0) then
+            message = 'invalid bundle destination for input-root alias '// &
+                trim(alias)//': '//trim(message)
             return
         end if
         call normalize_path(physical_path, normalized)
@@ -444,13 +672,15 @@ contains
             if (inventory%roots(i)%device /= device .or. &
                     inventory%roots(i)%inode /= inode) cycle
             root_index = i
-            call add_root_alias(inventory%roots(i), alias, ierr, message)
+            call add_root_alias(inventory%roots(i), alias, checked_bundle_path, ierr, &
+                message)
             if (ierr /= 0) return
             if (trim(alias) == 'project' .or. &
                     (trim(inventory%roots(i)%canonical_alias) /= 'project' .and. &
                     trim(alias) < trim(inventory%roots(i)%canonical_alias))) then
                 inventory%roots(i)%canonical_alias = trim(alias)
                 inventory%roots(i)%physical_path = trim(normalized)
+                inventory%roots(i)%bundle_path = trim(checked_bundle_path)
             end if
             ierr = 0
             return
@@ -465,14 +695,17 @@ contains
         inventory%roots(root_index)%inode = inode
         inventory%roots(root_index)%physical_path = trim(normalized)
         inventory%roots(root_index)%canonical_alias = trim(alias)
-        call add_root_alias(inventory%roots(root_index), alias, ierr, message)
+        inventory%roots(root_index)%bundle_path = trim(checked_bundle_path)
+        call add_root_alias(inventory%roots(root_index), alias, &
+            checked_bundle_path, ierr, &
+            message)
         if (ierr /= 0) return
         ierr = 0
     end subroutine add_root
 
-    subroutine add_root_alias(root, alias, ierr, message)
+    subroutine add_root_alias(root, alias, bundle_path, ierr, message)
         type(input_root_t), intent(inout) :: root
-        character(len=*), intent(in) :: alias
+        character(len=*), intent(in) :: alias, bundle_path
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         integer :: i
@@ -480,7 +713,13 @@ contains
         ierr = 0
         message = ''
         do i = 1, root%alias_count
-            if (trim(root%aliases(i)) == trim(alias)) return
+            if (trim(root%aliases(i)) /= trim(alias)) cycle
+            if (trim(root%bundle_paths(i)) /= trim(bundle_path)) then
+                ierr = 1
+                message = 'ambiguous bundle mapping for input-root alias: '// &
+                    trim(alias)
+            end if
+            return
         end do
         if (root%alias_count >= MAX_ALIASES) then
             ierr = 1
@@ -490,27 +729,40 @@ contains
         end if
         root%alias_count = root%alias_count + 1
         root%aliases(root%alias_count) = trim(alias)
+        root%bundle_paths(root%alias_count) = trim(bundle_path)
         call sort_aliases(root)
     end subroutine add_root_alias
 
     subroutine sort_aliases(root)
         type(input_root_t), intent(inout) :: root
         character(len=ALIAS_LEN) :: value
+        character(len=PATH_LEN) :: path_value
         integer :: i, j
 
         do i = 2, root%alias_count
             value = root%aliases(i)
+            path_value = root%bundle_paths(i)
             j = i - 1
             do while (j >= 1)
                 if (llt(trim(value), trim(root%aliases(j)))) then
                     root%aliases(j + 1) = root%aliases(j)
+                    root%bundle_paths(j + 1) = root%bundle_paths(j)
                     j = j - 1
                 else
                     exit
                 end if
             end do
             root%aliases(j + 1) = value
+            root%bundle_paths(j + 1) = path_value
         end do
+        if (root%alias_count > 0) then
+            j = 1
+            do i = 1, root%alias_count
+                if (trim(root%aliases(i)) == 'project') j = i
+            end do
+            root%canonical_alias = root%aliases(j)
+            root%bundle_path = root%bundle_paths(j)
+        end if
     end subroutine sort_aliases
 
     integer function alias_root(inventory, alias) result(index_root)
@@ -528,6 +780,44 @@ contains
             end do
         end do
     end function alias_root
+
+    function bundle_path_for_alias(root, alias) result(path)
+        type(input_root_t), intent(in) :: root
+        character(len=*), intent(in) :: alias
+        character(len=PATH_LEN) :: path
+        integer :: i
+
+        path = ''
+        do i = 1, root%alias_count
+            if (trim(root%aliases(i)) /= trim(alias)) cycle
+            path = root%bundle_paths(i)
+            return
+        end do
+    end function bundle_path_for_alias
+
+    subroutine bundle_destination(parent_bundle, dependency_path, destination, &
+            ierr, message)
+        character(len=*), intent(in) :: parent_bundle, dependency_path
+        character(len=*), intent(out) :: destination
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=PATH_LEN) :: joined, normalized
+
+        joined = trim(parent_bundle)//'/'//trim(dependency_path)
+        call normalize_path(trim(joined), normalized)
+        destination = ''
+        ierr = 1
+        message = ''
+        if (len_trim(normalized) == 0 .or. normalized(1:1) == '/' .or. &
+                trim(normalized) == '..' .or. index(trim(normalized), '../') == 1 .or. &
+                len_trim(normalized) >= PATH_LEN) then
+            message = 'path dependency escapes the frozen bundle: '// &
+                trim(dependency_path)
+            return
+        end if
+        destination = trim(normalized)
+        ierr = 0
+    end subroutine bundle_destination
 
     subroutine add_optional_manifest(inventory, root_index, alias, path, role, &
             ierr, message)
@@ -986,9 +1276,9 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         type(input_entry_t) :: value
-        character(len=PATH_LEN + ALIAS_LEN + 3 * 64 + HASH_LEN) :: part
+        character(len=2 * PATH_LEN + ALIAS_LEN + 3 * 64 + HASH_LEN + 64) :: part
         character(len=:), allocatable :: parts(:)
-        integer :: i, j, capacity, root_index, retained
+        integer :: i, j, capacity, root_index, retained, n_parts
 
         ierr = 0
         message = ''
@@ -1031,20 +1321,52 @@ contains
             inventory%entries(retained) = inventory%entries(i)
         end do
         inventory%entry_count = retained
-        capacity = max(1, 6 * inventory%entry_count)
+        capacity = inventory%entry_count
+        do i = 1, inventory%root_count
+            capacity = capacity + inventory%roots(i)%alias_count
+        end do
+        capacity = max(1, capacity)
         allocate(character(len=len(part)) :: parts(capacity))
+        n_parts = 0
+        do i = 1, inventory%root_count
+            do j = 1, inventory%roots(i)%alias_count
+                n_parts = n_parts + 1
+                write (part, '("root|",a,"|",a)') &
+                    trim(inventory%roots(i)%aliases(j)), &
+                    trim(inventory%roots(i)%bundle_paths(j))
+                parts(n_parts) = trim(part)
+            end do
+        end do
         do i = 1, inventory%entry_count
+            root_index = alias_root(inventory, &
+                trim(inventory%entries(i)%root_alias))
+            if (root_index == 0) then
+                ierr = 1
+                message = 'input entry lost its physical root while hashing'
+                return
+            end if
+            n_parts = n_parts + 1
             write (part, '(a,"|",a,"|",a,"|",i0,"|",i0,"|",l1,"|",a)') &
-                trim(inventory%entries(i)%root_alias), &
+                'entry|'//trim(inventory%entries(i)%root_alias)//'|'// &
+                trim(inventory%roots(root_index)%bundle_path), &
                 trim(inventory%entries(i)%relative_path), &
                 trim(inventory%entries(i)%role), inventory%entries(i)%kind, &
                 inventory%entries(i)%mode, &
                 inventory%entries(i)%writable_at_execution, &
                 trim(inventory%entries(i)%content_digest)
-            parts(i) = trim(part)
+            parts(n_parts) = trim(part)
         end do
-        inventory%digest = cache_digest(parts(:inventory%entry_count), &
-            inventory%entry_count)
+        do i = 2, n_parts
+            part = parts(i)
+            j = i - 1
+            do while (j >= 1)
+                if (.not. llt(trim(part), trim(parts(j)))) exit
+                parts(j + 1) = parts(j)
+                j = j - 1
+            end do
+            parts(j + 1) = part
+        end do
+        inventory%digest = cache_digest(parts(:n_parts), n_parts)
     end subroutine canonicalize_inventory
 
     logical function same_entry_key(left, right)
