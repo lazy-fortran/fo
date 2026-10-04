@@ -370,9 +370,10 @@ harness. The frozen baseline `1f8a1a3` had 31 JS fixtures, including
 context-provenance and coverage-restart tests omitted from the earlier count.
 Issue #158 is complete through `6eb8045`: ten CLI fixtures are Fortran, the
 recursive test JSON ownership repair passes the full gfortran-13 FPM suite and
-the test-only C shim is Darwin-portable. #159 replaced four MCP fixtures at
-`346b4ff` but is reopened because full Ubuntu gfortran 13 exposed a distinct
-recursive response-array ownership crash. Fifteen JS fixtures remain for #160--#163.
+the test-only C shim is Darwin-portable. #159 is repaired through `6b3ac43`:
+explicit recursive response ownership passes all five public MCP/ownership
+fixtures on the integrated head, while the frozen original-code GCC 13.3 mutant
+reproduces exit 139. Fifteen JS fixtures remain for #160--#163.
 
 ## Ordered implementation and independent verifiers
 
@@ -752,16 +753,17 @@ Implemented issue state:
   oracles plus an independent recursive ownership stress test pass. The original
   parser fails that oracle on Ubuntu gfortran 13 with exit 139; the repaired full
   FPM and 65-test native pipelines pass. The harness/C shim remain test-only.
-- #159 delivered four MCP Fortran clients at `346b4ff`, but post-submit run
-  37162328033 exposed a gfortran-13 response-array deallocation SIGSEGV in all
-  four. Keep it reopened until a discriminating ownership stress oracle and exact
-  full FPM mode pass.
+- #159 is repaired at `6b3ac43` after post-submit run 37162328033 exposed the
+  gfortran-13 response-array deallocation SIGSEGV. The new independent ownership
+  stress fails the original with exit 139; repaired GCC 13.3 focused 6/6 and
+  full FPM pass, native 70-test pipeline passes, independent review approves,
+  and the exact integrated MCP gate passes 5/5.
 - #162's repaired Fortran publication-fixture stack is independently approved at
   `6b99023` on `fo/fortran-tests-162-review`. Its timeout oracle proves a live
   heartbeat before bounded owned termination and confirmed reap, preserves
   scratch on reap failure, and compares interrupted archive paths plus SHA-256
   digests. Fresh focused tests pass and the worker full suite is 72/72; port it
-  after the #159 repair.
+  on the repaired current integration head.
 - #160's campaign-history slice is delivered at `361d1ca`: the stale
   per-campaign JavaScript sampler is replaced by an independent Fortran oracle
   for finite epoch order, restart/replay, markers, failure priority and cancelled
@@ -791,7 +793,8 @@ Implemented issue state:
   approved on `fo/darwin-archive-173-review`: four exact BSD/Apple index names
   are accepted while arbitrary/duplicate/missing/corrupt members remain errors.
   Preserved faepmac1 evidence `31031f21...` proves native `/usr/bin/ar` cold/warm
-  behavior separately from controlled mutations. Port after the #159 repair.
+  behavior separately from controlled mutations. Port on the repaired current
+  integration head.
 - #174 owns the separate Darwin shared-watcher initialization failure that stops
   public Gremlin before ready state even though direct `kqueue()` creation works.
 - #143/#152 and PR #147 are closed without merge after the KISS review assigned
@@ -821,7 +824,7 @@ Implemented issue state:
   `fo/local-gate-154-review`. Independent Luna review approved frozen diff
   `35e243fe...`; focused change-watch/readiness/supervisor/public oracles pass
   4/4 and the full/native evidence is green. Port it to the current integration
-  head after the #159 current-main repair, then rerun the exact combined gate.
+  head and rerun the exact combined gate.
 - #151's provenance subdefect is fixed at `b2a31e1`: each compiler/Git probe has
   fresh argv/output state, and metadata-only events preserve execution identity.
   Exact driver-image pinning remains in task-specific Sol repair after two
