@@ -17,9 +17,12 @@ program test_gremlin_input_inventory
     dependency = trim(fixture)//'/dependency'
     leaf = trim(fixture)//'/leaf'
     call fs_make_dir(trim(project)//'/src')
+    call fs_make_dir(trim(project)//'/src/build')
+    call fs_make_dir(trim(project)//'/src/cache')
     call fs_make_dir(trim(project)//'/test')
     call fs_make_dir(trim(project)//'/include')
     call fs_make_dir(trim(project)//'/build')
+    call fs_make_dir(trim(project)//'/cache')
     call fs_make_dir(trim(project)//'/.git/hooks')
     call fs_make_dir(trim(project)//'/.gremlin/cache')
     call fs_make_dir(trim(project)//'/.cache')
@@ -27,6 +30,8 @@ program test_gremlin_input_inventory
     call fs_make_dir(trim(leaf)//'/src')
     call write(trim(project)//'/fpm.toml', &
         'name = "inventory-fixture"'//new_line('a')// &
+        '[build]'//new_line('a')// &
+        'source-dir = "."'//new_line('a')// &
         '[dependencies]'//new_line('a')// &
         'fixture-dep = { path = "../dependency" }'//new_line('a')// &
         'dependency-copy = { path = "../dependency" }')
@@ -44,6 +49,10 @@ program test_gremlin_input_inventory
     call write(trim(project)//'/.git/hooks/ignored.py', '#!/usr/bin/env python3')
     call write(trim(project)//'/.gremlin/cache/ignored.f90', 'generated')
     call write(trim(project)//'/.cache/ignored.f90', 'generated')
+    call write(trim(project)//'/cache/ignored.f90', 'generated')
+    call write(trim(project)//'/cache/runtime.dat', 'runtime declaration')
+    call write(trim(project)//'/src/build/retained.f90', 'module retained_build')
+    call write(trim(project)//'/src/cache/retained.f90', 'module retained_cache')
     call write(trim(project)//'/PLAN.md', 'not a build input')
 
     call discover(initial, ierr, diagnostic)
@@ -56,6 +65,10 @@ program test_gremlin_input_inventory
         'test oracle is a declared input')
     call require(has_entry(initial, 'project', 'include/runtime.inc', 'include'), &
         'include dependency is an input')
+    call require(has_entry(initial, 'project', 'src/build/retained.f90', &
+        'build-source'), 'nested src/build source is retained')
+    call require(has_entry(initial, 'project', 'src/cache/retained.f90', &
+        'build-source'), 'nested src/cache source is retained')
     call require(has_root_alias(initial, 'dependency:fixture-dep'), &
         'canonical dependency root retains the original alias')
     call require(has_entry(initial, 'dependency:dependency-copy', 'src/dep.f90', &
@@ -64,11 +77,31 @@ program test_gremlin_input_inventory
         'src/leaf.f90', 'dependency-source'), &
         'transitive path dependency source is an input')
 
-    call write(trim(project)//'/PLAN.md', 'changed unrelated plan')
+    call write(trim(project)//'/build/generated.f90', &
+        'program generated_changed')
+    call write(trim(project)//'/.cache/ignored.f90', 'changed generated')
+    call write(trim(project)//'/cache/ignored.f90', 'changed generated')
     call discover(ignored, ierr, diagnostic)
     call require(ierr == 0, 'inventory after ignored mutations: '//trim(diagnostic))
     call require(ignored%digest == initial%digest, &
-        'plans and generated/cache/git outputs do not affect the digest')
+        'root generated/cache/git outputs do not affect the digest')
+
+    previous = initial
+    call write(trim(project)//'/src/build/retained.f90', &
+        'module retained_build_changed')
+    call discover(changed, ierr, diagnostic)
+    call require(ierr == 0, 'inventory after nested build-source edit: '// &
+        trim(diagnostic))
+    call require(changed%digest /= previous%digest, &
+        'nested src/build source content changes inventory identity')
+    previous = changed
+    call write(trim(project)//'/src/cache/retained.f90', &
+        'module retained_cache_changed')
+    call discover(changed, ierr, diagnostic)
+    call require(ierr == 0, 'inventory after nested cache-source edit: '// &
+        trim(diagnostic))
+    call require(changed%digest /= previous%digest, &
+        'nested src/cache source content changes inventory identity')
 
     call write(trim(project)//'/src/main.f90', 'program changed')
     call discover(changed, ierr, diagnostic)
@@ -97,9 +130,8 @@ program test_gremlin_input_inventory
     call require(changed%digest /= previous%digest, &
         'path dependency content edit changes digest')
 
-    call write(trim(project)//'/runtime.dat', 'runtime declaration')
     declarations(1)%root_alias = 'project'
-    declarations(1)%relative_path = 'runtime.dat'
+    declarations(1)%relative_path = 'cache/runtime.dat'
     declarations(1)%role = 'runtime-data'
     declarations(1)%expected_kind = INPUT_FILE
     declarations(1)%writable_at_execution = .false.
@@ -108,9 +140,11 @@ program test_gremlin_input_inventory
     call input_inventory_discover(trim(project), declarations, runtime, ierr, &
         diagnostic)
     call require(ierr == 0, 'runtime declarations: '//trim(diagnostic))
-    call require(has_entry(runtime, 'project', 'runtime.dat', 'runtime-data'), &
+    call require(has_entry(runtime, 'project', 'cache/runtime.dat', &
+        'runtime-data'), &
         'runtime data role is retained')
-    call require(has_entry(runtime, 'project', 'runtime.dat', 'runtime-oracle'), &
+    call require(has_entry(runtime, 'project', 'cache/runtime.dat', &
+        'runtime-oracle'), &
         'duplicate physical path retains its second role')
     declarations(2)%writable_at_execution = .true.
     call input_inventory_discover(trim(project), declarations, runtime, ierr, &
@@ -126,7 +160,7 @@ program test_gremlin_input_inventory
     call expect_rejected(bad_declaration, 'absolute declaration is rejected')
     bad_declaration(1)%relative_path = 'missing.dat'
     call expect_rejected(bad_declaration, 'missing declaration is diagnosed')
-    bad_declaration(1)%relative_path = 'runtime.dat'
+    bad_declaration(1)%relative_path = 'cache/runtime.dat'
     bad_declaration(1)%root_alias = 'undeclared-root'
     call expect_rejected(bad_declaration, 'unknown root alias is rejected')
 

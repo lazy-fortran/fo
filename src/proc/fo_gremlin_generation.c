@@ -13,14 +13,22 @@
 
 #define FO_GENERATION_FORTRAN_PATH_LEN 4096
 
-static int excluded_entry(const char *parent_rel, const char *name) {
+static int excluded_entry(const char *parent_rel, const char *name,
+                          int exclusion_policy) {
     if (strcmp(name, ".git") == 0 || strcmp(name, ".hg") == 0 ||
         strcmp(name, ".svn") == 0 || strcmp(name, ".bzr") == 0 ||
         strcmp(name, ".gremlin") == 0) {
         return 1;
     }
-    /* A build directory is an output only at the root of an input tree. */
-    return parent_rel[0] == '\0' && strcmp(name, "build") == 0;
+    if (parent_rel[0] != '\0') return 0;
+    /* Build is always excluded at a whole-tree scan root. */
+    if (exclusion_policy >= 1 && strcmp(name, "build") == 0) return 1;
+    /* Input inventories also skip other root output/cache directories. */
+    return exclusion_policy >= 2 &&
+           (strcmp(name, ".cache") == 0 || strcmp(name, "cache") == 0 ||
+            strcmp(name, "caches") == 0 || strcmp(name, "session") == 0 ||
+            strcmp(name, "sessions") == 0 || strcmp(name, "log") == 0 ||
+            strcmp(name, "logs") == 0);
 }
 
 static int validate_tree_root(const char *root) {
@@ -168,7 +176,7 @@ static int normalize_link_target(const char *link_rel, const char *raw,
     return 0;
 }
 
-static int relative_path_is_excluded(const char *rel) {
+static int relative_path_is_excluded(const char *rel, int exclusion_policy) {
     char parent[8192] = "";
     const char *p = rel;
     size_t parent_len = 0;
@@ -178,7 +186,7 @@ static int relative_path_is_excluded(const char *rel) {
         if (len >= sizeof(name)) return 1;
         memcpy(name, p, len);
         name[len] = '\0';
-        if (excluded_entry(parent, name)) return 1;
+        if (excluded_entry(parent, name, exclusion_policy)) return 1;
         if (parent_len + len + (parent_len == 0 ? 0 : 1) >= sizeof(parent)) {
             return 1;
         }
@@ -359,7 +367,7 @@ fail:
 
 static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
                               const char *dest, FILE *manifest,
-                              int copy_files) {
+                              int copy_files, int exclusion_policy) {
     struct name_list names;
     size_t i;
     if (rel[0] != '\0' && write_path(manifest, 'D', 0, rel) != 0) return -1;
@@ -378,7 +386,7 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
         char child[8192], target[8192], link_target[8192];
         struct stat st;
         int rc = 0;
-        if (excluded_entry(rel, name)) continue;
+        if (excluded_entry(rel, name, exclusion_policy)) continue;
         if (snprintf(child, sizeof(child), "%s%s%s", rel,
                      rel[0] == '\0' ? "" : "/", name) >=
             (int)sizeof(child)) {
@@ -393,7 +401,8 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
                 rc = -1;
             } else {
                 rc = walk_directory_at(root_fd, child_fd, child, dest,
-                                       manifest, copy_files);
+                                       manifest, copy_files,
+                                       exclusion_policy);
                 close(child_fd);
             }
         } else if (S_ISLNK(st.st_mode)) {
@@ -408,7 +417,8 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
                 if (normalize_link_target(child, link_target, resolved,
                                           sizeof(resolved)) != 0) {
                     rc = -1;
-                } else if (relative_path_is_excluded(resolved)) {
+                } else if (relative_path_is_excluded(resolved,
+                                                     exclusion_policy)) {
                     errno = EPERM;
                     rc = -1;
                 } else if (strchr(link_target, '/') != NULL ||
@@ -470,11 +480,12 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
 }
 
 static int walk_tree(const char *root, const char *dest, FILE *manifest,
-                     int copy_files) {
+                     int copy_files, int exclusion_policy) {
     int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     int rc;
     if (root_fd < 0) return -1;
-    rc = walk_directory_at(root_fd, root_fd, "", dest, manifest, copy_files);
+    rc = walk_directory_at(root_fd, root_fd, "", dest, manifest, copy_files,
+                           exclusion_policy);
     close(root_fd);
     return rc;
 }
@@ -485,7 +496,19 @@ int fo_c_generation_list_tree(const char *root, const char *manifest) {
     if (validate_tree_root(root) != 0) return errno == 0 ? 1 : errno;
     out = fopen(manifest, "w");
     if (out == NULL) return errno == 0 ? 1 : errno;
-    rc = walk_tree(root, "", out, 0);
+    rc = walk_tree(root, "", out, 0, 1);
+    if (fclose(out) != 0 && rc == 0) rc = -1;
+    return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
+}
+
+int fo_c_generation_list_input_tree(const char *root, const char *manifest,
+                                    int exclude_root_outputs) {
+    FILE *out;
+    int rc;
+    if (validate_tree_root(root) != 0) return errno == 0 ? 1 : errno;
+    out = fopen(manifest, "w");
+    if (out == NULL) return errno == 0 ? 1 : errno;
+    rc = walk_tree(root, "", out, 0, exclude_root_outputs != 0 ? 2 : 0);
     if (fclose(out) != 0 && rc == 0) rc = -1;
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
@@ -498,7 +521,7 @@ int fo_c_generation_copy_tree(const char *root, const char *dest,
     if (make_dirs(dest) != 0) return errno == 0 ? 1 : errno;
     out = fopen(manifest, "w");
     if (out == NULL) return errno == 0 ? 1 : errno;
-    rc = walk_tree(root, dest, out, 1);
+    rc = walk_tree(root, dest, out, 1, 1);
     if (fclose(out) != 0 && rc == 0) rc = -1;
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
@@ -645,7 +668,7 @@ static int freeze_tree_at(const char *root, const char *rel) {
             const char *name = entries[i]->d_name;
             int rc = 0;
             if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0 ||
-                excluded_entry(rel, name)) {
+                excluded_entry(rel, name, 1)) {
                 free(entries[i]);
                 continue;
             }
