@@ -89,6 +89,29 @@ limitations and research links remain available without duplicate narratives:
 Historical timings are not current measurements. This planning revision does
 not assert new test passes, speedups or resolved CI failures.
 
+## Current incremental delivery (2026-10-04)
+
+Driver pinning and canonical inventory providers are integrated through
+`c591e79`, preserving planning commits `fe78809`/`73f59b1`. Linux #151's native
+A/B replacement oracle passes in 3.55s and generation oracle in 2.11s; #175's
+declared-input mutation oracle and state gate pass. The combined supervisor,
+MCP request-structure and public MCP gate pass 3/3 in 8.73s. Validation uses exact
+executable SHA256 `7dd3dfeedb313c04f6c8007ac4d1f6435274f13214186a532918dbe7d98c0c86`.
+Source/driver pinning is not complete toolchain closure. #175's watcher/capture/
+execution consumers and #189 campaign adoption remain separate work.
+
+Mac #151 is pending fx #56's public feature-declaration repair. Linux evidence
+is not a Mac receipt. Darwin startup uses public UUID/held-descriptor checks;
+same-UUID substitution before descriptor capture remains an explicit limit.
+No private OS API or generalized security framework is added.
+
+fx #54's one strict typed parser is locally green and published; #150 consumes
+it next. fx #51/#55 remove production synchronization hooks and compliance
+meta-testing, preserving meaningful public behavior. #191 bounds source scanner
+cycles/truncated paths before #186's wider policy extraction. #190 remains an
+independent optional audit and starts with workflow separation, not a benchmark
+run imposed on these increments.
+
 ## One architecture
 
 ```text
