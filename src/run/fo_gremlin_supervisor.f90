@@ -2207,6 +2207,7 @@ contains
         character(len=NAME_LEN) :: pending(MAX_NODES)
         character(len=HASH_LEN) :: receipt_generation, requirement
         character(len=NAME_LEN) :: case_name
+        character(len=PATH_LEN) :: journal_path
         character(len=16) :: outcome, gate_required
         logical :: attempted(MAX_NODES)
         integer(int64) :: cursor, next_cursor
@@ -2218,8 +2219,11 @@ contains
         cursor = 0_int64
         ierr = 0
         message = ''
+        call gremlin_get_session_journal_path(session%project_key, request%lane_id, &
+            session%session_id, journal_path, ierr, message)
+        if (ierr /= 0) return
         do
-            call journal_read_page(session%state_dir//'/journal.jsonl', cursor, 64, &
+            call journal_read_page(trim(journal_path), cursor, 64, &
                 int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, next_cursor, &
                 ierr, message)
             if (ierr /= JOURNAL_OK) return
