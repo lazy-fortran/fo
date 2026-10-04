@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 
 /* The shared change provider uses FSEvents on Darwin. It watches complete
  * directory trees through one stream rather than opening one kqueue vnode
@@ -42,12 +43,31 @@ struct change_watch {
     CFStringRef mode;
     CFRunLoopRef runloop;
     FSEventStreamRef stream;
+    CFArrayRef stream_paths;
+    CFStringRef *stream_strings;
+    size_t nstream_strings;
     char **roots;
     size_t nroots, nevents;
     struct apple_event events[APPLE_EVENT_LIMIT];
     int dirty, error;
+    long long dirty_deadline, dirty_maximum;
     char diagnostic[PATH_MAX + 192];
 };
+
+static long long apple_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void apple_mark_dirty(struct change_watch *w) {
+    long long now = apple_now_ms();
+    if (!w->dirty) w->dirty_maximum = now + 500;
+    w->dirty = 1;
+    w->dirty_deadline = now + 100;
+    if (w->dirty_deadline > w->dirty_maximum)
+        w->dirty_deadline = w->dirty_maximum;
+}
 
 static void apple_error(struct change_watch *w, const char *operation,
     const char *root, int error) {
@@ -66,7 +86,10 @@ static int apple_symbol(void *library, const char *name, void *target,
 
 #define APPLE_LOAD(library, name, field) do { \
     if (apple_symbol(library, name, &w->field, sizeof(w->field))) { \
-        apple_error(w, "resolve framework symbol", name, ENOSYS); \
+        const char *detail = dlerror(); \
+        snprintf(w->diagnostic, sizeof(w->diagnostic), \
+            "resolve %s: %s", name, detail ? detail : "dlsym failed"); \
+        w->error = ENOSYS; \
         *error = w->error; goto failed_open; \
     } \
 } while (0)
@@ -103,10 +126,10 @@ static int apple_excluded(const char *path) {
 static void apple_queue(struct change_watch *w, const char *path, int kind) {
     struct apple_event *event;
     if (kind != 4 && (!apple_relevant(w, path) || apple_excluded(path))) return;
-    if (w->nevents == APPLE_EVENT_LIMIT) { w->dirty = 1; return; }
+    if (w->nevents == APPLE_EVENT_LIMIT) { apple_mark_dirty(w); return; }
     event = &w->events[w->nevents];
     event->path = strdup(path);
-    if (!event->path) { w->dirty = 1; return; }
+    if (!event->path) { apple_mark_dirty(w); return; }
     event->kind = kind;
     ++w->nevents;
 }
@@ -121,19 +144,23 @@ static void apple_callback(ConstFSEventStreamRef stream, void *info,
         kFSEventStreamEventFlagMustScanSubDirs |
         kFSEventStreamEventFlagUserDropped |
         kFSEventStreamEventFlagKernelDropped |
-        kFSEventStreamEventFlagEventIdsWrapped |
-        kFSEventStreamEventFlagRootChanged |
-        kFSEventStreamEventFlagMount | kFSEventStreamEventFlagUnmount;
+        kFSEventStreamEventFlagEventIdsWrapped;
     (void)stream; (void)ids;
     for (i = 0; i < count; ++i) {
         int kind = 0;
-        if (flags[i] & lost) { w->dirty = 1; continue; }
+        if (flags[i] & lost) { apple_mark_dirty(w); continue; }
+        if (!apple_relevant(w, paths[i]) || apple_excluded(paths[i])) continue;
+        if (flags[i] & (kFSEventStreamEventFlagRootChanged |
+                kFSEventStreamEventFlagMount | kFSEventStreamEventFlagUnmount)) {
+            apple_mark_dirty(w);
+            continue;
+        }
         if (flags[i] & kFSEventStreamEventFlagItemIsDir) {
-            w->dirty = 1;
+            apple_mark_dirty(w);
             continue;
         }
         if (flags[i] & kFSEventStreamEventFlagItemRenamed) {
-            w->dirty = 1;
+            apple_mark_dirty(w);
             continue;
         }
         if (flags[i] & (kFSEventStreamEventFlagItemCreated |
@@ -145,41 +172,53 @@ static void apple_callback(ConstFSEventStreamRef stream, void *info,
                 kFSEventStreamEventFlagItemChangeOwner |
                 kFSEventStreamEventFlagItemFinderInfoMod)) kind = 1;
         if (kind) apple_queue(w, paths[i], kind);
-        else w->dirty = 1;
+        else apple_mark_dirty(w);
     }
 }
 
 static void apple_drop_stream(struct change_watch *w) {
-    if (!w->stream) return;
-    w->stream_stop(w->stream);
-    w->stream_invalidate(w->stream);
-    w->stream_release(w->stream);
-    w->stream = NULL;
+    size_t i;
+    if (w->stream) {
+        w->stream_stop(w->stream);
+        w->stream_invalidate(w->stream);
+        w->stream_release(w->stream);
+        w->stream = NULL;
+    }
+    if (w->stream_paths) w->release(w->stream_paths);
+    w->stream_paths = NULL;
+    for (i = 0; i < w->nstream_strings; ++i)
+        if (w->stream_strings[i]) w->release(w->stream_strings[i]);
+    free(w->stream_strings);
+    w->stream_strings = NULL;
+    w->nstream_strings = 0;
 }
 
-static void apple_clear_events(struct change_watch *w) {
+static void apple_discard_events(struct change_watch *w) {
     size_t i;
     for (i = 0; i < w->nevents; ++i) free(w->events[i].path);
     w->nevents = 0;
-    w->dirty = 0;
 }
 
-static void apple_settle(struct change_watch *w) {
-    int attempt;
-    for (attempt = 0; attempt < 3; ++attempt)
-        (void)w->runloop_run(w->mode, 0.05, true);
-    apple_clear_events(w);
-}
-
-void *fo_change_native_open(int *error) {
+static void *apple_open(int *error, char *diagnostic, int capacity) {
     struct change_watch *w = calloc(1, sizeof(*w));
     if (!w) { *error = ENOMEM; return NULL; }
     w->core = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
         RTLD_NOW | RTLD_LOCAL);
-    w->services = dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices",
+    if (!w->core) {
+        const char *detail = dlerror();
+        snprintf(w->diagnostic, sizeof(w->diagnostic), "load CoreFoundation: %s",
+            detail ? detail : "dlopen failed");
+        w->error = ENOSYS;
+        *error = w->error; goto failed_open;
+    }
+    w->services = dlopen(
+        "/System/Library/Frameworks/CoreServices.framework/CoreServices",
         RTLD_NOW | RTLD_LOCAL);
-    if (!w->core || !w->services) {
-        apple_error(w, "load CoreServices FSEvents", "<event stream>", ENOSYS);
+    if (!w->services) {
+        const char *detail = dlerror();
+        snprintf(w->diagnostic, sizeof(w->diagnostic), "load CoreServices: %s",
+            detail ? detail : "dlopen failed");
+        w->error = ENOSYS;
         *error = w->error; goto failed_open;
     }
     APPLE_LOAD(w->core, "CFStringCreateWithCString", string_create);
@@ -202,11 +241,22 @@ void *fo_change_native_open(int *error) {
     *error = 0;
     return w;
 failed_open:
+    if (diagnostic && capacity > 0)
+        snprintf(diagnostic, (size_t)capacity, "%s", w->diagnostic);
     if (w->mode && w->release) w->release(w->mode);
     if (w->services) dlclose(w->services);
     if (w->core) dlclose(w->core);
     free(w);
     return NULL;
+}
+
+void *fo_change_native_open(int *error) {
+    return apple_open(error, NULL, 0);
+}
+
+void *fo_change_native_open_diagnostic(int *error, char *diagnostic,
+    int capacity) {
+    return apple_open(error, diagnostic, capacity);
 }
 
 void fo_change_native_clear_roots(void *handle) {
@@ -240,9 +290,9 @@ int fo_change_native_reconcile(void *handle) {
     CFStringRef *strings;
     const void **values;
     char **stream_roots;
-    CFArrayRef paths;
+    CFArrayRef paths = NULL;
     FSEventStreamContext context = {0, w, NULL, NULL, NULL};
-    size_t i, j;
+    size_t i, j, used = 0;
     if (!w) return EINVAL;
     apple_drop_stream(w);
     stream_roots = calloc(2 * w->nroots, sizeof(*stream_roots));
@@ -282,7 +332,6 @@ int fo_change_native_reconcile(void *handle) {
         stream_roots[i] = stream_root;
     }
     {
-        size_t used = 0;
         for (i = 0; i < w->nroots; ++i) {
             if (!stream_roots[i]) continue;
             strings[used] = w->string_create(NULL, stream_roots[i],
@@ -308,7 +357,6 @@ int fo_change_native_reconcile(void *handle) {
         kFSEventStreamEventIdSinceNow, 0.10,
         kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer |
         kFSEventStreamCreateFlagWatchRoot);
-    w->release(paths);
     if (!w->stream) {
         apple_error(w, "create recursive event stream", w->nroots ? w->roots[0] :
             "<no declared roots>", EIO);
@@ -321,22 +369,22 @@ int fo_change_native_reconcile(void *handle) {
         apple_drop_stream(w);
         goto failed;
     }
-    /* Finish the stream's bounded startup delivery before capture begins.
-     * Those events predate the next input snapshot and are represented by it. */
-    for (i = 0; i < 3; ++i)
-        (void)w->runloop_run(w->mode, 0.05, true);
-    apple_clear_events(w);
-    for (i = 0; i < 2 * w->nroots; ++i) {
-        if (strings[i]) w->release(strings[i]);
-        free(stream_roots[i]);
-    }
-    free(stream_roots); free(strings); free(values);
+    /* The array has no retain callbacks. Keep both it and its CFStrings alive
+     * until the stream has been stopped, invalidated, and released. */
+    w->stream_paths = paths;
+    w->stream_strings = strings;
+    w->nstream_strings = used;
+    free(values);
+    for (i = 0; i < 2 * w->nroots; ++i) free(stream_roots[i]);
+    free(stream_roots);
     w->error = 0;
     w->diagnostic[0] = 0;
     return 0;
 failed:
+    if (w->stream || w->stream_paths) apple_drop_stream(w);
+    if (paths) w->release(paths);
     for (i = 0; i < 2 * w->nroots; ++i) {
-        if (strings[i]) w->release(strings[i]);
+        if (strings && strings[i]) w->release(strings[i]);
         free(stream_roots[i]);
     }
     free(stream_roots); free(strings); free(values);
@@ -354,16 +402,32 @@ int fo_change_native_poll(void *handle, int timeout, char *path, int capacity,
     int *kind) {
     struct change_watch *w = handle;
     struct apple_event event;
+    long long now, wait_ms;
+    CFTimeInterval wait_seconds;
     if (!w || capacity <= 0) return EINVAL;
     *path = 0; *kind = 0;
-    if (!w->nevents && !w->dirty)
-        (void)w->runloop_run(w->mode, (CFTimeInterval)timeout / 1000.0, true);
+    now = apple_now_ms();
+    wait_ms = timeout;
+    if (w->dirty) {
+        long long until = w->dirty_deadline - now;
+        if (until < 0) until = 0;
+        if (wait_ms > until) wait_ms = until;
+    }
+    if (!w->nevents) {
+        wait_seconds = (CFTimeInterval)wait_ms / 1000.0;
+        (void)w->runloop_run(w->mode, wait_seconds, true);
+    }
     if (w->error) return w->error;
     if (w->dirty) {
-        apple_settle(w);
-        if (fo_change_native_reconcile(w)) return w->error;
-        apple_settle(w);
-        *kind = 4;
+        now = apple_now_ms();
+        if (timeout > 0 &&
+            (now >= w->dirty_deadline || now >= w->dirty_maximum)) {
+            w->dirty = 0;
+            apple_discard_events(w);
+            if (fo_change_native_reconcile(w)) return w->error;
+            *kind = 4;
+            return 0;
+        }
         return 0;
     }
     if (!w->nevents) return 0;
@@ -378,6 +442,11 @@ int fo_change_native_poll(void *handle, int timeout, char *path, int capacity,
     free(event.path);
     memmove(w->events, w->events + 1, --w->nevents * sizeof(w->events[0]));
     return 0;
+}
+
+int fo_change_native_pending(void *handle) {
+    struct change_watch *w = handle;
+    return !w || w->dirty || w->nevents != 0;
 }
 
 void fo_change_native_self(void *handle, const char *path) {

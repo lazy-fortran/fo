@@ -16,9 +16,12 @@ module fo_change_watch
     integer, parameter, public :: CHANGE_RECONCILE = 4
 
     interface
-        function native_open(ierr) bind(C, name='fo_change_native_open') result(handle)
-            import :: c_ptr, c_int
+        function native_open(ierr, diagnostic, capacity) &
+                bind(C, name='fo_change_native_open_diagnostic') result(handle)
+            import :: c_ptr, c_int, c_char
             integer(c_int), intent(out) :: ierr
+            character(c_char), intent(out) :: diagnostic(*)
+            integer(c_int), value :: capacity
             type(c_ptr) :: handle
         end function native_open
         subroutine native_close(handle) bind(C, name='fo_change_native_close')
@@ -53,6 +56,19 @@ module fo_change_watch
             import :: c_ptr, c_int
             type(c_ptr), value :: handle
         end function native_pending
+        subroutine native_error_text(error, buffer, capacity) &
+                bind(C, name='fo_change_watch_error_text')
+            import :: c_char, c_int
+            integer(c_int), value :: error, capacity
+            character(c_char), intent(out) :: buffer(*)
+        end subroutine native_error_text
+        subroutine native_diagnostic(handle, buffer, capacity) &
+                bind(C, name='fo_change_native_diagnostic')
+            import :: c_ptr, c_char, c_int
+            type(c_ptr), value :: handle
+            character(c_char), intent(out) :: buffer(*)
+            integer(c_int), value :: capacity
+        end subroutine native_diagnostic
         subroutine native_self(handle, path) bind(C, name='fo_change_native_self')
             import :: c_ptr, c_char
             type(c_ptr), value :: handle
@@ -87,17 +103,39 @@ module fo_change_watch
 
 contains
 
-    subroutine change_watch_init(watch, project_root, ierr)
+    subroutine change_watch_init(watch, project_root, ierr, message)
         type(change_watch_t), intent(inout) :: watch
         character(len=*), intent(in) :: project_root
         integer, intent(out) :: ierr
+        character(len=*), intent(out), optional :: message
 
         integer(c_int) :: native_error
+        character(len=PATH_LEN) :: native_message
+        character(kind=c_char) :: open_detail(PATH_LEN)
+        integer :: i
 
+        if (present(message)) message = ''
         call change_watch_close(watch)
-        watch%native = native_open(native_error)
+        open_detail = c_null_char
+        watch%native = native_open(native_error, open_detail, &
+            int(size(open_detail), c_int))
         ierr = native_error
-        if (ierr /= 0) return
+        if (ierr /= 0) then
+            if (present(message)) then
+                native_message = ''
+                do i = 1, size(open_detail)
+                    if (open_detail(i) == c_null_char) exit
+                    native_message(i:i) = open_detail(i)
+                end do
+                if (len_trim(native_message) > 0) then
+                    message = 'initialize declared root "'//trim(project_root)// &
+                        '": '//trim(native_message)
+                else
+                    message = provider_error('open native provider', project_root, ierr)
+                end if
+            end if
+            return
+        end if
         if (.not. c_associated(watch%native)) then
             call watcher_init(watch%watcher, ierr)
             if (ierr /= 0) return
@@ -113,7 +151,7 @@ contains
             return
         end if
         if (c_associated(watch%native)) then
-            call sync_native_roots(watch, ierr)
+            call sync_native_roots(watch, ierr, message)
             if (ierr /= 0) call change_watch_close(watch)
             return
         end if
@@ -132,28 +170,30 @@ contains
         if (ierr /= 0) call change_watch_close(watch)
     end subroutine change_watch_init
 
-    subroutine change_watch_add_context(watch, context, ierr)
+    subroutine change_watch_add_context(watch, context, ierr, message)
         type(change_watch_t), intent(inout) :: watch
         type(generation_context_t), intent(in) :: context
         integer, intent(out) :: ierr
+        character(len=*), intent(out), optional :: message
 
         character(len=PATH_LEN) :: root
         integer :: i, j
 
+        if (present(message)) message = ''
         ierr = 0
         watch%active(:) = .false.
         if (watch%n_roots > 0) watch%active(1) = .true.
         do i = 1, size(context%inputs)
             root = canonical_or_entry(context%inputs(i)%source_root)
             if (len_trim(root) == 0) cycle
-            call change_watch_add_root(watch, trim(root), ierr)
+            call change_watch_add_root(watch, trim(root), ierr, message)
             if (ierr /= 0) return
             do j = 1, watch%n_roots
                 if (trim(watch%roots(j)) == trim(root)) watch%active(j) = .true.
             end do
         end do
         if (c_associated(watch%native)) then
-            call sync_native_roots(watch, ierr)
+            call sync_native_roots(watch, ierr, message)
         else
             do j = 2, watch%n_roots
                 if (watch%active(j)) cycle
@@ -163,10 +203,11 @@ contains
         end if
     end subroutine change_watch_add_context
 
-    subroutine change_watch_add_root(watch, path, ierr)
+    subroutine change_watch_add_root(watch, path, ierr, message)
         type(change_watch_t), intent(inout) :: watch
         character(len=*), intent(in) :: path
         integer, intent(out) :: ierr
+        character(len=*), intent(out), optional :: message
 
         character(len=PATH_LEN), allocatable :: updated(:)
         logical, allocatable :: updated_active(:)
@@ -174,6 +215,7 @@ contains
         integer :: j
         logical :: exists
 
+        if (present(message)) message = ''
         root = canonical_root(path)
         if (len_trim(root) == 0) root = canonical_or_entry(path)
         exists = .false.
@@ -203,7 +245,8 @@ contains
         call move_alloc(updated_active, watch%active)
         watch%n_roots = watch%n_roots + 1
         ierr = 0
-        if (c_associated(watch%native)) call sync_native_roots(watch, ierr)
+        if (c_associated(watch%native)) &
+            call sync_native_roots(watch, ierr, message)
     end subroutine change_watch_add_root
 
     subroutine change_watch_poll(watch, timeout_ms, changed_path, event_type, &
@@ -309,18 +352,32 @@ contains
         end do
     end function excluded_path
 
-    subroutine sync_native_roots(watch, ierr)
+    subroutine sync_native_roots(watch, ierr, message)
         type(change_watch_t), intent(inout) :: watch
         integer, intent(out) :: ierr
-        integer :: i
+        character(len=*), intent(out), optional :: message
+        integer :: i, first_active
 
+        if (present(message)) message = ''
         call native_clear(watch%native)
+        first_active = 0
         do i = 1, watch%n_roots
             if (.not. watch%active(i)) cycle
+            if (first_active == 0) first_active = i
             ierr = native_root(watch%native, trim(watch%roots(i))//c_null_char)
-            if (ierr /= 0) return
+            if (ierr /= 0) then
+                if (present(message)) message = provider_error( &
+                    'register declared root', trim(watch%roots(i)), ierr)
+                return
+            end if
         end do
         ierr = native_reconcile(watch%native)
+        if (ierr /= 0 .and. present(message)) then
+            message = native_error_detail(watch%native)
+            if (len_trim(message) == 0 .and. first_active > 0) &
+                message = provider_error('reconcile', &
+                    trim(watch%roots(first_active)), ierr)
+        end if
     end subroutine sync_native_roots
 
     subroutine reconcile_roots(watch, ierr)
@@ -396,6 +453,39 @@ contains
         if (allocated(watch%active)) deallocate(watch%active)
         watch%n_roots = 0
     end subroutine change_watch_close
+
+    function provider_error(operation, root, error) result(message)
+        character(len=*), intent(in) :: operation, root
+        integer, intent(in) :: error
+        character(len=PATH_LEN) :: message
+        character(kind=c_char) :: error_text(256)
+        integer :: i, n
+
+        message = trim(operation)//' root "'//trim(root)//'" failed: '
+        call native_error_text(int(error, c_int), error_text, &
+            int(size(error_text), c_int))
+        n = len_trim(message)
+        do i = 1, size(error_text)
+            if (error_text(i) == c_null_char) exit
+            n = n + 1
+            message(n:n) = error_text(i)
+        end do
+    end function provider_error
+
+    function native_error_detail(handle) result(message)
+        type(c_ptr), intent(in) :: handle
+        character(len=PATH_LEN) :: message
+        character(kind=c_char) :: detail(PATH_LEN)
+        integer :: i
+
+        message = ''
+        detail = c_null_char
+        call native_diagnostic(handle, detail, int(size(detail), c_int))
+        do i = 1, size(detail)
+            if (detail(i) == c_null_char) exit
+            message(i:i) = detail(i)
+        end do
+    end function native_error_detail
 
     subroutine change_watch_mark_self_written(watch, path)
         type(change_watch_t), intent(inout) :: watch

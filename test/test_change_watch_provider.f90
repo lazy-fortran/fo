@@ -1,5 +1,6 @@
 program test_change_watch_provider
     !! Public shared-provider behavior fixture, independent of Gremlin lifecycle.
+    use, intrinsic :: iso_c_binding, only: c_int, c_long
     use fo_change_watch, only: change_watch_t, change_watch_init, &
         change_watch_add_root, change_watch_poll, change_watch_close, &
         CHANGE_RECONCILE
@@ -8,16 +9,45 @@ program test_change_watch_provider
     use fo_util, only: make_tmpfile
     implicit none
 
-    type(change_watch_t) :: watch
-    character(len=4096) :: scratch, project, dependency, ignored
-    character(len=4096) :: nested, retired, changed, error_text
-    character(len=4096) :: created_file, renamed_file
-    integer :: ierr, kind, captures, rename_error
-    logical :: got_event
+    type, bind(C) :: rlimit_t
+        integer(c_long) :: current, maximum
+    end type rlimit_t
+    interface
+        integer(c_int) function getrlimit(resource, limits) bind(C, name='getrlimit')
+            import :: c_int, rlimit_t
+            integer(c_int), value :: resource
+            type(rlimit_t), intent(out) :: limits
+        end function getrlimit
+        integer(c_int) function setrlimit(resource, limits) bind(C, name='setrlimit')
+            import :: c_int, rlimit_t
+            integer(c_int), value :: resource
+            type(rlimit_t), intent(in) :: limits
+        end function setrlimit
+    end interface
 
-    call change_watch_init(watch, '.', ierr, error_text)
-    call require(ierr == 0, 'large project tree init: '//trim(error_text))
-    call change_watch_close(watch)
+    type(change_watch_t) :: watch
+    type(change_watch_t) :: diagnostic_watch
+    type(rlimit_t) :: saved_limits, test_limits
+    character(len=4096) :: scratch, project, dependency, ignored
+    character(len=4096) :: nested, retired, changed, error_text, ignored_dir
+    character(len=4096) :: latency_dir
+    character(len=4096) :: created_file, renamed_file
+    integer :: ierr, kind, captures, rename_error, clock_start, clock_end, clock_rate
+    integer :: attempt
+    logical :: got_event
+    logical :: provider_quiet
+    logical :: linux_inotify
+
+    inquire(file='/proc/sys/fs/inotify/max_queued_events', exist=linux_inotify)
+    if (linux_inotify) call verify_open_diagnostic()
+
+    do attempt = 1, 12
+        call change_watch_init(watch, '.', ierr, error_text)
+        call require(ierr == 0, 'large project tree init: '//trim(error_text))
+        call require(len_trim(error_text) == 0, &
+            'successful provider init returned a false-positive diagnostic')
+        call change_watch_close(watch)
+    end do
 
     call make_tmpfile('fo-change-provider-public', scratch)
     project = trim(scratch)//'/project'
@@ -38,10 +68,37 @@ program test_change_watch_provider
     call require(ierr == 0, 'declared dependency root: '//trim(error_text))
 
     captures = 0
+    call system_clock(count=clock_start, count_rate=clock_rate)
     call change_watch_poll(watch, 300, changed, kind, got_event, ierr)
+    call system_clock(count=clock_end)
     call require(ierr == 0, 'idle poll returned an error')
     call require(.not. got_event, 'idle provider emitted a change')
     call require(captures == 0, 'idle provider caused an expensive capture')
+    call require((clock_end - clock_start)*1000.0/real(max(1, clock_rate)) < 400.0, &
+        'idle poll exceeded its timeout plus scheduling allowance')
+
+    latency_dir = trim(project)//'/latency-probe'
+    call fs_make_dir(trim(latency_dir))
+    call fs_sleep_ms(50)
+    call assert_zero_poll_latency('pending directory event')
+    call fs_sleep_ms(150)
+    call system_clock(count=clock_start, count_rate=clock_rate)
+    call change_watch_poll(watch, 0, changed, kind, got_event, ierr, provider_quiet)
+    call system_clock(count=clock_end)
+    call require(ierr == 0, 'expired dirty-state zero-timeout poll failed')
+    call require(.not. got_event, &
+        'zero-timeout poll reconciled after the quiet deadline')
+    call require(.not. provider_quiet, &
+        'pending reconciliation was reported quiet after its deadline')
+    call require((clock_end - clock_start)*1000.0/real(max(1, clock_rate)) < 50.0, &
+        'expired dirty-state zero-timeout poll blocked')
+    call change_watch_poll(watch, 300, changed, kind, got_event, ierr)
+    call require(ierr == 0, 'positive-budget dirty-state poll failed')
+    call require(got_event .and. kind == CHANGE_RECONCILE, &
+        'positive-budget poll did not complete pending reconciliation')
+    captures = captures + 1
+    call settle_events()
+    captures = 0
 
     call fs_write_text(trim(created_file), 'program fresh')
     call await_path_nonblocking(trim(created_file))
@@ -51,7 +108,7 @@ program test_change_watch_provider
     call settle_events()
     rename_error = fs_rename(trim(created_file), trim(renamed_file))
     call require(rename_error == 0, 'cannot rename watched file')
-    call await_path(trim(created_file))
+    call await_rename(trim(created_file), trim(renamed_file))
     call settle_events()
     call fs_remove_file(trim(renamed_file))
     call await_path(trim(renamed_file))
@@ -63,6 +120,26 @@ program test_change_watch_provider
     captures = 0
     call fs_write_text(trim(ignored)//'/outside.f90', 'program ignored')
     call assert_idle('undeclared root')
+
+    captures = 0
+    do attempt = 1, 3
+        select case (attempt)
+        case (1)
+            ignored_dir = trim(project)//'/.git'
+        case (2)
+            ignored_dir = trim(project)//'/.gremlin'
+        case (3)
+            ignored_dir = trim(project)//'/build'
+        end select
+        call fs_make_dir(trim(ignored_dir))
+        call fs_write_text(trim(ignored_dir)//'/discard.f90', 'program ignored')
+        call fs_make_dir(trim(ignored_dir)//'/nested')
+        call assert_zero_poll_latency('excluded '//trim(ignored_dir))
+        rename_error = fs_rename(trim(ignored_dir)//'/nested', &
+            trim(ignored_dir)//'/renamed')
+        call require(rename_error == 0, 'cannot rename excluded directory')
+        call assert_idle('excluded rename '//trim(ignored_dir))
+    end do
 
     rename_error = fs_rename(trim(nested), trim(retired))
     call require(rename_error == 0, 'cannot rename watched directory')
@@ -105,17 +182,37 @@ contains
         error stop message
     end subroutine require
 
+    subroutine verify_open_diagnostic()
+        integer(c_int) :: status
+
+        status = getrlimit(7_c_int, saved_limits)
+        if (status /= 0) error stop 'cannot read descriptor limit for diagnostic oracle'
+        test_limits = saved_limits
+        test_limits%current = 0_c_long
+        status = setrlimit(7_c_int, test_limits)
+        if (status /= 0) error stop 'cannot lower descriptor limit for diagnostic oracle'
+        call change_watch_init(diagnostic_watch, '.', ierr, error_text)
+        status = setrlimit(7_c_int, saved_limits)
+        call change_watch_close(diagnostic_watch)
+        if (status /= 0) error stop 'cannot restore descriptor limit after diagnostic oracle'
+        if (ierr == 0) error stop 'descriptor exhaustion did not fail provider initialization'
+        if (index(trim(error_text), 'initialize declared root "."') == 0) &
+            error stop 'provider diagnostic lost its declared root context'
+        if (index(trim(error_text), 'open inotify provider') == 0) &
+            error stop 'provider diagnostic lost its open operation: '//trim(error_text)
+        if (index(trim(error_text), 'errno 24') == 0) &
+            error stop 'provider diagnostic lost the exact OS error'
+    end subroutine verify_open_diagnostic
+
     subroutine await_path(expected)
         character(len=*), intent(in) :: expected
-        integer :: attempt
 
         do attempt = 1, 40
             call change_watch_poll(watch, 100, changed, kind, got_event, ierr)
             call require(ierr == 0, 'event poll returned an error')
             if (.not. got_event) cycle
             captures = captures + 1
-            if (index(trim(changed), trim(expected)) > 0) return
-            if (kind == CHANGE_RECONCILE) return
+            if (trim(changed) == trim(expected)) return
         end do
         call require(.false., 'timed out waiting for '//trim(expected))
     end subroutine await_path
@@ -129,13 +226,46 @@ contains
             call require(ierr == 0, 'nonblocking poll returned an error')
             if (got_event) then
                 captures = captures + 1
-                if (index(trim(changed), trim(expected)) > 0) return
-                if (kind == CHANGE_RECONCILE) return
+                if (trim(changed) == trim(expected)) return
             end if
             call fs_sleep_ms(50)
         end do
         call require(.false., 'nonblocking poll timed out waiting for '//trim(expected))
     end subroutine await_path_nonblocking
+
+    subroutine await_rename(old_path, new_path)
+        character(len=*), intent(in) :: old_path, new_path
+        integer :: attempt
+        logical :: new_exists, old_exists
+
+        do attempt = 1, 40
+            call change_watch_poll(watch, 100, changed, kind, got_event, ierr)
+            call require(ierr == 0, 'rename poll returned an error')
+            if (.not. got_event) cycle
+            captures = captures + 1
+            if (trim(changed) == trim(new_path)) return
+            if (kind /= CHANGE_RECONCILE) cycle
+            inquire(file=trim(new_path), exist=new_exists)
+            inquire(file=trim(old_path), exist=old_exists)
+            if (new_exists .and. .not. old_exists) return
+        end do
+        call require(.false., 'timed out waiting for verified rename')
+    end subroutine await_rename
+
+    subroutine assert_zero_poll_latency(label)
+        character(len=*), intent(in) :: label
+        integer :: attempt, start_count, end_count, rate
+
+        do attempt = 1, 4
+            call system_clock(count=start_count, count_rate=rate)
+            call change_watch_poll(watch, 0, changed, kind, got_event, ierr)
+            call system_clock(count=end_count)
+            call require(ierr == 0, trim(label)//' zero-timeout poll failed')
+            call require((end_count - start_count)*1000.0/real(max(1, rate)) < 50.0, &
+                trim(label)//' zero-timeout poll blocked')
+            if (got_event) captures = captures + 1
+        end do
+    end subroutine assert_zero_poll_latency
 
     subroutine await_reconcile(label)
         character(len=*), intent(in) :: label

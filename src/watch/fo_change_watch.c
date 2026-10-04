@@ -53,7 +53,8 @@ int fo_change_watch_is_dir(const char *path) {
 struct change_entry { int wd, seen; char *path; };
 struct change_self { char *path; long long until; };
 struct change_watch {
-    int fd, epoch;
+    int fd, epoch, reconcile_pending;
+    long long reconcile_deadline, reconcile_maximum;
     union { char bytes[65536]; struct inotify_event alignment; } pending;
     size_t pending_pos, pending_len;
     char **roots;
@@ -184,6 +185,15 @@ void *fo_change_native_open(int *error) {
     if (w->fd < 0) { *error = errno; free(w); return NULL; }
     return w;
 }
+void *fo_change_native_open_diagnostic(int *error, char *diagnostic, int capacity) {
+    void *handle = fo_change_native_open(error);
+    if (diagnostic != NULL && capacity > 0) {
+        if (handle || *error == 0) diagnostic[0] = 0;
+        else snprintf(diagnostic, (size_t)capacity,
+            "open inotify provider: %s (errno %d)", strerror(*error), *error);
+    }
+    return handle;
+}
 void fo_change_native_clear_roots(void *handle) {
     struct change_watch *w = handle;
     size_t i;
@@ -224,6 +234,34 @@ int fo_change_native_poll(void *handle, int timeout, char *path, int capacity, i
     int structural = 0, batch, rc;
     if (!w || capacity < PATH_MAX) return EINVAL;
     *path = 0; *kind = 0;
+    if (w->reconcile_pending) {
+        long long now = change_now();
+        long long remaining = w->reconcile_deadline - now;
+        if (timeout <= 0) return 0;
+        if (now < w->reconcile_deadline && now < w->reconcile_maximum) {
+            int wait_ms = (int)(remaining < timeout ? remaining : timeout);
+            pfd.fd = w->fd; pfd.events = POLLIN; pfd.revents = 0;
+            rc = poll(&pfd, 1, wait_ms);
+            if (rc < 0) return errno == EINTR ? 0 : errno;
+            if (rc == 0 && wait_ms < timeout) return 0;
+            if (rc > 0) {
+                change_discard_queued(w);
+                now = change_now();
+                w->reconcile_deadline = now + 100;
+                if (w->reconcile_deadline > w->reconcile_maximum)
+                    w->reconcile_deadline = w->reconcile_maximum;
+                return 0;
+            }
+            if (change_now() < w->reconcile_deadline &&
+                change_now() < w->reconcile_maximum) return 0;
+        }
+        change_discard_queued(w);
+        w->reconcile_pending = 0;
+        rc = fo_change_native_reconcile(w);
+        if (rc) return rc;
+        *kind = 4;
+        return 0;
+    }
     pfd.fd = w->fd; pfd.events = POLLIN; pfd.revents = 0;
     rc = w->pending_pos < w->pending_len ? 1 : poll(&pfd, 1, timeout);
     if (rc < 0) return errno == EINTR ? 0 : errno;
@@ -272,6 +310,14 @@ int fo_change_native_poll(void *handle, int timeout, char *path, int capacity, i
              * shared debounce coalesces them without dropping formatter work. */
             if (structural) {
                 change_discard_queued(w);
+                if (timeout == 0) {
+                    long long now = change_now();
+                    w->reconcile_pending = 1;
+                    w->reconcile_deadline = now + 100;
+                    w->reconcile_maximum = now + 500;
+                    *kind = 0; *path = 0;
+                    return 0;
+                }
                 rc = fo_change_native_reconcile(w);
                 if (rc) return rc;
                 *kind = 4; *path = 0;
@@ -281,6 +327,14 @@ int fo_change_native_poll(void *handle, int timeout, char *path, int capacity, i
     }
     if (structural) {
         change_discard_queued(w);
+        if (timeout == 0) {
+            long long now = change_now();
+            w->reconcile_pending = 1;
+            w->reconcile_deadline = now + 100;
+            w->reconcile_maximum = now + 500;
+            *kind = 0; *path = 0;
+            return 0;
+        }
         rc = fo_change_native_reconcile(w);
         if (rc) return rc;
         /* Include files populated before the new directory subscription. */
@@ -293,7 +347,7 @@ int fo_change_native_poll(void *handle, int timeout, char *path, int capacity, i
 int fo_change_native_pending(void *handle) {
     struct change_watch *w = handle;
     struct pollfd pfd;
-    if (!w || w->pending_pos < w->pending_len) return 1;
+    if (!w || w->reconcile_pending || w->pending_pos < w->pending_len) return 1;
     pfd.fd = w->fd; pfd.events = POLLIN; pfd.revents = 0;
     return poll(&pfd, 1, 0) != 0;
 }
@@ -329,6 +383,11 @@ void fo_change_native_close(void *handle) {
 }
 #elif !defined(__APPLE__)
 void *fo_change_native_open(int *error) { *error = 0; return NULL; }
+void *fo_change_native_open_diagnostic(int *error, char *diagnostic, int capacity) {
+    void *handle = fo_change_native_open(error);
+    if (diagnostic != NULL && capacity > 0) diagnostic[0] = 0;
+    return handle;
+}
 void fo_change_native_close(void *handle) { (void)handle; }
 void fo_change_native_clear_roots(void *handle) { (void)handle; }
 int fo_change_native_root(void *h, const char *p) { (void)h; (void)p; return ENOSYS; }
