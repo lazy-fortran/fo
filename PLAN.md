@@ -379,7 +379,7 @@ Extend existing ownership rather than start a blanket rewrite: #149 finishes
 real supervisor service boundaries; #167 removes competing build/run engines;
 #165 removes duplicated snapshot storage; #148 removes the independent watch
 policy. #150 is reopened for residual strict JSON scanners in the request and
-MCP modules, with generic parsing owned by fx. #185 removes transport-owned
+MCP modules, with generic parsing owned by fx #54. #185 removes transport-owned
 async scheduling. #186 moves source-discovery policy out of C after #175/#172.
 Do not split files solely to hit a line target or block useful increments on
 unrelated architectural cleanup.
