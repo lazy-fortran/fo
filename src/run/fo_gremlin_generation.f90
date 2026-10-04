@@ -819,7 +819,15 @@ contains
                         if (trim(observed%roots(observed_root)%aliases(l)) /= &
                             trim(expected%roots(expected_root)%aliases(j))) cycle
                         if (trim(observed%roots(observed_root)%bundle_paths(l)) /= &
-                            trim(expected%roots(expected_root)%bundle_paths(j))) cycle
+                            trim(expected%roots(expected_root)%bundle_paths(j))) then
+                            message = 'materialized alias path differs for '// &
+                                trim(expected%roots(expected_root)%aliases(j))// &
+                                ': expected='// &
+                                trim(expected%roots(expected_root)%bundle_paths(j))// &
+                                ', observed='// &
+                                trim(observed%roots(observed_root)%bundle_paths(l))
+                            return
+                        end if
                         found = .true.
                         exit
                     end do
