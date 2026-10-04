@@ -734,7 +734,7 @@ current correctness.
 ## Active delivery state
 
 **Execution is user-authorized in parallel mode.** The reviewed core is on fo
-`main`; PR #146 is merged. The current main head `f5058a8` includes the shared
+`main`; PR #146 is merged. The current integration head `bf6000d` includes the shared
 Linux event watcher, finite crash-safe coverage, factual local-gate reporting,
 GCC 13.3 ownership repairs, Darwin archive portability, thirteen removed JS
 fixtures and side-effect-free install help. Exact combined focused gates passed
@@ -801,6 +801,14 @@ Implemented issue state:
   eight focused gates, five fault mutants, 86-executable bare pipeline, formatting,
   two zero-leak audits and independent review pass. The native watcher preserves
   #174's dependency-root replacement, nested creation and follow-up capture sequence.
+- #183 has a reviewed partial repair through `bf6000d`: coverage selection
+  rewinds an exhausted persisted cursor to the earliest still-UNKNOWN obligation,
+  and the independent 40-case oracle distinguishes marker-before-exit from a
+  terminal PASS receipt. Exact focused coverage testing passes and all six #161
+  JavaScript fixtures remain. Full #183/#161 completion still requires a forced
+  crash after durable terminal receipt but before coverage update, the distinct
+  marker-before-terminal recovery barrier and native stale-generation PASS
+  injection; no marker may manufacture coverage credit.
 - #164 is complete at `d482807`: unique descriptor-held temporary publication,
   unstable-hash retry and write/close/crash recovery passed independent review,
   focused current-head testing and three production mutants. Its macOS rerun is
