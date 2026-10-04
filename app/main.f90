@@ -6,7 +6,8 @@ program fo_main
     use fx_dag, only: dag_t, dag_topo_sort, dag_to_dot, MAX_NODES
     use fo_dag_bridge, only: build_dag_from_units
     use fo_build_backend, only: backend_t, detect_backend, backend_build, &
-        backend_test, backend_test_names, backend_test_affected, BACKEND_NONE, &
+        backend_build_test_target, backend_test, backend_test_names, &
+        backend_test_affected, BACKEND_NONE, &
         BACKEND_NATIVE, BACKEND_CMAKE, profile_flags
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
         collect_failed_test_names, should_report_frontend_diagnostics, &
@@ -790,9 +791,12 @@ contains
             call make_tmpfile('fo-exec-build', build_log)
             if (trim(action) == 'run') then
                 call backend_build(b, exitcode, flags=all_flags, log_file=build_log)
+            else if (b%kind == BACKEND_NATIVE .and. &
+                    .not. exec_target_is_app(b, parsed%target)) then
+                call backend_build_test_target(b, parsed%target, exitcode, &
+                    flags=all_flags, log_file=build_log)
             else
-                call backend_build(b, exitcode, flags=all_flags, log_file=build_log, &
-                    with_tests=.not. exec_target_is_app(b, parsed%target))
+                call backend_build(b, exitcode, flags=all_flags, log_file=build_log)
             end if
             if (exitcode /= 0) then
                 write (error_unit, '(a)') 'fo exec: build failed'

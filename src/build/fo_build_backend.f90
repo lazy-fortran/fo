@@ -15,7 +15,8 @@ module fo_build_backend
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
-    public :: backend_build, backend_test, backend_test_names
+    public :: backend_build, backend_build_test_target, backend_test, &
+        backend_test_names
     public :: backend_test_affected, backend_clean
     public :: profile_flags
     public :: BACKEND_NONE, BACKEND_NATIVE, BACKEND_CMAKE
@@ -248,6 +249,38 @@ contains
                 ' set FO_BUILD_TIMEOUT env var or investigate slow build'
         end if
     end subroutine backend_build
+
+    subroutine backend_build_test_target(self, target, exitcode, flags, log_file)
+        type(backend_t), intent(inout) :: self
+        character(len=*), intent(in) :: target
+        integer, intent(out) :: exitcode
+        character(len=*), intent(in), optional :: flags, log_file
+
+        character(len=128) :: names(1)
+        character(len=512) :: log_path, flag_text, lock_dir
+        integer :: lock_ierr
+
+        log_path = ''
+        if (present(log_file)) log_path = log_file
+        flag_text = ''
+        if (present(flags)) flag_text = flags
+        exitcode = 1
+        if (self%kind == BACKEND_NONE) return
+
+        call acquire_project_lock(self%project_dir, lock_dir, lock_ierr)
+        if (lock_ierr /= 0) return
+
+        select case (self%kind)
+        case (BACKEND_NATIVE)
+            names(1) = target
+            call gfortran_test_names(self%project_dir, names, 1, log_path, &
+                exitcode, include_slow=.true., flags=flag_text, build_only=.true.)
+        case (BACKEND_CMAKE)
+            call cmake_build(self%cmake, flag_text, log_path, exitcode)
+        end select
+
+        call release_project_lock(lock_dir)
+    end subroutine backend_build_test_target
 
     function profile_flags(name) result(flags)
         character(len=*), intent(in) :: name
