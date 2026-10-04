@@ -148,8 +148,7 @@ contains
         integer :: j, selected_count, local_status, unit
 
         mutant_path = 'gremlin-coverage-cursor-mutant.state'
-        call execute_command_line('rm -f '//trim(mutant_path)//' '// &
-            trim(mutant_path)//'.tmp '//trim(mutant_path)//'.lock')
+        call remove_cursor_mutant_files(mutant_path)
         do j = 1, n_cases
             write(mutant_names(j), '(a,i2.2)') 'mutant_', j
         end do
@@ -198,9 +197,30 @@ contains
         call coverage_view(recovered, mutant_view)
         call check(mutant_view%pass_count == n_cases .and. mutant_view%unknown_count == 0 .and. &
             mutant_view%full_coverage, 'recovered mutant reaches 40 PASS without duplicate credit')
-        call execute_command_line('rm -f '//trim(mutant_path)//' '// &
-            trim(mutant_path)//'.tmp '//trim(mutant_path)//'.lock')
+        call remove_cursor_mutant_files(mutant_path)
     end subroutine check_cursor_rewinds_39_of_40
+
+    subroutine remove_cursor_mutant_files(state_path)
+        character(len=*), intent(in) :: state_path
+
+        call remove_test_file(trim(state_path))
+        call remove_test_file(trim(state_path)//'.tmp')
+        call remove_test_file(trim(state_path)//'.lock')
+    end subroutine remove_cursor_mutant_files
+
+    subroutine remove_test_file(filename)
+        character(len=*), intent(in) :: filename
+        integer :: unit, local_status
+        logical :: exists
+
+        inquire(file=trim(filename), exist=exists)
+        if (.not. exists) return
+        open(newunit=unit, file=trim(filename), status='old', iostat=local_status)
+        call check(local_status == 0, 'opens cursor mutant file for native cleanup')
+        if (local_status /= 0) return
+        close(unit, status='delete', iostat=local_status)
+        call check(local_status == 0, 'deletes cursor mutant file with Fortran I/O')
+    end subroutine remove_test_file
 
     subroutine check_mixed_outcomes()
         character(len=16) :: mixed_names(8), mixed_selected(8), mixed_priorities(8)
