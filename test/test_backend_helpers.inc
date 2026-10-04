@@ -298,7 +298,6 @@
             'a repeated CMake build leaves the up-to-date CXX target alone')
         call write_cpp_runtime(source_file, 'edited')
         call backend_build(b, exitcode, log_file=log_file)
-        call assert(exitcode == 0, 'CMake warm build rebuilds edited source')
         n_args = 0
         call argv_push(packed, n_args, 'build dir with spaces/context_app')
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
@@ -355,6 +354,7 @@
 
         call write_cpp_runtime(source_file, 'edited')
         call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'CMake build succeeds after source edit')
         n_args = 0
         call argv_push(packed, n_args, 'build/context_app')
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
