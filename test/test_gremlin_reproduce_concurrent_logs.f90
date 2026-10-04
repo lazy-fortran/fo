@@ -2,12 +2,12 @@ program test_gremlin_reproduce_concurrent_logs
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_directory, write_text, read_text, assert_true
     use fo_test_harness, only: assert_equal_integer, finish_assertions
-    use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_run, gremlin_json
+    use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json
     use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_wait_ms, gremlin_wait_file
     use fo_test_gremlin_oracle, only: gremlin_spawn, gremlin_wait_child, gremlin_poll_child
-    use fo_test_gremlin_oracle, only: gremlin_fifo, gremlin_release_fifo
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value
+    use fo_test_gremlin_oracle, only: gremlin_stop_lane
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state, lane
@@ -26,6 +26,10 @@ program test_gremlin_reproduce_concurrent_logs
     call write_text(project//'/fpm.toml', &
         'name = "gremlin_reproduce_concurrent_probe"'//new_line('a'))
     call write_case('test_reproduce_anchor', '', 'FO_REPRODUCE_ANCHOR_OUTPUT')
+    call setup_gate('test_reproduce_gate_first', 'FO_REPRODUCE_GATE_FIRST_48ef31', &
+        gate_one, entered_one)
+    call setup_gate('test_reproduce_gate_second', 'FO_REPRODUCE_GATE_SECOND_0ba742', &
+        gate_two, entered_two)
     call gremlin_start_args(args, project, lane, 'test_reproduce_anchor')
     call list_add(args, '--seed')
     call list_add(args, '1729')
@@ -35,10 +39,6 @@ program test_gremlin_reproduce_concurrent_logs
     call assert_true(len(session) > 0, 'start returns an owner session')
     call wait_for_anchor(session, generation)
 
-    call setup_gate('test_reproduce_gate_first', 'FO_REPRODUCE_GATE_FIRST_48ef31', &
-        gate_one, entered_one)
-    call setup_gate('test_reproduce_gate_second', 'FO_REPRODUCE_GATE_SECOND_0ba742', &
-        gate_two, entered_two)
     out_one = scratch//'/first.stdout'
     err_one = scratch//'/first.stderr'
     out_two = scratch//'/second.stdout'
@@ -50,7 +50,7 @@ program test_gremlin_reproduce_concurrent_logs
     call reproduction_args('test_reproduce_gate_second', args)
     call gremlin_spawn(driver, project, args, out_two, err_two, child_two)
 
-    call gremlin_release_fifo(gate_one)
+    call write_text(gate_one, 'release'//new_line('a'))
     call gremlin_wait_child(child_one, exit_one)
     call assert_equal_integer(exit_one, 1, 'first reproduction retains its failing status')
     call gremlin_wait_file(entered_two, 15000, found)
@@ -62,7 +62,7 @@ program test_gremlin_reproduce_concurrent_logs
         call gremlin_wait_file(entered_two, 30000, found)
     end if
     call assert_true(found, 'second overlapping or retried request reaches its own barrier')
-    call gremlin_release_fifo(gate_two)
+    call write_text(gate_two, 'release'//new_line('a'))
     call gremlin_wait_child(child_two, exit_two)
     call assert_equal_integer(exit_two, 1, 'second reproduction retains its failing status')
 
@@ -107,14 +107,21 @@ contains
         character(:), allocatable :: source
         fifo = scratch//'/'//name//'.fifo'
         entered = scratch//'/'//name//'.entered'
-        call gremlin_fifo(fifo)
-        source = 'program '//name//new_line('a')//'implicit none'//new_line('a')// &
-            'integer :: unit'//new_line('a')//'character :: token'//new_line('a')// &
+        ! A durable release wakes campaign and reproduction readers independently.
+        source = 'program '//name//new_line('a')// &
+            'use, intrinsic :: iso_c_binding, only: c_int'//new_line('a')// &
+            'implicit none'//new_line('a')// &
+            'interface'//new_line('a')// &
+            'integer(c_int) function c_usleep(us) bind(C,name="usleep")'//new_line('a')// &
+            'import :: c_int'//new_line('a')//'integer(c_int), value :: us'//new_line('a')// &
+            'end function c_usleep'//new_line('a')//'end interface'//new_line('a')// &
+            'integer :: unit, rc'//new_line('a')//'logical :: released'//new_line('a')// &
             "open(newunit=unit,file='"//entered//"',status='replace')"//new_line('a')// &
             "write(unit,'(a)') 'entered'"//new_line('a')//'close(unit)'//new_line('a')// &
-            "open(newunit=unit,file='"//fifo//"',status='old',access='stream', &"//new_line('a')// &
-            "    form='unformatted',action='read')"//new_line('a')// &
-            'read(unit) token'//new_line('a')//'close(unit)'//new_line('a')// &
+            'do'//new_line('a')// &
+            "inquire(file='"//fifo//"',exist=released)"//new_line('a')// &
+            'if (released) exit'//new_line('a')// &
+            'rc = c_usleep(20000_c_int)'//new_line('a')//'end do'//new_line('a')// &
             "print '(a)', '"//token//"'"//new_line('a')//'error stop 7'//new_line('a')// &
             'end program '//name//new_line('a')
         call write_text(project//'/test/'//name//'.f90', source)
@@ -193,6 +200,7 @@ contains
                 event = json_element(events, j)
                 if (field(event, 'generation') /= active_generation .or. &
                     field(event, 'status') /= 'FAIL') cycle
+                if (index(field(event, 'log_path'), '-reproduce-') == 0) cycle
                 if (field(event, 'case_id') == 'test_reproduce_gate_first') &
                     first = field(event, 'log_path')
                 if (field(event, 'case_id') == 'test_reproduce_gate_second') &
@@ -206,19 +214,7 @@ contains
 
     subroutine stop_lane(owner)
         character(len=*), intent(in) :: owner
-        type(string_list_t) :: values
-        type(process_result_t) :: result
-        call list_add(values, 'gremlin')
-        call list_add(values, 'stop')
-        call list_add(values, '--dir')
-        call list_add(values, project)
-        call list_add(values, '--lane')
-        call list_add(values, lane)
-        call list_add(values, '--session')
-        call list_add(values, owner)
-        call list_add(values, '--json')
-        call gremlin_run(driver, project, cache, state, values, result, timeout=30000)
-        call assert_equal_integer(result%exit_code, 0, 'Gremlin owner stops cleanly')
+        call gremlin_stop_lane(driver, project, cache, state, lane, owner)
     end subroutine stop_lane
 
 end program test_gremlin_reproduce_concurrent_logs

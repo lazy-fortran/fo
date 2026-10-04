@@ -1475,7 +1475,8 @@ contains
 
         if (n_entries > 0) then
             if (use_json) then
-                call format_test_results_json(entries, n_entries, exitcode, json_output)
+                call format_test_results_json(entries, n_entries, exitcode, &
+                    json_output, test_log)
                 write (output_unit, '(a)') trim(json_output)
             else
                 call format_test_results_human(entries, n_entries, test_log, &

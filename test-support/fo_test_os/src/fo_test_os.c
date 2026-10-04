@@ -46,6 +46,8 @@ static int remove_one(const char *path) {
     struct stat info;
     if (lstat(path, &info) != 0) return errno == ENOENT ? 0 : -1;
     if (!S_ISDIR(info.st_mode) || S_ISLNK(info.st_mode)) return unlink(path);
+    /* Fixture snapshots deliberately remove directory write permission. */
+    if (chmod(path, info.st_mode | S_IRUSR | S_IWUSR | S_IXUSR) != 0) return -1;
     DIR *directory = opendir(path);
     if (directory == NULL) return -1;
     struct dirent *entry;
@@ -81,6 +83,46 @@ int64_t fo_test_monotonic_ms(void) {
     return (int64_t)now.tv_sec * 1000 + (int64_t)now.tv_nsec / 1000000;
 }
 
+int fo_test_release_fifo(const char *path, int timeout_ms) {
+    int64_t deadline = fo_test_monotonic_ms() + timeout_ms;
+    int descriptor;
+    struct timespec pause = {0, 20000000};
+    do {
+        descriptor = open(path, O_WRONLY | O_NONBLOCK);
+        if (descriptor >= 0) break;
+        if (errno != ENXIO && errno != EINTR) return -1;
+        nanosleep(&pause, NULL);
+    } while (fo_test_monotonic_ms() < deadline);
+    if (descriptor < 0) return -1;
+    struct sigaction ignored = {0}, previous;
+    ignored.sa_handler = SIG_IGN;
+    sigemptyset(&ignored.sa_mask);
+    if (sigaction(SIGPIPE, &ignored, &previous) != 0) { close(descriptor); return -1; }
+    ssize_t written = write(descriptor, "x", 1);
+    int result = written == 1 ? 0 : -1;
+    if (sigaction(SIGPIPE, &previous, NULL) != 0) result = -1;
+    if (close(descriptor) != 0) result = -1;
+    return result;
+}
+
+int fo_test_process_running(int pid) {
+    if (pid <= 0 || kill(pid, 0) != 0) return 0;
+#if defined(__linux__)
+    char path[64], line[4096];
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    FILE *stream = fopen(path, "r");
+    if (stream == NULL) return 0;
+    char *read_result = fgets(line, sizeof(line), stream);
+    fclose(stream);
+    if (read_result == NULL) return 0;
+    char *end = strrchr(line, ')');
+    if (end == NULL || end[1] != ' ') return 0;
+    return end[2] != 'Z' && end[2] != 'X';
+#else
+    return 1;
+#endif
+}
+
 int fo_test_set_nonblocking(int descriptor) {
     int flags = fcntl(descriptor, F_GETFL, 0);
     return flags < 0 ? -1 : fcntl(descriptor, F_SETFL, flags | O_NONBLOCK);
@@ -108,8 +150,9 @@ int fo_test_poll(struct pollfd *descriptors, size_t count, int timeout_ms) {
 }
 
 int fo_test_waitpid(pid_t process, int *status, int options) {
-    pid_t waited = waitpid(process, status, options);
-    return waited < 0 && errno == EINTR ? 0 : (int)waited;
+    pid_t waited;
+    do { waited = waitpid(process, status, options); } while (waited < 0 && errno == EINTR);
+    return (int)waited;
 }
 
 int fo_test_spawn_capture(const char *const *arguments, const char *cwd,
@@ -125,10 +168,6 @@ int fo_test_spawn_capture(const char *const *arguments, const char *cwd,
     close(err);
     execvp(arguments[0], (char *const *)arguments);
     _exit(127);
-}
-
-int fo_test_signal_group(int process, int signal_number) {
-    return kill(-(pid_t)process, signal_number);
 }
 
 int fo_test_silence_output(void) {

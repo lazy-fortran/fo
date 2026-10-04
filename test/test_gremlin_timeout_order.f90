@@ -6,10 +6,11 @@ program test_gremlin_timeout_order
     use fo_test_harness, only: run_process, list_with_first, assert_true
     use fo_test_harness, only: assert_equal_string, assert_equal_integer, finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_run, gremlin_json
-    use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_wait_file, gremlin_wait_ms
+    use fo_test_gremlin_oracle, only: gremlin_wait_file, gremlin_wait_ms
     use fo_test_gremlin_oracle, only: gremlin_fifo, gremlin_release_fifo
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value, json_number_value, json_parse
+    use fo_test_gremlin_oracle, only: gremlin_stop_lane
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state, lane
@@ -25,7 +26,7 @@ program test_gremlin_timeout_order
 
     interface
         integer(c_int) function c_utime(path, times) bind(C, name='utime')
-            import :: c_char, c_int, c_ptr
+            use, intrinsic :: iso_c_binding, only: c_char, c_int, c_ptr
             character(kind=c_char), intent(in) :: path(*)
             type(c_ptr), value :: times
         end function c_utime
@@ -67,6 +68,8 @@ program test_gremlin_timeout_order
     call assert_true(found, 'captured test reaches its FIFO')
     call status_now(lane, session, report)
     generation = field(report, 'active_generation')
+    call wait_for_file(pid_path, 5000, found)
+    call assert_true(found, 'blocked test publishes a complete PID record')
     test_pid = file_integer(pid_path)
     call assert_true(test_pid > 0, 'blocked test publishes its PID')
     call write_text(hold, 'hold'//new_line('a'))
@@ -104,6 +107,8 @@ program test_gremlin_timeout_order
     session = field(report, 'session_id')
     call wait_for_file(started, 30000, found)
     call assert_true(found, 'timeout control child reaches its FIFO')
+    call wait_for_file(pid_path, 5000, found)
+    call assert_true(found, 'timeout control publishes a complete PID record')
     test_pid = file_integer(pid_path)
     call assert_true(test_pid > 0, 'timeout child publishes its PID')
     call wait_for_case(lane, session, 'TIMEOUT', event, 15000)
@@ -158,10 +163,12 @@ contains
             'const char *hold=getenv("FO_TIMEOUT_VERSION_HOLD");'//new_line('a')// &
             'if(argc==2 && strcmp(argv[1],"--version")==0 && hold && access(hold,F_OK)==0){'//new_line('a')// &
             'const char *p=getenv("FO_TIMEOUT_VERSION_ENTERED"); FILE *f=fopen(p,"w");'//new_line('a')// &
-            'if(!f)return 120; fprintf(f,"%ld\\n",(long)getpid()); fclose(f);'//new_line('a')// &
+            'if(!f)return 120; fprintf(f,"%ld'//achar(92)// &
+            'n",(long)getpid()); fclose(f);'//new_line('a')// &
             'const char *r=getenv("FO_TIMEOUT_VERSION_RELEASE"); struct timespec t={0,20000000};'//new_line('a')// &
             'while(access(r,F_OK)!=0)nanosleep(&t,0); }'//new_line('a')// &
-            'execv("'//real_compiler//'",argv); return 127; }'//new_line('a')
+            'argv[0]="'//real_compiler//'";'//new_line('a')// &
+            'execv(argv[0],argv); return 127; }'//new_line('a')
         call write_text(path, source)
     end subroutine write_wrapper
 
@@ -169,11 +176,11 @@ contains
         character(:), allocatable, intent(out) :: path
         type(string_list_t) :: args
         type(process_result_t) :: result
-        call list_add(args, 'which')
         call list_add(args, 'gfortran')
         call list_with_first('which', args, command)
         call run_process(command, project, result, timeout_ms=10000)
-        path = trim(result%stdout)
+        call assert_equal_integer(result%exit_code, 0, 'locates the real compiler')
+        path = result%stdout(:index(result%stdout, new_line('a')) - 1)
     end subroutine locate_compiler
 
     subroutine start_lane(lane_id, block_probe, value)
@@ -308,19 +315,7 @@ contains
 
     subroutine stop_lane(lane_id, owner)
         character(len=*), intent(in) :: lane_id, owner
-        type(string_list_t) :: values
-        type(process_result_t) :: result
-        call list_add(values, 'gremlin')
-        call list_add(values, 'stop')
-        call list_add(values, '--dir')
-        call list_add(values, project)
-        call list_add(values, '--lane')
-        call list_add(values, lane_id)
-        call list_add(values, '--session')
-        call list_add(values, owner)
-        call list_add(values, '--json')
-        call gremlin_run(driver, project, cache, state, values, result, timeout=30000)
-        call assert_equal_integer(result%exit_code, 0, 'stops timeout-order lane')
+        call gremlin_stop_lane(driver, project, cache, state, lane_id, owner)
     end subroutine stop_lane
 
 end program test_gremlin_timeout_order

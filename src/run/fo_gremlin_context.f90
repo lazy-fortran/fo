@@ -275,7 +275,7 @@ contains
     end subroutine capture_context
 
     subroutine append_environment_value(environment, name)
-        character(len=*), intent(inout) :: environment
+        character(len=:), allocatable, intent(inout) :: environment
         character(len=*), intent(in) :: name
         character(len=512) :: value
         integer :: length, status
