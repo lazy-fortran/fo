@@ -11,7 +11,8 @@ program test_gremlin_execution_view
 
     type(input_declaration_t) :: declarations(1)
     type(input_inventory_t) :: inventory, escaping, incomplete, invalid
-    type(execution_view_t) :: first, second, partial, rejected
+    type(input_inventory_t) :: multirole, conflicting
+    type(execution_view_t) :: first, second, partial, paired, rejected
     character(len=512) :: root, views, source_file, text, message
     character(len=512) :: first_fixture, second_output, escape_path
     character(len=HASH_LEN) :: source_digest, after_digest
@@ -127,6 +128,32 @@ program test_gremlin_execution_view
         rejected, ierr, message)
     call check(ierr /= 0 .and. .not. rejected%active, &
         'unavailable inventory rejects execution without fixture knowledge')
+
+    do i = 1, inventory%entry_count
+        if (trim(inventory%entries(i)%role) == 'test-fixture') exit
+    end do
+    call check(i <= inventory%entry_count, 'fixture entry is present')
+    multirole = inventory
+    multirole%entry_count = multirole%entry_count + 1
+    multirole%entries(multirole%entry_count) = inventory%entries(i)
+    multirole%entries(multirole%entry_count)%role = 'runtime-fixture'
+    call execution_view_create(trim(root)//'/views', repeat('a', HASH_LEN), &
+        'session-multirole', 'test_case', multirole, .true., .true., &
+        paired, ierr, message)
+    call check(ierr == 0 .and. paired%active, &
+        'compatible fixture roles materialize one private physical file')
+    call read_text_file(trim(paired%cwd)//'/fixtures/input.txt', text)
+    call check(index(text, 'frozen fixture') > 0, &
+        'multi-role materialization preserves declared bytes')
+    call execution_view_release(paired, .false., release_status, message)
+
+    conflicting = multirole
+    conflicting%entries(conflicting%entry_count)%writable_at_execution = .false.
+    call execution_view_create(trim(root)//'/views', repeat('a', HASH_LEN), &
+        'session-conflict', 'test_case', conflicting, .true., .true., &
+        rejected, ierr, message)
+    call check(ierr /= 0 .and. index(message, 'conflicting') > 0, &
+        'conflicting fixture intent rejects the private view')
 
     escaping = inventory
     do i = 1, escaping%entry_count
