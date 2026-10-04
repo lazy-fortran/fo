@@ -5,7 +5,7 @@ module fo_mcp
         strip_path_prefix_in_str, jsonrpc_error_fixed => jsonrpc_error, &
         jsonrpc_null_fixed => jsonrpc_null
     use fx_json_build, only: json_escape_string
-    use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init, &
+    use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
         JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, &
         JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_BOOL, &
         JSON_NULL_VAL, JSON_ERROR, JSON_END_OF_INPUT
@@ -26,8 +26,6 @@ module fo_mcp
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
     use fo_fs, only: fs_sleep_ms
     use fo_gremlin_supervisor, only: gremlin_handle
-    use fo_gremlin_request, only: gremlin_json_text_valid, &
-        json_parser_next => gremlin_json_parser_next
     implicit none
     private
     public :: mcp_serve
@@ -373,7 +371,7 @@ contains
         type(json_event_t) :: event, value_event
         character(len=:), allocatable :: raw_key, raw_value
         character(len=4096) :: decoded_dir
-        integer :: action_count, dir_count, key_start, value_start, value_end, dir_length
+        integer :: action_count, dir_count, value_start, value_end, dir_length
         logical :: valid_string
 
         public_action = ''
@@ -384,19 +382,18 @@ contains
         ierr = 1
         action_count = 0
         dir_count = 0
-        if (.not. gremlin_json_text_valid(arguments)) return
-        call json_parser_init(parser, arguments)
+        call json_parser_init_strict(parser, arguments)
         call json_parser_next(parser, event)
         if (event%event_type /= JSON_OBJECT_START) return
         do
-            key_start = json_value_first(parser)
             call json_parser_next(parser, event)
             if (event%event_type == JSON_OBJECT_END) exit
             if (event%event_type /= JSON_KEY .or. .not. allocated(event%string_val)) return
-            raw_key = parser%input(key_start:parser%pos - 1)
-            value_start = json_value_first(parser)
+            raw_key = parser%input(event%raw_start:event%raw_end)
             call json_parser_next(parser, value_event)
-            if (json_key_matches(event%string_val, len(event%string_val), 'action')) then
+            value_start = value_event%raw_start
+            if (value_event%event_type == JSON_ERROR) return
+            if (event%string_val == 'action') then
                 value_end = parser%pos - 1
                 raw_value = parser%input(value_start:value_end)
                 action_count = action_count + 1
@@ -412,7 +409,7 @@ contains
                     return
                 end if
                 public_action = value_event%string_val
-            else if (json_key_matches(event%string_val, len(event%string_val), 'dir')) then
+            else if (event%string_val == 'dir') then
                 value_end = parser%pos - 1
                 raw_value = parser%input(value_start:value_end)
                 dir_count = dir_count + 1
@@ -469,22 +466,6 @@ contains
         message = ''
     end subroutine normalize_gremlin_arguments
 
-    integer function json_value_first(parser)
-        type(json_parser_t), intent(in) :: parser
-        integer :: position
-
-        position = parser%pos
-        do while (position <= len(parser%input))
-            select case (parser%input(position:position))
-            case (' ', achar(9), achar(10), achar(13), ':', ',')
-                position = position + 1
-            case default
-                exit
-            end select
-        end do
-        json_value_first = position
-    end function json_value_first
-
     logical function json_text_has_control(text)
         character(len=*), intent(in) :: text
         integer :: i
@@ -518,6 +499,9 @@ contains
             case (JSON_ARRAY_END, JSON_OBJECT_END)
                 depth = depth - 1
             case (JSON_END_OF_INPUT)
+                ierr = 1
+                return
+            case (JSON_ERROR)
                 ierr = 1
                 return
             end select
