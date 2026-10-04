@@ -1,5 +1,23 @@
 # fo architecture and compatibility
 
+## Product boundary
+
+fo is a Fortran development driver: project build, incremental cache, test/run,
+affected and continuous testing, formatting/lint/diagnostics and thin editor/agent
+interfaces. It intentionally stays below the level of an environment manager or
+scientific workflow platform.
+
+fo does not replace fpm's manifest/registry role, Nix/Spack/container tooling,
+CI/repository governance, agent schedulers, proof/synthesis systems or scientific
+provenance/checkpoint/capsule infrastructure. The shared content store is a build
+cache, not a general-purpose Nix store or scientific object store.
+
+Compiler identity/version, effective flags, linker policy and declared project
+dependencies are recorded sufficiently for correct build/test invalidation.
+Complete host compiler-helper/sysroot/loader/system-library capture is not a fo
+contract. Users requiring hermetic reproducibility provide that environment
+externally.
+
 ## Build model
 
 fo detects the nearest parent `fpm.toml` or `CMakeLists.txt`. A directory with
@@ -93,10 +111,10 @@ fo and fpm deliberately differ in private state:
 Shell output is also intentionally different. fo emits compact progress and
 bounded diagnostics for LLM edit loops.
 
-Git and registry dependency acquisition still uses fpm as a bootstrap when no
-compiled dependency artifacts are available. Installation currently delegates
-to fpm with the release profile. Removing those last runtime dependencies is
-tracked work.
+Git and registry dependency acquisition uses fpm as a bootstrap when required,
+and installation follows fpm's release-install model. fo may streamline that
+build/test integration, but it does not replace fpm's package registry or grow
+a separate system/environment package manager.
 
 ## CMake contract
 
