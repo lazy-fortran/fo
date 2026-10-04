@@ -103,6 +103,7 @@ program test_continuous_preemption
     call assert_true(found, 'blocked descendant records its private execution view')
     if (found) then
         progress_cwd = read_text(progress_view)
+        progress_cwd = progress_cwd(:len(progress_cwd) - 1)
         call assert_true(file_exists(progress_cwd//'/preempted-output.txt'), &
             'blocked descendant owns a private relative output before preemption')
     end if
@@ -249,8 +250,8 @@ contains
             "write(unit,'(a)') 'owned by A'"//new_line('a')// &
             'close(unit)'//new_line('a')// &
             "open(newunit=unit,file='"//progress_view// &
-            "',status='replace',access='stream',form='unformatted')"//new_line('a')// &
-            'write(unit) trim(execution_cwd)'//new_line('a')// &
+            "',status='replace')"//new_line('a')// &
+            "write(unit,'(a)') trim(execution_cwd)"//new_line('a')// &
             'close(unit)'//new_line('a')// &
             'child = c_fork()'//new_line('a')// &
             'if (child < 0) error stop 8'//new_line('a')// &
