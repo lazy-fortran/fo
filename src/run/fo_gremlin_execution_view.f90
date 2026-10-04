@@ -1,9 +1,9 @@
 module fo_gremlin_execution_view
     !! Private per-invocation working directories over frozen Gremlin inputs.
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
-    use fo_cache, only: HASH_LEN, cache_digest
     use fo_fs, only: fs_make_dir, fs_mkdir_excl, fs_remove_tree
     use fo_input_inventory, only: input_entry_t, input_inventory_t, INPUT_FILE
+    use fo_process, only: process_getpid
     implicit none
     private
 
@@ -14,8 +14,8 @@ module fo_gremlin_execution_view
         character(len=PATH_LEN) :: cwd = ''
         character(len=PATH_LEN) :: owner_key = ''
         character(len=128) :: case_id = ''
-        character(len=HASH_LEN) :: generation_id = ''
-        character(len=HASH_LEN) :: inventory_digest = ''
+        character(len=64) :: generation_id = ''
+        character(len=64) :: inventory_digest = ''
         logical :: active = .false.
         logical :: complete = .false.
         logical :: retain_on_failure = .true.
@@ -47,9 +47,8 @@ contains
         character(len=*), intent(out) :: message
 
         character(len=PATH_LEN) :: source, destination, alias_root
-        character(len=PATH_LEN) :: parent, candidate
-        character(len=HASH_LEN) :: owner_digest
-        integer :: root_index, i, attempt, copy_rc
+        character(len=PATH_LEN) :: candidate
+        integer :: root_index, i, attempt, copy_rc, clock_count
         integer(c_int) :: writable
 
         view = execution_view_t()
@@ -67,17 +66,16 @@ contains
             return
         end if
         call fs_make_dir(trim(scratch_parent))
-        parent = trim(scratch_parent)//'/execution-'
-        owner_digest = cache_digest([character(len=512) :: &
-            trim(generation_id), trim(owner_key), trim(case_id)], 3)
-        if (len_trim(parent) + len(owner_digest) + 4 >= PATH_LEN) then
+        if (len_trim(scratch_parent) + 48 >= PATH_LEN) then
             message = 'execution view path exceeds the supported length'
             return
         end if
+        call system_clock(clock_count)
         attempt = 0
         do
             attempt = attempt + 1
-            write(candidate, '(a,a,"-",i0)') trim(parent), trim(owner_digest), attempt
+            write(candidate, '(a,"/execution-",i0,"-",i0,"-",i0)') &
+                trim(scratch_parent), process_getpid(), clock_count, attempt
             if (len_trim(candidate) >= PATH_LEN) then
                 message = 'execution view path exceeds the supported length'
                 return
