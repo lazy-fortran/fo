@@ -23,7 +23,7 @@ program test_gremlin_test_impact
     type(test_impact_result_t) :: selected, repeated
     type(dag_t) :: dag
     character(len=MAX_PATH) :: filenames(MAX_NODES)
-    integer :: ierr
+    integer :: ierr, filesystem_status
     character(len=1024) :: message
     character(len=4096) :: warm_cache, cold_cache, run_log
     character(len=4096) :: cache_files(128)
@@ -188,8 +188,9 @@ program test_gremlin_test_impact
         'module new_module'//new_line('a')//'end module new_module'//new_line('a'))
     call widen_after_change('new input selects all cases')
     call discover(baseline)
-    call fs_rename(trim(project)//'/src/new_module.f90', &
+    filesystem_status = fs_rename(trim(project)//'/src/new_module.f90', &
         trim(project)//'/src/renamed_module.f90')
+    call require(filesystem_status == 0, 'fixture module rename succeeds')
     call widen_after_change('renamed input selects all cases')
     call discover(baseline)
     call fs_remove_file(trim(project)//'/src/renamed_module.f90')
