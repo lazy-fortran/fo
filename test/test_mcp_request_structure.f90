@@ -13,7 +13,7 @@ program test_mcp_request_structure
     type(process_result_t) :: process
     type(json_value_t), allocatable :: responses(:)
     type(json_value_t) :: payload, result_object, field, content, first, tools, tool
-    type(json_value_t) :: schema, properties
+    type(json_value_t) :: schema, properties, rpc_id, error_object
     type(string_list_t) :: arguments
 
     call resolve_driver(driver)
@@ -35,13 +35,22 @@ program test_mcp_request_structure
         ',"lane_id":"safe"}}'))
     call append(mcp_request(3, 'tools/list'))
     call append(mcp_call(4, '{"action":"gremlin_status","dir":' // mcp_quote(project) // &
-        ',"lane_id":"safe","odd\"key":1}'))
+        ',"lane_id":"safe","odd":{"deep":[true,{"text":"x,}["}]}}'))
     call append(mcp_call(41, '{"action":"gremlin_status","dir":' // mcp_quote(project) // &
         ',"lane_id ":"safe"}'))
     call append(mcp_call(42, '{"action":"gremlin_status ","dir":' // mcp_quote(project) // &
         ',"lane_id":"safe"}'))
     call append(mcp_call(5, '{"action":"gremlin_start","dir":' // mcp_quote(project) // &
         ',"lane_id":"safe","background":false}'))
+    call append(mcp_call(43, '{"action":"graph","dir":' // mcp_quote(project) // &
+        ',"dot":true}'))
+    call append(mcp_call(44, '{"action":"graph","dir":' // mcp_quote(project) // &
+        ',"dot":"true"}'))
+    call append('{"jsonrpc":"2.0","id":"trace\u002d\"quoted",' // &
+        '"method":"unsupported/method"}')
+    call append('{"jsonrpc":"2.0","id":9007199254740993,' // &
+        '"method":"unsupported/method"}')
+    call append('{"jsonrpc":"2.0","id":9,"method":"tools/list"}{}')
     call append(mcp_request(6, 'shutdown'))
     call mcp_exchange(driver, project, cache, input, .false., responses, process)
     call assert_equal_integer(process%exit_code, 0, 'MCP server exits cleanly')
@@ -62,11 +71,15 @@ program test_mcp_request_structure
     properties = json_member(schema, 'properties')
     field = json_member(properties, 'background')
     call assert_true(field%kind == 0, 'background is not advertised while unsupported')
+    field = json_member(properties, 'dot')
+    content = json_member(field, 'type')
+    call assert_equal_string(json_string_value(content), 'boolean', &
+        'Graphviz DOT output is advertised as a boolean option')
 
     payload = tool_payload(responses(4), .true.)
     field = json_member(payload, 'error')
     call assert_contains(json_string_value(field), 'unsupported Gremlin request field', &
-        'escaped unknown key reaches strict core validation')
+        'nested composite argument reaches strict core validation')
     payload = tool_payload(responses(5), .true.)
     field = json_member(payload, 'error')
     call assert_contains(json_string_value(field), 'field', &
@@ -79,6 +92,33 @@ program test_mcp_request_structure
     field = json_member(payload, 'error')
     call assert_contains(json_string_value(field), 'background', &
         'unsupported background request is rejected')
+
+    result_object = json_member(responses(8), 'result')
+    content = json_member(result_object, 'content')
+    first = json_element(content, 1)
+    field = json_member(first, 'text')
+    call assert_true(index(json_string_value(field), 'digraph {') == 1, &
+        'boolean dot option selects Graphviz output')
+    result_object = json_member(responses(9), 'result')
+    content = json_member(result_object, 'content')
+    first = json_element(content, 1)
+    field = json_member(first, 'text')
+    call assert_true(index(json_string_value(field), 'digraph {') == 0, &
+        'string dot option does not select Graphviz output')
+
+    rpc_id = json_member(responses(10), 'id')
+    call assert_equal_string(json_string_value(rpc_id), 'trace-"quoted', &
+        'legal string RPC id decodes through the independent test parser')
+    call assert_true(index(process%stdout, '"id":"trace\u002d\"quoted"') > 0, &
+        'string RPC id preserves its original escape spelling')
+    rpc_id = json_member(responses(11), 'id')
+    call assert_equal_string(rpc_id%text, '9007199254740993', &
+        'large legal integer RPC id preserves its exact digits')
+
+    error_object = json_member(responses(12), 'error')
+    field = json_member(error_object, 'code')
+    call assert_equal_integer(int(json_number_value(field)), -32600, &
+        'trailing JSON after the RPC envelope is rejected')
 
     arguments = string_list_t()
     call list_add(arguments, 'gremlin')
@@ -93,7 +133,7 @@ program test_mcp_request_structure
 
     call remove_tree(scratch)
     call finish_assertions()
-    write(*, '(a)') 'mcp-request-structure: envelope, metadata, escaped keys and strict fields passed'
+    write(*, '(a)') 'mcp-request-structure: envelope, composite values and strict fields passed'
 
 contains
 

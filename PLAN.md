@@ -7,10 +7,11 @@ New interfaces/workflows below are planned, not claimed implemented by this edit
 
 ## Immediate controller instructions
 
-Execution has resumed under the explicit continuation objective: implement and
-test Gremlin through its own bootstrap according to this plan. Continue parallel
-Luna work with scoped Sol escalation and resident Gremlin feedback; prepared
-source is promoted only after its focused integrated correctness evidence.
+The explicit goal continuation resumes implementation and testing through
+Gremlin's own bootstrap. Use parallel Luna source work and task-specific Sol
+escalation. Until measured admission is implemented, allow one heavy build/test
+lane per host; parallel source work continues. Preserve warm caches and push
+exact integrated increments after focused local correctness checks.
 
 1. Continue small, locally verified main increments. Use the exact candidate's
    focused correctness tests and known reproducers; reuse warm caches. Do not
@@ -169,15 +170,53 @@ The integrated native harness oracle passes 1/1 in 0.30s; no actual benchmark,
 third-party acquisition or new performance result was run or claimed. Real-edit
 workloads and broader audit instrumentation remain open under #190/#145.
 
-### Parked implementation checkpoints
+### Preserved implementation checkpoints
 
 | Issue | Published task checkpoint | Evidence and remaining work |
 | --- | --- | --- |
-| #150 | `agent/150-shared-json` at `583c385` | Domain request adoption promoted; integrated request/structure 2/2 (0.09s), public MCP 1/1 (8.80s). Residual MCP lexical helpers remain the next slice. |
-| #191 | `agent/191-verify` at `18af66a` | Promoted bounded scanner fix; integrated oracle 1/1 (0.22s), controlled old-driver negative rejects the prior behavior. |
-| #170 | `agent/170-sol-repair` at `1fc8456` | Isolated provider test/build green after two failed Luna repairs; combined/public runtime integration still required. |
-| #189 | `agent/189-campaign` at `5441a03` | Campaign adoption/metadata source only; independent executed-case oracle and combined verification pending. |
-| #161 | `agent/161-native-verify` at `7eef4ef` | First native MCP replacement source repaired but unverified; all six JS fixtures remain. |
+| #150 | integrated `6f68eb6` | Shared typed request/MCP scanner adoption and nested runner-result repair pass exact combined public gates. Adjacent RPC ID validation remains explicitly tracked rather than claimed fixed. |
+| #191 | main through `39df584` | Bounded scanner oracle passes 1/1 (0.22s); controlled prior-driver negative rejects three behavioral faults and confirms cleanup. Issue closed. |
+| #170 | combined `bcc676f`, public parser repair `87a6272` | Combined provider/inventory 2/2 (0.03s), app build 71/71. Actual repaired app proves relative pass output cleanup and failed-output retention without editable-source mutation; preemption and declaration plumbing remain. |
+| #189 | `agent/189-campaign` at `f2d83f5` | Frozen input-delta campaign selection, retained regression ordering and real executed-case oracle are published source only; combined verification pending. |
+| #161 | first slice integrated `6f68eb6` | Scoped Sol repair adds native stale-MCP and explicit failed-evidence retention. Exact combined five-target gate passes; schema-veto mutation rejects four behavioral faults. Six JS fixtures remain until workflow/replacement integration finishes. |
+| #151 | `agent/151-git-provenance` at `c1f2dd6` | Metadata-only execution-identity slice and native oracle are published source only. Declared/configure-consumed Git version remains a real input, not an ignored metadata change. |
+| #165/#175 | isolated Luna tasks at base `bcc676f` | Incomplete source frozen with hashes below; no tests/builds ran. Compact manifests reuse Fx storage, and the single `[[extra.fo.inputs]]` declaration shape feeds canonical inventory. Dependency/layout consumers remain incomplete. |
+
+Fx Darwin repair is promoted on main `33baa0c`; #56 is closed. Exact task source
+`894ff9a` passes the two native lease/read-lease cases on faepmac1 (0.46s/1.33s)
+with actual pinned driver `f68e0916`, and on Linux (2/2, 6.89s) with app
+`206228c5`. It resolves ordinary filesystem root aliases and restoration parents.
+Prior failures remain evidence; no timeout was increased.
+
+The nested runner-report regression is repaired in exact integrated code
+`6f68eb62a15e696ad945b97f7f0abf9cbbc88457`: actual app build 70/70 (43.23s),
+runner report/harness evidence/stale MCP/request structure/MCP system 5/5 PASS
+(12.46s runtime). No full-suite, whole-bootstrap or native-migration completion
+is implied. Actual verified app SHA256:
+`b320e6059f5dc82c5160a160f0795662e95d9a0a96addcd801940dd8fc62986b`.
+Dependencies: Fx `311ace3`, FortFront `fe59a05`, gfortran 16.2.1.
+Build log SHA256 `832f5bf25d047e61a7b1685a076a5dd80d2c9f5110349dac1562f9255d66080e`;
+focused-gate log SHA256 `c86ee6f9e84328f5dff43a5b8d87b79e642ccfea56f3b0babfeabc253336523d`.
+
+#170's public continuous-preemption check failed (75.45s): its relative
+`token.txt` fixture is not yet declared/restored into the private execution view.
+Do not fix that by weakening the oracle or copying arbitrary runtime inputs.
+Prepared fixture declarations/reproduction oracle `7cbe949` depend on #175's
+parser and #161's additive failed-evidence retention (`2e52d78`). This failing
+gate prevents #170 promotion despite its provider/pass/fail cleanup checks.
+
+Frozen incomplete patches, including untracked source: #175 diff SHA256
+`da2cf8ec5d3fff28727277ebc18fad40cb5768ce2c190005f295d925874fcb39`;
+#165 manifest-file SHA256
+`75a36291806b14329c6246c2b02bab5a9fe7fbed78b07b2f16ffd1948491cb7b`,
+with untracked-file patch SHA256
+`c01487d9b4efd6b6314726008316eecc68a35e599ac6e0269a5f9b38877b26f1`.
+These are local partial source, not completed implementation or test evidence.
+
+Source workers are active again. Start one resident integration lane after the
+declared-fixture preemption gate; temporary acceptance lanes have explicit owners
+and verified cleanup. Background payload work yields the single heavy host lane
+to focused gates. Do not launch one cold resident per worker.
 
 The combined #150/#191 code checkpoint is `2e7c048`, now integrated with current
 documentation through `91c8b62`. Its code patch versus prior main `7a638e8` has SHA256
@@ -187,11 +226,56 @@ The app used for public acceptance was built from `8a957c0`, with SHA256
 the intervening scanner fix changes only its test import. App and oracle inputs
 are recorded separately, not claimed to be a fully verified whole generation.
 
-Implementation resumes from these small prepared increments. Finish #170/#189
+Continue these small increments. Finish #170/#189
 consumers and use resident Gremlin by default. Repair backend/dependency defects
 in their owning provider and recheck the original consumer; do not permanently
 work around them or exclude fpm/CMake projects. #148 and #165-#167 follow the
 same canonical inventory. Optional #190/#145 audits stay independent.
+
+## CMake and CTest expansion (#192)
+
+The detailed plan is [doc/CMAKE_GREMLIN_PLAN.md](doc/CMAKE_GREMLIN_PLAN.md).
+[#192](https://github.com/lazy-fortran/fo/issues/192) coordinates #193 context and
+File API, #194 CTest semantics, #195 result/receipt import, #196 persistent
+incremental slots, #197 shared input/impact adaptation, #198 ITpPlasma feature
+parity, and optional #199 compiler-launcher cache reuse. This is planned scope;
+no CMake Gremlin implementation or scientific-project test pass is claimed here.
+
+CMake remains configure/target/dependency authority; cmake --build retains its
+generator's incremental compilation; CTest remains the registered test executor.
+One shared engine does not mean translating CMake into the native gfortran DAG.
+Start with correct delegation and broad conservative tests, then isolated
+last-compilable slots and precise impact. Unsupported optimization falls back
+explicitly; unsupported requested isolation/receipt guarantees never become a
+false full capability. Preserve presets, compiler/configuration choices, actual
+test scopes, fixtures, resource semantics and upstream Python/MPI/GPU commands.
+
+The CMake plan refines two generic assumptions below. Git metadata is irrelevant
+only when project execution does not consume it: SIMPLE embeds git describe in
+version.f90, so its relevant Git-derived version is an input (#197). Likewise,
+private CTest fixture groups can share their configured working/build view and
+perform same-generation setup builds; do not force a different cwd/read-only
+tree per case or deadlock a fixture's nested cmake --build (#194/#196). Immutable
+captured inputs remain separate from owned generated/test output.
+
+#195 reports CTest receipt granularity honestly; incomplete cancelled batch XML
+is not per-case PASS evidence. #198 extends the existing #145/#190 internal
+non-blocking matrix, including real project profiles and reference workflows.
+Scientific repositories retain human review/required CI/golden-record policies.
+Complete project/performance audits do not gate ordinary fo main increments.
+#199 is optional and never blocks delegated CMake compatibility.
+
+Operational rollout: the shared prompts/Fortran skill defaults to resident
+Gremlin for both fpm and CMake consumers. Follow the detailed plan's delegated
+vertical slice (#193 plus bounded #194/#195) before event-driven serialized
+operation, then #196 slots and #197 precision. This work can land alongside the
+native engine migration; it does not wait for #199 or the full #198 audit.
+A serialized slot stops/reaps tests before mutation and reports unavailable
+last-compilable overlap. Keep backend capabilities separate from resident
+session lifetime (#142/#155): completed tests never expire a persistent owner.
+Consumer failures become focused upstream fo/dependency repairs and are checked
+again in the original profile. Ordinary CTest success does not establish Gremlin
+freshness, cancellation or receipt support. Shared prompts retain those limits.
 
 ## One architecture
 
@@ -322,7 +406,8 @@ must retain any closure incompleteness. A relevant edit/overflow/root loss clear
 freshness and wakes bounded reconciliation. No idle source recapture, toolchain
 probe, payload hashing or build/test loop. Preserve finite red/unknown outcomes
 without a busy retry loop. Git commit metadata is provenance, not a new execution
-generation when bytes/configuration are unchanged.
+generation when bytes/configuration are unchanged and the project does not use
+Git-derived values in generated code or tests; #197 handles that exception.
 
 ### Resident development and temporary task lifetimes (#142/#155/#139)
 
@@ -510,6 +595,8 @@ These are ownership/dependency edges, not a single serial mega-gate:
 | quiescence | #155 with #148/#153/#154 | same owner remains resident; no payload work asleep; edit wakes; scope/completeness honest |
 | decomposition | #149/#150/#185/#186 | existing behavioral parity; no new competing service or line-count gate |
 | optional audit | #190 / #145 | tiny harness/acquisition correctness now; real runs asynchronous, never blocking |
+| CMake/CTest backend | #192 umbrella; #193-#198 | delegated context/test parity, incremental slot ownership, conservative impact and explicit capabilities |
+| optional CMake cache | #199 | supported compile-action reuse; unknown command uses exact compiler passthrough |
 
 Fix concrete regressions with focused local reproducers before unrelated main
 promotion. Independent planning/provider work can proceed in parallel. Apply one
