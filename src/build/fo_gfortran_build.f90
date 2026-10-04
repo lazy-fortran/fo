@@ -1,7 +1,8 @@
 module fo_gfortran_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, manifest_exe_name, &
         manifest_executable_selected, &
-        manifest_test_name, manifest_test_args, manifest_example_name, dep_kind, DEP_PATH
+        manifest_test_name, manifest_test_args, manifest_example_name, dep_kind, &
+        DEP_PATH, DEP_GIT
     use fo_scan, only: scan_unit_t, scan_dir, scan_dir_regex, scan_dir_cached, &
         source_defines_module, &
         MAX_UNITS, MAX_NAME, MAX_PATH
