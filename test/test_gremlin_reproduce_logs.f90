@@ -333,7 +333,8 @@ contains
 
     subroutine stop_lane(owner)
         character(len=*), intent(in) :: owner
-        call gremlin_stop_lane(driver, project, cache, state, lane, owner)
+        call gremlin_stop_lane(driver, project, cache, state, lane, owner, &
+            allow_terminal_error=.true.)
     end subroutine stop_lane
 
 end program test_gremlin_reproduce_logs

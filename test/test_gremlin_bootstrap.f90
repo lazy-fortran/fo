@@ -40,7 +40,10 @@ program test_gremlin_bootstrap
     lane_gate = scratch//'/lane-b.fifo'
     call make_directory(project//'/test')
     call write_text(project//'/fpm.toml', &
-        'name = "gremlin_bootstrap_probe"'//new_line('a'))
+        'name = "gremlin_bootstrap_probe"'//new_line('a')// &
+        '[[extra.fo.inputs]]'//new_line('a')// &
+        'path = "test/obsolete.version"'//new_line('a')// &
+        'role = "test-fixture"'//new_line('a'))
     call gremlin_fifo(old_gate)
     call gremlin_fifo(new_gate)
     call write_generation('old')
