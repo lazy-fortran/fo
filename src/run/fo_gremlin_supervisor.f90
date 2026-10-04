@@ -43,7 +43,7 @@ module fo_gremlin_supervisor
     use fo_test_budget, only: test_budget_seconds, test_wall_cap_seconds
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_process, only: argv_push, process_cancel_pid, &
-        process_poll_pid, process_start_argv_logged
+        process_poll_pid, process_start_argv_logged, process_set_async_scope
     use fo_scan_types, only: MAX_PATH
     use fo_util, only: extract_json_field, json_bool, json_int, make_tmpfile
     use fx_dag, only: dag_t, MAX_NODES
@@ -1125,6 +1125,18 @@ contains
             end if
             call simple_response('run', request%lane_id, trim(stored_session_id), &
                 'attached', response)
+            return
+        end if
+        call process_set_async_scope(session%state_dir, session%owner_pid, &
+            session%owner_start, ierr)
+        if (ierr /= 0) then
+            call gremlin_session_release(session, release_error, state_message)
+            if (release_error == 0) message = 'cannot configure exact process ownership: '// &
+                trim(int_text(ierr))
+            if (release_error /= 0) message = 'cannot release owner after process ownership '// &
+                'setup failure: '//trim(state_message)
+            call error_response('run', trim(message), response)
+            exitcode = 2
             return
         end if
         call gremlin_recover_owner_journal(project_dir, session, ierr, message)
