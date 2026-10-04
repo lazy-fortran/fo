@@ -393,9 +393,7 @@ contains
             call json_parser_next(parser, value_event)
             value_start = value_event%raw_start
             if (value_event%event_type == JSON_ERROR) return
-            if (event%string_val == 'action') then
-                value_end = parser%pos - 1
-                raw_value = parser%input(value_start:value_end)
+            if (json_key_matches(event%string_val, len(event%string_val), 'action')) then
                 action_count = action_count + 1
                 if (value_event%event_type /= JSON_STRING .or. &
                     .not. allocated(value_event%string_val)) then
@@ -409,9 +407,7 @@ contains
                     return
                 end if
                 public_action = value_event%string_val
-            else if (event%string_val == 'dir') then
-                value_end = parser%pos - 1
-                raw_value = parser%input(value_start:value_end)
+            else if (json_key_matches(event%string_val, len(event%string_val), 'dir')) then
                 dir_count = dir_count + 1
                 if (value_event%event_type /= JSON_STRING .or. &
                     .not. allocated(value_event%string_val)) then
