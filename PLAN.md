@@ -703,6 +703,9 @@ completed entries below are retained as prerequisites and evidence:
 19. **Complete:** [#177](https://github.com/lazy-fortran/fo/issues/177): make global and
     command-local help side-effect free. `fo install --help` must never build or
     replace the controller-owned installed driver.
+20. **Complete:** [#178](https://github.com/lazy-fortran/fo/issues/178): keep the
+    standalone install-help C program outside FPM automatic test discovery while
+    preserving the explicit public-process Fortran oracle.
 
 Experimental agent scheduler PR #147 is closed without merge; #143 and #152 are
 closed as not planned. External controllers own worker DAGs, worktrees, model
@@ -792,6 +795,11 @@ Implemented issue state:
   project, HOME, cache and prefix unchanged while explicit isolated install
   alone replaces the sentinel. CI runs it explicitly; independent review and
   the exact integrated focused gate pass, and the real global driver remains unchanged.
+- #178 is complete at `9a8ca76`: the standalone install-help helper lives under
+  explicit `test-fixtures/c`, so clean FPM no longer links its C `main` into
+  unrelated Fortran tests. The old placement reproduces duplicate-main; repaired
+  full FPM, exact inventory, focused #177 and integrated clean-help gates pass.
+  The post-submit regression promotion pause is cleared.
 - fx #42 is complete on fx main through `6beeec4`: verified immutable blobs and
   trees publish from retained descriptors, survive publication/cleanup races and
   materialize safely on Linux/APFS. The deterministic premature-marker oracle
