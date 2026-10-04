@@ -23,6 +23,11 @@ program test_gremlin_manifest
             character(kind=c_char), intent(in) :: path(*)
             integer(c_int), value :: mode
         end function c_access
+        integer(c_int) function c_chmod(path, mode) bind(C, name='chmod')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: mode
+        end function c_chmod
         integer(c_int) function c_symlink(target, path) bind(C, name='symlink')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: target(*), path(*)
@@ -41,21 +46,22 @@ program test_gremlin_manifest
         end function remove_tree
     end interface
 
-    character(len=512) :: root, project, dependency, cache, driver
-    character(len=512) :: first_file, second_file, message
+    character(len=512) :: root, project, dependency, cache, cache_b, driver
+    character(len=512) :: first_file, second_file, mutated_file, message
     character(len=HASH_LEN) :: driver_digest
     integer(int64) :: driver_size
     integer :: ierr, status, unit, ios, i, shared_root
     type(input_declaration_t) :: declarations(1)
     type(input_inventory_t) :: inventory, changed
     type(generation_context_t) :: context
-    type(generation_t) :: first, reused, mutated
+    type(generation_t) :: first, reused, mutated, corrupted_reuse
     logical :: found_aliases
 
     root = '/var/tmp/fo-generation-manifest-'//int_text(process_getpid())
     project = trim(root)//'/project'
     dependency = trim(root)//'/shared'
     cache = trim(root)//'/cache'
+    cache_b = trim(root)//'/cache-b'
     driver = trim(root)//'/driver-image'
     call remove_fixture(trim(root))
     call fs_make_dir(trim(project)//'/src')
@@ -135,6 +141,9 @@ program test_gremlin_manifest
 
     context%base_commit = 'base-b'
     context%patch_digest = 'patch-b'
+    status = c_setenv('FO_CACHE_DIR'//c_null_char, &
+        trim(cache_b)//c_null_char, 1_c_int)
+    call require(status == 0, 'second Fx cache environment is configured')
     call generation_capture(trim(project), trim(cache), &
         context, reused, ierr, message)
     call require(ierr == 0, 'generation reuse with provenance change: '//trim(message))
@@ -143,6 +152,8 @@ program test_gremlin_manifest
             'provenance-only change preserves execution identity')
         call require(reused%base_commit == 'base-a', &
             'reused generation keeps its original provenance')
+        call require(reused%store_root == first%store_root, &
+            'recovery follows the generation-pinned Fx store')
     end if
 
     call write(trim(project)//'/fixture.dat', 'source-two')
@@ -154,10 +165,24 @@ program test_gremlin_manifest
     if (ierr == 0) then
         call require(mutated%identity /= first%identity, &
             'source mutation changes the execution identity')
+        call require(mutated%store_root /= first%store_root, &
+            'new generation records its own current Fx store')
         call require(file_equals(trim(first%project_root)//'/fixture.dat', &
             'source-one'), 'prior generation remains immutable after mutation')
         call require(file_equals(trim(mutated%project_root)//'/fixture.dat', &
             'source-two'), 'new generation contains the changed input')
+        mutated_file = trim(mutated%project_root)//'/fixture.dat'
+        status = c_chmod(trim(mutated%project_root)//c_null_char, 493_c_int)
+        status = c_chmod(trim(mutated_file)//c_null_char, 420_c_int)
+        call write(trim(mutated_file), 'cache-corruption')
+        call require(file_equals(trim(mutated_file), 'cache-corruption'), &
+            'fixture changes bytes in the cached generation')
+        status = c_chmod(trim(mutated_file)//c_null_char, 292_c_int)
+        status = c_chmod(trim(mutated%project_root)//c_null_char, 365_c_int)
+        call generation_capture(trim(project), trim(cache), context, &
+            corrupted_reuse, ierr, message)
+        call require(ierr /= 0, &
+            'reuse rejects changed bytes in the materialized generation')
     end if
 
     call remove_fixture(trim(root))
