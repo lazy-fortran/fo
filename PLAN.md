@@ -7,10 +7,11 @@ New interfaces/workflows below are planned, not claimed implemented by this edit
 
 ## Immediate controller instructions
 
-Execution has resumed under the explicit continuation objective: implement and
-test Gremlin through its own bootstrap according to this plan. Continue parallel
-Luna work with scoped Sol escalation and resident Gremlin feedback; prepared
-source is promoted only after its focused integrated correctness evidence.
+The latest replacement workspace AGENTS instructions restrict current delivery
+to plans, issue maintenance and document commits/pushes. Implementation, builds,
+tests and model workers are stopped until an explicit execution trigger. The
+development rules below apply after resumption; preserved source and completed
+focused evidence do not authorize source promotion during this pause.
 
 1. Continue small, locally verified main increments. Use the exact candidate's
    focused correctness tests and known reproducers; reuse warm caches. Do not
@@ -169,27 +170,50 @@ The integrated native harness oracle passes 1/1 in 0.30s; no actual benchmark,
 third-party acquisition or new performance result was run or claimed. Real-edit
 workloads and broader audit instrumentation remain open under #190/#145.
 
-### Active implementation checkpoints
+### Preserved implementation checkpoints
 
 | Issue | Published task checkpoint | Evidence and remaining work |
 | --- | --- | --- |
-| #150 | `agent/150-mcp-codec` at `f6c82fa` | Domain adoption is on main; residual MCP scanner replacement is published source only. Public Gremlin found a nested runner-report consumer incorrectly using a top-level getter; repair and independent result oracle have one Sol owner. |
+| #150 | `agent/150-mcp-codec` at `dcbd09f` | Domain adoption is on main. Residual MCP scanner replacement built and passed public MCP/system and request-structure gates using app `72fb9f3b`; the final change corrects only the DOT fixture oracle. Prepared, not promoted. |
 | #191 | main through `39df584` | Bounded scanner oracle passes 1/1 (0.22s); controlled prior-driver negative rejects three behavioral faults and confirms cleanup. Issue closed. |
 | #170 | combined `bcc676f`, public parser repair `87a6272` | Combined provider/inventory 2/2 (0.03s), app build 71/71. Actual repaired app proves relative pass output cleanup and failed-output retention without editable-source mutation; preemption and declaration plumbing remain. |
 | #189 | `agent/189-campaign` at `f2d83f5` | Frozen input-delta campaign selection, retained regression ordering and real executed-case oracle are published source only; combined verification pending. |
-| #161 | frozen Luna `cf0b975`, scoped Sol repair active | Two failed substantive fixture repairs triggered task-specific escalation. Passing runner report misclassification is a confirmed production defect; six JS fixtures remain until native behavioral replacements pass. |
+| #161 | `agent/161-sol-repair` at `c431498` | After two substantive Luna failures, scoped Sol repair preserves truthful nested runner results and failed evidence. Actual app build 70/70 (10.19s); stale-MCP/report/harness gate 3/3 (3.64s). Schema-veto mutation fails four behavioral assertions. Prepared, not promoted; six JS fixtures remain. |
 | #151 | `agent/151-git-provenance` at `c1f2dd6` | Metadata-only execution-identity slice and native oracle are published source only. Declared/configure-consumed Git version remains a real input, not an ignored metadata change. |
-| #165/#175 | isolated Luna tasks | Compact manifest capture reuses Fx storage; canonical Git dependency and fixture declaration consumers need completion. No second inventory/store or host closure. |
+| #165/#175 | isolated Luna tasks at base `bcc676f` | Incomplete source frozen with hashes below; no tests/builds ran. Compact manifests reuse Fx storage, and the single `[[extra.fo.inputs]]` declaration shape feeds canonical inventory. Dependency/layout consumers remain incomplete. |
 
-Fx Darwin repair `894ff9a` passes the two native lease/read-lease cases on
-faepmac1 (0.46s and 1.33s) with actual pinned driver `f68e0916`. It resolves
-ordinary filesystem root aliases and restoration parents; Linux integration
-remains pending. Failed earlier receipts remain evidence rather than being
-relabelled green. No timeout increase was used.
+Fx Darwin repair is promoted on main `33baa0c`; #56 is closed. Exact task source
+`894ff9a` passes the two native lease/read-lease cases on faepmac1 (0.46s/1.33s)
+with actual pinned driver `f68e0916`, and on Linux (2/2, 6.89s) with app
+`206228c5`. It resolves ordinary filesystem root aliases and restoration parents.
+Prior failures remain evidence; no timeout was increased.
 
-One resident integration lane starts after the actual combined runner verdict
-and preemption gates pass. Temporary acceptance lanes have explicit owners and
-are stopped after checking cleanup. Do not launch one cold resident per worker.
+The known runner-report regression remains on Fo main: a genuine nested PASS
+can become INFRA_ERROR after strict JSON adoption. The prepared repair is
+`87a6272` plus `7f1d7d3`; the controller also holds it at `97e1556`, with source
+bytes matching the verified Sol app inputs. Repair this first after resumption.
+Actual verified app SHA256:
+`235c1c609aa62e47b4a644339c61e3711d024002468f02937832717a84492c00`.
+
+#170's public continuous-preemption check failed (75.45s): its relative
+`token.txt` fixture is not yet declared/restored into the private execution view.
+Do not fix that by weakening the oracle or copying arbitrary runtime inputs.
+Prepared fixture declarations/reproduction oracle `7cbe949` depend on #175's
+parser and #161's additive failed-evidence retention (`2e52d78`). This failing
+gate prevents #170 promotion despite its provider/pass/fail cleanup checks.
+
+Frozen incomplete patches, including untracked source: #175 diff SHA256
+`da2cf8ec5d3fff28727277ebc18fad40cb5768ce2c190005f295d925874fcb39`;
+#165 manifest-file SHA256
+`75a36291806b14329c6246c2b02bab5a9fe7fbed78b07b2f16ffd1948491cb7b`,
+with untracked-file patch SHA256
+`c01487d9b4efd6b6314726008316eecc68a35e599ac6e0269a5f9b38877b26f1`.
+These are local partial source, not completed implementation or test evidence.
+
+All owned jobs/worker slots are stopped. After explicit resumption, one resident
+integration lane starts after the actual combined runner verdict and preemption
+gates pass. Temporary acceptance lanes have explicit owners and verified cleanup.
+Do not launch one cold resident per worker.
 
 The combined #150/#191 code checkpoint is `2e7c048`, now integrated with current
 documentation through `91c8b62`. Its code patch versus prior main `7a638e8` has SHA256
@@ -199,7 +223,7 @@ The app used for public acceptance was built from `8a957c0`, with SHA256
 the intervening scanner fix changes only its test import. App and oracle inputs
 are recorded separately, not claimed to be a fully verified whole generation.
 
-Implementation resumes from these small prepared increments. Finish #170/#189
+After an explicit execution trigger, resume these small increments. Finish #170/#189
 consumers and use resident Gremlin by default. Repair backend/dependency defects
 in their owning provider and recheck the original consumer; do not permanently
 work around them or exclude fpm/CMake projects. #148 and #165-#167 follow the
