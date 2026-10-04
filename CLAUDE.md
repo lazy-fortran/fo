@@ -102,13 +102,15 @@ silently accept one random case or download benchmark projects.
 Run unresolved reproducers first, then all affected/mandatory cases, then the
 finite unseen background epoch. Preserve slow affected correctness requirements
 and exact scope/counts. Do not truncate requirements to a campaign chunk.
-Current-generation observations, model completeness and reproducible-closure
-completeness are separate facts. Repository governance remains external.
+Current-generation observations and project-input/impact-model completeness are
+separate facts. Repository governance remains external; hermetic host closure is
+not a fo concept.
 
 Only successfully built immutable candidates replace the active generation.
 Failed candidates publish diagnostics and receive no tests; last-compilable
 work continues. Keep source views immutable and use private writable execution
-scratch. Each running process leases its exact build/runtime result. Cancellation
+scratch. Each running process leases the exact project build outputs and declared project
+assets it needs. Cancellation
 and cleanup touch only proven-owned state; no broad pkill or shared-cache purge.
 Keep documented platform containment limits honest.
 
