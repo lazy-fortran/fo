@@ -45,7 +45,8 @@ contains
     end subroutine assert
 
     subroutine test_gfortran_build_writes_compile_commands()
-        character(len=512) :: project_dir, log_file, compdb, cache_dir, invalid_compdb
+        character(len=512) :: project_dir, log_file, compdb, cache_dir
+        character(len=512) :: invalid_compdb, suffix_mutant_compdb
         integer :: exitcode, n_first, n_second, ierr, u
         logical :: exists
 
@@ -71,6 +72,11 @@ contains
         close (u)
         call assert(.not. valid_compdb(project_dir, invalid_compdb), &
             'compdb oracle rejects malformed JSON')
+
+        suffix_mutant_compdb = trim(project_dir)//'/suffix_mutant_compile_commands.json'
+        call write_suffix_mutant(project_dir, suffix_mutant_compdb)
+        call assert(.not. valid_compdb(project_dir, suffix_mutant_compdb), &
+            'compdb oracle rejects a source path with an extra suffix')
 
         call execute_command_line('rm -f '//trim(compdb))
         call gfortran_build(project_dir, log_file, exitcode, n_compiled=n_second)
@@ -121,8 +127,8 @@ contains
             field = json_member(entry, 'file')
             if (field%kind /= json_string) return
             filename = json_string_value(field)
-            if (index(trim(filename), '/src/lib.f90') > 0) has_library = .true.
-            if (index(trim(filename), '/app/main.f90') > 0) has_main = .true.
+            if (path_has_suffix(filename, '/src/lib.f90')) has_library = .true.
+            if (path_has_suffix(filename, '/app/main.f90')) has_main = .true.
 
             arguments = json_member(entry, 'arguments')
             if (arguments%kind /= json_array .or. json_size(arguments) == 0) return
@@ -150,6 +156,35 @@ contains
         end do
         valid_compdb = has_library .and. has_main
     end function valid_compdb
+
+    logical function path_has_suffix(path, suffix)
+        character(len=*), intent(in) :: path, suffix
+        integer :: path_length, suffix_length
+
+        path_has_suffix = .false.
+        path_length = len_trim(path)
+        suffix_length = len(suffix)
+        if (path_length < suffix_length) return
+        path_has_suffix = path(path_length - suffix_length + 1:path_length) == suffix
+    end function path_has_suffix
+
+    subroutine write_suffix_mutant(project_dir, compdb)
+        character(len=*), intent(in) :: project_dir, compdb
+        integer :: u
+
+        open (newunit=u, file=trim(compdb), status='replace', action='write')
+        write (u, '(a)') '[{"directory":"'//trim(project_dir)// &
+            '","file":"'//trim(project_dir)//'/src/lib.f90.extra",'// &
+            '"arguments":["/usr/bin/gfortran","-c","-J'//trim(project_dir)// &
+            '/build/mod","-o","'//trim(project_dir)//'/build/lib.o","'// &
+            trim(project_dir)//'/src/lib.f90.extra"]},'
+        write (u, '(a)') '{"directory":"'//trim(project_dir)// &
+            '","file":"'//trim(project_dir)//'/app/main.f90",'// &
+            '"arguments":["/usr/bin/gfortran","-c","-J'//trim(project_dir)// &
+            '/build/mod","-o","'//trim(project_dir)//'/build/main.o","'// &
+            trim(project_dir)//'/app/main.f90"]}]'
+        close (u)
+    end subroutine write_suffix_mutant
 
     subroutine make_compdb_project(project_dir)
         character(len=*), intent(in) :: project_dir
