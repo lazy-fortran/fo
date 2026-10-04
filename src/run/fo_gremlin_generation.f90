@@ -505,6 +505,10 @@ contains
                     context%input_inventory, status, message)
             end if
             if (status == 0) then
+                call bind_inventory_to_bundle(restored_inventory, trim(cache), &
+                    status, message)
+            end if
+            if (status == 0) then
                 generation%manifest_id = manifest_id
                 generation%input_inventory = restored_inventory
                 generation%input_inventory_ready = .true.
@@ -576,6 +580,12 @@ contains
         call fo_c_generation_unlock(int(fd, c_int))
         generation%manifest_id = manifest_id
         generation%input_inventory = context%input_inventory
+        call bind_inventory_to_bundle(generation%input_inventory, trim(cache), &
+            status, message)
+        if (status /= 0) then
+            ierr = 1
+            return
+        end if
         generation%input_inventory_ready = .true.
         generation%input_inventory_complete = context%input_inventory%complete
         generation%input_inventory_diagnostic = context%input_inventory%diagnostic
@@ -616,6 +626,9 @@ contains
             message = 'generation manifest does not match its execution identity'
             return
         end if
+        call bind_inventory_to_bundle(inventory, trim(generation%root), &
+            status, message)
+        if (status /= 0) return
         generation%manifest_id = manifest_id
         generation%input_inventory = inventory
         generation%input_inventory_ready = .true.
@@ -628,6 +641,31 @@ contains
         message = trim(inventory%diagnostic)
         ierr = 0
     end subroutine generation_load_inventory
+
+    subroutine bind_inventory_to_bundle(inventory, generation_root, ierr, message)
+        type(input_inventory_t), intent(inout) :: inventory
+        character(len=*), intent(in) :: generation_root
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        integer :: i
+
+        ierr = 1
+        message = ''
+        if (.not. allocated(inventory%roots) .or. &
+            len_trim(generation_root) == 0) then
+            message = 'cannot bind input inventory to its generation bundle'
+            return
+        end if
+        if (len_trim(generation_root) + len('/bundle') >= PATH_LEN) then
+            message = 'generation bundle path exceeds the supported length'
+            return
+        end if
+        do i = 1, inventory%root_count
+            inventory%roots(i)%physical_path = &
+                trim(generation_root)//'/bundle'
+        end do
+        ierr = 0
+    end subroutine bind_inventory_to_bundle
 
     subroutine freeze_generation_inputs(generation_root, roots, ierr)
         character(len=*), intent(in) :: generation_root
