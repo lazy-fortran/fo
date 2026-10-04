@@ -5,6 +5,7 @@ module fo_gremlin_generation
     use fo_cache, only: HASH_LEN, cache_digest, cache_file_digest
     use fo_fs, only: fs_make_dir, fs_mkdir_excl
     use fo_process, only: process_getpid
+    use fo_input_inventory, only: input_inventory_t
     implicit none
     private
 
@@ -28,6 +29,7 @@ module fo_gremlin_generation
         character(len=HASH_LEN) :: driver_digest = ''
         integer(int64) :: driver_size = 0_int64
         type(generation_input_t), allocatable :: inputs(:)
+        type(input_inventory_t) :: input_inventory
     end type generation_context_t
 
     type, public :: generation_t
@@ -39,6 +41,10 @@ module fo_gremlin_generation
         character(len=PATH_LEN) :: project_root = ''
         character(len=:), allocatable :: base_commit
         character(len=:), allocatable :: patch_digest
+        type(input_inventory_t) :: input_inventory
+        logical :: input_inventory_ready = .false.
+        logical :: input_inventory_complete = .false.
+        character(len=1024) :: input_inventory_diagnostic = ''
     end type generation_t
 
     public :: generation_capture, generation_driver_identity

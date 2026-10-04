@@ -317,12 +317,12 @@ static int list_names(int dir_fd, struct name_list *names) {
 }
 
 static int copy_regular_file(int input, const char *target,
-                             const struct stat *before) {
+                             const struct stat *before, mode_t output_mode) {
     int output;
     char buffer[65536];
     ssize_t n;
     struct stat after;
-    output = open(target, O_WRONLY | O_CREAT | O_EXCL, before->st_mode & 0777);
+    output = open(target, O_WRONLY | O_CREAT | O_EXCL, output_mode & 0777);
     if (output < 0) return -1;
     while ((n = read(input, buffer, sizeof(buffer))) > 0) {
         ssize_t at = 0;
@@ -340,7 +340,7 @@ static int copy_regular_file(int input, const char *target,
         errno = EAGAIN;
         goto fail;
     }
-    if (fchmod(output, before->st_mode & 0777) != 0) goto fail;
+    if (fchmod(output, output_mode & 0777) != 0) goto fail;
     if (fsync(output) != 0) {
         int saved = errno;
         close(output);
@@ -448,7 +448,8 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
                     errno = ENAMETOOLONG;
                     rc = -1;
                 } else if (make_parent(target) != 0 ||
-                           copy_regular_file(input, target, &st) != 0) {
+                           copy_regular_file(input, target, &st,
+                                             st.st_mode & 0777) != 0) {
                     rc = -1;
                 }
                 close(input);
@@ -500,6 +501,44 @@ int fo_c_generation_copy_tree(const char *root, const char *dest,
     rc = walk_tree(root, dest, out, 1);
     if (fclose(out) != 0 && rc == 0) rc = -1;
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
+}
+
+/* Materialize one declared regular input without linking it to its source. */
+int fo_c_generation_copy_declared_file(const char *source, const char *dest,
+                                       int writable) {
+    int input, rc, saved;
+    struct stat before;
+    mode_t mode;
+
+    if (source == NULL || dest == NULL || source[0] == '\0' || dest[0] == '\0') {
+        errno = EINVAL;
+        return errno;
+    }
+    input = open(source, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (input < 0) return errno == 0 ? 1 : errno;
+    if (fstat(input, &before) != 0 || !S_ISREG(before.st_mode)) {
+        close(input);
+        errno = EINVAL;
+        return errno;
+    }
+    mode = before.st_mode & 0777;
+    if (writable) mode |= S_IWUSR;
+    else mode &= ~(S_IWUSR | S_IWGRP | S_IWOTH);
+    if (make_parent(dest) != 0) {
+        saved = errno;
+        close(input);
+        errno = saved;
+        return errno == 0 ? 1 : errno;
+    }
+    rc = copy_regular_file(input, dest, &before, mode);
+    saved = errno;
+    close(input);
+    if (rc != 0) {
+        unlink(dest);
+        errno = saved;
+        return errno == 0 ? 1 : errno;
+    }
+    return 0;
 }
 
 static int freeze_tree_at(const char *root, const char *rel) {

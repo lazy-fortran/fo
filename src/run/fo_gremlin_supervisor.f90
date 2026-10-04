@@ -3,13 +3,15 @@ module fo_gremlin_supervisor
     use fo_build_backend, only: BACKEND_NATIVE, backend_t, detect_backend
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_check, only: fo_changed_modules
-    use fo_gremlin_context, only: capture_candidate
+    use fo_gremlin_context, only: capture_candidate, generation_inventory_restore
     use fo_gremlin_request, only: gremlin_request_t, parse_request, is_hex_digest, &
         gremlin_json_field
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
         json_parser_next, JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, &
         JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_ERROR, JSON_END_OF_INPUT
     use fo_gremlin_generation, only: generation_t, generation_driver_identity
+    use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
+        execution_view_release
     use fo_driver, only: driver_pin_t, driver_pin_current, driver_pin_existing
     use fo_change_watch, only: change_watch_t, change_watch_init, &
         change_watch_poll, change_watch_close
@@ -73,6 +75,7 @@ module fo_gremlin_supervisor
         integer :: seed = 0
         character(len=PATH_LEN) :: log_file = ''
         character(len=NAME_LEN) :: case_name = ''
+        type(execution_view_t) :: execution_view
         logical :: gate_required = .false.
         real :: started_at = 0.0
     end type child_t
@@ -856,6 +859,7 @@ contains
         type(gremlin_session_t) :: session
         type(gremlin_lease_t) :: reproduction_lease
         type(generation_t) :: generation
+        type(execution_view_t) :: execution_view
         type(driver_pin_t) :: reproduction_pin
         type(gremlin_request_t) :: selection_request
         character(len=PATH_LEN) :: message, active_project, log_file, executable
@@ -867,10 +871,12 @@ contains
         character(len=16) :: outcome
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
         character(len=128) :: session_id, owner_start
-        character(len=:), allocatable :: packed
+        character(len=:), allocatable :: packed, execution_env
         integer :: owner_pid, ierr, n_selected, mandatory_count, seed
         integer :: n_args, spawn_exit, test_exit, sequence, release_error
         integer :: reproduction_timeout
+        character(len=128) :: view_owner
+        logical :: retain_view
         logical :: have_reproduction_lease, executable_ok
 
         exitcode = 0
@@ -918,6 +924,7 @@ contains
         generation%identity = active_identity
         generation%root = generation_root
         generation%project_root = active_project
+        call generation_inventory_restore(generation, ierr, message)
         call gremlin_generation_lease_acquire_at(generation%root, reproduction_lease, &
             ierr, message)
         if (ierr /= 0) then
@@ -1004,9 +1011,25 @@ contains
         call argv_push(packed, n_args, trim(request%case_id))
         reproduction_timeout = case_wall_timeout(active_project, request%case_id, &
             request%timeout_seconds)
+        write(view_owner, '(a,"-reproduce-",i0)') trim(session%session_id), sequence
+        call execution_view_create(trim(session%state_dir)//'/views', &
+            generation%identity, trim(view_owner), request%case_id, &
+            generation%input_inventory, generation%input_inventory_ready, &
+            generation%input_inventory_complete, execution_view, ierr, message)
+        if (ierr /= 0) then
+            call release_generation_lease(reproduction_lease, &
+                have_reproduction_lease, release_error, cleanup_message)
+            call release_if_owner(session, release_error, cleanup_message)
+            call error_response('reproduce', 'cannot create private execution view: '// &
+                trim(message), response)
+            exitcode = 2
+            return
+        end if
+        execution_env = 'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
+            'FO_GREMLIN_EXECUTION_CWD='//trim(execution_view%cwd)
         call process_start_argv_logged(trim(active_project), packed, n_args, &
             trim(log_file), owner_pid, spawn_exit, &
-            'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0')
+            trim(execution_env))
         if (spawn_exit == 0) then
             call process_wait_bounded(owner_pid, reproduction_timeout, test_exit)
             if (test_exit == 124) then
@@ -1023,6 +1046,10 @@ contains
             test_exit = spawn_exit
             outcome = 'INFRA_ERROR'
         end if
+        if (spawn_exit == 0) call append_execution_provenance(log_file, execution_view)
+        retain_view = spawn_exit == 0 .and. test_exit /= 0
+        call execution_view_release(execution_view, retain_view, release_error, &
+            cleanup_message)
         call record_immediate_case(session, request, generation, request%case_id, &
             test_exit, trim(outcome), sequence, 1, seed, trim(log_file), ierr, message, &
             credit_coverage=.false., gate_required=.true.)
@@ -1316,9 +1343,14 @@ contains
                     state_name = 'testing'
                     observed_outcome = runner_case_outcome(test_child%log_file, &
                         test_child%case_name)
+                    call append_execution_provenance(test_child%log_file, &
+                        test_child%execution_view)
                     call record_case(session, owner_request, active_generation, &
                         test_child, test_exit, observed_outcome, sequence, campaign_seed, &
                         ierr, message)
+                    call execution_view_release(test_child%execution_view, &
+                        test_exit /= 0 .or. trim(observed_outcome) /= 'PASS', &
+                        release_error, state_message)
                     test_child%pid = 0
                     completed = completed + 1
                     if (ierr /= 0) then
@@ -1348,6 +1380,10 @@ contains
                         fatal_error = .true.
                         exit
                     end if
+                    call append_execution_provenance(test_child%log_file, &
+                        test_child%execution_view)
+                    call execution_view_release(test_child%execution_view, .true., &
+                        release_error, state_message)
                     call record_case(session, owner_request, active_generation, &
                         test_child, 124, 'TIMEOUT', sequence, campaign_seed, ierr, message)
                     test_child%pid = 0
@@ -2285,11 +2321,35 @@ contains
         message = 'cannot cancel owned test process'
         if (ierr /= 0) return
         child%pid = 0
+        call append_execution_provenance(child%log_file, child%execution_view)
+        call execution_view_release(child%execution_view, .false., ierr, message)
+        if (ierr /= 0) return
         coverage_path = trim(session%state_dir)//'/coverage-'// &
             generation%identity//'.state'
         call coverage_record_path(trim(coverage_path), generation%identity, &
             child%case_name, 'CANCELLED', ierr, message)
     end subroutine cancel_test_case
+
+    subroutine append_execution_provenance(log_file, view)
+        character(len=*), intent(in) :: log_file
+        type(execution_view_t), intent(in) :: view
+
+        integer :: unit, ios
+        character(len=8) :: completeness
+
+        completeness = 'complete'
+        if (.not. view%complete) completeness = 'incomplete'
+        open (newunit=unit, file=trim(log_file), status='unknown', &
+            position='append', action='write', iostat=ios)
+        if (ios /= 0) return
+        write (unit, '(a)', iostat=ios) 'fo: execution cwd: '//trim(view%cwd)
+        if (ios == 0) write (unit, '(a)', iostat=ios) &
+            'fo: execution generation: '//trim(view%generation_id)
+        if (ios == 0) write (unit, '(a)', iostat=ios) &
+            'fo: execution input inventory: '//trim(view%inventory_digest)// &
+            ' ('//trim(completeness)//')'
+        close (unit)
+    end subroutine append_execution_provenance
 
     subroutine launch_selected_case(session, request, generation, selected, n_selected, &
             index_case, seed, campaign, child, ierr, message, completed, sequence)
@@ -2305,8 +2365,10 @@ contains
 
         character(len=PATH_LEN) :: executable, log_name
         character(len=PATH_LEN) :: journal_message
-        character(len=:), allocatable :: packed
+        character(len=PATH_LEN) :: view_owner, view_message
+        character(len=:), allocatable :: packed, execution_env
         integer :: n_args, spawn_exit, journal_status, coverage_status
+        integer :: view_status
         logical :: exists
         character(len=PATH_LEN) :: coverage_path
 
@@ -2332,6 +2394,15 @@ contains
         executable = session%driver_path
         write (log_name, '(a,i0,a,i0,a)') 'case-', campaign, '-', index_case, '.log'
         call log_path(session, trim(log_name), child%log_file)
+        write(view_owner, '(a,"-case-",i0,"-",i0)') trim(session%session_id), &
+            campaign, index_case
+        call execution_view_create(trim(session%state_dir)//'/views', &
+            generation%identity, trim(view_owner), selected(index_case), &
+            generation%input_inventory, generation%input_inventory_ready, &
+            generation%input_inventory_complete, child%execution_view, ierr, message)
+        if (ierr /= 0) return
+        execution_env = 'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
+            'FO_GREMLIN_EXECUTION_CWD='//trim(child%execution_view%cwd)
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'test')
@@ -2342,10 +2413,12 @@ contains
         call argv_push(packed, n_args, trim(selected(index_case)))
         call process_start_argv_logged(trim(generation%project_root), packed, &
             n_args, trim(child%log_file), child%pid, spawn_exit, &
-            'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0')
+            trim(execution_env))
         ierr = spawn_exit
         if (spawn_exit /= 0) then
             child%pid = 0
+            call execution_view_release(child%execution_view, .false., view_status, &
+                view_message)
             journal_message = 'cannot start selected test '//trim(selected(index_case))
             sequence = sequence + 1
             call record_immediate_case(session, request, generation, &

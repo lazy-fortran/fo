@@ -28,6 +28,7 @@ module fo_fpm_config
     integer, parameter :: MAX_FLAGS = 64
     integer, parameter :: MAX_EXES = 64
     integer, parameter :: MAX_TEST_ARG_SETS = 128
+    integer, parameter :: MAX_FO_INPUTS = 128
 
     type :: fpm_dep_t
         character(len=256) :: name = ''
@@ -52,6 +53,15 @@ module fo_fpm_config
         character(len=128) :: name = ''
         character(len=:), allocatable :: args
     end type fpm_test_args_t
+
+    type, public :: fpm_input_t
+        character(len=512) :: path = ''
+        character(len=64) :: role = ''
+        logical :: writable_at_execution = .false.
+        logical :: path_seen = .false.
+        logical :: role_seen = .false.
+        logical :: writable_seen = .false.
+    end type fpm_input_t
 
     type :: fpm_config_t
         character(len=128) :: name = ''
@@ -86,6 +96,9 @@ module fo_fpm_config
         type(fpm_exe_t) :: examples(MAX_EXES)
         integer :: n_test_arg_sets = 0
         type(fpm_test_args_t) :: test_arg_sets(MAX_TEST_ARG_SETS)
+        integer :: n_fo_inputs = 0
+        type(fpm_input_t) :: fo_inputs(MAX_FO_INPUTS)
+        character(len=512) :: fo_input_parse_error = ''
         ! [extra.fo] test budgets in seconds; 0 leaves fo's default. The
         ! FO_TEST_TIMEOUT, FO_SLOW_TEST_TIMEOUT and FO_TEST_WALL_TIMEOUT
         ! environment variables override these per invocation.
@@ -179,6 +192,8 @@ contains
         c%n_tests = 0
         c%n_examples = 0
         c%n_test_arg_sets = 0
+        c%n_fo_inputs = 0
+        c%fo_input_parse_error = ''
     end subroutine fpm_config_init
 
     subroutine fpm_config_parse(project_dir, config, ierr)
@@ -228,6 +243,9 @@ contains
                         call parse_preprocess(pending_key, val, config)
                     case ('extra.fo.test-args')
                         call parse_test_args(pending_key, val, config)
+                    case ('extra.fo.inputs')
+                        config%fo_input_parse_error = &
+                            'fixture input fields must be scalar values'
                     end select
                 end if
                 cycle
@@ -248,6 +266,14 @@ contains
                     config%n_examples = config%n_examples + 1
                     config%examples(config%n_examples) = &
                         fpm_exe_t(source_dir='example')
+                else if (trim(section) == 'extra.fo.inputs') then
+                    if (config%n_fo_inputs >= MAX_FO_INPUTS) then
+                        ierr = 1
+                        close(u)
+                        return
+                    end if
+                    config%n_fo_inputs = config%n_fo_inputs + 1
+                    config%fo_inputs(config%n_fo_inputs) = fpm_input_t()
                 end if
                 cycle
             end if
@@ -287,6 +313,8 @@ contains
                 call parse_test_args(key, val, config)
             case ('extra.fo')
                 call parse_extra_fo(key, val, config)
+            case ('extra.fo.inputs')
+                call parse_fo_input(key, val, config)
             case ('extra')
                 if (index(key, 'fo.') == 1) &
                     call parse_extra_fo(key(4:), val, config)
@@ -298,6 +326,10 @@ contains
         end do
 
         close (u)
+        if (len_trim(config%fo_input_parse_error) > 0) then
+            ierr = 1
+            return
+        end if
         if (ierr == 0) call resolve_metapackages(config, ierr)
     end subroutine fpm_config_parse
 
@@ -809,6 +841,63 @@ contains
         case default
         end select
     end subroutine parse_extra_fo
+
+    subroutine parse_fo_input(key, val, config)
+        character(len=*), intent(in) :: key, val
+        type(fpm_config_t), intent(inout) :: config
+        character(len=512) :: str_val
+        integer :: slot
+
+        if (config%n_fo_inputs <= 0) then
+            config%fo_input_parse_error = 'fixture input fields require [[extra.fo.inputs]]'
+            return
+        end if
+        if (len_trim(val) == 0) then
+            config%fo_input_parse_error = 'fixture input fields cannot be empty'
+            return
+        end if
+        if (val(1:1) == '[' .or. val(1:1) == '{') then
+            config%fo_input_parse_error = 'fixture input fields must be scalar values'
+            return
+        end if
+        slot = config%n_fo_inputs
+        select case (trim(key))
+        case ('path')
+            if (config%fo_inputs(slot)%path_seen) then
+                config%fo_input_parse_error = 'duplicate fixture input path field'
+                return
+            end if
+            call extract_string(val, str_val)
+            config%fo_inputs(slot)%path = trim(str_val)
+            config%fo_inputs(slot)%path_seen = .true.
+        case ('role')
+            if (config%fo_inputs(slot)%role_seen) then
+                config%fo_input_parse_error = 'duplicate fixture input role field'
+                return
+            end if
+            call extract_string(val, str_val)
+            config%fo_inputs(slot)%role = trim(str_val)
+            config%fo_inputs(slot)%role_seen = .true.
+        case ('writable-at-execution')
+            if (config%fo_inputs(slot)%writable_seen) then
+                config%fo_input_parse_error = &
+                    'duplicate fixture writable-at-execution field'
+                return
+            end if
+            config%fo_inputs(slot)%writable_seen = .true.
+            if (trim(val) == 'true') then
+                config%fo_inputs(slot)%writable_at_execution = .true.
+            else if (trim(val) == 'false') then
+                config%fo_inputs(slot)%writable_at_execution = .false.
+            else
+                config%fo_input_parse_error = &
+                    'fixture writable-at-execution must be true or false'
+            end if
+        case default
+            config%fo_input_parse_error = 'unknown [[extra.fo.inputs]] field: '// &
+                trim(key)
+        end select
+    end subroutine parse_fo_input
 
     integer function positive_seconds(val, key) result(seconds)
         character(len=*), intent(in) :: val, key

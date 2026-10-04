@@ -21,10 +21,20 @@ program test_gremlin_reproduce_logs
 
     call gremlin_setup(driver, scratch, project, cache, state)
     lane = 'reproduce-log-oracle'
-    call write_text(project//'/fpm.toml', 'name = "gremlin_reproduce_log_probe"'//new_line('a'))
+    call write_text(project//'/fpm.toml', 'name = "gremlin_reproduce_log_probe"'//new_line('a')// &
+        '[[extra.fo.inputs]]'//new_line('a')// &
+        'path = "token.txt"'//new_line('a')// &
+        'role = "test-fixture"'//new_line('a'))
+    call write_text(project//'/token.txt', 'FROZEN_REPRODUCE_TOKEN'//new_line('a'))
     call gremlin_write_case(project, 'test_reproduce_anchor', &
         "print '(a)', 'FO_REPRODUCE_ANCHOR_OUTPUT'")
     call gremlin_write_case(project, 'test_reproduce_first', &
+        'integer :: unit'//new_line('a')// &
+        'character(len=64) :: token'//new_line('a')// &
+        "open(newunit=unit,file='token.txt',status='old')"//new_line('a')// &
+        "read(unit,'(a)') token"//new_line('a')// &
+        'close(unit)'//new_line('a')// &
+        "print '(a)', trim(token)"//new_line('a')// &
         "print '(a)', 'FO_REPRODUCE_FIRST_OUTPUT_61c8c1'"//new_line('a')// &
         "print '(a)', '"//achar(34)//'quoted'//achar(34)//achar(92)//"path'"// &
         new_line('a')//"print '(a)', repeat('q',4096)//'LONG_OUTPUT_END'"// &
@@ -40,6 +50,7 @@ program test_gremlin_reproduce_logs
     call assert_true(len(session) > 0, 'start returns the owner session id')
     call wait_for_anchor(session, generation)
 
+    call write_text(project//'/token.txt', 'EDITED_REPRODUCE_TOKEN'//new_line('a'))
     call reproduce('test_reproduce_first', first_log)
     call reproduce('test_reproduce_second', second_log)
     call assert_true(first_log /= second_log, 'sequential receipts use distinct reproduction logs')
@@ -47,6 +58,10 @@ program test_gremlin_reproduce_logs
     second_text = read_text(second_log)
     call assert_true(index(first_text, 'FO_REPRODUCE_FIRST_OUTPUT_61c8c1') > 0, &
         'first receipt log contains its independent test output')
+    call assert_true(index(first_text, 'FROZEN_REPRODUCE_TOKEN') > 0, &
+        'reproduced test reads the declared fixture from its captured generation')
+    call assert_true(index(first_text, 'EDITED_REPRODUCE_TOKEN') == 0, &
+        'reproduced test does not read later editable fixture bytes')
     call assert_true(index(first_text, 'FO_REPRODUCE_SECOND_OUTPUT_9d09d2') == 0, &
         'second test cannot overwrite the first receipt log')
     call assert_true(index(second_text, 'FO_REPRODUCE_SECOND_OUTPUT_9d09d2') > 0, &
@@ -63,15 +78,22 @@ contains
     subroutine assert_output_json(text)
         character(len=*), intent(in) :: text
         type(json_value_t) :: report, tests, entry
-        character(:), allocatable :: message, output
+        character(:), allocatable :: message, output, report_line
         logical :: valid
-        integer :: first
+        integer :: first, line_end
 
         first = index(text, '{"tests":[')
         call assert_true(first > 0, 'reproduction log preserves the runner JSON report')
         if (first == 0) return
-        call json_parse(text(first:), report, valid, message)
+        line_end = index(text(first:), new_line('a'))
+        call assert_true(line_end > 0, 'runner JSON is a complete log record')
+        if (line_end == 0) return
+        report_line = text(first:first + line_end - 2)
+        call json_parse(report_line, report, valid, message)
         call assert_true(valid, 'captured output remains valid JSON: '//message)
+        if (.not. valid) return
+        call assert_true(index(text(first + line_end:), 'fo: execution cwd: ') > 0, &
+            'reproduction log also records the private execution view')
         tests = json_member(report, 'tests')
         entry = json_element(tests, 1)
         output = member_text(entry, 'output')

@@ -3,10 +3,13 @@ module fo_gremlin_context
     use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_fpm_config, only: DEP_PATH, fpm_config_t, fpm_config_parse, dep_kind
-    use fo_dep_resolve, only: normalize_path
+    use fo_dep_resolve, only: normalize_path, resolve_dev_dep_srcs, &
+        resolved_src_t, MAX_RESOLVED
     use fo_gremlin_generation, only: generation_context_t, generation_input_t, &
         generation_t, generation_capture
     use fo_driver, only: driver_pin_t
+    use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
+        input_inventory_discover, input_inventory_declarations_from_config
     use fo_gremlin_state, only: gremlin_generation_register_at
     use fo_change_watch, only: change_watch_t, change_watch_add_context
     use fo_process, only: argv_push, process_cancel_pid, process_poll_pid, &
@@ -18,7 +21,7 @@ module fo_gremlin_context
 
     integer, parameter :: PATH_LEN = 4096
 
-    public :: capture_candidate
+    public :: capture_candidate, generation_inventory_restore
 
 contains
 
@@ -33,6 +36,8 @@ contains
         type(change_watch_t), intent(inout), optional :: change_watch
 
         type(generation_context_t) :: context
+        type(input_inventory_t) :: input_inventory
+        type(input_declaration_t), allocatable :: declarations(:)
         character(len=PATH_LEN) :: cas_root
         character(len=PATH_LEN) :: watch_message
         integer :: ierr
@@ -43,6 +48,21 @@ contains
             ok = .false.
             return
         end if
+        call input_inventory_declarations_from_config(project_dir, declarations, &
+            ierr, message)
+        if (ierr /= 0) then
+            registration_error = ierr
+            ok = .false.
+            return
+        end if
+        call input_inventory_discover(project_dir, declarations, input_inventory, &
+            ierr, message)
+        if (ierr /= 0 .or. .not. input_inventory%valid) then
+            registration_error = max(1, ierr)
+            ok = .false.
+            return
+        end if
+        context%input_inventory = input_inventory
         context%driver_path = driver_pin%path
         context%driver_digest = driver_pin%digest
         context%driver_size = driver_pin%size
@@ -65,6 +85,9 @@ contains
             ierr, message)
         ok = ierr == 0
         if (.not. ok) return
+        call generation_inventory_restore(generation, ierr, watch_message)
+        ! Inventory failure does not invalidate immutable source/build evidence.
+        ! Consumers must inspect input_inventory_complete and its diagnostic.
         call gremlin_generation_register_at(generation%root, ierr, message)
         ok = ierr == 0
         if (ierr /= 0) registration_error = ierr
@@ -73,6 +96,53 @@ contains
         change_watch%capture_count = change_watch%capture_count + 1
         call observe_test_capture(change_watch%capture_count, generation%identity)
     end subroutine capture_candidate
+
+    subroutine generation_inventory_restore(generation, ierr, message)
+        !! Discover the canonical inventory once from this frozen generation.
+        !! Recovery uses the same path; incomplete declarations remain explicit.
+        type(generation_t), intent(inout) :: generation
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        type(input_declaration_t), allocatable :: declarations(:)
+
+        ierr = 0
+        message = ''
+        if (generation%input_inventory_ready) then
+            message = trim(generation%input_inventory_diagnostic)
+            if (generation%input_inventory%valid) then
+                ierr = 0
+            else
+                ierr = 1
+            end if
+            return
+        end if
+        call input_inventory_declarations_from_config( &
+            trim(generation%project_root), declarations, ierr, message)
+        if (ierr /= 0) then
+            generation%input_inventory_ready = .true.
+            generation%input_inventory%valid = .false.
+            generation%input_inventory_complete = .false.
+            generation%input_inventory_diagnostic = trim(message)
+            return
+        end if
+        call input_inventory_discover(trim(generation%project_root), declarations, &
+            generation%input_inventory, ierr, message)
+        generation%input_inventory_ready = .true.
+        generation%input_inventory_complete = &
+            generation%input_inventory%complete
+        generation%input_inventory_diagnostic = &
+            trim(generation%input_inventory%diagnostic)
+        if (ierr /= 0 .or. .not. generation%input_inventory%valid) then
+            if (len_trim(generation%input_inventory_diagnostic) == 0) &
+                generation%input_inventory_diagnostic = trim(message)
+            ierr = 1
+            message = trim(generation%input_inventory_diagnostic)
+            return
+        end if
+        ierr = 0
+        message = trim(generation%input_inventory_diagnostic)
+    end subroutine generation_inventory_restore
 
     subroutine observe_test_capture(count, identity)
         !! Explicit test opt-in: replace one bounded record atomically. Observer
@@ -152,6 +222,7 @@ contains
 
         type(fpm_config_t), allocatable :: config
         type(generation_input_t), allocatable :: inputs(:)
+        type(resolved_src_t) :: resolved_dev_deps(MAX_RESOLVED)
         character(len=PATH_LEN) :: compiler_path, command_path
         character(len=:), allocatable :: packed
         character(len=PATH_LEN) :: log_file, output_line
@@ -160,8 +231,9 @@ contains
         character(len=256) :: fingerprint
         integer(c_long_long) :: tree_sum, tree_mixed, tree_count
         type(generation_input_t), allocatable :: captured_inputs(:)
-        integer :: i, n_inputs, n_args, exitcode, git_exit
-        logical :: found, git_found, fingerprint_ok
+        integer :: i, n_inputs, n_args, n_resolved_dev, resolve_status
+        integer :: exitcode, git_exit
+        logical :: found, git_found, fingerprint_ok, exists
 
         ierr = 0
         message = ''
@@ -176,12 +248,21 @@ contains
             message = 'cannot parse fpm.toml for generation inputs'
             return
         end if
+        call resolve_dev_dep_srcs(project_dir, resolved_dev_deps, &
+            n_resolved_dev, resolve_status)
+        if (resolve_status /= 0) n_resolved_dev = 0
         n_inputs = 0
         do i = 1, config%n_deps
             if (dep_kind(config%deps(i)) == DEP_PATH) n_inputs = n_inputs + 1
         end do
         do i = 1, config%n_dev_deps
             if (dep_kind(config%dev_deps(i)) == DEP_PATH) n_inputs = n_inputs + 1
+        end do
+        do i = 1, n_resolved_dev
+            if (dev_dependency_is_path(config, &
+                    trim(resolved_dev_deps(i)%name))) cycle
+            inquire(file=trim(resolved_dev_deps(i)%dir)//'/fpm.toml', exist=exists)
+            if (exists) n_inputs = n_inputs + 1
         end do
         allocate (inputs(n_inputs))
         n_inputs = 0
@@ -196,6 +277,23 @@ contains
             call append_path_dependency(project_dir, config%dev_deps(i)%path, &
                 config%dev_deps(i)%name, inputs, n_inputs, ierr, message)
             if (ierr /= 0) return
+        end do
+        do i = 1, n_resolved_dev
+            if (dev_dependency_is_path(config, &
+                    trim(resolved_dev_deps(i)%name))) cycle
+            inquire(file=trim(resolved_dev_deps(i)%dir)//'/fpm.toml', exist=exists)
+            if (.not. exists) cycle
+            if (n_inputs >= size(inputs)) then
+                ierr = 1
+                message = 'too many resolved development dependencies to freeze'
+                return
+            end if
+            n_inputs = n_inputs + 1
+            inputs(n_inputs)%label = 'dependency:'// &
+                trim(resolved_dev_deps(i)%name)
+            inputs(n_inputs)%source_root = trim(resolved_dev_deps(i)%dir)
+            inputs(n_inputs)%destination = 'build/dependencies/'// &
+                trim(resolved_dev_deps(i)%name)
         end do
         if (n_inputs < size(inputs)) then
             allocate (captured_inputs(n_inputs))
@@ -287,6 +385,19 @@ contains
             context%patch_digest = context_text_digest('git-unavailable|'//trim(fingerprint))
         end if
     end subroutine capture_context
+
+    logical function dev_dependency_is_path(config, dependency_name)
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: dependency_name
+        integer :: i
+
+        dev_dependency_is_path = .false.
+        do i = 1, config%n_dev_deps
+            if (trim(config%dev_deps(i)%name) /= trim(dependency_name)) cycle
+            dev_dependency_is_path = dep_kind(config%dev_deps(i)) == DEP_PATH
+            return
+        end do
+    end function dev_dependency_is_path
 
     subroutine append_environment_value(environment, name)
         character(len=:), allocatable, intent(inout) :: environment

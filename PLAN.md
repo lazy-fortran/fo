@@ -176,7 +176,7 @@ workloads and broader audit instrumentation remain open under #190/#145.
 | --- | --- | --- |
 | #150 | integrated `6f68eb6` | Shared typed request/MCP scanner adoption and nested runner-result repair pass exact combined public gates. Adjacent RPC ID validation remains explicitly tracked rather than claimed fixed. |
 | #191 | main through `39df584` | Bounded scanner oracle passes 1/1 (0.22s); controlled prior-driver negative rejects three behavioral faults and confirms cleanup. Issue closed. |
-| #170 | combined `bcc676f`, public parser repair `87a6272` | Combined provider/inventory 2/2 (0.03s), app build 71/71. Actual repaired app proves relative pass output cleanup and failed-output retention without editable-source mutation; preemption and declaration plumbing remain. |
+| #170 | main `fe89e3f`, actual driver `df74b3e4` | Declared fixtures, private outputs, preemption and reproduction gates pass. Manifest-backed alias consumption and ordinary app-run paths remain. |
 | #189 | `agent/189-campaign` at `f2d83f5` | Frozen input-delta campaign selection, retained regression ordering and real executed-case oracle are published source only; combined verification pending. |
 | #161 | first slice integrated `6f68eb6` | Scoped Sol repair adds native stale-MCP and explicit failed-evidence retention. Exact combined five-target gate passes; schema-veto mutation rejects four behavioral faults. Six JS fixtures remain until workflow/replacement integration finishes. |
 | #151 | `agent/151-git-provenance` at `c1f2dd6` | Metadata-only execution-identity slice and native oracle are published source only. Declared/configure-consumed Git version remains a real input, not an ignored metadata change. |
@@ -205,14 +205,26 @@ Prepared fixture declarations/reproduction oracle `7cbe949` depend on #175's
 parser and #161's additive failed-evidence retention (`2e52d78`). This failing
 gate prevents #170 promotion despite its provider/pass/fail cleanup checks.
 
-Current combined declared-input candidate is published on
-`gremlin/core-controller`. At exact `c5e6ef7`, config and execution-view
-checks pass, but the inventory check rejects a compatible multi-role fixture
-(three-target gate: 23.62s total). This is a provider defect, not grounds to
-weaken the existing oracle. #175 repair `14c1f3b` preserves compatible roles;
-#170 will materialize each physical fixture once and reject conflicting intent.
-The corrected combined candidate still needs the public preemption/reproduction
-gates. No resident integration lane is claimed running yet.
+The declared-fixture/private-view increment is promoted at `fe89e3f`.
+Provider/config/view checks pass 3/3 at `2f6ed9e`; the actual app builds 71/71
+in 10.70s. Its production sources are unchanged through `fe89e3f` (only the
+independent oracle record parsing changed). Public preemption passes at
+`6dbebfe` (19.73s), concurrent reproduction at `6dbebfe` (3.53s), and frozen-token
+reproduction at `fe89e3f` (4.11s). The public installed driver now has SHA256
+`df74b3e42f837d8bc924f0b24404656dc27184c232aaa415072ba1b617445f1d`.
+The checks prove last-good retention, owned cancellation, frozen declared bytes,
+private concurrent outputs and retained failure evidence. They do not prove
+ordinary app-run isolation or the unverified manifest-backed #165 consumer.
+
+Gate log SHA256 values:
+- Provider/config/view: `35a509ffcdfc5e95a967a68fd8297ad112872f6fab8db733d4c86d4e30f193c4`.
+- Preemption: `c755348a373d15ce0aac2e372d7862914bca209f9acecc376f449cc5449de778`.
+- Concurrent reproduction: `c77be9dea32116d023224e50eea6ea97c9be96bc6944cf42570bb0262a06b08c`.
+- Frozen-token reproduction: `14904c0400ebb015c69f81671b786bc9bc59631e5d5d5547fbce2a73cdd9bdff`.
+
+The earlier compatible-role rejection, incomplete progress marker and log-footer
+parsing failures remain recorded evidence. They were repaired without weakening
+actual outcome, fixture content or ownership assertions.
 
 Parallel source checkpoints remain unverified: #188 at `99b2665` replaces a
 shell command counter with a native Fortran wrapper; #193 at `99ae59c` adds
@@ -222,8 +234,8 @@ coexistence, not unsupported-peer parity; keep the old fixture until that exact
 replacement passes. #165 compact manifests and #189 campaign adoption remain
 source work. These checkpoints do not constitute whole-bootstrap completion.
 
-Source workers are active again. Start one resident integration lane after the
-declared-fixture preemption gate; temporary acceptance lanes have explicit owners
+Source workers are active again. Start one resident integration lane using the
+verified driver; temporary acceptance lanes have explicit owners
 and verified cleanup. Background payload work yields the single heavy host lane
 to focused gates. Do not launch one cold resident per worker.
 
