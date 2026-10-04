@@ -10,6 +10,22 @@ interfaces below are proposed, not implemented by this documentation change.
 
 ## Goal and smallest architecture
 
+KISS refinement (2026-10-04): deliver usable resident dogfood first, then shared
+compact generation/session execution, finite native coverage and quiescence,
+then bounded retention and the final matrix. Source/fixture declarations are a
+supported-input contract, not an OS sandbox. Validate materialization paths and
+report known unsupported ambient dependencies as incomplete closure; do not add
+generic read interception or containers. Current-generation observations and
+reproducible-closure completeness are distinct facts. Inventory tests work in
+Git-free source exports without a Gremlin-specific Git metadata artifact.
+
+Keep warm caches and focused per-increment gates. One review covers each
+material concurrency/platform change; repeat for concrete findings only. Full
+pipelines/platform matrices are milestones. Revisit the temporary heavy-lane
+limit with a bounded 1-vs-2 warm-lane measurement of throughput, local-gate
+latency, RSS, disk growth and writeback, then raise concurrency only where it
+improves throughput within the host budget. Coding remains parallel throughout.
+
 Run useful tests continuously while humans or coding workers prepare the next
 change. Test immutable generations, keep the last compilable generation running
 through failed candidate builds, and preempt obsolete tests immediately when a
@@ -250,8 +266,10 @@ an atomic successful-session commit. Every build/test/run process also gets a
 private writable working directory, so relative scratch cannot mutate immutable
 source blobs or wake the watcher. Its execution view materializes declared
 relative fixtures by reflink/clone/copy with the same layout, permitting private
-fixture mutation while routing outputs to scratch. Escaping `..`, absolute and
-undeclared inputs have explicit fail-closed rules. Concurrent cases and
+fixture mutation while routing outputs to scratch. Escaping materialization
+declarations are rejected; known unsupported/ambient execution dependencies
+report incomplete closure rather than claiming reproducible reuse. Arbitrary
+application reads are not intercepted. Concurrent cases and
 reproductions never share mutable scratch.
 
 Private physical session names are not semantic action inputs. The engine uses
