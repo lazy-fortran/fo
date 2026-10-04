@@ -6,6 +6,9 @@ module fo_gremlin_supervisor
     use fo_gremlin_context, only: capture_candidate
     use fo_gremlin_request, only: gremlin_request_t, parse_request, is_hex_digest, &
         gremlin_json_field
+    use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
+        json_parser_next, JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, &
+        JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_ERROR, JSON_END_OF_INPUT
     use fo_gremlin_generation, only: generation_t, generation_driver_identity
     use fo_driver, only: driver_pin_t, driver_pin_current, driver_pin_existing
     use fo_change_watch, only: change_watch_t, change_watch_init, &
@@ -3328,9 +3331,12 @@ contains
         character(len=*), intent(in) :: log_file, case_name
         character(len=16) :: outcome
         character(len=8192) :: line
-        character(len=NAME_LEN) :: name
-        character(len=32) :: verdict
-        integer :: unit, ios
+        character(len=NAME_LEN) :: result_name
+        character(len=32) :: result_status, verdict
+        type(json_parser_t) :: parser
+        type(json_event_t) :: event
+        integer :: unit, ios, depth, matches
+        logical :: tests_array, test_object, want_tests, want_name, want_status
 
         outcome = 'INFRA_ERROR'
         open (newunit=unit, file=log_file, status='old', iostat=ios)
@@ -3339,21 +3345,77 @@ contains
             read (unit, '(a)', iostat=ios) line
             if (ios /= 0) exit
             if (index(line, '{"tests":[') /= 1) cycle
-            call gremlin_json_field(line, 'name', name)
-            if (trim(name) /= trim(case_name)) cycle
-            call gremlin_json_field(line, 'status', verdict)
-            select case (trim(verdict))
-            case ('pass')
-                outcome = 'PASS'
-            case ('fail')
-                outcome = 'FAIL'
-            case ('timeout')
-                outcome = 'TIMEOUT'
-            case ('flaky')
-                outcome = 'FLAKY'
-            case default
-                outcome = 'INFRA_ERROR'
-            end select
+            outcome = 'INFRA_ERROR'
+            depth = 0
+            matches = 0
+            verdict = ''
+            tests_array = .false.
+            test_object = .false.
+            want_tests = .false.
+            want_name = .false.
+            want_status = .false.
+            call json_parser_init_strict(parser, trim(line))
+            do
+                call json_parser_next(parser, event)
+                select case (event%event_type)
+                case (JSON_OBJECT_START)
+                    depth = depth + 1
+                    if (depth == 3 .and. tests_array) then
+                        test_object = .true.
+                        result_name = ''
+                        result_status = ''
+                    end if
+                case (JSON_ARRAY_START)
+                    depth = depth + 1
+                    if (depth == 2 .and. want_tests) tests_array = .true.
+                    want_tests = .false.
+                case (JSON_OBJECT_END)
+                    if (depth == 3 .and. test_object) then
+                        if (trim(result_name) == trim(case_name)) then
+                            matches = matches + 1
+                            verdict = result_status
+                        end if
+                        test_object = .false.
+                    end if
+                    depth = depth - 1
+                case (JSON_ARRAY_END)
+                    if (depth == 2) tests_array = .false.
+                    depth = depth - 1
+                case (JSON_KEY)
+                    if (.not. allocated(event%string_val)) cycle
+                    if (depth == 1) then
+                        want_tests = event%string_val == 'tests'
+                    else if (depth == 3 .and. test_object) then
+                        want_name = event%string_val == 'name'
+                        want_status = event%string_val == 'status'
+                    end if
+                case (JSON_STRING)
+                    if (depth /= 3 .or. .not. test_object) cycle
+                    if (.not. allocated(event%string_val)) cycle
+                    if (want_name) result_name = event%string_val
+                    if (want_status) result_status = event%string_val
+                    want_name = .false.
+                    want_status = .false.
+                case (JSON_ERROR)
+                    exit
+                case (JSON_END_OF_INPUT)
+                    if (matches == 1) then
+                        select case (trim(verdict))
+                        case ('pass')
+                            outcome = 'PASS'
+                        case ('fail')
+                            outcome = 'FAIL'
+                        case ('timeout')
+                            outcome = 'TIMEOUT'
+                        case ('flaky')
+                            outcome = 'FLAKY'
+                        case default
+                            outcome = 'INFRA_ERROR'
+                        end select
+                    end if
+                    exit
+                end select
+            end do
         end do
         close (unit)
     end function runner_case_outcome
