@@ -193,6 +193,39 @@ in their owning provider and recheck the original consumer; do not permanently
 work around them or exclude fpm/CMake projects. #148 and #165-#167 follow the
 same canonical inventory. Optional #190/#145 audits stay independent.
 
+## CMake and CTest expansion (#192)
+
+The detailed plan is [doc/CMAKE_GREMLIN_PLAN.md](doc/CMAKE_GREMLIN_PLAN.md).
+[#192](https://github.com/lazy-fortran/fo/issues/192) coordinates #193 context and
+File API, #194 CTest semantics, #195 result/receipt import, #196 persistent
+incremental slots, #197 shared input/impact adaptation, #198 ITpPlasma feature
+parity, and optional #199 compiler-launcher cache reuse. This is planned scope;
+no CMake Gremlin implementation or scientific-project test pass is claimed here.
+
+CMake remains configure/target/dependency authority; cmake --build retains its
+generator's incremental compilation; CTest remains the registered test executor.
+One shared engine does not mean translating CMake into the native gfortran DAG.
+Start with correct delegation and broad conservative tests, then isolated
+last-compilable slots and precise impact. Unsupported optimization falls back
+explicitly; unsupported requested isolation/receipt guarantees never become a
+false full capability. Preserve presets, compiler/configuration choices, actual
+test scopes, fixtures, resource semantics and upstream Python/MPI/GPU commands.
+
+The CMake plan refines two generic assumptions below. Git metadata is irrelevant
+only when project execution does not consume it: SIMPLE embeds git describe in
+version.f90, so its relevant Git-derived version is an input (#197). Likewise,
+private CTest fixture groups can share their configured working/build view and
+perform same-generation setup builds; do not force a different cwd/read-only
+tree per case or deadlock a fixture's nested cmake --build (#194/#196). Immutable
+captured inputs remain separate from owned generated/test output.
+
+#195 reports CTest receipt granularity honestly; incomplete cancelled batch XML
+is not per-case PASS evidence. #198 extends the existing #145/#190 internal
+non-blocking matrix, including real project profiles and reference workflows.
+Scientific repositories retain human review/required CI/golden-record policies.
+Complete project/performance audits do not gate ordinary fo main increments.
+#199 is optional and never blocks delegated CMake compatibility.
+
 ## One architecture
 
 ```text
@@ -322,7 +355,8 @@ must retain any closure incompleteness. A relevant edit/overflow/root loss clear
 freshness and wakes bounded reconciliation. No idle source recapture, toolchain
 probe, payload hashing or build/test loop. Preserve finite red/unknown outcomes
 without a busy retry loop. Git commit metadata is provenance, not a new execution
-generation when bytes/configuration are unchanged.
+generation when bytes/configuration are unchanged and the project does not use
+Git-derived values in generated code or tests; #197 handles that exception.
 
 ### Resident development and temporary task lifetimes (#142/#155/#139)
 
@@ -510,6 +544,8 @@ These are ownership/dependency edges, not a single serial mega-gate:
 | quiescence | #155 with #148/#153/#154 | same owner remains resident; no payload work asleep; edit wakes; scope/completeness honest |
 | decomposition | #149/#150/#185/#186 | existing behavioral parity; no new competing service or line-count gate |
 | optional audit | #190 / #145 | tiny harness/acquisition correctness now; real runs asynchronous, never blocking |
+| CMake/CTest backend | #192 umbrella; #193-#198 | delegated context/test parity, incremental slot ownership, conservative impact and explicit capabilities |
+| optional CMake cache | #199 | supported compile-action reuse; unknown command uses exact compiler passthrough |
 
 Fix concrete regressions with focused local reproducers before unrelated main
 promotion. Independent planning/provider work can proceed in parallel. Apply one
