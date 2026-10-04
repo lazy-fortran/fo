@@ -1,7 +1,7 @@
 program test_mcp_gremlin_stale
     use, intrinsic :: iso_c_binding, only: c_int64_t
     use fo_test_harness, only: string_list_t, process_result_t, list_add
-    use fo_test_harness, only: write_text, read_text, assert_true, assert_equal_integer
+    use fo_test_harness, only: write_text, read_text, assert_true
     use fo_test_harness, only: finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, gremlin_write_case
     use fo_test_gremlin_oracle, only: gremlin_wait_ms, gremlin_wait_file, gremlin_stop_lane
@@ -18,16 +18,17 @@ program test_mcp_gremlin_stale
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state
-    character(:), allocatable :: session_id, arguments, blocked_body
+    character(:), allocatable :: session_id, arguments, status_arguments
+    character(:), allocatable :: blocked_body, case_id, case_status, state_name
     character(:), allocatable :: blocked_pid_path, blocked_pid_text
     type(mcp_session_t) :: server
     type(string_list_t) :: args
     type(process_result_t) :: process
-    type(json_value_t) :: response, payload, events, event, field, result
-    integer :: exit_code, attempt, blocked_pid, status, cleanup_status
+    type(json_value_t) :: response, payload, events, event, result
+    integer :: exit_code, attempt, blocked_pid, status, cleanup_status, i
     character(len=16) :: exit_text
     integer(c_int64_t) :: blocked_start
-    logical :: found
+    logical :: found, pass_seen, blocked_seen
 
     call gremlin_setup(driver, scratch, project, cache, state)
     call write_text(project//'/fpm.toml', &
@@ -104,15 +105,25 @@ program test_mcp_gremlin_stale
         'blocked test owns a live sleeper with its recorded start identity')
 
     do attempt = 1, 600
-        arguments = '{"action":"gremlin_status","dir":'//mcp_quote(project)// &
+        status_arguments = '{"action":"gremlin_status","dir":'//mcp_quote(project)// &
             ',"lane_id":"new-cli-lane","session_id":'//mcp_quote(session_id)//'}'
-        call mcp_session_call(server, arguments, response)
+        call mcp_session_call(server, status_arguments, response)
         call extract_payload(response, payload)
         if (json_string_value(json_member(payload, 'session_id')) == session_id) exit
+        state_name = json_string_value(json_member(payload, 'state'))
+        if (state_name == 'stopped' .or. state_name == 'error') then
+            call assert_true(.false., 'persistent MCP saw terminal owner state before its ID: '// &
+                state_name)
+            call stop_lane_without_owner()
+            call mcp_session_shutdown(server, exit_code)
+            call finish_assertions()
+        end if
         call gremlin_wait_ms(50)
     end do
     call assert_true(attempt <= 600, &
         'already-running MCP observes a CLI lane created after its startup')
+    pass_seen = .false.
+    blocked_seen = .false.
     do attempt = 1, 600
         arguments = '{"action":"gremlin_events","dir":'//mcp_quote(project)// &
             ',"lane_id":"new-cli-lane","session_id":'//mcp_quote(session_id)// &
@@ -120,26 +131,39 @@ program test_mcp_gremlin_stale
         call mcp_session_call(server, arguments, response)
         call extract_payload(response, payload)
         events = json_member(payload, 'events')
-        if (json_size(events) == 1) then
-            event = json_element(events, 1)
-            if (json_string_value(json_member(event, 'case_id')) == &
-                    'test_stale_pass') exit
+        pass_seen = .false.
+        blocked_seen = .false.
+        do i = 1, json_size(events)
+            event = json_element(events, i)
+            case_id = json_string_value(json_member(event, 'case_id'))
+            case_status = json_string_value(json_member(event, 'status'))
+            if (case_id == 'test_stale_pass' .and. case_status == 'PASS') then
+                pass_seen = .true.
+            end if
+            if (case_id == 'test_stale_blocked') blocked_seen = .true.
+        end do
+        if (pass_seen) exit
+        if (mod(attempt, 20) == 0) then
+            call mcp_session_call(server, status_arguments, response)
+            call extract_payload(response, payload)
+            state_name = json_string_value(json_member(payload, 'state'))
+            if (state_name == 'stopped' .or. state_name == 'error') then
+                call assert_true(.false., &
+                    'persistent MCP reports terminal owner state before pass receipt: '// &
+                    state_name)
+                call stop_lane_without_owner()
+                call mcp_session_shutdown(server, exit_code)
+                call finish_assertions()
+            end if
         end if
         call gremlin_wait_ms(50)
     end do
-    call assert_true(attempt <= 600, &
+    call assert_true(pass_seen, &
         'already-running MCP sees the CLI completion receipt')
-    call assert_equal_integer(json_size(events), 1, &
-        'MCP reads the CLI owner durable receipt from shared state')
-    if (json_size(events) == 1) then
-        event = json_element(events, 1)
-        field = json_member(event, 'status')
-        call assert_true(json_string_value(field) == 'PASS', &
-            'cross-process receipt reports the independent passing behavior')
-        field = json_member(event, 'case_id')
-        call assert_true(json_string_value(field) == 'test_stale_pass', &
-            'in-flight blocked case remains unknown while the pass is receipted')
-    end if
+    call assert_true(.not. blocked_seen, &
+        'MCP leaves the in-flight blocked case without a terminal event')
+    call assert_true(mcp_process_identity_running(blocked_pid, blocked_start), &
+        'blocked child is still running while MCP reports the pass receipt')
     call assert_true(mcp_process_identity_running(server%pid, server%start_time), &
         'CLI lane creation and completion do not replace or terminate the MCP process')
     call gremlin_stop_lane(driver, project, cache, state, 'new-cli-lane', session_id)
