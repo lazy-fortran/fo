@@ -178,8 +178,6 @@ contains
             exitcode = 1
             return
         end if
-        call merge_dep_link_libs(project_dir, config)
-
         ! Combine config flags with CLI flags
         call merge_flags(config, flag_text)
         call lock_check(project_dir, flag_text, lock_ok, lock_message)
@@ -222,6 +220,7 @@ contains
         call bootstrap_external_deps(project_dir, config, lf, request_flags, &
             exitcode)
         if (exitcode /= 0) return
+        call merge_dep_link_libs(project_dir, config)
 
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
