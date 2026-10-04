@@ -190,11 +190,18 @@ program test_gremlin_public_readiness
     call stop_fixture()
     call check(status == 0, 'owned fixture campaign stops through the public CLI')
     if (status == 0) call exercise_infra_failure()
-    if (status == 0) then
+    if (status == 0 .and. failures == 0) then
         call command('rm -rf '//quote(trim(primary_fixture))//' '// &
             quote(trim(fixture))//' '//quote(trim(state_directory))//' '// &
             quote(trim(cli_file))//' '//quote(trim(rpc_file))//' '// &
             quote(trim(rpc_input))//' '//quote(trim(primary_fixture)//'-once'), status)
+    else
+        write (error_unit, '(a)') 'Preserving failed public-readiness fixture:'
+        write (error_unit, '(a)') 'fixture='//trim(primary_fixture)
+        write (error_unit, '(a)') 'state='//trim(state_directory)
+        write (error_unit, '(a)') 'cli='//trim(cli_file)
+        write (error_unit, '(a)') 'mcp='//trim(rpc_file)
+        write (error_unit, '(a)') 'mcp_input='//trim(rpc_input)
     end if
     if (failures > 0) stop 1
     print '(a)', 'Public readiness: typed waits, token invalidation/restart and exact verdict events PASS'
@@ -348,6 +355,29 @@ contains
             'restarted watcher validates changed closure and observes current failure')
         call write_provider(1, 0)
         call cli('wait --until fully-verified --wait-ms 30000', cli_json, exitcode)
+        if (exitcode /= 0 .or. field(cli_json, 'wait_satisfied') /= 'true' .or. &
+            field(cli_json, 'gate_token') == held_token) then
+            write (error_unit, '(a)') 'Restarted readiness diagnostic:'
+            write (error_unit, '(a)') 'held_token='//trim(held_token)
+            write (error_unit, '(a)') 'new_token='//field(cli_json, 'gate_token')
+            write (error_unit, '(a)') 'active_generation='// &
+                field(cli_json, 'active_generation')
+            write (error_unit, '(a)') 'candidate_generation='// &
+                field(cli_json, 'candidate_generation')
+            write (error_unit, '(a)') 'gate_required='//field(cli_json, 'gate_required')// &
+                ' gate_passed='//field(cli_json, 'gate_passed')
+            write (error_unit, '(a)') 'ordinary_required='// &
+                field(cli_json, 'ordinary_required')//' ordinary_passed='// &
+                field(cli_json, 'ordinary_passed')
+            write (error_unit, '(a)') 'full_required='// &
+                field(cli_json, 'full_required')//' full_passed='// &
+                field(cli_json, 'full_passed')
+            write (error_unit, '(a)') 'requirement_digest='// &
+                field(cli_json, 'requirement_digest')
+            write (error_unit, '(a)') 'last_outcome='//field(cli_json, 'last_outcome')// &
+                ' diagnostic='//field(cli_json, 'diagnostic')
+            write (error_unit, '(a)') 'raw cli_json='//trim(cli_json)
+        end if
         call check(exitcode == 0 .and. field(cli_json, 'wait_satisfied') == 'true' .and. &
             field(cli_json, 'gate_token') /= held_token, &
             'armed restart watcher verifies replacement and issues a fresh token')
