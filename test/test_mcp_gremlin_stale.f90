@@ -15,12 +15,16 @@ program test_mcp_gremlin_stale
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_size
     use fo_test_json, only: json_string_value
+    use fx_hash, only: sha256_file
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state
     character(:), allocatable :: session_id, arguments, status_arguments
     character(:), allocatable :: blocked_body, case_id, case_status, state_name
     character(:), allocatable :: blocked_pid_path, blocked_pid_text
+    character(:), allocatable :: stale_driver, pass_marker
+    character(len=4096) :: stale_image
+    character(len=64) :: stale_digest, driver_digest
     type(mcp_session_t) :: server
     type(string_list_t) :: args
     type(process_result_t) :: process
@@ -28,20 +32,38 @@ program test_mcp_gremlin_stale
     integer :: exit_code, attempt, blocked_pid, status, cleanup_status, i
     character(len=16) :: exit_text
     integer(c_int64_t) :: blocked_start
-    logical :: found, pass_seen, blocked_seen
+    logical :: found, pass_seen, fail_seen, blocked_seen
 
     call gremlin_setup(driver, scratch, project, cache, state)
+    stale_driver = driver
+    call get_environment_variable('FO_MCP_STALE_DRIVER', stale_image, status=status)
+    if (status == 0 .and. len_trim(stale_image) > 0) then
+        stale_driver = trim(stale_image)
+        call sha256_file(stale_driver, stale_digest, status)
+        call assert_true(status == 0, 'hashes the supplied immutable older MCP image')
+        call sha256_file(driver, driver_digest, status)
+        call assert_true(status == 0, 'hashes the current CLI image')
+        call assert_true(stale_digest /= driver_digest, &
+            'supplied older MCP and current CLI use distinct immutable images')
+    end if
     call write_text(project//'/fpm.toml', &
         'name = "mcp_stale_owner_probe"'//new_line('a'))
+    pass_marker = scratch//'/pass.done'
     call gremlin_write_case(project, 'test_stale_pass', &
-        'print *, "stale-owner-pass-token-9711"')
+        'integer :: unit'//new_line('a')// &
+        'open(newunit=unit,file="'//pass_marker//'",status="replace")'// &
+        new_line('a')//'write(unit,"(a)") "stale-owner-pass-token-9711"'// &
+        new_line('a')//'close(unit)')
+    call gremlin_write_case(project, 'test_stale_fail', &
+        'print *, ''{"tests":[{"name":"test_stale_fail","status":"pass"}]}'''// &
+        new_line('a')//'error stop 19')
     blocked_pid_path = scratch//'/blocked-child.pid'
     blocked_body = 'integer :: status'//new_line('a')// &
         'call execute_command_line("sh -c ''sleep 60 & echo $! > '// &
         blocked_pid_path//'; wait''", exitstat=status)'
     call gremlin_write_case(project, 'test_stale_blocked', blocked_body)
 
-    call mcp_session_start(server, driver, project, cache, state, &
+    call mcp_session_start(server, stale_driver, project, cache, state, &
         scratch//'/mcp-stale.stderr')
     call mcp_session_request(server, 'initialize', &
         '{"protocolVersion":"2025-11-25","capabilities":{},'// &
@@ -65,9 +87,9 @@ program test_mcp_gremlin_stale
     call list_add(args, '--target')
     call list_add(args, 'test_stale_pass')
     call list_add(args, '--target')
+    call list_add(args, 'test_stale_fail')
+    call list_add(args, '--target')
     call list_add(args, 'test_stale_blocked')
-    call list_add(args, '--timeout-seconds')
-    call list_add(args, '5')
     call list_add(args, '--json')
     call gremlin_json(driver, project, cache, state, args, payload, process, 30000)
     if (process%exit_code /= 0) then
@@ -76,7 +98,7 @@ program test_mcp_gremlin_stale
             '); stderr='//trim(process%stderr)//'; stdout='//trim(process%stdout))
         call stop_lane_without_owner()
         call mcp_session_shutdown(server, exit_code)
-        call finish_assertions()
+        call finish_assertions(retain_failed_scratch=.true.)
     end if
     session_id = json_string_value(json_member(payload, 'session_id'))
     if (len(session_id) == 0) then
@@ -84,11 +106,13 @@ program test_mcp_gremlin_stale
             trim(process%stderr)//'; stdout='//trim(process%stdout))
         call stop_lane_without_owner()
         call mcp_session_shutdown(server, exit_code)
-        call finish_assertions()
+        call finish_assertions(retain_failed_scratch=.true.)
     end if
 
     call gremlin_wait_file(blocked_pid_path, 30000, found)
     call assert_true(found, 'blocked test publishes its sleeper PID before stop')
+    call assert_true(index(read_text(pass_marker), 'stale-owner-pass-token-9711') > 0, &
+        'passing fixture independently publishes its completion token')
     blocked_pid = 0
     blocked_start = 0_c_int64_t
     if (found) then
@@ -116,13 +140,14 @@ program test_mcp_gremlin_stale
                 state_name)
             call stop_lane_without_owner()
             call mcp_session_shutdown(server, exit_code)
-            call finish_assertions()
+            call finish_assertions(retain_failed_scratch=.true.)
         end if
         call gremlin_wait_ms(50)
     end do
     call assert_true(attempt <= 600, &
         'already-running MCP observes a CLI lane created after its startup')
     pass_seen = .false.
+    fail_seen = .false.
     blocked_seen = .false.
     do attempt = 1, 600
         arguments = '{"action":"gremlin_events","dir":'//mcp_quote(project)// &
@@ -132,6 +157,7 @@ program test_mcp_gremlin_stale
         call extract_payload(response, payload)
         events = json_member(payload, 'events')
         pass_seen = .false.
+        fail_seen = .false.
         blocked_seen = .false.
         do i = 1, json_size(events)
             event = json_element(events, i)
@@ -140,9 +166,12 @@ program test_mcp_gremlin_stale
             if (case_id == 'test_stale_pass' .and. case_status == 'PASS') then
                 pass_seen = .true.
             end if
+            if (case_id == 'test_stale_fail' .and. case_status == 'FAIL') then
+                fail_seen = .true.
+            end if
             if (case_id == 'test_stale_blocked') blocked_seen = .true.
         end do
-        if (pass_seen) exit
+        if (pass_seen .and. fail_seen) exit
         if (mod(attempt, 20) == 0) then
             call mcp_session_call(server, status_arguments, response)
             call extract_payload(response, payload)
@@ -153,13 +182,15 @@ program test_mcp_gremlin_stale
                     state_name)
                 call stop_lane_without_owner()
                 call mcp_session_shutdown(server, exit_code)
-                call finish_assertions()
+                call finish_assertions(retain_failed_scratch=.true.)
             end if
         end if
         call gremlin_wait_ms(50)
     end do
     call assert_true(pass_seen, &
         'already-running MCP sees the CLI completion receipt')
+    call assert_true(fail_seen, &
+        'MCP preserves a real FAIL despite PASS-shaped fixture output')
     call assert_true(.not. blocked_seen, &
         'MCP leaves the in-flight blocked case without a terminal event')
     call assert_true(mcp_process_identity_running(blocked_pid, blocked_start), &
@@ -184,7 +215,7 @@ program test_mcp_gremlin_stale
     call mcp_session_shutdown(server, exit_code)
     call assert_true(exit_code == 0, &
         'persistent MCP exits cleanly after stale-owner check')
-    call finish_assertions()
+    call finish_assertions(retain_failed_scratch=.true.)
 
 contains
 
@@ -192,6 +223,7 @@ contains
         type(string_list_t) :: stop_args
         type(json_value_t) :: stop_reply
         type(process_result_t) :: stop_process
+        character(:), allocatable :: cleanup_owner
 
         call list_add(stop_args, 'gremlin')
         call list_add(stop_args, 'stop')
@@ -205,6 +237,11 @@ contains
         call assert_true(stop_process%exit_code == 0, &
             'cleanup by lane name succeeds after start omitted its owner ID; stderr='// &
             trim(stop_process%stderr))
+        cleanup_owner = json_string_value(json_member(stop_reply, 'session_id'))
+        if (len(cleanup_owner) > 0) then
+            call gremlin_stop_lane(driver, project, cache, state, &
+                'new-cli-lane', cleanup_owner)
+        end if
     end subroutine stop_lane_without_owner
 
     subroutine extract_payload(envelope, document)
