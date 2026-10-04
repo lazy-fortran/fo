@@ -146,3 +146,38 @@ main = "test_test_os_link.f90"
 name = "test_install_help"
 source-dir = "test"
 main = "test_install_help.f90"
+
+[[test]]
+name = "test_gremlin_reproduce_logs"
+source-dir = "test"
+main = "test_gremlin_reproduce_logs.f90"
+
+[[test]]
+name = "test_gremlin_reproduce_concurrent_logs"
+source-dir = "test"
+main = "test_gremlin_reproduce_concurrent_logs.f90"
+
+[[test]]
+name = "test_gremlin_context_provenance"
+source-dir = "test"
+main = "test_gremlin_context_provenance.f90"
+
+[[test]]
+name = "test_gremlin_timeout_order"
+source-dir = "test"
+main = "test_gremlin_timeout_order.f90"
+
+[[test]]
+name = "test_gremlin_bootstrap"
+source-dir = "test"
+main = "test_gremlin_bootstrap.f90"
+
+[[test]]
+name = "test_continuous_preemption"
+source-dir = "test"
+main = "test_continuous_preemption.f90"
+
+[[test]]
+name = "test_gremlin_watch"
+source-dir = "test"
+main = "test_gremlin_watch.f90"
