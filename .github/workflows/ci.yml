@@ -60,6 +60,22 @@ jobs:
       - name: Test
         run: fpm test
 
+      - name: Test Fortran benchmark driver and bounded smoke
+        env:
+          FO_DISABLE_SELF_REFRESH: "1"
+          FO_SELF_REFRESH: "0"
+          FO_CACHE_DIR: ${{ runner.temp }}/fo-bench-driver-cache
+        run: |
+          fo_path="$(find "$GITHUB_WORKSPACE/build" -path '*/bin/fo' -type f | head -n 1)"
+          test -x "$fo_path"
+          cd bench
+          "$fo_path" build
+          "$fo_path" test test_bench_driver
+          "$GITHUB_WORKSPACE/bench/build/fo/bin/fo-bench" run \
+            --fo "$fo_path" --reps 1 \
+            --output "$RUNNER_TEMP/fo-bench-smoke.jsonl" \
+            --workloads "$GITHUB_WORKSPACE/bench/workloads"
+
       - name: Test standalone Fortran CLI fixtures
         run: |
           export FO="$(command -v fo)"
