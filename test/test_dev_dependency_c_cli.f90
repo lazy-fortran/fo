@@ -10,6 +10,7 @@ program test_dev_dependency_c_cli
     character(:), allocatable :: driver, scratch, consumer, dependency, cache
     type(process_result_t) :: result
     type(string_list_t) :: arguments, environment
+    character(len=88) :: test_lines(8), production_lines(4)
     character(len=1), parameter :: nl = new_line('a')
 
     call resolve_driver(driver)
@@ -26,13 +27,15 @@ program test_dev_dependency_c_cli
     call write_text(join_path(dependency, 'include/value.h'), '#define DEV_VALUE 21' // nl)
     call write_shim(.false.)
     call write_helper(0)
-    call write_lines(join_path(consumer, 'test/test_probe.f90'), [character(len=88) :: &
+    test_lines = [character(len=88) :: &
         'program test_probe', 'use devhelper, only: current_value', 'implicit none', &
         'integer :: unit', "open(newunit=unit, file='dev.receipt', status='replace')", &
-        "write(unit, '(i0)') current_value()", 'close(unit)', 'end program test_probe'])
-    call write_lines(join_path(consumer, 'app/production.f90'), [character(len=88) :: &
+        "write(unit, '(i0)') current_value()", 'close(unit)', 'end program test_probe']
+    call write_lines(join_path(consumer, 'test/test_probe.f90'), test_lines)
+    production_lines = [character(len=88) :: &
         'program production', 'implicit none', "print '(a)', 'production'", &
-        'end program production'])
+        'end program production']
+    call write_lines(join_path(consumer, 'app/production.f90'), production_lines)
 
     ! The first operation is a test with no build tree, external profile or cache.
     call expect_value('21', '', 'cold static dev dependency')
@@ -103,15 +106,18 @@ contains
     subroutine write_helper(offset)
         integer, intent(in) :: offset
         character(len=16) :: text
+        character(len=88) :: lines(16)
 
         write (text, '(i0)') offset
-        call write_lines(join_path(dependency, 'src/devhelper.f90'), [character(len=88) :: &
+        lines = [character(len=88) :: &
             'module devhelper', 'use iso_c_binding, only: c_int', 'implicit none', &
             'interface', 'integer(c_int) function dev_shim() bind(C)', 'import c_int', &
             'end function dev_shim', 'end interface', '#ifndef DEV_OFFSET', &
             '#define DEV_OFFSET 0', '#endif', 'contains', 'integer function current_value()', &
-            'current_value = dev_shim() + ' // trim(text) // ' + DEV_OFFSET', &
-            'end function current_value', 'end module devhelper'])
+            'current_value = dev_shim() + DEV_OFFSET', &
+            'end function current_value', 'end module devhelper']
+        lines(14) = 'current_value = dev_shim() + ' // trim(text) // ' + DEV_OFFSET'
+        call write_lines(join_path(dependency, 'src/devhelper.f90'), lines)
     end subroutine write_helper
 
     subroutine arguments_for(command, target)
