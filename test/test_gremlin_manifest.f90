@@ -46,25 +46,28 @@ program test_gremlin_manifest
         end function remove_tree
     end interface
 
-    character(len=512) :: root, project, dependency, cache, cache_b, driver
+    character(len=512) :: root, project, dependency, nested_dependency
+    character(len=512) :: cache, cache_b, driver
     character(len=512) :: first_file, second_file, mutated_file, message
     character(len=HASH_LEN) :: driver_digest
     integer(int64) :: driver_size
-    integer :: ierr, status, unit, ios, i, shared_root
+    integer :: ierr, status, unit, ios, i, shared_root, conflict_entry
     type(input_declaration_t) :: declarations(1)
-    type(input_inventory_t) :: inventory, changed
+    type(input_inventory_t) :: inventory, changed, conflicting
     type(generation_context_t) :: context
-    type(generation_t) :: first, reused, mutated, corrupted_reuse
+    type(generation_t) :: first, reused, mutated, corrupted_reuse, conflict
     logical :: found_aliases
 
     root = '/var/tmp/fo-generation-manifest-'//int_text(process_getpid())
     project = trim(root)//'/project'
     dependency = trim(root)//'/shared'
+    nested_dependency = trim(project)//'/test-support/fo_test_os'
     cache = trim(root)//'/cache'
     cache_b = trim(root)//'/cache-b'
     driver = trim(root)//'/driver-image'
     call remove_fixture(trim(root))
     call fs_make_dir(trim(project)//'/src')
+    call fs_make_dir(trim(nested_dependency)//'/src')
     call fs_make_dir(trim(dependency)//'/src')
     status = c_symlink('shared'//c_null_char, &
         trim(root)//'/shared-alias'//c_null_char)
@@ -75,9 +78,14 @@ program test_gremlin_manifest
     call write(trim(project)//'/fpm.toml', &
         'name = "manifest-fixture"'//new_line('a')// &
         '[dependencies]'//new_line('a')// &
-        'shared-one = { path = "../shared" }'//new_line('a')// &
-        'shared-two = { path = "../shared-alias" }'//new_line('a'))
+            'shared-one = { path = "../shared" }'//new_line('a')// &
+            'shared-two = { path = "../shared-alias" }'//new_line('a')// &
+            '[dev-dependencies]'//new_line('a')// &
+            'fo_test_os = { path = "test-support/fo_test_os" }')
     call write(trim(dependency)//'/fpm.toml', 'name = "shared"')
+    call write(trim(nested_dependency)//'/fpm.toml', 'name = "fo_test_os"')
+    call write(trim(nested_dependency)//'/src/fo_test_os.f90', &
+        'module fo_test_os')
     call write(trim(project)//'/src/main.f90', 'program main')
     call write(trim(project)//'/fixture.dat', 'source-one')
     call write(trim(project)//'/src/target.dat', 'link-target')
@@ -143,6 +151,39 @@ program test_gremlin_manifest
             call require(file_equals(trim(second_file), 'module shared'), &
                 'second alias reuses payload at its own destination')
         end if
+        call require(file_equals(trim(first%project_root)// &
+            '/test-support/fo_test_os/fpm.toml', 'name = "fo_test_os"'), &
+            'nested path dev dependency materializes its manifest once')
+        call require(file_equals(trim(first%project_root)// &
+            '/test-support/fo_test_os/src/fo_test_os.f90', &
+            'module fo_test_os'), &
+            'nested path dev dependency materializes source bytes')
+    end if
+
+    conflicting = inventory
+    conflict_entry = 0
+    do i = 1, conflicting%entry_count
+        if (trim(conflicting%entries(i)%root_alias) /= &
+                'dependency:fo_test_os' .or. &
+            trim(conflicting%entries(i)%relative_path) /= 'fpm.toml') cycle
+        conflict_entry = i
+        conflicting%entries(i)%mode = &
+            modulo(conflicting%entries(i)%mode + 1, 512)
+        exit
+    end do
+    call require(conflict_entry > 0, &
+        'nested dependency inventory includes its fpm.toml record')
+    if (conflict_entry > 0) then
+        context%flags = 'conflicting-input-records'
+        context%input_inventory = conflicting
+        call generation_capture(trim(project), trim(cache), context, conflict, &
+            ierr, message)
+        call require(ierr /= 0 .and. &
+            index(trim(message), &
+                'logical path has conflicting generation input records') > 0, &
+            'overlapping destination rejects conflicting mode metadata')
+        context%flags = '-O0'
+        context%input_inventory = inventory
     end if
 
     context%base_commit = 'base-b'

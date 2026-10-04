@@ -1134,6 +1134,7 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         integer :: current_root, prior_root, i, j
+        character(len=:), allocatable :: current_path, prior_path
 
         duplicate = .false.
         ierr = 0
@@ -1145,9 +1146,9 @@ contains
             message = 'generation entry lost its physical root alias'
             return
         end if
+        current_path = join_path(trim(bundle_path), &
+            trim(inventory%entries(current)%relative_path))
         do i = 1, current - 1
-            if (trim(inventory%entries(i)%relative_path) /= &
-                trim(inventory%entries(current)%relative_path)) cycle
             prior_root = manifest_alias_root(inventory, &
                 trim(inventory%entries(i)%root_alias))
             if (prior_root == 0) then
@@ -1156,23 +1157,25 @@ contains
                 return
             end if
             do j = 1, inventory%roots(prior_root)%alias_count
-                if (trim(inventory%roots(prior_root)%bundle_paths(j)) /= &
-                    trim(bundle_path)) cycle
-                exit
-            end do
-            if (j > inventory%roots(prior_root)%alias_count) cycle
-            if (inventory%entries(i)%kind /= inventory%entries(current)%kind .or. &
-                inventory%entries(i)%mode /= inventory%entries(current)%mode .or. &
-                inventory%entries(i)%content_digest /= &
-                    inventory%entries(current)%content_digest .or. &
-                inventory%entries(i)%link_target /= &
-                    inventory%entries(current)%link_target) then
-                ierr = 1
-                message = 'logical path has conflicting generation input records'
+                prior_path = join_path(&
+                    trim(inventory%roots(prior_root)%bundle_paths(j)), &
+                    trim(inventory%entries(i)%relative_path))
+                if (trim(prior_path) /= trim(current_path)) cycle
+                if (inventory%entries(i)%kind /= &
+                        inventory%entries(current)%kind .or. &
+                    inventory%entries(i)%mode /= &
+                        inventory%entries(current)%mode .or. &
+                    inventory%entries(i)%content_digest /= &
+                        inventory%entries(current)%content_digest .or. &
+                    inventory%entries(i)%link_target /= &
+                        inventory%entries(current)%link_target) then
+                    ierr = 1
+                    message = 'logical path has conflicting generation input records'
+                    return
+                end if
+                duplicate = .true.
                 return
-            end if
-            duplicate = .true.
-            return
+            end do
         end do
     end subroutine duplicate_materialized_entry
 
