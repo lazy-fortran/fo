@@ -1,80 +1,97 @@
-# fo adjacent roadmap
+# fo issue ownership and adjacent roadmap
 
-Updated 2026-10-04. The complete Gremlin roadmap, bootstrap and ordered provider
-issues are in [PLAN.md](PLAN.md). This file contains adjacent fo responsibilities,
-not a competing Gremlin schedule. The workspace master orders repositories;
-[ffc PLAN.md](https://github.com/lazy-fortran/ffc/blob/main/PLAN.md) owns compiler
-language work. Current delivery is the user-authorized fo Gremlin implementation
-in parallel mode, including bootstrap and subsequent Gremlin dogfooding. ffc
-implementation is outside the current objective and awaits a later explicit
-trigger.
+Updated 2026-10-04. [PLAN.md](PLAN.md) is the authoritative execution and provider
+plan; this file maps responsibilities, not a competing schedule. Issue bodies
+carry focused acceptance and later delivery evidence. Check live issue state
+before assigning work; planning edits do not prove implementation complete.
 
-## Build and tool contracts
+## Development versus audits
 
-Retain module/submodule ancestry from source, complete action/dependency keys,
-atomic cache publication, original dispatcher names and child exit status.
-Performance never permits dropping a source, diagnostic, negative test or result.
-Use the existing native/fpm/CMake backend contracts. Gremlin repairs missing
-freshness/result/process behavior before consumers can rely on it.
+Use warm focused local correctness gates and push small exact green increments
+to main. GitHub CI is asynchronous; benchmarks and third-party matrices are
+explicitly **non-blocking scheduled/manual CI or optional slow audits**. They are
+not main/merge gates, required development checks, or prerequisites for unrelated
+issue closure. Confirmed current correctness regressions still get repair/revert
+priority. Slow correctness cases and safety deadlines are not timing benchmarks.
 
-## Existing issue ownership
+[Performance audit #190](https://github.com/lazy-fortran/fo/issues/190) owns real
+byte-edit scenarios, edit-to-verdict phases, counters, raw paired measurements,
+advisory reporting and moving benchmark execution out of the normal CI job.
+[Project audit #145](https://github.com/lazy-fortran/fo/issues/145) owns automatic
+allowlisted pinned acquisition and independent reference workflows for ffc,
+fortran-lang/fpm, selected fpm fixtures and stdlib/preprocessing/CMake examples.
+Acquisition is isolated and explicit; normal fo/test/Gremlin never downloads a
+benchmark matrix. Ordinary declared project dependency bootstrap is unchanged.
 
-| Issue | Responsibility |
+## Current implementation spine
+
+| Issues | Responsibility and dependency boundary |
 | --- | --- |
-| [#117](https://github.com/lazy-fortran/fo/issues/117) | Formatter correctness for assignment identifiers ending in function; preserve independent oracle. |
-| [#119](https://github.com/lazy-fortran/fo/issues/119) | Lossless machine-readable results beyond old count/byte limits; shared Gremlin event transport consumes this. |
-| [#129](https://github.com/lazy-fortran/fo/issues/129) | Link-stage/stale-artifact inventory; cleanup must preserve live ownership and useful CAS data. |
-| [#130](https://github.com/lazy-fortran/fo/issues/130) | Suite visibility, slow-child timing and durable logs. |
-| [#131](https://github.com/lazy-fortran/fo/issues/131), [#132](https://github.com/lazy-fortran/fo/issues/132) | Shared test binary/case dispatch; verify existing behavior before closing stale reports. |
-| [#134](https://github.com/lazy-fortran/fo/issues/134) | Truthful timeout/hang status rather than confusing low CPU with deadlock. |
-| [#135](https://github.com/lazy-fortran/fo/issues/135) | Path-dependency freshness and valid recompilation/link reuse. |
-| [#138](https://github.com/lazy-fortran/fo/issues/138), [#139](https://github.com/lazy-fortran/fo/issues/139), [#140](https://github.com/lazy-fortran/fo/issues/140), [#142](https://github.com/lazy-fortran/fo/issues/142), [#144](https://github.com/lazy-fortran/fo/issues/144), [#145](https://github.com/lazy-fortran/fo/issues/145) | Open Gremlin enabling stages, atomic link publication and maintained/external project matrix; exact sequence in PLAN. |
-| [#141](https://github.com/lazy-fortran/fo/issues/141) | Completed last-compilable retention and successful-generation preemption; the behavioral oracle remains a permanent CI gate. |
-| [#148](https://github.com/lazy-fortran/fo/issues/148), [#149](https://github.com/lazy-fortran/fo/issues/149), [#151](https://github.com/lazy-fortran/fo/issues/151), [#153](https://github.com/lazy-fortran/fo/issues/153), [#154](https://github.com/lazy-fortran/fo/issues/154), [#155](https://github.com/lazy-fortran/fo/issues/155), [#157](https://github.com/lazy-fortran/fo/issues/157) | Event gating, service decomposition, execution closure, finite coverage, factual local-gate reporting and quiescence. |
-| [#158](https://github.com/lazy-fortran/fo/issues/158)--[#163](https://github.com/lazy-fortran/fo/issues/163) | #158, #159, #160 and #162 are complete; six #161 JS fixtures plus generated Python/shell helpers remain before repository-owned interpreter runtimes can be removed. |
-| [#164](https://github.com/lazy-fortran/fo/issues/164) | Complete cross-process stat-memo publication and recovery at `d482807`. |
-| [#165](https://github.com/lazy-fortran/fo/issues/165)--[#170](https://github.com/lazy-fortran/fo/issues/170), [fx #42](https://github.com/lazy-fortran/fx/issues/42)--[#44](https://github.com/lazy-fortran/fx/issues/44) | Writable execution views, one immutable blob/action store, compact generations, private transactional build sessions, one ordinary/Gremlin engine and rooted low-churn collection. fx #44 Phase A precedes #166 with collection disabled; #168 adopts every owner before Phase B enables collection. |
-| [#171](https://github.com/lazy-fortran/fo/issues/171) | Complete through `9331c04`: state-provider declarations and portability oracles pass on Linux/macOS; #172 separately owns public lifecycle. |
-| [#172](https://github.com/lazy-fortran/fo/issues/172) | Add scoped Darwin asynchronous owner/descendant containment for public Gremlin lifecycle. |
-| [#173](https://github.com/lazy-fortran/fo/issues/173) | Complete: accept documented platform archive index metadata while preserving exact expected-object verification. |
-| [#174](https://github.com/lazy-fortran/fo/issues/174) | Complete through `f340fad`: initialize/diagnose the shared Darwin provider and advance pending Linux reconciliation with a bounded owner tick. |
-| [#175](https://github.com/lazy-fortran/fo/issues/175) | Own one declared execution-input inventory shared by watcher relevance, compact generation capture and later action invalidation. |
-| [#176](https://github.com/lazy-fortran/fo/issues/176) | Complete through `8431a6d`: standalone Fortran benchmark orchestration, JSONL reporting and exact inventory verification replace the shell/Python executables. |
-| [#177](https://github.com/lazy-fortran/fo/issues/177) | Complete: every command-local help path is side-effect free, including `fo install --help`. |
-| [#178](https://github.com/lazy-fortran/fo/issues/178) | Complete at `9a8ca76`: standalone install-help C code is explicit-only and cannot enter FPM's automatic Fortran test links. |
-| [#179](https://github.com/lazy-fortran/fo/issues/179) | Complete at `24018a3`: the archive-metadata Fortran oracle compiles within the portable source-line limit with byte-identical generated script behavior. |
-| [#181](https://github.com/lazy-fortran/fo/issues/181) | Repair the cold explicit-cache oracle to target active store/v2 blobs and prove isolated root switching plus corrupt-payload miss/republish behavior. |
+| [#175](https://github.com/lazy-fortran/fo/issues/175) | One canonical declared logical input inventory; watcher, capture, scratch, build and impact consume it. |
+| [#189](https://github.com/lazy-fortran/fo/issues/189), [#138](https://github.com/lazy-fortran/fo/issues/138) | Cache-independent baseline/candidate impact, whole required-set gating, reproducers first, finite background coverage. |
+| [#148](https://github.com/lazy-fortran/fo/issues/148), [#170](https://github.com/lazy-fortran/fo/issues/170) | Declared-input event relevance and private writable execution views; no second watch policy. |
+| [#151](https://github.com/lazy-fortran/fo/issues/151), [#157](https://github.com/lazy-fortran/fo/issues/157) | Exact driver and represented toolchain/helper/runtime identity; honest completeness. |
+| [#165](https://github.com/lazy-fortran/fo/issues/165) | Compact generation manifests over shared immutable blobs, not copied payload trees. |
+| [#166](https://github.com/lazy-fortran/fo/issues/166), [#167](https://github.com/lazy-fortran/fo/issues/167) | Private transactional sessions and one ordinary/Gremlin engine; separate compile/link/test identities. |
+| [#168](https://github.com/lazy-fortran/fo/issues/168), [fx #44](https://github.com/lazy-fortran/fx/issues/44) | Phase A roots/leases with collection disabled, then owner-audited Phase B collection. |
+| [#140](https://github.com/lazy-fortran/fo/issues/140), [#183](https://github.com/lazy-fortran/fo/issues/183) | Durable per-case receipts and exact receipt/coverage crash recovery; markers are not PASS. |
+| [#155](https://github.com/lazy-fortran/fo/issues/155) | Quiescence/wake over configured local scope, excluding optional audits. |
+| [#188](https://github.com/lazy-fortran/fo/issues/188) | Test-only Git dependency bootstrap without dummy root libraries or full root builds. |
 
-Adjacent scope is [#56](https://github.com/lazy-fortran/fo/issues/56) LSP,
-[#59](https://github.com/lazy-fortran/fo/issues/59) deep-lint provider,
-[#62](https://github.com/lazy-fortran/fo/issues/62) fortrun retirement and
-[#120](https://github.com/lazy-fortran/fo/issues/120) accepted Synthesis pipeline.
-They do not delay Gremlin unless an exact current dependency blocks its verifier.
-Future proposal acceptance belongs to standard; no speculative syntax expansion
-is implied by this queue.
+[fx #42](https://github.com/lazy-fortran/fx/issues/42) immutable blobs/trees and
+[fx #43](https://github.com/lazy-fortran/fx/issues/43) action-result publication
+are delivered foundations. Phase A of fx #44 precedes long-lived session graph
+adoption; collection remains off until all live ownership is represented. No
+new database, cache daemon or application-level blob RAM cache is planned.
 
-## Verification and status
+## Remaining integration and architecture
 
-Run the exact integrated candidate's focused local gate before each small push,
-recording source/toolchain/dependency and artifact identities. Gremlin continues
-background bounded tests while implementation proceeds; full pipelines and
-fixed-version matrix evidence remain milestone/completion criteria. CLI and MCP have one shared engine
-and feature set; use current CLI after fixes when MCP cannot reload.
+| Issues | Scope |
+| --- | --- |
+| [#119](https://github.com/lazy-fortran/fo/issues/119), [#130](https://github.com/lazy-fortran/fo/issues/130) | Lossless public output, useful slow-child attribution and bounded owned logs. |
+| [#129](https://github.com/lazy-fortran/fo/issues/129), [#144](https://github.com/lazy-fortran/fo/issues/144) | Link/result inventory, atomic complete artifact publication and ownership-safe retention. |
+| [#131](https://github.com/lazy-fortran/fo/issues/131), [#132](https://github.com/lazy-fortran/fo/issues/132) | Shared executable/public case routing with per-invocation isolation; no mandatory in-process batching. |
+| [#134](https://github.com/lazy-fortran/fo/issues/134), [#135](https://github.com/lazy-fortran/fo/issues/135) | Truthful timeout/accounting and path-dependency freshness. |
+| [#139](https://github.com/lazy-fortran/fo/issues/139), [#172](https://github.com/lazy-fortran/fo/issues/172) | Scoped process ownership and actual platform limits, not PID/name guesses. |
+| [#142](https://github.com/lazy-fortran/fo/issues/142), [#185](https://github.com/lazy-fortran/fo/issues/185) | CLI/MCP lifecycle parity and removal of transport-owned scheduling. |
+| [#149](https://github.com/lazy-fortran/fo/issues/149), [#150](https://github.com/lazy-fortran/fo/issues/150), [#186](https://github.com/lazy-fortran/fo/issues/186) | Cohesive campaign/command services, shared strict JSON, Fortran-owned discovery policy. |
+| [#161](https://github.com/lazy-fortran/fo/issues/161), [#163](https://github.com/lazy-fortran/fo/issues/163), [#184](https://github.com/lazy-fortran/fo/issues/184) | Remaining native fixture migration and useful test-cost reduction; no doc/layout conformity suite. |
 
-Past snapshots remain in Git history. Discussion PR #146 is merged; reviewed
-locally green increments now advance `main` directly while GitHub CI audits the
-latest main asynchronously.
-Issues #148--#151 own the core change-event, supervisor, JSON and execution-
-identity consolidation. #153--#155 add finite coverage epochs, explicit
-local-gate/full-verification facts and event-driven quiescence. Early matrix evidence includes
-one bounded fpm pass, one independent CMake/CTest pass with a fo discovery defect,
-and one honest missing-dependency block. Controller alone promotes reviewed
-paths to main and pushes every integrated milestone while it is under review.
-Agent scheduler PR #147 and issues #143/#152 are closed without merge; external
-controllers own worker/task orchestration.
+Completed #141/#153/#154 and native/concurrency/platform slices
+#158/#159/#160/#162/#164/#169/#171/#173/#174/#176/#177/#178/#179/#180/#181/#182
+are foundations to reuse, not tasks to redo. Historical exact evidence is linked
+from PLAN. #176 completed the benchmark harness migration, **not** real-edit
+performance validation; #190 owns the new measurement work.
 
+## Adjacent capabilities, outside the Gremlin critical path
 
-Issue #169 is complete through `af5d144`: self-refresh is worktree-private so
-worker builds cannot publish a global driver; only an explicit controller install
-may do that. The cold standalone Fortran oracle has an explicit 240-second wall
-budget.
+| Issue | Scope |
+| --- | --- |
+| [#56](https://github.com/lazy-fortran/fo/issues/56) | Unsaved-version LSP diagnostics; never build/test on every keystroke. |
+| [#59](https://github.com/lazy-fortran/fo/issues/59) | Explicit optional fluff deep lint, separate from cheap native checks. |
+| [#62](https://github.com/lazy-fortran/fo/issues/62) | fortrun salvage/retirement record, no second runner. |
+| [#117](https://github.com/lazy-fortran/fo/issues/117) | Formatter identifier/keyword boundary correctness. |
+| [#120](https://github.com/lazy-fortran/fo/issues/120) | Future explicit synthesis/proof actions; no implicit prover gate. |
+
+[ffc #798](https://github.com/lazy-fortran/ffc/issues/798) is a narrow consumer of
+fo's shared leaf/corpus runner and exact input model. fo's optional matrix may
+fetch a pinned isolated ffc copy as authorized, without starting unrelated
+compiler language work or changing ffc's release dashboard. Its giant corpora
+are not a prerequisite for fo development.
+
+## Coordination
+
+Core PR #146 is merged. PR #147 and #143/#152 were abandoned: external controllers
+own coding agents/worktrees/integration. Do not add GitHub, CI, promotion or model
+scheduling inside fo. Protected scientific repositories retain their external
+review/CI policies; this fast-main convention is lazy-fortran's current policy.
+
+Each changed behavior receives a bounded named native independent correctness
+oracle and a pinned exact driver. Broad correctness suites remain asynchronous
+or milestone evidence, not a full rerun per mechanical extraction. Benchmarks
+remain optional audits even at milestones. Preserve failures and unsupported
+cases; never convert partial/cancelled evidence into full green.
+
+Update the owning issue and PLAN after meaningful delivery. Keep historical
+measurements labelled, close only actually completed scope, and avoid duplicate
+narratives or blanket dependencies on every issue in the programme.
