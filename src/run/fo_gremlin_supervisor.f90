@@ -55,7 +55,7 @@ module fo_gremlin_supervisor
     use fo_util, only: json_bool, json_int, make_tmpfile
     use fx_dag, only: dag_t, MAX_NODES
     use fx_json_build, only: json_escape_string
-    use fo_fs, only: fs_make_dir, fs_sleep_ms
+    use fo_fs, only: fs_make_dir, fs_sleep_ms, fs_remove_tree
     use fo_gremlin_session, only: gremlin_resolve_read_session, &
         gremlin_load_terminal_session, gremlin_get_session_journal_path, &
         gremlin_stage_recovery_journal, gremlin_recover_owner_journal, &
@@ -859,7 +859,7 @@ contains
         type(gremlin_session_t) :: session
         type(gremlin_lease_t) :: reproduction_lease
         type(generation_t) :: generation
-        type(execution_view_t) :: execution_view
+        type(execution_view_t) :: execution_view, build_view
         type(driver_pin_t) :: reproduction_pin
         type(gremlin_request_t) :: selection_request
         character(len=PATH_LEN) :: message, active_project, log_file, executable
@@ -871,6 +871,7 @@ contains
         character(len=16) :: outcome
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
         character(len=128) :: session_id, owner_start
+        character(len=128) :: build_view_owner
         character(len=:), allocatable :: packed, execution_env
         integer :: owner_pid, ierr, n_selected, mandatory_count, seed
         integer :: n_args, spawn_exit, test_exit, sequence, release_error
@@ -1012,11 +1013,28 @@ contains
         reproduction_timeout = case_wall_timeout(active_project, request%case_id, &
             request%timeout_seconds)
         write(view_owner, '(a,"-reproduce-",i0)') trim(session%session_id), sequence
+        write(build_view_owner, '(a,"-build")') trim(view_owner)
+        call execution_view_create(trim(session%state_dir)//'/views', &
+            generation%identity, trim(build_view_owner), 'build', &
+            generation%input_inventory, generation%input_inventory_ready, &
+            generation%input_inventory_complete, build_view, ierr, message, &
+            candidate_bundle_root=trim(generation%root)//'/bundle')
+        if (ierr /= 0) then
+            call release_generation_lease(reproduction_lease, &
+                have_reproduction_lease, release_error, cleanup_message)
+            call release_if_owner(session, release_error, cleanup_message)
+            call error_response('reproduce', 'cannot create private build view: '// &
+                trim(message), response)
+            exitcode = 2
+            return
+        end if
         call execution_view_create(trim(session%state_dir)//'/views', &
             generation%identity, trim(view_owner), request%case_id, &
             generation%input_inventory, generation%input_inventory_ready, &
             generation%input_inventory_complete, execution_view, ierr, message)
         if (ierr /= 0) then
+            call execution_view_release(build_view, .false., release_error, &
+                cleanup_message)
             call release_generation_lease(reproduction_lease, &
                 have_reproduction_lease, release_error, cleanup_message)
             call release_if_owner(session, release_error, cleanup_message)
@@ -1027,7 +1045,7 @@ contains
         end if
         execution_env = 'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
             'FO_GREMLIN_EXECUTION_CWD='//trim(execution_view%cwd)
-        call process_start_argv_logged(trim(active_project), packed, n_args, &
+        call process_start_argv_logged(trim(build_view%cwd), packed, n_args, &
             trim(log_file), owner_pid, spawn_exit, &
             trim(execution_env))
         if (spawn_exit == 0) then
@@ -1049,6 +1067,8 @@ contains
         if (spawn_exit == 0) call append_execution_provenance(log_file, execution_view)
         retain_view = spawn_exit == 0 .and. test_exit /= 0
         call execution_view_release(execution_view, retain_view, release_error, &
+            cleanup_message)
+        call execution_view_release(build_view, retain_view, release_error, &
             cleanup_message)
         call record_immediate_case(session, request, generation, request%case_id, &
             test_exit, trim(outcome), sequence, 1, seed, trim(log_file), ierr, message, &
@@ -1093,6 +1113,7 @@ contains
         character(len=PATH_LEN) :: message, state_name, last_failed_identity
         character(len=PATH_LEN) :: capture_diagnostic
         character(len=PATH_LEN) :: fatal_message, state_message
+        character(len=PATH_LEN) :: build_view_cleanup_message
         character(len=16) :: observed_outcome
         character(len=PATH_LEN) :: owner_start
         character(len=NAME_LEN) :: selected(MAX_NODES)
@@ -1102,6 +1123,7 @@ contains
         integer :: ierr, build_exit, test_exit, launch_error, completed, selected_count
         integer :: cancel_error, release_error, capture_error, state_error
         integer :: registration_error
+        integer :: build_view_cleanup_status
         integer :: owner_pid, i
         integer :: sequence, campaign_seed, campaign_number, test_index
         integer(int64) :: capture_debounce_ms, campaign_started_ms, freshness_ticket
@@ -1315,6 +1337,16 @@ contains
                         candidate_pinned, selected, selected_count, campaign_seed, &
                         completed, state_name, last_failed_identity, sequence, ierr, message)
                     if (ierr /= 0) then
+                        build_child%pid = 0
+                        if (build_child%execution_view%active) then
+                            call execution_view_release( &
+                                build_child%execution_view, .false., &
+                                build_view_cleanup_status, &
+                                build_view_cleanup_message)
+                        end if
+                        if (candidate_generation%build_project_root == &
+                                build_child%execution_view%cwd) &
+                            candidate_generation%build_project_root = ''
                         fatal_error = .true.
                         exit
                     end if
@@ -1469,7 +1501,15 @@ contains
             if (build_child%pid > 0) then
                 call cancel_owned_process(build_child%pid, build_exit)
                 if (build_exit /= 0 .and. cancel_error == 0) cancel_error = build_exit
-                if (build_exit == 0) build_child%pid = 0
+                if (build_exit == 0) then
+                    build_child%pid = 0
+                    if (build_child%execution_view%active) then
+                        call execution_view_release( &
+                            build_child%execution_view, .false., &
+                            build_view_cleanup_status, build_view_cleanup_message)
+                    end if
+                    candidate_generation%build_project_root = ''
+                end if
             end if
             if (cancel_error == 0) then
                 if (candidate_pinned) then
@@ -1520,7 +1560,13 @@ contains
         if (build_child%pid > 0) then
             call cancel_owned_process(build_child%pid, build_exit)
             if (build_exit /= 0 .and. cancel_error == 0) cancel_error = build_exit
-            if (build_exit == 0) build_child%pid = 0
+            if (build_exit == 0) then
+                build_child%pid = 0
+                if (build_child%execution_view%active) &
+                    call execution_view_release(build_child%execution_view, .false., &
+                        release_error, state_message)
+                candidate_generation%build_project_root = ''
+            end if
         end if
         if (cancel_error /= 0) then
             call publish_state(session, owner_request, 'error', active_generation, &
@@ -1582,6 +1628,10 @@ contains
             call error_response('run', trim(message), response)
             exitcode = 2
             return
+        end if
+        if (len_trim(active_generation%build_project_root) > 0) then
+            call fs_remove_tree(trim(active_generation%build_project_root))
+            active_generation%build_project_root = ''
         end if
         call simple_response('run', request%lane_id, session%session_id, 'stopped', response)
     end subroutine run_owner
@@ -1731,14 +1781,14 @@ contains
 
     subroutine start_build(session, generation, child, ierr, message)
         type(gremlin_session_t), intent(in) :: session
-        type(generation_t), intent(in) :: generation
+        type(generation_t), intent(inout) :: generation
         type(child_t), intent(out) :: child
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
-        character(len=PATH_LEN) :: executable
+        character(len=PATH_LEN) :: executable, view_message
         character(len=:), allocatable :: packed
-        integer :: n_args, spawn_exit
+        integer :: n_args, spawn_exit, view_status
         logical :: exists
 
         child = child_t()
@@ -1756,17 +1806,31 @@ contains
             return
         end if
         executable = session%driver_path
+        generation%build_project_root = ''
+        call execution_view_create(trim(session%state_dir)//'/views', &
+            generation%identity, trim(session%session_id)//'-build', 'build', &
+            generation%input_inventory, generation%input_inventory_ready, &
+            generation%input_inventory_complete, child%execution_view, ierr, message, &
+            candidate_bundle_root=trim(generation%root)//'/bundle')
+        if (ierr /= 0) then
+            message = 'cannot create candidate build view: '//trim(message)
+            return
+        end if
+        generation%build_project_root = child%execution_view%cwd
         call log_path(session, 'build-'//generation%identity(1:16), child%log_file)
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'build')
-        call process_start_argv_logged(trim(generation%project_root), packed, &
+        call process_start_argv_logged(trim(child%execution_view%cwd), packed, &
             n_args, trim(child%log_file), child%pid, spawn_exit, &
             'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0')
         ierr = spawn_exit
         if (ierr /= 0) then
             message = 'cannot start candidate build'
             child%pid = 0
+            call execution_view_release(child%execution_view, .false., view_status, &
+                view_message)
+            generation%build_project_root = ''
             return
         end if
         call clock_seconds(child%started_at)
@@ -1814,6 +1878,10 @@ contains
         if (ierr /= 0) return
         build_child%pid = 0
         if (build_exit /= 0) then
+            if (build_child%execution_view%active) &
+                call execution_view_release(build_child%execution_view, .false., &
+                    release_status, release_message)
+            candidate%build_project_root = ''
             last_failed = candidate%identity
             state_name = 'build_failed'
             active_case = ''
@@ -1900,10 +1968,14 @@ contains
         new_active_lease%lock_fd = -1
         new_active_lease%slot = -1
         have_active_lease = .true.
+        candidate%build_project_root = build_child%execution_view%cwd
+        if (was_active .and. len_trim(active%build_project_root) > 0) &
+            call fs_remove_tree(trim(active%build_project_root))
         request%has_previous_generation = was_active
         request%requirement_digest = ''
         request%gate_cases = ''
         active = candidate
+        build_child%execution_view%active = .false.
         have_active = .true.
         request%input_changed = .false.
         request%gate_required_count = 0
@@ -2091,8 +2163,12 @@ contains
             message = 'coverage scheduler rejected eligible inventory or priorities'
             return
         end if
-        if (n_priorities == 0 .and. n_selected > 0) then
-            priorities(1) = selected(1)
+        if (n_priorities == 0) then
+            if (n_selected > 0) then
+                priorities(1) = selected(1)
+            else
+                priorities(1) = all_names(1)
+            end if
             n_priorities = 1
         end if
         if (len_trim(request%requirement_digest) /= HASH_LEN) then
@@ -2102,6 +2178,10 @@ contains
             request%requirement_digest = cache_digest(priorities, n_priorities)
         end if
         n_mandatory_selected = n_selected_priorities
+        call select_missing_gate_cases(session, generation_id, request, &
+            min(limit, size(selected)), selected, n_selected, &
+            n_mandatory_selected, ierr, message)
+        if (ierr /= 0) return
         if (request%shuffle) then
             call shuffle_gremlin_tests(selected, n_mandatory_selected, n_selected, &
                 seed, shuffle_status)
@@ -2111,6 +2191,80 @@ contains
             end if
         end if
     end subroutine discover_campaign
+
+    subroutine select_missing_gate_cases(session, generation, request, limit, &
+            selected, n_selected, n_mandatory, ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        character(len=*), intent(in) :: generation
+        type(gremlin_request_t), intent(in) :: request
+        integer, intent(in) :: limit
+        character(len=*), intent(inout) :: selected(:)
+        integer, intent(inout) :: n_selected, n_mandatory
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        type(journal_record_t), allocatable :: records(:)
+        character(len=NAME_LEN) :: pending(MAX_NODES)
+        character(len=HASH_LEN) :: receipt_generation, requirement
+        character(len=NAME_LEN) :: case_name
+        character(len=PATH_LEN) :: journal_path
+        character(len=16) :: outcome, gate_required
+        logical :: attempted(MAX_NODES)
+        integer(int64) :: cursor, next_cursor
+        integer :: i, j, n_pending
+
+        ! Coverage may already be complete when a frozen generation is reused
+        ! with a different gate. Only actual receipts can discharge that gate.
+        attempted = .false.
+        cursor = 0_int64
+        ierr = 0
+        message = ''
+        call gremlin_get_session_journal_path(session%project_key, request%lane_id, &
+            session%session_id, journal_path, ierr, message)
+        if (ierr /= 0) return
+        do
+            call journal_read_page(trim(journal_path), cursor, 64, &
+                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, next_cursor, &
+                ierr, message)
+            if (ierr /= JOURNAL_OK) return
+            if (size(records) == 0) exit
+            do i = 1, size(records)
+                call gremlin_json_field(records(i)%json, 'generation', &
+                    receipt_generation)
+                if (trim(receipt_generation) /= trim(generation)) cycle
+                call gremlin_json_field(records(i)%json, 'requirement_digest', &
+                    requirement)
+                if (requirement /= request%requirement_digest) cycle
+                call gremlin_json_field(records(i)%json, 'gate_required', gate_required)
+                if (trim(gate_required) /= 'true') cycle
+                call gremlin_json_field(records(i)%json, 'status', outcome)
+                if (outcome /= 'PASS' .and. .not. status_is_failure(outcome)) cycle
+                call gremlin_json_field(records(i)%json, 'case_id', case_name)
+                do j = 1, request%gate_required_count
+                    if (case_name == request%gate_cases(j)) attempted(j) = .true.
+                end do
+            end do
+            if (next_cursor <= cursor) then
+                ierr = JOURNAL_INVALID
+                message = 'Gremlin receipt cursor did not advance during gate selection'
+                return
+            end if
+            cursor = next_cursor
+        end do
+        pending = ''
+        n_pending = 0
+        do i = 1, request%gate_required_count
+            if (attempted(i)) cycle
+            n_pending = n_pending + 1
+            pending(n_pending) = request%gate_cases(i)
+        end do
+        call append_priority_names(selected, n_mandatory, pending, n_pending)
+        n_mandatory = min(n_pending, limit)
+        call append_priority_names(selected, n_selected, pending, n_pending)
+        n_selected = min(n_pending, limit)
+        selected = ''
+        selected(:n_selected) = pending(:n_selected)
+    end subroutine select_missing_gate_cases
 
     subroutine append_priority_names(source, n_source, destination, n_destination)
         character(len=*), intent(in) :: source(:)
@@ -2363,7 +2517,7 @@ contains
         character(len=*), intent(out) :: message
         integer, intent(inout) :: sequence
 
-        character(len=PATH_LEN) :: executable, log_name
+        character(len=PATH_LEN) :: executable, log_name, test_project
         character(len=PATH_LEN) :: journal_message
         character(len=PATH_LEN) :: view_owner, view_message
         character(len=:), allocatable :: packed, execution_env
@@ -2376,6 +2530,12 @@ contains
         ierr = 0
         message = ''
         if (index_case < 1 .or. index_case > n_selected) return
+        if (len_trim(generation%build_project_root) == 0) then
+            ierr = 1
+            message = 'active generation has no candidate build view'
+            return
+        end if
+        test_project = generation%build_project_root
         child%gate_required = any(request%gate_cases(:request%gate_required_count) == &
             selected(index_case))
         if (generation%driver_digest /= session%driver_digest .or. &
@@ -2411,7 +2571,7 @@ contains
             call argv_push(packed, n_args, '--all')
         end if
         call argv_push(packed, n_args, trim(selected(index_case)))
-        call process_start_argv_logged(trim(generation%project_root), packed, &
+        call process_start_argv_logged(trim(test_project), packed, &
             n_args, trim(child%log_file), child%pid, spawn_exit, &
             trim(execution_env))
         ierr = spawn_exit

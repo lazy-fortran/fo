@@ -1,4 +1,5 @@
 program test_backend_gfortran
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
         detect_jobs, backend_build, backend_test, &
@@ -16,53 +17,71 @@ program test_backend_gfortran
     use fo_linker_policy, only: linker_should_try_lld
     use fx_dag, only: MAX_NODES
     implicit none
-    integer :: n_pass, n_fail
+    integer :: n_pass, n_fail, n_args
+    character(len=64) :: selector
 
     n_pass = 0
     n_fail = 0
+    n_args = command_argument_count()
+    selector = ''
+    if (n_args > 0) call get_command_argument(1, selector)
+    if (n_args > 1) selector = '__invalid__'
 
     call isolate_backend_cache()
-    call test_gfortran_flags_change_action_id()
-    call test_compiler_baseline_flags_change_action_id()
-    call test_gfortran_compiler_identity_changes_action_id()
-    call test_gfortran_private_change_keeps_dependent_cached()
-    call test_gfortran_interface_change_rebuilds_dependent()
-    call test_gfortran_parallel_test_loop_restores_cached_objects()
-    call test_gfortran_test_skips_app_but_build_restores_it()
-    call test_gfortran_test_links_helper_modules_and_lib()
-    call test_gfortran_named_test_links_helper_modules()
-    call test_gfortran_named_test_uses_manifest_name()
-    call test_gfortran_app_links_only_reachable_library_objects()
-    call test_compiler_switch_clears_the_tree()
-    call test_slow_test_gets_its_own_timeout()
-    call test_test_budget_respects_available_clock()
-    call test_gfortran_builds_manifest_example()
-    call test_gfortran_preprocesses_lowercase_f90()
-    call test_gfortran_builds_nested_auto_example()
-    call test_gfortran_builds_c_source_with_public_header()
-    call test_gfortran_builds_path_dependency()
-    call test_gfortran_names_binary_from_manifest_executable()
-    call test_gfortran_path_dep_ignores_coexisting_fpm_tree()
-    call test_gfortran_test_link_ignores_coexisting_fpm_tree()
-    call test_gfortran_test_drops_stale_path_dep_objects()
-    call test_gfortran_link_failure_reports_fail()
-    call test_gfortran_bootstraps_git_dependency()
-    call test_gfortran_repairs_partial_git_dependency_artifacts()
-    call test_gfortran_worktree_path_dep_bootstraps_git_dependency()
-    call test_gfortran_dep_library_object_marker_not_dropped()
-    call test_gfortran_test_builds_dev_dependency()
-    call test_fpm_path_with_spaces()
-    call test_gfortran_rejects_compile_errors()
-    call test_gfortran_rebuilds_cached_module_without_mod()
-    call test_array_temporary_warning_flag_policy()
-    call test_pipe_flag_policy()
-    call test_linker_policy()
-    call test_lld_failure_falls_back_to_default_linker()
-    call test_gfortran_warns_about_array_temporaries()
-    call test_gfortran_named_tests_fit_default_stack()
-    call test_gfortran_passes_manifest_test_arguments()
-
-    call report('backend_gfortran')
+    if (n_args == 0) then
+        call test_gfortran_flags_change_action_id()
+        call test_compiler_baseline_flags_change_action_id()
+        call test_gfortran_compiler_identity_changes_action_id()
+        call test_gfortran_private_change_keeps_dependent_cached()
+        call test_gfortran_interface_change_rebuilds_dependent()
+        call test_gfortran_parallel_test_loop_restores_cached_objects()
+        call test_gfortran_test_skips_app_but_build_restores_it()
+        call test_gfortran_test_links_helper_modules_and_lib()
+        call test_gfortran_named_test_links_helper_modules()
+        call test_gfortran_named_test_uses_manifest_name()
+        call test_gfortran_app_links_only_reachable_library_objects()
+        call test_compiler_switch_clears_the_tree()
+        call test_slow_test_gets_its_own_timeout()
+        call test_test_budget_respects_available_clock()
+        call test_gfortran_builds_manifest_example()
+        call test_gfortran_preprocesses_lowercase_f90()
+        call test_gfortran_builds_nested_auto_example()
+        call test_gfortran_builds_c_source_with_public_header()
+        call test_gfortran_builds_path_dependency()
+        call test_gfortran_names_binary_from_manifest_executable()
+        call test_gfortran_path_dep_ignores_coexisting_fpm_tree()
+        call test_gfortran_test_link_ignores_coexisting_fpm_tree()
+        call test_gfortran_test_drops_stale_path_dep_objects()
+        call test_gfortran_link_failure_reports_fail()
+        call test_gfortran_bootstraps_git_dependency()
+        call test_gfortran_bootstraps_git_dev_dependency_closure()
+        call test_gfortran_repairs_partial_git_dependency_artifacts()
+        call test_gfortran_worktree_path_dep_bootstraps_git_dependency()
+        call test_gfortran_dep_library_object_marker_not_dropped()
+        call test_gfortran_test_builds_dev_dependency()
+        call test_fpm_path_with_spaces()
+        call test_gfortran_rejects_compile_errors()
+        call test_gfortran_rebuilds_cached_module_without_mod()
+        call test_array_temporary_warning_flag_policy()
+        call test_pipe_flag_policy()
+        call test_linker_policy()
+        call test_lld_failure_falls_back_to_default_linker()
+        call test_gfortran_warns_about_array_temporaries()
+        call test_gfortran_named_tests_fit_default_stack()
+        call test_gfortran_passes_manifest_test_arguments()
+        call report('backend_gfortran')
+    else
+        select case (trim(selector))
+        case ('dependency-bootstrap')
+            call test_gfortran_bootstraps_git_dev_dependency_closure()
+            call report('backend_gfortran/dependency-bootstrap')
+        case default
+            write (error_unit, '(a)') 'unknown backend_gfortran subcase: '// &
+                trim(selector)
+            n_fail = 1
+            call report('backend_gfortran/unknown-subcase')
+        end select
+    end if
 
 contains
 
@@ -154,21 +173,6 @@ contains
         end if
         call fs_remove_file(log_file)
     end subroutine compile_backend_command_fixture
-
-    subroutine run_backend_argv(executable, arguments, log_file, exitcode)
-        character(len=*), intent(in) :: executable, arguments(:), log_file
-        integer, intent(out) :: exitcode
-        character(len=:), allocatable :: packed
-        integer :: n_args, i
-
-        n_args = 0
-        call argv_push(packed, n_args, trim(executable))
-        do i = 1, size(arguments)
-            call argv_push(packed, n_args, trim(arguments(i)))
-        end do
-        call process_run_argv_logged('', packed, n_args, trim(log_file), &
-            .false., 60, exitcode)
-    end subroutine run_backend_argv
 
     subroutine run_backend_program(executable, log_file, exitcode)
         character(len=*), intent(in) :: executable, log_file
@@ -465,33 +469,6 @@ contains
         write (u, '(a)') 'end program '//trim(name)
         close (u)
     end subroutine write_sleeping_test
-
-    subroutine set_env(name, value)
-        !! Set or clear an environment variable for this process.
-        use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
-        interface
-            function c_setenv(name, value, overwrite) bind(C, name='setenv') &
-                    result(ierr)
-                import :: c_char, c_int
-                character(kind=c_char), intent(in) :: name(*), value(*)
-                integer(c_int), value :: overwrite
-                integer(c_int) :: ierr
-            end function c_setenv
-            function c_unsetenv(name) bind(C, name='unsetenv') result(ierr)
-                import :: c_char, c_int
-                character(kind=c_char), intent(in) :: name(*)
-                integer(c_int) :: ierr
-            end function c_unsetenv
-        end interface
-        character(len=*), intent(in) :: name, value
-        integer(c_int) :: ierr
-
-        if (len_trim(value) == 0) then
-            ierr = c_unsetenv(trim(name)//c_null_char)
-        else
-            ierr = c_setenv(trim(name)//c_null_char, trim(value)//c_null_char, 1_c_int)
-        end if
-    end subroutine set_env
 
     subroutine test_gfortran_builds_manifest_example()
         character(len=512) :: project_dir, log_file, binary

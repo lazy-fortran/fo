@@ -1,4 +1,5 @@
 module fo_test_gremlin_oracle
+    use, intrinsic :: iso_fortran_env, only: error_unit
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_ptr, c_null_char, c_null_ptr, c_loc
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_scratch, join_path, make_directory, write_text
@@ -341,12 +342,15 @@ contains
         call assert_true(status == 0, 'releases FIFO with a live reader within its bound')
     end subroutine gremlin_release_fifo
 
-    subroutine gremlin_stop_lane(driver, project, cache, state, lane, owner)
+    subroutine gremlin_stop_lane(driver, project, cache, state, lane, owner, &
+            allow_terminal_error)
         character(len=*), intent(in) :: driver, project, cache, state, lane, owner
+        logical, optional, intent(in) :: allow_terminal_error
         type(string_list_t) :: args
-        type(process_result_t) :: process
-        type(json_value_t) :: reply
+        type(process_result_t) :: process, stop_process
+        type(json_value_t) :: reply, stop_reply
         integer :: attempt, owner_pid, ios, dash
+        logical :: accept_error
 
         call list_add(args, 'gremlin')
         call list_add(args, 'stop')
@@ -357,10 +361,15 @@ contains
         call list_add(args, '--session')
         call list_add(args, owner)
         call list_add(args, '--json')
-        call gremlin_json(driver, project, cache, state, args, reply, process, 10000)
-        call assert_true(process%exit_code == 0, 'requests shutdown of only the owned lane')
+        call gremlin_json(driver, project, cache, state, args, stop_reply, &
+            stop_process, 10000)
+        call assert_true(stop_process%exit_code == 0, &
+            'requests shutdown of only the owned lane')
         args%items(2)%value = 'status'
         owner_pid = -1
+        accept_error = .false.
+        if (present(allow_terminal_error)) accept_error = allow_terminal_error
+        ios = 1
         dash = index(owner, '-')
         if (dash > 1) then
             read(owner(:dash - 1), *, iostat=ios) owner_pid
@@ -371,10 +380,54 @@ contains
             if (process%exit_code /= 0) exit
             if (gremlin_field(reply, 'state') == 'stopped') then
                 if (.not. gremlin_process_running(owner_pid)) return
+            else if (accept_error) then
+                if (gremlin_field(reply, 'state') == 'error') then
+                    if (.not. gremlin_process_running(owner_pid)) then
+                        write(error_unit, '(a)') 'intentional failed-input shutdown: '// &
+                            'last_outcome='//gremlin_field(reply, 'last_outcome')// &
+                            ' last_exitcode='//gremlin_field(reply, 'last_exitcode')// &
+                            ' diagnostic='//gremlin_field(reply, 'diagnostic')
+                        return
+                    end if
+                end if
             end if
             call gremlin_wait_ms(50)
         end do
-        call assert_true(.false., 'owned supervisor finishes shutdown before fixture cleanup')
+        call gremlin_json(driver, project, cache, state, args, reply, process, 10000)
+        write(error_unit, '(a)') 'Gremlin fixture shutdown diagnostic: project='// &
+            trim(project)//' owner='//trim(owner)
+        write(error_unit, '(a,i0)') 'stop command exit: ', stop_process%exit_code
+        write(error_unit, '(a)') 'stop response state: '// &
+            gremlin_field(stop_reply, 'state')
+        write(error_unit, '(a,i0)') 'fresh status command exit: ', process%exit_code
+        write(error_unit, '(a)') 'fresh status state: '//gremlin_field(reply, 'state')
+        write(error_unit, '(a)') 'fresh status phase: '//gremlin_field(reply, 'phase')
+        write(error_unit, '(a)') 'owner process stat: '//test_process_stat(owner_pid)
+        call assert_true(.false., &
+            'owned supervisor finishes shutdown before fixture cleanup')
     end subroutine gremlin_stop_lane
+
+    function test_process_stat(pid) result(text)
+        integer, intent(in) :: pid
+        character(:), allocatable :: text
+        character(len=64) :: pid_text
+        character(len=2048) :: record
+        integer :: unit, ios
+
+        write(pid_text, '(i0)') pid
+        open (newunit=unit, file='/proc/'//trim(pid_text)//'/stat', &
+            status='old', action='read', iostat=ios)
+        if (ios /= 0) then
+            text = 'absent'
+            return
+        end if
+        read (unit, '(a)', iostat=ios) record
+        close (unit)
+        if (ios /= 0) then
+            text = 'unreadable'
+        else
+            text = trim(record)
+        end if
+    end function test_process_stat
 
 end module fo_test_gremlin_oracle

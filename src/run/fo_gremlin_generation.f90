@@ -2,10 +2,17 @@ module fo_gremlin_generation
     !! Immutable, content-addressed input snapshots for Gremlin campaigns.
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: int64
-    use fo_cache, only: HASH_LEN, cache_digest, cache_file_digest
+    use fo_cache, only: HASH_LEN, cache_digest, cache_file_digest, &
+        cache_store_root
     use fo_fs, only: fs_make_dir, fs_mkdir_excl
     use fo_process, only: process_getpid
-    use fo_input_inventory, only: input_inventory_t
+    use fx_immutable_store, only: immutable_store_t, immutable_store_init, &
+        IMMUTABLE_OK
+    use fo_input_inventory, only: input_inventory_t, input_inventory_revalidate, &
+        input_inventory_discover, input_entry_t, INPUT_FILE, INPUT_DIRECTORY
+    use fo_generation_manifest, only: generation_manifest_metadata_t, &
+        generation_manifest_capture, generation_manifest_load, &
+        generation_manifest_materialize, generation_manifest_execution_identity
     implicit none
     private
 
@@ -34,11 +41,15 @@ module fo_gremlin_generation
 
     type, public :: generation_t
         character(len=HASH_LEN) :: identity = ''
+        character(len=HASH_LEN) :: manifest_id = ''
+        character(len=PATH_LEN) :: store_root = ''
         character(len=PATH_LEN) :: driver_path = ''
         character(len=HASH_LEN) :: driver_digest = ''
         integer(int64) :: driver_size = 0_int64
         character(len=PATH_LEN) :: root = ''
         character(len=PATH_LEN) :: project_root = ''
+        ! Writable materialization locator; deliberately excluded from identity.
+        character(len=PATH_LEN) :: build_project_root = ''
         character(len=:), allocatable :: base_commit
         character(len=:), allocatable :: patch_digest
         type(input_inventory_t) :: input_inventory
@@ -47,7 +58,8 @@ module fo_gremlin_generation
         character(len=1024) :: input_inventory_diagnostic = ''
     end type generation_t
 
-    public :: generation_capture, generation_driver_identity
+    public :: generation_capture, generation_driver_identity, &
+        generation_load_inventory
 
     interface
         integer(c_int) function fo_c_generation_list_tree(root, manifest) &
@@ -153,6 +165,14 @@ contains
             .not. identity_field_fits(context%base_commit) .or. &
             .not. identity_field_fits(context%patch_digest)) then
             message = 'generation identity field exceeds the supported length'
+            return
+        end if
+        if (context%input_inventory%valid .and. &
+            context%input_inventory%root_count > 0 .and. &
+            allocated(context%input_inventory%roots) .and. &
+            allocated(context%input_inventory%entries)) then
+            call generation_capture_inventory(project_root, cas_root, context, &
+                generation, ierr, message)
             return
         end if
         n_roots = 1
@@ -413,6 +433,473 @@ contains
         call fo_c_generation_unlock(int(fd, c_int))
         call remove_capture(manifests, n_roots, capture_dir)
     end subroutine generation_capture
+
+    subroutine generation_capture_inventory(project_root, cas_root, context, &
+            generation, ierr, message)
+        character(len=*), intent(in) :: project_root, cas_root
+        type(generation_context_t), intent(in) :: context
+        type(generation_t), intent(out) :: generation
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(generation_manifest_metadata_t) :: metadata
+        type(input_inventory_t) :: restored_inventory
+        type(immutable_store_t) :: store
+        character(len=PATH_LEN) :: store_root, base, cache, capture_dir, stage
+        character(len=PATH_LEN) :: lock_path, manifest_path
+        character(len=HASH_LEN) :: manifest_id
+        character(len=32) :: clock_text
+        integer :: status, attempt, clock_count, fd
+        integer(c_int) :: crc
+        logical :: exists
+
+        generation = generation_t()
+        ierr = 1
+        message = ''
+        metadata%toolchain = value_or_empty(context%toolchain)
+        metadata%flags = value_or_empty(context%flags)
+        metadata%environment = value_or_empty(context%environment)
+        metadata%driver_digest = trim(context%driver_digest)
+        metadata%driver_size = context%driver_size
+        metadata%base_commit = value_or_empty(context%base_commit)
+        metadata%patch_digest = value_or_empty(context%patch_digest)
+        metadata%execution_identity = generation_manifest_execution_identity( &
+            metadata, context%input_inventory)
+        call cache_store_root(store_root)
+        if (len_trim(store_root) == 0 .or. len_trim(store_root) >= PATH_LEN) then
+            message = 'cannot resolve the shared immutable object store'
+            return
+        end if
+        base = trim(cas_root)//'/gremlin/generations'
+        cache = trim(base)//'/'//metadata%execution_identity
+        if (len_trim(base) + len('/.capture/manifest-') + 64 >= PATH_LEN .or. &
+            len_trim(cache) + len('/bundle/project') >= PATH_LEN .or. &
+            len_trim(base) + len('/.locks/') + HASH_LEN >= PATH_LEN) then
+            message = 'manifest generation path exceeds the supported length'
+            return
+        end if
+        generation%identity = metadata%execution_identity
+        generation%root = cache
+        generation%project_root = trim(cache)//'/bundle/project'
+        generation%driver_path = context%driver_path
+        generation%driver_digest = context%driver_digest
+        generation%driver_size = context%driver_size
+        lock_path = trim(base)//'/.locks/'//generation%identity
+        call fs_make_dir(trim(base))
+        call fs_make_dir(trim(base)//'/.capture')
+        call fs_make_dir(trim(base)//'/.locks')
+        fd = int(fo_c_generation_lock(trim(lock_path)//c_null_char))
+        if (fd < 0) then
+            message = 'cannot acquire manifest generation publication lock'
+            return
+        end if
+
+        inquire (file=trim(cache), exist=exists)
+        if (exists) then
+            call read_manifest_store(trim(cache)//'/store.root', store_root, &
+                status, message)
+            if (status /= 0) then
+                call fo_c_generation_unlock(int(fd, c_int))
+                return
+            end if
+            manifest_path = trim(cache)//'/manifest.id'
+            call read_manifest_id(trim(manifest_path), manifest_id, status, message)
+            if (status == 0) then
+                call generation_manifest_load(trim(store_root), manifest_id, &
+                    metadata, restored_inventory, status, message)
+            end if
+            if (status == 0 .and. metadata%execution_identity /= &
+                generation%identity) then
+                status = 1
+                message = 'stored manifest identity differs from its generation path'
+            end if
+            if (status == 0) then
+                call validate_manifest_bundle(generation%project_root, &
+                    restored_inventory, status, message)
+            end if
+            if (status == 0) then
+                call input_inventory_revalidate(project_root, &
+                    context%input_inventory%declarations, &
+                    context%input_inventory, status, message)
+            end if
+            if (status == 0) then
+                call bind_inventory_to_bundle(restored_inventory, trim(cache), &
+                    status, message)
+            end if
+            if (status == 0) then
+                generation%manifest_id = manifest_id
+                generation%store_root = store_root
+                generation%input_inventory = restored_inventory
+                generation%input_inventory_ready = .true.
+                generation%input_inventory_complete = &
+                    restored_inventory%complete
+                generation%input_inventory_diagnostic = &
+                    restored_inventory%diagnostic
+                generation%base_commit = metadata%base_commit
+                generation%patch_digest = metadata%patch_digest
+                ierr = 0
+            end if
+            call fo_c_generation_unlock(int(fd, c_int))
+            return
+        end if
+
+        call immutable_store_init(store, trim(store_root), status)
+        if (status /= IMMUTABLE_OK) then
+            message = 'cannot initialize the shared immutable object store'
+            call fo_c_generation_unlock(int(fd, c_int))
+            return
+        end if
+        if (len_trim(store%root_dir) == 0 .or. &
+            len_trim(store%root_dir) >= PATH_LEN) then
+            message = 'canonical immutable object store path is invalid'
+            call fo_c_generation_unlock(int(fd, c_int))
+            return
+        end if
+        store_root = trim(store%root_dir)
+
+        call generation_manifest_capture(trim(store_root), metadata, &
+            context%input_inventory, manifest_id, status, message)
+        if (status /= 0) then
+            call fo_c_generation_unlock(int(fd, c_int))
+            return
+        end if
+        call system_clock(clock_count)
+        do attempt = 1, 32
+            write (clock_text, '(i0)') clock_count + attempt
+            capture_dir = trim(base)//'/.capture/manifest-'// &
+                trim(int_text(process_getpid()))//'-'//trim(clock_text)
+            status = fs_mkdir_excl(trim(capture_dir))
+            if (status == 0) exit
+        end do
+        if (attempt > 32) then
+            message = 'cannot allocate manifest generation staging directory'
+            call fo_c_generation_unlock(int(fd, c_int))
+            return
+        end if
+        stage = trim(capture_dir)//'/generation'
+        status = fs_mkdir_excl(trim(stage))
+        if (status /= 0) then
+            message = 'cannot create manifest generation stage'
+            crc = fo_c_generation_remove_stage(trim(capture_dir)//c_null_char)
+            call fo_c_generation_unlock(int(fd, c_int))
+            return
+        end if
+        call fs_make_dir(trim(stage)//'/bundle')
+        call generation_manifest_materialize(trim(store_root), manifest_id, &
+            trim(stage)//'/bundle', metadata, restored_inventory, status, message)
+        if (status == 0) then
+            call write_manifest_id(trim(stage)//'/manifest.id', manifest_id, status)
+            if (status /= 0) message = 'cannot write generation manifest locator'
+        end if
+        if (status == 0) then
+            call write_manifest_store(trim(stage)//'/store.root', store_root, status)
+            if (status /= 0) message = 'cannot write generation store locator'
+        end if
+        if (status == 0) then
+            call write_manifest_identity(trim(stage)//'/identity.txt', metadata, &
+                status)
+            if (status /= 0) message = 'cannot write generation identity record'
+        end if
+        if (status == 0) then
+            ! Keep the staging directory writable until its atomic rename.
+            ! The publisher freezes that directory after publication.
+            crc = fo_c_generation_freeze_tree( &
+                trim(stage)//'/bundle'//c_null_char)
+            if (crc /= 0) status = int(crc)
+            if (status == 0) then
+                crc = fo_c_generation_freeze_tree( &
+                    trim(stage)//'/manifest.id'//c_null_char)
+                if (crc /= 0) status = int(crc)
+            end if
+            if (status == 0) then
+                crc = fo_c_generation_freeze_tree( &
+                    trim(stage)//'/store.root'//c_null_char)
+                if (crc /= 0) status = int(crc)
+            end if
+            if (status == 0) then
+                crc = fo_c_generation_freeze_tree( &
+                    trim(stage)//'/identity.txt'//c_null_char)
+                if (crc /= 0) status = int(crc)
+            end if
+            if (status /= 0) message = 'cannot freeze manifest generation content'
+        end if
+        if (status == 0) then
+            crc = fo_c_generation_publish(trim(stage)//c_null_char, &
+                trim(cache)//c_null_char)
+            if (crc /= 0) status = int(crc)
+            if (status /= 0) message = &
+                'cannot publish manifest generation stage ('// &
+                trim(int_text(status))//')'
+        end if
+        if (status /= 0) then
+            if (len_trim(message) == 0) &
+                message = 'cannot publish immutable manifest generation'
+            crc = fo_c_generation_remove_stage(trim(capture_dir)//c_null_char)
+            call fo_c_generation_unlock(int(fd, c_int))
+            return
+        end if
+        call fo_c_generation_unlock(int(fd, c_int))
+        generation%manifest_id = manifest_id
+        generation%store_root = store_root
+        generation%input_inventory = context%input_inventory
+        call bind_inventory_to_bundle(generation%input_inventory, trim(cache), &
+            status, message)
+        if (status /= 0) then
+            ierr = 1
+            return
+        end if
+        generation%input_inventory_ready = .true.
+        generation%input_inventory_complete = context%input_inventory%complete
+        generation%input_inventory_diagnostic = context%input_inventory%diagnostic
+        generation%base_commit = value_or_empty(context%base_commit)
+        generation%patch_digest = value_or_empty(context%patch_digest)
+        ierr = 0
+    end subroutine generation_capture_inventory
+
+    subroutine generation_load_inventory(generation, ierr, message)
+        type(generation_t), intent(inout) :: generation
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(generation_manifest_metadata_t) :: metadata
+        type(input_inventory_t) :: inventory
+        character(len=PATH_LEN) :: store_root, manifest_path
+        character(len=HASH_LEN) :: manifest_id
+        integer :: status
+
+        ierr = 1
+        message = ''
+        if (len_trim(generation%root) == 0 .or. &
+            len_trim(generation%identity) /= HASH_LEN) then
+            message = 'generation root or execution identity is unavailable'
+            return
+        end if
+        call read_manifest_store(trim(generation%root)//'/store.root', &
+            store_root, status, message)
+        if (status /= 0) return
+        generation%store_root = store_root
+        manifest_path = trim(generation%root)//'/manifest.id'
+        call read_manifest_id(trim(manifest_path), manifest_id, status, message)
+        if (status /= 0) return
+        call generation_manifest_load(trim(store_root), manifest_id, metadata, &
+            inventory, status, message)
+        if (status /= 0) return
+        if (metadata%execution_identity /= generation%identity) then
+            message = 'generation manifest does not match its execution identity'
+            return
+        end if
+        call bind_inventory_to_bundle(inventory, trim(generation%root), &
+            status, message)
+        if (status /= 0) return
+        generation%manifest_id = manifest_id
+        generation%input_inventory = inventory
+        generation%input_inventory_ready = .true.
+        generation%input_inventory_complete = inventory%complete
+        generation%input_inventory_diagnostic = inventory%diagnostic
+        generation%base_commit = metadata%base_commit
+        generation%patch_digest = metadata%patch_digest
+        generation%driver_digest = metadata%driver_digest
+        generation%driver_size = metadata%driver_size
+        message = trim(inventory%diagnostic)
+        ierr = 0
+    end subroutine generation_load_inventory
+
+    subroutine bind_inventory_to_bundle(inventory, generation_root, ierr, message)
+        type(input_inventory_t), intent(inout) :: inventory
+        character(len=*), intent(in) :: generation_root
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        integer :: i
+
+        ierr = 1
+        message = ''
+        if (.not. allocated(inventory%roots) .or. &
+            len_trim(generation_root) == 0) then
+            message = 'cannot bind input inventory to its generation bundle'
+            return
+        end if
+        if (len_trim(generation_root) + len('/bundle') >= PATH_LEN) then
+            message = 'generation bundle path exceeds the supported length'
+            return
+        end if
+        do i = 1, inventory%root_count
+            inventory%roots(i)%physical_path = &
+                trim(generation_root)//'/bundle'
+        end do
+        ierr = 0
+    end subroutine bind_inventory_to_bundle
+
+    subroutine validate_manifest_bundle(project_root, expected, ierr, message)
+        character(len=*), intent(in) :: project_root
+        type(input_inventory_t), intent(in) :: expected
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(input_inventory_t) :: observed
+
+        ierr = 1
+        message = ''
+        if (.not. allocated(expected%declarations)) then
+            message = 'stored generation manifest omits typed declarations'
+            return
+        end if
+        call input_inventory_discover(project_root, expected%declarations, &
+            observed, ierr, message)
+        if (ierr /= 0) return
+        if ((observed%complete .neqv. expected%complete) .or. &
+            (observed%valid .neqv. expected%valid)) then
+            ierr = 1
+            message = 'materialized generation differs from its canonical manifest'
+            return
+        end if
+        call compare_materialized_inventory(expected, observed, ierr, message)
+        if (ierr /= 0) return
+        ierr = 0
+        message = ''
+    end subroutine validate_manifest_bundle
+
+    subroutine compare_materialized_inventory(expected, observed, ierr, message)
+        type(input_inventory_t), intent(in) :: expected, observed
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        integer :: i, j, k, l, matches, expected_root, observed_root
+        logical :: found
+
+        ierr = 1
+        message = 'materialized generation differs from its canonical manifest'
+        matches = 0
+        do i = 1, expected%root_count
+            do j = 1, expected%roots(i)%alias_count
+                found = .false.
+                do k = 1, observed%root_count
+                    do l = 1, observed%roots(k)%alias_count
+                        if (trim(observed%roots(k)%aliases(l)) /= &
+                            trim(expected%roots(i)%aliases(j))) cycle
+                        if (trim(observed%roots(k)%bundle_paths(l)) /= &
+                            trim(expected%roots(i)%bundle_paths(j))) return
+                        found = .true.
+                        matches = matches + 1
+                        exit
+                    end do
+                    if (found) exit
+                end do
+                if (.not. found) return
+            end do
+        end do
+        if (matches /= total_alias_count(observed)) return
+        do i = 1, expected%entry_count
+            expected_root = root_with_alias(expected, &
+                trim(expected%entries(i)%root_alias))
+            if (expected_root == 0) return
+            do j = 1, expected%roots(expected_root)%alias_count
+                found = .false.
+                do k = 1, observed%entry_count
+                    if (.not. matching_materialized_entry( &
+                            expected%entries(i), observed%entries(k))) cycle
+                    observed_root = root_with_alias(observed, &
+                        trim(observed%entries(k)%root_alias))
+                    if (observed_root == 0) return
+                    do l = 1, observed%roots(observed_root)%alias_count
+                        if (trim(observed%roots(observed_root)%aliases(l)) /= &
+                            trim(expected%roots(expected_root)%aliases(j))) cycle
+                        if (trim(observed%roots(observed_root)%bundle_paths(l)) /= &
+                            trim(expected%roots(expected_root)%bundle_paths(j))) cycle
+                        found = .true.
+                        exit
+                    end do
+                    if (found) exit
+                end do
+                if (.not. found) then
+                    message = 'materialized entry is missing: '// &
+                        trim(expected%roots(expected_root)%aliases(j))//':'// &
+                        trim(expected%entries(i)%relative_path)
+                    return
+                end if
+            end do
+        end do
+        do i = 1, observed%entry_count
+            observed_root = root_with_alias(observed, &
+                trim(observed%entries(i)%root_alias))
+            if (observed_root == 0) return
+            found = .false.
+            do k = 1, expected%entry_count
+                if (.not. matching_materialized_entry( &
+                        expected%entries(k), observed%entries(i))) cycle
+                expected_root = root_with_alias(expected, &
+                    trim(expected%entries(k)%root_alias))
+                if (expected_root == 0) return
+                do j = 1, expected%roots(expected_root)%alias_count
+                    do l = 1, observed%roots(observed_root)%alias_count
+                        if (trim(expected%roots(expected_root)%aliases(j)) /= &
+                            trim(observed%roots(observed_root)%aliases(l))) cycle
+                        if (trim(expected%roots(expected_root)%bundle_paths(j)) /= &
+                            trim(observed%roots(observed_root)%bundle_paths(l))) cycle
+                        found = .true.
+                        exit
+                    end do
+                    if (found) exit
+                end do
+                if (found) exit
+            end do
+            if (.not. found) then
+                message = 'materialized entry is unexpected: '// &
+                    trim(observed%entries(i)%root_alias)//':'// &
+                    trim(observed%entries(i)%relative_path)
+                return
+            end if
+        end do
+        ierr = 0
+        message = ''
+    end subroutine compare_materialized_inventory
+
+    logical function matching_materialized_entry(expected, observed)
+        type(input_entry_t), intent(in) :: expected, observed
+        integer :: expected_mode
+
+        matching_materialized_entry = .false.
+        if (trim(expected%relative_path) /= trim(observed%relative_path)) return
+        if (trim(expected%role) /= trim(observed%role)) return
+        if (expected%kind /= observed%kind) return
+        if (expected%writable_at_execution .neqv. &
+                observed%writable_at_execution) return
+        if (expected%content_digest /= observed%content_digest) return
+        if (expected%link_target /= observed%link_target) return
+        expected_mode = expected%mode
+        select case (expected%kind)
+        case (INPUT_FILE)
+            if (iand(expected_mode, 73) == 0) then
+                expected_mode = 292
+            else
+                expected_mode = 365
+            end if
+        case (INPUT_DIRECTORY)
+            expected_mode = 0
+        end select
+        if (observed%mode /= expected_mode) return
+        matching_materialized_entry = .true.
+    end function matching_materialized_entry
+
+    integer function root_with_alias(inventory, alias)
+        type(input_inventory_t), intent(in) :: inventory
+        character(len=*), intent(in) :: alias
+        integer :: i, j
+
+        root_with_alias = 0
+        do i = 1, inventory%root_count
+            do j = 1, inventory%roots(i)%alias_count
+                if (trim(inventory%roots(i)%aliases(j)) /= trim(alias)) cycle
+                root_with_alias = i
+                return
+            end do
+        end do
+    end function root_with_alias
+
+    integer function total_alias_count(inventory)
+        type(input_inventory_t), intent(in) :: inventory
+        integer :: i
+
+        total_alias_count = 0
+        do i = 1, inventory%root_count
+            total_alias_count = total_alias_count + inventory%roots(i)%alias_count
+        end do
+    end function total_alias_count
 
     subroutine freeze_generation_inputs(generation_root, roots, ierr)
         character(len=*), intent(in) :: generation_root
@@ -733,6 +1220,119 @@ contains
         end if
         ierr = 0
     end subroutine generation_driver_identity
+
+    subroutine read_manifest_store(path, store_root, ierr, message)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(out) :: store_root
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        integer :: unit, ios
+        character(len=PATH_LEN) :: line
+
+        ierr = 1
+        store_root = ''
+        message = 'generation immutable store locator is unavailable'
+        line = ''
+        open (newunit=unit, file=trim(path), status='old', action='read', &
+            iostat=ios)
+        if (ios /= 0) return
+        read (unit, '(a)', iostat=ios) line
+        close (unit)
+        if (ios /= 0 .or. len_trim(line) == 0 .or. &
+            len_trim(line) >= len(store_root) .or. line(1:1) /= '/') then
+            message = 'generation immutable store locator is malformed'
+            return
+        end if
+        if (index(line, achar(0)) /= 0 .or. index(line, achar(10)) /= 0 .or. &
+            index(line, achar(13)) /= 0) then
+            message = 'generation immutable store locator is malformed'
+            return
+        end if
+        store_root = trim(line)
+        ierr = 0
+        message = ''
+    end subroutine read_manifest_store
+
+    subroutine write_manifest_store(path, store_root, ierr)
+        character(len=*), intent(in) :: path, store_root
+        integer, intent(out) :: ierr
+        integer :: unit, ios
+
+        ierr = 1
+        if (len_trim(store_root) == 0 .or. len_trim(store_root) >= PATH_LEN .or. &
+            store_root(1:1) /= '/') return
+        if (index(store_root, achar(0)) /= 0 .or. &
+            index(store_root, achar(10)) /= 0 .or. &
+            index(store_root, achar(13)) /= 0) return
+        open (newunit=unit, file=trim(path), status='new', action='write', &
+            iostat=ios)
+        if (ios /= 0) return
+        write (unit, '(a)', iostat=ios) trim(store_root)
+        if (ios == 0) flush (unit, iostat=ios)
+        close (unit, iostat=ierr)
+        if (ios /= 0) ierr = ios
+    end subroutine write_manifest_store
+
+    subroutine read_manifest_id(path, manifest_id, ierr, message)
+        character(len=*), intent(in) :: path
+        character(len=HASH_LEN), intent(out) :: manifest_id
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        integer :: unit, ios
+        character(len=HASH_LEN + 1) :: line
+
+        ierr = 1
+        manifest_id = ''
+        message = 'generation manifest reference is unavailable'
+        open (newunit=unit, file=trim(path), status='old', action='read', &
+            iostat=ios)
+        if (ios /= 0) return
+        read (unit, '(a)', iostat=ios) line
+        if (ios /= 0) then
+            message = 'generation manifest reference is malformed'
+            close (unit)
+            return
+        end if
+        if (valid_driver_digest(trim(line))) then
+            manifest_id = trim(line)
+            ierr = 0
+            message = ''
+        else
+            message = 'generation manifest reference is malformed'
+        end if
+        close (unit)
+    end subroutine read_manifest_id
+
+    subroutine write_manifest_id(path, manifest_id, ierr)
+        character(len=*), intent(in) :: path, manifest_id
+        integer, intent(out) :: ierr
+        integer :: unit, ios
+
+        ierr = 1
+        if (.not. valid_driver_digest(manifest_id)) return
+        open (newunit=unit, file=trim(path), status='new', action='write', &
+            iostat=ios)
+        if (ios /= 0) return
+        write (unit, '(a)', iostat=ios) trim(manifest_id)
+        if (ios == 0) flush (unit, iostat=ios)
+        close (unit, iostat=ierr)
+        if (ios /= 0) ierr = ios
+    end subroutine write_manifest_id
+
+    subroutine write_manifest_identity(path, metadata, ierr)
+        character(len=*), intent(in) :: path
+        type(generation_manifest_metadata_t), intent(in) :: metadata
+        integer, intent(out) :: ierr
+        character(len=:), allocatable :: record
+        character(len=32) :: driver_size_text
+
+        write (driver_size_text, '(i0)') metadata%driver_size
+        record = 'schema=fo-gremlin-manifest-v1'//new_line('a')// &
+            'execution_identity='//metadata%execution_identity//new_line('a')// &
+            'driver_digest='//metadata%driver_digest//new_line('a')// &
+            'driver_size='//trim(driver_size_text)//new_line('a')
+        call write_identity(path, record, ierr)
+    end subroutine write_manifest_identity
 
     logical function valid_driver_digest(digest)
         character(len=*), intent(in) :: digest

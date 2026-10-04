@@ -1,7 +1,8 @@
 module fo_gfortran_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, manifest_exe_name, &
         manifest_executable_selected, &
-        manifest_test_name, manifest_test_args, manifest_example_name, dep_kind, DEP_PATH
+        manifest_test_name, manifest_test_args, manifest_example_name, dep_kind, &
+        DEP_PATH, DEP_GIT
     use fo_scan, only: scan_unit_t, scan_dir, scan_dir_regex, scan_dir_cached, &
         source_defines_module, &
         MAX_UNITS, MAX_NAME, MAX_PATH
@@ -17,7 +18,7 @@ module fo_gfortran_build
     use fx_action_cache, only: cache_set_file_hash_hook
     use fo_compdb, only: compdb_write
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_levels, MAX_NODES
-    use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
+    use fo_cache, only: cache_t, cache_init, cache_key_for, &
         cache_restore_action, cache_store_action, hash_mod_file, &
         HASH_LEN, cache_digest, cache_file_digest, &
         cache_store_binary, cache_restore_binary, cache_binary_matches
@@ -177,8 +178,6 @@ contains
             exitcode = 1
             return
         end if
-        call merge_dep_link_libs(project_dir, config)
-
         ! Combine config flags with CLI flags
         call merge_flags(config, flag_text)
         call lock_check(project_dir, flag_text, lock_ok, lock_message)
@@ -221,11 +220,12 @@ contains
         call bootstrap_external_deps(project_dir, config, lf, request_flags, &
             exitcode)
         if (exitcode /= 0) return
+        call merge_dep_link_libs(project_dir, config)
 
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
         stamp_flags = compile_key_flags(flag_text)
-        allocate (stamp_roots(MAX_RESOLVED))
+        allocate (stamp_roots(3 * MAX_RESOLVED))
         call collect_stamp_roots(project_dir, stamp_roots, n_stamp_roots, stamp_ok)
         stamp_hit = .false.
         if (allow_cache .and. stamp_ok) then
@@ -280,16 +280,58 @@ contains
 
         type(resolved_src_t), allocatable :: deps(:)
         type(fpm_config_t), allocatable :: dep_config
-        integer :: n_deps, n_unresolved, ierr, i
+        integer :: n_deps, n_unresolved, n_registry, ierr, i
+        logical :: need_fetch
 
         exitcode = 0
         allocate (deps(MAX_RESOLVED))
         allocate (dep_config)
-        if (config_has_external_deps(config)) then
+        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr, &
+            n_registry)
+        if (ierr /= 0) return
+
+        ! Git sources are compiled by Fo's native DAG. Ask fpm only to acquire
+        ! missing checkouts; running `fpm build` here would compile the same
+        ! source a second time before Fo builds it. Registry sources still use
+        ! the existing fpm build path because Fo has no typed provider for the
+        ! registry cache location recorded by fpm.
+        need_fetch = n_unresolved > 0
+        do i = 1, config%n_dev_deps
+            if (dep_kind(config%dev_deps(i)) == DEP_PATH) cycle
+            if (.not. has_dependency_manifest(project_dir, &
+                    trim(config%dev_deps(i)%name))) need_fetch = .true.
+        end do
+        if (n_registry == 0 .and. need_fetch) then
+            call run_fpm_fetch_only(project_dir, log_file, exitcode)
+            if (exitcode /= 0) return
+            call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, &
+                ierr, n_registry)
+            if (ierr /= 0) return
+            if (n_unresolved > n_registry) then
+                write (error_unit, '(a)') &
+                    'fo: fpm fetch left Git dependency sources unresolved'
+                exitcode = 1
+                return
+            end if
+            do i = 1, config%n_dev_deps
+                if (dep_kind(config%dev_deps(i)) /= DEP_GIT) cycle
+                if (has_dependency_manifest(project_dir, &
+                        trim(config%dev_deps(i)%name))) cycle
+                write (error_unit, '(a)') 'fo: fpm fetch left dev dependency '// &
+                    trim(config%dev_deps(i)%name)//' unresolved'
+                exitcode = 1
+                return
+            end do
+        end if
+
+        if (n_registry > 0 .and. config_has_external_deps(config)) then
             call bootstrap_config_deps(project_dir, config, log_file, &
                 project_flags, exitcode)
             if (exitcode /= 0) return
         end if
+
+        if (n_registry == 0) return
+
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
         if (ierr /= 0) return
         do i = 1, n_deps
@@ -301,6 +343,34 @@ contains
             if (exitcode /= 0) return
         end do
     end subroutine bootstrap_external_deps
+
+    logical function has_dependency_manifest(project_dir, dep_name) result(found)
+        character(len=*), intent(in) :: project_dir, dep_name
+
+        inquire (file=trim(project_dir)//'/build/dependencies/'// &
+            trim(dep_name)//'/fpm.toml', exist=found)
+    end function has_dependency_manifest
+
+    subroutine run_fpm_fetch_only(project_dir, log_file, exitcode)
+        character(len=*), intent(in) :: project_dir, log_file
+        integer, intent(out) :: exitcode
+
+        character(len=:), allocatable :: packed
+        integer :: n_args
+
+        n_args = 0
+        call argv_push(packed, n_args, 'fpm')
+        call argv_push(packed, n_args, 'update')
+        call argv_push(packed, n_args, '--fetch-only')
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+            .true., build_timeout_seconds(), exitcode)
+        if (exitcode /= 0) then
+            write (error_unit, '(a)') 'fo: fpm dependency fetch failed'
+            if (len_trim(log_file) > 0) then
+                write (error_unit, '(a)') 'fo: see '//trim(log_file)
+            end if
+        end if
+    end subroutine run_fpm_fetch_only
 
     logical function config_has_external_deps(config) result(found)
         type(fpm_config_t), intent(in) :: config
@@ -698,8 +768,8 @@ contains
         integer, intent(out) :: n_roots
         logical, intent(out) :: ok
 
-        type(resolved_src_t) :: deps(MAX_RESOLVED)
-        integer :: n_deps, n_unresolved, ierr, i
+        type(resolved_src_t) :: deps(MAX_RESOLVED), devs(MAX_RESOLVED)
+        integer :: n_deps, n_dev, n_unresolved, ierr, i, j
 
         roots = ''
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
@@ -713,6 +783,34 @@ contains
             end if
             n_roots = n_roots + 1
             roots(n_roots) = deps(i)%src_dir
+        end do
+        call resolve_dev_dep_srcs(project_dir, devs, n_dev, ierr)
+        if (ierr /= 0) then
+            ok = .false.
+            return
+        end if
+        do i = 1, n_dev
+            do j = 1, n_roots
+                if (trim(roots(j)) == trim(devs(i)%dir)//'/fpm.toml') exit
+            end do
+            if (j > n_roots) then
+                if (n_roots >= size(roots)) then
+                    ok = .false.
+                    return
+                end if
+                n_roots = n_roots + 1
+                roots(n_roots) = trim(devs(i)%dir)//'/fpm.toml'
+            end if
+            do j = 1, n_roots
+                if (trim(roots(j)) == trim(devs(i)%src_dir)) exit
+            end do
+            if (j <= n_roots) cycle
+            if (n_roots >= size(roots)) then
+                ok = .false.
+                return
+            end if
+            n_roots = n_roots + 1
+            roots(n_roots) = devs(i)%src_dir
         end do
     end subroutine collect_stamp_roots
 
@@ -731,7 +829,7 @@ contains
         allow_cache = .true.
         if (present(use_cache)) allow_cache = use_cache
         if (.not. allow_cache) return
-        allocate (roots(MAX_RESOLVED))
+        allocate (roots(3 * MAX_RESOLVED))
         call collect_stamp_roots(project_dir, roots, n_roots, ok)
         if (.not. ok) return
         stamp_flags = flags
@@ -1271,20 +1369,50 @@ contains
         integer, intent(out) :: n_dep_objs
 
         type(resolved_src_t), allocatable :: deps(:)
+        type(resolved_src_t) :: devs(MAX_RESOLVED)
         type(fpm_config_t), allocatable :: dep_config
-        integer :: i, n_deps, n_unresolved, ierr
+        integer :: i, n_deps, n_devs, n_unresolved, n_registry, ierr
         integer :: n_obj_seen
         character(len=512), allocatable :: obj_basenames(:)
+        logical :: native_sources
 
         n_dep_includes = 0
         n_dep_objs = 0
         n_obj_seen = 0
         allocate (deps(MAX_RESOLVED), obj_basenames(MAX_DEP_OBJS))
         allocate (dep_config)
+        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr, &
+            n_registry)
+        if (ierr /= 0) return
+        ! Native source resolution covers path and acquired external deps.
+        ! Registry dependencies still require artifacts produced by FPM.
+        native_sources = n_registry == 0
+        call resolve_dev_dep_srcs(project_dir, devs, n_devs, ierr)
+        if (ierr /= 0) n_devs = 0
+
+        if (native_sources) then
+            call collect_external_module_dirs(config%external_modules, &
+                config%n_external_modules, dep_includes, n_dep_includes, &
+                MAX_DEP_DIRS)
+            do i = 1, n_deps
+                call fpm_config_parse(deps(i)%dir, dep_config, ierr)
+                if (ierr /= 0) cycle
+                call collect_external_module_dirs(dep_config%external_modules, &
+                    dep_config%n_external_modules, dep_includes, &
+                    n_dep_includes, MAX_DEP_DIRS)
+            end do
+            do i = 1, n_devs
+                call fpm_config_parse(devs(i)%dir, dep_config, ierr)
+                if (ierr /= 0) cycle
+                call collect_external_module_dirs(dep_config%external_modules, &
+                    dep_config%n_external_modules, dep_includes, &
+                    n_dep_includes, MAX_DEP_DIRS)
+            end do
+            return
+        end if
+
         call collect_dep_artifacts(project_dir, config, dep_includes, &
             n_dep_includes, dep_objs, n_dep_objs, obj_basenames, n_obj_seen)
-        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
-        if (ierr /= 0) return
         do i = 1, n_deps
             call fpm_config_parse(deps(i)%dir, dep_config, ierr)
             if (ierr /= 0) cycle
@@ -1630,8 +1758,8 @@ contains
                         compile_key_flags(flags), dep_keys, n_dep)
 
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
-                    if (.not. source_may_emit_smod(filenames(node_id)) .and. &
-                        cache_lookup(c, source_key)) then
+                    if (cache_ierr == 0 .and. &
+                        .not. source_may_emit_smod(filenames(node_id))) then
                         if (source_defines_module(filenames(node_id))) then
                             call cache_restore_action(c, source_key, obj_path, &
                                 mod_dir, restored, required_mod_name= &
@@ -2675,13 +2803,18 @@ contains
         test_warn = test_warn_seconds(test_timeout)
 
         call resolve_dev_dep_srcs(project_dir, devsrcs, n_dev, ierr)
-        if (ierr == 0 .and. n_dev > 0) then
-            do d = 1, n_dev
-                call scan_dir(trim(devsrcs(d)%src_dir), udev, nud, ierr)
-                if (ierr /= 0) cycle
-                call append_module_units(tunits, n_tests, udev, nud)
-            end do
+        if (ierr /= 0) then
+            exitcode = 1
+            return
         end if
+        do d = 1, n_dev
+            call scan_dir(trim(devsrcs(d)%src_dir), udev, nud, ierr)
+            if (ierr /= 0) then
+                exitcode = 1
+                return
+            end if
+            call append_module_units(tunits, n_tests, udev, nud)
+        end do
 
         call build_dag_from_units(tunits, n_tests, dag, filenames, is_test_arr, is_prog)
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
@@ -2873,7 +3006,7 @@ contains
             log_local = run_logs(i)
             call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
             restored = .false.
-            if (cache_ierr == 0 .and. cache_lookup(c, run_keys(i))) then
+            if (cache_ierr == 0) then
                 call cache_restore_action(c, run_keys(i), obj_path, mod_dir, &
                     restored)
             end if

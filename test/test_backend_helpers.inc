@@ -8,6 +8,48 @@
         if (n_fail > 0) stop 1
     end subroutine report
 
+    subroutine run_backend_argv(executable, arguments, log_file, exitcode)
+        character(len=*), intent(in) :: executable, arguments(:), log_file
+        integer, intent(out) :: exitcode
+        character(len=:), allocatable :: packed
+        integer :: n_args, i
+
+        n_args = 0
+        call argv_push(packed, n_args, trim(executable))
+        do i = 1, size(arguments)
+            call argv_push(packed, n_args, trim(arguments(i)))
+        end do
+        call process_run_argv_logged('', packed, n_args, trim(log_file), &
+            .false., 60, exitcode)
+    end subroutine run_backend_argv
+
+    subroutine set_env(name, value)
+        !! Set or clear an environment variable for this process.
+        use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+        interface
+            function c_setenv(name, value, overwrite) bind(C, name='setenv') &
+                    result(ierr)
+                import :: c_char, c_int
+                character(kind=c_char), intent(in) :: name(*), value(*)
+                integer(c_int), value :: overwrite
+                integer(c_int) :: ierr
+            end function c_setenv
+            function c_unsetenv(name) bind(C, name='unsetenv') result(ierr)
+                import :: c_char, c_int
+                character(kind=c_char), intent(in) :: name(*)
+                integer(c_int) :: ierr
+            end function c_unsetenv
+        end interface
+        character(len=*), intent(in) :: name, value
+        integer(c_int) :: ierr
+
+        if (len_trim(value) == 0) then
+            ierr = c_unsetenv(trim(name)//c_null_char)
+        else
+            ierr = c_setenv(trim(name)//c_null_char, trim(value)//c_null_char, 1_c_int)
+        end if
+    end subroutine set_env
+
     subroutine isolate_backend_cache()
         use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
         interface
@@ -328,6 +370,7 @@
     end subroutine write_cpp_runtime
 
     subroutine test_cmake_preset_external_root_hint()
+        use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
         interface
             function setenv(name, value, overwrite) bind(C, name='setenv') result(ierr)
                 import :: c_char, c_int
@@ -1270,37 +1313,94 @@
 
     subroutine test_gfortran_bootstraps_git_dependency()
         type(backend_t) :: b
-        integer :: exitcode, u, ios
-        character(len=512) :: base, libdir, appdir, log_file, outfile
-        character(len=64) :: line
+        integer :: exitcode, u, ios, path_status, path_length, compile_exit
+        character(len=512) :: base, leafdir, libdir, appdir, log_file, outfile
+        character(len=512) :: compiler, real_fpm, wrapper_dir, fpm_log
+        character(len=512) :: wrapper, compile_log, source_root
+        character(:), allocatable :: prior_path
+        character(len=512) :: line, fpm_call
+        logical :: compiler_found, fpm_found, exists
 
         call make_tmp_path('fo_test_gitdep', base)
+        leafdir = trim(base)//'/leaf'
         libdir = trim(base)//'/lib'
         appdir = trim(base)//'/app'
         call make_tmp_path('fo_backend_gitdep', log_file)
+        wrapper_dir = trim(base)//'/bin'
+        fpm_log = trim(base)//'/fpm.log'
+        wrapper = trim(wrapper_dir)//'/fpm'
+        call make_tmp_path('fo_backend_gitdep_compile', compile_log)
 
-        call execute_command_line('mkdir -p '//trim(libdir)//'/src '// &
-            trim(appdir)//'/app')
+        call fs_find_executable('gfortran', compiler, compiler_found)
+        call fs_find_executable('fpm', real_fpm, fpm_found)
+        call assert(compiler_found .and. fpm_found, &
+            'git dependency oracle has its task compiler and fpm pin')
+        if (.not. compiler_found .or. .not. fpm_found) return
+        call process_getcwd(source_root, ios)
+        if (ios /= 0) then
+            call assert(.false., 'git dependency oracle locates fixture source')
+            return
+        end if
+        call make_dir(wrapper_dir)
+        call compile_fpm_command_fixture(wrapper, compiler, source_root, &
+            compile_log, compile_exit)
+        call assert(compile_exit == 0, 'native fpm argv counter compiles')
+        if (compile_exit /= 0) return
+
+        call get_environment_variable('PATH', length=path_length, status=path_status)
+        if (path_status == 0) then
+            allocate(character(len=path_length) :: prior_path)
+            call get_environment_variable('PATH', prior_path, status=path_status)
+        else
+            prior_path = ''
+        end if
+        call set_env('FO_TEST_REAL_FPM', trim(real_fpm))
+        call set_env('FO_TEST_FPM_LOG', trim(fpm_log))
+        call set_env('PATH', trim(wrapper_dir)//':/usr/bin:/bin:'// &
+            trim(prior_path))
+
+        call execute_command_line('mkdir -p "'//trim(leafdir)//'/src" "'// &
+            trim(libdir)//'/src" "'//trim(appdir)//'/app"')
+        open (newunit=u, file=trim(leafdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "leafdep"'
+        close (u)
+        open (newunit=u, file=trim(leafdir)//'/src/leafmod.f90', &
+            status='replace')
+        write (u, '(a)') 'module leafmod'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer function leaf_value()'
+        write (u, '(a)') '    leaf_value = 2'
+        write (u, '(a)') '  end function leaf_value'
+        write (u, '(a)') 'end module leafmod'
+        close (u)
+        call commit_local_dependency(leafdir)
+
         open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "deplib"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a,a,a)') 'leafdep = { git = "file://', &
+            trim(leafdir), '" }'
         close (u)
         open (newunit=u, file=trim(libdir)//'/src/depmod.f90', status='replace')
         write (u, '(a)') 'module depmod'
-        write (u, '(a)') '  implicit none'
+        write (u, '(a)') '  use, intrinsic :: iso_c_binding, only: c_int'
+        write (u, '(a)') '  use leafmod, only: leaf_value'
+        write (u, '(a)') '  interface'
+        write (u, '(a)') '    integer(c_int) function c_dep_value() &'
+        write (u, '(a)') '        bind(C, name="dep_c_value")'
+        write (u, '(a)') '      import c_int'
+        write (u, '(a)') '    end function c_dep_value'
+        write (u, '(a)') '  end interface'
         write (u, '(a)') 'contains'
         write (u, '(a)') '  integer function dep_value()'
-        write (u, '(a)') '#ifdef FO_INACTIVE_BRANCH'
-        write (u, '(a)') '    call symbol_that_must_not_be_linked'
-        write (u, '(a)') '#endif'
-        write (u, '(a)') '    dep_value = 13'
+        write (u, '(a)') '    dep_value = 9 + leaf_value() + c_dep_value()'
         write (u, '(a)') '  end function dep_value'
         write (u, '(a)') 'end module depmod'
         close (u)
-        call execute_command_line('git -C '//trim(libdir)//' init -q')
-        call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src/depmod.f90')
-        call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo commit -q -m init')
+        open (newunit=u, file=trim(libdir)//'/src/dep_c.c', status='replace')
+        write (u, '(a)') 'int dep_c_value(void) { return 2; }'
+        close (u)
+        call commit_local_dependency(libdir)
 
         open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "depapp"'
@@ -1316,7 +1416,41 @@
 
         b = detect_backend(appdir)
         call backend_build(b, exitcode, log_file=log_file)
-        call assert(exitcode == 0, 'project with git dependency bootstraps through fpm')
+        call assert(exitcode == 0, &
+            'native build fetches git dependencies without fpm compilation')
+
+        inquire (file=trim(appdir)//'/build/dependencies/deplib/fpm.toml', &
+            exist=exists)
+        call assert(exists, 'direct git dependency is materialized')
+        inquire (file=trim(appdir)//'/build/dependencies/leafdep/fpm.toml', &
+            exist=exists)
+        call assert(exists, 'transitive git dependency is materialized flat')
+        inquire (file=trim(appdir)//'/build/fo/mod/depmod.mod', exist=exists)
+        call assert(exists, 'git Fortran module is compiled by the native DAG')
+        inquire (file=trim(appdir)//'/build/fo/mod/leafmod.mod', exist=exists)
+        call assert(exists, 'transitive module is compiled by the native DAG')
+
+        open (newunit=u, file=trim(fpm_log), status='old', iostat=ios)
+        fpm_call = ''
+        if (ios == 0) then
+            read (u, '(a)', iostat=ios) fpm_call
+            close (u)
+        end if
+        call assert(trim(fpm_call) == 'fpm update --fetch-only', &
+            'fpm argv records fetch-only and never requests a build')
+
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'warm git dependency build remains current')
+        line = ''
+        open (newunit=u, file=trim(fpm_log), status='old', iostat=ios)
+        if (ios == 0) then
+            read (u, '(a)', iostat=ios) fpm_call
+            read (u, '(a)', iostat=ios) line
+            close (u)
+        else
+            line = 'missing argv log'
+        end if
+        call assert(trim(line) == '', 'warm build performs no second fpm call')
 
         outfile = trim(base)//'/out.txt'
         call execute_command_line(trim(appdir)//'/build/fo/bin/depapp > '// &
@@ -1328,11 +1462,45 @@
             close (u)
         end if
         call assert(trim(adjustl(line)) == '13', &
-            'binary links git dep and prints the dep value')
+            'binary links nested Fortran and C dependency sources and prints 13')
 
         call remove_tree(base)
         call execute_command_line('rm -f '//trim(log_file))
+        call execute_command_line('rm -f '//trim(compile_log))
+        if (path_status == 0) then
+            call set_env('PATH', trim(prior_path))
+        else
+            call set_env('PATH', '')
+        end if
+        call set_env('FO_TEST_REAL_FPM', '')
+        call set_env('FO_TEST_FPM_LOG', '')
     end subroutine test_gfortran_bootstraps_git_dependency
+
+    subroutine commit_local_dependency(dependency_dir)
+        character(len=*), intent(in) :: dependency_dir
+
+        call execute_command_line('git -C "'//trim(dependency_dir)//'" init -q')
+        call execute_command_line('git -C "'//trim(dependency_dir)// &
+            '" -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src')
+        call execute_command_line('git -C "'//trim(dependency_dir)// &
+            '" -c user.email=fo@example.invalid -c user.name=fo commit -q -m init')
+    end subroutine commit_local_dependency
+
+    subroutine compile_fpm_command_fixture(executable, compiler, source_root, &
+            log_file, exitcode)
+        character(len=*), intent(in) :: executable, compiler, source_root
+        character(len=*), intent(in) :: log_file
+        integer, intent(out) :: exitcode
+
+        character(len=512) :: source, arguments(3)
+
+        source = trim(source_root)// &
+            '/test-fixtures/fortran/fo_fpm_argv_counter.f90'
+        arguments(1) = trim(source)
+        arguments(2) = '-o'
+        arguments(3) = trim(executable)
+        call run_backend_argv(trim(compiler), arguments, log_file, exitcode)
+    end subroutine compile_fpm_command_fixture
 
     subroutine test_gfortran_repairs_partial_git_dependency_artifacts()
         !! A nonempty fpm profile is not proof that every dependency module was
@@ -1676,6 +1844,198 @@
         call remove_tree(base)
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_gfortran_test_builds_dev_dependency
+
+    subroutine test_gfortran_bootstraps_git_dev_dependency_closure()
+        !! A named test must compile and link a Git dev-dependency's path
+        !! closure, including Fortran and C sources, and invalidate its warm
+        !! result when a transitive source changes.
+        type(backend_t) :: b
+        integer :: exitcode, u, ios, path_status, path_length, n_calls
+        character(len=512) :: base, leafdir, gitdir, appdir, log_file
+        character(len=512) :: compiler, real_fpm, wrapper_dir, fpm_log
+        character(len=512) :: wrapper, compile_log, source_root
+        character(:), allocatable :: prior_path
+        character(len=64) :: line
+        logical :: compiler_found, fpm_found, fpm_exists
+
+        call make_tmp_path('fo_test_git_devdep', base)
+        leafdir = trim(base)//'/leaf'
+        gitdir = trim(base)//'/gitdev'
+        appdir = trim(base)//'/app'
+        call make_tmp_path('fo_backend_git_devdep', log_file)
+        wrapper_dir = trim(base)//'/bin'
+        fpm_log = trim(base)//'/fpm.log'
+        wrapper = trim(wrapper_dir)//'/fpm'
+        compile_log = trim(base)//'/fpm-compile.log'
+
+        call fs_find_executable('gfortran', compiler, compiler_found)
+        call get_environment_variable('FO_TEST_FPM_EXECUTABLE', real_fpm, &
+            status=path_status)
+        fpm_found = path_status == 0 .and. len_trim(real_fpm) > 0
+        if (fpm_found) then
+            inquire (file=trim(real_fpm), exist=fpm_exists)
+            fpm_found = fpm_exists
+        else
+            call fs_find_executable('fpm', real_fpm, fpm_found)
+        end if
+        call assert(compiler_found .and. fpm_found, &
+            'Git dev-dependency oracle has compiler and pinned FPM')
+        if (.not. compiler_found .or. .not. fpm_found) return
+        call process_getcwd(source_root, ios)
+        call assert(ios == 0, 'Git dev-dependency oracle locates fixture source')
+        if (ios /= 0) return
+        call make_dir(wrapper_dir)
+        call compile_fpm_command_fixture(wrapper, compiler, source_root, &
+            compile_log, exitcode)
+        call assert(exitcode == 0, 'Git dev-dependency FPM argv fixture compiles')
+        if (exitcode /= 0) return
+        call get_environment_variable('PATH', length=path_length, status=path_status)
+        if (path_status == 0) then
+            allocate(character(len=path_length) :: prior_path)
+            call get_environment_variable('PATH', prior_path, status=path_status)
+        else
+            prior_path = ''
+        end if
+        call set_env('FO_TEST_REAL_FPM', trim(real_fpm))
+        call set_env('FO_TEST_FPM_LOG', trim(fpm_log))
+        call set_env('PATH', trim(wrapper_dir)//':/usr/bin:/bin:'// &
+            trim(prior_path))
+
+        call make_dir(trim(leafdir)//'/src')
+        call make_dir(trim(gitdir)//'/src')
+        call make_dir(trim(appdir)//'/test')
+        open (newunit=u, file=trim(leafdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "leafpath"'
+        close (u)
+        open (newunit=u, file=trim(leafdir)//'/src/leaf.f90', status='replace')
+        write (u, '(a)') 'module leaf'
+        write (u, '(a)') '  use iso_c_binding, only: c_int'
+        write (u, '(a)') '  interface'
+        write (u, '(a)') '    integer(c_int) function c_leaf() bind(C)'
+        write (u, '(a)') '      import c_int'
+        write (u, '(a)') '    end function c_leaf'
+        write (u, '(a)') '  end interface'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer function leaf_value()'
+        write (u, '(a)') '    leaf_value = 20 + c_leaf()'
+        write (u, '(a)') '  end function leaf_value'
+        write (u, '(a)') 'end module leaf'
+        close (u)
+        open (newunit=u, file=trim(leafdir)//'/src/leaf_c.c', status='replace')
+        write (u, '(a)') 'int c_leaf(void) { return 1; }'
+        close (u)
+
+        open (newunit=u, file=trim(gitdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "gitdev"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'leafpath = { path = "../../../../leaf" }'
+        close (u)
+        open (newunit=u, file=trim(gitdir)//'/src/dev.f90', status='replace')
+        write (u, '(a)') 'module dev'
+        write (u, '(a)') '  use leaf, only: leaf_value'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer function dev_value()'
+        write (u, '(a)') '    dev_value = leaf_value()'
+        write (u, '(a)') '  end function dev_value'
+        write (u, '(a)') 'end module dev'
+        close (u)
+        call commit_local_dependency(gitdir)
+
+        open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "gitdevapp"'
+        write (u, '(a)') '[dev-dependencies]'
+        write (u, '(a,a,a)') 'gitdev = { git = "file://', &
+            trim(gitdir), '" }'
+        close (u)
+        open (newunit=u, file=trim(appdir)//'/test/check.f90', status='replace')
+        write (u, '(a)') 'program check'
+        write (u, '(a)') '  use dev, only: dev_value'
+        write (u, '(a)') '  integer :: value'
+        write (u, '(a)') '  value = dev_value()'
+        write (u, '(a)') '  open(20,file="observed.txt",status="replace")'
+        write (u, '(a)') '  write(20,"(i0)") value'
+        write (u, '(a)') '  close(20)'
+        write (u, '(a)') '  if (value < 1) stop 1'
+        write (u, '(a)') 'end program check'
+        close (u)
+
+        b = detect_backend(appdir)
+        call backend_test(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, &
+            'named test builds Git dev, transitive path Fortran and C sources')
+        call read_first_line(trim(appdir)//'/observed.txt', line, ios)
+        call assert(ios == 0 .and. trim(line) == '21', &
+            'named test observes linked transitive Fortran and C result')
+        call count_file_lines(fpm_log, n_calls)
+        call read_first_line(fpm_log, line, ios)
+        call assert(n_calls == 1 .and. ios == 0 .and. &
+            trim(line) == 'fpm update --fetch-only', &
+            'cold Git dev bootstrap issues one fetch-only FPM call')
+
+        open (newunit=u, file=trim(leafdir)//'/src/leaf.f90', status='replace')
+        write (u, '(a)') 'module leaf'
+        write (u, '(a)') '  use iso_c_binding, only: c_int'
+        write (u, '(a)') '  interface'
+        write (u, '(a)') '    integer(c_int) function c_leaf() bind(C)'
+        write (u, '(a)') '      import c_int'
+        write (u, '(a)') '    end function c_leaf'
+        write (u, '(a)') '  end interface'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer function leaf_value()'
+        write (u, '(a)') '    leaf_value = 30 + c_leaf()'
+        write (u, '(a)') '  end function leaf_value'
+        write (u, '(a)') 'end module leaf'
+        close (u)
+        open (newunit=u, file=trim(leafdir)//'/src/leaf_c.c', status='replace')
+        write (u, '(a)') 'int c_leaf(void) { return 2; }'
+        close (u)
+        call backend_test(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'warm named test refreshes changed dev closure')
+        call read_first_line(trim(appdir)//'/observed.txt', line, ios)
+        call assert(ios == 0 .and. trim(line) == '32', &
+            'warm test output reflects changed transitive Fortran and C sources')
+        call count_file_lines(fpm_log, n_calls)
+        call assert(n_calls == 1, 'warm dev source edit does not refetch checkout')
+
+        call execute_command_line('rm -f "'//trim(leafdir)//'/fpm.toml"')
+        call backend_test(b, exitcode, log_file=log_file)
+        call assert(exitcode /= 0, &
+            'malformed transitive dependency cannot produce a current test pass')
+        call remove_tree(base)
+        call execute_command_line('rm -f "'//trim(log_file)//'" "'// &
+            trim(compile_log)//'"')
+        call set_env('PATH', trim(prior_path))
+    end subroutine test_gfortran_bootstraps_git_dev_dependency_closure
+
+    subroutine read_first_line(path, value, ios)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(out) :: value
+        integer, intent(out) :: ios
+        integer :: u
+
+        value = ''
+        open (newunit=u, file=trim(path), status='old', iostat=ios)
+        if (ios /= 0) return
+        read (u, '(a)', iostat=ios) value
+        close (u)
+    end subroutine read_first_line
+
+    subroutine count_file_lines(path, n_lines)
+        character(len=*), intent(in) :: path
+        integer, intent(out) :: n_lines
+        character(len=512) :: line
+        integer :: u, ios
+
+        n_lines = 0
+        open (newunit=u, file=trim(path), status='old', iostat=ios)
+        if (ios /= 0) return
+        do
+            read (u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            n_lines = n_lines + 1
+        end do
+        close (u)
+    end subroutine count_file_lines
 
     subroutine first_match(dir, infix, path)
         !! Return the first file under dir whose name contains infix. Shell-based

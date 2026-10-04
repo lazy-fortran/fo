@@ -4,6 +4,7 @@ module fo_gremlin_execution_view
     use fo_fs, only: fs_make_dir, fs_mkdir_excl, fs_remove_tree
     use fo_input_inventory, only: input_entry_t, input_inventory_t, INPUT_FILE
     use fo_process, only: process_getpid
+    use fo_util, only: make_tmpfile, delete_tmpfile
     implicit none
     private
 
@@ -25,6 +26,12 @@ module fo_gremlin_execution_view
     public :: execution_view_create, execution_view_release
 
     interface
+        integer(c_int) function generation_copy_tree(source, destination, manifest) &
+                bind(C, name='fo_c_generation_copy_tree')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: source(*), destination(*), manifest(*)
+        end function generation_copy_tree
+
         integer(c_int) function copy_declared_file(source, destination, writable) &
                 bind(C, name='fo_c_generation_copy_declared_file')
             import :: c_char, c_int
@@ -37,7 +44,7 @@ contains
 
     subroutine execution_view_create(scratch_parent, generation_id, owner_key, &
             case_id, inventory, inventory_ready, inventory_complete, view, ierr, &
-            message)
+            message, candidate_bundle_root)
         character(len=*), intent(in) :: scratch_parent, generation_id
         character(len=*), intent(in) :: owner_key, case_id
         type(input_inventory_t), intent(in) :: inventory
@@ -45,11 +52,12 @@ contains
         type(execution_view_t), intent(out) :: view
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
+        character(len=*), optional, intent(in) :: candidate_bundle_root
 
-        character(len=PATH_LEN) :: source, destination, alias_root
-        character(len=PATH_LEN) :: candidate
+        character(len=PATH_LEN) :: source, destination, alias_root, bundle_path
+        character(len=PATH_LEN) :: candidate, copy_manifest
         integer :: root_index, i, j, attempt, copy_rc, clock_count
-        integer(c_int) :: writable
+        integer(c_int) :: writable, tree_rc
         logical :: already_materialized
 
         view = execution_view_t()
@@ -113,6 +121,41 @@ contains
                     'canonical input inventory has unmodeled ambient inputs'
         end if
 
+        if (present(candidate_bundle_root)) then
+            if (len_trim(candidate_bundle_root) == 0 .or. &
+                    len_trim(candidate_bundle_root) >= PATH_LEN) then
+                call reject_view(view, &
+                    'candidate bundle root is empty or too long', ierr, message)
+                return
+            end if
+            if (len_trim(view%root) + len('/project') >= PATH_LEN) then
+                call reject_view(view, &
+                    'candidate build project path exceeds the supported length', &
+                    ierr, message)
+                return
+            end if
+            call make_tmpfile('fo-build-view-manifest', copy_manifest)
+            tree_rc = generation_copy_tree(trim(candidate_bundle_root)//c_null_char, &
+                trim(view%root)//c_null_char, trim(copy_manifest)//c_null_char)
+            call delete_tmpfile(copy_manifest)
+            if (tree_rc /= 0) then
+                call reject_view(view, &
+                    'cannot copy frozen generation into candidate build view', &
+                    ierr, message)
+                return
+            end if
+            view%cwd = trim(view%root)//'/project'
+            inquire (file=trim(view%cwd), exist=already_materialized)
+            if (.not. already_materialized) then
+                call reject_view(view, &
+                    'candidate bundle does not contain a project root', ierr, message)
+                return
+            end if
+            ierr = 0
+            message = trim(view%diagnostic)
+            return
+        end if
+
         do i = 1, inventory%entry_count
             if (.not. execution_input_role(inventory%entries(i)%role)) cycle
             if (inventory%entries(i)%kind /= INPUT_FILE) then
@@ -155,6 +198,20 @@ contains
                 exit
             end do
             if (already_materialized) cycle
+            bundle_path = ''
+            do j = 1, inventory%roots(root_index)%alias_count
+                if (trim(inventory%roots(root_index)%aliases(j)) /= &
+                        trim(inventory%entries(i)%root_alias)) cycle
+                bundle_path = inventory%roots(root_index)%bundle_paths(j)
+                exit
+            end do
+            if (.not. safe_relative_path(bundle_path) .or. &
+                    inventory%roots(root_index)%physical_path(1:1) /= '/') then
+                call reject_view(view, &
+                    'declared runtime fixture has no safe generation bundle path', &
+                    ierr, message)
+                return
+            end if
             if (trim(inventory%entries(i)%root_alias) == 'project') then
                 alias_root = ''
             else
@@ -163,6 +220,7 @@ contains
                 alias_root = '.fo-inputs/'//trim(inventory%entries(i)%root_alias)
             end if
             source = trim(inventory%roots(root_index)%physical_path)//'/'// &
+                trim(bundle_path)//'/'// &
                 trim(inventory%entries(i)%relative_path)
             destination = trim(view%root)
             if (len_trim(alias_root) > 0) &

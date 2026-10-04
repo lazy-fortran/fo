@@ -64,7 +64,7 @@ program fo_main
         call process_configure_openmp()
     end if
     if (nargs == 0) then
-        call cmd_run()
+        call gremlin_cli_run()
         stop
     end if
 
@@ -85,6 +85,8 @@ program fo_main
         end if
     case ('test')
         call cmd_test()
+    case ('verify')
+        call cmd_verify()
     case ('gremlin')
         call gremlin_cli_run()
     case ('bench')
@@ -135,7 +137,7 @@ program fo_main
 
 contains
 
-    subroutine cmd_run()
+    subroutine cmd_verify()
         ! staged pipeline: static -> build -> test -> lint
         type(backend_t) :: b
         type(dag_t) :: dag
@@ -342,7 +344,7 @@ contains
 
         t1 = wall_time_seconds()
         write (output_unit, '(a,f0.1,a)') 'All stages passed (', t1 - t0, 's)'
-    end subroutine cmd_run
+    end subroutine cmd_verify
 
     subroutine print_usage()
         write (output_unit, '(a)') 'fo - Fortran build driver'
@@ -352,7 +354,8 @@ contains
         write (output_unit, '(a)') ''
         write (output_unit, '(a)') 'usage: fo [command]'
         write (output_unit, '(a)') ''
-        write (output_unit, '(a)') '  (none)     static -> build -> test -> lint -> fmt hint'
+        write (output_unit, '(a)') '  (none)     start or attach Gremlin for this project'
+        write (output_unit, '(a)') '  verify     static -> build -> test -> lint -> fmt hint'
         write (output_unit, '(a)') '  build      build only (--flag "-O0")'
         write (output_unit, '(a)') &
             '  build --debug   add -g -O0 -fcheck=all -fbacktrace'
@@ -474,6 +477,9 @@ contains
             call print_install_usage()
         case ('test')
             call print_test_usage()
+        case ('verify')
+            write (output_unit, '(a)') &
+                'usage: fo verify  static checks, build, tests, lint and format hint'
         case ('exec', 'run')
             call print_exec_usage()
         case ('clean')

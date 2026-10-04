@@ -1,23 +1,31 @@
 program test_gremlin_execution_view
     use fo_cache, only: HASH_LEN, cache_file_digest
-    use fo_fs, only: fs_make_dir, fs_remove_tree, fs_write_text
+    use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_write_text
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, INPUT_FILE
     use fo_process, only: argv_push, process_getcwd, process_run_argv_logged
     use fo_util, only: delete_tmpfile, make_tmpfile, read_text_file
+    use fo_test_cli, only: resolve_driver, run_fo
+    use fo_test_harness, only: string_list_t, process_result_t, list_add
     implicit none
 
     type(input_declaration_t) :: declarations(1)
     type(input_inventory_t) :: inventory, escaping, incomplete, invalid
-    type(input_inventory_t) :: multirole, conflicting
-    type(execution_view_t) :: first, second, partial, paired, rejected
+    type(input_inventory_t) :: multirole, conflicting, aliased
+    type(execution_view_t) :: first, second, partial, paired, rejected, alias_view
+    type(execution_view_t) :: build_view
+    type(string_list_t) :: arguments, environment
+    type(process_result_t) :: build_result, run_result
     character(len=512) :: root, views, source_file, text, message
-    character(len=512) :: first_fixture, second_output, escape_path
+    character(len=512) :: first_fixture, second_output, escape_path, bundle_file
+    character(len=512) :: build_source, build_binary, dependency_source
     character(len=HASH_LEN) :: source_digest, after_digest
+    character(len=HASH_LEN) :: build_source_digest, build_source_after
+    character(len=HASH_LEN) :: dependency_digest, dependency_after
     character(len=512) :: argument, executable, current_dir, probe_log
-    character(len=:), allocatable :: packed
+    character(len=:), allocatable :: packed, driver
     integer :: n_args, probe_exit, cwd_status
     integer :: ierr, release_status, i
     logical :: exists
@@ -36,7 +44,6 @@ program test_gremlin_execution_view
         'version = "0.1.0"')
     source_file = trim(root)//'/fixtures/input.txt'
     call fs_write_text(trim(source_file), 'frozen fixture')
-    call cache_file_digest(trim(source_file), source_digest)
 
     declarations(1)%root_alias = 'project'
     declarations(1)%relative_path = 'fixtures/input.txt'
@@ -46,6 +53,14 @@ program test_gremlin_execution_view
     call input_inventory_discover(trim(root), declarations, inventory, ierr, message)
     call check(ierr == 0 .and. inventory%complete, &
         'discover the fixture through the canonical inventory')
+    bundle_file = trim(root)//'/bundle/project/fixtures/input.txt'
+    call fs_make_dir(trim(root)//'/bundle/project/fixtures')
+    call fs_write_text(trim(bundle_file), 'frozen fixture')
+    do i = 1, inventory%root_count
+        inventory%roots(i)%physical_path = trim(root)//'/bundle'
+    end do
+    call fs_write_text(trim(source_file), 'edited live fixture')
+    call cache_file_digest(trim(source_file), source_digest)
 
     call execution_view_create(trim(root)//'/views', repeat('a', HASH_LEN), &
         'session-case-1', 'test_case', inventory, .true., .true., first, ierr, message)
@@ -82,10 +97,16 @@ program test_gremlin_execution_view
     call check(index(text, 'written relative') > 0, &
         'relative output is created inside the private working directory')
 
+    call fs_remove_file(trim(source_file))
+    inquire(file=trim(source_file), exist=exists)
+    call check(.not. exists, 'editable fixture can be removed after capture')
     call execution_view_create(trim(root)//'/views', repeat('a', HASH_LEN), &
         'session-case-2', 'test_case', inventory, .true., .true., second, ierr, message)
     call check(ierr == 0 .and. second%cwd /= first%cwd, &
         'concurrent cases receive distinct working directories')
+    call read_text_file(trim(second%cwd)//'/fixtures/input.txt', text)
+    call check(index(text, 'frozen fixture') > 0, &
+        'later view reads captured bytes after editable source deletion')
     second_output = trim(second%cwd)//'/relative-output.txt'
     call fs_write_text(trim(second_output), 'case two')
     call read_text_file(trim(first%cwd)//'/relative-output.txt', text)
@@ -147,6 +168,37 @@ program test_gremlin_execution_view
         'multi-role materialization preserves declared bytes')
     call execution_view_release(paired, .false., release_status, message)
 
+    call check(trim(inventory%roots(1)%aliases(1)) == 'project', &
+        'project bundle alias is available for the fixture')
+    bundle_file = trim(root)//'/bundle/deps/fixture/nested/data.txt'
+    call fs_make_dir(trim(root)//'/bundle/deps/fixture/nested')
+    call fs_write_text(trim(bundle_file), 'frozen dependency fixture')
+    aliased = inventory
+    aliased%roots(1)%alias_count = 2
+    aliased%roots(1)%aliases(2) = 'dependency:fixture'
+    aliased%roots(1)%bundle_paths(2) = 'deps/fixture'
+    call check(aliased%entry_count < aliased%entry_capacity, &
+        'inventory has room for a second declared fixture')
+    aliased%entry_count = aliased%entry_count + 1
+    aliased%entries(aliased%entry_count) = inventory%entries(i)
+    aliased%entries(aliased%entry_count)%root_alias = 'dependency:fixture'
+    aliased%entries(aliased%entry_count)%relative_path = 'nested/data.txt'
+    call cache_file_digest(trim(bundle_file), &
+        aliased%entries(aliased%entry_count)%content_digest)
+    call execution_view_create(trim(root)//'/views', repeat('a', HASH_LEN), &
+        'session-alias', 'test_case', aliased, .true., .true., &
+        alias_view, ierr, message)
+    call check(ierr == 0 .and. alias_view%active, &
+        'dependency alias materializes from its own bundle subtree')
+    call read_text_file(trim(alias_view%cwd)// &
+        '/.fo-inputs/dependency:fixture/nested/data.txt', text)
+    call check(index(text, 'frozen dependency fixture') > 0, &
+        'nested dependency fixture retains captured bytes and layout')
+    call read_text_file(trim(alias_view%cwd)//'/fixtures/input.txt', text)
+    call check(index(text, 'frozen fixture') > 0, &
+        'dependency alias does not replace the project fixture')
+    call execution_view_release(alias_view, .false., release_status, message)
+
     conflicting = multirole
     conflicting%entries(conflicting%entry_count)%writable_at_execution = .false.
     call execution_view_create(trim(root)//'/views', repeat('a', HASH_LEN), &
@@ -169,6 +221,81 @@ program test_gremlin_execution_view
         'escaping declared paths receive an explicit rejection')
     inquire(file=trim(escape_path), exist=exists)
     call check(.not. exists, 'path rejection does not write outside the view')
+
+    ! Candidate builds get a fresh writable project tree rooted in the frozen
+    ! generation bundle; their compiler outputs cannot mutate that bundle.
+    call fs_make_dir(trim(root)//'/bundle/project/app')
+    call fs_make_dir(trim(root)//'/bundle/deps/provider/src')
+    call fs_write_text(trim(root)//'/bundle/project/fpm.toml', &
+        'name = "candidate_build_view"'//new_line('a')// &
+        '[dependencies]'//new_line('a')// &
+        'candidate_provider = { path = "../deps/provider" }'//new_line('a')// &
+        '[build]'//new_line('a')//'auto-executables = false'//new_line('a')// &
+        '[[executable]]'//new_line('a')//'name = "candidate_build_probe"'// &
+        new_line('a')//'source-dir = "app"'//new_line('a')//'main = "main.f90"'// &
+        new_line('a'))
+    build_source = trim(root)//'/bundle/project/app/main.f90'
+    dependency_source = trim(root)//'/bundle/deps/provider/src/provider.f90'
+    call fs_write_text(trim(root)//'/bundle/deps/provider/fpm.toml', &
+        'name = "candidate_provider"'//new_line('a'))
+    call fs_write_text(trim(dependency_source), &
+        'module candidate_provider_mod'//new_line('a')// &
+        'integer, parameter :: candidate_provider_value = 73'//new_line('a')// &
+        'end module candidate_provider_mod'//new_line('a'))
+    call fs_write_text(trim(build_source), &
+        'program candidate_build_probe'//new_line('a')// &
+        'use candidate_provider_mod, only: candidate_provider_value'//new_line('a')// &
+        'print "(i0)", candidate_provider_value'//new_line('a')// &
+        'end program candidate_build_probe'//new_line('a'))
+    call cache_file_digest(trim(build_source), build_source_digest)
+    call cache_file_digest(trim(dependency_source), dependency_digest)
+    call execution_view_create(trim(root)//'/views', repeat('b', HASH_LEN), &
+        'session-candidate-build', 'build', inventory, .true., .true., &
+        build_view, ierr, message, candidate_bundle_root=trim(root)//'/bundle')
+    call check(ierr == 0 .and. build_view%active, &
+        'candidate build view copies the frozen project')
+    if (build_view%active) then
+        call resolve_driver(driver)
+        environment = string_list_t()
+        call list_add(environment, 'FO_JOBS=1')
+        arguments = string_list_t()
+        call list_add(arguments, 'build')
+        call run_fo(driver, arguments, trim(build_view%cwd), &
+            trim(root)//'/build-view-cache', build_result, environment, 120000)
+        call check(build_result%exit_code == 0, &
+            'native Fo build succeeds in the candidate-owned view')
+        build_binary = trim(build_view%cwd)//'/build/fo/bin/candidate_build_probe'
+        inquire(file=trim(build_binary), exist=exists)
+        call check(exists, 'native executable is published in the candidate view')
+        if (exists) then
+            arguments = string_list_t()
+            call list_add(arguments, 'exec')
+            call list_add(arguments, '--no-build')
+            call list_add(arguments, 'candidate_build_probe')
+            call run_fo(driver, arguments, trim(build_view%cwd), &
+                trim(root)//'/build-view-cache', run_result, environment, 30000)
+            call check(run_result%exit_code == 0, &
+                'candidate executable exits successfully in the private view')
+            if (allocated(run_result%stdout)) then
+                call check(index(run_result%stdout, '73') > 0, &
+                    'candidate executable resolves the logical dependency root')
+            else
+                call check(.false., 'candidate executable output is captured')
+            end if
+        end if
+        call cache_file_digest(trim(build_source), build_source_after)
+        call check(build_source_digest == build_source_after, &
+            'candidate build leaves frozen source bytes unchanged')
+        call cache_file_digest(trim(dependency_source), dependency_after)
+        call check(dependency_digest == dependency_after, &
+            'candidate build leaves its dependency bundle unchanged')
+        inquire(file=trim(root)//'/bundle/project/build/fo/bin/'// &
+            'candidate_build_probe', exist=exists)
+        call check(.not. exists, &
+            'candidate build does not write outputs into its bundle')
+        call execution_view_release(build_view, .false., release_status, message)
+        call check(release_status == 0, 'candidate build view releases its owned tree')
+    end if
     call fs_remove_tree(trim(root))
     print '(a)', 'Gremlin writable execution view behavioral oracle: PASS'
 

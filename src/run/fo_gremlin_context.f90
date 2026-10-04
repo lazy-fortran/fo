@@ -6,7 +6,7 @@ module fo_gremlin_context
     use fo_dep_resolve, only: normalize_path, resolve_dev_dep_srcs, &
         resolved_src_t, MAX_RESOLVED
     use fo_gremlin_generation, only: generation_context_t, generation_input_t, &
-        generation_t, generation_capture
+        generation_t, generation_capture, generation_load_inventory
     use fo_driver, only: driver_pin_t
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, input_inventory_declarations_from_config
@@ -98,13 +98,11 @@ contains
     end subroutine capture_candidate
 
     subroutine generation_inventory_restore(generation, ierr, message)
-        !! Discover the canonical inventory once from this frozen generation.
-        !! Recovery uses the same path; incomplete declarations remain explicit.
+        !! Recovery restores only the canonical inventory captured in the
+        !! immutable generation manifest; it never scans a mutable checkout.
         type(generation_t), intent(inout) :: generation
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-
-        type(input_declaration_t), allocatable :: declarations(:)
 
         ierr = 0
         message = ''
@@ -117,25 +115,26 @@ contains
             end if
             return
         end if
-        call input_inventory_declarations_from_config( &
-            trim(generation%project_root), declarations, ierr, message)
-        if (ierr /= 0) then
+        call generation_load_inventory(generation, ierr, message)
+        if (.not. generation%input_inventory_ready) then
             generation%input_inventory_ready = .true.
             generation%input_inventory%valid = .false.
             generation%input_inventory_complete = .false.
             generation%input_inventory_diagnostic = trim(message)
+            if (len_trim(message) == 0) then
+                generation%input_inventory_diagnostic = &
+                    'generation manifest did not contain a restorable input inventory'
+            end if
+            ierr = 1
             return
         end if
-        call input_inventory_discover(trim(generation%project_root), declarations, &
-            generation%input_inventory, ierr, message)
-        generation%input_inventory_ready = .true.
-        generation%input_inventory_complete = &
-            generation%input_inventory%complete
+        generation%input_inventory_complete = generation%input_inventory%complete
         generation%input_inventory_diagnostic = &
             trim(generation%input_inventory%diagnostic)
         if (ierr /= 0 .or. .not. generation%input_inventory%valid) then
-            if (len_trim(generation%input_inventory_diagnostic) == 0) &
+            if (len_trim(generation%input_inventory_diagnostic) == 0) then
                 generation%input_inventory_diagnostic = trim(message)
+            end if
             ierr = 1
             message = trim(generation%input_inventory_diagnostic)
             return
