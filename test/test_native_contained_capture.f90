@@ -44,7 +44,8 @@ program test_native_contained_capture
 
     end interface
 
-    character(len=4096) :: executable, cwd, mode, scratch
+    character(len=4096) :: executable, cwd, mode, scratch_buffer
+    character(:), allocatable :: scratch
     integer :: status
 
     call get_command_argument(0, executable)
@@ -59,11 +60,11 @@ program test_native_contained_capture
     case ('--timeout-helper')
         call timeout_helper()
     case ('--contained')
-        call get_command_argument(2, scratch)
-        call contained_mode(trim(scratch))
+        call get_command_argument(2, scratch_buffer)
+        call contained_mode(trim(scratch_buffer))
     case ('--outer')
-        call get_command_argument(2, scratch)
-        call outer_mode(trim(scratch))
+        call get_command_argument(2, scratch_buffer)
+        call outer_mode(trim(scratch_buffer))
     case default
         call make_scratch('fo-native-contained-capture', scratch)
         call run_oracle(trim(scratch))
