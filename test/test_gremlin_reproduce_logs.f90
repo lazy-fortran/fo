@@ -16,10 +16,11 @@ program test_gremlin_reproduce_logs
     character(:), allocatable :: relocated_cache
     character(:), allocatable :: session, generation, first_log, second_log
     character(:), allocatable :: first_text, second_text, lane
+    character(:), allocatable :: startup_error
     type(string_list_t) :: arguments
     type(process_result_t) :: process
     type(json_value_t) :: document, started, event, events, parsed
-    logical :: valid
+    logical :: valid, anchor_ready
     character(:), allocatable :: parse_error
 
     call gremlin_setup(driver, scratch, project, cache, state)
@@ -47,10 +48,21 @@ program test_gremlin_reproduce_logs
     call list_add(arguments, '1729')
     call list_add(arguments, '--json')
     call gremlin_json(driver, project, cache, state, arguments, started, process, &
-        120000)
+        30000)
     session = member_text(started, 'session_id')
-    call assert_true(len(session) > 0, 'start returns the owner session id')
-    call wait_for_anchor(session, generation)
+    if (len(session) == 0 .or. process%exit_code /= 0 .or. &
+            process%runner_failed .or. process%timed_out) then
+        startup_error = start_failure(process)
+        if (len(session) > 0) call stop_lane(session)
+        call assert_true(.false., 'initial owner start failed: '//startup_error)
+        call finish_assertions()
+    end if
+    call wait_for_anchor(session, generation, anchor_ready, startup_error)
+    if (.not. anchor_ready) then
+        call stop_lane(session)
+        call assert_true(.false., 'initial anchor did not become ready: '//startup_error)
+        call finish_assertions()
+    end if
 
     call write_text(project//'/token.txt', 'EDITED_REPRODUCE_TOKEN'//new_line('a'))
     call write_dependency('EDITED_DEPENDENCY_TOKEN')
@@ -191,27 +203,80 @@ contains
         call gremlin_json(driver, project, cache, state, args, value, result, 30000)
     end subroutine status_now
 
-    subroutine wait_for_anchor(owner, active_generation)
+    subroutine wait_for_anchor(owner, active_generation, ready, failure)
         character(len=*), intent(in) :: owner
         character(:), allocatable, intent(out) :: active_generation
+        logical, intent(out) :: ready
+        character(:), allocatable, intent(out) :: failure
         type(json_value_t) :: status, list, receipt
+        character(:), allocatable :: owner_state, diagnostic
         integer :: attempt, j
 
         active_generation = ''
-        do attempt = 1, 1200
+        failure = ''
+        ready = .false.
+        do attempt = 1, 300
             call status_now(owner, status)
             active_generation = member_text(status, 'active_generation')
+            owner_state = member_text(status, 'state')
             list = json_member(status, 'events')
             do j = 1, json_size(list)
                 receipt = json_element(list, j)
                 if (member_text(receipt, 'case_id') == 'test_reproduce_anchor' .and. &
                     member_text(receipt, 'status') == 'PASS' .and. &
-                    member_text(receipt, 'generation') == active_generation) return
+                    member_text(receipt, 'generation') == active_generation) then
+                    ready = .true.
+                    return
+                end if
             end do
+            if (owner_state == 'build_failed' .or. owner_state == 'capture_failed' .or. &
+                    owner_state == 'inventory_failed' .or. &
+                    owner_state == 'test_launch_failed' .or. owner_state == 'error' .or. &
+                    owner_state == 'stopped') then
+                diagnostic = member_text(status, 'diagnostic')
+                failure = 'state='//owner_state
+                if (len_trim(diagnostic) > 0) then
+                    failure = failure//'; diagnostic='//trim(diagnostic)
+                else
+                    diagnostic = member_text(status, 'last_outcome')
+                    if (len_trim(diagnostic) > 0) &
+                        failure = failure//'; last_outcome='//trim(diagnostic)
+                end if
+                return
+            end if
             call gremlin_wait_ms(100)
         end do
-        call assert_true(.false., 'anchor completes on the active immutable generation')
+        failure = 'no committed PASS receipt for test_reproduce_anchor within 30 seconds; '// &
+            'last state='//owner_state
     end subroutine wait_for_anchor
+
+    function start_failure(result) result(detail)
+        type(process_result_t), intent(in) :: result
+        character(:), allocatable :: detail
+
+        detail = 'exit_code='//integer_text(result%exit_code)
+        if (result%runner_failed) detail = detail//'; process runner failed'
+        if (result%timed_out) detail = detail//'; command timed out'
+        if (allocated(result%runner_error)) then
+            if (len_trim(result%runner_error) > 0) &
+                detail = detail//'; runner='//trim(result%runner_error)
+        end if
+        if (allocated(result%stderr)) then
+            if (len_trim(result%stderr) > 0) detail = detail//'; stderr='//trim(result%stderr)
+        end if
+        if (allocated(result%stdout)) then
+            if (len_trim(result%stdout) > 0) detail = detail//'; stdout='//trim(result%stdout)
+        end if
+    end function start_failure
+
+    function integer_text(value) result(text)
+        integer, intent(in) :: value
+        character(:), allocatable :: text
+        character(32) :: buffer
+
+        write(buffer, '(i0)') value
+        text = trim(buffer)
+    end function integer_text
 
     subroutine reproduce(case_id, log_path, cache_root)
         character(len=*), intent(in) :: case_id
