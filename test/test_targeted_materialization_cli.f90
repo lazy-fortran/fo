@@ -8,21 +8,25 @@ program test_targeted_materialization_cli
     use fo_test_harness, only: current_directory
     use fo_test_cli, only: resolve_driver, run_fo, run_external
     use fo_test_harness, only: finish_assertions
+    use fo_fs, only: fs_find_executable
     implicit none
 
     character(:), allocatable :: driver, scratch, marker, env_scratch, env_cache, bin_dir
     character(:), allocatable :: home_dir, config_dir, xdg_cache, prefix, state_dir
     character(:), allocatable :: source, dependency, dependency_build, probe_log
     character(:), allocatable :: compiler_path, cwd, arg0
-    character(:), allocatable :: path_value, fpm_wrapper_dir, fpm_script, fpm_binary
+    character(:), allocatable :: fpm_wrapper_dir, fpm_script, fpm_wrapper_source
     character(:), allocatable :: fpm_call_log
+    character(:), allocatable :: path_value
+    character(len=512) :: fpm_binary, wrapper_compiler
     character(len=32), parameter :: names(2) = &
         [character(len=32) :: 'test_mcp_pass', 'test_mcp_fail']
     character(len=32), parameter :: values(2) = &
         [character(len=32) :: 'first target ran', 'second target ran']
     type(process_result_t) :: result
     type(string_list_t) :: arguments, environment, probe_environment
-    integer :: i, arg0_length, arg_status
+    integer :: i, arg0_length, arg_status, path_length
+    logical :: executable_found
 
     call maybe_log_compiler_probe()
     call resolve_driver(driver)
@@ -50,11 +54,6 @@ program test_targeted_materialization_cli
     call make_directory(state_dir)
     call make_directory(fpm_wrapper_dir)
     call make_directory(join_path(dependency, 'src'))
-    call get_environment_variable('PATH', length=arg0_length, status=arg_status)
-    call assert_true(arg_status == 0 .and. arg0_length > 0, &
-        'fixture has a process PATH for dependency bootstrap')
-    allocate (character(len=arg0_length) :: path_value)
-    call get_environment_variable('PATH', path_value)
     call list_add(environment, 'HOME=' // home_dir)
     call list_add(environment, 'XDG_CONFIG_HOME=' // config_dir)
     call list_add(environment, 'XDG_CACHE_HOME=' // xdg_cache)
@@ -62,25 +61,32 @@ program test_targeted_materialization_cli
     call list_add(environment, 'FO_CACHE_DIR=' // env_cache)
     call list_add(environment, 'FO_GREMLIN_STATE_DIR=' // state_dir)
     call list_add(environment, 'FO_JOBS=2')
-    call list_add(environment, 'PATH=' // fpm_wrapper_dir // ':' // path_value)
     call list_add(environment, 'FO_TEST_FPM_CALL_LOG=' // fpm_call_log)
-    arguments = string_list_t()
-    call list_add(arguments, '-c')
-    call list_add(arguments, 'command -v fpm')
-    call run_external('sh', arguments, scratch, result)
-    call assert_process_ok(result, 'locate fpm for the command counter')
-    fpm_binary = trim(result%stdout)
-    if (len(fpm_binary) > 0) then
-        arg0_length = index(fpm_binary, new_line('a'))
-        if (arg0_length > 0) fpm_binary = fpm_binary(:arg0_length - 1)
+    call fs_find_executable('fpm', fpm_binary, executable_found)
+    call assert_true(executable_found, 'resolve the absolute fpm executable')
+    call list_add(environment, 'FO_TEST_REAL_FPM=' // trim(fpm_binary))
+    call fs_find_executable('gfortran', wrapper_compiler, executable_found)
+    call assert_true(executable_found, 'resolve compiler for native FPM wrapper')
+    path_length = 0
+    call get_environment_variable('PATH', length=path_length, status=arg_status)
+    call assert_true(arg_status == 0 .and. path_length > 0, &
+        'fixture has a process PATH for dependency bootstrap')
+    if (arg_status == 0 .and. path_length > 0) then
+        allocate (character(len=path_length) :: path_value)
+        call get_environment_variable('PATH', path_value)
+    else
+        path_value = ''
     end if
-    call assert_true(len(fpm_binary) > 0, 'resolve the absolute fpm executable')
-    call list_add(environment, 'FO_TEST_REAL_FPM=' // fpm_binary)
-    call write_text(fpm_script, '#!/bin/sh' // new_line('a') // &
-        'printf "%s\\n" "$*" >> "$FO_TEST_FPM_CALL_LOG"' // new_line('a') // &
-        'exec "$FO_TEST_REAL_FPM" "$@"' // new_line('a'))
-    call run_external('chmod', [character(len=16) :: '+x', fpm_script], scratch, result)
-    call assert_process_ok(result, 'make the fpm command counter executable')
+    call current_directory(cwd)
+    fpm_wrapper_source = join_path(cwd, &
+        'test-fixtures/fortran/fo_test_fpm_command.f90')
+    arguments = string_list_t()
+    call list_add(arguments, fpm_wrapper_source)
+    call list_add(arguments, '-o')
+    call list_add(arguments, fpm_script)
+    call run_external(wrapper_compiler, arguments, cwd, result, timeout_ms=30000)
+    call assert_process_ok(result, 'compile the native Fortran FPM wrapper')
+    call list_add(environment, 'PATH=' // fpm_wrapper_dir // ':' // path_value)
 
     call write_text(join_path(dependency, 'fpm.toml'), &
         'name = "probe_dependency"' // new_line('a'))
