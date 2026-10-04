@@ -9,7 +9,7 @@ module fo_gremlin_generation
     use fx_immutable_store, only: immutable_store_t, immutable_store_init, &
         IMMUTABLE_OK
     use fo_input_inventory, only: input_inventory_t, input_inventory_revalidate, &
-        input_inventory_discover, INPUT_FILE
+        input_inventory_discover, INPUT_FILE, INPUT_DIRECTORY
     use fo_generation_manifest, only: generation_manifest_metadata_t, &
         generation_manifest_capture, generation_manifest_load, &
         generation_manifest_materialize, generation_manifest_execution_identity
@@ -732,7 +732,7 @@ contains
         type(input_inventory_t), intent(in) :: expected, observed
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-        integer :: i, j, k, l, matches, expected_mode
+        integer :: i, j, k, l, matches, expected_root, observed_root
         logical :: found
 
         ierr = 1
@@ -756,35 +756,103 @@ contains
                 if (.not. found) return
             end do
         end do
-        if (matches /= total_alias_count(observed) .or. &
-            observed%entry_count /= expected%entry_count) return
+        if (matches /= total_alias_count(observed)) return
         do i = 1, expected%entry_count
-            if (trim(observed%entries(i)%root_alias) /= &
-                trim(expected%entries(i)%root_alias)) return
-            if (trim(observed%entries(i)%relative_path) /= &
-                trim(expected%entries(i)%relative_path)) return
-            if (trim(observed%entries(i)%role) /= &
-                trim(expected%entries(i)%role)) return
-            if (observed%entries(i)%kind /= expected%entries(i)%kind) return
-            if (observed%entries(i)%writable_at_execution .neqv. &
-                expected%entries(i)%writable_at_execution) return
-            if (observed%entries(i)%content_digest /= &
-                expected%entries(i)%content_digest) return
-            if (observed%entries(i)%link_target /= &
-                expected%entries(i)%link_target) return
-            expected_mode = expected%entries(i)%mode
-            if (expected%entries(i)%kind == INPUT_FILE) then
-                if (iand(expected_mode, 73) == 0) then
-                    expected_mode = 292
-                else
-                    expected_mode = 365
-                end if
-            end if
-            if (observed%entries(i)%mode /= expected_mode) return
+            expected_root = root_with_alias(expected, &
+                trim(expected%entries(i)%root_alias))
+            if (expected_root == 0) return
+            do j = 1, expected%roots(expected_root)%alias_count
+                found = .false.
+                do k = 1, observed%entry_count
+                    if (.not. matching_materialized_entry( &
+                            expected%entries(i), observed%entries(k))) cycle
+                    observed_root = root_with_alias(observed, &
+                        trim(observed%entries(k)%root_alias))
+                    if (observed_root == 0) return
+                    do l = 1, observed%roots(observed_root)%alias_count
+                        if (trim(observed%roots(observed_root)%aliases(l)) /= &
+                            trim(expected%roots(expected_root)%aliases(j))) cycle
+                        if (trim(observed%roots(observed_root)%bundle_paths(l)) /= &
+                            trim(expected%roots(expected_root)%bundle_paths(j))) cycle
+                        found = .true.
+                        exit
+                    end do
+                    if (found) exit
+                end do
+                if (.not. found) return
+            end do
+        end do
+        do i = 1, observed%entry_count
+            observed_root = root_with_alias(observed, &
+                trim(observed%entries(i)%root_alias))
+            if (observed_root == 0) return
+            found = .false.
+            do k = 1, expected%entry_count
+                if (.not. matching_materialized_entry( &
+                        expected%entries(k), observed%entries(i))) cycle
+                expected_root = root_with_alias(expected, &
+                    trim(expected%entries(k)%root_alias))
+                if (expected_root == 0) return
+                do j = 1, expected%roots(expected_root)%alias_count
+                    do l = 1, observed%roots(observed_root)%alias_count
+                        if (trim(expected%roots(expected_root)%aliases(j)) /= &
+                            trim(observed%roots(observed_root)%aliases(l))) cycle
+                        if (trim(expected%roots(expected_root)%bundle_paths(j)) /= &
+                            trim(observed%roots(observed_root)%bundle_paths(l))) cycle
+                        found = .true.
+                        exit
+                    end do
+                    if (found) exit
+                end do
+                if (found) exit
+            end do
+            if (.not. found) return
         end do
         ierr = 0
         message = ''
     end subroutine compare_materialized_inventory
+
+    logical function matching_materialized_entry(expected, observed)
+        type(input_entry_t), intent(in) :: expected, observed
+        integer :: expected_mode
+
+        matching_materialized_entry = .false.
+        if (trim(expected%relative_path) /= trim(observed%relative_path)) return
+        if (trim(expected%role) /= trim(observed%role)) return
+        if (expected%kind /= observed%kind) return
+        if (expected%writable_at_execution .neqv. &
+                observed%writable_at_execution) return
+        if (expected%content_digest /= observed%content_digest) return
+        if (expected%link_target /= observed%link_target) return
+        expected_mode = expected%mode
+        select case (expected%kind)
+        case (INPUT_FILE)
+            if (iand(expected_mode, 73) == 0) then
+                expected_mode = 292
+            else
+                expected_mode = 365
+            end if
+        case (INPUT_DIRECTORY)
+            expected_mode = 365
+        end select
+        if (observed%mode /= expected_mode) return
+        matching_materialized_entry = .true.
+    end function matching_materialized_entry
+
+    integer function root_with_alias(inventory, alias)
+        type(input_inventory_t), intent(in) :: inventory
+        character(len=*), intent(in) :: alias
+        integer :: i, j
+
+        root_with_alias = 0
+        do i = 1, inventory%root_count
+            do j = 1, inventory%roots(i)%alias_count
+                if (trim(inventory%roots(i)%aliases(j)) /= trim(alias)) cycle
+                root_with_alias = i
+                return
+            end do
+        end do
+    end function root_with_alias
 
     integer function total_alias_count(inventory)
         type(input_inventory_t), intent(in) :: inventory
