@@ -31,6 +31,7 @@ program test_mcp_gremlin_stale
     type(process_result_t) :: process
     type(json_value_t) :: response, payload, events, event, result, actions
     integer :: exit_code, attempt, blocked_pid, status, cleanup_status, i
+    integer :: started_at, finished_at, clock_rate
     character(len=16) :: exit_text
     integer(c_int64_t) :: blocked_start
     logical :: found, pass_seen, fail_seen, blocked_seen, has_gremlin, catalog_valid
@@ -130,7 +131,9 @@ program test_mcp_gremlin_stale
     call list_add(args, '--target')
     call list_add(args, 'test_stale_blocked')
     call list_add(args, '--json')
+    call system_clock(started_at, clock_rate)
     call gremlin_json(driver, project, cache, state, args, payload, process, 30000)
+    call system_clock(finished_at)
     if (process%exit_code /= 0) then
         write (exit_text, '(i0)') process%exit_code
         call assert_true(.false., 'new CLI failed to start lane (exit='//trim(exit_text)// &
@@ -140,6 +143,12 @@ program test_mcp_gremlin_stale
         call finish_assertions(retain_failed_scratch=.true.)
     end if
     session_id = json_string_value(json_member(payload, 'session_id'))
+    call assert_true(json_string_value(json_member(payload, 'state')) == 'running', &
+        'new CLI start reports its running owner state')
+    if (clock_rate > 0) then
+        call assert_true(real(finished_at - started_at) / real(clock_rate) < 3.0, &
+            'new CLI start returns promptly while the peer stays connected')
+    end if
     if (len(session_id) == 0) then
         call assert_true(.false., 'CLI response omitted its owner ID; stderr='// &
             trim(process%stderr)//'; stdout='//trim(process%stdout))
@@ -228,6 +237,40 @@ program test_mcp_gremlin_stale
         'blocked child is still running while new CLI reports the pass receipt')
     call assert_true(mcp_process_identity_running(server%pid, server%start_time), &
         'CLI lane creation and completion do not replace or terminate the MCP process')
+
+    args = string_list_t()
+    call list_add(args, 'gremlin')
+    call list_add(args, 'status')
+    call list_add(args, '--dir')
+    call list_add(args, project)
+    call list_add(args, '--lane')
+    call list_add(args, 'new-cli-lane')
+    call list_add(args, '--session')
+    call list_add(args, session_id)
+    call list_add(args, '--cursor')
+    call list_add(args, '0')
+    call list_add(args, '--max-records')
+    call list_add(args, '8')
+    call list_add(args, '--max-bytes')
+    call list_add(args, '8192')
+    call list_add(args, '--json')
+    call gremlin_json(driver, project, cache, state, args, payload, process, 10000)
+    call assert_true(process%exit_code == 0, &
+        'public paginated status succeeds while the old MCP peer stays connected')
+    events = json_member(payload, 'events')
+    pass_seen = .false.
+    blocked_seen = .false.
+    do i = 1, json_size(events)
+        event = json_element(events, i)
+        case_id = json_string_value(json_member(event, 'case_id'))
+        case_status = json_string_value(json_member(event, 'status'))
+        if (case_id == 'test_stale_pass' .and. case_status == 'PASS') pass_seen = .true.
+        if (case_id == 'test_stale_blocked') blocked_seen = .true.
+    end do
+    call assert_true(pass_seen, 'paginated status reports the completed pass')
+    call assert_true(.not. blocked_seen, &
+        'paginated status leaves the in-flight case without a terminal event')
+
     call gremlin_stop_lane(driver, project, cache, state, 'new-cli-lane', session_id)
     if (blocked_start > 0_c_int64_t) then
         do attempt = 1, 250
