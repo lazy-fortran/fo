@@ -630,8 +630,14 @@ cases. Passing that priority set does not stop the generation-scoped finite
 background epoch. #175 supplies the shared declared input inventory to watching,
 capture, action keys and impact analysis; separate incompatible input models
 must not silently exclude tests. New/unknown inputs, manifest/toolchain/runtime
-changes and unsupported dependencies conservatively widen selection, up to all
-ordinary cases. Expose model completeness rather than assume it.
+changes and unsupported dependencies conservatively widen selection, up to the
+complete supported eligible inventory, including affected slow cases. Expose model completeness rather than assume it.
+
+[#189](https://github.com/lazy-fortran/fo/issues/189) owns the concrete repair:
+replace post-build cache-miss change discovery with baseline/candidate inventory
+differences, then integrate reproducer-first ordering into the existing campaign.
+Cache population must not change affected membership. Keep #175, #148 and #170
+as the inventory, watch and writable-view owners; no competing scheduler is added.
 
 Until conservative impact accounting is demonstrated for the supported inputs,
 a reduced affected set is prioritization evidence, not sufficient proof of the
@@ -641,6 +647,12 @@ same-generation failure outside the selected set is evidence to inspect the
 selector; call it a selector miss only when the supported change model should
 have included that case, keeping preexisting failures, flaky outcomes and
 unclassified inputs distinct. No GitHub/merge policy belongs in this service.
+
+The Linux development CLI was atomically refreshed from locally gated `a8cbde3`
+with SHA256 `8437146dd444b1dc2d2a6f9e3c0690748df1077fbec53c9a96dd91de697fc9df`.
+The previous binary is retained under its digest for replay; in-flight validation
+uses immutable explicit driver paths. Session driver pinning #151 remains a
+separate published source slice pending its replacement oracle, not claimed done.
 
 `local_gate_green=true` at the gate. What happens next belongs to the external
 repository policy. Lazy-fortran controllers push the exact integrated generation
