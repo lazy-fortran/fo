@@ -428,9 +428,12 @@ shell interpreters from repository-owned test execution. Issue #176 replaces the
 repository-owned shell/Python benchmark driver and reporter. Configuration/workflow files
 and documentation remain their declarative formats; executable test/benchmark
 policy, orchestration, parsing and assertions are Fortran, with only narrow C OS
-shims. Each old fixture is deleted only after its
-Fortran replacement preserves or strengthens the crash, concurrency, JSON,
-filesystem and execution oracle. Production code never depends on the test
+shims. Each old fixture is deleted after its distinct supported behavior has a
+passing independent native oracle. #184 also removes artificial implementation
+phase/meta checks: do not rebuild LD_PRELOAD interception or production hooks
+solely to preserve an old forced EPERM/micro-phase scenario. Record the lost
+forced window explicitly; retain public cancellation/error, owned cleanup and
+unrelated-process survival checks. Production code never depends on the test
 harness. The frozen baseline `1f8a1a3` had 31 JS fixtures, including
 context-provenance and coverage-restart tests omitted from the earlier count.
 At `18b28c7`, six JS fixtures remain, all owned by #161. #160's seven fixtures
@@ -764,8 +767,9 @@ completed entries below are retained as prerequisites and evidence:
 13. **Complete:** [#171](https://github.com/lazy-fortran/fo/issues/171): Darwin
     state declarations and canonical-path portability oracles pass on Linux and
     macOS. #172 separately owns the public lifecycle gate.
-14. [#172](https://github.com/lazy-fortran/fo/issues/172): add scoped Darwin
-    asynchronous owner/descendant containment and unblock public Gremlin lifecycle.
+14. **Delivered:** [#172](https://github.com/lazy-fortran/fo/issues/172): scoped Darwin
+    asynchronous ownership and public lifecycle pass Linux/macOS focused gates.
+    Exact registered births replace unsafe absent-leader SID attribution.
 15. **Complete:** [#173](https://github.com/lazy-fortran/fo/issues/173): accept
     only documented platform archive index members while retaining exact object
     verification.
@@ -929,9 +933,16 @@ Implemented issue state:
   feature declarations before headers, the negative compile oracle proves the
   former macro defect, and state/portability/supervisor tests pass on Linux and
   macOS. The declaration issue is closed; #172 owns the separate public lifecycle gate.
-- #172 owns the subsequently exposed `ENOTSUP` from Linux-only asynchronous
-  descendant containment; macOS state/supervisor providers pass, while public
-  Gremlin start/status/stop remains blocked until scoped Darwin ownership lands.
+- #172's repair is integrated through `0b10bde` and explicit fixture-driver
+  compatibility at `c08ab78`. The exact combined Linux gate passes 2/2 in 22.79s;
+  explicit FO-only public-driver fallback passes 4.20s. Frozen worker macOS
+  async/public gates pass 20.62s/12.94s with normal slow budgets. Independent
+  ownership review found the absent-leader SID bridge repaired. Linux signals
+  via pidfds; Darwin checks birth immediately before individual kill, with a
+  non-atomic exit/PID-reuse window. No complete public token-acquisition API was
+  found for arbitrary descendants; private ABI machinery is outside this KISS
+  repair. Unobserved/unregistered descendants are not attributed after leader
+  identity loss. Those limits are not claimed solved by the passing gates.
 - #173 owns the Apple `ar` `__.SYMDEF SORTED` index-member classification defect
   exposed by the exact #172 macOS test build. Complete at `7f0cccc`: four exact
   BSD/Apple index names are accepted while arbitrary/duplicate/missing/corrupt
