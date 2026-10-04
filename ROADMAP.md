@@ -42,6 +42,7 @@ freshness/result/process behavior before consumers can rely on it.
 | [#176](https://github.com/lazy-fortran/fo/issues/176) | Complete through `8431a6d`: standalone Fortran benchmark orchestration, JSONL reporting and exact inventory verification replace the shell/Python executables. |
 | [#177](https://github.com/lazy-fortran/fo/issues/177) | Complete: every command-local help path is side-effect free, including `fo install --help`. |
 | [#178](https://github.com/lazy-fortran/fo/issues/178) | Complete at `9a8ca76`: standalone install-help C code is explicit-only and cannot enter FPM's automatic Fortran test links. |
+| [#179](https://github.com/lazy-fortran/fo/issues/179) | Complete at `24018a3`: the archive-metadata Fortran oracle compiles within the portable source-line limit with byte-identical generated script behavior. |
 
 Adjacent scope is [#56](https://github.com/lazy-fortran/fo/issues/56) LSP,
 [#59](https://github.com/lazy-fortran/fo/issues/59) deep-lint provider,
