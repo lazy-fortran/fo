@@ -1,6 +1,8 @@
 program test_compdb
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use fo_test_json, only: json_value_t, json_array, json_object, json_string, &
+        json_parse, json_member, json_element, json_size, json_string_value
     use fo_gfortran_build, only: gfortran_build
     use fo_process, only: process_getpid
     implicit none
@@ -44,7 +46,8 @@ contains
 
     subroutine test_gfortran_build_writes_compile_commands()
         character(len=512) :: project_dir, log_file, compdb, cache_dir
-        integer :: exitcode, n_first, n_second, ierr
+        character(len=512) :: invalid_compdb, suffix_mutant_compdb
+        integer :: exitcode, n_first, n_second, ierr, u
         logical :: exists
 
         call make_tmp_path('fo_compdb_project', project_dir)
@@ -62,6 +65,19 @@ contains
         call assert(exists, 'cold build writes compile_commands.json')
         call assert(valid_compdb(project_dir, compdb), 'cold compdb is valid')
 
+        invalid_compdb = trim(project_dir)//'/invalid_compile_commands.json'
+        open (newunit=u, file=trim(invalid_compdb), status='replace', action='write')
+        write (u, '(a)') '[{"directory":"x","file":"x",'// &
+            '"arguments":["gfortran",],"extra":true}]'
+        close (u)
+        call assert(.not. valid_compdb(project_dir, invalid_compdb), &
+            'compdb oracle rejects malformed JSON')
+
+        suffix_mutant_compdb = trim(project_dir)//'/suffix_mutant_compile_commands.json'
+        call write_suffix_mutant(project_dir, suffix_mutant_compdb)
+        call assert(.not. valid_compdb(project_dir, suffix_mutant_compdb), &
+            'compdb oracle rejects a source path with an extra suffix')
+
         call execute_command_line('rm -f '//trim(compdb))
         call gfortran_build(project_dir, log_file, exitcode, n_compiled=n_second)
         call assert(exitcode == 0, 'warm build succeeds')
@@ -78,34 +94,97 @@ contains
 
     logical function valid_compdb(project_dir, compdb)
         character(len=*), intent(in) :: project_dir, compdb
-        character(len=512) :: script, cmd
-        integer :: u, exitcode
+        type(json_value_t) :: document, entry, field, arguments, argument
+        character(len=512) :: filename
+        character(:), allocatable :: source, error_message, value
+        integer :: u, file_size, ios, i, j
+        logical :: valid, has_compile, has_module_dir, has_source_arg
+        logical :: has_library, has_main
 
         valid_compdb = .false.
-        script = trim(project_dir)//'/check_compdb.py'
-        open (newunit=u, file=trim(script), status='replace', action='write')
-        write (u, '(a)') 'import json, sys'
-        write (u, '(a)') 'path = sys.argv[1]'
-        write (u, '(a)') 'data = json.load(open(path))'
-        write (u, '(a)') 'assert isinstance(data, list), data'
-        write (u, '(a)') 'assert len(data) == 2, data'
-        write (u, '(a)') 'for entry in data:'
-        write (u, '(a)') '    assert set(["directory", "file", "arguments"]) <= set(entry), entry'
-        write (u, '(a)') '    assert isinstance(entry["arguments"], list), entry'
-        write (u, '(a)') '    assert len(entry["arguments"]) > 0, entry'
-        write (u, '(a)') '    assert entry["arguments"][0].endswith("gfortran"), entry'
-        write (u, '(a)') '    assert "-c" in entry["arguments"], entry'
-        write (u, '(a)') '    assert any(arg.startswith("-J") or arg == "-J" for arg in entry["arguments"]), entry'
-        write (u, '(a)') '    assert entry["file"] in entry["arguments"], entry'
-        write (u, '(a)') 'files = {entry["file"] for entry in data}'
-        write (u, '(a)') 'assert any(file.endswith("src/lib.f90") for file in files), files'
-        write (u, '(a)') 'assert any(file.endswith("app/main.f90") for file in files), files'
+        inquire (file=trim(compdb), size=file_size, iostat=ios)
+        if (ios /= 0 .or. file_size <= 0) return
+        allocate (character(len=file_size) :: source)
+        open (newunit=u, file=trim(compdb), status='old', action='read', &
+            access='stream', form='unformatted', iostat=ios)
+        if (ios /= 0) return
+        read (u, iostat=ios) source
         close (u)
+        if (ios /= 0) return
 
-        cmd = 'python3 '//trim(script)//' '//trim(compdb)
-        call execute_command_line(trim(cmd), exitstat=exitcode)
-        valid_compdb = exitcode == 0
+        call json_parse(source, document, valid, error_message)
+        if (.not. valid) return
+        if (document%kind /= json_array .or. json_size(document) /= 2) return
+
+        has_library = .false.
+        has_main = .false.
+        do i = 1, json_size(document)
+            entry = json_element(document, i)
+            if (entry%kind /= json_object) return
+            field = json_member(entry, 'directory')
+            if (field%kind /= json_string) return
+            if (json_string_value(field) /= trim(project_dir)) return
+            field = json_member(entry, 'file')
+            if (field%kind /= json_string) return
+            filename = json_string_value(field)
+            if (path_has_suffix(filename, '/src/lib.f90')) has_library = .true.
+            if (path_has_suffix(filename, '/app/main.f90')) has_main = .true.
+
+            arguments = json_member(entry, 'arguments')
+            if (arguments%kind /= json_array .or. json_size(arguments) == 0) return
+            argument = json_element(arguments, 1)
+            if (argument%kind /= json_string) return
+            value = json_string_value(argument)
+            if (len(value) < 8) return
+            if (value(len(value) - 7:) /= 'gfortran') return
+
+            has_compile = .false.
+            has_module_dir = .false.
+            has_source_arg = .false.
+            do j = 1, json_size(arguments)
+                argument = json_element(arguments, j)
+                if (argument%kind /= json_string) return
+                value = json_string_value(argument)
+                if (value == '-c') has_compile = .true.
+                if (value == trim(filename)) has_source_arg = .true.
+                if (len(value) >= 2) then
+                    if (value(1:2) == '-J') has_module_dir = .true.
+                end if
+            end do
+            if (.not. has_compile .or. .not. has_module_dir .or. &
+                .not. has_source_arg) return
+        end do
+        valid_compdb = has_library .and. has_main
     end function valid_compdb
+
+    logical function path_has_suffix(path, suffix)
+        character(len=*), intent(in) :: path, suffix
+        integer :: path_length, suffix_length
+
+        path_has_suffix = .false.
+        path_length = len_trim(path)
+        suffix_length = len(suffix)
+        if (path_length < suffix_length) return
+        path_has_suffix = path(path_length - suffix_length + 1:path_length) == suffix
+    end function path_has_suffix
+
+    subroutine write_suffix_mutant(project_dir, compdb)
+        character(len=*), intent(in) :: project_dir, compdb
+        integer :: u
+
+        open (newunit=u, file=trim(compdb), status='replace', action='write')
+        write (u, '(a)') '[{"directory":"'//trim(project_dir)// &
+            '","file":"'//trim(project_dir)//'/src/lib.f90.extra",'// &
+            '"arguments":["/usr/bin/gfortran","-c","-J'//trim(project_dir)// &
+            '/build/mod","-o","'//trim(project_dir)//'/build/lib.o","'// &
+            trim(project_dir)//'/src/lib.f90.extra"]},'
+        write (u, '(a)') '{"directory":"'//trim(project_dir)// &
+            '","file":"'//trim(project_dir)//'/app/main.f90",'// &
+            '"arguments":["/usr/bin/gfortran","-c","-J'//trim(project_dir)// &
+            '/build/mod","-o","'//trim(project_dir)//'/build/main.o","'// &
+            trim(project_dir)//'/app/main.f90"]}]'
+        close (u)
+    end subroutine write_suffix_mutant
 
     subroutine make_compdb_project(project_dir)
         character(len=*), intent(in) :: project_dir
