@@ -1,12 +1,30 @@
 program test_cache
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_cache, only: cache_t, cache_init, cache_key_for, cache_lookup, &
         cache_store_action, cache_restore_action, cache_schema, &
         cache_store_root, cache_debug_write_action_record, &
-        cache_debug_corrupt_object_payload, HASH_LEN
+        HASH_LEN
+    use fo_process, only: process_getpid
+    use fx_immutable_store, only: immutable_store_t, immutable_store_init, &
+        immutable_store_hash_file, immutable_store_blob_path
     implicit none
 
     integer :: n_pass, n_fail
+
+    interface
+        integer(c_int) function c_setenv(name, value, overwrite) &
+                bind(C, name='setenv')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: name(*), value(*)
+            integer(c_int), value :: overwrite
+        end function c_setenv
+
+        integer(c_int) function c_unsetenv(name) bind(C, name='unsetenv')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: name(*)
+        end function c_unsetenv
+    end interface
 
     n_pass = 0
     n_fail = 0
@@ -22,6 +40,7 @@ program test_cache
     call test_partial_temp_ignored()
     call test_large_file_hashes_full_source()
     call test_schema_and_root()
+    call test_distinct_roots_are_isolated()
 
     write (output_unit, '(a,i0,a,i0,a)') 'cache: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -154,9 +173,12 @@ contains
 
     subroutine test_corrupt_payload_misses()
         type(cache_t) :: c
-        integer :: ierr
-        character(len=512) :: obj_path, mod_dir
+        type(immutable_store_t) :: store
+        integer :: ierr, file_status
+        character(len=512) :: obj_path, mod_dir, store_root
         character(len=HASH_LEN) :: action_id, output_id
+        character(len=HASH_LEN) :: object_id, recovered_id
+        character(len=:), allocatable :: payload_path
         logical :: restored
 
         call cache_init(c, ierr)
@@ -168,12 +190,45 @@ contains
         action_id = repeat('c', HASH_LEN)
         call cache_store_action(c, action_id, obj_path, mod_dir, 'badmod', &
             output_id, ierr)
-        call cache_debug_corrupt_object_payload(c, action_id, ierr)
-        call assert(ierr == 0, 'debug corrupt object payload succeeds')
+        call cache_store_root(store_root)
+        call immutable_store_init(store, trim(store_root), ierr)
+        call assert(ierr == 0, 'initialize active immutable cache store')
+        call immutable_store_hash_file(trim(obj_path), object_id, ierr)
+        call assert(ierr == 0, 'hash active object payload')
+        payload_path = immutable_store_blob_path(store, object_id)
+        call execute_command_line('chmod u+w '//payload_path, wait=.true., &
+            exitstat=file_status)
+        call assert(file_status == 0, 'make immutable payload writable for corruption')
+        if (file_status == 0) then
+            call write_text(payload_path, 'corrupt payload')
+            call execute_command_line('chmod a-w '//payload_path, wait=.true., &
+                exitstat=file_status)
+            call assert(file_status == 0, 'restore immutable payload permissions')
+        end if
+        call assert(.not. cache_lookup(c, action_id), &
+            'corrupt immutable payload does not restore as a hit')
         call execute_command_line('rm -f '//trim(obj_path)//' '// &
             trim(mod_dir)//'/badmod.mod', wait=.true.)
         call cache_restore_action(c, action_id, obj_path, mod_dir, restored)
-        call assert(.not. restored, 'corrupt payload does not restore as hit')
+        call assert(.not. restored, 'restore rejects corrupt immutable payload')
+
+        call execute_command_line('rm -f '//payload_path, wait=.true.)
+        call write_text(obj_path, 'valid object')
+        call write_text(trim(mod_dir)//'/badmod.mod', 'valid mod')
+        call cache_store_action(c, action_id, obj_path, mod_dir, 'badmod', &
+            output_id, ierr)
+        call assert(ierr == 0, 'valid action republishes its missing payload')
+        call execute_command_line('rm -f '//trim(obj_path)//' '// &
+            trim(mod_dir)//'/badmod.mod', wait=.true.)
+        call cache_restore_action(c, action_id, obj_path, mod_dir, restored)
+        call assert(restored, 'repaired immutable payload restores successfully')
+        call assert(file_contains(obj_path, 'valid object'), &
+            'repaired object bytes are restored')
+        call assert(file_contains(trim(mod_dir)//'/badmod.mod', 'valid mod'), &
+            'repaired module bytes are restored')
+        call immutable_store_hash_file(trim(obj_path), recovered_id, ierr)
+        call assert(ierr == 0 .and. recovered_id == object_id, &
+            'repaired payload digest matches its original identity')
 
         call execute_command_line('rm -f '//trim(obj_path), wait=.true.)
         call execute_command_line('rm -rf '//trim(mod_dir), wait=.true.)
@@ -255,18 +310,95 @@ contains
         call cache_schema(text)
         call assert(trim(text) == 'action-output-v2', 'cache schema is reported')
         call cache_store_root(text)
-        ! FO_CACHE_DIR overrides the root (the parallel test runner sets it so
-        ! each test gets an isolated cache). Honour it; otherwise the default is
-        ! under $HOME/.cache/fo. Either way the store lives under .../store/v1.
+        ! FO_CACHE_DIR overrides the immutable action-result store root; the
+        ! legacy action-record store remains under store/v1.
         call get_environment_variable('FO_CACHE_DIR', override)
         if (len_trim(override) > 0) then
-            call assert(index(text, trim(override)//'/store/v1') > 0, &
+            call assert(trim(text) == trim(override)//'/store/v2', &
                 'FO_CACHE_DIR override points the store root at it')
         else
-            call assert(index(text, '/.cache/fo/store/v1') > 0, &
-                'default cache root points at store v1')
+            call assert(index(text, '/.cache/fo/store/v2') > 0, &
+                'default cache root points at store v2')
         end if
     end subroutine test_schema_and_root
+
+    subroutine test_distinct_roots_are_isolated()
+        type(cache_t) :: cache_a, cache_b
+        integer :: ierr, env_len, env_status, rc
+        character(len=512) :: root_a, root_b, observed_root
+        character(len=512) :: object_a, object_b, mods_a, mods_b
+        character(len=HASH_LEN) :: action_id, output_id
+        character(len=:), allocatable :: prior_override
+        logical :: had_override, restored
+
+        call get_environment_variable('FO_CACHE_DIR', length=env_len, &
+            status=env_status)
+        had_override = env_status == 0
+        if (had_override) then
+            allocate (character(len=env_len) :: prior_override)
+            call get_environment_variable('FO_CACHE_DIR', prior_override)
+        end if
+        call make_tmp_path('fo_cache_root_a', root_a, '')
+        call make_tmp_path('fo_cache_root_b', root_b, '')
+        call make_tmp_path('fo_cache_root_obj_a', object_a, '.o')
+        call make_tmp_path('fo_cache_root_obj_b', object_b, '.o')
+        call make_tmp_path('fo_cache_root_mod_a', mods_a, '')
+        call make_tmp_path('fo_cache_root_mod_b', mods_b, '')
+        action_id = repeat('f', HASH_LEN)
+        call execute_command_line('rm -rf '//trim(root_a)//' '//trim(root_b), &
+            wait=.true.)
+
+        rc = c_setenv('FO_CACHE_DIR'//c_null_char, trim(root_a)//c_null_char, 1_c_int)
+        call assert(rc == 0, 'set first isolated cache root')
+        call cache_init(cache_a, ierr)
+        call assert(ierr == 0, 'initialize first isolated cache root')
+        call execute_command_line('mkdir -p '//trim(mods_a), wait=.true.)
+        call write_text(object_a, 'root a object')
+        call write_text(trim(mods_a)//'/root_mod.mod', 'root a module')
+        call cache_store_action(cache_a, action_id, object_a, mods_a, 'root_mod', &
+            output_id, ierr)
+        call assert(ierr == 0, 'store first root action')
+
+        rc = c_setenv('FO_CACHE_DIR'//c_null_char, trim(root_b)//c_null_char, 1_c_int)
+        call assert(rc == 0, 'switch to second isolated cache root')
+        call cache_store_root(observed_root)
+        call assert(trim(observed_root) == trim(root_b)//'/store/v2', &
+            'cache store root follows the current environment')
+        call cache_init(cache_b, ierr)
+        call assert(ierr == 0, 'initialize second isolated cache root')
+        call execute_command_line('mkdir -p '//trim(mods_b), wait=.true.)
+        call write_text(object_b, 'root b object')
+        call write_text(trim(mods_b)//'/root_mod.mod', 'root b module')
+        call cache_store_action(cache_b, action_id, object_b, mods_b, 'root_mod', &
+            output_id, ierr)
+        call assert(ierr == 0, 'store same action independently in second root')
+        call assert(cache_lookup(cache_a, action_id), 'first root retains its action')
+        call assert(cache_lookup(cache_b, action_id), 'second root retains its action')
+
+        call execute_command_line('rm -f '//trim(object_a)//' '// &
+            trim(mods_a)//'/root_mod.mod '//trim(object_b)//' '// &
+            trim(mods_b)//'/root_mod.mod', wait=.true.)
+        call cache_restore_action(cache_a, action_id, object_a, mods_a, restored)
+        call assert(restored, 'first root restores independently')
+        call assert(file_contains(object_a, 'root a object'), &
+            'first root never reads second root payload')
+        call cache_restore_action(cache_b, action_id, object_b, mods_b, restored)
+        call assert(restored, 'second root restores independently')
+        call assert(file_contains(object_b, 'root b object'), &
+            'second root never reads first root payload')
+
+        if (had_override) then
+            rc = c_setenv('FO_CACHE_DIR'//c_null_char, &
+                trim(prior_override)//c_null_char, 1_c_int)
+        else
+            rc = c_unsetenv('FO_CACHE_DIR'//c_null_char)
+        end if
+        call assert(rc == 0, 'restore original FO_CACHE_DIR environment')
+        call execute_command_line('rm -f '//trim(object_a)//' '// &
+            trim(object_b), wait=.true.)
+        call execute_command_line('rm -rf '//trim(mods_a)//' '//trim(mods_b)// &
+            ' '//trim(root_a)//' '//trim(root_b), wait=.true.)
+    end subroutine test_distinct_roots_are_isolated
 
     subroutine write_text(path, text)
         character(len=*), intent(in) :: path, text
@@ -317,13 +449,14 @@ contains
         character(len=*), intent(in) :: prefix, suffix
         character(len=*), intent(out) :: path
 
-        integer :: count
+        integer :: count, pid
         integer, save :: serial = 0
 
         serial = serial + 1
+        pid = process_getpid()
         call system_clock(count)
-        write (path, '(a,a,a,i0,a,i0,a)') '/tmp/', trim(prefix), '-', &
-            count, '-', serial, trim(suffix)
+        write (path, '(a,a,a,i0,a,i0,a,i0,a)') '/var/tmp/', trim(prefix), '-', &
+            pid, '-', count, '-', serial, trim(suffix)
     end subroutine make_tmp_path
 
 end program test_cache
