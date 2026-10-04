@@ -436,7 +436,7 @@ program test_gremlin_coverage_restart
 
     coverage_before_replay = read_text(coverage_path)
     call write_text(fail_flag//reproduced_case, 'fail')
-    call reproduction_args(reproduced_case, generation)
+    call reproduction_args(reproduced_case, '')
     call gremlin_json(driver, project, cache, state, args, reproduction_report, &
         process, 120000)
     call assert_equal_integer(process%exit_code, 1, &
