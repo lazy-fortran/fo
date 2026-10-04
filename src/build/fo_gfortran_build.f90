@@ -280,16 +280,58 @@ contains
 
         type(resolved_src_t), allocatable :: deps(:)
         type(fpm_config_t), allocatable :: dep_config
-        integer :: n_deps, n_unresolved, ierr, i
+        integer :: n_deps, n_unresolved, n_registry, ierr, i
+        logical :: need_fetch
 
         exitcode = 0
         allocate (deps(MAX_RESOLVED))
         allocate (dep_config)
-        if (config_has_external_deps(config)) then
+        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr, &
+            n_registry)
+        if (ierr /= 0) return
+
+        ! Git sources are compiled by Fo's native DAG. Ask fpm only to acquire
+        ! missing checkouts; running `fpm build` here would compile the same
+        ! source a second time before Fo builds it. Registry sources still use
+        ! the existing fpm build path because Fo has no typed provider for the
+        ! registry cache location recorded by fpm.
+        need_fetch = n_unresolved > 0
+        do i = 1, config%n_dev_deps
+            if (dep_kind(config%dev_deps(i)) == DEP_PATH) cycle
+            if (.not. has_dependency_manifest(project_dir, &
+                    trim(config%dev_deps(i)%name))) need_fetch = .true.
+        end do
+        if (n_registry == 0 .and. need_fetch) then
+            call run_fpm_fetch_only(project_dir, log_file, exitcode)
+            if (exitcode /= 0) return
+            call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, &
+                ierr, n_registry)
+            if (ierr /= 0) return
+            if (n_unresolved > n_registry) then
+                write (error_unit, '(a)') &
+                    'fo: fpm fetch left Git dependency sources unresolved'
+                exitcode = 1
+                return
+            end if
+            do i = 1, config%n_dev_deps
+                if (dep_kind(config%dev_deps(i)) /= DEP_GIT) cycle
+                if (has_dependency_manifest(project_dir, &
+                        trim(config%dev_deps(i)%name))) cycle
+                write (error_unit, '(a)') 'fo: fpm fetch left dev dependency '// &
+                    trim(config%dev_deps(i)%name)//' unresolved'
+                exitcode = 1
+                return
+            end do
+        end if
+
+        if (n_registry > 0 .and. config_has_external_deps(config)) then
             call bootstrap_config_deps(project_dir, config, log_file, &
                 project_flags, exitcode)
             if (exitcode /= 0) return
         end if
+
+        if (n_registry == 0) return
+
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
         if (ierr /= 0) return
         do i = 1, n_deps
@@ -301,6 +343,34 @@ contains
             if (exitcode /= 0) return
         end do
     end subroutine bootstrap_external_deps
+
+    logical function has_dependency_manifest(project_dir, dep_name) result(found)
+        character(len=*), intent(in) :: project_dir, dep_name
+
+        inquire (file=trim(project_dir)//'/build/dependencies/'// &
+            trim(dep_name)//'/fpm.toml', exist=found)
+    end function has_dependency_manifest
+
+    subroutine run_fpm_fetch_only(project_dir, log_file, exitcode)
+        character(len=*), intent(in) :: project_dir, log_file
+        integer, intent(out) :: exitcode
+
+        character(len=:), allocatable :: packed
+        integer :: n_args
+
+        n_args = 0
+        call argv_push(packed, n_args, 'fpm')
+        call argv_push(packed, n_args, 'update')
+        call argv_push(packed, n_args, '--fetch-only')
+        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+            .true., build_timeout_seconds(), exitcode)
+        if (exitcode /= 0) then
+            write (error_unit, '(a)') 'fo: fpm dependency fetch failed'
+            if (len_trim(log_file) > 0) then
+                write (error_unit, '(a)') 'fo: see '//trim(log_file)
+            end if
+        end if
+    end subroutine run_fpm_fetch_only
 
     logical function config_has_external_deps(config) result(found)
         type(fpm_config_t), intent(in) :: config
@@ -1271,20 +1341,56 @@ contains
         integer, intent(out) :: n_dep_objs
 
         type(resolved_src_t), allocatable :: deps(:)
+        type(resolved_src_t) :: devs(MAX_RESOLVED)
         type(fpm_config_t), allocatable :: dep_config
-        integer :: i, n_deps, n_unresolved, ierr
+        integer :: i, n_deps, n_devs, n_unresolved, n_registry, ierr
         integer :: n_obj_seen
         character(len=512), allocatable :: obj_basenames(:)
+        logical :: native_git
 
         n_dep_includes = 0
         n_dep_objs = 0
         n_obj_seen = 0
         allocate (deps(MAX_RESOLVED), obj_basenames(MAX_DEP_OBJS))
         allocate (dep_config)
+        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr, &
+            n_registry)
+        if (ierr /= 0) return
+        native_git = n_registry == 0
+        do i = 1, n_deps
+            if (deps(i)%kind == DEP_GIT) exit
+        end do
+        native_git = native_git .and. i <= n_deps
+        call resolve_dev_dep_srcs(project_dir, devs, n_devs, ierr)
+        if (ierr == 0) then
+            do i = 1, n_devs
+                if (devs(i)%kind == DEP_GIT) native_git = .true.
+            end do
+        end if
+
+        if (native_git) then
+            call collect_external_module_dirs(config%external_modules, &
+                config%n_external_modules, dep_includes, n_dep_includes, &
+                MAX_DEP_DIRS)
+            do i = 1, n_deps
+                call fpm_config_parse(deps(i)%dir, dep_config, ierr)
+                if (ierr /= 0) cycle
+                call collect_external_module_dirs(dep_config%external_modules, &
+                    dep_config%n_external_modules, dep_includes, &
+                    n_dep_includes, MAX_DEP_DIRS)
+            end do
+            do i = 1, n_devs
+                call fpm_config_parse(devs(i)%dir, dep_config, ierr)
+                if (ierr /= 0) cycle
+                call collect_external_module_dirs(dep_config%external_modules, &
+                    dep_config%n_external_modules, dep_includes, &
+                    n_dep_includes, MAX_DEP_DIRS)
+            end do
+            return
+        end if
+
         call collect_dep_artifacts(project_dir, config, dep_includes, &
             n_dep_includes, dep_objs, n_dep_objs, obj_basenames, n_obj_seen)
-        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
-        if (ierr /= 0) return
         do i = 1, n_deps
             call fpm_config_parse(deps(i)%dir, dep_config, ierr)
             if (ierr /= 0) cycle
