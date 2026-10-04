@@ -786,7 +786,8 @@ contains
         type(scan_unit_t), allocatable :: units(:)
         type(fpm_config_t), allocatable :: config
         type(current_test_t), allocatable :: tests(:)
-        integer :: n_units, n_tests, ierr, warn_s, i
+        integer :: n_units, n_tests, ierr, warn_s, i, cwd_status
+        character(len=MAX_PATH) :: execution_cwd, requested_execution_cwd
 
         exitcode = 0
         call scan_dir_cached(trim(project_dir)//'/'//trim(test_dir), units, &
@@ -804,7 +805,13 @@ contains
         warn_s = test_warn_seconds(test_timeout_seconds(config))
         call select_current_tests(project_dir, config, units, n_units, test_dir, &
             bin_dir, selected_names, n_selected, include_slow, tests, n_tests)
-        call run_current_team(project_dir, config, tests, n_tests)
+        execution_cwd = project_dir
+        requested_execution_cwd = ''
+        call get_environment_variable('FO_GREMLIN_EXECUTION_CWD', &
+            requested_execution_cwd, status=cwd_status)
+        if (cwd_status == 0 .and. len_trim(requested_execution_cwd) > 0) &
+            execution_cwd = trim(requested_execution_cwd)
+        call run_current_team(project_dir, execution_cwd, config, tests, n_tests)
         call report_current_tests(project_dir, log_file, tests, n_tests, warn_s, &
             exitcode)
         do i = 1, n_tests
@@ -1075,11 +1082,11 @@ contains
         end do
     end subroutine select_current_tests
 
-    subroutine run_current_team(project_dir, config, tests, n_tests)
+    subroutine run_current_team(project_dir, execution_cwd, config, tests, n_tests)
         !! Run independent test executables as an OpenMP team, `FO_JOBS`-wide.
         !! A single flaky rerun happens inside the worker, so the recorded exit
         !! is the same one the serial runner would have reported.
-        character(len=*), intent(in) :: project_dir
+        character(len=*), intent(in) :: project_dir, execution_cwd
         type(fpm_config_t), intent(in) :: config
         type(current_test_t), intent(inout) :: tests(:)
         integer, intent(in) :: n_tests
@@ -1138,15 +1145,15 @@ contains
         !$omp parallel do if (n_tests > 1) num_threads(max(1, min(n_tests, native_jobs()))) &
         !$omp& schedule(dynamic) private(i, rerun_log, clk0, clk1, clk_rate)
         do i = 1, n_tests
-            call run_one_current_test(project_dir, config, tests(i))
+            call run_one_current_test(project_dir, execution_cwd, config, tests(i))
         end do
         !$omp end parallel do
     end subroutine run_current_team
 
-    subroutine run_one_current_test(project_dir, config, test)
+    subroutine run_one_current_test(project_dir, execution_cwd, config, test)
         !! One worker: run, time, and if it failed, rerun once to tell a genuine
         !! failure from flakiness.
-        character(len=*), intent(in) :: project_dir
+        character(len=*), intent(in) :: project_dir, execution_cwd
         type(fpm_config_t), intent(in) :: config
         type(current_test_t), intent(inout) :: test
 
@@ -1154,15 +1161,15 @@ contains
         integer(8) :: clk0, clk1, clk_rate
 
         call system_clock(clk0, clk_rate)
-        call run_test_binary(project_dir, test%bin, test%args, test%log, config, &
-            is_slow_name(test%name), test%exit, test%cpu_secs)
+        call run_test_binary(project_dir, execution_cwd, test%bin, test%args, &
+            test%log, config, is_slow_name(test%name), test%exit, test%cpu_secs)
         call system_clock(clk1, clk_rate)
         test%ran = .true.
         if (clk_rate > 0) test%secs = real(clk1 - clk0) / real(clk_rate)
         if (test%exit /= 0 .and. test%exit /= 124) then
             call make_tmpfile('fo_test_rerun', rerun_log)
-            call run_test_binary(project_dir, test%bin, test%args, rerun_log, &
-                config, is_slow_name(test%name), test%rerun_exit)
+            call run_test_binary(project_dir, execution_cwd, test%bin, test%args, &
+                rerun_log, config, is_slow_name(test%name), test%rerun_exit)
             call delete_tmpfile(rerun_log)
             if (test%rerun_exit == 0) then
                 test%flaky = .true.
@@ -2993,13 +3000,14 @@ contains
             n_run, test_warn, log_file)
     end subroutine compile_and_run_tests
 
-    subroutine run_test_binary(project_dir, bin_path, arg_lines, log_file, &
+    subroutine run_test_binary(project_dir, execution_cwd, bin_path, arg_lines, log_file, &
             config, slow, exitcode, cpu_seconds)
         !! Run one test binary under its CPU budget and wall-clock cap (see
         !! fo_test_budget). A timeout returns 124 and appends a line naming the
         !! limit that fired to the test's own log. cpu_seconds is the CPU time
         !! the test used, negative when unknown.
-        character(len=*), intent(in) :: project_dir, bin_path, arg_lines, log_file
+        character(len=*), intent(in) :: project_dir, execution_cwd
+        character(len=*), intent(in) :: bin_path, arg_lines, log_file
         type(fpm_config_t), intent(in) :: config
         logical, intent(in) :: slow
         integer, intent(out) :: exitcode
@@ -3015,7 +3023,7 @@ contains
         call argv_push_split_nl(packed, n_args, arg_lines)
         budget = test_budget_seconds(config, slow)
         wall_cap = test_wall_cap_seconds(config, budget)
-        call process_run_argv_logged(project_dir, packed, n_args, log_file, .true., &
+        call process_run_argv_logged(execution_cwd, packed, n_args, log_file, .true., &
             wall_cap, exitcode, cpu_budget_s=budget, timeout_kind=kind, &
             cpu_seconds=cpu_s, wall_seconds=wall_s)
         if (present(cpu_seconds)) cpu_seconds = cpu_s

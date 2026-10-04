@@ -7,6 +7,7 @@ module fo_gremlin_context
     use fo_gremlin_generation, only: generation_context_t, generation_input_t, &
         generation_t, generation_capture
     use fo_driver, only: driver_pin_t
+    use fo_input_inventory, only: input_declaration_t, input_inventory_discover
     use fo_gremlin_state, only: gremlin_generation_register_at
     use fo_change_watch, only: change_watch_t, change_watch_add_context
     use fo_process, only: argv_push, process_cancel_pid, process_poll_pid, &
@@ -18,7 +19,7 @@ module fo_gremlin_context
 
     integer, parameter :: PATH_LEN = 4096
 
-    public :: capture_candidate
+    public :: capture_candidate, generation_inventory_restore
 
 contains
 
@@ -65,6 +66,9 @@ contains
             ierr, message)
         ok = ierr == 0
         if (.not. ok) return
+        call generation_inventory_restore(generation, ierr, watch_message)
+        ! Inventory failure does not invalidate immutable source/build evidence.
+        ! Consumers must inspect input_inventory_complete and its diagnostic.
         call gremlin_generation_register_at(generation%root, ierr, message)
         ok = ierr == 0
         if (ierr /= 0) registration_error = ierr
@@ -73,6 +77,37 @@ contains
         change_watch%capture_count = change_watch%capture_count + 1
         call observe_test_capture(change_watch%capture_count, generation%identity)
     end subroutine capture_candidate
+
+    subroutine generation_inventory_restore(generation, ierr, message)
+        !! Discover the canonical inventory once from this frozen generation.
+        !! Recovery uses the same path; incomplete declarations remain explicit.
+        type(generation_t), intent(inout) :: generation
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        type(input_declaration_t) :: declarations(0)
+
+        ierr = 0
+        message = ''
+        if (generation%input_inventory_ready) then
+            message = trim(generation%input_inventory_diagnostic)
+            if (generation%input_inventory_complete) return
+            ierr = 1
+            return
+        end if
+        call input_inventory_discover(trim(generation%project_root), declarations, &
+            generation%input_inventory, ierr, message)
+        generation%input_inventory_ready = .true.
+        generation%input_inventory_complete = ierr == 0 .and. &
+            generation%input_inventory%complete
+        if (.not. generation%input_inventory_complete) then
+            if (len_trim(message) == 0) &
+                message = 'canonical generation input inventory is incomplete'
+            generation%input_inventory_diagnostic = trim(message)
+            return
+        end if
+        generation%input_inventory_diagnostic = ''
+    end subroutine generation_inventory_restore
 
     subroutine observe_test_capture(count, identity)
         !! Explicit test opt-in: replace one bounded record atomically. Observer
