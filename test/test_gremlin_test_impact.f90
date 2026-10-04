@@ -16,6 +16,7 @@ program test_gremlin_test_impact
     character(len=4096) :: fixture, project
     character(len=4096) :: source_a, include_file, harness_file, runtime_file
     character(len=4096) :: toolchain_file
+    character(len=4096) :: source_b
     type(input_declaration_t) :: declarations(4)
     type(input_inventory_t) :: baseline, candidate
     type(test_impact_case_t), allocatable :: cases(:)
@@ -48,6 +49,7 @@ program test_gremlin_test_impact
     call fs_write_text(trim(project)//'/fpm.toml', 'name = "impact_fixture"'// &
         new_line('a'))
     source_a = trim(project)//'/src/a_base.f90'
+    source_b = trim(project)//'/src/b_base.f90'
     include_file = trim(project)//'/include/shared.inc'
     harness_file = trim(project)//'/test-support/harness.f90'
     runtime_file = trim(project)//'/runtime.dat'
@@ -69,7 +71,7 @@ program test_gremlin_test_impact
         'program test_alpha'//new_line('a')//'use a_middle'//new_line('a')// &
         'if (middle_value() /= 1) error stop 1'//new_line('a')// &
         'end program test_alpha'//new_line('a'))
-    call fs_write_text(trim(project)//'/src/b_base.f90', &
+    call fs_write_text(source_b, &
         'module b_base'//new_line('a')//'end module b_base'//new_line('a'))
     call fs_write_text(trim(project)//'/test/test_beta_slow.f90', &
         'program test_beta_slow'//new_line('a')//'use b_base'//new_line('a')// &
@@ -150,6 +152,23 @@ program test_gremlin_test_impact
     call select(baseline, candidate, repeated)
     call require(same_selection(selected, repeated), &
         'warm and empty isolated caches yield identical selected identities')
+
+    call fs_write_text(source_b, 'module b_base'//new_line('a')// &
+        'integer, parameter :: b_value = 2'//new_line('a')// &
+        'end module b_base'//new_line('a'))
+    call discover(candidate)
+    call scan_model()
+    call select(baseline, candidate, selected)
+    call require(has_case(selected, 'test_beta_slow') .and. &
+        case_is_slow(selected, 'test_beta_slow'), &
+        'affected slow case is selected with its slow classification')
+    run_names(1) = 'test_beta_slow'
+    call gfortran_test_names(project, run_names(:1), 1, run_log, run_exit, &
+        include_slow=.true., use_cache=.true.)
+    call require(run_exit == 0 .and. file_contains(run_log, &
+        'TEST_RESULT test_beta_slow PASS'), &
+        'affected slow test retains its own executable oracle and budget')
+    baseline = candidate
 
     call fs_write_text(include_file, 'integer, parameter :: shared = 2'//new_line('a'))
     call widen_after_change('shared include change selects all cases')
