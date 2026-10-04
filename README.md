@@ -20,6 +20,7 @@ fo test [NAME ...]         build and run tests
 fo test --only-changed     run tests affected by changed modules
 fo test --random 12        reproducible sample without replacement
 fo test --random 12 --seed 1729
+fo gremlin                continuous generation-aware build and testing
 fo run [options] NAME      build and run an application or example
 fo exec NAME [ARGS...]     build and run any fo executable target
 fo check [--json...]       compact build and test status
@@ -34,6 +35,13 @@ fo info                    backend, source, compiler, and cache information
 fo mcp-server              MCP JSON-RPC server on standard input/output
 fo lsp                     diagnostics-on-save language server
 ```
+
+Affected-test selection is being consolidated around canonical execution-input
+changes rather than compile-cache misses in [#189](https://github.com/lazy-fortran/fo/issues/189).
+Until that contract is complete, use explicit known reproducers/affected targets
+or conservative wider testing rather than interpreting an empty selection as
+proof that a change is safe. Build-cache reuse is not evidence that tests passed.
+Gremlin capabilities and remaining limitations are recorded in [PLAN.md](PLAN.md).
 
 Each test has a budget of 10 seconds of CPU time (300 for tests named
 `*_slow`, which run only under `fo test --all`). The budget counts CPU, not
@@ -134,13 +142,16 @@ native fpm backend explicitly).
 ## Cache and concurrency
 
 Action IDs are SHA-256 hashes of source content, compiler identity, effective
-flags, and dependency module payloads. The shared store defaults to
-`~/.cache/fo/store/v1`; set `FO_CACHE_DIR` to isolate it.
+flags, and dependency module payloads. Shared cache data defaults below
+`~/.cache/fo`; set `FO_CACHE_DIR` to isolate it. Store schema and migration
+contracts are recorded in [PLAN.md](PLAN.md).
 
 The module DAG and selected tests run through native OpenMP loops. Each worker
 has private command, log, and temporary-path state. Cache publication is
 atomic, and a project lock protects build-tree materialization across
 processes. `FO_JOBS=N` caps fanout and defaults to the available CPU count.
+Gremlin's bootstrap capacity is currently narrower; query its supported options
+rather than assuming ordinary build fanout is available in every mode.
 
 GNU Fortran builds enable `-Warray-temporaries` by default. Disable it only
 with an explicit project decision:
@@ -159,6 +170,26 @@ correctly selected.
 
 ## Development
 
-Run `fo` with no arguments before each commit. This executes the full static,
-build, test, lint, and formatting-check pipeline. Architecture and compatibility
-details are in [doc/FO.md](doc/FO.md).
+Use a pinned exact fo candidate, warm caches and focused correctness tests for
+each change. The lazy-fortran controller pushes small locally green increments
+to main without waiting for GitHub CI, the full Gremlin epoch or unrelated work.
+A confirmed current correctness regression gets repair/revert priority. Broad
+`fo`/`fo test --all` correctness runs remain useful background or milestone
+validation; they are not required after every mechanical edit.
+
+Gremlin reports verification facts, not repository governance. Projects with
+required human review or CI keep those requirements; this repository's fast-main
+policy is not imposed on other users.
+
+Benchmarks are **optional, non-blocking audits**, not development/main/merge
+gates. [#190](https://github.com/lazy-fortran/fo/issues/190) plans real byte-edit
+and edit-to-verdict measurements in independent scheduled/manual CI or explicit
+slow/performance execution. [#145](https://github.com/lazy-fortran/fo/issues/145)
+plans isolated pinned acquisition of ffc, fpm and other public examples. Normal
+fo/test/Gremlin commands must not acquire benchmark projects or enroll timing
+audits automatically. Existing ordinary project dependency bootstrap is separate.
+See [bench/README.md](bench/README.md) for current tooling and limitations.
+
+Architecture details are in [doc/FO.md](doc/FO.md); current implementation
+priorities, honest capability limits and issue ownership are in
+[PLAN.md](PLAN.md) and [ROADMAP.md](ROADMAP.md).
