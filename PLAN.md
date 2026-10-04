@@ -7,6 +7,11 @@ New interfaces/workflows below are planned, not claimed implemented by this edit
 
 ## Immediate controller instructions
 
+The current workspace controller is in documents/issues-only delivery under
+the latest replacement AGENTS instructions. Prepared source is parked until a
+new explicit execution trigger. The development rules below apply when execution
+is authorized; this documentation checkpoint starts no builds, tests or workers.
+
 1. Continue small, locally verified main increments. Use the exact candidate's
    focused correctness tests and known reproducers; reuse warm caches. Do not
    wait for GitHub CI, a full Gremlin epoch, a benchmark, or a project matrix.
@@ -130,17 +135,22 @@ Source/driver pinning intentionally stops at fo's own driver; complete host
 toolchain closure is out of scope. #175's watcher/capture/execution consumers
 and #189 campaign adoption remain separate work.
 
-Mac #151 is pending fx #56's public feature-declaration repair. Linux evidence
-is not a Mac receipt. Darwin startup uses public UUID/held-descriptor checks;
-same-UUID substitution before descriptor capture remains an explicit limit.
-No private OS API or generalized security framework is added.
+Mac #151's driver-pin and generation oracles now pass (5.26s and 0.89s runtime)
+using actual driver SHA256
+`f68e0916afc1c79bbaba18d045e6dd63116fb14deb7d9a8a63f1fb6bee2ef1e4`.
+Inputs are Fo `670e6b3`, Fx `7965a7d`, FortFront `fe59a05`, and the private
+dependency-path manifest patch SHA256
+`ce585ad348a8cf9a971d93ce76d19822476ecd8e98bc4269a0d7fa734c9bf089`.
+Metadata-only Git identity acceptance remains open. Darwin startup uses public
+UUID/held-descriptor checks; same-UUID substitution before descriptor capture
+remains an explicit limit. No private OS API or host-environment capture is added.
 
-fx #54's one strict typed parser is locally green and published; #150 consumes
-it next. fx #51/#55 remove production synchronization hooks and compliance
-meta-testing, preserving meaningful public behavior. #191 bounds source scanner
-cycles/truncated paths before #186's wider policy extraction. #190 remains an
-independent optional audit and starts with workflow separation, not a benchmark
-run imposed on these increments.
+Fx #54's strict parser and #51/#55's production-hook/compliance cleanup are
+published through Fx main `df3b259`; the integrated native gate passes 9/9 in
+31.06s. #55 is closed; #51 retains remaining stated review acceptance. Prepared
+Darwin helper fix `e427a10` clears compilation, but both native lease/read-lease
+tests time out at their unchanged 10s budget (STOP 42/73); diagnose before any
+budget change. These failed Mac receipts are not replaced by Linux passes.
 
 #189's conservative static impact provider is integrated through `c37b845`.
 The combined canonical-inventory/impact gate passes 2/2 in 0.44s with the same
@@ -158,6 +168,31 @@ commands still report errors. Touch-only metrics are labeled `metadata_touch_*`.
 The integrated native harness oracle passes 1/1 in 0.30s; no actual benchmark,
 third-party acquisition or new performance result was run or claimed. Real-edit
 workloads and broader audit instrumentation remain open under #190/#145.
+
+### Parked implementation checkpoints
+
+| Issue | Published task checkpoint | Evidence and remaining work |
+| --- | --- | --- |
+| #150 | `agent/150-shared-json` at `583c385` | Integrated request/structure 2/2 (0.09s), public MCP 1/1 (8.80s); code promotion parked. |
+| #191 | `agent/191-verify` at `18af66a` | Integrated scanner oracle 1/1 (0.22s); code promotion parked. |
+| #170 | `agent/170-sol-repair` at `1fc8456` | Isolated provider test/build green after two failed Luna repairs; combined/public runtime integration still required. |
+| #189 | `agent/189-campaign` at `5441a03` | Campaign adoption/metadata source only; independent executed-case oracle and combined verification pending. |
+| #161 | `agent/161-native-verify` at `7eef4ef` | First native MCP replacement source repaired but unverified; all six JS fixtures remain. |
+
+The combined #150/#191 controller is frozen at `2e7c048`, not main. Its patch
+versus main `7a638e8` has SHA256
+`80180b725ab0669b302fb18a6507ad1c0687c04ba036adfbc1b3b4d67068e225`.
+The app used for public acceptance was built from `8a957c0`, with SHA256
+`206228c5ebda4fb1ca22907b13ad9dc0288b693d58795d464ad72bbe2818e839`;
+the intervening scanner fix changes only its test import. App and oracle inputs
+are recorded separately, not claimed to be a fully verified whole generation.
+
+All implementation workers and owned build/test processes have stopped. On a
+new execution trigger, resume these small prepared increments, finish #170/#189
+consumers and use resident Gremlin by default. Repair backend/dependency defects
+in their owning provider and recheck the original consumer; do not permanently
+work around them or exclude fpm/CMake projects. #148 and #165-#167 follow the
+same canonical inventory. Optional #190/#145 audits stay independent.
 
 ## One architecture
 
