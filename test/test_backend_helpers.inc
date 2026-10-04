@@ -1805,7 +1805,7 @@
         character(len=512) :: compiler, real_fpm, wrapper_dir, fpm_log
         character(len=512) :: wrapper, compile_log, source_root, prior_path
         character(len=64) :: line
-        logical :: compiler_found, fpm_found
+        logical :: compiler_found, fpm_found, fpm_exists
 
         call make_tmp_path('fo_test_git_devdep', base)
         leafdir = trim(base)//'/leaf'
@@ -1818,7 +1818,15 @@
         compile_log = trim(base)//'/fpm-compile.log'
 
         call fs_find_executable('gfortran', compiler, compiler_found)
-        call fs_find_executable('fpm', real_fpm, fpm_found)
+        call get_environment_variable('FO_TEST_FPM_EXECUTABLE', real_fpm, &
+            status=path_status)
+        fpm_found = path_status == 0 .and. len_trim(real_fpm) > 0
+        if (fpm_found) then
+            inquire (file=trim(real_fpm), exist=fpm_exists)
+            fpm_found = fpm_exists
+        else
+            call fs_find_executable('fpm', real_fpm, fpm_found)
+        end if
         call assert(compiler_found .and. fpm_found, &
             'Git dev-dependency oracle has compiler and pinned FPM')
         if (.not. compiler_found .or. .not. fpm_found) return
