@@ -154,7 +154,7 @@ program test_continuous_preemption
     call terminate_process_group(sentinel_pid, sentinel_status, &
         owned_reaped=sentinel_reaped)
     call assert_true(sentinel_reaped, 'test reaps its own sentinel before cleanup')
-    call finish_assertions()
+    call finish_assertions(retain_failed_scratch=.true.)
 
 contains
 
@@ -171,7 +171,10 @@ contains
         character(len=*), intent(in) :: root, value
         call make_directory(root//'/test')
         call make_directory(root//'/src')
-        call write_text(root//'/fpm.toml', 'name = "preemption_probe"'//new_line('a'))
+        call write_text(root//'/fpm.toml', 'name = "preemption_probe"'//new_line('a')// &
+            '[[extra.fo.inputs]]'//new_line('a')// &
+            'path = "token.txt"'//new_line('a')// &
+            'role = "test-fixture"'//new_line('a'))
         call write_text(root//'/src/probe.f90', &
             'module probe'//new_line('a')// &
             'character(len=*), parameter :: probe_value = "'//value//'"'//new_line('a')// &
