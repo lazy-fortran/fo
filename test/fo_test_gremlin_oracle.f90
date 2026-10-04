@@ -342,12 +342,15 @@ contains
         call assert_true(status == 0, 'releases FIFO with a live reader within its bound')
     end subroutine gremlin_release_fifo
 
-    subroutine gremlin_stop_lane(driver, project, cache, state, lane, owner)
+    subroutine gremlin_stop_lane(driver, project, cache, state, lane, owner, &
+            allow_terminal_error)
         character(len=*), intent(in) :: driver, project, cache, state, lane, owner
+        logical, optional, intent(in) :: allow_terminal_error
         type(string_list_t) :: args
         type(process_result_t) :: process, stop_process
         type(json_value_t) :: reply, stop_reply
         integer :: attempt, owner_pid, ios, dash
+        logical :: accept_error
 
         call list_add(args, 'gremlin')
         call list_add(args, 'stop')
@@ -364,6 +367,8 @@ contains
             'requests shutdown of only the owned lane')
         args%items(2)%value = 'status'
         owner_pid = -1
+        accept_error = .false.
+        if (present(allow_terminal_error)) accept_error = allow_terminal_error
         ios = 1
         dash = index(owner, '-')
         if (dash > 1) then
@@ -375,6 +380,16 @@ contains
             if (process%exit_code /= 0) exit
             if (gremlin_field(reply, 'state') == 'stopped') then
                 if (.not. gremlin_process_running(owner_pid)) return
+            else if (accept_error) then
+                if (gremlin_field(reply, 'state') == 'error') then
+                    if (.not. gremlin_process_running(owner_pid)) then
+                        write(error_unit, '(a)') 'intentional failed-input shutdown: '// &
+                            'last_outcome='//gremlin_field(reply, 'last_outcome')// &
+                            ' last_exitcode='//gremlin_field(reply, 'last_exitcode')// &
+                            ' diagnostic='//gremlin_field(reply, 'diagnostic')
+                        return
+                    end if
+                end if
             end if
             call gremlin_wait_ms(50)
         end do

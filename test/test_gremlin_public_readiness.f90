@@ -3,7 +3,7 @@ program test_gremlin_public_readiness
     use, intrinsic :: iso_c_binding, only: c_int
     implicit none
 
-    character(len=4096) :: root, fixture, prefix, cli_file, rpc_file, rpc_input
+    character(len=4096) :: root, fixture, prefix, cli_file, rpc_file, rpc_input, driver_path
     character(len=4096) :: primary_fixture, state_directory
     character(len=65536) :: cli_json, rpc_json, output
     character(len=32) :: conditions(5)
@@ -11,6 +11,7 @@ program test_gremlin_public_readiness
     character(len=128) :: event_session
     integer :: unit, ios, status, failures, i
     integer(int64) :: clock
+    logical :: driver_exists
     integer(c_int) :: stop_signal, continue_signal
 
     interface
@@ -27,6 +28,11 @@ program test_gremlin_public_readiness
     end interface
 
     failures = 0
+    call get_environment_variable('FO_BIN', driver_path, status=ios)
+    driver_exists = ios == 0 .and. len_trim(driver_path) > 0
+    if (driver_exists) inquire(file=trim(driver_path), exist=driver_exists)
+    call check(driver_exists, 'test runner provides the assigned pinned FO_BIN')
+    if (.not. driver_exists) stop 1
     call get_environment_variable('PWD', root, status=ios)
     call check(ios == 0, 'project working directory is available')
     if (ios /= 0) stop 1
@@ -36,7 +42,7 @@ program test_gremlin_public_readiness
     state_directory = trim(fixture)//'-state'
     prefix = 'cd '//quote(trim(root))//' && FO_DISABLE_SELF_REFRESH=1 '// &
         'FO_GREMLIN_STATE_DIR='//quote(trim(state_directory))//' '// &
-        'fo exec --no-build fo '
+        quote(trim(driver_path))//' '
     cli_file = trim(fixture)//'-cli.json'
     rpc_file = trim(fixture)//'-rpc.json'
     rpc_input = trim(fixture)//'-rpc-input.jsonl'
