@@ -18,32 +18,25 @@ The six near-term milestones are listed under [Revised standalone target](#revis
 Current provider targets name focused scope; they do not by themselves prove
 the exact candidate-B public behavior.
 
-Verified runtime source is on main through `9e0ca2d`. The adopted driver is
-`a84747f49d1dd15389b68b743f89a1e11f5f1b7d31fa6be5549bb9a2ecb60c6d`.
-Its four focused gates pass: input inventory, manifest capture/reuse, execution
-view and utility behavior. Prior driver `c3847777` also passed public readiness,
-restart/requirement recovery and cache checks at source `71d59e1`. Bare `fo`
-starts/attaches the default Gremlin lane; `fo verify` names the former pipeline.
+Verified runtime source on main remains `9e0ca2d`. Actual resident session
+`3623392-1791130701-091998317` built Fo and passed two initial gate cases, but
+its native nested launch failed under inherited containment. The owner was
+stopped and reaped; completed receipts are preserved.
 
-The input-boundary repair retains legitimate `src/build` and `src/cache` while
-excluding generated root outputs. Actual Fo resident session
-`3623392-1791130701-091998317` built generation `448e724e` successfully and
-recorded utility and inventory PASS. Its required execution-view case and a
-background MCP-cleanup case failed: the native harness rejects inherited process
-containment before launching its nested child. Repair the shared capture/ownership
-adapter, preserving separate streams and scoped descendant cleanup. The owner
-was stopped and reaped to admit focused dependency verification; receipts remain.
-The three-case gate is not green yet, and no full Fo verification is claimed.
+The scoped capture repair is published on the integration branch through
+`35393619` (integrated at `4312bde`). Rebuilt candidate SHA256 `6877916c`
+passes execution-view, MCP cleanup, harness evidence and async process-boundary
+checks (4/4). A separate native contained-capture oracle is under bounded Sol
+repair after compile/interface findings and a fixture cleanup cycle. Its failed
+focused run is retained; source review alone does not prove the lane ready.
 
-Fx `537a165` is verified and pushed to main. Single-blob materialization uses
-its verified held descriptor instead of rewriting the entire lease snapshot
-twice per file. Four focused checks pass, including unlink/corruption/destination
-behavior and multi-file graph lease lifetime. This addresses observed metadata
-amplification: an approximately 11 MB Fo bundle produced over 1 GB of lease
-metadata writes. Graph/publication leases and durable roots remain. Fo must now
-rebuild/adopt that dependency and recheck its original resident consumer.
-Validated store initialization reuse and warm local-hit lease avoidance remain
-open in fx#57; no end-to-end improvement is claimed before consumer recheck.
+Fx main `c8fb7ef` includes held-FD materialization and validated warm local-hit
+preflight. Both owning focused gates pass (4/4 each). Fo candidate SHA256
+`f8c2197d`, rebuilt with that dependency, passes the original manifest and
+execution-view consumer checks (2/2). No end-to-end latency or full self-development
+green is claimed. Finish the independent capture oracle, publish the gated Fo
+increment, adopt its exact image, and restart the three-case resident lane.
+Initialized-store reuse and remaining demonstrated cost stay under fx#57.
 
 - **Benchmarks are never the development gate.** Real timing/resource runs and
    third-party project acquisition belong to independent scheduled/manual CI or
