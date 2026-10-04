@@ -807,6 +807,11 @@ Implemented issue state:
   and gives CLI/MCP the same domain validation. Focused supervisor, MCP parity,
   request-structure and full-pipeline gates passed. GitHub Actions also passed
   the exact published `b73f9ac` head (`build + fpm test`, run 37148134220).
+- #154's task-specific Sol repair is committed at `783551f` and pushed to
+  `fo/local-gate-154-review`. Independent Luna review approved frozen diff
+  `35e243fe...`; focused change-watch/readiness/supervisor/public oracles pass
+  4/4 and the full/native evidence is green. Port it to the current integration
+  head after the #159 current-main repair, then rerun the exact combined gate.
 - #151's provenance subdefect is fixed at `b2a31e1`: each compiler/Git probe has
   fresh argv/output state, and metadata-only events preserve execution identity.
   Exact driver-image pinning remains in task-specific Sol repair after two
