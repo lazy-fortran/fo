@@ -2036,8 +2036,10 @@ contains
                 request%gate_required_count, priorities, n_priorities)
         else
             n_history = 0
+            ! Historical failures stay pending until a newer PASS or a fresh
+            ! candidate receipt resolves them; they are not current failures.
             call read_campaign_history(session, all_names, n_all, history, n_history, &
-                debt, n_debt, cursor_seed, ierr, message, baseline_generation)
+                debt, n_debt, cursor_seed, ierr, message)
             if (ierr /= 0) return
             empty_inventory = input_inventory_t()
             call campaign_impact_cases(project_dir, dag, filenames, all_names, &
@@ -2363,19 +2365,16 @@ contains
     end subroutine reconcile_coverage
 
     subroutine read_campaign_history(session, inventory, n_inventory, history, &
-            n_history, debt, n_debt, cursor_seed, ierr, message, &
-            compatible_generation)
+            n_history, debt, n_debt, cursor_seed, ierr, message)
         type(gremlin_session_t), intent(in) :: session
         character(len=*), intent(in) :: inventory(:)
         integer, intent(in) :: n_inventory
         character(len=*), intent(out) :: history(:), debt(:)
         integer, intent(out) :: n_history, n_debt, cursor_seed, ierr
         character(len=*), intent(out) :: message
-        character(len=*), intent(in), optional :: compatible_generation
 
         type(journal_record_t), allocatable :: records(:)
         character(len=NAME_LEN) :: case_name
-        character(len=HASH_LEN) :: record_generation
         character(len=16) :: status_name, seed_text
         character(len=PATH_LEN) :: path
         integer(int64) :: cursor, next_cursor
@@ -2404,18 +2403,11 @@ contains
             if (size(records) == 0) exit
             do i = 1, size(records)
                 case_name = ''
-                record_generation = ''
                 status_name = ''
                 seed_text = ''
-                call extract_json_field(records(i)%json, 'generation', &
-                    record_generation)
                 call extract_json_field(records(i)%json, 'case_id', case_name)
                 call extract_json_field(records(i)%json, 'status', status_name)
                 call extract_json_field(records(i)%json, 'seed', seed_text)
-                if (present(compatible_generation)) then
-                    if (len_trim(compatible_generation) == 0) cycle
-                    if (trim(record_generation) /= trim(compatible_generation)) cycle
-                end if
                 if (.not. any(inventory(:n_inventory) == case_name)) cycle
                 if (status_name /= 'PASS' .and. status_name /= 'FAIL' .and. &
                     status_name /= 'TIMEOUT') cycle
