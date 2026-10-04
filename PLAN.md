@@ -7,11 +7,11 @@ New interfaces/workflows below are planned, not claimed implemented by this edit
 
 ## Immediate controller instructions
 
-The latest replacement workspace AGENTS instructions restrict current delivery
-to plans, issue maintenance and document commits/pushes. Implementation, builds,
-tests and model workers are stopped until an explicit execution trigger. The
-development rules below apply after resumption; preserved source and completed
-focused evidence do not authorize source promotion during this pause.
+The explicit goal continuation resumes implementation and testing through
+Gremlin's own bootstrap. Use parallel Luna source work and task-specific Sol
+escalation. Until measured admission is implemented, allow one heavy build/test
+lane per host; parallel source work continues. Preserve warm caches and push
+exact integrated increments after focused local correctness checks.
 
 1. Continue small, locally verified main increments. Use the exact candidate's
    focused correctness tests and known reproducers; reuse warm caches. Do not
@@ -174,11 +174,11 @@ workloads and broader audit instrumentation remain open under #190/#145.
 
 | Issue | Published task checkpoint | Evidence and remaining work |
 | --- | --- | --- |
-| #150 | `agent/150-mcp-codec` at `dcbd09f` | Domain adoption is on main. Residual MCP scanner replacement built and passed public MCP/system and request-structure gates using app `72fb9f3b`; the final change corrects only the DOT fixture oracle. Prepared, not promoted. |
+| #150 | integrated `6f68eb6` | Shared typed request/MCP scanner adoption and nested runner-result repair pass exact combined public gates. Adjacent RPC ID validation remains explicitly tracked rather than claimed fixed. |
 | #191 | main through `39df584` | Bounded scanner oracle passes 1/1 (0.22s); controlled prior-driver negative rejects three behavioral faults and confirms cleanup. Issue closed. |
 | #170 | combined `bcc676f`, public parser repair `87a6272` | Combined provider/inventory 2/2 (0.03s), app build 71/71. Actual repaired app proves relative pass output cleanup and failed-output retention without editable-source mutation; preemption and declaration plumbing remain. |
 | #189 | `agent/189-campaign` at `f2d83f5` | Frozen input-delta campaign selection, retained regression ordering and real executed-case oracle are published source only; combined verification pending. |
-| #161 | `agent/161-sol-repair` at `c431498` | After two substantive Luna failures, scoped Sol repair preserves truthful nested runner results and failed evidence. Actual app build 70/70 (10.19s); stale-MCP/report/harness gate 3/3 (3.64s). Schema-veto mutation fails four behavioral assertions. Prepared, not promoted; six JS fixtures remain. |
+| #161 | first slice integrated `6f68eb6` | Scoped Sol repair adds native stale-MCP and explicit failed-evidence retention. Exact combined five-target gate passes; schema-veto mutation rejects four behavioral faults. Six JS fixtures remain until workflow/replacement integration finishes. |
 | #151 | `agent/151-git-provenance` at `c1f2dd6` | Metadata-only execution-identity slice and native oracle are published source only. Declared/configure-consumed Git version remains a real input, not an ignored metadata change. |
 | #165/#175 | isolated Luna tasks at base `bcc676f` | Incomplete source frozen with hashes below; no tests/builds ran. Compact manifests reuse Fx storage, and the single `[[extra.fo.inputs]]` declaration shape feeds canonical inventory. Dependency/layout consumers remain incomplete. |
 
@@ -188,12 +188,15 @@ with actual pinned driver `f68e0916`, and on Linux (2/2, 6.89s) with app
 `206228c5`. It resolves ordinary filesystem root aliases and restoration parents.
 Prior failures remain evidence; no timeout was increased.
 
-The known runner-report regression remains on Fo main: a genuine nested PASS
-can become INFRA_ERROR after strict JSON adoption. The prepared repair is
-`87a6272` plus `7f1d7d3`; the controller also holds it at `97e1556`, with source
-bytes matching the verified Sol app inputs. Repair this first after resumption.
-Actual verified app SHA256:
-`235c1c609aa62e47b4a644339c61e3711d024002468f02937832717a84492c00`.
+The nested runner-report regression is repaired in exact integrated code
+`6f68eb62a15e696ad945b97f7f0abf9cbbc88457`: actual app build 70/70 (43.23s),
+runner report/harness evidence/stale MCP/request structure/MCP system 5/5 PASS
+(12.46s runtime). No full-suite, whole-bootstrap or native-migration completion
+is implied. Actual verified app SHA256:
+`b320e6059f5dc82c5160a160f0795662e95d9a0a96addcd801940dd8fc62986b`.
+Dependencies: Fx `311ace3`, FortFront `fe59a05`, gfortran 16.2.1.
+Build log SHA256 `832f5bf25d047e61a7b1685a076a5dd80d2c9f5110349dac1562f9255d66080e`;
+focused-gate log SHA256 `c86ee6f9e84328f5dff43a5b8d87b79e642ccfea56f3b0babfeabc253336523d`.
 
 #170's public continuous-preemption check failed (75.45s): its relative
 `token.txt` fixture is not yet declared/restored into the private execution view.
@@ -210,10 +213,10 @@ with untracked-file patch SHA256
 `c01487d9b4efd6b6314726008316eecc68a35e599ac6e0269a5f9b38877b26f1`.
 These are local partial source, not completed implementation or test evidence.
 
-All owned jobs/worker slots are stopped. After explicit resumption, one resident
-integration lane starts after the actual combined runner verdict and preemption
-gates pass. Temporary acceptance lanes have explicit owners and verified cleanup.
-Do not launch one cold resident per worker.
+Source workers are active again. Start one resident integration lane after the
+declared-fixture preemption gate; temporary acceptance lanes have explicit owners
+and verified cleanup. Background payload work yields the single heavy host lane
+to focused gates. Do not launch one cold resident per worker.
 
 The combined #150/#191 code checkpoint is `2e7c048`, now integrated with current
 documentation through `91c8b62`. Its code patch versus prior main `7a638e8` has SHA256
@@ -223,7 +226,7 @@ The app used for public acceptance was built from `8a957c0`, with SHA256
 the intervening scanner fix changes only its test import. App and oracle inputs
 are recorded separately, not claimed to be a fully verified whole generation.
 
-After an explicit execution trigger, resume these small increments. Finish #170/#189
+Continue these small increments. Finish #170/#189
 consumers and use resident Gremlin by default. Repair backend/dependency defects
 in their owning provider and recheck the original consumer; do not permanently
 work around them or exclude fpm/CMake projects. #148 and #165-#167 follow the
