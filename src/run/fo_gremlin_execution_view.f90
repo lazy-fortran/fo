@@ -46,7 +46,7 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
-        character(len=PATH_LEN) :: source, destination, alias_root
+        character(len=PATH_LEN) :: source, destination, alias_root, bundle_path
         character(len=PATH_LEN) :: candidate
         integer :: root_index, i, j, attempt, copy_rc, clock_count
         integer(c_int) :: writable
@@ -155,6 +155,20 @@ contains
                 exit
             end do
             if (already_materialized) cycle
+            bundle_path = ''
+            do j = 1, inventory%roots(root_index)%alias_count
+                if (trim(inventory%roots(root_index)%aliases(j)) /= &
+                        trim(inventory%entries(i)%root_alias)) cycle
+                bundle_path = inventory%roots(root_index)%bundle_paths(j)
+                exit
+            end do
+            if (.not. safe_relative_path(bundle_path) .or. &
+                    inventory%roots(root_index)%physical_path(1:1) /= '/') then
+                call reject_view(view, &
+                    'declared runtime fixture has no safe generation bundle path', &
+                    ierr, message)
+                return
+            end if
             if (trim(inventory%entries(i)%root_alias) == 'project') then
                 alias_root = ''
             else
@@ -163,6 +177,7 @@ contains
                 alias_root = '.fo-inputs/'//trim(inventory%entries(i)%root_alias)
             end if
             source = trim(inventory%roots(root_index)%physical_path)//'/'// &
+                trim(bundle_path)//'/'// &
                 trim(inventory%entries(i)%relative_path)
             destination = trim(view%root)
             if (len_trim(alias_root) > 0) &
