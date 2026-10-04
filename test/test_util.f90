@@ -53,21 +53,47 @@ contains
     subroutine test_read_text_file_preserves_long_records()
         character(len=512) :: path
         character(len=2048) :: text
-        character(:), allocatable :: long_line, expected
+        character(len=9) :: small_text
+        character(len=512) :: exact_line
+        character(len=:), allocatable :: long_line, expected, trailing_line
         integer :: u
 
         call make_tmpfile('fo-util-long-line', path)
         long_line = repeat('x', 900)//'unique-tail-fo-util-41c7'
+        trailing_line = 'trim me'//'   '
         open (newunit=u, file=trim(path), status='replace')
         write (u, '(a)') long_line
         write (u, '(a)') 'following-short-record'
+        write (u, '(a)') trailing_line
+        write (u, '(a)') ''
         close (u)
 
         call read_text_file(trim(path), text)
-        expected = long_line//char(10)//'following-short-record'//char(10)
+        expected = long_line//char(10)//'following-short-record'//char(10)// &
+            'trim me'//char(10)//char(10)
         call assert(text(1:len(expected)) == expected, &
-            'read_text_file preserves a long record, its tail, and following line')
+            'reader preserves long tail, next record, trim, and blank line')
+
+        exact_line = repeat('y', len(exact_line))
+        open (newunit=u, file=trim(path), status='replace')
+        write (u, '(a)') exact_line
+        close (u)
+        call read_text_file(trim(path), text)
+        expected = exact_line//char(10)
+        call assert(text(1:len(expected)) == expected, &
+            'reader preserves a record exactly 512 characters long')
+
+        open (newunit=u, file=trim(path), status='replace')
+        write (u, '(a)') 'complete'
+        write (u, '(a)') 'does-not-fit'
+        close (u)
+        call read_text_file(trim(path), small_text)
+        call assert(small_text == 'complete'//char(10), &
+            'bounded output retains only complete prior records')
+
         call delete_tmpfile(path)
+        call read_text_file(trim(path), text)
+        call assert(len_trim(text) == 0, 'missing text file still returns empty text')
     end subroutine test_read_text_file_preserves_long_records
 
     subroutine test_profile_filter_ignores_compiler_name_in_basename()
