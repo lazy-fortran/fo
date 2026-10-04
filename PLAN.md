@@ -1,6 +1,6 @@
 # Fo delivery goals
 
-Updated 2026-10-04. This plan orders delivery; issues define observable success.
+Updated 2026-10-05. This plan orders delivery; issues define observable success.
 [Goals and architectural freedom](doc/GOAL_DRIVEN_DEVELOPMENT.md) applies to
 every task. Make architectural decisions as soon as required and as late as
 possible. Agents may simplify, consolidate or replace internal mechanisms while
@@ -10,18 +10,28 @@ preserving supported behavior and independently demonstrated correctness.
 
 Keep one useful resident Fo Gremlin lane running and develop through it.
 [#200](https://github.com/lazy-fortran/fo/issues/200) owns current source/driver,
-session, gate and failure evidence. The resident lane built and passed
-its four required cases; the controller published that locally green increment.
-Background coverage found async-start, driver-input and inherited test-directory
-failures and cleared readiness. Those repairs are pushed at `318ecea`; driver
-`6e54f805` passes six focused reproducers and two existing process/session cleanup
-checks. Resident session `4014645-1791139032-043537972` built and began its
-24-case required gate, then exited with retained error/infra state. A nested
-campaign-history owner start returned ESTALE; the cause/exit chain is under
-scoped investigation. Restoring sustained residency is the immediate task;
-earlier receipts remain and no new resident green is claimed.
-This is actual Fo
-dogfooding, not a claim of full verification or final speed.
+session, gate and failure evidence. Earlier async-start, driver-input and
+inherited test-directory repairs remain pushed at `318ecea`; driver `6e54f805`
+passes six focused reproducers and two existing process/session cleanup checks.
+
+The prior 24-case session `4014645-1791139032-043537972` ended with an
+`INFRA_ERROR` when a nested campaign-history owner start returned ESTALE. Its
+trace identified a stable root/member/owner process identity whose parent and
+session fields changed after reparenting. Member-record comparison now validates
+those fields while tolerating that change for the same stable identities. The
+readiness report maps `capture_pending` to `starting` or `testing` according to
+the active generation. The campaign seed oracle preserves the mandatory first
+case and shuffles the remaining order. The killed-writer test now blocks after a
+one-byte temporary write, so the parent kills it before atomic publication.
+
+On base `1c45a55`, patch SHA256 `12fd995d`, generation
+`8f568aa75a0af5f73aace5d8fd9ef131771f35f6b4a2e8c50671cb23d758d96f` passed the
+three-case required local gate: `test_stat_memo`,
+`test_gremlin_campaign_history`, and `test_gremlin_capture_pending`. Candidate
+driver SHA256 `a643b884` also passed `fo test test_gremlin_capture_pending` with
+both `FO` and `FO_BIN` set to that candidate. The lane's fourth random case was
+cancelled after the required gate turned green. The full 24-case gate remains
+to be rerun; no full-coverage or final-speed claim is made.
 
 The initial utility/input-inventory/execution-view gate and contained-launch
 reproducer are independently exercised. Fx materialization/warm-hit repairs are

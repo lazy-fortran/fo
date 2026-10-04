@@ -494,8 +494,9 @@ contains
             call fs_sleep_ms(1)
         end do
         kill_status = -1
-        if (.not. done .and. temp_size > 0_c_long_long) then
+        if (.not. done) then
             kill_status = c_kill(int(pid, c_int), 9_c_int)
+            if (kill_status /= 0) call process_cancel_pid(pid, status)
         end if
         if (.not. done) call wait_for_child(pid, done, exitcode)
         call assert(temp_size > 0_c_long_long, &
@@ -764,6 +765,7 @@ contains
         call write_text(trim(ready), 'ready')
         call wait_for_file(trim(gate), exists)
         if (.not. exists) return
+        call arm_io_oracle(4_c_int)
         call memo_save()
         exitcode = 0
     end subroutine run_crash_worker
@@ -909,6 +911,7 @@ end program test_stat_memo
 ! Publication I/O interposition belongs only to this test executable.
 ! Production calls these functions directly; the SHA oracle uses a provider.
 module stat_memo_io_oracle
+    use fo_fs, only: fs_sleep_ms
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_size_t, c_intptr_t, &
         c_ptr, c_funptr, c_null_char, c_associated, c_f_procpointer, c_f_pointer
     implicit none
@@ -1033,6 +1036,15 @@ contains
         integer(c_size_t), value :: count
         integer(c_intptr_t) :: n
         call oracle_initialize()
+        if (fault_mode == 4 .and. fd == owned_fd) then
+            n = real_write(fd, buffer, min(count, 1_c_size_t))
+            if (n > 0_c_intptr_t) then
+                do
+                    call fs_sleep_ms(10)
+                end do
+            end if
+            return
+        end if
         if (fault_mode == 1 .and. fd == owned_fd) then
             io_faults = io_faults + 1
             call set_io_error()

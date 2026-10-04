@@ -1804,8 +1804,13 @@ static int async_owner_registry(const char *state_dir, pid_t owner_pid,
     return private_directory(registry, create);
 }
 
+static int async_member_record_equivalent(const char *existing,
+                                         size_t existing_size,
+                                         const char *requested,
+                                         size_t requested_size);
+
 static int async_record_matches(const char *path, const char *record,
-                                size_t record_size) {
+                                size_t record_size, int member_record) {
     struct stat st;
     char current[512];
     size_t used = 0;
@@ -1814,23 +1819,29 @@ static int async_record_matches(const char *path, const char *record,
     if (fstat(fd, &st) != 0) { int e = errno; close(fd); return e; }
     if (!S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
         (st.st_mode & 0077) != 0 || st.st_size < 0 ||
-        (size_t)st.st_size != record_size || record_size > sizeof(current)) {
+        (size_t)st.st_size >= sizeof(current) ||
+        record_size >= sizeof(current) ||
+        (!member_record && (size_t)st.st_size != record_size)) {
         close(fd);
         return ESTALE;
     }
-    while (used < record_size) {
-        ssize_t n = read(fd, current + used, record_size - used);
+    while (used < (size_t)st.st_size) {
+        ssize_t n = read(fd, current + used, (size_t)st.st_size - used);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) { int e = n < 0 ? errno : EIO; close(fd); return e; }
         used += (size_t)n;
     }
     if (close(fd) != 0) return errno;
-    return memcmp(current, record, record_size) == 0 ? 0 : ESTALE;
+    if (used == record_size && memcmp(current, record, record_size) == 0)
+        return 0;
+    if (member_record && async_member_record_equivalent(
+            current, used, record, record_size)) return 0;
+    return ESTALE;
 }
 
 static int async_publish_record(const char *registry, const char *path,
                                 const char *stem, const char *record,
-                                size_t record_size) {
+                                size_t record_size, int member_record) {
     char temporary[PATH_MAX];
     struct timespec ts;
     int e, n, fd, dirfd, created = 0;
@@ -1847,8 +1858,8 @@ static int async_publish_record(const char *registry, const char *path,
     if (close(fd) != 0 && e == 0) e = errno;
     if (e == 0) {
         if (link(temporary, path) == 0) created = 1;
-        else if (errno == EEXIST) e = async_record_matches(path, record,
-                                                            record_size);
+        else if (errno == EEXIST) e = async_record_matches(
+            path, record, record_size, member_record);
         else e = errno;
     }
     if (unlink(temporary) != 0 && e == 0) e = errno;
@@ -1888,7 +1899,7 @@ static int register_async_session(struct async_process *item) {
                  item->owns_session, owner_start);
     if (n < 0 || n >= (int)sizeof(record)) return EOVERFLOW;
     e = async_publish_record(registry, path,
-                             strrchr(path, '/') + 1, record, (size_t)n);
+                             strrchr(path, '/') + 1, record, (size_t)n, 0);
     if (e != 0) {
         return e;
     }
@@ -1968,7 +1979,7 @@ static int register_async_descendants(struct async_process *item,
                      parent_start, item->scope_owner_start);
         if (n < 0 || n >= (int)sizeof(record)) { e = EOVERFLOW; break; }
         e = async_publish_record(item->registry_dir, path,
-                                 strrchr(path, '/') + 1, record, (size_t)n);
+                                 strrchr(path, '/') + 1, record, (size_t)n, 1);
         if (e != 0) break;
     }
     free(records);
@@ -2037,6 +2048,56 @@ static int parse_positive_pid(const char *text, pid_t *pid) {
         return EINVAL;
     *pid = (pid_t)value;
     return 0;
+}
+
+static int async_member_record_fields_valid(char fields[8][64]) {
+    pid_t root_pid, member_pid, session, parent_pid;
+    uint64_t root_identity, identity, parent_identity;
+
+    if (parse_positive_pid(fields[0], &root_pid) != 0 ||
+        parse_identity_text(fields[1], &root_identity) != 0 ||
+        parse_positive_pid(fields[2], &member_pid) != 0 ||
+        parse_identity_text(fields[3], &identity) != 0 ||
+        parse_positive_pid(fields[4], &session) != 0 ||
+        parse_positive_pid(fields[5], &parent_pid) != 0 ||
+        parse_identity_text(fields[6], &parent_identity) != 0 ||
+        parse_identity_text(fields[7], &identity) != 0) return 0;
+    return parent_pid != root_pid || parent_identity == root_identity;
+}
+
+static int async_member_record_equivalent(const char *existing,
+                                         size_t existing_size,
+                                         const char *requested,
+                                         size_t requested_size) {
+    char existing_buffer[512], requested_buffer[512];
+    char existing_fields[8][64], requested_fields[8][64];
+    char *cursor;
+
+    if (existing_size == 0 || existing_size >= sizeof(existing_buffer) ||
+        requested_size == 0 || requested_size >= sizeof(requested_buffer))
+        return 0;
+    memcpy(existing_buffer, existing, existing_size);
+    existing_buffer[existing_size] = '\0';
+    memcpy(requested_buffer, requested, requested_size);
+    requested_buffer[requested_size] = '\0';
+    cursor = existing_buffer;
+    for (size_t i = 0; i < 8; i++) {
+        if (copy_line(&cursor, existing_fields[i], sizeof(existing_fields[i])) != 0)
+            return 0;
+    }
+    if (*cursor != '\0') return 0;
+    cursor = requested_buffer;
+    for (size_t i = 0; i < 8; i++) {
+        if (copy_line(&cursor, requested_fields[i], sizeof(requested_fields[i])) != 0)
+            return 0;
+    }
+    if (*cursor != '\0') return 0;
+    for (size_t i = 0; i < 4; i++) {
+        if (strcmp(existing_fields[i], requested_fields[i]) != 0) return 0;
+    }
+    if (strcmp(existing_fields[7], requested_fields[7]) != 0) return 0;
+    return async_member_record_fields_valid(existing_fields) &&
+           async_member_record_fields_valid(requested_fields);
 }
 
 static int read_recovery_session(const char *registry, const char *name,

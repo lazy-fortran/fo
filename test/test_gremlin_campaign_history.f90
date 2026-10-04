@@ -759,11 +759,13 @@ contains
         call require(n_first >= 5, 'reproducer spans two campaign chunks')
         expected_epoch = inventory
         call random_permutation(expected_epoch, size(expected_epoch), 1729)
-        do chunk_start = 1, 8, 4
-            chunk_end = min(chunk_start + 3, size(expected_epoch))
-            call random_permutation(expected_epoch(chunk_start:chunk_end), &
-                chunk_end - chunk_start + 1, 1729)
-        end do
+        ! The first case establishes the default gate and stays at the front;
+        ! later chunks shuffle every selected case.
+        call random_permutation(expected_epoch(2:4), 3, 1729)
+        chunk_start = 5
+        chunk_end = min(chunk_start + 3, size(expected_epoch))
+        call random_permutation(expected_epoch(chunk_start:chunk_end), &
+            chunk_end - chunk_start + 1, 1729)
         do i = 1, 8
             event = receipt_at(first, n_first, rest, n_rest, i)
             call require(event%case_id == expected_epoch(i), &

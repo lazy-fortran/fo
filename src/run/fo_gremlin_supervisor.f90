@@ -493,6 +493,12 @@ contains
             input%phase = GREMLIN_PHASE_QUIESCENT
         case ('stopped')
             input%phase = GREMLIN_PHASE_STOPPED
+        case ('capture_pending')
+            if (input%exact_active_generation) then
+                input%phase = GREMLIN_PHASE_TESTING
+            else
+                input%phase = GREMLIN_PHASE_STARTING
+            end if
         case ('error', 'inventory_failed', 'test_launch_failed', 'build_failed', &
                 'capture_failed')
             input%phase = GREMLIN_PHASE_FAILED
