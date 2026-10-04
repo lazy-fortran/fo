@@ -729,7 +729,7 @@ current correctness.
 ## Active delivery state
 
 **Execution is user-authorized in parallel mode.** The reviewed core is on fo
-`main`; PR #146 is merged. The current main head `67b41ec` includes the shared
+`main`; PR #146 is merged. The current main head `459c9be` includes the shared
 Linux event watcher, finite crash-safe coverage, factual local-gate reporting,
 GCC 13.3 ownership repairs, Darwin archive portability, thirteen removed JS
 fixtures and side-effect-free install help. Exact combined focused gates passed
@@ -912,8 +912,9 @@ Implemented issue state:
   private writable build/test/run working directories over the immutable source
   view. The same run materialized 304 MB across the two lanes, confirming that
   compact manifests and private disposable sessions remain required.
-- The installed driver now comes from exact main `b0a356e`, SHA256
-  `b0fedbd4bd0179209ed26f20e0210cd2e37aa9e29d15a7bac18ebd0bcf33609f`.
+- The installed development driver was refreshed from exact `7f70a09` with fx
+  `ab7f90d`, SHA256
+  `d5ebdd39a2da83bf3a1afe521f98de51ff149d0b8d5d542eb6ecdd21fcfe076b`.
   The fx dogfood5 lane remains resident after completing 18/18 green. The fo
   resident lane was stopped cleanly after plan-only generations and retained
   private builds grew state to 2.0 GB; its evidence is preserved. Fresh exact
@@ -921,9 +922,12 @@ Implemented issue state:
   state/cache and immediately reproduced #182: both publish `capture_failed`
   because a test-only path dependency nested inside the project root is copied
   over the already captured project tree, and public status omits the concrete
-  capture diagnostic. #182 now owns nested/external dependency capture semantics
-  and actionable failure evidence; focused one-shot gates remain the fallback
-  while that resident bootstrap defect is repaired.
+  capture diagnostic. #182 is complete through `459c9be`: an internal path
+  dependency remains represented once by the primary project-tree digest,
+  external siblings retain distinct frozen roots, both mutation identities are
+  proved, and the exact bounded capture error appears in public status and
+  lifecycle events. The rebased focused fixture/provenance gates and independent
+  review pass; current fo/fx resident lanes are restarted as the dogfood gate.
 
 After each meaningful delivery, update this plan, workspace master and affected
 issues; commit and push the controller branch immediately. Preserve exact bases,
