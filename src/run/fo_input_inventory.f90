@@ -262,8 +262,8 @@ contains
             end if
             return
         end if
-        call scan_tree(inventory, root_index, alias, trim(source_dir), trim(rel), &
-            role, ierr, message)
+        call scan_tree(inventory, root_index, alias, trim(project_root), trim(rel), &
+            role, .false., ierr, message)
     end subroutine scan_configured_dir
 
     subroutine add_target_main(project_root, alias, target, role, inventory, &
@@ -285,9 +285,9 @@ contains
         if (ierr /= 0) message = trim(message)//' ('//trim(path)//')'
     end subroutine add_target_main
 
-    subroutine discover_path_dependency(parent_root, dep_path, alias, &
+    subroutine discover_path_dependency(parent_root, dependency_path, alias, &
             follow_regular_deps, inventory, ierr, message, depth)
-        character(len=*), intent(in) :: parent_root, dep_path, alias
+        character(len=*), intent(in) :: parent_root, dependency_path, alias
         logical, intent(in) :: follow_regular_deps
         type(input_inventory_t), intent(inout) :: inventory
         integer, intent(out) :: ierr
@@ -305,12 +305,13 @@ contains
             message = 'path dependency closure exceeds depth 16 at '//trim(alias)
             return
         end if
-        if (len_trim(dep_path) == 0 .or. dep_path(1:1) == '/') then
+        if (len_trim(dependency_path) == 0 .or. &
+                dependency_path(1:1) == '/') then
             message = 'unsupported absolute or empty FPM path dependency: '// &
                 trim(alias)
             return
         end if
-        call validate_relative_path(dep_path, dependency_root, ierr, message, &
+        call validate_relative_path(dependency_path, dependency_root, ierr, message, &
             allow_parent=.true.)
         if (ierr /= 0) return
         if (dependency_root(1:1) /= '/') then
@@ -625,7 +626,7 @@ contains
         ierr = 1
         message = ''
         call make_tmpfile('fo-input-inventory', manifest)
-        c_root = trim(physical_root)//c_null_char
+        c_root = trim(physical_root)//'/'//trim(prefix)//c_null_char
         c_manifest = trim(manifest)//c_null_char
         rc = c_list_tree(c_root, c_manifest)
         if (rc /= 0) then
@@ -666,6 +667,7 @@ contains
                 message = 'unknown record from input enumerator'
                 exit
             end select
+            relative = trim(prefix)//'/'//trim(relative)
             if (ignored_input_path(trim(relative), kind == INPUT_DIRECTORY)) cycle
             if (.not. under_prefix(trim(relative), trim(prefix))) cycle
             if (trim(relative) == trim(prefix)) cycle
@@ -700,7 +702,7 @@ contains
                 entry%mode = 0
                 entry%link_target = trim(target)
                 hash = cache_digest([character(len=PATH_LEN) :: &
-                    'symlink:'//trim(target)])
+                    'symlink:'//trim(target)], 1)
                 entry%content_digest = hash
             end select
             call append_entry(inventory, entry, ierr, message)
@@ -1041,7 +1043,8 @@ contains
                 trim(inventory%entries(i)%content_digest)
             parts(i) = trim(part)
         end do
-        inventory%digest = cache_digest(parts(:inventory%entry_count))
+        inventory%digest = cache_digest(parts(:inventory%entry_count), &
+            inventory%entry_count)
     end subroutine canonicalize_inventory
 
     logical function same_entry_key(left, right)
