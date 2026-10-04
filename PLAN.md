@@ -436,7 +436,7 @@ does not itself close or reopen implementation issues.
 | Issues | Scoped responsibility |
 | --- | --- |
 | #56 / #59 | unsaved-buffer LSP and opt-in deep lint; do not add them to Gremlin's critical path |
-| #62 / #120 | fortrun retirement / future synthesis-proof actions; separate governance and optional capabilities |
+| #62 | fortrun retirement record; no second runner |
 | #117 | formatter token-boundary correctness |
 | #119 / #130 | lossless output, useful slow-child attribution and owned log retention |
 | #129 / #144 | link-result inventory/retention and atomic complete artifact publication |
@@ -446,6 +446,11 @@ does not itself close or reopen implementation issues.
 | #142 / #185 | reconnectable CLI/MCP parity and removal of transport-owned execution |
 | #161 / #163 / #184 | native fixture migration, interpreter cleanup and lower test cost without weakening oracles |
 | #188 | test-only Git-dependency bootstrap without dummy root library or redundant full build |
+
+Closed out-of-scope research issues #120 (proof/synthesis) and #157 (complete
+host toolchain/runtime capture) remain historical references only; do not assign
+implementation work from them. Earlier capsule/Nix/FortOS issues #1/#3/#6/#7
+are likewise historical.
 
 Completed foundations (#141/#153/#154/#158/#159/#160/#162/#164/#169/#171/#173/
 #174/#176/#177/#178/#179/#180/#181/#182, fx #42/#43) are reused. Check live issue
