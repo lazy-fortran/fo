@@ -1,7 +1,9 @@
 program test_gremlin_reproduce_logs
     use fo_test_harness, only: string_list_t, process_result_t, list_add
-    use fo_test_harness, only: write_text, read_text, assert_true
-    use fo_test_harness, only: assert_equal_integer, assert_equal_string, finish_assertions
+    use fo_test_harness, only: make_directory, write_text, read_text, file_exists
+    use fo_test_harness, only: remove_path, assert_true
+    use fo_test_harness, only: assert_equal_integer, assert_equal_string
+    use fo_test_harness, only: finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_run, gremlin_json
     use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_write_case
     use fo_test_gremlin_oracle, only: gremlin_wait_ms
@@ -10,7 +12,8 @@ program test_gremlin_reproduce_logs
     use fo_test_gremlin_oracle, only: gremlin_stop_lane
     implicit none
 
-    character(:), allocatable :: driver, scratch, project, cache, state
+    character(:), allocatable :: driver, scratch, project, dependency, cache, state
+    character(:), allocatable :: relocated_cache
     character(:), allocatable :: session, generation, first_log, second_log
     character(:), allocatable :: first_text, second_text, lane
     type(string_list_t) :: arguments
@@ -21,39 +24,48 @@ program test_gremlin_reproduce_logs
 
     call gremlin_setup(driver, scratch, project, cache, state)
     lane = 'reproduce-log-oracle'
-    call write_text(project//'/fpm.toml', 'name = "gremlin_reproduce_log_probe"'//new_line('a')// &
+    dependency = scratch//'/fixture-dep'
+    relocated_cache = scratch//'/cache-relocated'
+    call make_directory(dependency//'/src')
+    call make_directory(relocated_cache)
+    call write_text(project//'/fpm.toml', &
+        'name = "gremlin_reproduce_log_probe"'//new_line('a')// &
+        '[dependencies]'//new_line('a')// &
+        'fixture_dep = { path = "../fixture-dep" }'//new_line('a')// &
         '[[extra.fo.inputs]]'//new_line('a')// &
         'path = "token.txt"'//new_line('a')// &
         'role = "test-fixture"'//new_line('a'))
+    call write_text(dependency//'/fpm.toml', 'name = "fixture_dep"'//new_line('a'))
+    call write_dependency('FROZEN_DEPENDENCY_TOKEN')
     call write_text(project//'/token.txt', 'FROZEN_REPRODUCE_TOKEN'//new_line('a'))
     call gremlin_write_case(project, 'test_reproduce_anchor', &
         "print '(a)', 'FO_REPRODUCE_ANCHOR_OUTPUT'")
-    call gremlin_write_case(project, 'test_reproduce_first', &
-        'integer :: unit'//new_line('a')// &
-        'character(len=64) :: token'//new_line('a')// &
-        "open(newunit=unit,file='token.txt',status='old')"//new_line('a')// &
-        "read(unit,'(a)') token"//new_line('a')// &
-        'close(unit)'//new_line('a')// &
-        "print '(a)', trim(token)"//new_line('a')// &
-        "print '(a)', 'FO_REPRODUCE_FIRST_OUTPUT_61c8c1'"//new_line('a')// &
-        "print '(a)', '"//achar(34)//'quoted'//achar(34)//achar(92)//"path'"// &
-        new_line('a')//"print '(a)', repeat('q',4096)//'LONG_OUTPUT_END'"// &
-        new_line('a')//'error stop 7')
-    call gremlin_write_case(project, 'test_reproduce_second', &
-        "print '(a)', 'FO_REPRODUCE_SECOND_OUTPUT_9d09d2'"//new_line('a')//'error stop 7')
+    call write_reproduction_case('test_reproduce_first')
+    call write_reproduction_case('test_reproduce_second')
     call gremlin_start_args(arguments, project, lane, 'test_reproduce_anchor')
     call list_add(arguments, '--seed')
     call list_add(arguments, '1729')
     call list_add(arguments, '--json')
-    call gremlin_json(driver, project, cache, state, arguments, started, process, 120000)
+    call gremlin_json(driver, project, cache, state, arguments, started, process, &
+        120000)
     session = member_text(started, 'session_id')
     call assert_true(len(session) > 0, 'start returns the owner session id')
     call wait_for_anchor(session, generation)
 
     call write_text(project//'/token.txt', 'EDITED_REPRODUCE_TOKEN'//new_line('a'))
+    call write_dependency('EDITED_DEPENDENCY_TOKEN')
     call reproduce('test_reproduce_first', first_log)
-    call reproduce('test_reproduce_second', second_log)
-    call assert_true(first_log /= second_log, 'sequential receipts use distinct reproduction logs')
+    call assert_true(index(read_text(first_log), 'FROZEN_DEPENDENCY_TOKEN') > 0, &
+        'reproduction builds from the captured dependency alias')
+    call remove_path(project//'/token.txt')
+    call remove_path(dependency//'/src/fixture_dep.f90')
+    call assert_true(.not. file_exists(project//'/token.txt'), &
+        'live declared project input is deleted before manifest recovery')
+    call assert_true(.not. file_exists(dependency//'/src/fixture_dep.f90'), &
+        'live path-dependency source is deleted before manifest recovery')
+    call reproduce('test_reproduce_second', second_log, relocated_cache)
+    call assert_true(first_log /= second_log, &
+        'sequential receipts use distinct reproduction logs')
     first_text = read_text(first_log)
     second_text = read_text(second_log)
     call assert_true(index(first_text, 'FO_REPRODUCE_FIRST_OUTPUT_61c8c1') > 0, &
@@ -62,10 +74,20 @@ program test_gremlin_reproduce_logs
         'reproduced test reads the declared fixture from its captured generation')
     call assert_true(index(first_text, 'EDITED_REPRODUCE_TOKEN') == 0, &
         'reproduced test does not read later editable fixture bytes')
+    call assert_true(index(first_text, 'EDITED_DEPENDENCY_TOKEN') == 0, &
+        'reproduced test excludes later editable dependency source bytes')
     call assert_true(index(first_text, 'FO_REPRODUCE_SECOND_OUTPUT_9d09d2') == 0, &
         'second test cannot overwrite the first receipt log')
     call assert_true(index(second_text, 'FO_REPRODUCE_SECOND_OUTPUT_9d09d2') > 0, &
         'second receipt log contains its independent test output')
+    call assert_true(index(second_text, 'FROZEN_REPRODUCE_TOKEN') > 0, &
+        'reopened private view restores captured input after source deletion')
+    call assert_true(index(second_text, 'EDITED_REPRODUCE_TOKEN') == 0, &
+        'reopened private view excludes edited live input bytes')
+    call assert_true(index(second_text, 'FROZEN_DEPENDENCY_TOKEN') > 0, &
+        'relocated cache still restores the captured dependency alias')
+    call assert_true(index(second_text, 'EDITED_DEPENDENCY_TOKEN') == 0, &
+        'relocated cache excludes edited live dependency bytes')
     call assert_true(index(second_text, 'FO_REPRODUCE_FIRST_OUTPUT_61c8c1') == 0, &
         'second receipt log excludes first test output')
     call assert_output_json(first_text)
@@ -74,6 +96,42 @@ program test_gremlin_reproduce_logs
     call finish_assertions()
 
 contains
+
+    subroutine write_dependency(token)
+        character(len=*), intent(in) :: token
+
+        call write_text(dependency//'/src/fixture_dep.f90', &
+            'module fixture_dep'//new_line('a')// &
+            'implicit none'//new_line('a')// &
+            'character(len=*), parameter :: fixture_token = "'//trim(token)//'"'// &
+            new_line('a')//'end module fixture_dep'//new_line('a'))
+    end subroutine write_dependency
+
+    subroutine write_reproduction_case(case_id)
+        character(len=*), intent(in) :: case_id
+        character(:), allocatable :: source
+
+        source = 'program '//trim(case_id)//new_line('a')// &
+            'use fixture_dep, only: fixture_token'//new_line('a')// &
+            'implicit none'//new_line('a')//'integer :: unit'//new_line('a')// &
+            'character(len=64) :: token'//new_line('a')// &
+            "open(newunit=unit,file='token.txt',status='old')"//new_line('a')// &
+            "read(unit,'(a)') token"//new_line('a')//'close(unit)'//new_line('a')// &
+            "print '(a)', trim(token)"//new_line('a')// &
+            "print '(a)', trim(fixture_token)"//new_line('a')
+        if (trim(case_id) == 'test_reproduce_first') then
+            source = source//"print '(a)', 'FO_REPRODUCE_FIRST_OUTPUT_61c8c1'"// &
+                new_line('a')//"print '(a)', '"//achar(34)//'quoted'// &
+                achar(34)//achar(92)//"path'"//new_line('a')// &
+                "print '(a)', repeat('q',4096)//'LONG_OUTPUT_END'"//new_line('a')
+        else
+            source = source// &
+                "print '(a)', 'FO_REPRODUCE_SECOND_OUTPUT_9d09d2'"//new_line('a')
+        end if
+        source = source//'error stop 7'//new_line('a')// &
+            'end program '//trim(case_id)//new_line('a')
+        call write_text(project//'/test/'//trim(case_id)//'.f90', source)
+    end subroutine write_reproduction_case
 
     subroutine assert_output_json(text)
         character(len=*), intent(in) :: text
@@ -155,9 +213,10 @@ contains
         call assert_true(.false., 'anchor completes on the active immutable generation')
     end subroutine wait_for_anchor
 
-    subroutine reproduce(case_id, log_path)
+    subroutine reproduce(case_id, log_path, cache_root)
         character(len=*), intent(in) :: case_id
         character(:), allocatable, intent(out) :: log_path
+        character(len=*), intent(in), optional :: cache_root
         type(string_list_t) :: args
         type(process_result_t) :: result
         type(json_value_t) :: response
@@ -175,8 +234,15 @@ contains
         call list_add(args, '--generation')
         call list_add(args, generation)
         call list_add(args, '--json')
-        call gremlin_run(driver, project, cache, state, args, result, timeout=120000)
-        call assert_equal_integer(result%exit_code, 1, case_id//' returns its deliberate failure')
+        if (present(cache_root)) then
+            call gremlin_run(driver, project, cache_root, state, args, result, &
+                timeout=120000)
+        else
+            call gremlin_run(driver, project, cache, state, args, result, &
+                timeout=120000)
+        end if
+        call assert_equal_integer(result%exit_code, 1, &
+            case_id//' returns its deliberate failure')
         call json_parse(result%stdout, response, valid, parse_error)
         call assert_true(valid, case_id//' reproduction result is JSON')
         call assert_equal_string(member_text(response, 'state'), 'FAIL', &
