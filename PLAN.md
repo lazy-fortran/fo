@@ -142,6 +142,15 @@ cycles/truncated paths before #186's wider policy extraction. #190 remains an
 independent optional audit and starts with workflow separation, not a benchmark
 run imposed on these increments.
 
+#189's conservative static impact provider is integrated through `c37b845`.
+The combined canonical-inventory/impact gate passes 2/2 in 0.44s with the same
+exact pinned Linux driver above. Its oracle changes source bytes, observes the
+expected compiled failure, checks cache-independent membership and includes an
+affected slow case. This is provider evidence: campaign and ordinary
+`--only-changed` adoption remain open, and the current cache-based callers have
+not yet been replaced. The installed Linux CLI now uses that validated pinned
+driver; older immutable bootstrap executables remain available for comparison.
+
 ## One architecture
 
 ```text
