@@ -385,8 +385,7 @@ int fo_test_spawn_same_group_sentinel(void) {
     pid_t child = fork();
     if (child < 0) return -1;
     if (child == 0) {
-        execl("/bin/sleep", "sleep", "30", (char *)NULL);
-        _exit(127);
+        for (;;) pause();
     }
     return (int)child;
 }
