@@ -13,8 +13,8 @@ program test_gremlin_execution_view
     type(input_inventory_t) :: inventory, escaping
     type(execution_view_t) :: first, second, rejected
     character(len=512) :: root, views, source_file, text, message
-    character(len=512) :: first_fixture, second_output, source_digest
-    character(len=512) :: after_digest, escape_path
+    character(len=512) :: first_fixture, second_output, escape_path
+    character(len=HASH_LEN) :: source_digest, after_digest
     character(len=512) :: argument, executable, current_dir, probe_log
     character(len=:), allocatable :: packed
     integer :: n_args, probe_exit, cwd_status
@@ -87,8 +87,9 @@ program test_gremlin_execution_view
         'concurrent cases receive distinct working directories')
     second_output = trim(second%cwd)//'/relative-output.txt'
     call fs_write_text(trim(second_output), 'case two')
-    inquire(file=trim(first%cwd)//'/relative-output.txt', exist=exists)
-    call check(.not. exists, 'relative outputs stay isolated between cases')
+    call read_text_file(trim(first%cwd)//'/relative-output.txt', text)
+    call check(index(text, 'written relative') > 0, &
+        'relative outputs stay isolated between cases')
 
     call execution_view_release(first, .true., release_status, message)
     inquire(file=trim(first_fixture), exist=exists)
