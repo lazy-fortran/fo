@@ -756,6 +756,12 @@ Implemented issue state:
   37162328033 exposed a gfortran-13 response-array deallocation SIGSEGV in all
   four. Keep it reopened until a discriminating ownership stress oracle and exact
   full FPM mode pass.
+- #162's repaired Fortran publication-fixture stack is independently approved at
+  `6b99023` on `fo/fortran-tests-162-review`. Its timeout oracle proves a live
+  heartbeat before bounded owned termination and confirmed reap, preserves
+  scratch on reap failure, and compares interrupted archive paths plus SHA-256
+  digests. Fresh focused tests pass and the worker full suite is 72/72; port it
+  after the #159 repair.
 - #160's campaign-history slice is delivered at `361d1ca`: the stale
   per-campaign JavaScript sampler is replaced by an independent Fortran oracle
   for finite epoch order, restart/replay, markers, failure priority and cancelled
