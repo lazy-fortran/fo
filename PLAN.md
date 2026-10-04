@@ -377,7 +377,12 @@ and generated shell helpers in archive, link, compiler, FFC, benchmark and CLI
 fixtures. Its first slice is complete at `290a61c`: `test_compdb` parses and
 asserts compile-database JSON entirely in Fortran, rejects malformed JSON and
 suffix impostors such as `.f90.extra`, and passes with Node/Python absent. The
-remaining generated shell helpers and final interpreter inventory stay in #163.
+compiler-artifact shell fixture is replaced at `f5058a8` by a distinct generated
+Fortran compiler executable with direct `execv` forwarding. A bounded forced
+self-forward oracle exits 86 without producing an object, preventing recurrence
+of the rejected argv0/symlink design that spawned 57,328 exact test processes.
+Focused exact-head evidence and independent review pass. Remaining generated
+shell helpers and the final interpreter inventory stay in #163.
 Issue #158 is complete through `6eb8045`: ten CLI fixtures are Fortran, the
 recursive test JSON ownership repair passes the full gfortran-13 FPM suite and
 the test-only C shim is Darwin-portable. #159 is repaired through `6b3ac43`:
@@ -729,7 +734,7 @@ current correctness.
 ## Active delivery state
 
 **Execution is user-authorized in parallel mode.** The reviewed core is on fo
-`main`; PR #146 is merged. The current main head `459c9be` includes the shared
+`main`; PR #146 is merged. The current main head `f5058a8` includes the shared
 Linux event watcher, finite crash-safe coverage, factual local-gate reporting,
 GCC 13.3 ownership repairs, Darwin archive portability, thirteen removed JS
 fixtures and side-effect-free install help. Exact combined focused gates passed
