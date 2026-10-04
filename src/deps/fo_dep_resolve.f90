@@ -2,11 +2,10 @@ module fo_dep_resolve
     !! Resolve a project's dependency closure to the set of library source
     !! directories fo must compile alongside the project's own sources.
     !!
-    !! Path dependencies are resolved transitively here: each path dep's own
-    !! fpm.toml is parsed for its source-dir and its further path deps, walked to
-    !! a fixpoint with a visit guard. Git and registry deps are classified and
-    !! reported separately; a dep whose modules are never `use`d contributes no
-    !! compiles because the module DAG only pulls in reachable units.
+    !! Path dependencies and acquired Git dependencies are resolved
+    !! transitively here. FPM stores the flattened Git closure in the root
+    !! build/dependencies directory. Registry sources remain unresolved until
+    !! a provider for FPM's registry cache is available.
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, dep_kind, &
         DEP_PATH, DEP_GIT, DEP_REGISTRY, add_link_lib
     implicit none
@@ -26,26 +25,32 @@ module fo_dep_resolve
 
 contains
 
-    subroutine resolve_dep_srcs(project_dir, out, n_out, n_unresolved, ierr)
-        !! Collect the transitive path-dependency library source dirs of the
-        !! project at project_dir. n_unresolved counts git/registry deps that
-        !! were seen but not acquired here (the caller decides whether any are
-        !! actually needed). out excludes the root project's own sources.
+    subroutine resolve_dep_srcs(project_dir, out, n_out, n_unresolved, ierr, &
+            n_registry_out)
+        !! Collect path deps and acquired Git source dirs for this project.
+        !! Registry deps and missing Git checkouts are counted as unresolved.
+        !! out excludes the root project's own sources.
         character(len=*), intent(in) :: project_dir
         type(resolved_src_t), intent(out) :: out(MAX_RESOLVED)
         integer, intent(out) :: n_out, n_unresolved, ierr
+        integer, intent(out), optional :: n_registry_out
+        integer :: n_registry
 
         type(fpm_config_t), allocatable :: root_config
         character(len=512) :: root
 
         n_out = 0
         n_unresolved = 0
+        n_registry = 0
         ierr = 0
         call normalize_path(project_dir, root)
         allocate (root_config)
         call fpm_config_parse(root, root_config, ierr)
         if (ierr /= 0) return
-        call walk(root, out, n_out, n_unresolved, ierr, 0, root_config)
+        call walk(root, out, n_out, n_unresolved, n_registry, ierr, 0, &
+            root_config)
+        if (n_registry > 0) call drop_git_sources(out, n_out)
+        if (present(n_registry_out)) n_registry_out = n_registry
     end subroutine resolve_dep_srcs
 
     subroutine resolve_dev_dep_srcs(project_dir, out, n_out, ierr)
@@ -86,7 +91,8 @@ contains
                 end if
             end do
             if (.not. seen) then
-                call record_dep_src(cfg%dev_deps(i)%name, dep_dir, out, n_out)
+                call record_dep_src(cfg%dev_deps(i)%name, dep_dir, out, n_out, &
+                    kind)
             end if
         end do
     end subroutine resolve_dev_dep_srcs
@@ -134,17 +140,17 @@ contains
         end do
     end subroutine merge_dep_link_libs
 
-    recursive subroutine walk(dir, out, n_out, n_unresolved, ierr, depth, &
-            root_config)
+    recursive subroutine walk(dir, out, n_out, n_unresolved, n_registry, &
+            ierr, depth, root_config)
         character(len=*), intent(in) :: dir
         type(resolved_src_t), intent(inout) :: out(MAX_RESOLVED)
-        integer, intent(inout) :: n_out, n_unresolved
+        integer, intent(inout) :: n_out, n_unresolved, n_registry
         integer, intent(out) :: ierr
         integer, intent(in) :: depth
         type(fpm_config_t), intent(in) :: root_config
 
         type(fpm_config_t), allocatable :: cfg
-        integer :: i, k, kind
+        integer :: i, k, kind, root_kind
         character(len=512) :: dep_dir, dep_src
         logical :: seen, shadowed
 
@@ -156,23 +162,41 @@ contains
 
         do i = 1, cfg%n_deps
             kind = dep_kind(cfg%deps(i))
-            if (kind /= DEP_PATH) then
+            root_kind = kind
+            if (kind == DEP_PATH) then
+                ! If the root pins this package through Git, use that
+                ! flattened checkout instead of a second path copy.
+                shadowed = .false.
+                do k = 1, root_config%n_deps
+                    if (trim(root_config%deps(k)%name) /= &
+                            trim(cfg%deps(i)%name)) cycle
+                    root_kind = dep_kind(root_config%deps(k))
+                    if (root_kind == DEP_PATH) cycle
+                    shadowed = .true.
+                    exit
+                end do
+                if (shadowed) then
+                    if (root_kind /= DEP_GIT) then
+                        n_unresolved = n_unresolved + 1
+                        cycle
+                    end if
+                    dep_dir = trim(root_config%project_dir)// &
+                        '/build/dependencies/'//trim(cfg%deps(i)%name)
+                else
+                    call resolve_path_dep(dir, trim(cfg%deps(i)%path), dep_dir)
+                end if
+            else if (kind == DEP_GIT) then
+                dep_dir = trim(root_config%project_dir)// &
+                    '/build/dependencies/'//trim(cfg%deps(i)%name)
+            else
                 n_unresolved = n_unresolved + 1
+                n_registry = n_registry + 1
                 cycle
             end if
-            ! If the root names this package as Git/registry, use that
-            ! immutable provider for every edge rather than compile a second
-            ! path copy reached through another dependency.
-            shadowed = .false.
-            do k = 1, root_config%n_deps
-                if (trim(root_config%deps(k)%name) /= &
-                        trim(cfg%deps(i)%name)) cycle
-                if (dep_kind(root_config%deps(k)) == DEP_PATH) cycle
-                shadowed = .true.
-                exit
-            end do
-            if (shadowed) cycle
-            call resolve_path_dep(dir, trim(cfg%deps(i)%path), dep_dir)
+            if (.not. has_manifest(dep_dir)) then
+                if (root_kind == DEP_GIT) n_unresolved = n_unresolved + 1
+                cycle
+            end if
             seen = .false.
             do k = 1, n_out
                 if (trim(out(k)%dir) == trim(dep_dir)) then
@@ -181,21 +205,40 @@ contains
                 end if
             end do
             ! Record the dep's library source dir (its own source-dir setting),
-            ! then recurse into the dep for its transitive path deps. Dedup keys
-            ! on the resolved dep dir so a diamond is compiled once.
+            ! then recurse into the dep for its transitive dependencies. Dedup
+            ! on the resolved root so a diamond is compiled once.
             if (.not. seen) then
-                call record_dep_src(cfg%deps(i)%name, dep_dir, out, n_out)
-                call walk(dep_dir, out, n_out, n_unresolved, ierr, depth + 1, &
-                    root_config)
+                call record_dep_src(cfg%deps(i)%name, dep_dir, out, n_out, &
+                    root_kind)
+                call walk(dep_dir, out, n_out, n_unresolved, n_registry, &
+                    ierr, depth + 1, root_config)
                 ierr = 0
             end if
         end do
     end subroutine walk
 
-    subroutine record_dep_src(name, dep_dir, out, n_out)
+    subroutine drop_git_sources(out, n_out)
+        type(resolved_src_t), intent(inout) :: out(MAX_RESOLVED)
+        integer, intent(inout) :: n_out
+
+        type(resolved_src_t) :: kept(MAX_RESOLVED)
+        integer :: i, n_kept
+
+        n_kept = 0
+        do i = 1, n_out
+            if (out(i)%kind == DEP_GIT) cycle
+            n_kept = n_kept + 1
+            kept(n_kept) = out(i)
+        end do
+        out = kept
+        n_out = n_kept
+    end subroutine drop_git_sources
+
+    subroutine record_dep_src(name, dep_dir, out, n_out, kind)
         character(len=*), intent(in) :: name, dep_dir
         type(resolved_src_t), intent(inout) :: out(MAX_RESOLVED)
         integer, intent(inout) :: n_out
+        integer, intent(in), optional :: kind
 
         type(fpm_config_t), allocatable :: dcfg
         integer :: derr
@@ -214,6 +257,7 @@ contains
         out(n_out)%dir = trim(dep_dir)
         out(n_out)%src_dir = trim(src)
         out(n_out)%kind = DEP_PATH
+        if (present(kind)) out(n_out)%kind = kind
     end subroutine record_dep_src
 
     subroutine resolve_path_dep(base, rel, out)

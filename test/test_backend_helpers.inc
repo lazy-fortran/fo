@@ -1270,37 +1270,86 @@
 
     subroutine test_gfortran_bootstraps_git_dependency()
         type(backend_t) :: b
-        integer :: exitcode, u, ios
-        character(len=512) :: base, libdir, appdir, log_file, outfile
-        character(len=64) :: line
+        integer :: exitcode, u, ios, path_status, compile_exit
+        character(len=512) :: base, leafdir, libdir, appdir, log_file, outfile
+        character(len=512) :: compiler, real_fpm, wrapper_dir, fpm_log
+        character(len=512) :: wrapper, compile_log, source_root, prior_path
+        character(len=512) :: line, fpm_call
+        logical :: compiler_found, fpm_found, exists
 
         call make_tmp_path('fo_test_gitdep', base)
+        leafdir = trim(base)//'/leaf'
         libdir = trim(base)//'/lib'
         appdir = trim(base)//'/app'
         call make_tmp_path('fo_backend_gitdep', log_file)
+        wrapper_dir = trim(base)//'/bin'
+        fpm_log = trim(base)//'/fpm.log'
+        wrapper = trim(wrapper_dir)//'/fpm'
+        call make_tmp_path('fo_backend_gitdep_compile', compile_log)
 
-        call execute_command_line('mkdir -p '//trim(libdir)//'/src '// &
-            trim(appdir)//'/app')
+        call fs_find_executable('gfortran', compiler, compiler_found)
+        call fs_find_executable('fpm', real_fpm, fpm_found)
+        call assert(compiler_found .and. fpm_found, &
+            'git dependency oracle has its task compiler and fpm pin')
+        if (.not. compiler_found .or. .not. fpm_found) return
+        call process_getcwd(source_root, ios)
+        if (ios /= 0) then
+            call assert(.false., 'git dependency oracle locates fixture source')
+            return
+        end if
+        call make_dir(wrapper_dir)
+        call compile_fpm_command_fixture(wrapper, compiler, source_root, &
+            compile_log, compile_exit)
+        call assert(compile_exit == 0, 'native fpm argv counter compiles')
+        if (compile_exit /= 0) return
+
+        call get_environment_variable('PATH', prior_path, status=path_status)
+        call set_env('FO_TEST_REAL_FPM', trim(real_fpm))
+        call set_env('FO_TEST_FPM_LOG', trim(fpm_log))
+        call set_env('PATH', trim(wrapper_dir)//':'//trim(prior_path))
+
+        call execute_command_line('mkdir -p "'//trim(leafdir)//'/src" "'// &
+            trim(libdir)//'/src" "'//trim(appdir)//'/app"')
+        open (newunit=u, file=trim(leafdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "leafdep"'
+        close (u)
+        open (newunit=u, file=trim(leafdir)//'/src/leafmod.f90', &
+            status='replace')
+        write (u, '(a)') 'module leafmod'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer function leaf_value()'
+        write (u, '(a)') '    leaf_value = 2'
+        write (u, '(a)') '  end function leaf_value'
+        write (u, '(a)') 'end module leafmod'
+        close (u)
+        call commit_local_dependency(leafdir)
+
         open (newunit=u, file=trim(libdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "deplib"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a,a,a)') 'leafdep = { git = "file://', &
+            trim(leafdir), '" }'
         close (u)
         open (newunit=u, file=trim(libdir)//'/src/depmod.f90', status='replace')
         write (u, '(a)') 'module depmod'
-        write (u, '(a)') '  implicit none'
+        write (u, '(a)') '  use, intrinsic :: iso_c_binding, only: c_int'
+        write (u, '(a)') '  use leafmod, only: leaf_value'
+        write (u, '(a)') '  interface'
+        write (u, '(a)') '    integer(c_int) function c_dep_value() &'
+        write (u, '(a)') '        bind(C, name="dep_c_value")'
+        write (u, '(a)') '      import c_int'
+        write (u, '(a)') '    end function c_dep_value'
+        write (u, '(a)') '  end interface'
         write (u, '(a)') 'contains'
         write (u, '(a)') '  integer function dep_value()'
-        write (u, '(a)') '#ifdef FO_INACTIVE_BRANCH'
-        write (u, '(a)') '    call symbol_that_must_not_be_linked'
-        write (u, '(a)') '#endif'
-        write (u, '(a)') '    dep_value = 13'
+        write (u, '(a)') '    dep_value = 9 + leaf_value() + c_dep_value()'
         write (u, '(a)') '  end function dep_value'
         write (u, '(a)') 'end module depmod'
         close (u)
-        call execute_command_line('git -C '//trim(libdir)//' init -q')
-        call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src/depmod.f90')
-        call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo commit -q -m init')
+        open (newunit=u, file=trim(libdir)//'/src/dep_c.c', status='replace')
+        write (u, '(a)') 'int dep_c_value(void) { return 2; }'
+        close (u)
+        call commit_local_dependency(libdir)
 
         open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "depapp"'
@@ -1316,7 +1365,41 @@
 
         b = detect_backend(appdir)
         call backend_build(b, exitcode, log_file=log_file)
-        call assert(exitcode == 0, 'project with git dependency bootstraps through fpm')
+        call assert(exitcode == 0, &
+            'native build fetches git dependencies without fpm compilation')
+
+        inquire (file=trim(appdir)//'/build/dependencies/deplib/fpm.toml', &
+            exist=exists)
+        call assert(exists, 'direct git dependency is materialized')
+        inquire (file=trim(appdir)//'/build/dependencies/leafdep/fpm.toml', &
+            exist=exists)
+        call assert(exists, 'transitive git dependency is materialized flat')
+        inquire (file=trim(appdir)//'/build/fo/mod/depmod.mod', exist=exists)
+        call assert(exists, 'git Fortran module is compiled by the native DAG')
+        inquire (file=trim(appdir)//'/build/fo/mod/leafmod.mod', exist=exists)
+        call assert(exists, 'transitive module is compiled by the native DAG')
+
+        open (newunit=u, file=trim(fpm_log), status='old', iostat=ios)
+        fpm_call = ''
+        if (ios == 0) then
+            read (u, '(a)', iostat=ios) fpm_call
+            close (u)
+        end if
+        call assert(trim(fpm_call) == 'fpm update --fetch-only', &
+            'fpm argv records fetch-only and never requests a build')
+
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, 'warm git dependency build remains current')
+        line = ''
+        open (newunit=u, file=trim(fpm_log), status='old', iostat=ios)
+        if (ios == 0) then
+            read (u, '(a)', iostat=ios) fpm_call
+            read (u, '(a)', iostat=ios) line
+            close (u)
+        else
+            line = 'missing argv log'
+        end if
+        call assert(trim(line) == '', 'warm build performs no second fpm call')
 
         outfile = trim(base)//'/out.txt'
         call execute_command_line(trim(appdir)//'/build/fo/bin/depapp > '// &
@@ -1328,11 +1411,46 @@
             close (u)
         end if
         call assert(trim(adjustl(line)) == '13', &
-            'binary links git dep and prints the dep value')
+            'binary links nested Fortran and C dependency sources and prints 13')
+
+        if (path_status == 0) then
+            call set_env('PATH', trim(prior_path))
+        else
+            call set_env('PATH', '')
+        end if
+        call set_env('FO_TEST_REAL_FPM', '')
+        call set_env('FO_TEST_FPM_LOG', '')
 
         call remove_tree(base)
         call execute_command_line('rm -f '//trim(log_file))
+        call execute_command_line('rm -f '//trim(compile_log))
     end subroutine test_gfortran_bootstraps_git_dependency
+
+    subroutine commit_local_dependency(dependency_dir)
+        character(len=*), intent(in) :: dependency_dir
+
+        call execute_command_line('git -C "'//trim(dependency_dir)//'" init -q')
+        call execute_command_line('git -C "'//trim(dependency_dir)// &
+            '" -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src')
+        call execute_command_line('git -C "'//trim(dependency_dir)// &
+            '" -c user.email=fo@example.invalid -c user.name=fo commit -q -m init')
+    end subroutine commit_local_dependency
+
+    subroutine compile_fpm_command_fixture(executable, compiler, source_root, &
+            log_file, exitcode)
+        character(len=*), intent(in) :: executable, compiler, source_root
+        character(len=*), intent(in) :: log_file
+        integer, intent(out) :: exitcode
+
+        character(len=512) :: source, arguments(3)
+
+        source = trim(source_root)// &
+            '/test-fixtures/fortran/fo_fpm_argv_counter.f90'
+        arguments(1) = trim(source)
+        arguments(2) = '-o'
+        arguments(3) = trim(executable)
+        call run_backend_argv(trim(compiler), arguments, log_file, exitcode)
+    end subroutine compile_fpm_command_fixture
 
     subroutine test_gfortran_repairs_partial_git_dependency_artifacts()
         !! A nonempty fpm profile is not proof that every dependency module was
