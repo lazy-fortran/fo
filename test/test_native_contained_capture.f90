@@ -10,7 +10,7 @@ program test_native_contained_capture
         gremlin_session_release
     use fo_test_harness, only: string_list_t, process_result_t, list_add, &
         make_scratch, make_directory, write_text, read_text, file_exists, &
-        environment_value, run_process, process_alive, assert_true, &
+        environment_value, run_process, process_alive, poll_process, stop_sentinel, assert_true, &
         assert_equal_integer, assert_equal_string, finish_assertions
     implicit none
 
@@ -42,11 +42,17 @@ program test_native_contained_capture
             import :: c_int
         end function c_spawn_same_group_sentinel
 
+        integer(c_int) function c_containment_required() &
+                bind(C, name='fo_c_process_containment_required')
+            import :: c_int
+        end function c_containment_required
+
     end interface
 
     character(len=4096) :: executable, cwd, mode, scratch_buffer
     character(:), allocatable :: scratch
     integer :: status
+    integer(c_int) :: containment_required
 
     call get_command_argument(0, executable)
     call process_getcwd(cwd, status)
@@ -67,8 +73,17 @@ program test_native_contained_capture
         call outer_mode(trim(scratch_buffer))
     case default
         call make_scratch('fo-native-contained-capture', scratch)
-        call run_oracle(trim(scratch))
-        call finish_assertions(retain_failed_scratch=.true.)
+        containment_required = c_containment_required()
+        call assert_true(containment_required >= 0, &
+            'checks whether inherited containment is active')
+        if (containment_required < 0) then
+            call finish_assertions(retain_failed_scratch=.true.)
+        else if (containment_required == 1) then
+            call contained_mode(trim(scratch))
+        else
+            call run_oracle(trim(scratch))
+            call finish_assertions(retain_failed_scratch=.true.)
+        end if
     end select
 
 contains
@@ -232,15 +247,22 @@ contains
         character(len=*), intent(in) :: root
         type(string_list_t) :: args
         type(process_result_t) :: result
-        integer :: sentinel_pid, descendant_pid
+        integer :: sentinel_pid, descendant_pid, sentinel_status
         integer :: contained_pid, monitor_pid
         character(len=32) :: pid_text
+        logical :: sentinel_running
 
         contained_pid = process_getpid()
         write(pid_text, '(i0)') contained_pid
         call write_text(trim(root)//'/contained.pid', trim(pid_text))
         sentinel_pid = int(c_spawn_same_group_sentinel())
         call assert_true(sentinel_pid > 0, 'starts unrelated same-group sentinel')
+        sentinel_running = .false.
+        if (sentinel_pid > 0) then
+            call poll_process(sentinel_pid, sentinel_status)
+            sentinel_running = sentinel_status == 999
+        end if
+        call assert_true(sentinel_running, 'same-group sentinel is initially running')
         write(pid_text, '(i0)') sentinel_pid
         call write_text(trim(root)//'/sentinel.pid', trim(pid_text))
 
@@ -303,8 +325,25 @@ contains
         call assert_true(descendant_pid > 0, 'records the exact descendant identity')
         call assert_true(.not. process_alive(descendant_pid), &
             'timeout cleanup removes the TERM-resistant descendant')
-        call assert_true(process_alive(sentinel_pid), &
-            'inner timeout cleanup preserves unrelated same-group sentinel')
+        if (sentinel_running) then
+            call poll_process(sentinel_pid, sentinel_status)
+            sentinel_running = sentinel_status == 999
+        end if
+        call assert_true(sentinel_running, &
+            'inner timeout cleanup preserves a running same-group sentinel')
+        if (sentinel_running) call stop_sentinel(sentinel_pid)
+        call assert_pid_absent(trim(root)//'/sentinel.pid', &
+            'contained test stops and reaps its sentinel before owner teardown')
+        call assert_pid_absent(trim(root)//'/descendant.pid', &
+            'contained test leaves no descendant')
+        call assert_pid_absent(trim(root)//'/target.pid', &
+            'contained test leaves no target process')
+        call assert_pid_absent(trim(root)//'/io-monitor.pid', &
+            'contained test leaves no normal monitor')
+        call assert_pid_absent(trim(root)//'/signal-monitor.pid', &
+            'contained test leaves no signal monitor')
+        call assert_pid_absent(trim(root)//'/timeout-monitor.pid', &
+            'contained test leaves no timeout monitor')
         call finish_assertions(retain_failed_scratch=.true.)
         call process_exit(0)
     end subroutine contained_mode
