@@ -26,6 +26,14 @@
 #include <libproc.h>
 #endif
 
+int fo_test_host_is_linux(void) {
+#ifdef __linux__
+    return 1;
+#else
+    return 0;
+#endif
+}
+
 static uint64_t process_start_time(pid_t pid) {
 #if defined(__linux__)
     char path[64], line[4096];

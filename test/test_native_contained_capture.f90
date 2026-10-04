@@ -1,5 +1,5 @@
 program test_native_contained_capture
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, &
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_int64_t, c_null_char, &
         c_funptr, c_funloc
     use, intrinsic :: iso_fortran_env, only: input_unit, error_unit, output_unit
     use fo_fs, only: fs_sleep_ms
@@ -13,6 +13,8 @@ program test_native_contained_capture
         environment_value, run_process, process_alive, poll_process, stop_sentinel, assert_true, &
         assert_equal_integer, assert_equal_string, finish_assertions
     use fo_test_json, only: json_value_t, json_parse, json_member, json_string_value
+    use fo_test_process_identity, only: mcp_process_start_time, &
+        mcp_process_identity_running
     implicit none
 
     interface
@@ -47,6 +49,10 @@ program test_native_contained_capture
                 bind(C, name='fo_c_process_containment_required')
             import :: c_int
         end function c_containment_required
+
+        integer(c_int) function c_host_is_linux() bind(C, name='fo_test_host_is_linux')
+            import :: c_int
+        end function c_host_is_linux
 
     end interface
 
@@ -262,6 +268,7 @@ contains
         integer :: async_target_pid, async_descendant_pid
         integer :: async_count
         integer :: cli_owner_pid, cli_status, cli_attempt, separator
+        integer(c_int64_t) :: cli_owner_start
         character(len=32) :: pid_text
         character(:), allocatable :: driver, session_id, json_error
         logical :: sentinel_running
@@ -284,8 +291,14 @@ contains
         write(pid_text, '(i0)') sentinel_pid
         call write_text(trim(root)//'/sentinel.pid', trim(pid_text))
 
-        call assert_equal_integer(int(c_containment_required()), 1, &
-            'nested async launch runs under strict group containment')
+        containment_required = c_containment_required()
+        if (c_host_is_linux() == 1) then
+            call assert_equal_integer(int(containment_required), 1, &
+                'nested async launch runs under strict group containment')
+        else
+            call assert_equal_integer(int(containment_required), 0, &
+                'nested launch uses the available standard process boundary')
+        end if
         async_args = ''
         async_count = 0
         call argv_push(async_args, async_count, trim(executable))
@@ -386,6 +399,8 @@ contains
         call list_add(args, '1')
         call list_add(args, '--json')
         call run_process(args, trim(root), result, timeout_ms=15000)
+        call write_text(trim(root)//'/public-start.stdout', result%stdout)
+        call write_text(trim(root)//'/public-start.stderr', result%stderr)
         call assert_true(.not. result%runner_failed .and. result%reaped .and. &
             result%exit_code == 0, 'public Gremlin start completes in capture monitor')
         call json_parse(result%stdout, cli_json, json_valid, json_error)
@@ -399,10 +414,15 @@ contains
             if (cli_status /= 0) cli_owner_pid = -1
         end if
         call assert_true(cli_owner_pid > 0, 'public session identifies its owner process')
+        cli_owner_start = 0_c_int64_t
+        if (cli_owner_pid > 0) cli_owner_start = mcp_process_start_time(cli_owner_pid)
+        call assert_true(cli_owner_start > 0_c_int64_t, &
+            'public session owner has a recorded process birth identity')
         write(pid_text, '(i0)') cli_owner_pid
         call write_text(trim(root)//'/public-owner.pid', trim(pid_text))
-        cli_owner_live = cli_owner_pid > 0
-        if (cli_owner_live) cli_owner_live = process_alive(cli_owner_pid)
+        cli_owner_live = cli_owner_pid > 0 .and. cli_owner_start > 0_c_int64_t
+        if (cli_owner_live) cli_owner_live = &
+            mcp_process_identity_running(cli_owner_pid, cli_owner_start)
         call assert_true(cli_owner_live, &
             'resident owner survives the completed public start capture')
 
@@ -418,10 +438,13 @@ contains
         call list_add(args, session_id)
         call list_add(args, '--json')
         call run_process(args, trim(root), result, timeout_ms=10000)
+        call write_text(trim(root)//'/public-status.stdout', result%stdout)
+        call write_text(trim(root)//'/public-status.stderr', result%stderr)
         call assert_true(.not. result%runner_failed .and. result%reaped .and. &
             result%exit_code == 0, 'public status attaches after start capture exits')
-        cli_owner_live = cli_owner_pid > 0
-        if (cli_owner_live) cli_owner_live = process_alive(cli_owner_pid)
+        cli_owner_live = cli_owner_pid > 0 .and. cli_owner_start > 0_c_int64_t
+        if (cli_owner_live) cli_owner_live = &
+            mcp_process_identity_running(cli_owner_pid, cli_owner_start)
         call assert_true(cli_owner_live, 'status observes the resident owner alive')
 
         args = string_list_t()
@@ -436,12 +459,15 @@ contains
         call list_add(args, session_id)
         call list_add(args, '--json')
         call run_process(args, trim(root), result, timeout_ms=10000)
+        call write_text(trim(root)//'/public-stop.stdout', result%stdout)
+        call write_text(trim(root)//'/public-stop.stderr', result%stderr)
         call assert_true(.not. result%runner_failed .and. result%reaped .and. &
             result%exit_code == 0, 'public stop requests resident owner teardown')
         cli_stopped = .false.
         do cli_attempt = 1, 100
-            cli_owner_live = cli_owner_pid > 0
-            if (cli_owner_live) cli_owner_live = process_alive(cli_owner_pid)
+            cli_owner_live = cli_owner_pid > 0 .and. cli_owner_start > 0_c_int64_t
+            if (cli_owner_live) cli_owner_live = &
+                mcp_process_identity_running(cli_owner_pid, cli_owner_start)
             if (.not. cli_owner_live) exit
             call fs_sleep_ms(20)
         end do
@@ -457,14 +483,17 @@ contains
         call list_add(args, session_id)
         call list_add(args, '--json')
         call run_process(args, trim(root), result, timeout_ms=10000)
+        call write_text(trim(root)//'/public-stopped-status.stdout', result%stdout)
+        call write_text(trim(root)//'/public-stopped-status.stderr', result%stderr)
         if (.not. result%runner_failed .and. result%exit_code == 0) then
             call json_parse(result%stdout, cli_json, json_valid, json_error)
             cli_stopped = json_valid .and. &
                 json_string_value(json_member(cli_json, 'state')) == 'stopped'
         end if
         call assert_true(cli_stopped, 'public status observes completed owner stop')
-        if (cli_owner_pid > 0) call assert_true(.not. process_alive(cli_owner_pid), &
-            'publicly stopped owner process is gone')
+        if (cli_owner_pid > 0 .and. cli_owner_start > 0_c_int64_t) &
+            call assert_true(.not. mcp_process_identity_running(cli_owner_pid, &
+                cli_owner_start), 'publicly stopped owner identity is no longer running')
 
         args = string_list_t()
         call list_add(args, trim(executable))
