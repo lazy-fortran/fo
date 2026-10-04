@@ -12,6 +12,7 @@ program test_native_contained_capture
         make_scratch, make_directory, write_text, read_text, file_exists, &
         environment_value, run_process, process_alive, poll_process, stop_sentinel, assert_true, &
         assert_equal_integer, assert_equal_string, finish_assertions
+    use fo_test_json, only: json_value_t, json_parse, json_member, json_string_value
     implicit none
 
     interface
@@ -65,6 +66,8 @@ program test_native_contained_capture
         call signal_helper()
     case ('--timeout-helper')
         call timeout_helper()
+    case ('--async-exit-helper')
+        call async_exit_helper()
     case ('--contained')
         call get_command_argument(2, scratch_buffer)
         call contained_mode(trim(scratch_buffer))
@@ -162,6 +165,12 @@ contains
             'TERM-resistant descendant is gone after outer teardown')
         call assert_pid_absent(trim(root)//'/sentinel.pid', &
             'same-group sentinel is gone after outer teardown')
+        call assert_pid_absent(trim(root)//'/async-target.pid', &
+            'contained async target exits before outer teardown')
+        call assert_pid_absent(trim(root)//'/async-descendant.pid', &
+            'contained async descendant exits before outer teardown')
+        call assert_pid_absent(trim(root)//'/public-owner.pid', &
+            'publicly stopped resident owner exits before outer teardown')
     end subroutine run_oracle
 
     subroutine outer_mode(root)
@@ -248,9 +257,18 @@ contains
         type(string_list_t) :: args
         type(process_result_t) :: result
         integer :: sentinel_pid, descendant_pid, sentinel_status
-        integer :: contained_pid, monitor_pid
+        integer :: contained_pid, monitor_pid, async_pid, async_start_error
+        integer :: async_exit, async_attempt, async_cancel_error
+        integer :: async_target_pid, async_descendant_pid
+        integer :: async_count
+        integer :: cli_owner_pid, cli_status, cli_attempt, separator
         character(len=32) :: pid_text
+        character(:), allocatable :: driver, session_id, json_error
         logical :: sentinel_running
+        logical :: async_done
+        logical :: json_valid, cli_owner_live, cli_stopped
+        character(:), allocatable :: async_args
+        type(json_value_t) :: cli_json
 
         contained_pid = process_getpid()
         write(pid_text, '(i0)') contained_pid
@@ -265,6 +283,188 @@ contains
         call assert_true(sentinel_running, 'same-group sentinel is initially running')
         write(pid_text, '(i0)') sentinel_pid
         call write_text(trim(root)//'/sentinel.pid', trim(pid_text))
+
+        call assert_equal_integer(int(c_containment_required()), 1, &
+            'nested async launch runs under strict group containment')
+        async_args = ''
+        async_count = 0
+        call argv_push(async_args, async_count, trim(executable))
+        call argv_push(async_args, async_count, '--async-exit-helper')
+        async_pid = -1
+        async_start_error = -1
+        call process_start_argv_logged(trim(cwd), async_args, async_count, &
+            trim(root)//'/async-exit.log', async_pid, async_start_error)
+        call assert_true(async_start_error == 0 .and. async_pid > 0, &
+            'starts an async command through the contained monitor')
+        write(pid_text, '(i0)') async_pid
+        call write_text(trim(root)//'/async-monitor.pid', trim(pid_text))
+        async_done = .false.
+        async_exit = -1
+        if (async_start_error == 0 .and. async_pid > 0) then
+            do async_attempt = 1, 2000
+                call process_poll_pid(async_pid, async_done, async_exit)
+                if (async_done) exit
+                call fs_sleep_ms(10)
+            end do
+        end if
+        call assert_true(async_done, 'polls the contained async command to completion')
+        if (.not. async_done .and. async_pid > 0) &
+            call process_cancel_pid(async_pid, async_cancel_error)
+        call assert_equal_integer(async_exit, 7, &
+            'contained async monitor preserves the target exit status')
+        if (file_exists(trim(root)//'/async-exit.log')) then
+            call assert_true(index(read_text(trim(root)//'/async-exit.log'), &
+                'async target output') > 0, 'contained async command captures output')
+        else
+            call assert_true(.false., 'contained async command creates its log')
+        end if
+        if (sentinel_running) then
+            call poll_process(sentinel_pid, sentinel_status)
+            sentinel_running = sentinel_status == 999
+        end if
+        call assert_true(sentinel_running, &
+            'normal contained async completion preserves same-group sentinel')
+
+        async_args = ''
+        async_count = 0
+        call argv_push(async_args, async_count, trim(executable))
+        call argv_push(async_args, async_count, '--timeout-helper')
+        call argv_push(async_args, async_count, trim(root)//'/async-target.pid')
+        call argv_push(async_args, async_count, trim(root)//'/async-descendant.pid')
+        call argv_push(async_args, async_count, trim(root)//'/async-descendant.ready')
+        call argv_push(async_args, async_count, &
+            trim(root)//'/async-descendant.heartbeat')
+        async_pid = -1
+        async_start_error = -1
+        call process_start_argv_logged(trim(cwd), async_args, async_count, &
+            trim(root)//'/async-timeout.log', async_pid, async_start_error)
+        call assert_true(async_start_error == 0 .and. async_pid > 0, &
+            'starts a contained async tree for cancellation')
+        write(pid_text, '(i0)') async_pid
+        call write_text(trim(root)//'/async-cancel-monitor.pid', trim(pid_text))
+        do async_attempt = 1, 200
+            if (file_exists(trim(root)//'/async-descendant.ready')) exit
+            call fs_sleep_ms(10)
+        end do
+        call assert_true(file_exists(trim(root)//'/async-descendant.ready'), &
+            'contained async descendant reaches its ready barrier')
+        call process_cancel_pid(async_pid, async_cancel_error)
+        call assert_equal_integer(async_cancel_error, 0, &
+            'cancels the exact contained async monitor tree')
+        async_target_pid = read_pid(trim(root)//'/async-target.pid')
+        async_descendant_pid = read_pid(trim(root)//'/async-descendant.pid')
+        call assert_true(async_target_pid > 0 .and. async_descendant_pid > 0, &
+            'records both contained async process identities')
+        call assert_true(.not. process_alive(async_target_pid), &
+            'cancellation reaps contained async target')
+        call assert_true(.not. process_alive(async_descendant_pid), &
+            'cancellation reaps TERM-resistant async descendant')
+        if (sentinel_running) then
+            call poll_process(sentinel_pid, sentinel_status)
+            sentinel_running = sentinel_status == 999
+        end if
+        call assert_true(sentinel_running, &
+            'contained async cancellation preserves same-group sentinel')
+
+        driver = environment_value('FO_BIN')
+        call make_directory(trim(root)//'/project/src')
+        call write_text(trim(root)//'/project/fpm.toml', &
+            'name = "contained_capture_owner"'//new_line('a'))
+        call write_text(trim(root)//'/project/src/probe.f90', &
+            'module contained_capture_probe'//new_line('a')// &
+            'implicit none'//new_line('a')// &
+            'end module contained_capture_probe'//new_line('a'))
+        args = string_list_t()
+        call list_add(args, driver)
+        call list_add(args, 'gremlin')
+        call list_add(args, 'start')
+        call list_add(args, '--dir')
+        call list_add(args, trim(root)//'/project')
+        call list_add(args, '--lane')
+        call list_add(args, 'capture-owner')
+        call list_add(args, '--random-count')
+        call list_add(args, '1')
+        call list_add(args, '--json')
+        call run_process(args, trim(root), result, timeout_ms=15000)
+        call assert_true(.not. result%runner_failed .and. result%reaped .and. &
+            result%exit_code == 0, 'public Gremlin start completes in capture monitor')
+        call json_parse(result%stdout, cli_json, json_valid, json_error)
+        call assert_true(json_valid, 'public start returns valid JSON: '//json_error)
+        session_id = json_string_value(json_member(cli_json, 'session_id'))
+        call assert_true(len(session_id) > 0, 'public start returns its owner session')
+        separator = index(session_id, '-')
+        cli_owner_pid = -1
+        if (separator > 1) then
+            read(session_id(:separator - 1), *, iostat=cli_status) cli_owner_pid
+            if (cli_status /= 0) cli_owner_pid = -1
+        end if
+        call assert_true(cli_owner_pid > 0, 'public session identifies its owner process')
+        write(pid_text, '(i0)') cli_owner_pid
+        call write_text(trim(root)//'/public-owner.pid', trim(pid_text))
+        cli_owner_live = cli_owner_pid > 0
+        if (cli_owner_live) cli_owner_live = process_alive(cli_owner_pid)
+        call assert_true(cli_owner_live, &
+            'resident owner survives the completed public start capture')
+
+        args = string_list_t()
+        call list_add(args, driver)
+        call list_add(args, 'gremlin')
+        call list_add(args, 'status')
+        call list_add(args, '--dir')
+        call list_add(args, trim(root)//'/project')
+        call list_add(args, '--lane')
+        call list_add(args, 'capture-owner')
+        call list_add(args, '--session')
+        call list_add(args, session_id)
+        call list_add(args, '--json')
+        call run_process(args, trim(root), result, timeout_ms=10000)
+        call assert_true(.not. result%runner_failed .and. result%reaped .and. &
+            result%exit_code == 0, 'public status attaches after start capture exits')
+        cli_owner_live = cli_owner_pid > 0
+        if (cli_owner_live) cli_owner_live = process_alive(cli_owner_pid)
+        call assert_true(cli_owner_live, 'status observes the resident owner alive')
+
+        args = string_list_t()
+        call list_add(args, driver)
+        call list_add(args, 'gremlin')
+        call list_add(args, 'stop')
+        call list_add(args, '--dir')
+        call list_add(args, trim(root)//'/project')
+        call list_add(args, '--lane')
+        call list_add(args, 'capture-owner')
+        call list_add(args, '--session')
+        call list_add(args, session_id)
+        call list_add(args, '--json')
+        call run_process(args, trim(root), result, timeout_ms=10000)
+        call assert_true(.not. result%runner_failed .and. result%reaped .and. &
+            result%exit_code == 0, 'public stop requests resident owner teardown')
+        cli_stopped = .false.
+        do cli_attempt = 1, 100
+            cli_owner_live = cli_owner_pid > 0
+            if (cli_owner_live) cli_owner_live = process_alive(cli_owner_pid)
+            if (.not. cli_owner_live) exit
+            call fs_sleep_ms(20)
+        end do
+        args = string_list_t()
+        call list_add(args, driver)
+        call list_add(args, 'gremlin')
+        call list_add(args, 'status')
+        call list_add(args, '--dir')
+        call list_add(args, trim(root)//'/project')
+        call list_add(args, '--lane')
+        call list_add(args, 'capture-owner')
+        call list_add(args, '--session')
+        call list_add(args, session_id)
+        call list_add(args, '--json')
+        call run_process(args, trim(root), result, timeout_ms=10000)
+        if (.not. result%runner_failed .and. result%exit_code == 0) then
+            call json_parse(result%stdout, cli_json, json_valid, json_error)
+            cli_stopped = json_valid .and. &
+                json_string_value(json_member(cli_json, 'state')) == 'stopped'
+        end if
+        call assert_true(cli_stopped, 'public status observes completed owner stop')
+        if (cli_owner_pid > 0) call assert_true(.not. process_alive(cli_owner_pid), &
+            'publicly stopped owner process is gone')
 
         args = string_list_t()
         call list_add(args, trim(executable))
@@ -344,6 +544,14 @@ contains
             'contained test leaves no signal monitor')
         call assert_pid_absent(trim(root)//'/timeout-monitor.pid', &
             'contained test leaves no timeout monitor')
+        call assert_pid_absent(trim(root)//'/async-monitor.pid', &
+            'contained test leaves no completed async monitor')
+        call assert_pid_absent(trim(root)//'/async-cancel-monitor.pid', &
+            'contained test leaves no cancelled async monitor')
+        call assert_pid_absent(trim(root)//'/async-target.pid', &
+            'contained test leaves no async target')
+        call assert_pid_absent(trim(root)//'/async-descendant.pid', &
+            'contained test leaves no async descendant')
         call finish_assertions(retain_failed_scratch=.true.)
         call process_exit(0)
     end subroutine contained_mode
@@ -358,6 +566,11 @@ contains
         write(error_unit, '(a)') 'stderr:'//trim(input_line)
         call process_exit(7)
     end subroutine io_helper
+
+    subroutine async_exit_helper()
+        write(output_unit, '(a)') 'async target output'
+        call process_exit(7)
+    end subroutine async_exit_helper
 
     subroutine signal_helper()
         integer(c_int) :: rc
