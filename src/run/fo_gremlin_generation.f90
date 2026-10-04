@@ -806,7 +806,12 @@ contains
                     end do
                     if (found) exit
                 end do
-                if (.not. found) return
+                if (.not. found) then
+                    message = 'materialized entry is missing: '// &
+                        trim(expected%roots(expected_root)%aliases(j))//':'// &
+                        trim(expected%entries(i)%relative_path)
+                    return
+                end if
             end do
         end do
         do i = 1, observed%entry_count
@@ -833,7 +838,12 @@ contains
                 end do
                 if (found) exit
             end do
-            if (.not. found) return
+            if (.not. found) then
+                message = 'materialized entry is unexpected: '// &
+                    trim(observed%entries(i)%root_alias)//':'// &
+                    trim(observed%entries(i)%relative_path)
+                return
+            end if
         end do
         ierr = 0
         message = ''
@@ -860,7 +870,7 @@ contains
                 expected_mode = 365
             end if
         case (INPUT_DIRECTORY)
-            expected_mode = 365
+            expected_mode = 0
         end select
         if (observed%mode /= expected_mode) return
         matching_materialized_entry = .true.
