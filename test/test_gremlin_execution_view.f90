@@ -122,6 +122,12 @@ program test_gremlin_execution_view
     call check(index(message, 'invalid declared fixture') > 0, &
         'invalid declaration reports its discovery diagnostic')
 
+    call execution_view_create(trim(root)//'/views', repeat('a', HASH_LEN), &
+        'session-unavailable', 'test_case', inventory, .false., .false., &
+        rejected, ierr, message)
+    call check(ierr /= 0 .and. .not. rejected%active, &
+        'unavailable inventory rejects execution without fixture knowledge')
+
     escaping = inventory
     do i = 1, escaping%entry_count
         if (trim(escaping%entries(i)%role) /= 'test-fixture') cycle
