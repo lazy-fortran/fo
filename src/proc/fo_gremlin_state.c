@@ -23,6 +23,7 @@
 
 #ifdef __APPLE__
 #include <libproc.h>
+#include <sys/proc.h>
 #endif
 
 static int make_dirs(const char *path) {
@@ -46,6 +47,8 @@ static uint64_t hash_bytes(uint64_t h, const unsigned char *s) {
 }
 
 int fo_gremlin_process_matches(int pid, const char *start);
+int fo_c_recover_async_scope(const char *state_dir, int owner_pid,
+                             const char *owner_start);
 
 static int state_path(const char *project, const char *lane, char *out,
                       size_t cap, char *canonical, size_t canonical_cap,
@@ -184,9 +187,10 @@ static int process_start(pid_t pid, char *out, size_t cap) {
     struct proc_bsdinfo info;
     int n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
     if (n != sizeof(info)) return ESRCH;
-    if (snprintf(out, cap, "%llu.%06u",
+    if (info.pbi_status == SZOMB) return ESRCH;
+    if (snprintf(out, cap, "%llu.%06llu",
                  (unsigned long long)info.pbi_start_tvsec,
-                 info.pbi_start_tvusec) >= (int)cap)
+                 (unsigned long long)info.pbi_start_tvusec) >= (int)cap)
         return ENAMETOOLONG;
     return 0;
 #else
@@ -273,13 +277,23 @@ int fo_gremlin_session_acquire(const char *project, const char *lane,
             return EAGAIN;
         }
     }
+    e = read_owner(dir, prior_id, sizeof(prior_id), &prior_pid,
+                   prior_start, sizeof(prior_start));
+    if (e == 0) {
+        if (fo_gremlin_process_matches(prior_pid, prior_start)) {
+            e = EBUSY;
+            goto fail;
+        }
+        e = fo_c_recover_async_scope(dir, prior_pid, prior_start);
+        if (e != 0) goto fail;
+    } else if (e != ENOENT) {
+        goto fail;
+    }
     e = read_recovery_source(dir, recovered, (size_t)recoveredcap);
     if (e != 0 && e != ENOENT) goto fail;
     if (e == ENOENT) {
         recovered[0] = 0;
-        e = read_owner(dir, prior_id, sizeof(prior_id), &prior_pid,
-                       prior_start, sizeof(prior_start));
-        if (e == 0 && !fo_gremlin_process_matches(prior_pid, prior_start)) {
+        if (prior_pid > 0) {
             if (strlen(prior_id) + 1 > (size_t)recoveredcap) {
                 e = ENAMETOOLONG;
                 goto fail;

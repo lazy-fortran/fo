@@ -6,6 +6,7 @@ module fo_process
     public :: process_setenv_default
     public :: process_scan_sources
     public :: process_start_fo_check, process_start_argv_logged
+    public :: process_set_async_scope
     public :: process_poll_pid, process_cancel_pid
     public :: process_run_logged
     public :: process_stderr_is_tty, process_write_stderr
@@ -21,6 +22,14 @@ module fo_process
     integer, parameter :: TIMEOUT_UNMEASURED = 3
 
     interface
+        function fo_c_process_set_async_scope(state_dir, owner_pid, owner_start) &
+                bind(C, name='fo_c_process_set_async_scope') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: state_dir(*), owner_start(*)
+            integer(c_int), value :: owner_pid
+            integer(c_int) :: ierr
+        end function fo_c_process_set_async_scope
+
         subroutine fo_c_detect_nproc(nproc) bind(C, name='fo_c_detect_nproc')
             import :: c_int
             integer(c_int), intent(out) :: nproc
@@ -145,6 +154,18 @@ module fo_process
     end interface
 
 contains
+
+    subroutine process_set_async_scope(state_dir, owner_pid, owner_start, exitcode)
+        !! Tie future async process launches in this owner to its durable state.
+        character(len=*), intent(in) :: state_dir, owner_start
+        integer, intent(in) :: owner_pid
+        integer, intent(out) :: exitcode
+        integer(c_int) :: c_exit
+
+        c_exit = fo_c_process_set_async_scope(trim(state_dir)//c_null_char, &
+            int(owner_pid, c_int), trim(owner_start)//c_null_char)
+        exitcode = int(c_exit)
+    end subroutine process_set_async_scope
 
     subroutine process_setenv_default(name, value)
         !! Put `name=value` in the environment unless the user already set it.

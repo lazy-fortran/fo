@@ -1,4 +1,10 @@
+#ifdef __APPLE__
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE 1
+#endif
+#else
 #define _GNU_SOURCE
+#endif
 
 #include <errno.h>
 #include <dirent.h>
@@ -22,6 +28,7 @@
 #endif
 #ifdef __APPLE__
 #include <libproc.h>
+#include <sys/proc.h>
 #endif
 #include <sys/resource.h>
 #include <sys/time.h>
@@ -42,10 +49,17 @@ struct async_process {
     uint64_t start_identity;
     int leader_done;
     int exitcode;
+    char *registry_path;
     struct async_process *next;
 };
 
 static struct async_process *async_processes = NULL;
+
+int fo_gremlin_process_matches(int pid, const char *start);
+#ifdef __linux__
+static void reap_async_session_children(pid_t session, pid_t leader);
+static int reap_async_group_children(pid_t pid);
+#endif
 
 static int heartbeats_suppressed = 0;
 
@@ -568,6 +582,111 @@ static int start_command_monitor(const char *cwd, char *const argv[],
     }
     *report_fd = pipefd[0];
     return 0;
+}
+#endif
+
+#ifdef __APPLE__
+static int darwin_process_details(pid_t pid, pid_t *session,
+                                 uint64_t *start) {
+    struct proc_bsdinfo info;
+    pid_t sid;
+    int bytes;
+
+    if (pid <= 0) return ESRCH;
+    bytes = proc_pidinfo((int)pid, PROC_PIDTBSDINFO, 0, &info,
+                         (int)sizeof(info));
+    if (bytes != (int)sizeof(info) || info.pbi_pid != (uint32_t)pid ||
+        info.pbi_status == SZOMB) return ESRCH;
+    sid = getsid(pid);
+    if (sid <= 0) return errno != 0 ? errno : ESRCH;
+    if (session != NULL) *session = sid;
+    if (start != NULL) {
+        *start = (uint64_t)info.pbi_start_tvsec * 1000000ULL +
+                 (uint64_t)info.pbi_start_tvusec;
+        if (*start == 0) return ESRCH;
+    }
+    return 0;
+}
+
+static int darwin_list_processes(pid_t **pids_out, size_t *count_out) {
+    pid_t *pids = NULL;
+    size_t capacity;
+    int required, bytes;
+
+    required = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
+    if (required < 0) return errno != 0 ? errno : EIO;
+    capacity = (size_t)required / sizeof(pid_t) + 64;
+    if (capacity < 64) capacity = 64;
+    for (;;) {
+        pid_t *next;
+        size_t buffer_size;
+        if (capacity > (size_t)INT_MAX / sizeof(pid_t)) {
+            free(pids);
+            return EOVERFLOW;
+        }
+        buffer_size = capacity * sizeof(pid_t);
+        next = realloc(pids, buffer_size);
+        if (next == NULL) {
+            free(pids);
+            return ENOMEM;
+        }
+        pids = next;
+        bytes = proc_listpids(PROC_ALL_PIDS, 0, pids, (int)buffer_size);
+        if (bytes < 0) {
+            free(pids);
+            return errno != 0 ? errno : EIO;
+        }
+        if ((size_t)bytes < buffer_size) {
+            if (bytes % (int)sizeof(pid_t) != 0) {
+                free(pids);
+                return EIO;
+            }
+            *pids_out = pids;
+            *count_out = (size_t)bytes / sizeof(pid_t);
+            return 0;
+        }
+        if (capacity > SIZE_MAX / 2) {
+            free(pids);
+            return EOVERFLOW;
+        }
+        capacity *= 2;
+    }
+}
+
+/* Darwin has no pidfd. Match session and process birth time twice before
+   signalling a member so a stale enumeration cannot cross a PID reuse. */
+static int darwin_signal_session(pid_t session, int signal_number) {
+    pid_t *pids = NULL;
+    size_t count = 0, i;
+    int error = darwin_list_processes(&pids, &count);
+    int matched = 0;
+
+    if (error != 0) { errno = error; return -1; }
+    for (i = 0; i < count; i++) {
+        pid_t candidate_session;
+        uint64_t candidate_start;
+        if (darwin_process_details(pids[i], &candidate_session,
+                                   &candidate_start) != 0 ||
+            candidate_session != session) continue;
+        matched++;
+        if (signal_number == 0) continue;
+        {
+            pid_t verified_session;
+            uint64_t verified_start;
+            if (darwin_process_details(pids[i], &verified_session,
+                                       &verified_start) != 0 ||
+                verified_session != session ||
+                verified_start != candidate_start) continue;
+        }
+        if (kill(pids[i], signal_number) != 0 && errno != ESRCH) {
+            error = errno;
+            free(pids);
+            errno = error;
+            return -1;
+        }
+    }
+    free(pids);
+    return matched;
 }
 #endif
 
@@ -1109,6 +1228,11 @@ static int install_async_group_containment(int strict_group) {
     if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) != 0) return errno;
     return 0;
 #else
+#ifdef __APPLE__
+    /* A fresh Darwin session is enumerable by SID. Keep rejecting the
+       fallback process-group mode, which has no session-wide containment. */
+    if (!strict_group) return 0;
+#endif
     /* Without an inherited group-escape barrier, do not claim tree ownership. */
     (void)strict_group;
     return ENOTSUP;
@@ -1119,9 +1243,10 @@ static int install_async_group_containment(int strict_group) {
 /* Session IDs remain inherited across process groups. Read the kernel's SID
    for each candidate before signalling it; pidfds pin the selected process
    across a concurrent exit and PID reuse. */
-static int linux_process_session(pid_t pid, pid_t *session) {
+static int linux_process_session(pid_t pid, pid_t *group_out, pid_t *session,
+                                 char *state_out) {
     char path[64], line[4096], *close, state;
-    long parent, group, sid;
+    long parent, process_group, sid;
     FILE *file;
 
     snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
@@ -1134,9 +1259,11 @@ static int linux_process_session(pid_t pid, pid_t *session) {
     fclose(file);
     close = strrchr(line, ')');
     if (close == NULL || sscanf(close + 1, " %c %ld %ld %ld",
-                                &state, &parent, &group, &sid) != 4)
+                                &state, &parent, &process_group, &sid) != 4)
         return -1;
     *session = (pid_t)sid;
+    if (group_out != NULL) *group_out = (pid_t)process_group;
+    if (state_out != NULL) *state_out = state;
     return 0;
 }
 
@@ -1150,6 +1277,7 @@ static int signal_async_session(pid_t session, int signal_number) {
         char *end;
         long value = strtol(entry->d_name, &end, 10);
         pid_t candidate, current;
+        char state;
 #if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
         int fd = -1;
 #endif
@@ -1157,14 +1285,16 @@ static int signal_async_session(pid_t session, int signal_number) {
         if (*entry->d_name == '\0' || *end != '\0' || value <= 0 ||
             value > INT_MAX) continue;
         candidate = (pid_t)value;
-        if (linux_process_session(candidate, &current) != 0 ||
+        if (linux_process_session(candidate, NULL, &current, &state) != 0 ||
+            state == 'Z' || state == 'X' ||
             current != session) continue;
         count++;
         if (signal_number == 0) continue;
 #if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
         fd = (int)syscall(SYS_pidfd_open, candidate, 0);
         if (fd >= 0) {
-            if (linux_process_session(candidate, &current) == 0 &&
+            if (linux_process_session(candidate, NULL, &current, &state) == 0 &&
+                state != 'Z' && state != 'X' &&
                 current == session &&
                 syscall(SYS_pidfd_send_signal, fd, signal_number,
                         NULL, 0) != 0 && errno != ESRCH) {
@@ -1187,6 +1317,60 @@ static int signal_async_session(pid_t session, int signal_number) {
             errno = error;
             return -1;
         }
+    }
+    closedir(directory);
+    return count;
+}
+
+static int signal_async_process_group(pid_t group, pid_t session,
+                                     int signal_number) {
+    DIR *directory = opendir("/proc");
+    struct dirent *entry;
+    int count = 0;
+
+    if (directory == NULL) return -1;
+    while ((entry = readdir(directory)) != NULL) {
+        char *end;
+        long value = strtol(entry->d_name, &end, 10);
+        pid_t candidate, current_group, current_session;
+        char state;
+        if (*entry->d_name == '\0' || *end != '\0' || value <= 0 ||
+            value > INT_MAX) continue;
+        candidate = (pid_t)value;
+        if (linux_process_session(candidate, &current_group, &current_session,
+                                  &state) != 0 || state == 'Z' || state == 'X' ||
+            current_group != group || current_session != session) continue;
+        count++;
+        if (signal_number == 0) continue;
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+        {
+            int fd = (int)syscall(SYS_pidfd_open, candidate, 0);
+            int error;
+            if (fd < 0) {
+                if (errno == ESRCH) continue;
+                error = errno;
+                closedir(directory);
+                errno = error;
+                return -1;
+            }
+            if (linux_process_session(candidate, &current_group, &current_session,
+                                      &state) == 0 && state != 'Z' && state != 'X' &&
+                current_group == group && current_session == session &&
+                syscall(SYS_pidfd_send_signal, fd, signal_number, NULL, 0) != 0 &&
+                errno != ESRCH) {
+                error = errno;
+                close(fd);
+                closedir(directory);
+                errno = error;
+                return -1;
+            }
+            close(fd);
+        }
+#else
+        closedir(directory);
+        errno = ENOTSUP;
+        return -1;
+#endif
     }
     closedir(directory);
     return count;
@@ -1265,6 +1449,481 @@ static int write_exact(int fd, const void *buffer, size_t size) {
     return 0;
 }
 
+static int process_identity_text(pid_t pid, char *out, size_t cap) {
+    uint64_t identity = process_start_identity(pid);
+    int n;
+    if (identity == 0) return ESRCH;
+#ifdef __APPLE__
+    n = snprintf(out, cap, "%llu.%06llu",
+                 (unsigned long long)(identity / 1000000ULL),
+                 (unsigned long long)(identity % 1000000ULL));
+#else
+    n = snprintf(out, cap, "%llu", (unsigned long long)identity);
+#endif
+    return n < 0 || (size_t)n >= cap ? ENAMETOOLONG : 0;
+}
+
+static int parse_identity_text(const char *text, uint64_t *identity) {
+    char *end;
+    unsigned long long first;
+#ifdef __APPLE__
+    unsigned long long second;
+#endif
+    if (!has_text(text)) return EINVAL;
+#ifdef __APPLE__
+    first = strtoull(text, &end, 10);
+    if (end == text || *end++ != '.' || strlen(end) != 6) return EINVAL;
+    second = strtoull(end, &end, 10);
+    if (*end != '\0' || second >= 1000000ULL ||
+        first > (UINT64_MAX - second) / 1000000ULL) return EINVAL;
+    *identity = (uint64_t)first * 1000000ULL + (uint64_t)second;
+#else
+    first = strtoull(text, &end, 10);
+    if (end == text || *end != '\0') return EINVAL;
+    *identity = (uint64_t)first;
+#endif
+    return *identity == 0 ? EINVAL : 0;
+}
+
+static int private_directory(const char *path, int create) {
+    struct stat st;
+    if (create && mkdir(path, 0700) != 0 && errno != EEXIST) return errno;
+    if (lstat(path, &st) != 0) return errno;
+    if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode) || st.st_uid != geteuid() ||
+        (st.st_mode & 0077) != 0) return EPERM;
+    return 0;
+}
+
+static int async_scope_owner(char *state_dir, size_t dircap, pid_t *owner_pid,
+                             char *owner_start, size_t startcap) {
+    const char *dir = getenv("FO_GREMLIN_PROCESS_SCOPE_DIR");
+    const char *pid_text = getenv("FO_GREMLIN_PROCESS_SCOPE_PID");
+    const char *start_text = getenv("FO_GREMLIN_PROCESS_SCOPE_START");
+    char current[64], *end;
+    long value;
+    int e;
+
+    if (!dir && !pid_text && !start_text) return ENOENT;
+    if (!has_text(dir) || !has_text(pid_text) || !has_text(start_text)) return EINVAL;
+    value = strtol(pid_text, &end, 10);
+    if (end == pid_text || *end != '\0' || value <= 0 || value > INT_MAX)
+        return EINVAL;
+    if (strlen(dir) + 1 > dircap || strlen(start_text) + 1 > startcap)
+        return ENAMETOOLONG;
+    e = process_identity_text((pid_t)value, current, sizeof(current));
+    if (e != 0 || strcmp(current, start_text) != 0) return ESTALE;
+    e = private_directory(dir, 0);
+    if (e != 0) return e;
+    strcpy(state_dir, dir);
+    strcpy(owner_start, start_text);
+    *owner_pid = (pid_t)value;
+    return 0;
+}
+
+static int async_owner_registry(const char *state_dir, pid_t owner_pid,
+                                const char *owner_start, char *registry,
+                                size_t cap, int create) {
+    char base[PATH_MAX];
+    int n, e;
+    n = snprintf(base, sizeof(base), "%s/async-processes", state_dir);
+    if (n < 0 || n >= (int)sizeof(base)) return ENAMETOOLONG;
+    e = private_directory(base, create);
+    if (e != 0) return e;
+    n = snprintf(registry, cap, "%s/%ld-%s", base, (long)owner_pid,
+                 owner_start);
+    if (n < 0 || n >= (int)cap) return ENAMETOOLONG;
+    return private_directory(registry, create);
+}
+
+static int register_async_session(struct async_process *item) {
+    char state_dir[PATH_MAX], owner_start[64], registry[PATH_MAX];
+    char child_start[64], path[PATH_MAX], temporary[PATH_MAX], record[256];
+    pid_t owner_pid;
+    uint64_t child_identity;
+    int e, n, fd, dirfd;
+    struct timespec ts;
+
+    e = async_scope_owner(state_dir, sizeof(state_dir), &owner_pid,
+                          owner_start, sizeof(owner_start));
+    if (e == ENOENT) return 0;
+    if (e != 0) return e;
+    e = process_identity_text(item->pid, child_start, sizeof(child_start));
+    if (e != 0 || parse_identity_text(child_start, &child_identity) != 0)
+        return e != 0 ? e : EINVAL;
+    if (child_identity != item->start_identity) return ESTALE;
+    e = async_owner_registry(state_dir, owner_pid, owner_start, registry,
+                             sizeof(registry), 1);
+    if (e != 0) return e;
+    n = snprintf(path, sizeof(path), "%s/%ld-%s.session", registry,
+                 (long)item->pid, child_start);
+    if (n < 0 || n >= (int)sizeof(path)) return ENAMETOOLONG;
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return errno;
+    n = snprintf(temporary, sizeof(temporary), "%s/.%ld-%s.%ld.%lld.%09ld.tmp",
+                 registry, (long)item->pid, child_start, (long)getpid(),
+                 (long long)ts.tv_sec, ts.tv_nsec);
+    if (n < 0 || n >= (int)sizeof(temporary)) return ENAMETOOLONG;
+    n = snprintf(record, sizeof(record), "%ld\n%s\n%ld\n%d\n%s\n",
+                 (long)item->pid, child_start, (long)item->session,
+                 item->owns_session, owner_start);
+    if (n < 0 || n >= (int)sizeof(record)) return EOVERFLOW;
+    fd = open(temporary, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW,
+              0600);
+    if (fd < 0) return errno;
+    e = write_exact(fd, record, (size_t)n) == 0 ? 0 : errno;
+    if (e == 0 && fsync(fd) != 0) e = errno;
+    if (close(fd) != 0 && e == 0) e = errno;
+    if (e == 0 && link(temporary, path) != 0) e = errno;
+    if (unlink(temporary) != 0 && e == 0) e = errno;
+    if (e == 0) {
+        dirfd = open(registry, O_RDONLY | O_CLOEXEC);
+        if (dirfd < 0) e = errno;
+        else {
+            if (fsync(dirfd) != 0) e = errno;
+            close(dirfd);
+        }
+    }
+    if (e != 0) {
+        unlink(temporary);
+        unlink(path);
+        return e;
+    }
+    item->registry_path = strdup(path);
+    if (item->registry_path == NULL) {
+        unlink(path);
+        return ENOMEM;
+    }
+    return 0;
+}
+
+static void unregister_async_session(struct async_process *item) {
+    if (!item || !item->registry_path) return;
+    (void)unlink(item->registry_path);
+    free(item->registry_path);
+    item->registry_path = NULL;
+}
+
+struct recovery_session {
+    pid_t pid;
+    pid_t session;
+    uint64_t identity;
+    int owns_session;
+    char start[64];
+    char path[PATH_MAX];
+};
+
+static int copy_line(char **cursor, char *out, size_t cap) {
+    char *end = strchr(*cursor, '\n');
+    size_t n;
+    if (end == NULL) return EINVAL;
+    n = (size_t)(end - *cursor);
+    if (n == 0 || n >= cap) return EINVAL;
+    memcpy(out, *cursor, n);
+    out[n] = '\0';
+    *cursor = end + 1;
+    return 0;
+}
+
+static int parse_positive_pid(const char *text, pid_t *pid) {
+    char *end;
+    long value = strtol(text, &end, 10);
+    if (end == text || *end != '\0' || value <= 0 || value > INT_MAX)
+        return EINVAL;
+    *pid = (pid_t)value;
+    return 0;
+}
+
+static int read_recovery_session(const char *registry, const char *name,
+                                 const char *owner_start,
+                                 struct recovery_session *item) {
+    char path[PATH_MAX], buffer[512], pid_text[32], session_text[32];
+    char owns_session_text[8];
+    char saved_start[64], saved_owner[64], file_name_start[64];
+    struct stat st;
+    char *cursor = buffer;
+    const char *suffix = ".session";
+    size_t name_len = strlen(name), suffix_len = strlen(suffix);
+    int fd, e;
+    ssize_t n;
+
+    if (name_len <= suffix_len ||
+        strcmp(name + name_len - suffix_len, suffix) != 0) return EINVAL;
+    if (snprintf(path, sizeof(path), "%s/%s", registry, name) >=
+        (int)sizeof(path)) return ENAMETOOLONG;
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return errno;
+    if (fstat(fd, &st) != 0) { e = errno; close(fd); return e; }
+    if (!S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+        (st.st_mode & 0077) != 0) { close(fd); return EPERM; }
+    do { n = read(fd, buffer, sizeof(buffer) - 1); } while (n < 0 && errno == EINTR);
+    e = n < 0 ? errno : 0;
+    if (close(fd) != 0 && e == 0) e = errno;
+    if (e != 0) return e;
+    if (n <= 0 || (size_t)n >= sizeof(buffer) - 1) return EOVERFLOW;
+    buffer[n] = '\0';
+    e = copy_line(&cursor, pid_text, sizeof(pid_text));
+    if (e == 0) e = copy_line(&cursor, saved_start, sizeof(saved_start));
+    if (e == 0) e = copy_line(&cursor, session_text, sizeof(session_text));
+    if (e == 0) e = copy_line(&cursor, owns_session_text, sizeof(owns_session_text));
+    if (e == 0) e = copy_line(&cursor, saved_owner, sizeof(saved_owner));
+    if (e != 0 || *cursor != '\0') return e != 0 ? e : EINVAL;
+    e = parse_positive_pid(pid_text, &item->pid);
+    if (e != 0 || parse_identity_text(saved_start, &item->identity) != 0)
+        return EINVAL;
+    e = parse_positive_pid(session_text, &item->session);
+    if (e != 0 || (strcmp(owns_session_text, "0") != 0 &&
+                   strcmp(owns_session_text, "1") != 0) ||
+        strcmp(saved_owner, owner_start) != 0) return EINVAL;
+    item->owns_session = strcmp(owns_session_text, "1") == 0;
+    if (item->owns_session && item->session != item->pid) return EINVAL;
+
+    const char *dash = strchr(name, '-');
+    if (dash == NULL || dash == name) return EINVAL;
+    char name_pid[32];
+    size_t pid_len = (size_t)(dash - name);
+    if (pid_len >= sizeof(name_pid)) return EINVAL;
+    memcpy(name_pid, name, pid_len);
+    name_pid[pid_len] = '\0';
+    pid_t filename_pid;
+    if (parse_positive_pid(name_pid, &filename_pid) != 0 ||
+        filename_pid != item->pid) return EINVAL;
+    size_t start_len = name_len - suffix_len - pid_len - 1;
+    if (start_len == 0 || start_len >= sizeof(file_name_start)) return EINVAL;
+    memcpy(file_name_start, dash + 1, start_len);
+    file_name_start[start_len] = '\0';
+    if (strcmp(file_name_start, saved_start) != 0 ||
+        parse_identity_text(file_name_start, &item->identity) != 0) return EINVAL;
+    strcpy(item->start, saved_start);
+    strcpy(item->path, path);
+    return 0;
+}
+
+static int recovery_session_count(const struct recovery_session *item) {
+    char current[64];
+    int e = process_identity_text(item->pid, current, sizeof(current));
+    if (e == 0) {
+        if (strcmp(current, item->start) != 0 ||
+            getpgid(item->pid) != item->pid ||
+            getsid(item->pid) != item->session ||
+            (item->owns_session && item->session != item->pid)) {
+            errno = ESTALE;
+            return -1;
+        }
+    } else if (e != ESRCH) {
+        errno = e;
+        return -1;
+    }
+#ifdef __linux__
+    int count;
+    if (item->owns_session) {
+        count = signal_async_session(item->session, 0);
+    } else {
+        count = signal_async_process_group(item->pid, item->session, 0);
+    }
+    if (count == 0) {
+        int status;
+        pid_t got;
+        do { got = waitpid(item->pid, &status, WNOHANG); }
+        while (got < 0 && errno == EINTR);
+        if (item->owns_session)
+            reap_async_session_children(item->session, item->pid);
+        else
+            (void)reap_async_group_children(item->pid);
+    }
+    return count;
+#elif defined(__APPLE__)
+    if (item->owns_session) return darwin_signal_session(item->session, 0);
+    if (kill(-item->pid, 0) == 0 || errno == EPERM) return 1;
+    if (errno == ESRCH) return 0;
+    return -1;
+#else
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
+static int signal_recovery_session(const struct recovery_session *item,
+                                   int signal_number) {
+    int count = recovery_session_count(item);
+    if (count < 0) return errno;
+    if (count == 0) return 0;
+#ifdef __linux__
+    if (item->owns_session) {
+        if (signal_async_session(item->session, signal_number) < 0) return errno;
+    } else {
+        if (signal_async_process_group(item->pid, item->session,
+                                       signal_number) < 0) return errno;
+    }
+    return 0;
+#elif defined(__APPLE__)
+    if (item->owns_session) {
+        if (darwin_signal_session(item->session, signal_number) < 0) return errno;
+    } else {
+        char current[64];
+        int e = process_identity_text(item->pid, current, sizeof(current));
+        if (e == 0 && (strcmp(current, item->start) != 0 ||
+                       getpgid(item->pid) != item->pid ||
+                       getsid(item->pid) != item->session)) return ESTALE;
+        if (e != 0 && e != ESRCH) return e;
+        if (kill(-item->pid, signal_number) != 0 && errno != ESRCH) return errno;
+    }
+    return 0;
+#else
+    return ENOTSUP;
+#endif
+}
+
+int fo_c_recover_async_scope(const char *state_dir, int owner_pid,
+                             const char *owner_start) {
+    char registry[PATH_MAX], current_owner[64];
+    struct recovery_session *items = NULL;
+    struct dirent *entry;
+    DIR *directory = NULL;
+    size_t count = 0, capacity = 0;
+    int e, dirfd;
+    struct timespec now, deadline;
+
+    uint64_t parsed_owner;
+    if (!has_text(state_dir) || owner_pid <= 0 ||
+        parse_identity_text(owner_start, &parsed_owner) != 0) return EINVAL;
+    e = process_identity_text((pid_t)owner_pid, current_owner,
+                              sizeof(current_owner));
+    if (e == 0 && strcmp(current_owner, owner_start) == 0 &&
+        fo_gremlin_process_matches(owner_pid, owner_start)) return EBUSY;
+    e = private_directory(state_dir, 0);
+    if (e != 0) return e;
+    e = async_owner_registry(state_dir, (pid_t)owner_pid, owner_start,
+                             registry, sizeof(registry), 0);
+    if (e == ENOENT) return 0;
+    if (e != 0) return e;
+    directory = opendir(registry);
+    if (directory == NULL) return errno;
+    while ((entry = readdir(directory)) != NULL) {
+        struct stat st;
+        char path[PATH_MAX];
+        size_t name_len = strlen(entry->d_name);
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+        if (snprintf(path, sizeof(path), "%s/%s", registry,
+                     entry->d_name) >= (int)sizeof(path)) { e = ENAMETOOLONG; break; }
+        if (entry->d_name[0] == '.' && name_len > 4 &&
+            strcmp(entry->d_name + name_len - 4, ".tmp") == 0) {
+            if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
+                st.st_uid != geteuid() || unlink(path) != 0) {
+                e = errno != 0 ? errno : EPERM;
+                break;
+            }
+            continue;
+        }
+        if (count == 4096) { e = EOVERFLOW; break; }
+        if (count == capacity) {
+            size_t next_capacity = capacity == 0 ? 16 : capacity * 2;
+            struct recovery_session *next = realloc(items,
+                next_capacity * sizeof(*items));
+            if (next == NULL) { e = ENOMEM; break; }
+            items = next;
+            capacity = next_capacity;
+        }
+        e = read_recovery_session(registry, entry->d_name, owner_start,
+                                  &items[count]);
+        if (e != 0) break;
+        count++;
+    }
+    if (closedir(directory) != 0 && e == 0) e = errno;
+    directory = NULL;
+    if (e != 0) { free(items); return e; }
+
+    for (size_t i = 0; i < count; i++) {
+        e = signal_recovery_session(&items[i], SIGTERM);
+        if (e != 0) { free(items); return e; }
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
+        free(items); return errno;
+    }
+    add_seconds(&deadline, 2);
+    for (;;) {
+        int remaining = 0;
+        for (size_t i = 0; i < count; i++) {
+            int live = recovery_session_count(&items[i]);
+            if (live < 0) { e = errno; free(items); return e; }
+            remaining += live > 0;
+        }
+        if (remaining == 0) break;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+            e = errno; free(items); return e;
+        }
+        if (timespec_at_or_after(&now, &deadline)) break;
+        sleep_ms(20);
+    }
+    for (size_t i = 0; i < count; i++) {
+        int live = recovery_session_count(&items[i]);
+        if (live < 0) { e = errno; free(items); return e; }
+        if (live > 0) {
+            e = signal_recovery_session(&items[i], SIGKILL);
+            if (e != 0) { free(items); return e; }
+        }
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
+        free(items); return errno;
+    }
+    add_seconds(&deadline, 1);
+    for (;;) {
+        int remaining = 0;
+        for (size_t i = 0; i < count; i++) {
+            int live = recovery_session_count(&items[i]);
+            if (live < 0) { e = errno; free(items); return e; }
+            remaining += live > 0;
+        }
+        if (remaining == 0) break;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+            e = errno; free(items); return e;
+        }
+        if (timespec_at_or_after(&now, &deadline)) {
+            free(items);
+            return ETIMEDOUT;
+        }
+        sleep_ms(10);
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (unlink(items[i].path) != 0 && errno != ENOENT) {
+            e = errno; free(items); return e;
+        }
+    }
+    free(items);
+    dirfd = open(registry, O_RDONLY | O_CLOEXEC);
+    if (dirfd >= 0) {
+        if (fsync(dirfd) != 0) { e = errno; close(dirfd); return e; }
+        close(dirfd);
+    }
+    if (rmdir(registry) != 0 && errno != ENOENT) return errno;
+    return 0;
+}
+
+int fo_c_process_set_async_scope(const char *state_dir, int owner_pid,
+                                 const char *owner_start) {
+    char current[64];
+    char pid_text[32];
+    int e;
+    if (!has_text(state_dir) || owner_pid != (int)getpid() ||
+        !has_text(owner_start)) return EINVAL;
+    e = process_identity_text((pid_t)owner_pid, current, sizeof(current));
+    if (e != 0) return e;
+    if (strcmp(current, owner_start) != 0) return ESTALE;
+    e = private_directory(state_dir, 0);
+    if (e != 0) return e;
+    if (snprintf(pid_text, sizeof(pid_text), "%d", owner_pid) >=
+        (int)sizeof(pid_text)) return EOVERFLOW;
+    if (setenv("FO_GREMLIN_PROCESS_SCOPE_DIR", state_dir, 1) != 0 ||
+        setenv("FO_GREMLIN_PROCESS_SCOPE_PID", pid_text, 1) != 0 ||
+        setenv("FO_GREMLIN_PROCESS_SCOPE_START", owner_start, 1) != 0) {
+        e = errno;
+        unsetenv("FO_GREMLIN_PROCESS_SCOPE_DIR");
+        unsetenv("FO_GREMLIN_PROCESS_SCOPE_PID");
+        unsetenv("FO_GREMLIN_PROCESS_SCOPE_START");
+        return e;
+    }
+    return 0;
+}
+
 static int async_group_exists(pid_t pid) {
     if (kill(-pid, 0) == 0) return 1;
     return errno == EPERM;
@@ -1276,6 +1935,11 @@ static int async_owner_exists(const struct async_process *item) {
         int count = signal_async_session(item->session, 0);
         return count < 0 ? -1 : count > 0;
     }
+#elif defined(__APPLE__)
+    if (item->owns_session) {
+        int count = darwin_signal_session(item->session, 0);
+        return count < 0 ? -1 : count > 0;
+    }
 #endif
     return async_group_exists(item->pid);
 }
@@ -1284,6 +1948,9 @@ static int signal_async_owner(const struct async_process *item, int signal_numbe
 #ifdef __linux__
     if (item->owns_session)
         return signal_async_session(item->session, signal_number) < 0 ? errno : 0;
+#elif defined(__APPLE__)
+    if (item->owns_session)
+        return darwin_signal_session(item->session, signal_number) < 0 ? errno : 0;
 #endif
     if (kill(-item->pid, signal_number) != 0 && errno != ESRCH) return errno;
     return 0;
@@ -1302,6 +1969,7 @@ static void forget_async_process(struct async_process *item) {
     while (*link != NULL) {
         if (*link == item) {
             *link = item->next;
+            free(item->registry_path);
             free(item);
             return;
         }
@@ -1345,6 +2013,20 @@ static int observe_async_leader(struct async_process *item) {
     return 0;
 }
 
+/* Reap our exact child before asking the live-process API to prove its PID.
+   Darwin removes exited children from libproc's session scan immediately, but
+   waitpid still holds their exact identity and exit status until we reap them. */
+static int verify_or_reap_async_leader(struct async_process *item) {
+    int error = observe_async_leader(item);
+    if (error != 0) return error;
+    if (!item->leader_done && !async_identity_matches(item)) {
+        error = observe_async_leader(item);
+        if (error != 0) return error;
+        if (!item->leader_done) return ESRCH;
+    }
+    return 0;
+}
+
 static int reap_async_group_children(pid_t pid) {
     int status;
     pid_t got;
@@ -1369,7 +2051,7 @@ static void reap_async_session_children(pid_t session, pid_t leader) {
         pid_t current;
         if (*entry->d_name == '\0' || *end != '\0' || value <= 0 ||
             value > INT_MAX || (pid_t)value == leader) continue;
-        if (linux_process_session((pid_t)value, &current) == 0 &&
+        if (linux_process_session((pid_t)value, NULL, &current, NULL) == 0 &&
             current == session) (void)waitpid((pid_t)value, NULL, WNOHANG);
     }
     closedir(directory);
@@ -1380,7 +2062,8 @@ static int terminate_async_group(struct async_process *item) {
     struct timespec now, deadline;
     int error, exists;
 
-    if (!item->leader_done && !async_identity_matches(item)) return ESRCH;
+    error = verify_or_reap_async_leader(item);
+    if (error != 0) return error;
     exists = async_owner_exists(item);
     if (exists < 0) return errno;
     if (!exists) return 0;
@@ -1605,10 +2288,23 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
     item->start_identity = identity;
     item->next = async_processes;
     async_processes = item;
+    reaper_error = register_async_session(item);
+    if (reaper_error != 0) {
+        close(gate_pipe[1]);
+        forget_async_process(item);
+        (void)kill(pid, SIGKILL);
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+        }
+        free_env_copy(child_env);
+        free(argv);
+        *exitcode = reaper_error;
+        return;
+    }
     {
         int release = 1;
         if (write_exact(gate_pipe[1], &release, sizeof(release)) != 0) {
             close(gate_pipe[1]);
+            unregister_async_session(item);
             forget_async_process(item);
             (void)kill(pid, SIGKILL);
             while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
@@ -1672,13 +2368,7 @@ void fo_c_poll_pid(int pid, int *done, int *exitcode) {
         *exitcode = ESRCH;
         return;
     }
-    if (!item->leader_done && !async_identity_matches(item)) {
-        *done = 1;
-        *exitcode = ESRCH;
-        forget_async_process(item);
-        return;
-    }
-    error = observe_async_leader(item);
+    error = verify_or_reap_async_leader(item);
     if (error != 0) {
         *done = 1;
         *exitcode = error;
@@ -1691,6 +2381,7 @@ void fo_c_poll_pid(int pid, int *done, int *exitcode) {
         *exitcode = error;
         return;
     }
+    unregister_async_session(item);
     *done = 1;
     *exitcode = item->exitcode;
     forget_async_process(item);
@@ -1706,8 +2397,9 @@ void fo_c_cancel_pid(int pid, int *exitcode) {
         *exitcode = ESRCH;
         return;
     }
-    if (!item->leader_done && !async_identity_matches(item)) {
-        *exitcode = ESRCH;
+    error = verify_or_reap_async_leader(item);
+    if (error != 0) {
+        *exitcode = error;
         forget_async_process(item);
         return;
     }
@@ -1716,6 +2408,7 @@ void fo_c_cancel_pid(int pid, int *exitcode) {
         *exitcode = error;
         return;
     }
+    unregister_async_session(item);
     forget_async_process(item);
 }
 
