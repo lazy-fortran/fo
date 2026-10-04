@@ -40,6 +40,15 @@ module fo_gremlin_request
         integer :: event_epoch = 0
         character(len=HASH_LEN) :: requirement_digest = ''
         integer :: gate_required_count = 0
+        character(len=HASH_LEN) :: impact_baseline_generation = ''
+        character(len=HASH_LEN) :: impact_baseline_inventory = ''
+        character(len=HASH_LEN) :: impact_candidate_inventory = ''
+        character(len=HASH_LEN) :: impact_model_identity = ''
+        logical :: impact_complete = .false.
+        logical :: impact_model_complete = .false.
+        logical :: impact_widened = .false.
+        integer :: impact_widening_count = 0
+        character(len=256) :: impact_widening_reasons(8) = ''
         character(len=NAME_LEN) :: targets(MAX_NODES) = ''
         integer :: n_targets = 0
     end type gremlin_request_t

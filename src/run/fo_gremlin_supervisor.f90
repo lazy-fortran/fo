@@ -6,6 +6,7 @@ module fo_gremlin_supervisor
     use fo_gremlin_context, only: capture_candidate
     use fo_gremlin_request, only: gremlin_request_t, parse_request, is_hex_digest
     use fo_gremlin_generation, only: generation_t, generation_driver_identity
+    use fo_input_inventory, only: input_inventory_t
     use fo_driver, only: driver_pin_t, driver_pin_current, driver_pin_existing
     use fo_change_watch, only: change_watch_t, change_watch_init, &
         change_watch_poll, change_watch_close
@@ -39,8 +40,11 @@ module fo_gremlin_supervisor
         gremlin_lease_release, &
         gremlin_generation_lease_acquire_at, gremlin_generation_pin_at, &
         gremlin_generation_root, GREMLIN_STATE_TEXT_MAX
-    use fo_gfortran_build, only: gfortran_selected_test_names
-    use fo_scan, only: is_slow_test
+    use fo_gfortran_build, only: gfortran_selected_test_names, &
+        gfortran_test_source_name
+    use fo_scan, only: is_slow_test, scan_unit_t, scan_dir
+    use fo_test_impact, only: test_impact_case_t, test_impact_result_t, &
+        test_impact_select
     use fo_test_budget, only: test_budget_seconds, test_wall_cap_seconds
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_process, only: argv_push, process_cancel_pid, &
@@ -86,6 +90,7 @@ contains
         type(gremlin_session_t) :: session
         character(len=PATH_LEN) :: error_message, owner_start
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
+        character(len=:), allocatable :: status_serialized
         character(len=128) :: session_id
         integer :: ierr, owner_pid
 
@@ -1762,13 +1767,24 @@ contains
         integer :: release_status, pin_status
         character(len=PATH_LEN) :: state_message, release_message
         character(len=PATH_LEN) :: coverage_path
+        character(len=:), allocatable :: impact_json
         type(gremlin_coverage_view_t) :: coverage_view
+        type(input_inventory_t) :: baseline_inventory
         character(len=NAME_LEN) :: active_case
+        character(len=HASH_LEN) :: baseline_generation
         logical :: was_active
 
         ierr = 0
         message = ''
         was_active = have_active
+        baseline_generation = ''
+        baseline_inventory = input_inventory_t()
+        if (was_active) then
+            baseline_generation = active%identity
+            baseline_inventory = active%input_inventory
+            baseline_inventory%complete = active%input_inventory_ready .and. &
+                active%input_inventory_complete
+        end if
         call record_build(session, request, candidate, build_exit, build_child%log_file, &
             sequence, ierr, message)
         if (ierr /= 0) return
@@ -1863,6 +1879,7 @@ contains
         request%has_previous_generation = was_active
         request%requirement_digest = ''
         request%gate_cases = ''
+        call clear_campaign_impact(request)
         active = candidate
         have_active = .true.
         request%input_changed = .false.
@@ -1884,10 +1901,13 @@ contains
         selection_request%seed = seed
         call discover_campaign(active%project_root, active%identity, session, &
             selection_request, selected, selected_count, mandatory_count, seed, &
-            inventory_status, message)
+            inventory_status, message, baseline_input=baseline_inventory, &
+            candidate_input=active%input_inventory, &
+            baseline_generation=baseline_generation)
         request%requirement_digest = selection_request%requirement_digest
         request%gate_cases = selection_request%gate_cases
         request%gate_required_count = selection_request%gate_required_count
+        call copy_campaign_impact(request, selection_request)
         if (inventory_status /= 0) then
             state_name = 'inventory_failed'
             selected_count = 0
@@ -1922,7 +1942,8 @@ contains
 
     subroutine discover_campaign(project_dir, generation_id, session, request, &
             selected, n_selected, &
-            n_mandatory_selected, seed, ierr, message, bypass_coverage)
+            n_mandatory_selected, seed, ierr, message, bypass_coverage, &
+            baseline_input, candidate_input, baseline_generation)
         character(len=*), intent(in) :: project_dir
         character(len=*), intent(in) :: generation_id
         type(gremlin_session_t), intent(in) :: session
@@ -1931,13 +1952,18 @@ contains
         integer, intent(out) :: n_selected, n_mandatory_selected, seed, ierr
         character(len=*), intent(out) :: message
         logical, intent(in), optional :: bypass_coverage
+        type(input_inventory_t), intent(in), optional :: baseline_input, candidate_input
+        character(len=*), intent(in), optional :: baseline_generation
 
         type(backend_t) :: backend
         type(dag_t) :: dag
+        type(input_inventory_t) :: empty_inventory
+        type(test_impact_case_t) :: impact_cases(MAX_NODES)
+        type(test_impact_result_t) :: impact
         integer :: changed_ids(MAX_NODES), affected_ids(MAX_NODES)
         integer :: n_changed, n_affected, n_cached, i, n_all, n_impacted
         integer :: n_history, n_debt, cursor_seed, n_priorities, limit
-        integer :: n_selected_priorities
+        integer :: n_selected_priorities, n_impact_cases
         integer :: candidate_ids(MAX_NODES), shuffle_status, coverage_status
         character(len=MAX_PATH) :: filenames(MAX_NODES)
         character(len=NAME_LEN) :: all_names(MAX_NODES), impacted(MAX_NODES)
@@ -1947,6 +1973,7 @@ contains
         character(len=PATH_LEN) :: coverage_path
         logical :: is_test_arr(MAX_NODES)
         logical :: reproduce_only
+        logical :: frozen_requirements
 
         selected = ''
         impacted = ''
@@ -1965,6 +1992,8 @@ contains
             message = 'Gremlin currently requires the native fpm test backend'
             return
         end if
+        ! The returned DAG describes candidate dependencies. Cache misses do
+        ! not define campaign impact; the frozen inventories below do.
         call fo_changed_modules(project_dir, dag, changed_ids, n_changed, &
             affected_ids, n_affected, n_cached, ierr, filenames=filenames, &
             is_test_arr=is_test_arr)
@@ -1977,34 +2006,15 @@ contains
         end do
         call gfortran_selected_test_names(project_dir, filenames, candidate_ids, &
             dag%n_nodes, .true., all_names, n_all)
-        call read_campaign_history(session, all_names, n_all, history, n_history, &
-            debt, n_debt, cursor_seed, ierr, message)
-        if (ierr /= 0) return
-        n_impacted = 0
-        if (request%only_changed .or. request%has_previous_generation) then
-            call gfortran_selected_test_names(project_dir, filenames, affected_ids, &
-                n_affected, .false., impacted, n_impacted)
-        end if
-        n_priorities = 0
-        if (request%only_changed .or. request%has_previous_generation .or. &
-            request%n_targets > 0 .or. n_history > 0) then
-            call append_priority_names(request%gate_cases, request%gate_required_count, &
-                priorities, n_priorities)
-        end if
-        call append_priority_names(request%targets, request%n_targets, priorities, &
-            n_priorities)
-        call append_priority_names(impacted, n_impacted, priorities, n_priorities)
-        call append_priority_names(history, n_history, priorities, n_priorities)
-        do i = 1, n_priorities
-            if (.not. any(all_names(:n_all) == priorities(i))) then
-                ierr = 2
-                message = 'requested or prioritized case is outside the eligible inventory'
-                return
-            end if
-        end do
         reproduce_only = .false.
         if (present(bypass_coverage)) reproduce_only = bypass_coverage
         if (reproduce_only) then
+            if (request%n_targets /= 1 .or. &
+                    .not. any(all_names(:n_all) == request%targets(1))) then
+                ierr = 2
+                message = 'requested reproduction case is outside the eligible inventory'
+                return
+            end if
             n_selected = 1
             n_mandatory_selected = 1
             selected(1) = request%targets(1)
@@ -2012,6 +2022,60 @@ contains
             message = ''
             return
         end if
+        n_impacted = 0
+        n_priorities = 0
+        frozen_requirements = len_trim(request%requirement_digest) == HASH_LEN
+        if (frozen_requirements) then
+            if (request%gate_required_count < 0 .or. &
+                    request%gate_required_count > size(request%gate_cases)) then
+                ierr = 2
+                message = 'frozen campaign requirement count is invalid'
+                return
+            end if
+            call append_priority_names(request%gate_cases, &
+                request%gate_required_count, priorities, n_priorities)
+        else
+            n_history = 0
+            call read_campaign_history(session, all_names, n_all, history, n_history, &
+                debt, n_debt, cursor_seed, ierr, message, baseline_generation)
+            if (ierr /= 0) return
+            empty_inventory = input_inventory_t()
+            call campaign_impact_cases(project_dir, dag, filenames, all_names, &
+                n_all, impact_cases, n_impact_cases, ierr, message)
+            if (ierr /= 0) return
+            if (present(baseline_input) .and. present(candidate_input)) then
+                call test_impact_select(baseline_input, candidate_input, dag, &
+                    filenames, impact_cases(:n_impact_cases), .true., impact, &
+                    ierr, message)
+            else
+                call test_impact_select(empty_inventory, empty_inventory, dag, &
+                    filenames, impact_cases(:n_impact_cases), .true., impact, &
+                    ierr, message)
+            end if
+            if (ierr /= 0) return
+            do i = 1, impact%required_count
+                if (n_impacted < size(impacted)) then
+                    n_impacted = n_impacted + 1
+                    impacted(n_impacted) = impact%required(i)%public_name
+                end if
+            end do
+            call append_priority_names(history, n_history, priorities, n_priorities)
+            call append_priority_names(request%targets, request%n_targets, &
+                priorities, n_priorities)
+            call append_priority_names(impacted, n_impacted, priorities, n_priorities)
+            call append_priority_names(request%gate_cases, &
+                request%gate_required_count, priorities, n_priorities)
+            call freeze_campaign_requirements(request, priorities, n_priorities, &
+                baseline_generation, generation_id, impact, baseline_input, &
+                candidate_input)
+        end if
+        do i = 1, n_priorities
+            if (.not. any(all_names(:n_all) == priorities(i))) then
+                ierr = 2
+                message = 'requested or prioritized case is outside the eligible inventory'
+                return
+            end if
+        end do
         n_mandatory_selected = 0
         limit = n_priorities + min(GREMLIN_NONMANDATORY_LIMIT, request%random_count)
         if (limit == 0) then
@@ -2071,6 +2135,148 @@ contains
             end if
         end if
     end subroutine discover_campaign
+
+    subroutine campaign_impact_cases(project_dir, dag, filenames, names, n_names, &
+            cases, n_cases, ierr, message)
+        character(len=*), intent(in) :: project_dir
+        type(dag_t), intent(in) :: dag
+        character(len=MAX_PATH), intent(in) :: filenames(:)
+        character(len=NAME_LEN), intent(in) :: names(:)
+        integer, intent(in) :: n_names
+        type(test_impact_case_t), intent(out) :: cases(:)
+        integer, intent(out) :: n_cases, ierr
+        character(len=*), intent(out) :: message
+
+        type(fpm_config_t), allocatable :: config
+        type(scan_unit_t), allocatable :: units(:)
+        character(len=128) :: source_name
+        integer :: scan_count, scan_error, i, j, k, matches
+
+        cases = test_impact_case_t()
+        n_cases = 0
+        ierr = 1
+        message = ''
+        if (size(cases) < n_names) then
+            message = 'eligible case catalog exceeds selector capacity'
+            return
+        end if
+        allocate(config)
+        call fpm_config_parse(project_dir, config, scan_error)
+        if (scan_error /= 0) then
+            message = 'cannot load test manifest for impact mapping'
+            return
+        end if
+        call scan_dir(trim(project_dir)//'/'//trim(config%test_dir), units, &
+            scan_count, scan_error)
+        if (scan_error /= 0) then
+            message = 'cannot scan test sources for impact mapping'
+            return
+        end if
+        do i = 1, n_names
+            cases(i)%public_name = names(i)
+            cases(i)%identity = 'test-oracle:'//trim(names(i))
+            cases(i)%eligible = .true.
+            cases(i)%slow = is_slow_test(trim(names(i)))
+            cases(i)%dependency_complete = .true.
+            matches = 0
+            do j = 1, scan_count
+                source_name = gfortran_test_source_name(config, config%test_dir, &
+                    units(j)%filename)
+                if (trim(source_name) /= trim(names(i))) cycle
+                matches = matches + 1
+                do k = 1, dag%n_nodes
+                    if (trim(filenames(k)) /= trim(units(j)%filename)) cycle
+                    cases(i)%node_id = k
+                    exit
+                end do
+            end do
+            if (matches /= 1 .or. cases(i)%node_id == 0) then
+                cases(i)%dependency_complete = .false.
+            end if
+        end do
+        n_cases = n_names
+        ierr = 0
+    end subroutine campaign_impact_cases
+
+    subroutine freeze_campaign_requirements(request, priorities, n_priorities, &
+            baseline_generation, candidate_generation, impact, baseline_input, &
+            candidate_input)
+        type(gremlin_request_t), intent(inout) :: request
+        character(len=*), intent(in) :: priorities(:)
+        integer, intent(in) :: n_priorities
+        character(len=*), intent(in) :: baseline_generation, candidate_generation
+        type(test_impact_result_t), intent(in) :: impact
+        type(input_inventory_t), intent(in), optional :: baseline_input, candidate_input
+
+        character(len=1024), allocatable :: parts(:)
+        integer :: i
+
+        request%gate_cases = ''
+        request%gate_cases(:n_priorities) = priorities(:n_priorities)
+        request%gate_required_count = n_priorities
+        request%impact_baseline_generation = baseline_generation
+        request%impact_baseline_inventory = ''
+        request%impact_candidate_inventory = ''
+        if (present(baseline_input)) &
+            request%impact_baseline_inventory = baseline_input%digest
+        if (present(candidate_input)) &
+            request%impact_candidate_inventory = candidate_input%digest
+        request%impact_model_identity = impact%model_identity
+        request%impact_complete = impact%complete
+        request%impact_model_complete = impact%model_complete
+        request%impact_widened = impact%widened
+        request%impact_widening_reasons = ''
+        if (allocated(impact%widening_reasons)) then
+            request%impact_widening_count = min(size(request%impact_widening_reasons), &
+                size(impact%widening_reasons), impact%widening_count)
+            request%impact_widening_reasons(:request%impact_widening_count) = &
+                impact%widening_reasons(:request%impact_widening_count)
+        else
+            request%impact_widening_count = 0
+        end if
+        allocate(parts(n_priorities + 4))
+        parts = ''
+        parts(1) = 'gremlin-campaign-requirements-v2'
+        parts(2) = 'baseline:'//trim(baseline_generation)
+        parts(3) = 'candidate:'//trim(candidate_generation)
+        parts(4) = 'impact:'//impact%model_identity//':complete='// &
+            trim(json_bool(impact%complete))//':widened='// &
+            trim(json_bool(impact%widened))//':model_complete='// &
+            trim(json_bool(impact%model_complete))
+        do i = 1, n_priorities
+            parts(4 + i) = 'required:'//trim(priorities(i))
+        end do
+        request%requirement_digest = cache_digest(parts, size(parts))
+    end subroutine freeze_campaign_requirements
+
+    subroutine clear_campaign_impact(request)
+        type(gremlin_request_t), intent(inout) :: request
+
+        request%impact_baseline_generation = ''
+        request%impact_baseline_inventory = ''
+        request%impact_candidate_inventory = ''
+        request%impact_model_identity = ''
+        request%impact_complete = .false.
+        request%impact_model_complete = .false.
+        request%impact_widened = .false.
+        request%impact_widening_count = 0
+        request%impact_widening_reasons = ''
+    end subroutine clear_campaign_impact
+
+    subroutine copy_campaign_impact(destination, source)
+        type(gremlin_request_t), intent(inout) :: destination
+        type(gremlin_request_t), intent(in) :: source
+
+        destination%impact_baseline_generation = source%impact_baseline_generation
+        destination%impact_baseline_inventory = source%impact_baseline_inventory
+        destination%impact_candidate_inventory = source%impact_candidate_inventory
+        destination%impact_model_identity = source%impact_model_identity
+        destination%impact_complete = source%impact_complete
+        destination%impact_model_complete = source%impact_model_complete
+        destination%impact_widened = source%impact_widened
+        destination%impact_widening_count = source%impact_widening_count
+        destination%impact_widening_reasons = source%impact_widening_reasons
+    end subroutine copy_campaign_impact
 
     subroutine append_priority_names(source, n_source, destination, n_destination)
         character(len=*), intent(in) :: source(:)
@@ -2157,16 +2363,19 @@ contains
     end subroutine reconcile_coverage
 
     subroutine read_campaign_history(session, inventory, n_inventory, history, &
-            n_history, debt, n_debt, cursor_seed, ierr, message)
+            n_history, debt, n_debt, cursor_seed, ierr, message, &
+            compatible_generation)
         type(gremlin_session_t), intent(in) :: session
         character(len=*), intent(in) :: inventory(:)
         integer, intent(in) :: n_inventory
         character(len=*), intent(out) :: history(:), debt(:)
         integer, intent(out) :: n_history, n_debt, cursor_seed, ierr
         character(len=*), intent(out) :: message
+        character(len=*), intent(in), optional :: compatible_generation
 
         type(journal_record_t), allocatable :: records(:)
         character(len=NAME_LEN) :: case_name
+        character(len=HASH_LEN) :: record_generation
         character(len=16) :: status_name, seed_text
         character(len=PATH_LEN) :: path
         integer(int64) :: cursor, next_cursor
@@ -2195,11 +2404,18 @@ contains
             if (size(records) == 0) exit
             do i = 1, size(records)
                 case_name = ''
+                record_generation = ''
                 status_name = ''
                 seed_text = ''
+                call extract_json_field(records(i)%json, 'generation', &
+                    record_generation)
                 call extract_json_field(records(i)%json, 'case_id', case_name)
                 call extract_json_field(records(i)%json, 'status', status_name)
                 call extract_json_field(records(i)%json, 'seed', seed_text)
+                if (present(compatible_generation)) then
+                    if (len_trim(compatible_generation) == 0) cycle
+                    if (trim(record_generation) /= trim(compatible_generation)) cycle
+                end if
                 if (.not. any(inventory(:n_inventory) == case_name)) cycle
                 if (status_name /= 'PASS' .and. status_name /= 'FAIL' .and. &
                     status_name /= 'TIMEOUT') cycle
@@ -2208,6 +2424,8 @@ contains
                 call move_to_recent(case_name, debt, n_debt)
                 if (status_name == 'FAIL' .or. status_name == 'TIMEOUT') then
                     call move_to_priority(case_name, history, n_history)
+                else
+                    call remove_priority(case_name, history, n_history)
                 end if
             end do
             if (next_cursor <= cursor) then
@@ -2268,6 +2486,22 @@ contains
         if (count_values > 1) values(2:count_values) = values(1:count_values - 1)
         values(1) = name
     end subroutine move_to_priority
+
+    subroutine remove_priority(name, values, count_values)
+        character(len=*), intent(in) :: name
+        character(len=*), intent(inout) :: values(:)
+        integer, intent(inout) :: count_values
+        integer :: i
+
+        do i = 1, count_values
+            if (values(i) /= name) cycle
+            if (i < count_values) values(i:count_values - 1) = &
+                values(i + 1:count_values)
+            values(count_values) = ''
+            count_values = count_values - 1
+            return
+        end do
+    end subroutine remove_priority
 
     subroutine cancel_test_case(session, generation, child, ierr, message)
         type(gremlin_session_t), intent(in) :: session
@@ -2412,6 +2646,7 @@ contains
             request%requirement_digest = next_request%requirement_digest
             request%gate_cases = next_request%gate_cases
             request%gate_required_count = next_request%gate_required_count
+            call copy_campaign_impact(request, next_request)
             if (ierr /= 0) then
                 state_name = 'inventory_failed'
                 call publish_state(session, request, state_name, generation, generation, '', &
@@ -2639,7 +2874,8 @@ contains
         if (present(diagnostic)) diagnostic_text = diagnostic
         if (len_trim(active%identity) > 0) active_project = trim(active%project_root)
         if (len_trim(candidate%identity) > 0) candidate_project = trim(candidate%project_root)
-        status_text = '{"protocol":1,"session_id":"'// &
+        impact_json = campaign_impact_json(request)
+        status_serialized = '{"protocol":1,"session_id":"'// &
             trim(json_escape_string(session%session_id))//'","lane_id":"'// &
             trim(json_escape_string(request%lane_id))//'","policy_key":"'// &
             request_policy_key(request)//'","state":"'//trim(state)// &
@@ -2664,9 +2900,18 @@ contains
             trim(json_int(last_exitcode))//',"gate_required":'// &
             trim(json_int(request%gate_required_count))// &
             ',"requirement_digest":"'//request%requirement_digest// &
-            '","event_epoch":'//trim(json_int(request%event_epoch))// &
+            '"'//impact_json// &
+            ',"event_epoch":'//trim(json_int(request%event_epoch))// &
             ',"input_changed":'//trim(json_bool(request%input_changed))// &
             ',"diagnostic":"'//trim(json_escape_string(trim(diagnostic_text)))//'"}'
+        if (len(status_serialized) > len(status_text)) then
+            status = 1
+            local_message = 'Gremlin status exceeds the published state capacity'
+            if (present(ierr)) ierr = status
+            if (present(message)) message = local_message
+            return
+        end if
+        status_text = status_serialized
         call gremlin_session_publish(session, trim(status_text), status, local_message)
         if (status == 0) then
             call lifecycle_path_for_session(session, request, lifecycle_path, &
@@ -2709,6 +2954,39 @@ contains
         if (present(message)) message = local_message
         if (present(status_text_out)) status_text_out = trim(status_text)
     end subroutine publish_state
+
+    function campaign_impact_json(request) result(text)
+        type(gremlin_request_t), intent(in) :: request
+        character(len=:), allocatable :: text
+        integer :: i, n_reasons, n_cases
+
+        n_reasons = max(0, min(request%impact_widening_count, &
+            size(request%impact_widening_reasons)))
+        n_cases = max(0, min(request%gate_required_count, size(request%gate_cases)))
+        text = ',"impact_baseline_generation":"'// &
+            trim(request%impact_baseline_generation)// &
+            '","baseline_inventory_digest":"'// &
+            trim(request%impact_baseline_inventory)// &
+            '","candidate_inventory_digest":"'// &
+            trim(request%impact_candidate_inventory)// &
+            '","impact_model_identity":"'//trim(request%impact_model_identity)// &
+            '","impact_complete":'//trim(json_bool(request%impact_complete))// &
+            ',"impact_model_complete":'// &
+            trim(json_bool(request%impact_model_complete))// &
+            ',"impact_widened":'//trim(json_bool(request%impact_widened))// &
+            ',"impact_widening_reasons":['
+        do i = 1, n_reasons
+            if (i > 1) text = text//','
+            text = text//'"'//trim(json_escape_string( &
+                request%impact_widening_reasons(i)))//'"'
+        end do
+        text = text//'],"required_cases":['
+        do i = 1, n_cases
+            if (i > 1) text = text//','
+            text = text//'"'//trim(json_escape_string(request%gate_cases(i)))//'"'
+        end do
+        text = text//']'
+    end function campaign_impact_json
 
     subroutine publish_lifecycle_transition(session, request, path, state, active, &
             candidate, current_case, last_outcome, readiness, coverage, have_coverage, &
