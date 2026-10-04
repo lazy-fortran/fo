@@ -169,15 +169,27 @@ The integrated native harness oracle passes 1/1 in 0.30s; no actual benchmark,
 third-party acquisition or new performance result was run or claimed. Real-edit
 workloads and broader audit instrumentation remain open under #190/#145.
 
-### Parked implementation checkpoints
+### Active implementation checkpoints
 
 | Issue | Published task checkpoint | Evidence and remaining work |
 | --- | --- | --- |
-| #150 | `agent/150-shared-json` at `583c385` | Domain request adoption promoted; integrated request/structure 2/2 (0.09s), public MCP 1/1 (8.80s). Residual MCP lexical helpers remain the next slice. |
-| #191 | `agent/191-verify` at `18af66a` | Promoted bounded scanner fix; integrated oracle 1/1 (0.22s), controlled old-driver negative rejects the prior behavior. |
-| #170 | `agent/170-sol-repair` at `1fc8456` | Isolated provider test/build green after two failed Luna repairs; combined/public runtime integration still required. |
-| #189 | `agent/189-campaign` at `5441a03` | Campaign adoption/metadata source only; independent executed-case oracle and combined verification pending. |
-| #161 | `agent/161-native-verify` at `7eef4ef` | First native MCP replacement source repaired but unverified; all six JS fixtures remain. |
+| #150 | `agent/150-mcp-codec` at `f6c82fa` | Domain adoption is on main; residual MCP scanner replacement is published source only. Public Gremlin found a nested runner-report consumer incorrectly using a top-level getter; repair and independent result oracle have one Sol owner. |
+| #191 | main through `39df584` | Bounded scanner oracle passes 1/1 (0.22s); controlled prior-driver negative rejects three behavioral faults and confirms cleanup. Issue closed. |
+| #170 | combined `bcc676f`, public parser repair `87a6272` | Combined provider/inventory 2/2 (0.03s), app build 71/71. Actual repaired app proves relative pass output cleanup and failed-output retention without editable-source mutation; preemption and declaration plumbing remain. |
+| #189 | `agent/189-campaign` at `f2d83f5` | Frozen input-delta campaign selection, retained regression ordering and real executed-case oracle are published source only; combined verification pending. |
+| #161 | frozen Luna `cf0b975`, scoped Sol repair active | Two failed substantive fixture repairs triggered task-specific escalation. Passing runner report misclassification is a confirmed production defect; six JS fixtures remain until native behavioral replacements pass. |
+| #151 | `agent/151-git-provenance` at `c1f2dd6` | Metadata-only execution-identity slice and native oracle are published source only. Declared/configure-consumed Git version remains a real input, not an ignored metadata change. |
+| #165/#175 | isolated Luna tasks | Compact manifest capture reuses Fx storage; canonical Git dependency and fixture declaration consumers need completion. No second inventory/store or host closure. |
+
+Fx Darwin repair `894ff9a` passes the two native lease/read-lease cases on
+faepmac1 (0.46s and 1.33s) with actual pinned driver `f68e0916`. It resolves
+ordinary filesystem root aliases and restoration parents; Linux integration
+remains pending. Failed earlier receipts remain evidence rather than being
+relabelled green. No timeout increase was used.
+
+One resident integration lane starts after the actual combined runner verdict
+and preemption gates pass. Temporary acceptance lanes have explicit owners and
+are stopped after checking cleanup. Do not launch one cold resident per worker.
 
 The combined #150/#191 code checkpoint is `2e7c048`, now integrated with current
 documentation through `91c8b62`. Its code patch versus prior main `7a638e8` has SHA256
