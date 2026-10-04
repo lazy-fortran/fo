@@ -10,7 +10,9 @@ before assigning work; planning edits do not prove implementation complete.
 Keep fo in the build/test developer-tool lane: fpm/CMake project discovery,
 incremental compilation/cache, run/test/affected/continuous testing, formatting,
 lint/static diagnostics, LSP/MCP convenience and closely related correctness
-infrastructure. Environment/package/system management, scientific provenance
+infrastructure. Implementation and focused verification are active; follow
+PLAN's staged standalone FPM and defined ITpPlasma CMake replacement target.
+Environment/system package management, scientific provenance
 capsules, proof/synthesis, containers, CI/promotion and agent orchestration are
 outside the product.
 

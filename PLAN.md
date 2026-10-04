@@ -7,9 +7,10 @@ New interfaces/workflows below are planned, not claimed implemented by this edit
 
 ## Immediate controller instructions
 
-The explicit goal continuation resumes implementation and testing through
-Gremlin's own bootstrap. Use parallel Luna source work and task-specific Sol
-escalation. Until measured admission is implemented, allow one heavy build/test
+Implementation and focused verification are active for Gremlin through its own
+bootstrap, standalone FPM compatibility and the later ITpPlasma CMake subset.
+Continue assigned work in this plan's stage order without another execution
+confirmation. Use parallel Luna source work and task-specific Sol escalation. Until measured admission is implemented, allow one heavy build/test
 lane per host; parallel source work continues. Preserve warm caches and push
 exact integrated increments after focused local correctness checks.
 
@@ -60,7 +61,7 @@ an interim-backend reference until its native replacement scope is reconciled.
 
 FPM #1329's minimal upstream fix is separate: two-file bugfix/test preparation
 and focused verification, no fo redesign in that PR. Existing source checkpoints
-are preserved; no broad standalone implementation is claimed by this revision.
+are preserved; standalone implementation remains subject to its behavioral acceptance.
 
 ## Product scope
 

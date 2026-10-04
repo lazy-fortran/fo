@@ -12,17 +12,21 @@ the build/test/run/cache role of Cargo or the Go toolchain, plus practical
 formatting, lint/static diagnostics, LSP/MCP integration and continuous
 affected-test feedback.
 
-It deliberately does **not** replace fpm as the package manifest/registry, Nix
-or Spack as an environment manager, containers as a sandbox, CI as repository
-governance, agent frameworks as task schedulers, or FortSym/other research tools
-as proof/synthesis/workflow systems. The older capsule/provenance/Nix/FortOS
+The active implementation target is a standalone drop-in replacement for FPM,
+followed by native support for a defined CMake subset used by ITpPlasma projects.
+Current Git/registry bootstrap and installation still invoke FPM, and the current
+CMake backend invokes CMake/CTest; standalone parity remains under development
+in [PLAN.md](PLAN.md).
+
+Environment management, containers/sandboxing, CI governance, agent scheduling
+and scientific proof/synthesis/workflow systems remain outside fo's scope. The older capsule/provenance/Nix/FortOS
 experiments remain historical closed issues (#1–#7); `fo prove` /
 synthesis (#120) and complete host toolchain/runtime capture (#157) are also
 closed as out of scope.
 
-For reproducibility, fo guarantees what a build/test driver reasonably can:
-content-based cache/action identities, explicit project inputs, deterministic
-selection/replay where supported, and honest compiler/configuration reporting.
+For reproducibility, fo uses content-based cache/action identities, explicit
+project inputs, deterministic selection/replay where supported, and explicit
+compiler/configuration reporting.
 Hermetic operating environments should be supplied externally when required.
 
 

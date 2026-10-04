@@ -1,12 +1,18 @@
 # CMake / CTest support for fo and Gremlin
 
-Planning date: 2026-10-04. Umbrella: [#192](https://github.com/lazy-fortran/fo/issues/192).
+Implementation reference updated 2026-10-04. Umbrella: [#192](https://github.com/lazy-fortran/fo/issues/192).
 This is an implementation plan based on source and official-interface review,
 not a claim that the new backend, project matrix or measurements already pass.
 The ordinary/backend source audit used fo `7a638e8bc3066f04f9240ecf18215b81953cba92`.
 Check current source before assigning work; other development continues.
 
-## 1. Decision: integrate CMake, do not replace it
+## 1. Current delegated backend
+
+Implementation is active. [PLAN.md](../PLAN.md) now targets a standalone CMake
+replacement for a defined ITpPlasma subset. The sections below describe the
+existing delegated backend and its compatibility/reference requirements; they
+are not a documents-only phase or a restriction against implementing the native
+subset. Standalone support is claimed only after native behavioral verification.
 
 ```text
 ordinary fo commands             Gremlin
@@ -28,11 +34,12 @@ scheduling, timeouts and verdict classification. fo owns developer feedback,
 project-input tracking, supported affected-test prioritization, generation
 lifetime and durable observations through its existing services.
 
-Delegated execution is the primary supported backend, not a temporary failure.
-Do not translate every CMake project into fo's native Fortran DAG, evaluate
-CMakeLists with a regex parser, depend on private libCMake internals, or treat
-compile_commands.json as a complete build/test graph. The documented File API
-is the integration API. A compiler-launcher cache is a later optional speedup.
+Delegated execution is the currently supported backend. Its documented File API
+provides integration metadata. Native subset implementation must parse and
+evaluate the supported semantics into fo's shared target/action graph; it must
+not depend on private libCMake internals or treat compile_commands.json as a
+complete build/test graph. A regex reader cannot establish compatibility.
+A compiler-launcher cache remains an optional delegated-backend speedup.
 
 No environment manager, system-toolchain capture, container service, CI/merge
 controller or agent scheduler is introduced. Existing consumer Python/shell/MPI
@@ -187,7 +194,7 @@ CTest fixture group ownership is the isolation unit where tests intentionally
 share prepared data. Opaque captured-input mutation or hard-coded external
 writes can require serialization/a separate group view or remain unsupported.
 
-### Honest early fallback
+### Serialized backend execution
 
 A serialized watch/configure/build/CTest route can ship before complete slots.
 It stops/reaps testing before mutating its owned build tree. Its status explicitly

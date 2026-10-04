@@ -27,8 +27,10 @@ one externally. Repository-internal third-party/performance audits stay under
 [ROADMAP.md](ROADMAP.md) maps adjacent issue ownership. Read workspace master
 PLAN/AGENTS when available and preserve their host restrictions.
 
-The Gremlin/storage/test-language program is authorized for implementation and
-verification. External controllers own coding agents, task DAGs, worktrees,
+Implementation and focused verification are active for Gremlin, shared storage,
+native tests, standalone FPM compatibility and the later defined ITpPlasma CMake
+subset. Follow PLAN's stage order and continue assigned work without a new
+execution confirmation. External controllers own coding agents, task DAGs, worktrees,
 model selection and integration. Parallel mode uses a luna coordinator and
 isolated luna workers; serial mode stays in the main session. After two
 substantive failed attempts on one task, freeze its evidence and transfer only
