@@ -327,6 +327,88 @@
         close (u)
     end subroutine write_cpp_runtime
 
+    subroutine test_cmake_preset_external_root_hint()
+        interface
+            function setenv(name, value, overwrite) bind(C, name='setenv') result(ierr)
+                import :: c_char, c_int
+                character(kind=c_char), intent(in) :: name(*), value(*)
+                integer(c_int), value :: overwrite
+                integer(c_int) :: ierr
+            end function setenv
+
+            function unsetenv(name) bind(C, name='unsetenv') result(ierr)
+                import :: c_char, c_int
+                character(kind=c_char), intent(in) :: name(*)
+                integer(c_int) :: ierr
+            end function unsetenv
+        end interface
+
+        type(backend_t) :: b
+        character(len=512) :: project_dir, external_root, wrong_root, log_file
+        integer :: u, exitcode
+        integer(c_int) :: ierr
+        logical :: wrong_hint_rejected
+
+        call make_tmp_path('fo cmake preset context', project_dir)
+        call make_tmp_path('fo cmake preset context log', log_file)
+        external_root = trim(project_dir)//'_external'
+        wrong_root = trim(project_dir)//'_wrong'
+        call make_dir(project_dir)
+        open (newunit=u, file=trim(project_dir)//'/CMakeLists.txt', &
+            status='replace')
+        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
+        write (u, '(a)') 'project(preset_cxx LANGUAGES CXX)'
+        write (u, '(a)') 'add_executable(preset_app main.cpp)'
+        close (u)
+        call write_cpp_runtime(trim(project_dir)//'/main.cpp', 'preset')
+        open (newunit=u, file=trim(project_dir)//'/CMakePresets.json', &
+            status='replace')
+        write (u, '(a)') '{"version":2,"configurePresets":['// &
+            '{"name":"external","generator":"Ninja",'// &
+            '"binaryDir":"'//trim(external_root)//'"}]}'
+        close (u)
+
+        ierr = setenv('FO_CMAKE_CONFIGURE_PRESET'//c_null_char, &
+            'external'//c_null_char, 1_c_int)
+        ierr = setenv('FO_CMAKE_BUILD_DIR'//c_null_char, &
+            trim(external_root)//c_null_char, 1_c_int)
+        ierr = unsetenv('FO_CMAKE_BUILD_PRESET'//c_null_char)
+        ierr = unsetenv('FO_CMAKE_TEST_PRESET'//c_null_char)
+        ierr = unsetenv('FO_CMAKE_GENERATOR'//c_null_char)
+        ierr = unsetenv('FO_CMAKE_ARGS'//c_null_char)
+        b = detect_backend(project_dir)
+        call backend_build(b, exitcode, log_file=log_file)
+        call assert(exitcode == 0, &
+            'CMake configure preset uses an external build-root locator hint')
+        call assert(b%cmake%has_codemodel .and. b%cmake%request_seen .and. &
+            trim(b%cmake%reported_generator) == 'Ninja', &
+            'preset File API reply is current at the hinted build root')
+
+        call make_dir(wrong_root)
+        open (newunit=u, file=trim(wrong_root)//'/CMakeCache.txt', &
+            status='replace')
+        write (u, '(a)') 'CMAKE_HOME_DIRECTORY:INTERNAL='// &
+            trim(wrong_root)//'_source'
+        write (u, '(a)') 'CMAKE_GENERATOR:INTERNAL=Ninja'
+        close (u)
+        ierr = setenv('FO_CMAKE_BUILD_DIR'//c_null_char, &
+            trim(wrong_root)//c_null_char, 1_c_int)
+        b = detect_backend(project_dir)
+        call backend_build(b, exitcode, log_file=log_file)
+        wrong_hint_rejected = .false.
+        if (exitcode /= 0 .and. allocated(b%cmake%error)) &
+            wrong_hint_rejected = index(b%cmake%error, 'different source') > 0
+        call assert(wrong_hint_rejected, &
+            'a locator hint for another source tree is rejected')
+
+        ierr = unsetenv('FO_CMAKE_CONFIGURE_PRESET'//c_null_char)
+        ierr = unsetenv('FO_CMAKE_BUILD_DIR'//c_null_char)
+        call remove_tree(project_dir)
+        call remove_tree(external_root)
+        call remove_tree(wrong_root)
+        call execute_command_line('rm -f '//trim(log_file))
+    end subroutine test_cmake_preset_external_root_hint
+
     subroutine test_cmake_named_test_rebuilds_changed_source()
         type(backend_t) :: b
         integer :: exitcode, u

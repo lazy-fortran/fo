@@ -1,5 +1,6 @@
 module fo_cmake_context
-    use fo_fs, only: fs_make_dir, fs_collect_files
+    use, intrinsic :: iso_fortran_env, only: int64
+    use fo_fs, only: fs_make_dir, fs_collect_files, fs_write_text
     use fx_json_parse, only: json_parser_t, json_event_t, &
         json_parser_init_strict, json_parser_next, JSON_OBJECT_START, &
         JSON_OBJECT_END, JSON_ARRAY_START, JSON_ARRAY_END, JSON_KEY, &
@@ -15,6 +16,7 @@ module fo_cmake_context
         character(:), allocatable :: configure_preset
         character(:), allocatable :: build_preset
         character(:), allocatable :: test_preset
+        character(:), allocatable :: request_token
         character(:), allocatable :: error
         character(:), allocatable :: extra_args(:)
         character(:), allocatable :: reported_generator
@@ -22,11 +24,15 @@ module fo_cmake_context
         logical :: has_codemodel = .false.
         logical :: has_cache = .false.
         logical :: has_toolchains = .false.
+        ! With a configure preset, this names the File API/cache location only.
+        ! CMake still chooses its own binaryDir from the preset.
+        logical :: build_root_hint = .false.
+        logical :: request_seen = .false.
         logical :: valid = .true.
     end type cmake_context_t
 
     public :: cmake_context_init, cmake_context_query, cmake_context_read_reply
-    public :: cmake_context_discover_build_root, cmake_context_build_path
+    public :: cmake_context_build_path, cmake_context_validate_hint
 
 contains
 
@@ -42,16 +48,17 @@ contains
         character(len=*), intent(in), optional :: test_preset, argv(:)
         character(:), allocatable :: raw_args
         integer :: i, env_length, env_status
-        logical :: explicit_build_root
+        integer(int64) :: clock_tick
+        character(len=40) :: token_text
 
         context%source_root = trim(source_root)
         context%build_root = 'build'
-        explicit_build_root = present(build_root)
+        context%build_root_hint = present(build_root)
         if (present(build_root)) context%build_root = trim(build_root)
         if (.not. present(build_root)) then
             call get_environment_variable('FO_CMAKE_BUILD_DIR', &
                 length=env_length, status=env_status)
-            explicit_build_root = env_status == 0 .and. env_length > 0
+            context%build_root_hint = env_status == 0 .and. env_length > 0
             call env_value('FO_CMAKE_BUILD_DIR', context%build_root)
         end if
         context%generator = ''
@@ -75,6 +82,10 @@ contains
         if (present(test_preset)) context%test_preset = trim(test_preset)
         if (.not. present(test_preset)) call env_value( &
             'FO_CMAKE_TEST_PRESET', context%test_preset)
+        context%reported_generator = ''
+        call system_clock(count=clock_tick)
+        write (token_text, '(i0)') clock_tick
+        context%request_token = trim(token_text)
 
         raw_args = ''
         if (present(extra_args)) raw_args = extra_args
@@ -96,11 +107,6 @@ contains
             context%valid = .false.
             context%error = 'FO_CMAKE_GENERATOR cannot override a configure preset'
         end if
-        if (len_trim(context%configure_preset) > 0 .and. explicit_build_root) then
-            context%valid = .false.
-            context%error = 'the configure preset owns the build directory; ' // &
-                'remove FO_CMAKE_BUILD_DIR or the explicit build directory'
-        end if
     end subroutine cmake_context_init
 
     subroutine cmake_context_query(context)
@@ -113,6 +119,11 @@ contains
         call create_empty_file(query_dir//'/codemodel-v2')
         call create_empty_file(query_dir//'/cache-v2')
         call create_empty_file(query_dir//'/toolchains-v1')
+        call fs_write_text(query_dir//'/query.json', &
+            '{"requests":[{"kind":"codemodel","version":2},'// &
+            '{"kind":"cache","version":2},'// &
+            '{"kind":"toolchains","version":1}],"client":'// &
+            '{"fo_request":"'//context%request_token//'"}}')
     end subroutine cmake_context_query
 
     subroutine create_empty_file(path)
@@ -123,40 +134,6 @@ contains
             iostat=ios)
         if (ios == 0) close (unit)
     end subroutine create_empty_file
-
-    subroutine cmake_context_discover_build_root(context)
-        type(cmake_context_t), intent(inout) :: context
-        character(len=4096) :: paths(128), line
-        character(:), allocatable :: marker, candidate
-        integer :: n_paths, i, unit, ios, root_len, last_slash
-
-        call fs_collect_files(trim(context%source_root), 'CMakeCache', '.txt', &
-            '', paths, n_paths)
-        marker = 'CMAKE_HOME_DIRECTORY:INTERNAL='//trim(context%source_root)
-        root_len = len_trim(context%source_root)
-        do i = 1, n_paths
-            open (newunit=unit, file=trim(paths(i)), status='old', &
-                action='read', iostat=ios)
-            if (ios /= 0) cycle
-            do
-                read (unit, '(a)', iostat=ios) line
-                if (ios /= 0) exit
-                if (index(line, marker) == 1) then
-                    close (unit)
-                    last_slash = index(trim(paths(i)), '/', back=.true.)
-                    if (last_slash == root_len + 1) then
-                        context%build_root = '.'
-                        return
-                    end if
-                    if (last_slash < root_len + 1) return
-                    candidate = paths(i)(root_len + 2:last_slash - 1)
-                    if (len(candidate) > 0) context%build_root = candidate
-                    return
-                end if
-            end do
-            close (unit)
-        end do
-    end subroutine cmake_context_discover_build_root
 
     function cmake_context_build_path(context) result(path)
         type(cmake_context_t), intent(in) :: context
@@ -200,6 +177,7 @@ contains
         context%has_codemodel = .false.
         context%has_cache = .false.
         context%has_toolchains = .false.
+        context%request_seen = .false.
         call fs_collect_files(cmake_context_build_path(context)// &
             '/.cmake/api/v1/reply', 'index-', '.json', &
             '', paths, n_paths, recursive=.false.)
@@ -214,6 +192,7 @@ contains
         type(json_parser_t) :: parser
         type(json_event_t) :: event
         character(:), allocatable :: key
+        character(len=32) :: path(8)
         integer :: depth, generator_depth, objects_depth
 
         call json_parser_init_strict(parser, input)
@@ -221,6 +200,7 @@ contains
         generator_depth = -1
         objects_depth = -1
         key = ''
+        path = ''
         do
             call json_parser_next(parser, event)
             if (event%event_type == JSON_END_OF_INPUT) exit
@@ -230,15 +210,18 @@ contains
                 key = event%string_val
             case (JSON_OBJECT_START)
                 depth = depth + 1
+                if (depth <= size(path)) path(depth) = key
                 if (key == 'generator') generator_depth = depth
                 key = ''
             case (JSON_ARRAY_START)
                 depth = depth + 1
+                if (depth <= size(path)) path(depth) = key
                 if (key == 'objects') objects_depth = depth
                 key = ''
             case (JSON_OBJECT_END, JSON_ARRAY_END)
                 if (depth == generator_depth) generator_depth = -1
                 if (depth == objects_depth) objects_depth = -1
+                if (depth > 0 .and. depth <= size(path)) path(depth) = ''
                 depth = depth - 1
                 key = ''
             case (JSON_STRING)
@@ -264,6 +247,13 @@ contains
                         context%has_toolchains = .true.
                     end select
                 end if
+                if (depth == 4 .and. key == 'fo_request' .and. &
+                        trim(path(2)) == 'client-fo' .and. &
+                        trim(path(3)) == 'query.json' .and. &
+                        trim(path(4)) == 'client' .and. &
+                        event%string_val == context%request_token) then
+                    context%request_seen = .true.
+                end if
                 key = ''
             case (JSON_BOOL)
                 if (depth == generator_depth .and. key == 'multiConfig') &
@@ -274,6 +264,50 @@ contains
             end select
         end do
     end subroutine parse_reply
+
+    subroutine cmake_context_validate_hint(context, valid)
+        type(cmake_context_t), intent(inout) :: context
+        logical, intent(out) :: valid
+        character(len=4096) :: line, cache_home, cache_generator
+        character(:), allocatable :: cache_file
+        integer :: unit, ios
+
+        valid = .false.
+        if (allocated(context%error)) deallocate (context%error)
+        cache_home = ''
+        cache_generator = ''
+        cache_file = cmake_context_build_path(context)//'/CMakeCache.txt'
+        open (newunit=unit, file=cache_file, status='old', action='read', &
+            iostat=ios)
+        if (ios /= 0) then
+            context%error = 'preset build-root hint has no CMakeCache.txt'
+            return
+        end if
+        do
+            read (unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, 'CMAKE_HOME_DIRECTORY:INTERNAL=') == 1) &
+                cache_home = line(len('CMAKE_HOME_DIRECTORY:INTERNAL=') + 1:)
+            if (index(line, 'CMAKE_GENERATOR:INTERNAL=') == 1) &
+                cache_generator = line(len('CMAKE_GENERATOR:INTERNAL=') + 1:)
+        end do
+        close (unit)
+
+        if (trim(cache_home) /= trim(context%source_root)) then
+            context%error = 'preset build-root hint points at a different source'
+            return
+        end if
+        if (.not. context%request_seen) then
+            context%error = 'preset did not produce a current File API reply at the supplied build-root hint'
+            return
+        end if
+        if (len_trim(cache_generator) == 0 .or. &
+                trim(cache_generator) /= trim(context%reported_generator)) then
+            context%error = 'preset build-root hint generator does not match its File API reply'
+            return
+        end if
+        valid = .true.
+    end subroutine cmake_context_validate_hint
 
     subroutine read_file(path, text)
         character(len=*), intent(in) :: path

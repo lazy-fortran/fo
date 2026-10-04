@@ -43,6 +43,7 @@ program test_backend
     call test_gfortran_app_main_keeps_package_name()
     call test_backend_clean_keeps_shared_store()
     call test_backend_clean_purge_removes_store()
+    call test_cmake_preset_external_root_hint()
 
     call report('backend')
 
