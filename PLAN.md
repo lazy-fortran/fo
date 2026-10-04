@@ -34,6 +34,34 @@ exact integrated increments after focused local correctness checks.
    `fo work` is abandoned (#143/#152, PR #147); do not recreate it or add a CI
    scheduler, promotion engine, cache daemon, database or bulk RAM cache to fo.
 
+## Revised standalone target (2026-10-04)
+
+Latest user instruction supersedes the earlier delegation-only product boundary:
+fo must become a standalone drop-in replacement for fpm, and later replace
+CMake/CTest for a well-defined subset used by ITpPlasma project profiles. Current
+FPM bootstrap and CMake delegation are implementation facts and transition paths,
+not the final target. Do not advertise this replacement as delivered yet.
+
+The native path consumes unchanged supported project descriptions, resolves
+inputs and executes through the shared fo build/cache/test/Gremlin engine without
+installed fpm/CMake/CTest. Ordinary compilers and declared project tools remain
+external. Preserve scientific flags, generated sources, dependencies, test and
+install semantics. Unsupported constructs get a file/construct diagnostic;
+no silent fallback establishes native compatibility.
+
+First finish FPM manifest/CLI/dependency/install semantics, considering licensed
+reuse of existing Fortran FPM parser/resolver modules rather than another partial
+parser. Then define the CMake semantic subset from pinned SIMPLE, NEO-2, libneo
+and transitive dependency profiles; implement proper parsing/evaluation into the
+same target/action graph. Command-name lists alone are insufficient. Reference
+FPM/CMake/CTest runs are independent compatibility oracles; execution with those
+tools absent proves standalone support. The older CMake delegation plan remains
+an interim-backend reference until its native replacement scope is reconciled.
+
+FPM #1329's minimal upstream fix is separate: two-file bugfix/test preparation
+and focused verification, no fo redesign in that PR. Existing source checkpoints
+are preserved; no broad standalone implementation is claimed by this revision.
+
 ## Product scope
 
 fo is the Fortran build/test/development driver: build, test, run, incremental
