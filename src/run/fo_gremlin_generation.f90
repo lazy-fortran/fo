@@ -48,6 +48,8 @@ module fo_gremlin_generation
         integer(int64) :: driver_size = 0_int64
         character(len=PATH_LEN) :: root = ''
         character(len=PATH_LEN) :: project_root = ''
+        ! Writable materialization locator; deliberately excluded from identity.
+        character(len=PATH_LEN) :: build_project_root = ''
         character(len=:), allocatable :: base_commit
         character(len=:), allocatable :: patch_digest
         type(input_inventory_t) :: input_inventory

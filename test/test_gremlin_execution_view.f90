@@ -7,17 +7,25 @@ program test_gremlin_execution_view
         input_inventory_discover, INPUT_FILE
     use fo_process, only: argv_push, process_getcwd, process_run_argv_logged
     use fo_util, only: delete_tmpfile, make_tmpfile, read_text_file
+    use fo_test_cli, only: resolve_driver, run_fo
+    use fo_test_harness, only: string_list_t, process_result_t, list_add
     implicit none
 
     type(input_declaration_t) :: declarations(1)
     type(input_inventory_t) :: inventory, escaping, incomplete, invalid
     type(input_inventory_t) :: multirole, conflicting, aliased
     type(execution_view_t) :: first, second, partial, paired, rejected, alias_view
+    type(execution_view_t) :: build_view
+    type(string_list_t) :: arguments, environment
+    type(process_result_t) :: build_result, run_result
     character(len=512) :: root, views, source_file, text, message
     character(len=512) :: first_fixture, second_output, escape_path, bundle_file
+    character(len=512) :: build_source, build_binary, dependency_source
     character(len=HASH_LEN) :: source_digest, after_digest
+    character(len=HASH_LEN) :: build_source_digest, build_source_after
+    character(len=HASH_LEN) :: dependency_digest, dependency_after
     character(len=512) :: argument, executable, current_dir, probe_log
-    character(len=:), allocatable :: packed
+    character(len=:), allocatable :: packed, driver
     integer :: n_args, probe_exit, cwd_status
     integer :: ierr, release_status, i
     logical :: exists
@@ -213,6 +221,81 @@ program test_gremlin_execution_view
         'escaping declared paths receive an explicit rejection')
     inquire(file=trim(escape_path), exist=exists)
     call check(.not. exists, 'path rejection does not write outside the view')
+
+    ! Candidate builds get a fresh writable project tree rooted in the frozen
+    ! generation bundle; their compiler outputs cannot mutate that bundle.
+    call fs_make_dir(trim(root)//'/bundle/project/app')
+    call fs_make_dir(trim(root)//'/bundle/deps/provider/src')
+    call fs_write_text(trim(root)//'/bundle/project/fpm.toml', &
+        'name = "candidate_build_view"'//new_line('a')// &
+        '[dependencies]'//new_line('a')// &
+        'candidate_provider = { path = "../deps/provider" }'//new_line('a')// &
+        '[build]'//new_line('a')//'auto-executables = false'//new_line('a')// &
+        '[[executable]]'//new_line('a')//'name = "candidate_build_probe"'// &
+        new_line('a')//'source-dir = "app"'//new_line('a')//'main = "main.f90"'// &
+        new_line('a'))
+    build_source = trim(root)//'/bundle/project/app/main.f90'
+    dependency_source = trim(root)//'/bundle/deps/provider/src/provider.f90'
+    call fs_write_text(trim(root)//'/bundle/deps/provider/fpm.toml', &
+        'name = "candidate_provider"'//new_line('a'))
+    call fs_write_text(trim(dependency_source), &
+        'module candidate_provider_mod'//new_line('a')// &
+        'integer, parameter :: candidate_provider_value = 73'//new_line('a')// &
+        'end module candidate_provider_mod'//new_line('a'))
+    call fs_write_text(trim(build_source), &
+        'program candidate_build_probe'//new_line('a')// &
+        'use candidate_provider_mod, only: candidate_provider_value'//new_line('a')// &
+        'print "(i0)", candidate_provider_value'//new_line('a')// &
+        'end program candidate_build_probe'//new_line('a'))
+    call cache_file_digest(trim(build_source), build_source_digest)
+    call cache_file_digest(trim(dependency_source), dependency_digest)
+    call execution_view_create(trim(root)//'/views', repeat('b', HASH_LEN), &
+        'session-candidate-build', 'build', inventory, .true., .true., &
+        build_view, ierr, message, candidate_bundle_root=trim(root)//'/bundle')
+    call check(ierr == 0 .and. build_view%active, &
+        'candidate build view copies the frozen project')
+    if (build_view%active) then
+        call resolve_driver(driver)
+        environment = string_list_t()
+        call list_add(environment, 'FO_JOBS=1')
+        arguments = string_list_t()
+        call list_add(arguments, 'build')
+        call run_fo(driver, arguments, trim(build_view%cwd), &
+            trim(root)//'/build-view-cache', build_result, environment, 120000)
+        call check(build_result%exit_code == 0, &
+            'native Fo build succeeds in the candidate-owned view')
+        build_binary = trim(build_view%cwd)//'/build/fo/bin/candidate_build_probe'
+        inquire(file=trim(build_binary), exist=exists)
+        call check(exists, 'native executable is published in the candidate view')
+        if (exists) then
+            arguments = string_list_t()
+            call list_add(arguments, 'exec')
+            call list_add(arguments, '--no-build')
+            call list_add(arguments, 'candidate_build_probe')
+            call run_fo(driver, arguments, trim(build_view%cwd), &
+                trim(root)//'/build-view-cache', run_result, environment, 30000)
+            call check(run_result%exit_code == 0, &
+                'candidate executable exits successfully in the private view')
+            if (allocated(run_result%stdout)) then
+                call check(index(run_result%stdout, '73') > 0, &
+                    'candidate executable resolves the logical dependency root')
+            else
+                call check(.false., 'candidate executable output is captured')
+            end if
+        end if
+        call cache_file_digest(trim(build_source), build_source_after)
+        call check(build_source_digest == build_source_after, &
+            'candidate build leaves frozen source bytes unchanged')
+        call cache_file_digest(trim(dependency_source), dependency_after)
+        call check(dependency_digest == dependency_after, &
+            'candidate build leaves its dependency bundle unchanged')
+        inquire(file=trim(root)//'/bundle/project/build/fo/bin/'// &
+            'candidate_build_probe', exist=exists)
+        call check(.not. exists, &
+            'candidate build does not write outputs into its bundle')
+        call execution_view_release(build_view, .false., release_status, message)
+        call check(release_status == 0, 'candidate build view releases its owned tree')
+    end if
     call fs_remove_tree(trim(root))
     print '(a)', 'Gremlin writable execution view behavioral oracle: PASS'
 

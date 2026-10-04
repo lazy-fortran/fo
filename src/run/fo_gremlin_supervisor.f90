@@ -55,7 +55,7 @@ module fo_gremlin_supervisor
     use fo_util, only: json_bool, json_int, make_tmpfile
     use fx_dag, only: dag_t, MAX_NODES
     use fx_json_build, only: json_escape_string
-    use fo_fs, only: fs_make_dir, fs_sleep_ms
+    use fo_fs, only: fs_make_dir, fs_sleep_ms, fs_remove_tree
     use fo_gremlin_session, only: gremlin_resolve_read_session, &
         gremlin_load_terminal_session, gremlin_get_session_journal_path, &
         gremlin_stage_recovery_journal, gremlin_recover_owner_journal, &
@@ -1093,6 +1093,7 @@ contains
         character(len=PATH_LEN) :: message, state_name, last_failed_identity
         character(len=PATH_LEN) :: capture_diagnostic
         character(len=PATH_LEN) :: fatal_message, state_message
+        character(len=PATH_LEN) :: build_view_cleanup_message
         character(len=16) :: observed_outcome
         character(len=PATH_LEN) :: owner_start
         character(len=NAME_LEN) :: selected(MAX_NODES)
@@ -1102,6 +1103,7 @@ contains
         integer :: ierr, build_exit, test_exit, launch_error, completed, selected_count
         integer :: cancel_error, release_error, capture_error, state_error
         integer :: registration_error
+        integer :: build_view_cleanup_status
         integer :: owner_pid, i
         integer :: sequence, campaign_seed, campaign_number, test_index
         integer(int64) :: capture_debounce_ms, campaign_started_ms, freshness_ticket
@@ -1315,6 +1317,16 @@ contains
                         candidate_pinned, selected, selected_count, campaign_seed, &
                         completed, state_name, last_failed_identity, sequence, ierr, message)
                     if (ierr /= 0) then
+                        build_child%pid = 0
+                        if (build_child%execution_view%active) then
+                            call execution_view_release( &
+                                build_child%execution_view, .false., &
+                                build_view_cleanup_status, &
+                                build_view_cleanup_message)
+                        end if
+                        if (candidate_generation%build_project_root == &
+                                build_child%execution_view%cwd) &
+                            candidate_generation%build_project_root = ''
                         fatal_error = .true.
                         exit
                     end if
@@ -1469,7 +1481,15 @@ contains
             if (build_child%pid > 0) then
                 call cancel_owned_process(build_child%pid, build_exit)
                 if (build_exit /= 0 .and. cancel_error == 0) cancel_error = build_exit
-                if (build_exit == 0) build_child%pid = 0
+                if (build_exit == 0) then
+                    build_child%pid = 0
+                    if (build_child%execution_view%active) then
+                        call execution_view_release( &
+                            build_child%execution_view, .false., &
+                            build_view_cleanup_status, build_view_cleanup_message)
+                    end if
+                    candidate_generation%build_project_root = ''
+                end if
             end if
             if (cancel_error == 0) then
                 if (candidate_pinned) then
@@ -1520,7 +1540,13 @@ contains
         if (build_child%pid > 0) then
             call cancel_owned_process(build_child%pid, build_exit)
             if (build_exit /= 0 .and. cancel_error == 0) cancel_error = build_exit
-            if (build_exit == 0) build_child%pid = 0
+            if (build_exit == 0) then
+                build_child%pid = 0
+                if (build_child%execution_view%active) &
+                    call execution_view_release(build_child%execution_view, .false., &
+                        release_error, state_message)
+                candidate_generation%build_project_root = ''
+            end if
         end if
         if (cancel_error /= 0) then
             call publish_state(session, owner_request, 'error', active_generation, &
@@ -1582,6 +1608,10 @@ contains
             call error_response('run', trim(message), response)
             exitcode = 2
             return
+        end if
+        if (len_trim(active_generation%build_project_root) > 0) then
+            call fs_remove_tree(trim(active_generation%build_project_root))
+            active_generation%build_project_root = ''
         end if
         call simple_response('run', request%lane_id, session%session_id, 'stopped', response)
     end subroutine run_owner
@@ -1731,14 +1761,14 @@ contains
 
     subroutine start_build(session, generation, child, ierr, message)
         type(gremlin_session_t), intent(in) :: session
-        type(generation_t), intent(in) :: generation
+        type(generation_t), intent(inout) :: generation
         type(child_t), intent(out) :: child
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
-        character(len=PATH_LEN) :: executable
+        character(len=PATH_LEN) :: executable, view_message
         character(len=:), allocatable :: packed
-        integer :: n_args, spawn_exit
+        integer :: n_args, spawn_exit, view_status
         logical :: exists
 
         child = child_t()
@@ -1756,17 +1786,31 @@ contains
             return
         end if
         executable = session%driver_path
+        generation%build_project_root = ''
+        call execution_view_create(trim(session%state_dir)//'/views', &
+            generation%identity, trim(session%session_id)//'-build', 'build', &
+            generation%input_inventory, generation%input_inventory_ready, &
+            generation%input_inventory_complete, child%execution_view, ierr, message, &
+            candidate_bundle_root=trim(generation%root)//'/bundle')
+        if (ierr /= 0) then
+            message = 'cannot create candidate build view: '//trim(message)
+            return
+        end if
+        generation%build_project_root = child%execution_view%cwd
         call log_path(session, 'build-'//generation%identity(1:16), child%log_file)
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'build')
-        call process_start_argv_logged(trim(generation%project_root), packed, &
+        call process_start_argv_logged(trim(child%execution_view%cwd), packed, &
             n_args, trim(child%log_file), child%pid, spawn_exit, &
             'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0')
         ierr = spawn_exit
         if (ierr /= 0) then
             message = 'cannot start candidate build'
             child%pid = 0
+            call execution_view_release(child%execution_view, .false., view_status, &
+                view_message)
+            generation%build_project_root = ''
             return
         end if
         call clock_seconds(child%started_at)
@@ -1814,6 +1858,10 @@ contains
         if (ierr /= 0) return
         build_child%pid = 0
         if (build_exit /= 0) then
+            if (build_child%execution_view%active) &
+                call execution_view_release(build_child%execution_view, .false., &
+                    release_status, release_message)
+            candidate%build_project_root = ''
             last_failed = candidate%identity
             state_name = 'build_failed'
             active_case = ''
@@ -1900,10 +1948,14 @@ contains
         new_active_lease%lock_fd = -1
         new_active_lease%slot = -1
         have_active_lease = .true.
+        candidate%build_project_root = build_child%execution_view%cwd
+        if (was_active .and. len_trim(active%build_project_root) > 0) &
+            call fs_remove_tree(trim(active%build_project_root))
         request%has_previous_generation = was_active
         request%requirement_digest = ''
         request%gate_cases = ''
         active = candidate
+        build_child%execution_view%active = .false.
         have_active = .true.
         request%input_changed = .false.
         request%gate_required_count = 0
@@ -2363,7 +2415,7 @@ contains
         character(len=*), intent(out) :: message
         integer, intent(inout) :: sequence
 
-        character(len=PATH_LEN) :: executable, log_name
+        character(len=PATH_LEN) :: executable, log_name, test_project
         character(len=PATH_LEN) :: journal_message
         character(len=PATH_LEN) :: view_owner, view_message
         character(len=:), allocatable :: packed, execution_env
@@ -2376,6 +2428,12 @@ contains
         ierr = 0
         message = ''
         if (index_case < 1 .or. index_case > n_selected) return
+        if (len_trim(generation%build_project_root) == 0) then
+            ierr = 1
+            message = 'active generation has no candidate build view'
+            return
+        end if
+        test_project = generation%build_project_root
         child%gate_required = any(request%gate_cases(:request%gate_required_count) == &
             selected(index_case))
         if (generation%driver_digest /= session%driver_digest .or. &
@@ -2411,7 +2469,7 @@ contains
             call argv_push(packed, n_args, '--all')
         end if
         call argv_push(packed, n_args, trim(selected(index_case)))
-        call process_start_argv_logged(trim(generation%project_root), packed, &
+        call process_start_argv_logged(trim(test_project), packed, &
             n_args, trim(child%log_file), child%pid, spawn_exit, &
             trim(execution_env))
         ierr = spawn_exit
