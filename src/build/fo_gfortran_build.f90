@@ -786,8 +786,8 @@ contains
         type(scan_unit_t), allocatable :: units(:)
         type(fpm_config_t), allocatable :: config
         type(current_test_t), allocatable :: tests(:)
-        integer :: n_units, n_tests, ierr, warn_s, i, cwd_status
-        character(len=MAX_PATH) :: execution_cwd, requested_execution_cwd
+        integer :: n_units, n_tests, ierr, warn_s, i
+        character(len=MAX_PATH) :: execution_cwd
 
         exitcode = 0
         call scan_dir_cached(trim(project_dir)//'/'//trim(test_dir), units, &
@@ -805,12 +805,7 @@ contains
         warn_s = test_warn_seconds(test_timeout_seconds(config))
         call select_current_tests(project_dir, config, units, n_units, test_dir, &
             bin_dir, selected_names, n_selected, include_slow, tests, n_tests)
-        execution_cwd = project_dir
-        requested_execution_cwd = ''
-        call get_environment_variable('FO_GREMLIN_EXECUTION_CWD', &
-            requested_execution_cwd, status=cwd_status)
-        if (cwd_status == 0 .and. len_trim(requested_execution_cwd) > 0) &
-            execution_cwd = trim(requested_execution_cwd)
+        execution_cwd = test_execution_cwd(project_dir)
         call run_current_team(project_dir, execution_cwd, config, tests, n_tests)
         call report_current_tests(project_dir, log_file, tests, n_tests, warn_s, &
             exitcode)
@@ -818,6 +813,19 @@ contains
             if (allocated(tests(i)%args)) deallocate (tests(i)%args)
         end do
     end subroutine run_current_tests
+
+    function test_execution_cwd(project_dir) result(execution_cwd)
+        character(len=*), intent(in) :: project_dir
+        character(len=MAX_PATH) :: execution_cwd, requested_execution_cwd
+        integer :: cwd_status
+
+        execution_cwd = project_dir
+        requested_execution_cwd = ''
+        call get_environment_variable('FO_GREMLIN_EXECUTION_CWD', &
+            requested_execution_cwd, status=cwd_status)
+        if (cwd_status == 0 .and. len_trim(requested_execution_cwd) > 0) &
+            execution_cwd = trim(requested_execution_cwd)
+    end function test_execution_cwd
 
     subroutine selected_test_targets_ready(project_dir, test_dir, bin_dir, &
             selected_names, n_selected, include_slow, ready)
@@ -1161,14 +1169,14 @@ contains
         integer(8) :: clk0, clk1, clk_rate
 
         call system_clock(clk0, clk_rate)
-        call run_test_binary(project_dir, execution_cwd, test%bin, test%args, &
+        call run_test_binary(execution_cwd, test%bin, test%args, &
             test%log, config, is_slow_name(test%name), test%exit, test%cpu_secs)
         call system_clock(clk1, clk_rate)
         test%ran = .true.
         if (clk_rate > 0) test%secs = real(clk1 - clk0) / real(clk_rate)
         if (test%exit /= 0 .and. test%exit /= 124) then
             call make_tmpfile('fo_test_rerun', rerun_log)
-            call run_test_binary(project_dir, execution_cwd, test%bin, test%args, &
+            call run_test_binary(execution_cwd, test%bin, test%args, &
                 rerun_log, config, is_slow_name(test%name), test%rerun_exit)
             call delete_tmpfile(rerun_log)
             if (test%rerun_exit == 0) then
@@ -2631,6 +2639,7 @@ contains
         character(len=512) :: test_dep_objs(MAX_DEP_OBJS)
         integer :: n_test_dep_objs
         character(len=512) :: archive_path
+        character(len=MAX_PATH) :: execution_cwd
         logical :: in_lib
         type(resolved_src_t) :: devsrcs(MAX_RESOLVED)
         integer :: n_dev, d, nud
@@ -2639,6 +2648,7 @@ contains
 
         bonly = .false.
         if (present(build_only)) bonly = build_only
+        execution_cwd = test_execution_cwd(project_dir)
         test_flags = ''
         if (present(flags)) test_flags = flags
         call append_array_temporary_warning_flag(fc_command(), test_flags)
@@ -2899,7 +2909,8 @@ contains
                 ! Run from the project root, not from whatever directory fo was
                 ! invoked from, so a test that opens a project-relative path
                 ! behaves the same under the CLI and under the MCP server.
-                call run_test_binary(project_dir, bin_path, run_args(i), log_local, &
+                call run_test_binary(execution_cwd, bin_path, &
+                    run_args(i), log_local, &
                     manifest_config, is_slow_name(run_names(i)), run_exits(i), &
                     run_cpu(i))
                 call system_clock(clk1)
@@ -2925,8 +2936,9 @@ contains
                 tname = run_names(i)
                 bin_path = run_bins(i)
                 call make_tmpfile('fo_test_rerun', rerun_log)
-                call run_test_binary(project_dir, bin_path, run_args(i), rerun_log, &
-                    manifest_config, is_slow_name(tname), run_exits(i))
+                call run_test_binary(execution_cwd, bin_path, &
+                    run_args(i), rerun_log, manifest_config, is_slow_name(tname), &
+                    run_exits(i))
                 call delete_tmpfile(rerun_log)
                 if (run_exits(i) == 0) flaky(i) = .true.
             end do
@@ -3000,14 +3012,13 @@ contains
             n_run, test_warn, log_file)
     end subroutine compile_and_run_tests
 
-    subroutine run_test_binary(project_dir, execution_cwd, bin_path, arg_lines, log_file, &
+    subroutine run_test_binary(execution_cwd, bin_path, arg_lines, log_file, &
             config, slow, exitcode, cpu_seconds)
         !! Run one test binary under its CPU budget and wall-clock cap (see
         !! fo_test_budget). A timeout returns 124 and appends a line naming the
         !! limit that fired to the test's own log. cpu_seconds is the CPU time
         !! the test used, negative when unknown.
-        character(len=*), intent(in) :: project_dir, execution_cwd
-        character(len=*), intent(in) :: bin_path, arg_lines, log_file
+        character(len=*), intent(in) :: execution_cwd, bin_path, arg_lines, log_file
         type(fpm_config_t), intent(in) :: config
         logical, intent(in) :: slow
         integer, intent(out) :: exitcode
