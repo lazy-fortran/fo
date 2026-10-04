@@ -44,7 +44,7 @@ Explicitly out of scope:
 - symbolic derivation/proof/synthesis pipelines;
 - cluster/job, CI/promotion or coding-agent orchestration.
 
-Historical capsule/Nix/FortOS issues #1/#3/#6/#7 are already closed. #120
+Historical capsule/Nix/FortOS issues #1–#7 are already closed. #120
 (proof/synthesis) and #157 (complete host toolchain/runtime capture) are closed
 not planned under this boundary. Users needing hermetic reproducibility provide
 it externally with CI images, containers, Nix, Spack or equivalent.
@@ -486,7 +486,7 @@ does not itself close or reopen implementation issues.
 
 Closed out-of-scope research issues #120 (proof/synthesis) and #157 (complete
 host toolchain/runtime capture) remain historical references only; do not assign
-implementation work from them. Earlier capsule/Nix/FortOS issues #1/#3/#6/#7
+implementation work from them. Earlier capsule/Nix/FortOS issues #1–#7
 are likewise historical.
 
 Completed foundations (#141/#153/#154/#158/#159/#160/#162/#164/#169/#171/#173/
