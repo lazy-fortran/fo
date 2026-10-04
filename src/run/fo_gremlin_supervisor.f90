@@ -859,7 +859,7 @@ contains
         type(gremlin_session_t) :: session
         type(gremlin_lease_t) :: reproduction_lease
         type(generation_t) :: generation
-        type(execution_view_t) :: execution_view
+        type(execution_view_t) :: execution_view, build_view
         type(driver_pin_t) :: reproduction_pin
         type(gremlin_request_t) :: selection_request
         character(len=PATH_LEN) :: message, active_project, log_file, executable
@@ -871,6 +871,7 @@ contains
         character(len=16) :: outcome
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
         character(len=128) :: session_id, owner_start
+        character(len=128) :: build_view_owner
         character(len=:), allocatable :: packed, execution_env
         integer :: owner_pid, ierr, n_selected, mandatory_count, seed
         integer :: n_args, spawn_exit, test_exit, sequence, release_error
@@ -1012,11 +1013,28 @@ contains
         reproduction_timeout = case_wall_timeout(active_project, request%case_id, &
             request%timeout_seconds)
         write(view_owner, '(a,"-reproduce-",i0)') trim(session%session_id), sequence
+        write(build_view_owner, '(a,"-build")') trim(view_owner)
+        call execution_view_create(trim(session%state_dir)//'/views', &
+            generation%identity, trim(build_view_owner), 'build', &
+            generation%input_inventory, generation%input_inventory_ready, &
+            generation%input_inventory_complete, build_view, ierr, message, &
+            candidate_bundle_root=trim(generation%root)//'/bundle')
+        if (ierr /= 0) then
+            call release_generation_lease(reproduction_lease, &
+                have_reproduction_lease, release_error, cleanup_message)
+            call release_if_owner(session, release_error, cleanup_message)
+            call error_response('reproduce', 'cannot create private build view: '// &
+                trim(message), response)
+            exitcode = 2
+            return
+        end if
         call execution_view_create(trim(session%state_dir)//'/views', &
             generation%identity, trim(view_owner), request%case_id, &
             generation%input_inventory, generation%input_inventory_ready, &
             generation%input_inventory_complete, execution_view, ierr, message)
         if (ierr /= 0) then
+            call execution_view_release(build_view, .false., release_error, &
+                cleanup_message)
             call release_generation_lease(reproduction_lease, &
                 have_reproduction_lease, release_error, cleanup_message)
             call release_if_owner(session, release_error, cleanup_message)
@@ -1027,7 +1045,7 @@ contains
         end if
         execution_env = 'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
             'FO_GREMLIN_EXECUTION_CWD='//trim(execution_view%cwd)
-        call process_start_argv_logged(trim(active_project), packed, n_args, &
+        call process_start_argv_logged(trim(build_view%cwd), packed, n_args, &
             trim(log_file), owner_pid, spawn_exit, &
             trim(execution_env))
         if (spawn_exit == 0) then
@@ -1049,6 +1067,8 @@ contains
         if (spawn_exit == 0) call append_execution_provenance(log_file, execution_view)
         retain_view = spawn_exit == 0 .and. test_exit /= 0
         call execution_view_release(execution_view, retain_view, release_error, &
+            cleanup_message)
+        call execution_view_release(build_view, retain_view, release_error, &
             cleanup_message)
         call record_immediate_case(session, request, generation, request%case_id, &
             test_exit, trim(outcome), sequence, 1, seed, trim(log_file), ierr, message, &
