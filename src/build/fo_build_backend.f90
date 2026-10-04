@@ -11,7 +11,7 @@ module fo_build_backend
         selected_compiler_command
     use fo_cmake_context, only: cmake_context_t, cmake_context_init, &
         cmake_context_query, cmake_context_read_reply, &
-        cmake_context_discover_build_root, cmake_context_build_path
+        cmake_context_build_path, cmake_context_validate_hint
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
@@ -414,7 +414,7 @@ contains
 
         character(len=:), allocatable :: packed, cache_file
         character(len=32) :: jobs_text
-        logical :: has_cache
+        logical :: has_cache, hint_valid
         integer :: n_args, i
 
         if (.not. context%valid) then
@@ -423,9 +423,19 @@ contains
             exitcode = 1
             return
         end if
+        if (len_trim(context%configure_preset) > 0 .and. &
+                .not. context%build_root_hint .and. &
+                len_trim(context%build_preset) == 0) then
+            write (error_unit, '(a)') &
+                'fo: configure preset build root is unknown; supply '// &
+                'FO_CMAKE_BUILD_DIR as a locator hint or select a build preset'
+            exitcode = 1
+            return
+        end if
 
         write (jobs_text, '(i0)') detect_jobs()
-        if (len_trim(context%configure_preset) == 0) &
+        if (len_trim(context%configure_preset) == 0 .or. &
+                context%build_root_hint) &
             call cmake_context_query(context)
         cache_file = cmake_context_build_path(context)//'/CMakeCache.txt'
         inquire (file=cache_file, exist=has_cache)
@@ -466,24 +476,20 @@ contains
             exitcode)
         if (exitcode /= 0) return
         if (len_trim(context%configure_preset) > 0) then
-            call cmake_context_discover_build_root(context)
-            call cmake_context_query(context)
-            deallocate (packed)
-            n_args = 0
-            call argv_push(packed, n_args, 'cmake')
-            call argv_push(packed, n_args, '--preset')
-            call argv_push(packed, n_args, context%configure_preset)
-            if (allocated(context%extra_args)) then
-                do i = 1, size(context%extra_args)
-                    call argv_push(packed, n_args, context%extra_args(i))
-                end do
+            if (context%build_root_hint) then
+                call cmake_context_read_reply(context)
+                call cmake_context_validate_hint(context, hint_valid)
+                if (.not. hint_valid) then
+                    write (error_unit, '(a,a)') &
+                        'fo: invalid CMake preset build-root hint: ', &
+                        context%error
+                    exitcode = 1
+                    return
+                end if
             end if
-            call process_run_argv_logged(context%source_root, packed, n_args, &
-                log_file, .true., environment_timeout('FO_BUILD_TIMEOUT', 300), &
-                exitcode)
-            if (exitcode /= 0) return
+        else
+            call cmake_context_read_reply(context)
         end if
-        call cmake_context_read_reply(context)
 
         deallocate (packed)
         n_args = 0
@@ -493,6 +499,13 @@ contains
             call argv_push(packed, n_args, '--preset')
             call argv_push(packed, n_args, context%build_preset)
         else
+            if (len_trim(context%configure_preset) > 0 .and. &
+                    .not. context%build_root_hint) then
+                write (error_unit, '(a)') &
+                    'fo: cannot run CMake build without a configure-preset build-root hint or build preset'
+                exitcode = 1
+                return
+            end if
             call argv_push(packed, n_args, context%build_root)
         end if
         if (len_trim(context%configuration) > 0) then
@@ -517,6 +530,15 @@ contains
         logical :: has_tests
         integer :: n_args
 
+        if (len_trim(context%configure_preset) > 0 .and. &
+                .not. context%build_root_hint .and. &
+                len_trim(context%test_preset) == 0) then
+            write (error_unit, '(a)') &
+                'fo: CTest root for configure preset is unknown; supply '// &
+                'FO_CMAKE_BUILD_DIR as a locator hint or select a test preset'
+            exitcode = 1
+            return
+        end if
         has_tests = len_trim(context%test_preset) > 0
         if (.not. has_tests) inquire ( &
             file=cmake_context_build_path(context)//'/CTestTestfile.cmake', &
