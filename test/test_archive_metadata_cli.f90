@@ -119,7 +119,7 @@ contains
         ! A valid one-member archive without a symbol table, independent of
         ! the helper's listing implementation and of the host ar's defaults.
         write (header, '(a16,a12,a6,a6,a8,a10,a2)') &
-            'payload.txt/    ', '0', '0', '0', '100644', '8', '`'//new_line('a')
+            'payload.txt     ', '0', '0', '0', '100644', '8', '`'//new_line('a')
         call write_text(archive_path, '!<arch>'//new_line('a')// &
             header//'payload'//new_line('a'))
         call list_add(args, 't')
