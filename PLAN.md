@@ -729,7 +729,7 @@ current correctness.
 ## Active delivery state
 
 **Execution is user-authorized in parallel mode.** The reviewed core is on fo
-`main`; PR #146 is merged. The current main head `290a61c` includes the shared
+`main`; PR #146 is merged. The current main head `67b41ec` includes the shared
 Linux event watcher, finite crash-safe coverage, factual local-gate reporting,
 GCC 13.3 ownership repairs, Darwin archive portability, thirteen removed JS
 fixtures and side-effect-free install help. Exact combined focused gates passed
@@ -862,6 +862,13 @@ Implemented issue state:
   and republishes/restores the valid bytes. Exact current fx dependencies,
   focused outer-override and unset/HOME runs, the 87-case fo gate and independent
   review pass; no private transitive fx module is imported.
+- #180 is complete through `67b41ec`. The reported missing test-only C object
+  came from a stale installed driver; current production already discovers and
+  links the full mixed-language development dependency. A cold native Fortran
+  regression now proves C/header/source/flag invalidation, warm shim removal,
+  test-symbol presence and production archive/link-symbol exclusion. Exact
+  focused integration, the complete prior-head 87-case gate and independent
+  review pass with current fx.
 - #143/#152 and PR #147 are closed without merge after the KISS review assigned
   agent scheduling to the external controller; no work-mode code enters core.
 - #145 has one bounded fpm row passing on the exact candidate, one independent
