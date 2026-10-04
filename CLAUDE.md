@@ -2,6 +2,25 @@
 
 Fortran build cache, incremental rebuild, affected-test selection and CLI/MCP.
 
+## Product boundary
+
+Keep fo a focused Fortran development tool: build, test, run, incremental/cache-aware
+rebuilds, affected/continuous testing, formatting, lint/static diagnostics,
+LSP/MCP convenience, dependency/bootstrap support needed by those commands, and
+their correctness/performance infrastructure.
+
+Do **not** expand fo into a Nix/Spack replacement, hermetic environment manager,
+container/sandbox platform, scientific workflow/provenance/capsule system,
+proof/synthesis framework, cluster scheduler, CI/promotion engine or coding-agent
+orchestrator. Historical capsule/Nix/FortOS issues #1/#3/#6/#7 are closed;
+#120 and #157 are closed not planned for the same boundary.
+
+Record compiler/configuration identity sufficiently for cache invalidation and
+diagnostics, but do not recursively capture system toolchains, sysroots, dynamic
+loaders or host runtime libraries. Users needing a hermetic environment provide
+one externally. Repository-internal third-party/performance audits stay under
+`bench/` and CI; they are not new public environment-management commands.
+
 ## Read first and keep the development loop fast
 
 [PLAN.md](PLAN.md) is the authoritative current provider and execution plan;
