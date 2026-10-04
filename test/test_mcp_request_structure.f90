@@ -93,12 +93,16 @@ program test_mcp_request_structure
     call assert_contains(json_string_value(field), 'background', &
         'unsupported background request is rejected')
 
-    payload = tool_payload(responses(8))
-    field = json_member(payload, 'text')
+    result_object = json_member(responses(8), 'result')
+    content = json_member(result_object, 'content')
+    first = json_element(content, 1)
+    field = json_member(first, 'text')
     call assert_true(index(json_string_value(field), 'digraph {') == 1, &
         'boolean dot option selects Graphviz output')
-    payload = tool_payload(responses(9))
-    field = json_member(payload, 'text')
+    result_object = json_member(responses(9), 'result')
+    content = json_member(result_object, 'content')
+    first = json_element(content, 1)
+    field = json_member(first, 'text')
     call assert_true(index(json_string_value(field), 'digraph {') == 0, &
         'string dot option does not select Graphviz output')
 
