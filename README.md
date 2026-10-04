@@ -16,7 +16,7 @@ It deliberately does **not** replace fpm as the package manifest/registry, Nix
 or Spack as an environment manager, containers as a sandbox, CI as repository
 governance, agent frameworks as task schedulers, or FortSym/other research tools
 as proof/synthesis/workflow systems. The older capsule/provenance/Nix/FortOS
-experiments remain historical closed issues (#1, #3, #6, #7); `fo prove` /
+experiments remain historical closed issues (#1–#7); `fo prove` /
 synthesis (#120) and complete host toolchain/runtime capture (#157) are also
 closed as out of scope.
 
