@@ -373,7 +373,8 @@ recursive test JSON ownership repair passes the full gfortran-13 FPM suite and
 the test-only C shim is Darwin-portable. #159 is repaired through `6b3ac43`:
 explicit recursive response ownership passes all five public MCP/ownership
 fixtures on the integrated head, while the frozen original-code GCC 13.3 mutant
-reproduces exit 139. Fifteen JS fixtures remain for #160--#163.
+reproduces exit 139. #162 is also complete through `38da2b3`; thirteen JS
+fixtures remain for #160/#161/#163.
 
 ## Ordered implementation and independent verifiers
 
@@ -665,7 +666,7 @@ completed entries below are retained as prerequisites and evidence:
    and watched through the shared declared-input inventory.
 10. Register every late behavioral oracle in the post-submit workflow and keep
    the complete matrix as provider-completion/milestone evidence.
-11. [#158](https://github.com/lazy-fortran/fo/issues/158)--[#163](https://github.com/lazy-fortran/fo/issues/163): replace all Node fixtures with standalone Fortran process drivers and remove Node from the test contract.
+11. [#158](https://github.com/lazy-fortran/fo/issues/158)--[#163](https://github.com/lazy-fortran/fo/issues/163): replace all Node fixtures with standalone Fortran process drivers and remove Node from the test contract. #158/#159/#162 are complete.
 12. **Complete:** [#164](https://github.com/lazy-fortran/fo/issues/164): stat-memo publication is cross-process safe.
 13. **Complete:** [#169](https://github.com/lazy-fortran/fo/issues/169):
     worktree-private self-refresh is delivered and its deliberate cold
@@ -759,12 +760,12 @@ Implemented issue state:
   stress fails the original with exit 139; repaired GCC 13.3 focused 6/6 and
   full FPM pass, native 70-test pipeline passes, independent review approves,
   and the exact integrated MCP gate passes 5/5.
-- #162's repaired Fortran publication-fixture stack is independently approved at
-  `6b99023` on `fo/fortran-tests-162-review`. Its timeout oracle proves a live
+- #162 is complete through `38da2b3`. Its repaired Fortran publication fixtures
+  prove a live
   heartbeat before bounded owned termination and confirmed reap, preserves
   scratch on reap failure, and compares interrupted archive paths plus SHA-256
-  digests. Fresh focused tests pass and the worker full suite is 72/72; port it
-  on the repaired current integration head.
+  digests. Fresh focused tests pass, the worker full suite is 72/72, independent
+  review approves, and the exact integrated three-case gate passes.
 - #160's campaign-history slice is delivered at `361d1ca`: the stale
   per-campaign JavaScript sampler is replaced by an independent Fortran oracle
   for finite epoch order, restart/replay, markers, failure priority and cancelled
