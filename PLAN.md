@@ -694,7 +694,7 @@ completed entries below are retained as prerequisites and evidence:
 20. [#176](https://github.com/lazy-fortran/fo/issues/176): port the benchmark
     driver/report from shell and Python to Fortran, then remove the final
     repository-owned executable scripting-language tools.
-21. [#177](https://github.com/lazy-fortran/fo/issues/177): make global and
+21. **Complete:** [#177](https://github.com/lazy-fortran/fo/issues/177): make global and
     command-local help side-effect free. `fo install --help` must never build or
     replace the controller-owned installed driver.
 
@@ -780,10 +780,12 @@ Implemented issue state:
   exact selected profiles survive cache hits, explicit install is the only global
   publication path, the inverse Node oracle is replaced by Fortran, and its cold
   CI invocation has an explicit 240-second wall budget.
-- #177 records a newly reproduced public CLI defect: `fo install --help`
-  performed the install and replaced the shared bootstrap during #162 work. The
-  controller restored the known binary immediately; help parsing needs an exact
-  isolated-prefix no-mutation oracle.
+- #177 is complete through `454c9ba`: `fo install --help`, `-h`, `fo help
+  install` and invalid/missing options are parsed before any mutation. The
+  isolated public Fortran oracle proves help leaves sentinel bytes/metadata,
+  project, HOME, cache and prefix unchanged while explicit isolated install
+  alone replaces the sentinel. CI runs it explicitly; independent review and
+  the exact integrated focused gate pass, and the real global driver remains unchanged.
 - fx #42 is complete on fx main through `6beeec4`: verified immutable blobs and
   trees publish from retained descriptors, survive publication/cleanup races and
   materialize safely on Linux/APFS. The deterministic premature-marker oracle
