@@ -468,7 +468,7 @@ contains
         character(len=32768) :: fields(10)
         integer :: status, unit, ios, n_fields
         integer :: got_aliases, got_entries, got_declarations
-        integer :: declaration_count, root_index, complete, valid, i, j
+        integer :: declaration_count, root_index, complete, valid, i, j, k
         integer(int64) :: driver_size
         character(len=:), allocatable :: decoded
         logical :: used_clone
@@ -1135,7 +1135,7 @@ contains
         duplicate = .false.
         ierr = 0
         message = ''
-        current_root = alias_root(inventory, &
+        current_root = manifest_alias_root(inventory, &
             trim(inventory%entries(current)%root_alias))
         if (current_root == 0) then
             ierr = 1
@@ -1145,7 +1145,7 @@ contains
         do i = 1, current - 1
             if (trim(inventory%entries(i)%relative_path) /= &
                 trim(inventory%entries(current)%relative_path)) cycle
-            prior_root = alias_root(inventory, &
+            prior_root = manifest_alias_root(inventory, &
                 trim(inventory%entries(i)%root_alias))
             if (prior_root == 0) then
                 ierr = 1
@@ -1172,6 +1172,21 @@ contains
             return
         end do
     end subroutine duplicate_materialized_entry
+
+    integer function manifest_alias_root(inventory, alias)
+        type(input_inventory_t), intent(in) :: inventory
+        character(len=*), intent(in) :: alias
+        integer :: i, j
+
+        manifest_alias_root = 0
+        do i = 1, inventory%root_count
+            do j = 1, inventory%roots(i)%alias_count
+                if (trim(inventory%roots(i)%aliases(j)) /= trim(alias)) cycle
+                manifest_alias_root = i
+                return
+            end do
+        end do
+    end function manifest_alias_root
 
     subroutine validate_loaded_aliases(inventory, ierr, message)
         type(input_inventory_t), intent(in) :: inventory
