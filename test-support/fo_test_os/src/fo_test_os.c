@@ -173,6 +173,16 @@ int fo_test_wait_nonblocking(int process, int *status) {
     return -998;
 }
 
+int fo_test_wait_blocking(int process) {
+    int status;
+    pid_t waited;
+    do { waited = waitpid(process, &status, 0); } while (waited < 0 && errno == EINTR);
+    if (waited != process) return -999;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return -WTERMSIG(status);
+    return -998;
+}
+
 int fo_test_spawn_heartbeat(const char *path, const char *directory) {
     pid_t child = fork();
     if (child < 0) return -1;

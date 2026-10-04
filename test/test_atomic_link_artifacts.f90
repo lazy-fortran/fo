@@ -12,6 +12,7 @@ program test_atomic_link_artifacts
     character(:), allocatable :: driver, scratch, project, fake_bin, fake_ar
     character(:), allocatable :: library_dir, archive, marker, cache, real_ar
     character(:), allocatable :: path_value
+    character(:), allocatable :: archive_state_before
     type(string_list_t) :: args, env
     type(process_result_t) :: result, external
     integer :: child = -1, status, archive_count
@@ -71,6 +72,7 @@ program test_atomic_link_artifacts
         'concurrent consumer executes complete published artifact')
 
     call source_files(38, 4)
+    archive_state_before = archive_snapshot()
     marker = join_path(scratch, 'hold-marker')
     if (file_exists(marker)) call remove_path(marker)
     args = words(['build'])
@@ -79,9 +81,10 @@ program test_atomic_link_artifacts
     call wait_for(marker, 100, child, found)
     call assert_true(found, 'partial archiver entered hold mode')
     call assert_file_exists(marker, 'partial archiver entered hold mode')
-    call terminate_process_group(child, status)
-    child = -1
-    call assert_true(status < 0, 'interrupted producer exits by signal')
+    call terminate_owned(child, status)
+    call assert_equal_integer(status, -15, 'interrupted producer exits by SIGTERM')
+    call assert_equal_string(archive_snapshot(), archive_state_before, &
+        'interrupted output preserves archive paths and digests')
     call find_archive(archive, archive_count)
     call assert_equal_integer(archive_count, 2, &
         'interrupted partial output is not published as a reusable archive')
@@ -273,8 +276,7 @@ contains
             end if
             call pause_briefly()
         end do
-        call terminate_process_group(process_id, ignored_status)
-        process_id = -1
+        call terminate_owned(process_id, ignored_status)
     end subroutine wait_for
 
     subroutine pause_briefly()
@@ -287,9 +289,18 @@ contains
     subroutine cleanup_child()
         integer :: ignored_status
 
-        call terminate_process_group(child, ignored_status)
-        child = -1
+        call terminate_owned(child, ignored_status)
     end subroutine cleanup_child
+
+    subroutine terminate_owned(process_id, exit_status)
+        integer, intent(inout) :: process_id
+        integer, intent(out) :: exit_status
+        logical :: owned_reaped
+
+        call terminate_process_group(process_id, exit_status, owned_reaped)
+        call assert_true(owned_reaped, 'owned producer is reaped before cleanup')
+        if (.not. owned_reaped) error stop 'preserving scratch after reap failure'
+    end subroutine terminate_owned
 
     subroutine poll_until(process_id, exit_status)
         integer, intent(inout) :: process_id
@@ -300,13 +311,17 @@ contains
         do i = 1, 300
             call poll_process(process_id, exit_status)
             if (exit_status /= 999) then
-                process_id = -1
+                if (exit_status == -999 .or. exit_status == -998) then
+                    call terminate_owned(process_id, exit_status)
+                    call assert_true(.false., 'poll fixture process status')
+                else
+                    process_id = -1
+                end if
                 return
             end if
             call pause_briefly()
         end do
-        call terminate_process_group(process_id, exit_status)
-        process_id = -1
+        call terminate_owned(process_id, exit_status)
         call assert_true(.false., 'fixture process completes before timeout')
     end subroutine poll_until
 
@@ -335,5 +350,54 @@ contains
             line_start = line_start + line_end
         end do
     end subroutine find_archive
+
+    function archive_snapshot() result(snapshot)
+        character(:), allocatable :: snapshot, listing_text, name, path
+        type(string_list_t) :: command
+        type(process_result_t) :: listing
+        integer :: cursor, newline_at, last
+
+        call list_add(command, '-1')
+        call list_add(command, library_dir)
+        call run_external('/bin/ls', command, project, listing)
+        call assert_process_ok(listing, 'list independently published archive paths')
+        listing_text = listing%stdout
+        snapshot = ''
+        cursor = 1
+        do while (cursor <= len(listing_text))
+            newline_at = index(listing_text(cursor:), new_line('a'))
+            if (newline_at == 0) then
+                last = len(listing_text)
+            else
+                last = cursor + newline_at - 2
+            end if
+            name = listing_text(cursor:last)
+            if (len(name) >= 8) then
+                if (index(name, 'objects_') == 1) then
+                    if (len(name) >= 2) then
+                        if (name(len(name) - 1:) == '.a') then
+                            path = join_path(library_dir, name)
+                            snapshot = snapshot // path // ' ' // file_digest(path) // &
+                                new_line('a')
+                        end if
+                    end if
+                end if
+            end if
+            if (newline_at == 0) exit
+            cursor = cursor + newline_at
+        end do
+    end function archive_snapshot
+
+    function file_digest(path) result(digest)
+        character(len=*), intent(in) :: path
+        character(:), allocatable :: digest
+        type(string_list_t) :: command
+        type(process_result_t) :: hashed
+
+        call list_add(command, path)
+        call run_external('/usr/bin/sha256sum', command, project, hashed)
+        call assert_process_ok(hashed, 'compute independent archive digest')
+        digest = hashed%stdout(:64)
+    end function file_digest
 
 end program test_atomic_link_artifacts
