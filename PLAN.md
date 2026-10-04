@@ -18,6 +18,12 @@ The six near-term milestones are listed under [Revised standalone target](#revis
 Current provider targets name focused scope; they do not by themselves prove
 the exact candidate-B public behavior.
 
+The reader/native MCP increment is pushed through `7843dc4`: `test_util`,
+`test_mcp_cancel_error`, and `test_mcp_gremlin_stale` each pass against the
+recorded new image. Combined manifest/recovery candidate `1ba4a74` passes its
+three provider gates; its public recovery gate exposed a candidate build
+failure and is under investigation. No resident Fo lane is claimed active yet.
+
 - **Benchmarks are never the development gate.** Real timing/resource runs and
    third-party project acquisition belong to independent scheduled/manual CI or
    an explicit slow/performance audit. They do not block main, merge, ordinary
@@ -52,9 +58,10 @@ install semantics. Unsupported constructs get a file/construct diagnostic;
 no silent fallback establishes native compatibility.
 
 The near-term delivery order is: usable resident Gremlin with named focused
-gates and exact candidate-B public checks; measured cleanup through dogfooding;
-the Fo capabilities in [#200](https://github.com/lazy-fortran/fo/issues/200)
-needed for FFC's FPM-only Gremlin route; repair of FFC's three current failures;
+gates and exact candidate-B public checks in
+[#200](https://github.com/lazy-fortran/fo/issues/200); measured cleanup through
+dogfooding; the Fo capabilities needed for FFC's FPM-only Gremlin route;
+repair of up to three confirmed current FFC failures;
 standalone Fo-native FPM semantics; then native CMake/CTest semantics for the
 required ITpPlasma profiles. Do not put completion of the full architecture,
 store, test-port or CI matrix ahead of dogfooding or FFC's FPM-only route.
