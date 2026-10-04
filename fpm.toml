@@ -197,12 +197,15 @@ name = "test_gremlin_watch"
 source-dir = "test"
 main = "test_gremlin_watch.f90"
 
+# Containment oracles include several bounded TERM/KILL grace periods.
+# Mark them slow so focused `fo test --all NAME` uses the slow-test budget
+# on Darwin, where live child CPU accounting is unavailable.
 [[test]]
-name = "test_async_process_boundary"
+name = "test_async_process_boundary_slow"
 source-dir = "test"
-main = "test_async_process_boundary.f90"
+main = "test_async_process_boundary_slow.f90"
 
 [[test]]
-name = "test_gremlin_process_boundary"
+name = "test_gremlin_process_boundary_slow"
 source-dir = "test"
-main = "test_gremlin_process_boundary.f90"
+main = "test_gremlin_process_boundary_slow.f90"
