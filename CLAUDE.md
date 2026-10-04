@@ -63,7 +63,7 @@ fo build                    # build applications/examples
 fo test NAME                # named focused correctness test
 fo test --only-changed      # affected selection; see #189 completeness limits
 fo test --all               # explicitly include slow correctness tests
-fo                          # broad staged pipeline; background/milestone use
+fo                          # current broad staged pipeline
 fo check --json             # structured build/test status
 fo exec TARGET [ARGS...]    # resolve/build and execute through fo
 fo exec --release --no-build TARGET [ARGS...]
@@ -73,6 +73,10 @@ fo fmt                      # native formatter
 fo graph --dot
 fo install --prefix /path   # explicit controlled installation only
 ```
+
+The CLI transition is planned: bare `fo` will start or attach to resident
+Gremlin, and the current staged pipeline will move to `fo verify`. Do not treat
+those planned names as implemented until the public behavior is verified.
 
 Commands above use `fo` as shorthand for that selected driver. Never execute a
 wildcard/newest build artifact to bypass freshness. Use the updated CLI after a

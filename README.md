@@ -12,8 +12,9 @@ the build/test/run/cache role of Cargo or the Go toolchain, plus practical
 formatting, lint/static diagnostics, LSP/MCP integration and continuous
 affected-test feedback.
 
-The active implementation target is a standalone drop-in replacement for FPM,
-followed by native support for a defined CMake subset used by ITpPlasma projects.
+The product target is a standalone drop-in replacement for FPM, followed by
+native support for a defined CMake subset used by ITpPlasma projects. The staged
+delivery order is in [PLAN.md](PLAN.md).
 Current Git/registry bootstrap and installation still invoke FPM, and the current
 CMake backend invokes CMake/CTest; standalone parity remains under development
 in [PLAN.md](PLAN.md).
@@ -60,6 +61,11 @@ fo info                    backend, source, compiler, and cache information
 fo mcp-server              MCP JSON-RPC server on standard input/output
 fo lsp                     diagnostics-on-save language server
 ```
+
+The first row describes the current staged pipeline. The planned CLI transition
+is for bare `fo` to start or attach to resident Gremlin and for that pipeline to
+move to `fo verify`; these names are not implemented yet. Until then, use the
+commands and options shown by the current Fo build.
 
 Affected-test selection is being consolidated around canonical execution-input
 changes rather than compile-cache misses in [#189](https://github.com/lazy-fortran/fo/issues/189).

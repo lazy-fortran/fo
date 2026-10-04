@@ -14,24 +14,25 @@ confirmation. Use parallel Luna source work and task-specific Sol escalation. Un
 lane per host; parallel source work continues. Preserve warm caches and push
 exact integrated increments after focused local correctness checks.
 
-1. Continue small, locally verified main increments. Use the exact candidate's
-   focused correctness tests and known reproducers; reuse warm caches. Do not
-   wait for GitHub CI, a full Gremlin epoch, a benchmark, or a project matrix.
-2. **Benchmarks are never the development gate.** Real timing/resource runs and
+The six near-term milestones are listed under [Revised standalone target](#revised-standalone-target-2026-10-04).
+Current provider targets name focused scope; they do not by themselves prove
+the exact candidate-B public behavior.
+
+- **Benchmarks are never the development gate.** Real timing/resource runs and
    third-party project acquisition belong to independent scheduled/manual CI or
    an explicit slow/performance audit. They do not block main, merge, ordinary
    development, or unrelated issue closure. Timing thresholds are advisory.
-3. Keep correctness distinct: a confirmed stale build, wrong result, lost
+- Keep correctness distinct: a confirmed stale build, wrong result, lost
    receipt, missed required test or ownership violation is a real defect even
    when discovered by a non-blocking audit. Reproduce against the exact current
    candidate; prioritize repair/revert without stopping independent coding.
-4. #175 and #189 are the immediate input/impact spine. Finish shared declared
+- #175 and #189 remain the input/impact spine. Finish shared declared
    inputs, then derive affected tests from baseline/candidate content, not cache
    misses. #148 and #170 consume that same inventory for watching and scratch.
-5. Land independent storage/session and correctness slices as ready. Do not wait
+- Land independent storage/session and correctness slices as ready. Do not wait
    for the complete #165-#168 migration to measure the existing baseline, and do
    not wait for its measurements to land a locally correct migration slice.
-6. External controllers own agents, task DAGs, worktrees and integration.
+- External controllers own agents, task DAGs, worktrees and integration.
    `fo work` is abandoned (#143/#152, PR #147); do not recreate it or add a CI
    scheduler, promotion engine, cache daemon, database or bulk RAM cache to fo.
 
@@ -50,14 +51,26 @@ external. Preserve scientific flags, generated sources, dependencies, test and
 install semantics. Unsupported constructs get a file/construct diagnostic;
 no silent fallback establishes native compatibility.
 
-First finish FPM manifest/CLI/dependency/install semantics, considering licensed
-reuse of existing Fortran FPM parser/resolver modules rather than another partial
-parser. Then define the CMake semantic subset from pinned SIMPLE, NEO-2, libneo
+The near-term delivery order is: usable resident Gremlin with named focused
+gates and exact candidate-B public checks; measured cleanup through dogfooding;
+the Fo capabilities in [#200](https://github.com/lazy-fortran/fo/issues/200)
+needed for FFC's FPM-only Gremlin route; repair of FFC's three current failures;
+standalone Fo-native FPM semantics; then native CMake/CTest semantics for the
+required ITpPlasma profiles. Do not put completion of the full architecture,
+store, test-port or CI matrix ahead of dogfooding or FFC's FPM-only route.
+
+Implement FPM manifest/CLI/dependency/install semantics in Fo. A generic TOML
+library is acceptable; do not import FPM-specific parser or resolver modules.
+Then define the CMake semantic subset from pinned SIMPLE, NEO-2, libneo
 and transitive dependency profiles; implement proper parsing/evaluation into the
 same target/action graph. Command-name lists alone are insufficient. Reference
 FPM/CMake/CTest runs are independent compatibility oracles; execution with those
 tools absent proves standalone support. The older CMake delegation plan remains
 an interim-backend reference until its native replacement scope is reconciled.
+
+CLI transitions are planned, not yet implemented: bare `fo` will start or attach
+to resident Gremlin, and the old staged delivery pipeline will move to `fo
+verify`. Until then, use the commands exposed by the current Fo build.
 
 FPM #1329's minimal upstream fix is separate: two-file bugfix/test preparation
 and focused verification, no fo redesign in that PR. Existing source checkpoints

@@ -71,7 +71,15 @@ all the ITpPlasma profiles below.
 | [#198](https://github.com/lazy-fortran/fo/issues/198) | ITpPlasma project/profile parity and rollout | existing #145/#190 audit infrastructure |
 | [#199](https://github.com/lazy-fortran/fo/issues/199) | Optional compiler-launcher shared CAS | stable delegated path and shared action service |
 
-Land a usable delegated vertical slice first: explicit CMake context, actual
+The current delegated CMake work is an interim route. It may provide focused
+Gremlin coverage while the earlier Fo milestones proceed, but it does not move
+native CMake/CTest ahead of resident Gremlin dogfooding, Fo #200, FFC's three
+current failure repairs, or standalone Fo-native FPM semantics. Once those
+milestones are complete, implement and verify the required ITpPlasma CMake/CTest
+profiles with the native semantic subset described in the Fo plan. Preserve the
+delegated route's CMake and CTest contracts during that transition.
+
+Within the delegated route, land a usable slice: explicit CMake context, actual
 CTest inventory, one supported test invocation, truthful result, then event-driven
 repetition. Unknown impact initially selects the whole configured local scope.
 Do not wait for complete cross-project precision or compiler-cache integration.
