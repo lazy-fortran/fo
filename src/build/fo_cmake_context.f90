@@ -247,10 +247,11 @@ contains
                         context%has_toolchains = .true.
                     end select
                 end if
-                if (depth == 4 .and. key == 'fo_request' .and. &
-                        trim(path(2)) == 'client-fo' .and. &
-                        trim(path(3)) == 'query.json' .and. &
-                        trim(path(4)) == 'client' .and. &
+                if (depth == 5 .and. key == 'fo_request' .and. &
+                        trim(path(2)) == 'reply' .and. &
+                        trim(path(3)) == 'client-fo' .and. &
+                        trim(path(4)) == 'query.json' .and. &
+                        trim(path(5)) == 'client' .and. &
                         event%string_val == context%request_token) then
                     context%request_seen = .true.
                 end if
