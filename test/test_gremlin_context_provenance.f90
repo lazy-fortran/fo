@@ -16,7 +16,8 @@ program test_gremlin_context_provenance
     character(:), allocatable :: initial_head, latest_head, compiler, compiler_dir
     character(:), allocatable :: lane, path_value, toolchain_value, counter, calls
     character(:), allocatable :: independent_head, before_identity, probes
-    integer :: baseline, repeat
+    character(:), allocatable :: calls_before_metadata_commit
+    integer :: baseline, repeat, metadata_commit_captures
     type(process_result_t) :: process
     type(json_value_t) :: report
     integer :: path_length, path_status
@@ -108,22 +109,28 @@ program test_gremlin_context_provenance
         line_value(before_identity, 'input=dependency:provenance_dep|'), &
         'dependency bytes independently change its captured digest')
 
-    ! A metadata-only commit changes the independently measured Git base while source
-    ! inputs and diff stay constant. A following uncommitted edit changes patch digest.
+    ! A metadata-only commit changes Git provenance while execution inputs stay
+    ! constant. It must not trigger a capture or replace immutable generation evidence.
     before_identity = read_text(identity)
+    baseline = capture_count()
+    calls_before_metadata_commit = read_text(calls)
     call git_command(project, [character(len=32) :: &
         'git', 'commit', '--allow-empty', '-qm', 'metadata only'])
     call git_command(project, [character(len=32) :: 'git', 'rev-parse', 'HEAD'], independent_head)
-    call touch_directory(project)
-    previous = generation
-    call wait_generation(session, lane, previous, generation)
-    identity = state//'/fo/gremlin/generations/'//generation//'/identity.txt'
-    latest_head = line_value(read_text(identity), 'base_commit=')
-    call assert_equal_string(latest_head//new_line('a'), independent_head, &
-        'metadata commit base equals independent Git HEAD')
-    call assert_true(latest_head /= initial_head, 'metadata commit changes the Git base')
-    call assert_equal_string(line_value(read_text(identity), 'patch_digest='), &
-        line_value(before_identity, 'patch_digest='), 'metadata commit preserves source diff digest')
+    latest_head = line_value(before_identity, 'base_commit=')
+    call assert_true(independent_head /= latest_head, 'metadata commit changes the Git base')
+    do repeat = 1, 10
+        call gremlin_wait_ms(100)
+    end do
+    metadata_commit_captures = capture_count()
+    call assert_true(metadata_commit_captures == baseline, &
+        'metadata-only commit does not trigger a capture')
+    call assert_equal_string(read_text(identity), before_identity, &
+        'metadata-only commit preserves immutable generation provenance')
+    call assert_equal_string(read_text(calls), calls_before_metadata_commit, &
+        'metadata-only commit does not rebuild or reprobe the compiler')
+
+    ! A following uncommitted source edit remains an execution input change.
     previous = generation
     call write_text(project//'/test/test_provenance.f90', &
         read_text(project//'/test/test_provenance.f90')//'! dirty patch variant'//new_line('a'))

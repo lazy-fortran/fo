@@ -397,15 +397,19 @@ program test_gremlin_generation
     call generation_capture(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
-        metadata_changed%identity /= build_source_changed%identity, &
-        'base commit changes invalidate generation identity')
+        metadata_changed%identity == build_source_changed%identity, &
+        'base commit metadata preserves execution generation identity')
+    call check(metadata_changed%base_commit == context%base_commit, &
+        'returned generation retains current base commit provenance')
     context%base_commit = 'base-commit'
     context%patch_digest = 'different-patch-digest'
     call generation_capture(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
-        metadata_changed%identity /= build_source_changed%identity, &
-        'patch digest changes invalidate generation identity')
+        metadata_changed%identity == build_source_changed%identity, &
+        'patch digest metadata preserves execution generation identity')
+    call check(metadata_changed%patch_digest == context%patch_digest, &
+        'returned generation retains current patch provenance')
 
     context%patch_digest = 'uncommitted-patch-digest'
     context%driver_digest = repeat('b', HASH_LEN)

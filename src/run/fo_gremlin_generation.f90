@@ -277,20 +277,18 @@ contains
             return
         end if
 
-        allocate (identity_parts(8 + 3 * n_roots))
-        identity_parts(1) = 'fo-gremlin-generation-v2'
+        allocate (identity_parts(6 + 3 * n_roots))
+        identity_parts(1) = 'fo-gremlin-generation-v3'
         identity_parts(2) = value_or_empty(context%toolchain)
         identity_parts(3) = value_or_empty(context%flags)
         identity_parts(4) = value_or_empty(context%environment)
-        identity_parts(5) = value_or_empty(context%base_commit)
-        identity_parts(6) = value_or_empty(context%patch_digest)
-        identity_parts(7) = trim(context%driver_digest)
+        identity_parts(5) = trim(context%driver_digest)
         write (driver_size_text, '(i0)') context%driver_size
-        identity_parts(8) = trim(driver_size_text)
+        identity_parts(6) = trim(driver_size_text)
         do i = 1, n_roots
-            identity_parts(8 + 3 * i - 2) = trim(roots(i)%label)
-            identity_parts(8 + 3 * i - 1) = trim(roots(i)%destination)
-            identity_parts(8 + 3 * i) = tree_hashes(i)
+            identity_parts(6 + 3 * i - 2) = trim(roots(i)%label)
+            identity_parts(6 + 3 * i - 1) = trim(roots(i)%destination)
+            identity_parts(6 + 3 * i) = tree_hashes(i)
         end do
         generation%identity = cache_digest(identity_parts, size(identity_parts))
         cache = trim(base)//'/'//generation%identity
@@ -640,7 +638,7 @@ contains
         integer :: i
 
         write (driver_size_text, '(i0)') context%driver_size
-        record = 'schema=fo-gremlin-generation-v2'//new_line('a')// &
+        record = 'schema=fo-gremlin-generation-v3'//new_line('a')// &
             'toolchain='//value_or_empty(context%toolchain)//new_line('a')// &
             'flags='//value_or_empty(context%flags)//new_line('a')// &
             'environment='//value_or_empty(context%environment)//new_line('a')// &
