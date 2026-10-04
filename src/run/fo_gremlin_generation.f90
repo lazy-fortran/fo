@@ -9,7 +9,7 @@ module fo_gremlin_generation
     use fx_immutable_store, only: immutable_store_t, immutable_store_init, &
         IMMUTABLE_OK
     use fo_input_inventory, only: input_inventory_t, input_inventory_revalidate, &
-        input_inventory_discover, INPUT_FILE, INPUT_DIRECTORY
+        input_inventory_discover, input_entry_t, INPUT_FILE, INPUT_DIRECTORY
     use fo_generation_manifest, only: generation_manifest_metadata_t, &
         generation_manifest_capture, generation_manifest_load, &
         generation_manifest_materialize, generation_manifest_execution_identity
