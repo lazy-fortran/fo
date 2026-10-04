@@ -31,6 +31,7 @@ program test_backend
     call test_native_test_runs_without_build_lock()
     call test_cmake_build_and_test()
     call test_cmake_context_cxx_runtime()
+    call test_cmake_warm_build_skips_configure()
     call test_native_combined_build_keeps_apps()
     call test_cmake_named_test_rebuilds_changed_source()
     call test_cmake_exec_target_resolution()
