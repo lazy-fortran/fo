@@ -1,6 +1,6 @@
 program test_gremlin_execution_view
     use fo_cache, only: HASH_LEN, cache_file_digest
-    use fo_fs, only: fs_make_dir, fs_remove_tree, fs_write_text
+    use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_write_text
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
@@ -11,10 +11,10 @@ program test_gremlin_execution_view
 
     type(input_declaration_t) :: declarations(1)
     type(input_inventory_t) :: inventory, escaping, incomplete, invalid
-    type(input_inventory_t) :: multirole, conflicting
-    type(execution_view_t) :: first, second, partial, paired, rejected
+    type(input_inventory_t) :: multirole, conflicting, aliased
+    type(execution_view_t) :: first, second, partial, paired, rejected, alias_view
     character(len=512) :: root, views, source_file, text, message
-    character(len=512) :: first_fixture, second_output, escape_path
+    character(len=512) :: first_fixture, second_output, escape_path, bundle_file
     character(len=HASH_LEN) :: source_digest, after_digest
     character(len=512) :: argument, executable, current_dir, probe_log
     character(len=:), allocatable :: packed
@@ -36,7 +36,6 @@ program test_gremlin_execution_view
         'version = "0.1.0"')
     source_file = trim(root)//'/fixtures/input.txt'
     call fs_write_text(trim(source_file), 'frozen fixture')
-    call cache_file_digest(trim(source_file), source_digest)
 
     declarations(1)%root_alias = 'project'
     declarations(1)%relative_path = 'fixtures/input.txt'
@@ -46,6 +45,14 @@ program test_gremlin_execution_view
     call input_inventory_discover(trim(root), declarations, inventory, ierr, message)
     call check(ierr == 0 .and. inventory%complete, &
         'discover the fixture through the canonical inventory')
+    bundle_file = trim(root)//'/bundle/project/fixtures/input.txt'
+    call fs_make_dir(trim(root)//'/bundle/project/fixtures')
+    call fs_write_text(trim(bundle_file), 'frozen fixture')
+    do i = 1, inventory%root_count
+        inventory%roots(i)%physical_path = trim(root)//'/bundle'
+    end do
+    call fs_write_text(trim(source_file), 'edited live fixture')
+    call cache_file_digest(trim(source_file), source_digest)
 
     call execution_view_create(trim(root)//'/views', repeat('a', HASH_LEN), &
         'session-case-1', 'test_case', inventory, .true., .true., first, ierr, message)
@@ -82,10 +89,16 @@ program test_gremlin_execution_view
     call check(index(text, 'written relative') > 0, &
         'relative output is created inside the private working directory')
 
+    call fs_remove_file(trim(source_file))
+    inquire(file=trim(source_file), exist=exists)
+    call check(.not. exists, 'editable fixture can be removed after capture')
     call execution_view_create(trim(root)//'/views', repeat('a', HASH_LEN), &
         'session-case-2', 'test_case', inventory, .true., .true., second, ierr, message)
     call check(ierr == 0 .and. second%cwd /= first%cwd, &
         'concurrent cases receive distinct working directories')
+    call read_text_file(trim(second%cwd)//'/fixtures/input.txt', text)
+    call check(index(text, 'frozen fixture') > 0, &
+        'later view reads captured bytes after editable source deletion')
     second_output = trim(second%cwd)//'/relative-output.txt'
     call fs_write_text(trim(second_output), 'case two')
     call read_text_file(trim(first%cwd)//'/relative-output.txt', text)
@@ -146,6 +159,37 @@ program test_gremlin_execution_view
     call check(index(text, 'frozen fixture') > 0, &
         'multi-role materialization preserves declared bytes')
     call execution_view_release(paired, .false., release_status, message)
+
+    call check(trim(inventory%roots(1)%aliases(1)) == 'project', &
+        'project bundle alias is available for the fixture')
+    bundle_file = trim(root)//'/bundle/deps/fixture/nested/data.txt'
+    call fs_make_dir(trim(root)//'/bundle/deps/fixture/nested')
+    call fs_write_text(trim(bundle_file), 'frozen dependency fixture')
+    aliased = inventory
+    aliased%roots(1)%alias_count = 2
+    aliased%roots(1)%aliases(2) = 'dependency:fixture'
+    aliased%roots(1)%bundle_paths(2) = 'deps/fixture'
+    call check(aliased%entry_count < aliased%entry_capacity, &
+        'inventory has room for a second declared fixture')
+    aliased%entry_count = aliased%entry_count + 1
+    aliased%entries(aliased%entry_count) = inventory%entries(i)
+    aliased%entries(aliased%entry_count)%root_alias = 'dependency:fixture'
+    aliased%entries(aliased%entry_count)%relative_path = 'nested/data.txt'
+    call cache_file_digest(trim(bundle_file), &
+        aliased%entries(aliased%entry_count)%content_digest)
+    call execution_view_create(trim(root)//'/views', repeat('a', HASH_LEN), &
+        'session-alias', 'test_case', aliased, .true., .true., &
+        alias_view, ierr, message)
+    call check(ierr == 0 .and. alias_view%active, &
+        'dependency alias materializes from its own bundle subtree')
+    call read_text_file(trim(alias_view%cwd)// &
+        '/.fo-inputs/dependency:fixture/nested/data.txt', text)
+    call check(index(text, 'frozen dependency fixture') > 0, &
+        'nested dependency fixture retains captured bytes and layout')
+    call read_text_file(trim(alias_view%cwd)//'/fixtures/input.txt', text)
+    call check(index(text, 'frozen fixture') > 0, &
+        'dependency alias does not replace the project fixture')
+    call execution_view_release(alias_view, .false., release_status, message)
 
     conflicting = multirole
     conflicting%entries(conflicting%entry_count)%writable_at_execution = .false.
