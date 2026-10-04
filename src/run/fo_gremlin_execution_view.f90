@@ -90,10 +90,8 @@ contains
         view%cwd = trim(candidate)
         view%active = .true.
         if (.not. inventory_ready) then
-            view%complete = .false.
-            view%diagnostic = 'canonical input inventory unavailable; scratch-only view'
-            ierr = 0
-            message = trim(view%diagnostic)
+            call reject_view(view, 'canonical input inventory unavailable', &
+                ierr, message)
             return
         end if
         if (.not. inventory%valid) then
