@@ -5,6 +5,20 @@ plan; this file maps responsibilities, not a competing schedule. Issue bodies
 carry focused acceptance and later delivery evidence. Check live issue state
 before assigning work; planning edits do not prove implementation complete.
 
+## Product boundary
+
+Keep fo in the build/test developer-tool lane: fpm/CMake project discovery,
+incremental compilation/cache, run/test/affected/continuous testing, formatting,
+lint/static diagnostics, LSP/MCP convenience and closely related correctness
+infrastructure. Environment/package/system management, scientific provenance
+capsules, proof/synthesis, containers, CI/promotion and agent orchestration are
+outside the product.
+
+Closed historical research scope includes #1/#3/#6/#7; #120 and #157 are now
+closed not planned. Hermetic environments are supplied externally. Internal
+bench/project audits may use pinned disposable environments but do not become
+public fo environment-management features.
+
 ## Development versus audits
 
 Use warm focused local correctness gates and push small exact green increments
@@ -30,7 +44,7 @@ benchmark matrix. Ordinary declared project dependency bootstrap is unchanged.
 | [#175](https://github.com/lazy-fortran/fo/issues/175) | One canonical declared logical input inventory; watcher, capture, scratch, build and impact consume it. |
 | [#189](https://github.com/lazy-fortran/fo/issues/189), [#138](https://github.com/lazy-fortran/fo/issues/138) | Cache-independent baseline/candidate impact, whole required-set gating, reproducers first, finite background coverage. |
 | [#148](https://github.com/lazy-fortran/fo/issues/148), [#170](https://github.com/lazy-fortran/fo/issues/170) | Declared-input event relevance and private writable execution views; no second watch policy. |
-| [#151](https://github.com/lazy-fortran/fo/issues/151), [#157](https://github.com/lazy-fortran/fo/issues/157) | Exact driver and represented toolchain/helper/runtime identity; honest completeness. |
+| [#151](https://github.com/lazy-fortran/fo/issues/151) | Pin fo's own driver so an active Gremlin session cannot switch implementation mid-run; host toolchain capture is out of scope. |
 | [#165](https://github.com/lazy-fortran/fo/issues/165) | Compact generation manifests over shared immutable blobs, not copied payload trees. |
 | [#166](https://github.com/lazy-fortran/fo/issues/166), [#167](https://github.com/lazy-fortran/fo/issues/167) | Private transactional sessions and one ordinary/Gremlin engine; separate compile/link/test identities. |
 | [#168](https://github.com/lazy-fortran/fo/issues/168), [fx #44](https://github.com/lazy-fortran/fx/issues/44) | Phase A roots/leases with collection disabled, then owner-audited Phase B collection. |
@@ -63,7 +77,7 @@ are foundations to reuse, not tasks to redo. Historical exact evidence is linked
 from PLAN. #176 completed the benchmark harness migration, **not** real-edit
 performance validation; #190 owns the new measurement work.
 
-## Adjacent capabilities, outside the Gremlin critical path
+## Adjacent in-scope developer capabilities
 
 | Issue | Scope |
 | --- | --- |
@@ -71,7 +85,9 @@ performance validation; #190 owns the new measurement work.
 | [#59](https://github.com/lazy-fortran/fo/issues/59) | Explicit optional fluff deep lint, separate from cheap native checks. |
 | [#62](https://github.com/lazy-fortran/fo/issues/62) | fortrun salvage/retirement record, no second runner. |
 | [#117](https://github.com/lazy-fortran/fo/issues/117) | Formatter identifier/keyword boundary correctness. |
-| [#120](https://github.com/lazy-fortran/fo/issues/120) | Future explicit synthesis/proof actions; no implicit prover gate. |
+
+
+Closed out-of-scope research directions remain in issue history rather than the active roadmap: #120 proof/synthesis and #157 complete host toolchain/runtime capture, plus earlier capsule/Nix/FortOS issues #1/#3/#6/#7.
 
 [ffc #798](https://github.com/lazy-fortran/ffc/issues/798) is a narrow consumer of
 fo's shared leaf/corpus runner and exact input model. fo's optional matrix may
