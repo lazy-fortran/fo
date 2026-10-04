@@ -404,6 +404,7 @@ contains
         character(len=*), intent(in) :: command
         character(len=256) :: arg
         integer :: i
+        logical :: end_options
 
         handled = .false.
         if (command == 'help') then
@@ -435,6 +436,23 @@ contains
                 if (trim(arg) == '--cwd' .or. trim(arg) == '--flag' .or. &
                     trim(arg) == '--profile') i = i + 1
                 i = i + 1
+            end do
+            return
+        end if
+        if (command == 'test') then
+            end_options = .false.
+            do i = 2, argument_count
+                call get_command_argument(i, arg)
+                if (.not. end_options .and. trim(arg) == '--') then
+                    end_options = .true.
+                    cycle
+                end if
+                if (end_options) cycle
+                if (trim(arg) == '--help' .or. trim(arg) == '-h') then
+                    call print_command_help(command)
+                    handled = .true.
+                    return
+                end if
             end do
             return
         end if
@@ -1146,6 +1164,7 @@ contains
         integer :: n_cached, ierr, i, n_test_names, n_arg_names
         integer :: random_count, random_seed, clock_count
         logical :: only_changed, include_all, verbose, use_json, skip_next
+        logical :: end_options, flags_seen
         character(len=256) :: arg
         character(len=128) :: test_names(MAX_NODES)
         character(len=128) :: random_candidates(MAX_NODES)
@@ -1156,69 +1175,96 @@ contains
         character(len=MAX_PATH) :: filenames(MAX_NODES)
         integer :: candidate_ids(MAX_NODES)
 
-        if (has_arg('--help') .or. has_arg('-h')) then
-            call print_test_usage()
-            return
-        end if
-        b = detect_backend('.')
-        if (b%kind == BACKEND_NONE) then
-            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
-            stop 1
-        end if
-
         only_changed = .false.
         include_all = .false.
         verbose = .false.
         use_json = .false.
+        flags = ''
+        profile = ''
+        flags_seen = .false.
         n_arg_names = 0
         random_count = 0
         random_seed = 0
         skip_next = .false.
+        end_options = .false.
         do i = 2, command_argument_count()
             call get_command_argument(i, arg)
             if (skip_next) then
                 skip_next = .false.
                 cycle
             end if
-            if (trim(arg) == '--flag' .or. trim(arg) == '--profile' .or. &
-                trim(arg) == '--random' .or. trim(arg) == '--seed') then
-                if (trim(arg) == '--random') then
-                    if (i >= command_argument_count()) then
-                        write (error_unit, '(a)') 'fo test: --random needs N'
-                        stop 1
-                    end if
-                    call get_command_argument(i + 1, arg)
-                    read (arg, *, iostat=ierr) random_count
-                    if (ierr /= 0 .or. random_count < 1) then
-                        write (error_unit, '(a)') 'fo test: invalid --random N'
-                        stop 1
-                    end if
-                else if (trim(arg) == '--seed') then
-                    if (i >= command_argument_count()) then
-                        write (error_unit, '(a)') 'fo test: --seed needs S'
-                        stop 1
-                    end if
-                    call get_command_argument(i + 1, arg)
-                    read (arg, *, iostat=ierr) random_seed
-                    if (ierr /= 0) then
-                        write (error_unit, '(a)') 'fo test: invalid --seed S'
-                        stop 1
-                    end if
-                end if
-                skip_next = .true.
-                cycle
-            end if
-            if (trim(arg) == '--only-changed') only_changed = .true.
-            if (trim(arg) == '--all') include_all = .true.
-            if (trim(arg) == '--verbose') verbose = .true.
-            if (trim(arg) == '--json') use_json = .true.
-            if (arg(1:1) /= '-') then
+            if (end_options) then
                 n_arg_names = n_arg_names + 1
                 test_names(n_arg_names) = arg(1:128)
+                cycle
             end if
+            if (trim(arg) == '--') then
+                end_options = .true.
+                cycle
+            end if
+            if (index(trim(arg), '--profile=') == 1) then
+                if (len_trim(arg) <= 10) call test_usage_error('--profile needs NAME')
+                profile = arg(11:)
+                cycle
+            end if
+            select case (trim(arg))
+            case ('--flag')
+                if (i >= command_argument_count()) &
+                    call test_usage_error('--flag needs FLAGS')
+                if (.not. flags_seen) call get_command_argument(i + 1, flags)
+                flags_seen = .true.
+                skip_next = .true.
+            case ('--profile')
+                if (i >= command_argument_count()) &
+                    call test_usage_error('--profile needs NAME')
+                call get_command_argument(i + 1, profile)
+                if (len_trim(profile) == 0) call test_usage_error('--profile needs NAME')
+                skip_next = .true.
+            case ('--random')
+                if (i >= command_argument_count()) &
+                    call test_usage_error('--random needs N')
+                call get_command_argument(i + 1, arg)
+                read (arg, *, iostat=ierr) random_count
+                if (ierr /= 0 .or. random_count < 1) &
+                    call test_usage_error('invalid --random N')
+                skip_next = .true.
+            case ('--seed')
+                if (i >= command_argument_count()) &
+                    call test_usage_error('--seed needs S')
+                call get_command_argument(i + 1, arg)
+                read (arg, *, iostat=ierr) random_seed
+                if (ierr /= 0) call test_usage_error('invalid --seed S')
+                skip_next = .true.
+            case ('--only-changed')
+                only_changed = .true.
+            case ('--all')
+                include_all = .true.
+            case ('--verbose')
+                verbose = .true.
+            case ('--json')
+                use_json = .true.
+            case ('--debug')
+                profile = 'debug'
+            case ('--release')
+                profile = 'release'
+            case ('--asan')
+                profile = 'asan'
+            case ('-h', '--help')
+                call print_test_usage()
+                return
+            case default
+                if (arg(1:1) == '-') &
+                    call test_usage_error('unknown option: '//trim(arg))
+                n_arg_names = n_arg_names + 1
+                test_names(n_arg_names) = arg(1:128)
+            end select
         end do
-        call get_flags_arg(flags)
-        call get_profile_arg(profile)
+
+        b = detect_backend('.')
+        if (b%kind == BACKEND_NONE) then
+            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            stop 1
+        end if
         if (len_trim(profile) > 0 .and. len_trim(profile_flags(profile)) == 0) then
             write (error_unit, '(a)') 'fo: unknown test profile: '//trim(profile)
             stop 1
@@ -1363,6 +1409,14 @@ contains
             call delete_tmpfile(test_log)
         end if
     end subroutine cmd_test
+
+    subroutine test_usage_error(message)
+        character(len=*), intent(in) :: message
+
+        write (error_unit, '(a)') 'fo test: '//trim(message)
+        call print_test_usage(error_unit)
+        stop 2
+    end subroutine test_usage_error
 
     integer function dag_find_test_index(dag, name) result(index)
         ! First test-node whose label matches NAME exactly or whose path
