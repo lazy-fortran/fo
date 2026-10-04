@@ -25,6 +25,7 @@ program test_continuous_preemption
     integer :: sentinel_bytes
     logical :: sentinel_reaped
     character(:), allocatable :: progress_pid, progress_child, progress_gate, progress_started
+    character(:), allocatable :: progress_view, progress_cwd
     logical :: found
 
     call gremlin_setup(driver, scratch, project, cache, state)
@@ -47,6 +48,8 @@ program test_continuous_preemption
     progress_child = scratch//'/progress.child.pid'
     progress_gate = scratch//'/progress.fifo'
     progress_started = scratch//'/progress.started'
+    progress_view = scratch//'/progress-view-path'
+    progress_cwd = ''
     call gremlin_fifo(progress_gate)
     call spawn_heartbeat_process(scratch//'/sentinel.log', scratch, sentinel_pid)
     call make_project(project, 'A')
@@ -96,6 +99,13 @@ program test_continuous_preemption
 
     call wait_file(progress_child, 5000, found)
     call assert_true(found, 'last-compilable campaign advances to its blocked descendant')
+    call wait_file(progress_view, 5000, found)
+    call assert_true(found, 'blocked descendant records its private execution view')
+    if (found) then
+        progress_cwd = read_text(progress_view)
+        call assert_true(file_exists(progress_cwd//'/preempted-output.txt'), &
+            'blocked descendant owns a private relative output before preemption')
+    end if
     pid_progress = read_integer(progress_child)
     call assert_true(process_alive(pid_progress), 'old generation owns a live descendant')
     call start_other_lane(session_other)
@@ -118,6 +128,10 @@ program test_continuous_preemption
     call assert_true(found, 'successful B generation starts its own capture child')
     call assert_true(generation_b /= generation_a, 'successful build switches immutable generation')
     call wait_dead(pid_progress)
+    if (len(progress_cwd) > 0) then
+        call assert_true(.not. file_exists(progress_cwd//'/preempted-output.txt'), &
+            'preemption cleans only the cancelled case execution view')
+    end if
     call assert_true(process_alive(sentinel_pid), 'unrelated sentinel survives replacement')
     call assert_true(len(read_text(scratch//'/sentinel.log')) > sentinel_bytes, &
         'unrelated sentinel continues producing bytes through replacement')
@@ -225,7 +239,19 @@ contains
             'implicit none'//new_line('a')//fork_interface()// &
             'integer :: unit, gate_unit, child, rc'//new_line('a')// &
             'character :: token'//new_line('a')// &
+            'character(len=4096) :: execution_cwd'//new_line('a')// &
             'if (probe_value == "A") then'//new_line('a')// &
+            "call get_environment_variable('FO_GREMLIN_EXECUTION_CWD',"// &
+            'execution_cwd,status=rc)'//new_line('a')// &
+            'if (rc /= 0) error stop 10'//new_line('a')// &
+            "open(newunit=unit,file='preempted-output.txt',status='replace')"// &
+            new_line('a')// &
+            "write(unit,'(a)') 'owned by A'"//new_line('a')// &
+            'close(unit)'//new_line('a')// &
+            "open(newunit=unit,file='"//progress_view// &
+            "',status='replace',access='stream',form='unformatted')"//new_line('a')// &
+            'write(unit) trim(execution_cwd)'//new_line('a')// &
+            'close(unit)'//new_line('a')// &
             'child = c_fork()'//new_line('a')// &
             'if (child < 0) error stop 8'//new_line('a')// &
             'if (child == 0) then'//new_line('a')// &

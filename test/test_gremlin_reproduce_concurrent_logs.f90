@@ -1,12 +1,13 @@
 program test_gremlin_reproduce_concurrent_logs
     use fo_test_harness, only: string_list_t, process_result_t, list_add
-    use fo_test_harness, only: make_directory, write_text, read_text, assert_true
+    use fo_test_harness, only: make_directory, write_text, read_text, file_exists
+    use fo_test_harness, only: assert_true, assert_equal_string
     use fo_test_harness, only: assert_equal_integer, finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json
     use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_wait_ms, gremlin_wait_file
     use fo_test_gremlin_oracle, only: gremlin_spawn, gremlin_wait_child, gremlin_poll_child
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
-    use fo_test_json, only: json_string_value
+    use fo_test_json, only: json_string_value, json_boolean_value, json_boolean
     use fo_test_gremlin_oracle, only: gremlin_stop_lane
     implicit none
 
@@ -14,7 +15,7 @@ program test_gremlin_reproduce_concurrent_logs
     character(:), allocatable :: session, generation, gate_one, gate_two
     character(:), allocatable :: entered_one, entered_two, out_one, err_one
     character(:), allocatable :: out_two, err_two, log_one, log_two
-    character(:), allocatable :: first_text, second_text
+    character(:), allocatable :: first_text, second_text, first_cwd, second_cwd
     type(string_list_t) :: args
     type(process_result_t) :: process
     type(json_value_t) :: report, response
@@ -78,10 +79,66 @@ program test_gremlin_reproduce_concurrent_logs
         'second receipt log retains the second process output')
     call assert_true(index(second_text, 'FO_REPRODUCE_GATE_FIRST_48ef31') == 0, &
         'second receipt log excludes the first process output')
+    first_cwd = execution_cwd(first_text)
+    second_cwd = execution_cwd(second_text)
+    call assert_true(len(first_cwd) > 0 .and. len(second_cwd) > 0, &
+        'both reproductions report their private execution directories')
+    call assert_true(first_cwd /= second_cwd, &
+        'overlapping reproductions own distinct execution directories')
+    if (len(first_cwd) > 0) then
+        call assert_true(file_exists(first_cwd//'/private-output.txt'), &
+            'failed first reproduction retains its relative output')
+        if (file_exists(first_cwd//'/private-output.txt')) &
+            call assert_equal_string(read_text(first_cwd//'/private-output.txt'), &
+                'FO_REPRODUCE_GATE_FIRST_48ef31'//new_line('a'), &
+                'first retained output belongs to the first reproduction')
+    end if
+    if (len(second_cwd) > 0) then
+        call assert_true(file_exists(second_cwd//'/private-output.txt'), &
+            'failed second reproduction retains its relative output')
+        if (file_exists(second_cwd//'/private-output.txt')) &
+            call assert_equal_string(read_text(second_cwd//'/private-output.txt'), &
+                'FO_REPRODUCE_GATE_SECOND_0ba742'//new_line('a'), &
+                'second retained output belongs to the second reproduction')
+    end if
+    call assert_true(.not. file_exists(project//'/private-output.txt'), &
+        'relative reproduction output never enters the editable project')
+    call status_args(session, args)
+    call gremlin_json(driver, project, cache, state, args, report, process, 30000)
+    call assert_equal_integer(process%exit_code, 0, &
+        'status reads source state after private reproduction writes')
+    call assert_equal_string(field(report, 'active_generation'), generation, &
+        'private reproduction writes leave the active generation unchanged')
+    response = json_member(report, 'dirty')
+    call assert_true(response%kind == json_boolean, 'status reports source dirtiness')
+    call assert_true(.not. json_boolean_value(response), &
+        'private reproduction writes do not dirty the source generation')
+    response = json_member(report, 'input_changed')
+    call assert_true(response%kind == json_boolean, &
+        'status reports source input events')
+    call assert_true(.not. json_boolean_value(response), &
+        'private reproduction writes do not create source input events')
+    call assert_true(.not. file_exists(field(report, 'active_project')// &
+        '/private-output.txt'), &
+        'relative reproduction output never enters the captured project')
     call stop_lane(session)
     call finish_assertions()
 
 contains
+
+    function execution_cwd(text) result(cwd)
+        character(len=*), intent(in) :: text
+        character(:), allocatable :: cwd, tail
+        integer :: start, finish
+
+        cwd = ''
+        start = index(text, 'fo: execution cwd: ')
+        if (start == 0) return
+        tail = text(start + len('fo: execution cwd: '):)
+        finish = index(tail, new_line('a'))
+        if (finish == 0) return
+        cwd = trim(tail(:finish - 1))
+    end function execution_cwd
 
     function field(document, key) result(value)
         type(json_value_t), intent(in) :: document
@@ -122,6 +179,10 @@ contains
             "inquire(file='"//fifo//"',exist=released)"//new_line('a')// &
             'if (released) exit'//new_line('a')// &
             'rc = c_usleep(20000_c_int)'//new_line('a')//'end do'//new_line('a')// &
+            "open(newunit=unit,file='private-output.txt',"// &
+            "status='replace')"//new_line('a')// &
+            "write(unit,'(a)') '"//token//"'"//new_line('a')// &
+            'close(unit)'//new_line('a')// &
             "print '(a)', '"//token//"'"//new_line('a')//'error stop 7'//new_line('a')// &
             'end program '//name//new_line('a')
         call write_text(project//'/test/'//name//'.f90', source)
