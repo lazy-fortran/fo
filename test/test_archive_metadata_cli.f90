@@ -105,7 +105,8 @@ contains
             '      fi ;;' // new_line('a') // &
             '    duplicate)' // new_line('a') // &
             '      duplicate="$listing.duplicate"' // new_line('a') // &
-            '      awk ''NF && $0 !~ /^__\.SYMDEF/ { print; print; exit }'' "$listing" > "$duplicate" || { rm -f "$listing" "$duplicate"; exit 74; }' // new_line('a') // &
+            '      awk ''NF && $0 !~ /^__\.SYMDEF/ { print; print; exit }'' "$listing" > "$duplicate" || { ' // &
+            'rm -f "$listing" "$duplicate"; exit 74; }' // new_line('a') // &
             '      first=$(sed -n "1p" "$duplicate") || exit $?' // new_line('a') // &
             '      second=$(sed -n "2p" "$duplicate") || exit $?' // new_line('a') // &
             '      lines=$(wc -l < "$duplicate") || exit $?' // new_line('a') // &
