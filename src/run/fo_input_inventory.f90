@@ -2,7 +2,8 @@ module fo_input_inventory
     !! Canonical, typed declaration of files and roots that can affect an fo run.
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, &
         c_long_long
-    use fo_cache, only: HASH_LEN, cache_digest, cache_file_digest
+    use fo_cache, only: HASH_LEN, cache_digest
+    use fx_immutable_store, only: immutable_store_hash_file, IMMUTABLE_OK
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_exe_t, &
         fpm_input_t, dep_kind, DEP_PATH
     use fo_dep_resolve, only: normalize_path, resolved_src_t, &
@@ -90,6 +91,7 @@ contains
         type(fpm_config_t) :: config
         type(resolved_src_t) :: resolved_dev_deps(MAX_RESOLVED)
         character(len=PATH_LEN) :: project_root
+        character(len=:), allocatable :: dependency_root
         integer :: project_index, i, j, status, n_resolved_dev
         logical :: is_local
 
@@ -112,7 +114,7 @@ contains
             call record_failure(inventory, message)
             return
         end if
-        call mark_unmodeled_config(config, 'project', inventory)
+        call mark_unmodeled_config(config, 'project', inventory, project_root)
         call add_root(inventory, 'project', trim(project_root), project_index, &
             ierr, message, 'project')
         if (ierr /= 0) then
@@ -147,6 +149,21 @@ contains
                 return
             end if
         end do
+        do i = 1, config%n_deps
+            if (dep_kind(config%deps(i)) == DEP_PATH) cycle
+            dependency_root = trim(project_root)//'/build/dependencies/'// &
+                trim(config%deps(i)%name)
+            if (alias_root(inventory, 'dependency:'// &
+                    trim(config%deps(i)%name)) /= 0) cycle
+            call discover_acquired_dependency(trim(dependency_root), &
+                'dependency:'//trim(config%deps(i)%name), &
+                'project/build/dependencies/'//trim(config%deps(i)%name), &
+                inventory, ierr, message, 0)
+            if (ierr /= 0) then
+                call record_failure(inventory, message)
+                return
+            end if
+        end do
         do i = 1, config%n_dev_deps
             if (dep_kind(config%dev_deps(i)) /= DEP_PATH) cycle
             call discover_path_dependency(trim(project_root), &
@@ -173,9 +190,10 @@ contains
                     exit
                 end do
                 if (is_local) cycle
-                call discover_resolved_dev_dependency(trim(resolved_dev_deps(i)%dir), &
-                    'dependency:'//trim(resolved_dev_deps(i)%name), inventory, &
-                    ierr, message)
+                call discover_acquired_dependency(trim(resolved_dev_deps(i)%dir), &
+                    'dependency:'//trim(resolved_dev_deps(i)%name), &
+                    'project/build/dependencies/'// &
+                    trim(resolved_dev_deps(i)%name), inventory, ierr, message, 0)
                 if (ierr /= 0) then
                     call record_failure(inventory, message)
                     return
@@ -361,19 +379,34 @@ contains
         message = ''
     end subroutine input_inventory_revalidate
 
-    subroutine discover_resolved_dev_dependency(dependency_root, alias, &
-            inventory, ierr, message)
-        character(len=*), intent(in) :: dependency_root, alias
+    recursive subroutine discover_acquired_dependency(dependency_root, alias, &
+            bundle_path, inventory, ierr, message, depth)
+        character(len=*), intent(in) :: dependency_root, alias, bundle_path
         type(input_inventory_t), intent(inout) :: inventory
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
+        integer, intent(in) :: depth
         type(fpm_config_t) :: config
-        character(len=PATH_LEN) :: manifest, bundle_path
+        character(len=PATH_LEN) :: manifest
+        character(len=:), allocatable :: child_root, child_bundle, child_alias
         integer :: root_index, i, status
         logical :: exists
 
         ierr = 0
         message = ''
+        if (depth > 16) then
+            call mark_incomplete(inventory, trim(alias)// &
+                ' exceeds acquired-dependency closure depth 16')
+            return
+        end if
+        if (len_trim(dependency_root) >= PATH_LEN .or. &
+                len_trim(bundle_path) >= PATH_LEN .or. &
+                len_trim(alias) > ALIAS_LEN) then
+            call mark_incomplete(inventory, trim(alias)// &
+                ' exceeds supported acquired-dependency path or alias length')
+            return
+        end if
+        if (alias_root(inventory, alias) /= 0) return
         manifest = trim(dependency_root)//'/fpm.toml'
         inquire(file=trim(manifest), exist=exists)
         if (.not. exists) then
@@ -387,8 +420,7 @@ contains
                 ' has an unreadable resolved FPM manifest')
             return
         end if
-        bundle_path = 'project/build/dependencies/'//alias(index(alias, ':', back=.true.) + 1:)
-        call mark_unmodeled_config(config, alias, inventory)
+        call mark_unmodeled_config(config, alias, inventory, dependency_root)
         call add_root(inventory, alias, dependency_root, root_index, ierr, message, &
             trim(bundle_path))
         if (ierr /= 0) return
@@ -405,10 +437,21 @@ contains
             if (dep_kind(config%deps(i)) /= DEP_PATH) cycle
             call discover_path_dependency(trim(dependency_root), &
                 config%deps(i)%path, trim(alias)//'/'//trim(config%deps(i)%name), &
-                .true., inventory, ierr, message, 1, trim(bundle_path))
+                .true., inventory, ierr, message, depth + 1, trim(bundle_path))
             if (ierr /= 0) return
         end do
-    end subroutine discover_resolved_dev_dependency
+        do i = 1, config%n_deps
+            if (dep_kind(config%deps(i)) == DEP_PATH) cycle
+            child_root = trim(dependency_root)//'/build/dependencies/'// &
+                trim(config%deps(i)%name)
+            child_alias = trim(alias)//'/dependency:'//trim(config%deps(i)%name)
+            child_bundle = trim(bundle_path)//'/build/dependencies/'// &
+                trim(config%deps(i)%name)
+            call discover_acquired_dependency(trim(child_root), trim(child_alias), &
+                trim(child_bundle), inventory, ierr, message, depth + 1)
+            if (ierr /= 0) return
+        end do
+    end subroutine discover_acquired_dependency
 
     subroutine record_failure(inventory, message)
         type(input_inventory_t), intent(inout) :: inventory
@@ -531,7 +574,7 @@ contains
         if (ierr /= 0) message = trim(message)//' ('//trim(path)//')'
     end subroutine add_target_main
 
-    subroutine discover_path_dependency(parent_root, dependency_path, alias, &
+    recursive subroutine discover_path_dependency(parent_root, dependency_path, alias, &
             follow_regular_deps, inventory, ierr, message, depth, parent_bundle)
         character(len=*), intent(in) :: parent_root, dependency_path, alias
         character(len=*), intent(in) :: parent_bundle
@@ -543,6 +586,7 @@ contains
 
         type(fpm_config_t) :: config
         character(len=PATH_LEN) :: dependency_root, bundle_path
+        character(len=:), allocatable :: child_root, child_bundle, child_alias
         integer :: root_index, i, status
         logical :: exists
 
@@ -580,7 +624,7 @@ contains
             message = 'cannot parse path dependency manifest: '//trim(alias)
             return
         end if
-        call mark_unmodeled_config(config, alias, inventory)
+        call mark_unmodeled_config(config, alias, inventory, dependency_root)
         call add_root(inventory, alias, trim(dependency_root), root_index, &
             ierr, message, trim(bundle_path))
         if (ierr /= 0) return
@@ -602,19 +646,39 @@ contains
                 inventory, ierr, message, depth + 1, trim(bundle_path))
             if (ierr /= 0) return
         end do
+        do i = 1, config%n_deps
+            if (dep_kind(config%deps(i)) == DEP_PATH) cycle
+            child_root = trim(dependency_root)//'/build/dependencies/'// &
+                trim(config%deps(i)%name)
+            child_alias = trim(alias)//'/dependency:'//trim(config%deps(i)%name)
+            child_bundle = trim(bundle_path)//'/build/dependencies/'// &
+                trim(config%deps(i)%name)
+            call discover_acquired_dependency(trim(child_root), trim(child_alias), &
+                trim(child_bundle), inventory, ierr, message, depth + 1)
+            if (ierr /= 0) return
+        end do
         ierr = 0
     end subroutine discover_path_dependency
 
-    subroutine mark_unmodeled_config(config, alias, inventory)
+    subroutine mark_unmodeled_config(config, alias, inventory, resolved_root)
         type(fpm_config_t), intent(in) :: config
         character(len=*), intent(in) :: alias
         type(input_inventory_t), intent(inout) :: inventory
+        character(len=*), intent(in), optional :: resolved_root
         integer :: i
+        logical :: acquired
 
         do i = 1, config%n_deps
             if (dep_kind(config%deps(i)) == DEP_PATH) cycle
+            acquired = .false.
+            if (present(resolved_root)) then
+                inquire(file=trim(resolved_root)//'/build/dependencies/'// &
+                    trim(config%deps(i)%name)//'/fpm.toml', exist=acquired)
+            end if
+            if (acquired) cycle
             call mark_incomplete(inventory, trim(alias)//' dependency '// &
-                trim(config%deps(i)%name)//' is not a local path dependency')
+                trim(config%deps(i)%name)// &
+                ' is not available in the existing acquired-dependency tree')
         end do
         do i = 1, config%n_dev_deps
             if (dep_kind(config%dev_deps(i)) == DEP_PATH) cycle
@@ -622,7 +686,8 @@ contains
                 cycle
             end if
             call mark_incomplete(inventory, trim(alias)//' dev-dependency '// &
-                trim(config%dev_deps(i)%name)//' is not a local path dependency')
+                trim(config%dev_deps(i)%name)// &
+                ' is not included in this package execution closure')
         end do
         if (config%n_external_modules > 0) then
             call mark_incomplete(inventory, trim(alias)// &
@@ -903,8 +968,10 @@ contains
                 trim(alias)//':'//trim(entry%relative_path)
             return
         end if
-        call cache_file_digest(trim(path), entry%content_digest)
-        if (len_trim(entry%content_digest) /= HASH_LEN) then
+        call immutable_store_hash_file(trim(path), entry%content_digest, &
+            mode_status)
+        if (mode_status /= IMMUTABLE_OK .or. &
+            len_trim(entry%content_digest) /= HASH_LEN) then
             ierr = 1
             message = 'cannot hash required input file: '// &
                 trim(alias)//':'//trim(entry%relative_path)
@@ -941,6 +1008,7 @@ contains
         character(len=*), intent(out) :: message
 
         character(len=PATH_LEN) :: manifest, line, relative, target
+        character(len=PATH_LEN) :: symlink_parts(1)
         character(len=HASH_LEN) :: hash
         integer :: rc, unit, ios, kind, decode_status
         type(input_entry_t) :: entry
@@ -1013,9 +1081,10 @@ contains
                     exit
                 end if
                 entry%mode = iand(entry%mode, 511)
-                call cache_file_digest(trim(physical_root)//'/'// &
-                    trim(relative), hash)
-                if (len_trim(hash) /= HASH_LEN) then
+                call immutable_store_hash_file(trim(physical_root)//'/'// &
+                    trim(relative), hash, decode_status)
+                if (decode_status /= IMMUTABLE_OK .or. &
+                    len_trim(hash) /= HASH_LEN) then
                     ierr = 1
                     message = 'cannot hash enumerated input: '//trim(relative)
                     exit
@@ -1024,8 +1093,14 @@ contains
             case (INPUT_SYMLINK)
                 entry%mode = 0
                 entry%link_target = trim(target)
-                hash = cache_digest([character(len=PATH_LEN) :: &
-                    'symlink:'//trim(target)], 1)
+                if (len_trim(target) > len(symlink_parts(1)) - &
+                    len('symlink:')) then
+                    ierr = 1
+                    message = 'symlink target is too long: '//trim(relative)
+                    exit
+                end if
+                symlink_parts(1) = 'symlink:'//trim(target)
+                hash = cache_digest(symlink_parts, 1)
                 entry%content_digest = hash
             end select
             call append_entry(inventory, entry, ierr, message)
@@ -1054,14 +1129,16 @@ contains
         read (line(16:23), '(i8)', iostat=ios) target_length
         if (ios /= 0) return
         if (path_length < 1 .or. target_length < 1) return
+        if (path_length > len(relative) .or. &
+            target_length > len(target)) return
         start = 25
-        if (start + path_length + 2 * target_length > len_trim(line)) return
+        if (start - 1 + path_length + 2 * target_length /= len_trim(line)) return
         relative = line(start:start + path_length - 1)
         do i = 1, target_length
-            hi = hex_value(line(start + path_length + 2 * i - 1:start + &
+            hi = hex_value(line(start + path_length + 2 * i - 2:start + &
+                path_length + 2 * i - 2))
+            lo = hex_value(line(start + path_length + 2 * i - 1:start + &
                 path_length + 2 * i - 1))
-            lo = hex_value(line(start + path_length + 2 * i:start + &
-                path_length + 2 * i))
             if (hi < 0 .or. lo < 0) return
             target(i:i) = achar(16 * hi + lo)
         end do

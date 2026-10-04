@@ -112,6 +112,12 @@ program test_gremlin_input_inventory
         'runtime data role is retained')
     call require(has_entry(runtime, 'project', 'runtime.dat', 'runtime-oracle'), &
         'duplicate physical path retains its second role')
+    declarations(2)%writable_at_execution = .true.
+    call input_inventory_discover(trim(project), declarations, runtime, ierr, &
+        diagnostic)
+    call require(ierr /= 0 .and. .not. runtime%valid, &
+        'same-path roles with conflicting writable intent are rejected')
+    declarations(2)%writable_at_execution = .false.
 
     bad_declaration(1) = declarations(1)
     bad_declaration(1)%relative_path = '../escape'
@@ -133,6 +139,26 @@ program test_gremlin_input_inventory
     call require(ierr == 0, 'partial inventory is available: '//trim(diagnostic))
     call require(.not. runtime%complete .and. len_trim(runtime%diagnostic) > 0, &
         'unresolved registry dependency cannot certify complete closure')
+    call fs_make_dir(trim(project)//'/build/dependencies/external-dep/src')
+    call write(trim(project)//'/build/dependencies/external-dep/fpm.toml', &
+        'name = "external-dep"')
+    call write(trim(project)//'/build/dependencies/external-dep/src/external.f90', &
+        'module external_dep')
+    call discover(changed, ierr, diagnostic)
+    call require(ierr == 0, 'inventory with acquired dependency: '//trim(diagnostic))
+    call require(changed%complete, &
+        'existing acquired registry source closes its declared dependency root')
+    call require(has_entry(changed, 'dependency:external-dep', &
+        'src/external.f90', 'dependency-source'), &
+        'acquired registry source is included in canonical inventory')
+    previous = changed
+    call write(trim(project)//'/build/dependencies/external-dep/src/external.f90', &
+        'module external_dep_changed')
+    call discover(changed, ierr, diagnostic)
+    call require(ierr == 0, 'inventory after acquired-source edit: '// &
+        trim(diagnostic))
+    call require(changed%digest /= previous%digest, &
+        'acquired dependency source edit changes inventory digest')
 
     call fs_remove_tree(trim(fixture))
 
