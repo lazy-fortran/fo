@@ -1,6 +1,6 @@
 program test_mcp_cancel_error
     use, intrinsic :: iso_c_binding, only: c_int64_t
-    use fo_test_harness, only: make_directory, write_text, start_sentinel
+    use fo_test_harness, only: make_directory, write_text, read_text, start_sentinel
     use fo_test_harness, only: process_alive, stop_sentinel
     use fo_test_harness, only: remove_path
     use fo_test_harness, only: assert_true, assert_equal_integer, finish_assertions
@@ -16,15 +16,16 @@ program test_mcp_cancel_error
     use fo_test_process_identity, only: mcp_kill_owned_tree
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_string_value, json_number_value, json_boolean_value
+    use fo_test_json, only: json_boolean
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state
     character(:), allocatable :: project_b, project_bad, ready_a, ready_b
     character(:), allocatable :: gate_a, gate_b, done_b, start_arguments, arguments
-    character(:), allocatable :: bad_arguments, diagnostics, body
+    character(:), allocatable :: bad_arguments, diagnostics, body, compiler_log
     character(len=32) :: number
     type(mcp_session_t) :: server, server_b
-    type(json_value_t) :: response, payload, status_payload, field
+    type(json_value_t) :: response, payload, status_payload, field, full_check
     integer :: exit_code, sentinel = 0, run_id, run_id_b, bad_run_id, error_code
     integer :: child_a = 0, child_b = 0
     integer(c_int64_t) :: child_a_start = 0_c_int64_t
@@ -59,7 +60,7 @@ program test_mcp_cancel_error
     start_arguments = '{"action":"check","mode":"start","root":'// &
         mcp_quote(project)//'}'
     call mcp_session_call(server, start_arguments, response)
-    call extract_payload(response, payload)
+    payload = json_member(response, 'result')
     run_id = int(json_number_value(json_member(payload, 'run_id')))
     call assert_true(run_id > 0, 'asynchronous public check returns its owned run ID')
     if (run_id <= 0) goto 900
@@ -87,7 +88,7 @@ program test_mcp_cancel_error
     arguments = '{"action":"check","mode":"start","root":'// &
         mcp_quote(project_b)//'}'
     call mcp_session_call(server_b, arguments, response)
-    call extract_payload(response, payload)
+    payload = json_member(response, 'result')
     run_id_b = int(json_number_value(json_member(payload, 'run_id')))
     call assert_true(run_id_b > 0, 'independent MCP server starts its own check')
     if (run_id_b <= 0) goto 900
@@ -153,10 +154,10 @@ program test_mcp_cancel_error
         'server B child exits after its own completion token')
 
     call prepare_failure_fixture(project_bad)
-    bad_arguments = '{"action":"check","mode":"start","root":'// &
+    bad_arguments = '{"action":"check","mode":"start","json":"full","root":'// &
         mcp_quote(project_bad)//'}'
     call mcp_session_call(server_b, bad_arguments, response)
-    call extract_payload(response, payload)
+    payload = json_member(response, 'result')
     bad_run_id = int(json_number_value(json_member(payload, 'run_id')))
     call assert_true(bad_run_id > 0, 'starts a naturally failing early-exit check')
     if (bad_run_id <= 0) goto 900
@@ -168,6 +169,15 @@ program test_mcp_cancel_error
     arguments = '{"action":"diagnostics","run_id":'//trim(number)//'}'
     call mcp_session_call(server_b, arguments, response)
     diagnostics = response_text(response)
+    call write_text(scratch//'/early-diagnostics.txt', diagnostics)
+    call read_full_check(diagnostics, full_check)
+    call assert_true(.not. json_boolean_value(json_member(full_check, 'tests_ok')), &
+        'full completed receipt retains the failing test outcome')
+    compiler_log = json_string_value(json_member(full_check, 'log_path'))
+    call assert_true(len(compiler_log) > 0, &
+        'full completed receipt references its retained compiler output artifact')
+    diagnostics = ''
+    if (len(compiler_log) > 0) diagnostics = read_text(compiler_log)
     call assert_true(index(diagnostics, 'test_mcp_failure.f90') > 0, &
         'finished child diagnostics retain the concrete failing source path')
     call assert_true(index(diagnostics, 'mcp_failure_probe') > 0 .or. &
@@ -185,6 +195,41 @@ program test_mcp_cancel_error
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
+
+    subroutine read_full_check(text, document)
+        character(len=*), intent(in) :: text
+        type(json_value_t), intent(out) :: document
+        type(json_value_t) :: candidate, build_field, tests_field
+        character(:), allocatable :: line, message
+        integer :: first, last, separator
+        logical :: valid, found
+
+        first = 1
+        found = .false.
+        do while (first <= len(text))
+            separator = index(text(first:), new_line('a'))
+            last = len(text)
+            if (separator > 0) last = first + separator - 2
+            line = ''
+            if (last >= first) line = text(first:last)
+            call json_parse(line, candidate, valid, message)
+            if (valid) then
+                build_field = json_member(candidate, 'build_ok')
+                tests_field = json_member(candidate, 'tests_ok')
+                if (build_field%kind == json_boolean .and. &
+                        tests_field%kind == json_boolean) then
+                    call assert_true(.not. found, &
+                        'completed diagnostics contain exactly one full check receipt')
+                    document = candidate
+                    found = .true.
+                end if
+            end if
+            if (separator == 0) exit
+            first = last + 2
+        end do
+        call assert_true(found, &
+            'public completed diagnostics retain valid full check JSON after progress')
+    end subroutine read_full_check
 
     subroutine read_child_identity(path, pid, start_time, found)
         character(len=*), intent(in) :: path
