@@ -37,7 +37,7 @@ program fo_main
     use fo_ffc_cli, only: ffc_cmd_build, ffc_cmd_run, ffc_native_requested
     use fo_gremlin_cli, only: gremlin_cli_run
     use fo_exec_target, only: resolve_exec_target, exec_target_is_app, &
-        exec_args_t, parse_exec_args
+        exec_target_is_test, exec_args_t, parse_exec_args
     use fo_build_tree, only: native_other_builds
     use fo_cover, only: fo_cover_run
     use fo_lock, only: lock_write
@@ -791,12 +791,12 @@ contains
             call make_tmpfile('fo-exec-build', build_log)
             if (trim(action) == 'run') then
                 call backend_build(b, exitcode, flags=all_flags, log_file=build_log)
-            else if (b%kind == BACKEND_NATIVE .and. &
-                    .not. exec_target_is_app(b, parsed%target)) then
+            else if (exec_target_is_test(b, parsed%target)) then
                 call backend_build_test_target(b, parsed%target, exitcode, &
                     flags=all_flags, log_file=build_log)
             else
-                call backend_build(b, exitcode, flags=all_flags, log_file=build_log)
+                call backend_build(b, exitcode, flags=all_flags, log_file=build_log, &
+                    with_tests=.not. exec_target_is_app(b, parsed%target))
             end if
             if (exitcode /= 0) then
                 write (error_unit, '(a)') 'fo exec: build failed'

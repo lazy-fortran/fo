@@ -3,12 +3,13 @@ module fo_exec_target
     use fo_build_tree, only: native_output_dir
     use fo_fs, only: fs_collect_files
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
-    use fo_gfortran_build, only: gfortran_app_source_name, gfortran_test_source_name
+    use fo_gfortran_build, only: gfortran_app_source_name, &
+        gfortran_test_source_name, gfortran_named_test_exists
     use fo_scan, only: scan_unit_t, scan_dir
     implicit none
     private
 
-    public :: resolve_exec_target, exec_target_is_app
+    public :: resolve_exec_target, exec_target_is_app, exec_target_is_test
     public :: exec_args_t, parse_exec_args
 
     type :: exec_args_t
@@ -163,6 +164,15 @@ contains
                 target, .true.)
         end if
     end function exec_target_is_app
+
+    logical function exec_target_is_test(b, target) result(is_test)
+        type(backend_t), intent(in) :: b
+        character(len=*), intent(in) :: target
+
+        is_test = .false.
+        if (b%kind /= BACKEND_NATIVE) return
+        is_test = gfortran_named_test_exists(b%project_dir, target)
+    end function exec_target_is_test
 
     logical function source_dir_has_target(config, source_dir, target, tests) &
             result(found)
