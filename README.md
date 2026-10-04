@@ -40,7 +40,8 @@ fpm install --profile release --prefix ~/.local
 ## Commands
 
 ```text
-fo                         static checks, build, tests, lint, format check
+fo                         start or attach to resident Gremlin
+fo verify                  static checks, build, tests, lint, format check
 fo build [--profile NAME]  build applications and examples
 fo test [NAME ...]         build and run tests
 fo test --only-changed     run tests affected by changed modules
@@ -62,10 +63,9 @@ fo mcp-server              MCP JSON-RPC server on standard input/output
 fo lsp                     diagnostics-on-save language server
 ```
 
-The first row describes the current staged pipeline. The planned CLI transition
-is for bare `fo` to start or attach to resident Gremlin and for that pipeline to
-move to `fo verify`; these names are not implemented yet. Until then, use the
-commands and options shown by the current Fo build.
+Bare `fo` starts or attaches to the default Gremlin lane. Use explicit
+`fo gremlin start --lane development` for a controller-assigned development
+lane; use `fo verify` for the broad staged pipeline at a verification checkpoint.
 
 Affected-test selection is being consolidated around canonical execution-input
 changes rather than compile-cache misses in [#189](https://github.com/lazy-fortran/fo/issues/189).

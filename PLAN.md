@@ -18,21 +18,27 @@ The six near-term milestones are listed under [Revised standalone target](#revis
 Current provider targets name focused scope; they do not by themselves prove
 the exact candidate-B public behavior.
 
-The reader/native MCP increment is pushed through `7843dc4`. Combined source
-`6856e19` builds candidate B (`6cb62c1e` image digest). The three named initial
-gates, manifest provider, frozen reproduction, default CLI, MCP cancellation
-and stale-peer checks pass. Corrected lifecycle fixtures also verify failed-build
-retention and successful-generation preemption. A restart/return-to-cached-input
-check still fails to obtain a fresh verification token; preserve its state and
-repair that gate-obligation bridge before claiming full readiness acceptance.
-No resident Fo lane is claimed active yet. Integration branch progress is pushed;
-the combined source has not been promoted to main.
+Verified runtime source is on main at `4e0090d` (integrated source `71d59e1`).
+The adopted driver has SHA256
+`c3847777cfc204b7c88871b206fd51192f43e1421e36744614d82803655c1e73`.
+Seven focused native checks pass: the three initial gates, generation manifest,
+current requirement recovery, public readiness/restart, and cache behavior.
+The cached-generation gate bridge and overlapping dependency materialization
+repairs are verified. Bare `fo` now starts/attaches Gremlin; `fo verify` names
+the former staged pipeline.
+
+Actual self-project startup exposed the next blocker: canonical input filtering
+omits legitimate `src/build` and `src/cache` directories, so the frozen Fo
+candidate cannot compile. Its owned resident was stopped and reaped; no active
+self-project generation or test receipts are claimed. Repair that generic input
+boundary with a native fixture, then restart on the main checkout. This consumer
+repair takes priority over unrelated source promotion.
 
 Fx `a89b787` is locally verified and pushed to main: warm restoration avoids a
 second matching-output hash and unnecessary transient-lock directory sync.
-Fo's duplicate lookup before restore is prepared in the integration branch;
-its combined consumer gate remains pending. Validated result-store initialization
-reuse remains open in fx#57. No end-to-end timing improvement is claimed yet.
+Fo's duplicate lookup before restore is integrated and its cache gate passes.
+Validated result-store initialization reuse remains open in fx#57. No
+end-to-end timing improvement or reduced capture write volume is claimed yet.
 
 - **Benchmarks are never the development gate.** Real timing/resource runs and
    third-party project acquisition belong to independent scheduled/manual CI or
@@ -95,9 +101,9 @@ dependency/metapackage/registry semantics, command/options parity and library/mo
 installation require separate native behavioral acceptance. Unsupported forms get
 explicit diagnostics while those slices are implemented.
 
-CLI transitions are planned, not yet implemented: bare `fo` will start or attach
-to resident Gremlin, and the old staged delivery pipeline will move to `fo
-verify`. Until then, use the commands exposed by the current Fo build.
+The CLI transition is implemented and behaviorally verified: bare `fo` starts
+or attaches to the default Gremlin lane, and `fo verify` runs the former staged
+pipeline. Controller-assigned lanes use explicit `fo gremlin` requests.
 
 FPM #1329's minimal upstream fix is separate: two-file bugfix/test preparation
 and focused verification, no fo redesign in that PR. Existing source checkpoints
