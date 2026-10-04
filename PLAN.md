@@ -370,7 +370,8 @@ Fortran replacement preserves or strengthens the crash, concurrency, JSON,
 filesystem and execution oracle. Production code never depends on the test
 harness. The frozen baseline `1f8a1a3` had 31 JS fixtures, including
 context-provenance and coverage-restart tests omitted from the earlier count.
-At `8978ab4`, 13 JS fixtures remain: seven in #160 and six in #161. #163 owns
+At `18b28c7`, six JS fixtures remain, all owned by #161. #160's seven fixtures
+are native Fortran public-process tests. #163 owns
 the final interpreter-free inventory, generated compile-database Python oracle
 and generated shell helpers in archive, link, compiler, FFC, benchmark and CLI
 fixtures.
@@ -675,7 +676,7 @@ completed entries below are retained as prerequisites and evidence:
    and watched through the shared declared-input inventory.
 9. Register every late behavioral oracle in the post-submit workflow and keep
    the complete matrix as provider-completion/milestone evidence.
-10. [#158](https://github.com/lazy-fortran/fo/issues/158)--[#163](https://github.com/lazy-fortran/fo/issues/163): replace all Node fixtures and generated Python/shell helpers with standalone Fortran process drivers or narrow C OS shims, then remove interpreter runtimes from the test contract. #158/#159/#162 are complete.
+10. [#158](https://github.com/lazy-fortran/fo/issues/158)--[#163](https://github.com/lazy-fortran/fo/issues/163): replace all Node fixtures and generated Python/shell helpers with standalone Fortran process drivers or narrow C OS shims, then remove interpreter runtimes from the test contract. #158/#159/#160/#162 are complete; #161 owns the final six JS fixtures.
 11. **Complete:** [#164](https://github.com/lazy-fortran/fo/issues/164): stat-memo publication is cross-process safe.
 12. **Complete:** [#169](https://github.com/lazy-fortran/fo/issues/169):
     worktree-private self-refresh is delivered and its deliberate cold
@@ -782,16 +783,16 @@ Implemented issue state:
   scratch on reap failure, and compares interrupted archive paths plus SHA-256
   digests. Fresh focused tests pass, the worker full suite is 72/72, independent
   review approves, and the exact integrated three-case gate passes.
-- #160's campaign-history slice is delivered at `361d1ca`: the stale
+- #160 is complete through `18b28c7`. Its campaign-history slice landed at `361d1ca`; the stale
   per-campaign JavaScript sampler is replaced by an independent Fortran oracle
   for finite epoch order, restart/replay, markers, failure priority and cancelled
   unknown work. The remaining seven lifecycle/reproduction fixtures are frozen
   on exact `8978ab4` and task-specifically escalated to Sol after two Luna repair
-  failures. The complete seven-fixture replacement is rebased at `aa1f7d1` and
-  had eight focused gates, five fault mutants and the bare pipeline green before
-  rebasing. Exact-main rerun exposed #174's zero-timeout reconciliation defect;
-  that defect is repaired at `f340fad`, so #160 now rebases and reruns its exact
-  focused/mutant/full gates before review.
+  failures. The remaining seven lifecycle/reproduction fixtures are now Fortran
+  public-process oracles and their JS files are deleted. Exact final evidence:
+  eight focused gates, five fault mutants, 86-executable bare pipeline, formatting,
+  two zero-leak audits and independent review pass. The native watcher preserves
+  #174's dependency-root replacement, nested creation and follow-up capture sequence.
 - #164 is complete at `d482807`: unique descriptor-held temporary publication,
   unstable-hash retry and write/close/crash recovery passed independent review,
   focused current-head testing and three production mutants. Its macOS rerun is
