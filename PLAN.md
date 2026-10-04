@@ -1,1102 +1,438 @@
-# fo Gremlin implementation plan
+# fo / Gremlin implementation and verification plan
 
-Updated 2026-10-04; implementation audit checkpoint `bce5b22`.
-This is the complete provider plan for Gremlin, fo's continuous randomized
-regression-testing engine. External controllers own coding-worker orchestration.
-The
-[ffc roadmap](https://github.com/lazy-fortran/ffc/blob/main/PLAN.md) depends on
-this stage **before further compiler work**. This document is a plan; new
-interfaces below are proposed, not implemented by this documentation change.
+Updated 2026-10-04. Planning/source audit: `d166c393fb1fbdd166a12f814030a5277b7a97fd`.
+This is the authoritative current plan. Issue bodies define focused acceptance;
+this document orders the work and resolves obsolete bootstrap instructions.
+New interfaces/workflows below are planned, not claimed implemented by this edit.
 
-## Goal and smallest architecture
+## Immediate controller instructions
 
-KISS refinement (2026-10-04): deliver usable resident dogfood first, then shared
-compact generation/session execution, finite native coverage and quiescence,
-then bounded retention and the final matrix. Source/fixture declarations are a
-supported-input contract, not an OS sandbox. Validate materialization paths and
-report known unsupported ambient dependencies as incomplete closure; do not add
-generic read interception or containers. Current-generation observations and
-reproducible-closure completeness are distinct facts. Inventory tests work in
-Git-free source exports without a Gremlin-specific Git metadata artifact.
+1. Continue small, locally verified main increments. Use the exact candidate's
+   focused correctness tests and known reproducers; reuse warm caches. Do not
+   wait for GitHub CI, a full Gremlin epoch, a benchmark, or a project matrix.
+2. **Benchmarks are never the development gate.** Real timing/resource runs and
+   third-party project acquisition belong to independent scheduled/manual CI or
+   an explicit slow/performance audit. They do not block main, merge, ordinary
+   development, or unrelated issue closure. Timing thresholds are advisory.
+3. Keep correctness distinct: a confirmed stale build, wrong result, lost
+   receipt, missed required test or ownership violation is a real defect even
+   when discovered by a non-blocking audit. Reproduce against the exact current
+   candidate; prioritize repair/revert without stopping independent coding.
+4. #175 and #189 are the immediate input/impact spine. Finish shared declared
+   inputs, then derive affected tests from baseline/candidate content, not cache
+   misses. #148 and #170 consume that same inventory for watching and scratch.
+5. Land independent storage/session and correctness slices as ready. Do not wait
+   for the complete #165-#168 migration to measure the existing baseline, and do
+   not wait for its measurements to land a locally correct migration slice.
+6. External controllers own agents, task DAGs, worktrees and integration.
+   `fo work` is abandoned (#143/#152, PR #147); do not recreate it or add a CI
+   scheduler, promotion engine, cache daemon, database or bulk RAM cache to fo.
 
-Keep warm caches and focused per-increment gates. One review covers each
-material concurrency/platform change; repeat for concrete findings only. Full
-pipelines/platform matrices are milestones. Revisit the temporary heavy-lane
-limit with a bounded 1-vs-2 warm-lane measurement of throughput, local-gate
-latency, RSS, disk growth and writeback, then raise concurrency only where it
-improves throughput within the host budget. Coding remains parallel throughout.
+## Repository policy versus verification facts
 
-Run useful tests continuously while humans or coding workers prepare the next
-change. Test immutable generations, keep the last compilable generation running
-through failed candidate builds, and preempt obsolete tests immediately when a
-new successfully built generation is ready. Preserve every completed observation
-and rerun old failures first against the newest generation. Editing never waits
-for a whole suite.
+Gremlin produces exact local evidence, not permission to merge. Lazy-fortran's
+current policy is to push small integrated increments to main as soon as the
+configured local correctness gate is green and no known current regression
+remains. GitHub CI is asynchronous post-submit evidence. Human/CI/golden-record
+requirements in repositories such as SIMPLE or NEO-2 are external policies and
+are neither weakened nor assumed by Gremlin.
 
-Use **one shared engine**, one owned supervisor per project session, and thin
-CLI/MCP adapters. Reuse fo's dependency DAG, action cache, process layer, project
-locks and dispatcher. No separate ffc scheduler, provider-specific daemon,
-second test runner or model-driven per-test polling loop is needed. Gremlin is
-continuous randomized testing, not fault-injection chaos engineering or input
-fuzzing. Start with a small working serial service; add capacity using the same
-state machine rather than a parallel-only rewrite.
+`local_gate_green` is only as sound as the represented requirements and input
+model. Until #189 fixes cache-dependent impact discovery, do not treat an
+arbitrary tiny sampled set as proof that all affected requirements passed. Use
+explicit focused reproducers/known affected targets or conservative widening,
+and label incomplete selection honestly. No old PASS or cache hit manufactures
+current-generation verification.
 
-## Project map and current mechanisms
+Controller integrates one candidate at a time; workers never self-promote main
+or replace a global tool. A confirmed current correctness failure normally
+pauses unrelated main promotions while independent work continues. Slow timing,
+upstream baseline failures, missing optional audit prerequisites and unfinished
+audits are not such a pause condition. Full correctness suites remain useful
+background/milestone evidence; performance audits are not mandatory milestones.
 
-| Area | Current files and behavior |
-| --- | --- |
-| CLI | `app/main.f90`; `fo test --random N --seed S`, named/all and `--only-changed` exist; random cannot yet combine with names/affected selection. |
-| Selection | `src/check/fo_test_random.f90`; seeded sampling without replacement. Sampling membership and actual execution order are distinct. |
-| Build/test | `src/build/fo_build_backend.f90`, `fo_gfortran_build.f90`; DAG/action caches and FO_JOBS; native team verdict reporting waits for the team. |
-| Async queue | `src/run/fo_run_queue.f90`; one pending request coalesces but waits for active completion. |
-| Watch | `src/watch/fo_watch.f90`; blocks in check and watches Fortran suffixes. |
-| MCP | `src/mcp/fo_mcp.f90`; async check/status/diagnostics/cancel exists, test is synchronous, selection fields are missing, progress polling depends on new requests. |
-| Process lifecycle | `src/proc/fo_process.c` and `.f90`; asynchronous cancel signals the parent and can wait indefinitely; bounded synchronous group termination is a reusable starting point. |
-| State/output | `src/check/fo_test_results.f90`, `fo_check_output.f90`, `src/lock/fo_lock.f90`; JSON truncation and receipt durability need behavioral verification. |
-| Shared cache | `src/cache/fo_cache.f90`; FO_CACHE_DIR or the normal user cache; atomic action publication and complete action keys must remain authoritative. |
+## Current state, not future claims
 
-Read `CLAUDE.md`, this plan, the active issue and its verifier first. Load the
-relevant portions of `doc/FO.md` when a public build/cache/process contract is
-changed. New cohesive modules may live under `src/run/`; avoid expanding
-`app/main.f90` or `fo_mcp.f90` into independent scheduler implementations.
+Core PR #146 is merged. Main has last-compilable retention/preemption (#141),
+finite randomized epochs (#153), readiness/events/waits (#154), a shared event
+provider, atomic artifact work and substantial native behavioral fixtures.
+These are implemented foundations, not grounds to claim every remaining input,
+closure, storage or performance problem solved.
 
-## Public interface and parity
+Known remaining limitations at the audit snapshot:
 
-Keep the public controls small. Proposed CLI:
+- #148: shared event delivery exists, but declared-input relevance and the old
+  `fo watch` policy still need consolidation. A PLAN.md-only edit previously
+  triggered capture; declared dependencies under build/ must not be ignored.
+- #189: `fo_changed_modules` uses compile-cache availability; Gremlin queries it
+  after building. Cache state is not an execution-generation difference.
+- #151/#157: provenance repairs exist, but exact driver and complete executed
+  compiler/helper/runtime identity still need their independent acceptance.
+- #170: tests need private writable execution views, not a read-only source
+  snapshot as their working directory.
+- #165-#168: shared fx store primitives exist; compact fo manifests, private
+  sessions, one ordinary/Gremlin engine and owner-aware retention are migration
+  work, not already completed by the shared-cache foundation.
+- #149/#150/#185/#186: supervisor/campaign/command, residual JSON, MCP async and
+  source-policy responsibilities still overlap.
+- #183/#161: native recovery parity includes remaining receipt-versus-coverage
+  crash windows. A case marker before exit is not a committed PASS.
+- Gremlin bootstrap children are restricted to jobs=1 and recursive public fo
+  calls. Cache reuse does not establish final parallel or edit-to-green speed.
+- `bench/src/bench_engine.f90` currently measures incremental_leaf/core using
+  metadata-only touch and enforces timing targets. #190 owns correction and
+  removal of benchmark gating; #176's native harness migration stays complete.
 
-```bash
-fo gremlin                          # start/attach; promptly return owner ID
-fo gremlin start --background        # owned detached supervisor
-fo gremlin status --json
-fo gremlin wait --failure --json     # cursor-based bounded/event wait
-fo gremlin failures --json
-fo gremlin reproduce ID
-fo gremlin stop
-fo test --continuous                # alias into the same engine
-```
+The previous detailed delivery log, exact historical commits/digests, platform
+limitations and research links remain available without duplicate narratives:
+[immutable prior plan and evidence](https://github.com/lazy-fortran/fo/blob/d166c393fb1fbdd166a12f814030a5277b7a97fd/PLAN.md#active-delivery-state).
+Historical timings are not current measurements. This planning revision does
+not assert new test passes, speedups or resolved CI failures.
 
-The start policy accepts explicit targeted tests, affected-test selection,
-`--random N`, `--seed S`, a distinct `--shuffle`, campaign/per-case budgets,
-lane identity and build/test capacity. `--jobs` controls process capacity, not
-model-worker count. External agent controllers supply task semantics, worktrees,
-model selection and integration; fo supplies build, test and Gremlin feedback.
-CLI capability discovery must distinguish currently implemented and proposed
-controls and reject unsupported parameters.
-
-Extend the existing **single fo MCP tool** with equivalent start, status,
-wait/events, failures, reproduce and stop actions/fields. CLI and MCP
-must call the same request validator, scheduling policy, generation handling,
-receipt reader and process lifecycle. All capabilities, cancellation semantics,
-errors and JSON/event schemas must match; do not put essential logic in MCP.
-Background execution is an engine lifecycle, not a third policy implementation.
-
-**CLI must always offer the complete feature set.** After a fo fix, use the
-newly built/refreshed CLI immediately if the attached MCP cannot reload. Do not
-wait for a new agent session or route around fo. A stale MCP can report its
-version/capabilities; it cannot advertise features it lacks. CLI can stop/restart
-or reconnect to the supervisor using a versioned state protocol, preserving
-receipts and ownership. Protocol mismatch must fail clearly and provide the
-CLI recovery path. Reload/restart never guesses that abandoned PIDs are safe to
-kill. Test the stale-MCP/new-CLI scenario explicitly.
-
-Start returns a stable run/session ID promptly. Status reports active generation,
-candidate build, lane/task, capacity leases, progress, coverage debt and
-unclassified/current failures. Wait uses event cursors, bounded client timeouts
-and cancellation rather than busy polling; no client request is necessary for
-the engine to make progress. Reproduce restores the recorded case, seed/order
-prefix, flags, environment and oracle, defaulting to the newest generation;
-allow explicit historical reproduction. Stop is scoped and bounded.
-
-## Generations and state machine
-
-A generation identifies a frozen input closure:
-`H(source, includes, manifests, tests/oracles, toolchain, flags, dependencies,
-runtime libraries, harness, relevant environment)`, plus its built artifacts.
-Freeze before building or prove the entire captured input vector stayed
-unchanged; a build that observed changing inputs cannot be published. Store exact
-base commits and patch digests, including untracked inputs. A clean commit is
-convenient, but a reproducible uncommitted hashed patch is valid evidence.
-
-Each lane keeps an editable worker checkout, a frozen candidate build and a
-last-compilable test generation. The protected integration lane has the same
-structure. Runtime/compiler libraries and sibling path dependencies are part of
-the bundle, not live symlinks into another worker's changing tree. A binary copy
-alone is insufficient. ffc's gauntlet fingerprints the checkout containing its
-harness even with `--ffc`, so freeze that harness/source/runtime together.
-
-1. Start/attach, validate inventory and resource leases, recover owned state.
-2. Coalesce edits into the newest candidate input; incrementally build it in
-   isolated materialization while tests continue on the last compilable version.
-3. If build fails, publish the build failure and retain useful testing. Never
-   relabel last-compilable as verified good, and never test an unbuilt candidate.
-4. If build succeeds, atomically publish its artifact/input identity, preserve
-   old completed receipts, cancel only this lane's obsolete test campaign, and
-   start reproducers/affected tests then a short randomized subset.
-5. On another successful generation, repeat immediately; do not drain old work.
-   If a subset finishes without a new build, start another seeded subset.
-6. Explicit stop/shutdown releases only owned processes and leases. Restart
-   recovers receipts and coverage position; partial execution remains unknown.
-
-The switch from old to new test generation is not promotion to main and does
-not mean all tests passed. Key cancellation by session/lane/generation/artifact,
-not a global timestamp. A worker update must not stop another worker or the
-integration campaign. Candidate bursts can skip intermediate unpublished builds;
-already published failures always survive.
-
-## Test policy and failure response
-
-Default campaign limit: 60 seconds, at most 32 exploratory cases, one corpus
-process per campaign and five seconds per ordinary corpus case. Mandatory
-reproducer/neighbor checks have their own small budget. These are starting
-settings to measure, not a reason to hide slow tests. A newer successful build
-preempts even a campaign with an exceptional budget. Random membership,
-shuffled dispatch order and parallel completion order are reported separately.
-
-Priority: confirmed current regressions, impacted tests, historically
-failure-prone tests, then unexplored randomized cases. Deduplicate the mandatory
-and sampled sets; never sample away a requested reproducer. Stratify suites and
-feature/negative-case families, shuffle without replacement, record the seed and
-exact selected/started order, and rotate starting strata across short campaigns.
-Reserve about a quarter of exploratory slots for least-recently completed,
-repeatedly cancelled and expensive cases. Coverage debt persists across versions;
-correctness verdicts do not automatically persist.
-
-When an old generation fails, record case, generation, action key, configuration,
-seed/order prefix, environment, exit/output and signature. Do not interrupt an
-uncommitted edit merely because the background runner went red. Rerun the exact
-reproducer first on the newest compilable version. If it passes, keep working;
-if it fails reproducibly, assign a compatible fixer ahead of feature work. In
-parallel mode unrelated workers continue; serial mode fixes it next. Flaky or
-order-dependent results get replay and an owned repair issue, never silent
-acceptance. Restore/revert a reproducibly broken integrated build before unrelated
-promotion. A failing candidate does not advance protected integration.
-
-Old failures are reproduction priorities. A successful cached action may be
-reused only when its full input/dependency/oracle closure and environment key
-remain valid. Report cache reuse distinctly; a matching test name or old PASS is
-insufficient. Missing suites, zero selected cases, dropped dependency edges and
-unavailable oracles fail inventory/evidence checks rather than creating green.
-
-## Durable observations and ownership
-
-Publish each completion to an append-only journal before waiting for another
-case. Preserve original public test names, exit status, output artifacts,
-duration, seed/order and version/action identity. Separate completed oracle
-pass, known failure, candidate/confirmed regression, cancellation/untested,
-flaky, timeout, OOM and infrastructure/build errors. Cancellation is not a
-behavioral failure or pass. Summary must expose observed/selected/untested
-counts and remain partial until the exact required set completes.
-
-Fsync/atomic publication policy must make completed receipts survive supervisor
-crash; recover a truncated tail without inventing or duplicating completions.
-Large stdout/stderr stays in referenced artifacts rather than an unbounded MCP
-response. Event cursors page losslessly beyond old 16 KB/256-entry limits.
-Compare only compatible same-case observations. Never union different compiler
-versions into a synthetic full green. The integration journal is authoritative;
-worker journals support review and triage.
-
-Give every campaign a dedicated owned process group/session, scratch directory
-and process start identity. TERM, at most two seconds grace by default, then
-KILL/reap surviving owned children; verify termination before reuse. Contain
-escaping descendants if the advertised contract promises whole-tree cleanup.
-Never broad-pkill, remove another process's lock, reuse a live build directory,
-or assume a PID alone proves ownership. Preserve proven-owned lock/cache
-invariants through crash recovery. Cache cleanup cannot race active leases.
-
-## External controller orchestration
-
-Use one controller, a protected integration worktree and one writable Git
-worktree per implementation/fix worker. Read-only investigators need no extra
-checkout. Workers may commit on their task branches, returning exact commits or
-base-plus-patch digests; they never self-promote to main. Independent worktrees
-share Git objects and valid fo CAS actions, with private mutable build trees.
-Keep path dependencies intentionally bundled rather than accidentally using an
-unpublished sibling checkout.
-
-Serial or parallel coding modes belong to the external controller. It owns
-file/API/ABI/registry conflicts, task dependencies, model selection, worktree
-creation and escalation. Distinct worktrees
-also isolate alternative approaches; overlapping results still integrate in an
-explicit order. Worker capacity and total compiler/test resource capacity are
-separate budgets. Use shared admission/leases across nested pools so N workers
-never silently create N times FO_JOBS times sixteen corpus jobs.
-
-On worker result A, construct integration candidate D+A in a temporary worktree
-or immutable candidate commit. Run current regression reproducers and the union
-of affected tests before advancing D. Return a failing candidate to its worker;
-leave protected integration unchanged. A fast targeted pass advances integration
-and starts its randomized campaign, not a full-green claim. Integrate one
-candidate at a time; unaffected workers continue. Eventually run comprehensive
-verification on a fixed final generation without pausing useful implementation
-merely to drain an obsolete suite.
-
-Use available parallel luna capacity when parallel mode is selected; after repeated failure
-on an **individual task**, transfer that task to sol. Record failure signatures
-and at least two substantive repair attempts, interrupt the previous writer,
-freeze its useful patch/evidence, then give sol the same task, verifier and ownership. Parallel mode uses a
-native Sol worker; serial mode uses the GPT skill for a bounded Sol task and
-returns evidence to the same main session. Do not spawn coding subagents in
-serial mode. Read the current GPT skill before that exception. Ordinary first
-test failures are feedback, not immediate escalation.
-Do not change the whole team's model or give two agents the same writable branch.
-Root/controller remains responsible for integration, main commits and pushes.
-
-## Cache, concurrent starts and disk budget
-
-Use one storage architecture for ordinary fo and Gremlin:
+## One architecture
 
 ```text
-immutable fx store: blobs + tree manifests + action-result manifests
-                              │
-                              ▼
-compact fo input generation → lane-private transactional build session
-                              │
-                 ┌────────────┴────────────┐
-                 ▼                         ▼
-        one-shot fo build/test      Gremlin supervisor loop
+canonical declared inputs and dependency/impact model
+                    |
+           immutable generation
+                    |
+       private transactional build session
+                    |
+        shared compile / link / test services
+                    |
+           verified fx action/blob store
+                    |
+           +--------+---------+
+           |                  |
+    ordinary fo once    Gremlin watch/supersede/coverage
 ```
 
-Ordinary fo and Gremlin call the same one-generation build/test engine. Gremlin
-adds watching, last-compilable activation, coverage and ownership policy; it
-does not own another cache or recursively run a public fo build inside a shared
-writable generation directory. Generation identity is a compact manifest over
-shared immutable source/dependency blobs. Mutable object/module/link output
-lives in a lane/session-owned working directory and becomes usable only through
-an atomic successful-session commit. Every build/test/run process also gets a
-private writable working directory, so relative scratch cannot mutate immutable
-source blobs or wake the watcher. Its execution view materializes declared
-relative fixtures by reflink/clone/copy with the same layout, permitting private
-fixture mutation while routing outputs to scratch. Escaping materialization
-declarations are rejected; known unsupported/ambient execution dependencies
-report incomplete closure rather than claiming reproducible reuse. Arbitrary
-application reads are not intercepted. Concurrent cases and
-reproductions never share mutable scratch.
+Share semantics and providers, not unnecessary I/O. Ordinary warm commands must
+not copy the whole source tree just to use the same API. Gremlin alone needs
+resident watching, generation replacement and coverage lifetime management.
+CLI/MCP are adapters. A one-shot check must not become an endless campaign.
+Preserve supported native/fpm/CMake behavior and report unsupported Gremlin
+backends explicitly. No special ffc scheduler or mandatory adapter framework.
 
-Private physical session names are not semantic action inputs. The engine uses
-stable logical source/build paths and supported compiler path mapping for debug
-records, `__FILE__`, module metadata and RPATH, or includes every genuinely
-significant path effect in the action key. Random session paths therefore do not
-manufacture action-output conflicts.
+Keep identities distinct:
 
-The shared store uses raw content IDs for bytes and canonical manifests for
-roles, modes, names and tree/action structure. Publishing an existing verified
-blob performs no rewrite. Equal action/result publication is idempotent; one
-action ID producing different result IDs quarantines that action from reuse
-while retaining both result IDs and durable nondeterminism/incomplete-key
-evidence. Optional Linux reflink and macOS
-clone materialization are optimizations with byte-copy fallback. No database,
-cache daemon or application-level bulk RAM cache is introduced; the filesystem
-and OS page cache remain the storage substrate.
+| Identity/relation | What it establishes |
+| --- | --- |
+| content/tree | exact bytes plus canonical logical paths, kinds and modes |
+| generation | represented source, dependency, test/oracle, configuration and execution inputs |
+| compile action | source/includes, effective flags, compiler and required module interfaces |
+| link result | objects, archives/libraries, linker policy and runtime companions |
+| test action/receipt | exact executable, public case/argv, harness, data/oracle, environment and outcome |
+| impact decision | baseline/candidate/input/model identities, affected cases and widening reasons |
 
-Keep the identities explicit and separate:
+A private-body change may preserve a .mod interface and avoid caller
+recompilation while changing linked behavior and test results. Do not conflate
+compile dependencies with runtime/test dependencies. Build-cache reuse is not
+PASS reuse. Reusable test evidence requires a complete compatible test-action
+contract; until then execute selected tests and retain current-generation
+receipts. Audit the current broad test-object key during #167 rather than
+weakening result invalidation to improve hit counts.
 
-| Identity | Covers | Publication rule |
-| --- | --- | --- |
-| content ID | exact immutable bytes | missing object publishes once; verified existing bytes are reused without copying |
-| tree ID | canonical path/type/mode-to-content graph | publish only after all referenced content validates |
-| action ID | complete computation inputs and environment | maps to one result ID or becomes durably quarantined on conflict |
-| result ID | canonical output roles/modes/content IDs and companions | publish only as a complete restorable result |
+## Canonical inputs and affected-first testing
 
-The action index is metadata rather than the payload store. Two concurrent
-producers may write private temporaries without a global payload lock. The first
-valid publication wins; an equal later result is success, while a different
-result for the same action retains both result identities and publishes
-`NONDETERMINISTIC_ACTION`/incomplete-key evidence. No last-writer-wins repair is
-allowed.
+#175 owns one typed declared inventory: logical root/path, role, kind/mode,
+content digest, owning target/case/shared scope and writable-fixture intent.
+Watch (#148), capture (#165), execution view (#170/#166), build (#167), source
+policy (#186) and test impact (#189) consume it. Discovery has no copy/build/test
+side effect. Relative declarations reject escapes and ambiguous aliases; known
+unsupported ambient reads report incompleteness. This is not an OS sandbox.
 
-Canonicalize project/worktree identity and lane/config namespace. One native
-supervisor owns the worktree session and lane registry. Two starts in the same
-namespace must acquire-or-attach **one** owner atomically, returning its stable
-session ID; incompatible policies return a clear conflict, never a second owner. Distinct lanes can coexist within global leases. PID/start
-identity, state protocol and active ownership prevent stale-lock/PID accidents.
-CLI and MCP starting simultaneously use the same path. A racing start/stop/build
-publication must yield a valid owner and explicit result, not orphaned children
-or an invented pass. Current-generation pointers and CAS outputs publish atomically. Static-library
-archives, shared libraries and executable link outputs also build under owned
-temporary names, validate, then atomically publish; a racing linker sees complete
-old or complete new output. Existing keyed artifact pathname alone is insufficient.
-[fo #144](https://github.com/lazy-fortran/fo/issues/144) owns the observed unsafe
-archive publication/partial-reuse path; preserve source evidence and do not
-assume every undefined symbol has the same cause.
+Represent Fortran modules/submodules, includes/preprocessing, C/BIND(C), generated
+code/generators, path/Git/dev dependencies, linked/runtime inputs, fixtures,
+arguments, relevant environment and subprocess-executed tools. A test that invokes
+fo/ffc has an execution dependency even when no USE edge connects its source.
+Preserve outside roots and declared dependencies nested below generated-looking
+paths. Root role matters; never blindly exclude a declared build/nested_dep.
 
-Reuse the existing content-addressed compiler and successful-test caches with
-complete keys and atomic publication. Snapshotting must not destroy fast
-incremental reuse. Identical inputs should attach/reuse without rebuild; changed
-includes, path dependencies, compiler flags, link/runtime inputs or oracle data
-must invalidate affected actions. Avoid global tool installs/shared-library mutation inside worker tasks.
-Worker self-builds must not auto-refresh the globally installed fo candidate;
-provide an explicit opt-out and isolate linked-worktree builds from authoritative
-CLI publication. Only the controller promotes the installed tool. Concurrent independent worktrees may read shared
-immutable cache entries; publication/cleanup respects active leases.
+#189 compares a frozen baseline/candidate by stable logical inputs, independently
+of CAS warmth, prior builds or other processes. Use old/new dependency edges for
+deletions and renames. New tests, missing baseline, unsupported edges, overflow,
+ambiguous inputs and global configuration/toolchain changes widen conservatively
+unless a sound narrower dependency relation exists. Include affected slow
+correctness tests with their normal budgets. Do not convert incomplete discovery
+into an empty successful gate or make the first random case its substitute.
 
-Keep source snapshots compact, share repository objects/CAS content, and avoid
-full repository clones, copies of external corpora or one fresh full build tree
-per test. Never hardlink a mutable live source file into an immutable snapshot.
-Keep current plus last compilable generations and explicitly pinned reproduction
-artifacts by default; remove only proven-inactive generated materializations.
-Retain small receipts/failure reproducer metadata with bounded/paged logs. A
-configured disk budget reports pinned usage and coverage/retention debt rather
-than deleting valuable uncommitted work, active artifacts or unique evidence.
-Test repeated no-op starts and many short generations for bounded disk growth;
-measure bytes rather than asserting that cleanup probably works.
+Freeze requirements per generation and run:
 
-fx owns immutable-store publication, action results and rooted collection. fo
-owns semantic roots and private build-session lifetimes. Replace the global
-Boolean generation pin with independently releasable owner/reason roots before
-automatic collection. Maintain the store through infrequent thresholded bounded
-sweeps; unchanged reads and idle Gremlin status do not rewrite access metadata
-or scan the store. Root acquisition, graph publication and sweep/deletion share
-an explicit synchronization protocol so a newly live graph cannot be collected
-between discovery and unlink. Legacy store/v1 and copied generations are lazily validated
-and imported while live old owners remain protected.
+1. unresolved compatible regression reproducers;
+2. the complete deduplicated affected/configured-mandatory set;
+3. other useful historical priorities and the finite unseen background epoch.
 
-Use a Go-like low-churn maintenance policy without copying its constants as
-unmeasured promises: record a coarse last-used/root-retention touch no more than
-once per configured interval, consider collection no more than once per longer
-interval unless a hard byte threshold is crossed, and delete only a bounded
-batch. The independent oracle controls both clocks and thresholds, proving that
-hot roots survive, idle hits cause no write storm, and the store converges under
-a small budget. `fo clean --cache` remains an explicit destructive user action;
-automatic maintenance is lease/root aware and never approximates it.
+A chunk limit controls dispatch, not required-set membership. More affected cases
+than one chunk remain required. CLI/MCP and ordinary --only-changed use the same
+service and report selection reasons/completeness. Changes to requirements or
+relevant inputs revoke the generation-bound gate token.
 
-Ordinary `fo build`/`test`/`run` must retain a fast one-shot path. They may avoid
-retaining a complete source materialization when the build lifetime makes that
-unnecessary, but they still produce the same canonical generation, action and
-result identities and use the same session context as Gremlin. Benchmark cold,
-warm no-op and one-file-change cases before and after each migration slice; a
-semantic unification that forces unconditional whole-tree copying into every
-ordinary command is rejected.
+Use existing remainder execution for shadow evaluation; do not add a second full
+suite. A failure outside the selected set is first a triage observation. Confirm
+the same-generation outcome and compatible baseline/control before attributing
+a regression; distinguish selector omission under the supported model from
+preexisting, flaky, infrastructure, unsupported-input and unexplained failures.
+Superseded/unrun remainder is censored, not evidence of no misses. Zero observed
+misses is not a proof of universal selector soundness.
 
-## Codebase and test-quality cleanup
+Per-test runtime coverage is a later optional ranking experiment, not a new
+completion dependency. Missing/stale traces, initialization, new branches,
+subprocesses, native libraries, runtime data and environment need conservative
+handling. Start by ordering the static set, not excluding its members. Isolate
+parallel coverage outputs and bind maps to exact case/generation/profile/tool
+identity. No default instrumentation or ML system.
 
-At code checkpoint `bce5b22`, tracked fo production source has 41,142 physical
-lines and tests/support/fixtures/bench have 37,843. These include blanks and
-comments; size is an inspection signal, not a defect count. The largest debt
-is concentrated in `fo_gfortran_build` (5,078), the Gremlin supervisor (3,341),
-CLI main (2,159), process C provider (1,854) and MCP adapter (1,647).
+## Generation lifecycle, coverage and evidence
 
-Extend existing ownership rather than start a blanket rewrite: #149 finishes
-real supervisor service boundaries; #167 removes competing build/run engines;
-#165 removes duplicated snapshot storage; #148 removes the independent watch
-policy. #150 is reopened for residual strict JSON scanners in the request and
-MCP modules, with generic parsing owned by fx #54. #185 removes transport-owned
-async scheduling. #186 moves source-discovery policy out of C after #175/#172.
-Do not split files solely to hit a line target or block useful increments on
-unrelated architectural cleanup.
+Arm watches before the capture used to claim clean. Coalesce a burst, capture a
+coherent immutable candidate, and build in an owned session. On build failure,
+report diagnostics, never test that candidate, and keep testing the last
+compilable generation. Only successful build publication activates the new
+generation; it is not yet verified. Preempt only its obsolete owned work,
+preserve completed receipts and leave cancelled/in-flight cases unknown.
 
-[#184](https://github.com/lazy-fortran/fo/issues/184) owns test quality/cost:
-remove duplicate, tautological and repository-doc/layout conformity assertions;
-retain independent product behavior and meaningful negative cases. An emitted
-README from `fo init` and `fo doc` output are real command behavior. No repository
-documentation conformity tests were found in the initial audit; do not claim
-their removal. Review the 1,929-line backend include, 1,381-line process harness
-and large campaign/stat-memo fixtures for repeated setup/compilation and waits.
-CI deduplication landed at `6f6605f`: 26 repeated registered target executions
-are replaced by one native `fo test test_mcp_system` dispatch smoke. Full FPM
-coverage, distinct standalone fixtures and opt-in refresh/install oracles remain;
-FPM's public-CLI fixtures now receive the explicit just-built installed driver.
-The exact focused integrated dispatch gate passes in 7.86 seconds. This does
-not claim a measured end-to-end CI speedup; the eliminated executions are counted.
-Never wait for CI during edits.
+For each exact generation, canonicalize eligible public case IDs and persist
+inventory digest, randomized-without-replacement permutation/seed, cursor and
+outcomes. Campaign boundaries do not reset coverage. Priority executions can
+discharge unseen obligations once. Recover launch/receipt/coverage transactions
+without losing or duplicating credit. Old-generation PASS and reproduction logs
+cannot silently inflate current coverage.
 
-[#187](https://github.com/lazy-fortran/fo/issues/187) fixes an observed slowdown:
-unknown `fo test` flags such as `--list` were ignored and could select
-the whole suite. Fixed at `a8cbde3`: unsupported flags return usage failure
-before discovery/build/test work. The exact integrated native oracle passes
-in 1.80 seconds; the old pinned driver fails the same independent negative
-cases. Valid named and end-of-options commands still pass. The accidental
-worker invocation was scoped-stopped and is not test evidence.
+Keep independent milestones: local gate, ordinary coverage, full supported
+local coverage, and quiescence. Publish phase, health, dirty state, generation,
+model/closure completeness, required/remaining counts and a token bound to owner,
+baseline/candidate, input/model/requirement digests and watcher epoch. Existing
+typed waits/events remain the interface; no CI/ref/promotion state enters it.
 
-[#188](https://github.com/lazy-fortran/fo/issues/188) records the separate
-test-only Git-project bootstrap defect exposed by this oracle: plain root
-`fpm build` requires a library/application. Repair dependency bootstrap through
-#167 without building every test or adding a redundant root target.
+The default full/local inventory does **not** include optional performance audits,
+remote project matrices or corpus experiments unless explicitly configured as
+that separate run's scope. Ordinary slow correctness cases are not benchmarks.
+Neither full coverage nor conservative widening should accidentally trigger
+network benchmarks. Always report the scope/denominator; never imply all possible
+tests or all environments were proved.
 
-Use completion/readiness barriers and bounded deadlines instead of arbitrary
-sleeps where the same fault remains detectable. Record affected cases, concrete
-faults retained, warm elapsed time and compiler/child counts. No permanent
-meta-test suite is added to enforce this plan or a test-quality table. Luna
-workers implement isolated slices and escalate only after two substantive
-unsuccessful attempts. Preserve independent protocol-oracle parsing where sharing
-production parsing would mask a bug. Expensive full/platform gates are milestones.
+When the configured scope has completed, stop scheduling redundant work. Full
+green with clean inputs and no candidate/reproducer permits quiescence; status
+must retain any closure incompleteness. A relevant edit/overflow/root loss clears
+freshness and wakes bounded reconciliation. No idle source recapture, toolchain
+probe, payload hashing or build/test loop. Preserve finite red/unknown outcomes
+without a busy retry loop. Git commit metadata is provenance, not a new execution
+generation when bytes/configuration are unchanged.
 
-## Test implementation language
+Durable JSONL receipts/events record actual outcomes before later work. Preserve
+PASS/FAIL/FLAKY/TIMEOUT/INFRA_ERROR, unknown/cancelled distinctions, original names,
+seed/order, exact driver/artifact inputs and referenced logs. Page losslessly;
+no former 16 KB/256-case truncation. A tiny durable record and recreatable build
+payload have different durability requirements.
 
-All fo test programs, generated fixture executables, orchestration and assertions are Fortran. Small C shims
-may expose OS process, signal, FIFO, symlink and monotonic-clock facilities that
-Fortran does not portably provide. End-to-end tests remain separate processes
-driving the public CLI/MCP boundary; process-boundary independence does not
-require JavaScript. A test-only Fortran JSON parser validates protocol output
-without sharing the production parser.
+## Shared storage, sessions and concurrency
 
-Issues #158--#163 migrate every current JavaScript fixture in behavior-preserving
-slices, replace the Python assertion generated by `test_compdb.f90`, replace
-generated shell compiler/linker/fixture helpers, then remove Node, Python and
-shell interpreters from repository-owned test execution. Issue #176 replaces the remaining
-repository-owned shell/Python benchmark driver and reporter. Configuration/workflow files
-and documentation remain their declarative formats; executable test/benchmark
-policy, orchestration, parsing and assertions are Fortran, with only narrow C OS
-shims. Each old fixture is deleted after its distinct supported behavior has a
-passing independent native oracle. #184 also removes artificial implementation
-phase/meta checks: do not rebuild LD_PRELOAD interception or production hooks
-solely to preserve an old forced EPERM/micro-phase scenario. Record the lost
-forced window explicitly; retain public cancellation/error, owned cleanup and
-unrelated-process survival checks. Production code never depends on the test
-harness. The frozen baseline `1f8a1a3` had 31 JS fixtures, including
-context-provenance and coverage-restart tests omitted from the earlier count.
-At `18b28c7`, six JS fixtures remain, all owned by #161. #160's seven fixtures
-are native Fortran public-process tests. #163 owns
-the final interpreter-free inventory, generated compile-database Python oracle
-and generated shell helpers in archive, link, compiler, FFC, benchmark and CLI
-fixtures. Its first slice is complete at `290a61c`: `test_compdb` parses and
-asserts compile-database JSON entirely in Fortran, rejects malformed JSON and
-suffix impostors such as `.f90.extra`, and passes with Node/Python absent. The
-compiler-artifact shell fixture is replaced at `f5058a8` by a distinct generated
-Fortran compiler executable with direct `execv` forwarding. A bounded forced
-self-forward oracle exits 86 without producing an object, preventing recurrence
-of the rejected argv0/symlink design that spawned 57,328 exact test processes.
-Focused exact-head evidence and independent review pass. Remaining generated
-shell helpers and the final interpreter inventory stay in #163.
-Issue #158 is complete through `6eb8045`: ten CLI fixtures are Fortran, the
-recursive test JSON ownership repair passes the full gfortran-13 FPM suite and
-the test-only C shim is Darwin-portable. #159 is repaired through `6b3ac43`:
-explicit recursive response ownership passes all five public MCP/ownership
-fixtures on the integrated head, while the frozen original-code GCC 13.3 mutant
-reproduces exit 139. #162 is also complete through `38da2b3`; thirteen JS
-fixtures remain for #160/#161/#163.
+Use fx verified blobs/trees/action results (#42/#43), private mutable sessions
+(#166), and the root/read/publication-lease protocol (#44 Phase A). Publish
+complete results atomically; equal action results reuse without rewriting;
+conflicting results quarantine the action and retain evidence. Atomic rename
+alone does not prove complete action keys or safe multi-file collection.
+
+#165 stores one unique input blob and compact manifests, not full source and
+verification payload trees per generation. Descriptor-rooted capture and mutation
+checks stay authoritative. Optional reflink/clone materialization has byte-copy
+fallback; never hardlink writable source/compiler output into the shared store.
+Stable logical paths or explicit path-sensitive keys preserve compiler semantics.
+
+#170 supplies unique writable fixture/scratch views from declared inputs;
+source/build evidence stays immutable. #166 centralizes source, dependency,
+working, output and process roots and commits complete compilable sessions.
+Current/last-compilable/reproduction processes lease exact result/runtime graphs.
+Public paths are compatibility views, not execution authority.
+
+#168 Phase A adopts independently releasable owner/reason roots. Collection
+remains disabled until every legacy/new live owner is covered. Only then enable
+fx #44/#168 Phase B bounded reachability collection, hysteresis/low-frequency
+retention touches and owner-aware cleanup. Budget pressure reports pinned debt;
+it never deletes active artifacts or unique evidence. Separate CAS, private
+sessions, logs and pins; logical/allocated bytes are not NAND wear.
+
+Use existing bounded host admission for compile/test/capture work; one lane must
+not multiply FO_JOBS into nested pools. Extend jobs=1 only with an ownership and
+capacity oracle, exposing actual capacity. The temporary one-heavy-lane limit
+can remain while coding is parallel; optional #190 measurements guide tuning,
+not unrelated implementation admission. No database, remote cache protocol,
+per-object global payload lock or application blob-RAM cache.
+
+## Optional performance audit (#190)
+
+This section is a measurement plan, **not a development or integration gate**.
+#190 owns real workload semantics, phase/counter collection, advisory reporting
+and independent CI/slow placement. #145 owns automatic project acquisition and
+reference compatibility. Both can run on today's code before migration.
+
+Separate four things: correct program output, valid measurement procedure,
+hardware timing observations, and advisory performance targets. A slow valid run
+is not a product-test failure. An invalid/failed/cancelled measurement has no
+successful timing result. Keep raw diagnostics and classify it; never hide it
+with a fake PASS. No required check or development job depends on benchmark
+completion. Even audit implementation uses tiny focused harness oracles rather
+than running the full external matrix per edit.
+
+Replace mislabeled touch-only incremental rows with explicit metadata_touch.
+Real-edit workloads include warm no-op; cold build; warm CAS with fresh private
+outputs; private-body leaf edit; public-interface edit; central fan-out; one
+test-body edit; include/path/C/header/runtime-fixture changes; broken build then
+repair; and intentional rollback to already cached content. Edits occur only in
+owned copies with before/after hashes and independent expected behavior.
+
+Repeated A/B toggling may already have compiled B: distinguish that cache-hit
+experiment from recompilation. Use fresh semantic revisions or a warm-baseline
+cache not containing the edited result for each real-recompile sample. Do not
+purge user caches. Separate acquisition/network/bootstrap from build latency.
+
+Record same-host monotonic timestamps from last relevant edit through debounce,
+capture, build ready, first test start, first durable verdict, local gate and
+optional full/quiescent completion. Record compiled units, action hits/misses,
+restored objects, link count, selected/executed unique tests, copied/cloned/stored
+bytes, retained bytes, CPU/RSS and effective capacity. Missing platform counters
+are unknown. Compare paired baseline/candidate runs with exact tool/project/
+dependency/profile/hardware/filesystem identity; retain raw samples and dispersion.
+Do not present p95 without adequate sample count, fixture constants as timings,
+or historical link measurements as current edit-to-verdict latency.
+
+Include tiny and realistically scaled synthetic workloads plus #145's pinned
+real projects. Measure one/two warm lanes and bounded larger configurations,
+quiescent I/O, and true compile-versus-link-versus-test cost. Optional coverage
+ranking experiments use an isolated instrumented profile. Instrument shared
+service seams lightly; no always-on profiler or durable per-stat tracing.
+
+Scheduled/manual audit workflows run independently, with explicit time/disk/CPU
+bounds and artifact retention. A local audit is explicitly requested and does
+not fetch without permission/options. Superseded measurements are partial;
+nightly pinned runs should have an independent concurrency group rather than be
+restarted by every main push. Development never waits for those workflows.
+
+## Automatic third-party matrix (#145)
+
+Use a small versioned public allowlist/manifest, for example bench/projects.toml,
+not a plugin framework. Each row records repository URL/full commit SHA,
+dependency/submodule pins, logical layout, backend, reference/fo argv, eligible
+case IDs, preprocessing requirements, expected baseline dispositions, reversible
+edit recipes and resource/network bounds. Resolve branch/tag pins only during
+explicit refresh, not silently during a measurement.
+
+Initial rows:
+
+| Project | Purpose and cautions |
+| --- | --- |
+| lazy-fortran/fo | self-dogfood plus independent process/output oracles |
+| lazy-fortran/ffc | large external consumer; pin matching FortFront/liric/runtime; named dispatcher cases first; corpora separate |
+| fortran-lang/fpm | real CPP/Git-dependency project; separate pinned reference fpm from candidate fpm to avoid self-recursion |
+| selected fixtures in pinned fortran-lang/fpm | small library/app, test-only, modules/submodules, includes, mixed language and dependencies; inspect actual paths/commands |
+| fortran-lang/stdlib | preprocessed stdlib-fpm commit or explicitly declared Fypp/CMake preprocessing; never assume raw source builds as plain Fortran |
+| optional fortran-lang/stdlib-cmake-example | small distinct CMake capability row after inspecting its pinned contract |
+
+Inspect each chosen revision, fetch exact immutable objects into owned isolated
+scratch/cache, verify identity/checksums and preserve licenses. Reuse downloads
+safely; no full corpus/repository copy per test/generation. Offline replay uses
+existing pins or reports missing inputs. Ordinary project dependency resolution
+is unchanged; **benchmark-project acquisition never occurs automatically in the
+normal fo/test/Gremlin loop**.
+
+Run the documented upstream reference workflow separately before comparing fo;
+this explicit audit exception permits fpm/CMake reference builds. Preserve named
+inventory and output/exit behavior, not merely aggregate counts. Unsupported,
+not-run, upstream/preexisting-failure, acquisition, infrastructure, fo-regression
+and cancelled rows remain visible. Do not advertise Gremlin CMake support from
+an ordinary CTest pass. Partial ffc samples never become release/full-corpus
+claims. Do not modify upstream projects to hide fo incompatibilities.
+
+Third-party execution uses disposable least-privilege CI without secrets/write
+credentials. Never use privileged pull_request_target for fork-controlled code,
+modify live user repositories, overwrite installations, or access production
+research hosts. Upstream tools such as Fypp are explicit external prerequisites,
+not exceptions allowing fo-owned benchmark orchestration to become Python/shell.
+Private repositories remain opt-in and never appear in public evidence.
 
 ## Ordered implementation and independent verifiers
 
-| Stage | Issue | Future behavioral verifier |
+These are ownership/dependency edges, not a single serial mega-gate:
+
+| Work | Owner / dependencies | Small independent acceptance |
 | --- | --- | --- |
-| Selection | [#138](https://github.com/lazy-fortran/fo/issues/138) | Mandatory targets execute; CLI/MCP replay the same seed/selection; sample and shuffle are separate. |
-| Process ownership | [#139](https://github.com/lazy-fortran/fo/issues/139) | Owned child/grandchild heartbeats stop within grace; unrelated sentinel survives. |
-| Durable completion | [#140](https://github.com/lazy-fortran/fo/issues/140) | Pass/fail receipts survive crash/cancel; interrupted test stays unknown. |
-| Generation supervisor | [#141](https://github.com/lazy-fortran/fo/issues/141) | A keeps testing during failed B build; successful C preempts A; frozen A never reads changing C inputs. |
-| CLI/MCP/background | [#142](https://github.com/lazy-fortran/fo/issues/142) | Idle client needs no polling; reconnect resumes events; new CLI works with stale MCP. |
-| Compiler adapter | [ffc #798](https://github.com/lazy-fortran/ffc/issues/798) | ffc dispatcher/corpus runs use this engine, frozen dependency bundles and partial-result rules. |
+| shared declared inputs | #175; coordinate #151/#157 | declared/ignored/root-change parity across consumers |
+| conservative impact | #189 using #175; policy #138 | same selection with empty/warm/prebuilt cache; real failing delta included |
+| watcher and writable views | #148 / #170 using #175 | no idle captures; no missed declared dependency; private relative writes |
+| exact driver/tool closure | #151 / #157 | replacement uses pinned bytes or reports incomplete/unsupported honestly |
+| compact manifests | #165 using fx #42 and #175 | one shared payload, exact immutable restoration, no verification copy |
+| transactional sessions | #166 using #170/#165, fx #43/#44 Phase A | failed candidate retains runnable prior result; concurrent views isolated |
+| one engine | #167 using #166, #189 | ordinary/Gremlin identities, invalidation and actual outputs agree |
+| roots then collection | #168 / fx #44 | independent roots/leases protected; collection enabled only after owner audit |
+| receipt recovery | #140/#183 and native migration #161 | receipt-before-coverage recovery; marker-before-exit never earns PASS |
+| quiescence | #155 with #148/#153/#154 | no payload work asleep; change revokes token; scope/completeness honest |
+| decomposition | #149/#150/#185/#186 | existing behavioral parity; no new competing service or line-count gate |
+| optional audit | #190 / #145 | tiny harness/acquisition correctness now; real runs asynchronous, never blocking |
 
-Provider selection, process and journal slices can be implemented independently
-with explicit ownership; supervisor consumes their APIs. Integrate the smallest
-working Gremlin CLI first, with shared-core MCP access, then use **Gremlin itself**
-to finish coverage, recovery and performance controls. Do not claim the
-initial version satisfies an unimplemented mode or option. ffc semantic work
-begins after the enabling contract needed for parallel Gremlin work is verified.
+Fix concrete regressions with focused local reproducers before unrelated main
+promotion. Independent planning/provider work can proceed in parallel. Apply one
+review per material concurrency/platform/API change and repeat for actual
+findings, not every mechanical extraction. Close issues for their stated scope
+and retained evidence; unrelated matrix, language migration or broad architecture
+completion is not an excuse to keep finished work permanently open. This edit
+does not itself close or reopen implementation issues.
 
-Existing [#119](https://github.com/lazy-fortran/fo/issues/119) complete JSON,
-[#130](https://github.com/lazy-fortran/fo/issues/130) logs/visibility,
-[#134](https://github.com/lazy-fortran/fo/issues/134) truthful timeout reporting,
-[#135](https://github.com/lazy-fortran/fo/issues/135) dependency freshness and
-[#131](https://github.com/lazy-fortran/fo/issues/131)/[#132](https://github.com/lazy-fortran/fo/issues/132)
-dispatcher routing remain exact prerequisites where they block these verifiers.
-Verify delivered behavior before closing; no pre-existing issue disappears by
-being renamed Gremlin. Fix fo whenever its workflow misbehaves; do not add a
-private project workaround or depend on reloading MCP to make progress.
+## Adjacent issue ownership
 
-Behavioral fixtures use fake compiler/worker executables with barriers, known
-outputs and exit codes. No paid model calls are needed to prove scheduling.
-Tests must cover simultaneous same-project CLI/MCP starts, two independent lanes,
-TERM-ignoring descendants, source edits during capture, crash during receipt/cache
-publication, stale ownership, large event streams, unchanged action reuse,
-changed dependency invalidation, and bounded disk growth. Preserve these oracles
-when adding features. The normal workflow is focused `fo test`/`fo exec` through
-Gremlin's exact local gate. A bare full `fo` pipeline is milestone evidence
-rather than a per-increment delivery prerequisite; record pre-existing failures
-without masking them.
+| Issues | Scoped responsibility |
+| --- | --- |
+| #56 / #59 | unsaved-buffer LSP and opt-in deep lint; do not add them to Gremlin's critical path |
+| #62 / #120 | fortrun retirement / future synthesis-proof actions; separate governance and optional capabilities |
+| #117 | formatter token-boundary correctness |
+| #119 / #130 | lossless output, useful slow-child attribution and owned log retention |
+| #129 / #144 | link-result inventory/retention and atomic complete artifact publication |
+| #131 / #132 | public named dispatcher routing and per-case isolation; no forced in-process batching |
+| #134 / #135 | honest timeout diagnosis and path-dependency freshness |
+| #139 / #172 | scoped process ownership and explicit platform limitations |
+| #142 / #185 | reconnectable CLI/MCP parity and removal of transport-owned execution |
+| #161 / #163 / #184 | native fixture migration, interpreter cleanup and lower test cost without weakening oracles |
+| #188 | test-only Git-dependency bootstrap without dummy root library or redundant full build |
 
-Performance acceptance measures no-op attach/reuse, incremental build latency,
-first useful verdict, build-ready-to-replacement-test latency, cancellation grace,
-CPU/RSS and bytes per retained generation. No-op attach must launch no duplicate
-build/test supervisor; replacement dispatch begins as soon as ownership cleanup
-and required build publication finish. Target cancellation within the two-second
-TERM grace plus measured bounded reaping, and supervisory overhead small relative
-to one targeted test. Record baseline/p95 and hardware; do not invent universal
-speedups. Continue coding while bounded background measurements run.
+Completed foundations (#141/#153/#154/#158/#159/#160/#162/#164/#169/#171/#173/
+#174/#176/#177/#178/#179/#180/#181/#182, fx #42/#43) are reused. Check live issue
+state before assigning; linked issue threads carry later updates. Do not reopen
+#176 because the new audit asks different measurement questions.
 
-## Bootstrap and dogfooding
+## Test implementation, execution and handoff
 
-The first milestone is a usable **Gremlin mode**, not the entire eventual worker
-platform. Parallel mode assigns disjoint primitive providers plus thin adapters;
-serial mode implements them in the main session in dependency order. Fix the
-shared library/archive publication and freshness blockers first where needed.
+All fo-owned test/benchmark assertions and orchestration are Fortran, with narrow
+test-only C OS/process/clock shims. Preserve independent protocol parsing where
+sharing production parsing would mask faults. Declarative workflow/configuration
+files are allowed. Upstream reference tools keep their documented dependencies.
+Do not add generic fault-injection/interception machinery or meta-tests asserting
+plan text, file counts, module layout or issue status. Test observable behavior.
 
-1. Freeze source and test inputs, derive a complete generation/action identity,
-   and run a tiny named fixture through the existing fo build/test path.
-2. Add one native owner with durable per-case receipts, status/reproduce/stop,
-   bounded owned cancellation and duplicate-start attachment. Candidate builds
-   happen in isolated materialization while last-compilable tests continue.
-3. Publish CLI `fo gremlin` and shared-core MCP parity; public start always
-   returns promptly. A stale MCP cannot prevent updated CLI use or supervisor
-   upgrade/reconnect. Advertise the exact supported initial options.
-4. Prove bootstrap with small source-level oracles: pass/fail/blocking test,
-   failed replacement build, newer successful version, source edits during
-   capture, concurrent same-place starts, another unaffected lane and crash tail.
-5. Use this initial Gremlin to develop the remaining Gremlin engine, coverage
-   ledger, worker admission, cache/performance and repository-matrix features.
-   Each fixed version supersedes its old campaign; no whole-suite drain per edit.
-6. After parallel-mode/capacity/recovery acceptance, integrate the ffc corpus
-   adapter and execute the compiler plan. Keep final comprehensive evidence
-   separate from the fast development gate.
+Classify checks by purpose: fast correctness, deliberately expensive correctness,
+and optional performance/third-party audit. Use existing --all/slow semantics for
+slow correctness, and an explicit audit command/workflow for performance. Merely
+renaming a benchmark *_slow is insufficient if it still enters the default
+Gremlin full inventory. Safety deadlines prevent hangs; they are not speed goals.
 
-Suggested module boundaries for a luna coordinator: shared selection policy,
-process lifecycle, generation capture, ownership/capacity state, durable journal,
-small supervisor, and CLI/MCP adapters. Freeze API ownership before parallel
-edits. The provisional shared boundary is
-`gremlin_handle(action, project_dir, request_json, response_json, exitcode)` in
-`fo_gremlin_supervisor`; adapters normalize argv/transport only. The core performs
-one validated request parse and delegates mechanical tasks to providers. Use
-real typed requests internally, bounded JSON/events externally and existing
-argv helpers; avoid shell string interpolation and duplicate scheduling rules.
-Worker prompts state exact issue/base/files/API/verifier and output-size limits.
+Use a controller-supplied immutable absolute fo executable path and SHA256 for
+validation; verify before use. Missing/mismatched binaries fail, with no PATH,
+newest-file or installed-tool fallback. Keep normal worktree builds private;
+only explicit controller installation changes the global driver. #151 makes
+pinning automatic for Gremlin children. Historical installed digests in the old
+plan are evidence, not today's executable selection.
 
-## Project-specific test adapters
+Coding workers own disjoint worktrees/files/APIs. Parallel mode uses the existing
+external luna coordinator/workers; serial mode stays in the main session. After
+two substantive failed attempts on one task, freeze its evidence, stop that
+writer and transfer only that task to Sol (native parallel worker or current
+GPT skill in serial mode). No model calls are needed by test fixtures. Preserve
+workspace host restrictions; this planning change authorizes no production-host
+execution or unrelated compiler semantic changes.
 
-Generic Gremlin can use a project's existing ordinary fo/fpm test inventory,
-a shared named-case dispatcher, or a narrow external-corpus adapter. Define a
-small declarative adapter schema in the provider implementation: list case IDs,
-run one named case or bounded batch, report independent oracle outcome, input
-closure, duration class, artifact ownership and cache/reproduction data. Invoke
-argv directly. The exact configuration path/schema is finalized in #142/#798
-rather than inventing an ffc-only scheduler or mandatory plugin framework.
-
-ffc has hundreds of compiler cases and several slow whole-corpus wrappers.
-Its existing dispatcher already shares statically linked code while preserving
-public case names and subprocess exit status. Keep this optimization. Gremlin
-selection must operate on cheap named/leaf cases, not repeatedly choose a giant
-wrapper and spend each generation's budget discarding unpublished observations.
-A sampled discovery adapter and complete full-verification mode share the same
-oracle/manifest semantics; leaf scheduling must not claim that a complete wrapper
-passed. Current gauntlet one-case batches are a bootstrap retention mechanism.
-
-Track per-project rebuild/link granularity, test binary count/bytes, monolithic
-wrapper cost, true nested compiler fanout and runtime/library hashes. Prefer
-shared dispatcher/prebuilt artifacts and valid reference-cache reuse. Preserve
-applicable default reduced debug payload, linker DCE, stale-profile hygiene and
-optional shared development linking when independently measured. Do not force
-ordinary external fpm projects to rewrite their tests to use Gremlin; support
-existing targets, and document efficient optional granularity improvements.
-
-## Project matrix
-
-[fo #145](https://github.com/lazy-fortran/fo/issues/145) owns generic compatibility
-and performance evidence. Inventory the user's maintained GitHub repositories
-read-only; identify real fo users from manifests/workflows and fpm projects as
-additional candidates. Every maintained fo-using repository eventually receives
-a measured row/disposition. Keep private repo names and evidence out of public
-plans/issues. Selected external fpm projects are pinned capability examples,
-not uncontrolled unbounded cloning. Execution is authorized; each row still
-uses a frozen revision, bounded command and independent project oracle.
-
-Start with fo, a small library, FortFront and focused ffc cases, then cover all
-maintained fo projects and representative external fpm projects. Exercise native,
-fpm and CMake backends where fo promises them, modules/submodules, path/Git
-inputs, ordinary standalone and shared-dispatch tests, mixed-language/linking,
-intentional failures and external corpora. Use existing project-local contracts
-and normal supported build/test workflows as independent oracles. Do not weaken
-legitimate failures to make cross-project sampling appear green.
-
-Record repository/toolchain/dependency revisions, normal/Gremlin commands, test
-identities/dispositions, no-op and incremental latency, first useful verdict,
-cache hits, relink count, CPU/RSS and retained bytes. Repeated same-place starts,
-parallel independent worktrees, cancellation and action-cache reuse must preserve
-normal behavior. Missing/unsupported/infrastructure-failed rows remain visible
-and owned. Early representative rows gate rollout; bounded rotating subsets run
-while development continues; complete fixed-version matrix coverage is a final
-provider-completion gate. Store compact receipts and replayable public summary
-when observations exist, never invented benchmark claims.
-
-## Final continuous-verification contract
-
-Gremlin is a deterministic continuous-verification state machine. It reports
-facts and never encodes repository governance, merges or pushes.
-
-For one immutable execution generation, keep these milestones distinct:
-
-1. **gate**: capture and build pass; every known current reproducer, affected
-   test and configured mandatory test passes; no gate case has FAIL, TIMEOUT or
-   INFRA_ERROR; no relevant input changed; the active generation is unchanged;
-2. **ordinary**: every continuously eligible ordinary case has a current-
-   generation PASS;
-3. **full**: the supported slow/full inventory passes with each case's normal
-   runner budget;
-4. **quiescent**: full is green, inputs are clean, and no candidate or pending
-   reproducer exists, so no tests, builds, captures, hashes or compiler probes
-   run until a relevant filesystem event wakes the owner.
-
-### Conservative affected-first feedback
-
-Known current failures/reproducers run first, followed by affected and mandatory
-cases. Passing that priority set does not stop the generation-scoped finite
-background epoch. #175 supplies the shared declared input inventory to watching,
-capture, action keys and impact analysis; separate incompatible input models
-must not silently exclude tests. New/unknown inputs, manifest/toolchain/runtime
-changes and unsupported dependencies conservatively widen selection, up to the
-complete supported eligible inventory, including affected slow cases. Expose model completeness rather than assume it.
-
-[#189](https://github.com/lazy-fortran/fo/issues/189) owns the concrete repair:
-replace post-build cache-miss change discovery with baseline/candidate inventory
-differences, then integrate reproducer-first ordering into the existing campaign.
-Cache population must not change affected membership. Keep #175, #148 and #170
-as the inventory, watch and writable-view owners; no competing scheduler is added.
-
-Until conservative impact accounting is demonstrated for the supported inputs,
-a reduced affected set is prioritization evidence, not sufficient proof of the
-local gate. Add runtime coverage later only to improve ordering/precision; do
-not add instrumentation or an ML system during this completion pass. A confirmed
-same-generation failure outside the selected set is evidence to inspect the
-selector; call it a selector miss only when the supported change model should
-have included that case, keeping preexisting failures, flaky outcomes and
-unclassified inputs distinct. No GitHub/merge policy belongs in this service.
-
-The Linux development CLI was atomically refreshed from locally gated `a8cbde3`
-with SHA256 `8437146dd444b1dc2d2a6f9e3c0690748df1077fbec53c9a96dd91de697fc9df`.
-The previous binary is retained under its digest for replay; in-flight validation
-uses immutable explicit driver paths. Session driver pinning #151 remains a
-separate published source slice pending its replacement oracle, not claimed done.
-
-`local_gate_green=true` at the gate. What happens next belongs to the external
-repository policy. Lazy-fortran controllers push the exact integrated generation
-to `main` immediately when this gate is green and no known current regression
-exists; they do not wait for ordinary/full coverage or GitHub CI. A later
-reproducible failure makes the gate red and gets repair/revert priority. Focused
-receipts support iteration but never manufacture a complete green.
-
-Expose orthogonal `phase`, `health`, `dirty`, active-generation identity,
-`local_gate_green`, `verification_level`, `fully_verified`, per-level coverage
-counts, and epoch identity/cursor. A versioned gate token binds the exact
-generation, inventory/requirement digest and watcher event epoch; any relevant
-event invalidates it without adding Git or CI policy. Emit durable typed
-transitions for generation,
-build, local-gate, regression, coverage completion, quiescence, wake and
-supersession. CLI and MCP share typed waits for local-gate-green, ordinary-
-verified, fully-verified, quiescent and failure. Lifecycle events use a versioned
-event envelope; never encode them as fake pass/fail case receipts.
-
-### Finite randomized coverage
-
-For generation `G`, canonicalize its eligible inventory, persist its digest and
-derive a replayable randomized permutation without replacement. Persist
-generation ID, inventory digest, epoch number, seed, cursor and each current-
-generation case outcome. Campaign durations are execution chunks; they do not
-reset the epoch. Crash/restart resumes its unseen set.
-
-Regression, affected, mandatory and bounded reproducer cases may jump ahead. If
-one is still unseen, its run satisfies that coverage obligation and the cursor
-later skips it. No exploratory case repeats before all eligible cases are
-attempted. Historical outcomes prioritize later generations but do not satisfy
-their coverage; CANCELLED remains unknown. Cross-generation PASS transfer is
-allowed only through a future rigorously complete action/oracle cache key.
-
-### Change events, identity and provenance
-
-One shared `fo_change_watch` provider watches project execution inputs and path
-dependencies, debounces bursts and marks the session dirty. Arm it before the
-capture used to declare clean. Directory replacement is relevant; overflow,
-watch loss or an unclassifiable event conservatively marks dirty and causes one
-bounded rescan. Gremlin performs one initial capture, then no discovery/capture
-until a relevant event. `fo watch`
-becomes a thin compatibility policy on the same provider or is deprecated; it
-does not retain an independent event-to-check engine. `.git` and unrelated paths
-are excluded execution inputs.
-
-An editor or coding agent may write several temporarily inconsistent files in
-one burst. After the short debounce, Gremlin captures only the newest coherent
-candidate it can observe. A candidate that fails to build publishes its compiler
-diagnostic but never runs tests or replaces the active generation. The frozen
-last-compilable generation continues useful testing. A later candidate takes
-over atomically only after its build succeeds; completed old receipts survive,
-and interrupted old cases remain unknown. The continuous-preemption oracle keeps
-this last-good behavior independent from the watcher/debounce implementation.
-
-Execution identity includes project, dependency, test/oracle and runtime input
-contents, toolchain/flags/relevant environment, the dynamic loader and resolved
-or declared late-loaded libraries, and the pinned fo driver digest.
-Git base commit and working-tree patch are provenance fields, not execution-key
-inputs. A metadata-only commit therefore preserves the generation and evidence;
-a relevant content edit creates a new generation with fresh provenance.
-
-The target module boundaries are `fo_change_watch`, `fo_gremlin_types`,
-`fo_gremlin_request`/`fo_gremlin_codec`, `fo_gremlin_context`,
-`fo_gremlin_generation`, `fo_gremlin_state`, `fo_gremlin_journal`,
-`fo_gremlin_coverage`, `fo_gremlin_policy`, `fo_gremlin_campaign`,
-`fo_gremlin_commands`/`fo_gremlin_session`, and a small state-machine-only
-`fo_gremlin_supervisor`. CLI and MCP remain adapters.
-
-## Delivery and architecture consolidation
-
-Progress is published continuously. Core PR #146 is merged; historical work-mode
-and combined branches remain immutable evidence only and are not integration
-candidates.
-
-Push each exact integrated generation when its focused local gate is green and
-there is no known current regression. Full pipeline, ordinary/full coverage,
-matrix and remote CI are milestone or post-submit evidence; they are not a
-per-increment merge gate. Never accumulate unpublished controller commits merely
-because a continuous campaign is partial.
-
-**Never wait for GitHub CI while implementation work is available. GitHub CI is
-post-submit evidence, not part of the development loop. Use Gremlin and focused
-local oracles while developing.** Workers reuse one exact built driver and run
-their owned independent oracle while iterating. The controller assigns a verified
-absolute driver path plus SHA256, copied read-only outside mutable build outputs.
-Verify before first launch; missing/mismatched drivers fail without PATH,
-installed-driver, wildcard or newest-mtime fallback. #151 makes this pin automatic
-for Gremlin child work. Keep warm caches; cold-cache or full-pipeline reruns need
-a specific claim, unresolved failure or milestone. Background coverage counts
-against the same host admission budget as focused verification. Until measured
-admission is delivered, use one heavy lane per host while coding stays parallel.
-For lazy-fortran, push an exact
-integrated generation to `main` immediately when `local_gate_green` is true and
-no known current regression exists. Do not wait for ordinary/full coverage,
-remote CI or unrelated review. CI audits current `main` asynchronously and may
-cancel superseded runs. A confirmed real regression gets immediate repair or
-revert priority; unrelated work may continue, but unrelated main pushes normally
-pause. Gremlin never models, polls or schedules CI, refs or external receipts.
-
-Dogfooding begins during implementation. Keep one named resident `fo gremlin`
-integration lane per active repository and rotate task-worktree lanes for
-focused changes. Six simultaneous cold lanes wrote 1.8 GB of state and all
-blocked in kernel writeback, so unrestricted per-worktree residency is rejected
-behavior pending #155, compact generations/private sessions and cross-lane I/O
-admission. #148's idle event gate is delivered, but declared-closure relevance
-is reopened after a plan-only edit triggered a generation. Preserve receipts,
-first-verdict latency, failures, restart behavior, idle activity and resource
-use as live evidence. Independent oracles remain authoritative; self-testing
-evidence alone never promotes the tested Gremlin implementation.
-
-The core is merged. Remaining implementation follows this dependency-aware DAG;
-completed entries below are retained as prerequisites and evidence:
-
-1. Coordinate [#151](https://github.com/lazy-fortran/fo/issues/151) and
-   [#175](https://github.com/lazy-fortran/fo/issues/175) at their shared context
-   boundary. #151 pins/hashes the exact live fo driver and separates Git
-   provenance from execution identity. #175 extracts one canonical declared
-   execution-input inventory with stable logical roots, paths and roles while
-   excluding `.git`, plans and generated session/cache data.
-2. **Reopened:** [#148](https://github.com/lazy-fortran/fo/issues/148) consumes
-   #175 for watcher roots and relevance so idle Gremlin performs no full
-   captures. [#170](https://github.com/lazy-fortran/fo/issues/170) also consumes
-   #175 to materialize only declared relative fixtures into unique writable
-   execution views. Consolidate or deprecate the independent `fo watch` loop.
-3. [#149](https://github.com/lazy-fortran/fo/issues/149): request, context and
-   session extraction are delivered; campaign/history extraction may proceed now,
-   while command extraction follows #154 public-semantic stabilization.
-4. **Reopened residual cleanup:** [#150](https://github.com/lazy-fortran/fo/issues/150):
-   typed decoding is delivered, but generic strict scanners remain in request
-   and MCP adapters; converge them on fx without sharing the independent oracle.
-5. [#157](https://github.com/lazy-fortran/fo/issues/157): bind the complete
-   compiler/helper/runtime/external-dependency closure to executed bytes. Expose
-   factual closure completeness and forbid complete verification/cross-generation
-   reuse while the executed closure is only partially represented.
-6. **Complete:** [#153](https://github.com/lazy-fortran/fo/issues/153): finite deterministic
-   randomized coverage epochs with crash-safe current-generation accounting.
-7. **Complete:** [#154](https://github.com/lazy-fortran/fo/issues/154): local-gate facts,
-   ordinary/full verification, semantic events and typed waits, including stale
-   token rejection before replacement generation and after owner restart.
-8. [#155](https://github.com/lazy-fortran/fo/issues/155): land sleeping/wake mechanics,
-   then claim full quiescence only after #151/#157 closure is represented, pinned
-   and watched through the shared declared-input inventory.
-9. Register every late behavioral oracle in the post-submit workflow and keep
-   the complete matrix as provider-completion/milestone evidence.
-10. [#158](https://github.com/lazy-fortran/fo/issues/158)--[#163](https://github.com/lazy-fortran/fo/issues/163): replace all Node fixtures and generated Python/shell helpers with standalone Fortran process drivers or narrow C OS shims, then remove interpreter runtimes from the test contract. #158/#159/#160/#162 are complete; #161 owns the final six JS fixtures.
-11. **Complete:** [#164](https://github.com/lazy-fortran/fo/issues/164): stat-memo publication is cross-process safe.
-12. **Complete:** [#169](https://github.com/lazy-fortran/fo/issues/169):
-    worktree-private self-refresh is delivered and its deliberate cold
-    multi-build Fortran CI oracle has an explicit 240-second wall budget.
-13. **Complete:** [#171](https://github.com/lazy-fortran/fo/issues/171): Darwin
-    state declarations and canonical-path portability oracles pass on Linux and
-    macOS. #172 separately owns the public lifecycle gate.
-14. **Delivered:** [#172](https://github.com/lazy-fortran/fo/issues/172): scoped Darwin
-    asynchronous ownership and public lifecycle pass Linux/macOS focused gates.
-    Exact registered births replace unsafe absent-leader SID attribution.
-15. **Complete:** [#173](https://github.com/lazy-fortran/fo/issues/173): accept
-    only documented platform archive index members while retaining exact object
-    verification.
-16. **Complete through `f340fad`:** [#174](https://github.com/lazy-fortran/fo/issues/174)
-    retains the delivered Darwin initialization/diagnostics and gives the
-    Gremlin owner a bounded poll tick so pending Linux reconciliation advances.
-17. Deliver the shared store without a second engine: **complete**
-    [fx #42](https://github.com/lazy-fortran/fx/issues/42); deliver
-    [fx #43](https://github.com/lazy-fortran/fx/issues/43) action-result manifests
-    and [fo #165](https://github.com/lazy-fortran/fo/issues/165) compact source
-    manifests independently once #175 is ready. Immediately after #43, land
-    fx #44 Phase A's owner/reason root and read/publication lease protocol with
-    collection disabled. Phase A is an explicit prerequisite of #166, which
-    introduces one session context without temporary retention machinery and
-    routes ordinary native and Gremlin candidate builds through it. #168 Phase A
-    adopts roots incrementally as #165--#167 paths land. Enable fx #44 collection
-    only after the final ownership audit through #168 Phase B.
-18. **Complete:** [#176](https://github.com/lazy-fortran/fo/issues/176): the
-    benchmark driver, JSONL reporter, complete-inventory check and independent
-    oracle are Fortran; the shell/Python executables are removed.
-19. **Complete:** [#177](https://github.com/lazy-fortran/fo/issues/177): make global and
-    command-local help side-effect free. `fo install --help` must never build or
-    replace the controller-owned installed driver.
-20. **Complete:** [#178](https://github.com/lazy-fortran/fo/issues/178): keep the
-    standalone install-help C program outside FPM automatic test discovery while
-    preserving the explicit public-process Fortran oracle.
-21. **Complete:** [#179](https://github.com/lazy-fortran/fo/issues/179): split
-    the archive oracle's generated-script literal below the portable Fortran
-    source-line limit without changing the generated bytes.
-
-Experimental agent scheduler PR #147 is closed without merge; #143 and #152 are
-closed as not planned. External controllers own worker DAGs, worktrees, model
-adapters and integration. Generic aggregate build/test/I/O admission remains a
-fo core requirement. Legacy MCP async queue consolidation and the C process-file
-split follow the core merge unless a behavioral verifier proves that they block
-current correctness.
-
-## Active delivery state
-
-**Execution is user-authorized in parallel mode.** The reviewed core is on fo
-`main`; PR #146 is merged. The code audit checkpoint `bce5b22` includes the shared
-Linux event watcher, finite crash-safe coverage, factual local-gate reporting,
-GCC 13.3 ownership repairs, Darwin archive portability, thirteen removed JS
-fixtures and side-effect-free install help. Exact combined focused gates passed
-before each code push;
-post-submit GitHub Actions remains asynchronous. Development continues as small
-locally gated main increments without waiting for CI.
-
-The `a0d3515` candidate passed the isolated full fo pipeline: static 109/109,
-build 62/62, test build/run 48/48, lint and format check, in 26.6 s. The same
-binary passed campaign history/seed replay, both owner-recovery crash barriers,
-timeout ordering, continuous generation preemption, sequential and overlapping
-reproduction logs, atomic link/run publication, Gremlin bootstrap, MCP named
-eligibility, stale-MCP/new-CLI behavior, lossless 300-receipt pagination and the
-then-current work-mode fixture. Four existing array-temporary warnings remain.
-
-The abandoned work-mode stack ended at `86870cf`; its generic CMake named-test
-routing fix and identical oracle already exist in core. The installed bootstrap
-fo has SHA256 `b0fedbd4bd0179209ed26f20e0210cd2e37aa9e29d15a7bac18ebd0bcf33609f`.
-The historical `1787f64` full
-pipeline passed 109/109 static, 62/62 build, 48/48 test, and lint in 19.0 seconds,
-followed by its historical work-mode fixture and MCP system test (79/79). It is
-retained only as prior evidence.
-
-Implemented issue state:
-
-- #138 selection/history and seed replay, #139 owned-tree cancellation and
-  timeout ordering, #140 durable receipts/recovery, #142 CLI/MCP lifecycle and
-  pagination, and #144 atomic artifact publication have passing focused behavior
-  on main. Keep their remaining scopes open through architecture consolidation.
-- #141 generation replacement is complete on main. Its behavioral oracle proves
-  that a failed intermediate build retains the active generation and running
-  test, never tests the broken candidate, preserves completed receipts, and
-  switches only after the repaired candidate builds.
-- #148's event gate landed at `48137f0`: idle capture delta is zero, bursts
-  debounce and `fo watch` uses the provider. Dogfood then proved closure filtering
-  incomplete: changing only `PLAN.md` created generation `56ab9d098b62...`.
-  The issue is reopened and must share #165's declared execution-input inventory.
-- #153 is complete at `be5aa7a` plus `b0a356e`: deterministic without-replacement
-  epochs survive stop/crash/restart, priority jumps satisfy unseen obligations,
-  reproduction does not earn coverage, and cancelled/stale RUNNING work remains
-  unknown with exact counts.
-- #158 is complete through `6eb8045`: ten ordinary CLI/build-routing Fortran
-  oracles plus an independent recursive ownership stress test pass. The original
-  parser fails that oracle on Ubuntu gfortran 13 with exit 139; the repaired full
-  FPM and 65-test native pipelines pass. The harness/C shim remain test-only.
-- #159 is repaired at `6b3ac43` after post-submit run 37162328033 exposed the
-  gfortran-13 response-array deallocation SIGSEGV. The new independent ownership
-  stress fails the original with exit 139; repaired GCC 13.3 focused 6/6 and
-  full FPM pass, native 70-test pipeline passes, independent review approves,
-  and the exact integrated MCP gate passes 5/5.
-- #162 is complete through `38da2b3`. Its repaired Fortran publication fixtures
-  prove a live
-  heartbeat before bounded owned termination and confirmed reap, preserves
-  scratch on reap failure, and compares interrupted archive paths plus SHA-256
-  digests. Fresh focused tests pass, the worker full suite is 72/72, independent
-  review approves, and the exact integrated three-case gate passes.
-- #160 is complete through `18b28c7`. Its campaign-history slice landed at `361d1ca`; the stale
-  per-campaign JavaScript sampler is replaced by an independent Fortran oracle
-  for finite epoch order, restart/replay, markers, failure priority and cancelled
-  unknown work. The remaining seven lifecycle/reproduction fixtures are frozen
-  on exact `8978ab4` and task-specifically escalated to Sol after two Luna repair
-  failures. The remaining seven lifecycle/reproduction fixtures are now Fortran
-  public-process oracles and their JS files are deleted. Exact final evidence:
-  eight focused gates, five fault mutants, 86-executable bare pipeline, formatting,
-  two zero-leak audits and independent review pass. The native watcher preserves
-  #174's dependency-root replacement, nested creation and follow-up capture sequence.
-- #183 has a reviewed partial repair through `bf6000d`: coverage selection
-  rewinds an exhausted persisted cursor to the earliest still-UNKNOWN obligation,
-  and the independent 40-case oracle distinguishes marker-before-exit from a
-  terminal PASS receipt. Exact focused coverage testing passes and all six #161
-  JavaScript fixtures remain. Full #183/#161 completion still requires a forced
-  crash after durable terminal receipt but before coverage update, the distinct
-  marker-before-terminal recovery barrier and native stale-generation PASS
-  injection; no marker may manufacture coverage credit.
-- #163 has two integrated native slices. `290a61c` replaces the generated
-  compile-database Python assertion with a strict Fortran JSON oracle. `eb99516`
-  replaces the archive-metadata shell helper with a standalone Fortran fixture,
-  real partial-header and object/archive mismatch oracles, and portable
-  index-free preflight. Exact Linux and Apple `/usr/bin/ar` focused gates, three
-  Linux behavioral mutants, zero-process audits and independent review pass.
-  `a15309a` replaces the generated gfortran/LLD shell programs, chmod/removal
-  commands and direct compiler/archive launches in `test_backend_gfortran` with
-  a standalone Fortran `execv` fixture plus argv APIs. Its focused gate and two
-  independent argv/status mutants pass review. Shared `test_backend_helpers.inc`
-  shell helpers, other generated helpers and the final interpreter inventory
-  remain open in #163; these slices do not claim the full migration complete.
-- #164 is complete at `d482807`: unique descriptor-held temporary publication,
-  unstable-hash retry and write/close/crash recovery passed independent review,
-  focused current-head testing and three production mutants. Its macOS rerun is
-  previously blocked on macOS by #171; that declaration defect is now fixed and
-  its optional platform rerun is no longer blocked.
-- #169 is complete through `af5d144`: ordinary self-builds remain worktree-private,
-  exact selected profiles survive cache hits, explicit install is the only global
-  publication path, the inverse Node oracle is replaced by Fortran, and its cold
-  CI invocation has an explicit 240-second wall budget.
-- #177 is complete through `454c9ba`: `fo install --help`, `-h`, `fo help
-  install` and invalid/missing options are parsed before any mutation. The
-  isolated public Fortran oracle proves help leaves sentinel bytes/metadata,
-  project, HOME, cache and prefix unchanged while explicit isolated install
-  alone replaces the sentinel. CI runs it explicitly; independent review and
-  the exact integrated focused gate pass, and the real global driver remains unchanged.
-- #178 is complete at `9a8ca76`: the standalone install-help helper lives under
-  explicit `test-fixtures/c`, so clean FPM no longer links its C `main` into
-  unrelated Fortran tests. The old placement reproduces duplicate-main; repaired
-  full FPM, exact inventory, focused #177 and integrated clean-help gates pass.
-  The post-submit regression promotion pause is cleared.
-- #179 is complete at `24018a3`: the 171-column archive-oracle source line is
-  split into 113-column-or-shorter Fortran lines with byte-identical generated
-  shell output. Strict 132-column Werror compilation, the restored-line mutant,
-  independent review and the exact integrated archive oracle pass. The GCC 13
-  post-submit regression promotion pause is cleared.
-- fx #42 is complete on fx main through `6beeec4`: verified immutable blobs and
-  trees publish from retained descriptors, survive publication/cleanup races and
-  materialize safely on Linux/APFS. The deterministic premature-marker oracle
-  repaired the final test flake; independent review, Linux 100/100 and APFS
-  30/30 stress pass. fx #43 action/result publication is now active from exact
-  fx documentation head `52ddc06`; #44's root/lease protocol follows with its
-  collector disabled.
-- #171 provider work is delivered through `9331c04`: Darwin selects its native
-  feature declarations before headers, the negative compile oracle proves the
-  former macro defect, and state/portability/supervisor tests pass on Linux and
-  macOS. The declaration issue is closed; #172 owns the separate public lifecycle gate.
-- #172's repair is integrated through `0b10bde` and explicit fixture-driver
-  compatibility at `c08ab78`. The exact combined Linux gate passes 2/2 in 22.79s;
-  explicit FO-only public-driver fallback passes 4.20s. Frozen worker macOS
-  async/public gates pass 20.62s/12.94s with normal slow budgets. Independent
-  ownership review found the absent-leader SID bridge repaired. Linux signals
-  via pidfds; Darwin checks birth immediately before individual kill, with a
-  non-atomic exit/PID-reuse window. No complete public token-acquisition API was
-  found for arbitrary descendants; private ABI machinery is outside this KISS
-  repair. Unobserved/unregistered descendants are not attributed after leader
-  identity loss. Those limits are not claimed solved by the passing gates.
-- #173 owns the Apple `ar` `__.SYMDEF SORTED` index-member classification defect
-  exposed by the exact #172 macOS test build. Complete at `7f0cccc`: four exact
-  BSD/Apple index names are accepted while arbitrary/duplicate/missing/corrupt
-  members remain errors. Preserved faepmac1 evidence `31031f21...` proves native
-  `/usr/bin/ar` cold/warm behavior separately from controlled mutations;
-  independent review and the exact integrated Linux fixture pass.
-- #174 is complete through `f340fad`: the shared FSEvents provider retains its
-  CF objects, filters exact relevant paths, keeps timeout-zero polls nonblocking,
-  settles dirty queued events, reports exact injected Darwin root errors and
-  recovers. Source/binary-bound faepmac1 evidence reaches the separate #172
-  `ENOTSUP` boundary. The reopened Linux repair gives the owner a 1 ms bounded
-  watcher tick followed by its existing 100 ms loop sleep; exact-head provider,
-  lifecycle, public watch and 79-test gates pass, while the timeout-zero mutant
-  deterministically stalls dependency-root replacement. Independent source and
-  1,684-file evidence review approve.
-- #176 is complete through `8431a6d`: the shell/Python benchmark driver and
-  reporter are replaced by a standalone Fortran tool with a narrow C process/
-  clock shim. Independent review approved strict JSON/Unicode, CLI/environment
-  precedence, owned cleanup, failure output and exact eight-metric coverage.
-  The exact integrated focused oracle and real complete smoke pass.
-- #181 is complete through `d434518`. The cache oracle now installs one unique
-  process-owned `FO_CACHE_DIR` before initialization, restores the caller's
-  exact set/unset state, proves two roots remain isolated, hashes and corrupts
-  the real v2 immutable blob under a containment guard, rejects the corrupt hit,
-  and republishes/restores the valid bytes. Exact current fx dependencies,
-  focused outer-override and unset/HOME runs, the 87-case fo gate and independent
-  review pass; no private transitive fx module is imported.
-- #180 is complete through `67b41ec`. The reported missing test-only C object
-  came from a stale installed driver; current production already discovers and
-  links the full mixed-language development dependency. A cold native Fortran
-  regression now proves C/header/source/flag invalidation, warm shim removal,
-  test-symbol presence and production archive/link-symbol exclusion. Exact
-  focused integration, the complete prior-head 87-case gate and independent
-  review pass with current fx.
-- #143/#152 and PR #147 are closed without merge after the KISS review assigned
-  agent scheduling to the external controller; no work-mode code enters core.
-- #145 has one bounded fpm row passing on the exact candidate, one independent
-  CMake/CTest row passing while exposing a fo CTest-name discovery defect, and
-  one row correctly blocked by a missing private path dependency. This is early
-  matrix evidence, not complete coverage.
-- #149's first three reviewed slices are integrated: request DTO/parsing/
-  validation lives in `fo_gremlin_request`; context, dependency, environment,
-  toolchain, capture and CAS-root discovery lives in `fo_gremlin_context`; live
-  and terminal session persistence/recovery lives in `fo_gremlin_session` at
-  `b987338`. Campaign and command extraction remains and waits for #153/#154
-  semantics respectively.
-- `58542eb` selects the host ABI for the async-filter oracle while preserving
-  explicit synthetic targets. Escalated repair `1cdbaa0` moves standalone C
-  fixtures outside fpm auto-discovery and explicitly registers the mixed-unit
-  generation test. Clean `fpm test`, the isolated full pipeline, async lifecycle
-  and all seven C variants passed; exact-head CI is live.
-- #150's initial typed decoder is integrated at `b73f9ac` after Luna repairs and task-specific Sol
-  escalation. The shared typed decoder now enforces JSON grammar/depth, retains
-  int64/raw values, decodes Unicode without key/path aliasing, rejects controls,
-  and gives CLI/MCP the same domain validation. Focused supervisor, MCP parity,
-  request-structure and full-pipeline gates passed. GitHub Actions also passed
-  the exact published `b73f9ac` head (`build + fpm test`, run 37148134220).
-  The 2026-10-04 audit reopened residual scanner duplication; that historical
-  passing evidence does not prove the remaining architecture work complete.
-- #154 is complete through `73fc19b`. Independent Luna review approved frozen
-  diff `35e243fe...`; generation/inventory/requirements/event/session-bound
-  tokens, factual failure events, typed CLI/MCP waits and conservative freshness
-  barriers pass. The exact integrated change-watch/readiness/supervisor/public
-  gate passes 4/4, including the 38-second public owner-pause/restart oracle.
-- #151's provenance subdefect is fixed at `b2a31e1`: each compiler/Git probe has
-  fresh argv/output state, and metadata-only events preserve execution identity.
-  Exact driver-image pinning remains in task-specific Sol repair after two
-  rejected Luna attempts; complete compiler/helper closure remains #157.
-- The dogfood-discovered mixed native/fpm dependency collision is repaired at
-  `1787f64`: distinct path/Git providers prove root-provider precedence and the
-  duplicate-object link failure no longer reproduces. Exact integrated focused
-  build, `test_dep_resolve` and the behavioral CLI fixture passed.
-- Resident dogfood lanes now run on fo and fx. The fx lane completed its exact
-  18-case epoch green and became idle. The fo lane exposed a session-model defect:
-  an immutable mode-0555 project root is also used as a test working directory,
-  so native tests creating relative state cannot initialize. #166 now requires
-  private writable build/test/run working directories over the immutable source
-  view. The same run materialized 304 MB across the two lanes, confirming that
-  compact manifests and private disposable sessions remain required.
-- The installed development driver was refreshed from exact `7f70a09` with fx
-  `ab7f90d`, SHA256
-  `d5ebdd39a2da83bf3a1afe521f98de51ff149d0b8d5d542eb6ecdd21fcfe076b`.
-  The fx dogfood5 lane remains resident after completing 18/18 green. The fo
-  resident lane was stopped cleanly after plan-only generations and retained
-  private builds grew state to 2.0 GB; its evidence is preserved. Fresh exact
-  `d434518` fo and current fx controller lanes were started again with isolated
-  state/cache and immediately reproduced #182: both publish `capture_failed`
-  because a test-only path dependency nested inside the project root is copied
-  over the already captured project tree, and public status omits the concrete
-  capture diagnostic. #182 is complete through `459c9be`: an internal path
-  dependency remains represented once by the primary project-tree digest,
-  external siblings retain distinct frozen roots, both mutation identities are
-  proved, and the exact bounded capture error appears in public status and
-  lifecycle events. The rebased focused fixture/provenance gates and independent
-  review pass; current fo/fx resident lanes are restarted as the dogfood gate.
-
-After each meaningful delivery, update this plan, workspace master and affected
-issues; commit and push the controller branch immediately. Preserve exact bases,
-patch digests and independent behavioral evidence. Root `PLAN.md`/`AGENTS.md`
-are outside Git; repository plans are committed.
-
-## Research basis
-
-[Saff and Ernst, ISSRE 2003](https://homes.cs.washington.edu/~mernst/pubs/wasted-time-issre2003.pdf)
-sections 5.3–5.4 describe background testing, random priority and restarting on
-the next compilable version. Their later
-[Eclipse continuous-testing plug-in](https://homes.cs.washington.edu/~mernst/pubs/conttest-plugin-etx2004-abstract.html)
-used otherwise idle developer-machine cycles for background regression feedback.
-[Infinitest](https://infinitest.github.io/) automatically runs relevant tests
-after code changes, while [JUnit Max](https://newsletter.kentbeck.com/p/the-economic-case-for-junit-max)
-emphasized automatic post-compile runs and latency to first failure. Gremlin
-extends this lineage with immutable compiled generations, last-compilable
-retention, owned preemption, durable receipts, crash recovery, finite randomized
-coverage and headless CLI/MCP operation. [pytest-randomly](https://github.com/pytest-dev/pytest-randomly)
-records reproducible shuffle seeds. [Git worktrees](https://git-scm.com/docs/git-worktree)
-provide separate checkout/HEAD/index state while sharing repository objects.
-The lane protocol, resource leases, disk budget and CLI/MCP contract are fo design
-choices; published continuous-testing results do not prove ffc speed or coverage.
+Update this plan/ROADMAP and affected issues after meaningful delivery, with exact
+source/driver pins, selected checks, real outcomes and remaining limitations.
+Use short evidence updates, not duplicate historical narratives. Keep coding
+while optional audits run; no asynchronous benchmark promise is a correctness
+receipt. The next agent should implement #190's workflow separation early,
+continue #175/#189 and finish current correctness slices without waiting for a
+performance dashboard.
