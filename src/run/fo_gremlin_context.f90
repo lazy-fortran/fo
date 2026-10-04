@@ -3,6 +3,7 @@ module fo_gremlin_context
     use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_fpm_config, only: DEP_PATH, fpm_config_t, fpm_config_parse, dep_kind
+    use fo_dep_resolve, only: normalize_path
     use fo_gremlin_generation, only: generation_context_t, generation_input_t, &
         generation_t, generation_capture
     use fo_gremlin_state, only: gremlin_generation_register_at
@@ -153,6 +154,7 @@ contains
         character(len=131072) :: git_status
         character(len=256) :: fingerprint
         integer(c_long_long) :: tree_sum, tree_mixed, tree_count
+        type(generation_input_t), allocatable :: captured_inputs(:)
         integer :: i, n_inputs, n_args, exitcode, git_exit
         logical :: found, git_found, fingerprint_ok
 
@@ -190,6 +192,11 @@ contains
                 config%dev_deps(i)%name, inputs, n_inputs, ierr, message)
             if (ierr /= 0) return
         end do
+        if (n_inputs < size(inputs)) then
+            allocate (captured_inputs(n_inputs))
+            if (n_inputs > 0) captured_inputs = inputs(:n_inputs)
+            call move_alloc(captured_inputs, inputs)
+        end if
         context%inputs = inputs
         do i = 1, config%n_flags
             context%flags = context%flags//' '//trim(config%flags(i))
@@ -298,6 +305,7 @@ contains
         character(len=*), intent(out) :: message
 
         integer :: i
+        logical :: exists
 
         ierr = 0
         message = ''
@@ -306,6 +314,13 @@ contains
             ierr = 1
             message = 'absolute fpm path dependencies cannot be frozen safely'
             return
+        end if
+        ! The project-tree manifest already freezes internal path dependencies.
+        ! Keep them out of the separate-root list so capture never overlays a
+        ! second copy onto their existing project-tree destination.
+        if (path_dependency_is_internal(project_dir, dep_path)) then
+            inquire (file=trim(project_dir)//'/'//trim(dep_path), exist=exists)
+            if (exists) return
         end if
         do i = 1, n_inputs
             if (trim(inputs(i)%destination) == trim(dep_path)) return
@@ -320,6 +335,46 @@ contains
         inputs(n_inputs)%source_root = trim(project_dir)//'/'//trim(dep_path)
         inputs(n_inputs)%destination = trim(dep_path)
     end subroutine append_path_dependency
+
+    logical function path_dependency_is_internal(project_dir, dep_path)
+        character(len=*), intent(in) :: project_dir, dep_path
+
+        character(len=PATH_LEN) :: normalized_project, normalized_dependency
+        integer :: project_length, dependency_length
+
+        path_dependency_is_internal = .false.
+        if (len_trim(project_dir) + len_trim(dep_path) + 1 >= PATH_LEN) return
+        call normalize_path(project_dir, normalized_project)
+        call normalize_path(trim(project_dir)//'/'//trim(dep_path), &
+            normalized_dependency)
+        project_length = len_trim(normalized_project)
+        dependency_length = len_trim(normalized_dependency)
+        if (project_length == 0 .or. dependency_length == 0) return
+
+        if (trim(normalized_project) == '.') then
+            if (normalized_dependency(1:1) == '/') return
+            if (trim(normalized_dependency) == '..') return
+            if (dependency_length >= 3) then
+                if (normalized_dependency(:3) == '../') return
+            end if
+            path_dependency_is_internal = .true.
+            return
+        end if
+
+        if (normalized_project(:project_length) == '/') then
+            path_dependency_is_internal = normalized_dependency(1:1) == '/'
+            return
+        end if
+        if (dependency_length < project_length) return
+        if (normalized_dependency(:project_length) /= &
+            normalized_project(:project_length)) return
+        if (dependency_length == project_length) then
+            path_dependency_is_internal = .true.
+            return
+        end if
+        path_dependency_is_internal = &
+            normalized_dependency(project_length + 1:project_length + 1) == '/'
+    end function path_dependency_is_internal
 
     subroutine context_cancel_owned_process(pid, ierr)
         integer, intent(in) :: pid

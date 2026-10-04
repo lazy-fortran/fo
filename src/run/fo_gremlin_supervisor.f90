@@ -1040,6 +1040,7 @@ contains
         type(change_watch_t) :: change_watch
         type(child_t) :: build_child, test_child
         character(len=PATH_LEN) :: message, state_name, last_failed_identity
+        character(len=PATH_LEN) :: capture_diagnostic
         character(len=PATH_LEN) :: fatal_message, state_message
         character(len=16) :: observed_outcome
         character(len=PATH_LEN) :: owner_start
@@ -1081,6 +1082,7 @@ contains
         active_pinned = .false.
         candidate_pinned = .false.
         last_failed_identity = ''
+        capture_diagnostic = ''
         state_name = 'starting'
         campaign_seed = request%seed
         if (campaign_seed == 0) then
@@ -1213,9 +1215,10 @@ contains
                 end if
             end if
         else if (.not. fatal_error) then
+            capture_diagnostic = trim(message)
             call publish_state(session, owner_request, 'capture_failed', active_generation, &
                 candidate_generation, '', completed, selected_count, 0, 'NONE', 0, &
-                ierr, message)
+                ierr, message, diagnostic=trim(capture_diagnostic))
             if (ierr /= 0) fatal_error = .true.
         end if
 
@@ -1348,10 +1351,11 @@ contains
             if (capture_failed) then
                 state_name = 'capture_failed'
                 capture_error = 1
+                capture_diagnostic = trim(message)
                 call publish_state(session, owner_request, state_name, active_generation, &
                     candidate_generation, current_test_name(selected, selected_count), &
                     completed, selected_count, campaign_seed, 'NONE', capture_error, &
-                    state_error, state_message)
+                    state_error, state_message, diagnostic=trim(capture_diagnostic))
                 if (state_error /= 0) then
                     fatal_message = 'cannot publish capture failure: '//trim(state_message)
                     fatal_error = .true.
@@ -2541,7 +2545,7 @@ contains
 
     subroutine publish_state(session, request, state, active, candidate, current_case, &
             completed, selected_count, seed, last_outcome, last_exitcode, ierr, message, &
-            status_text_out)
+            status_text_out, diagnostic)
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(in) :: request
         character(len=*), intent(in) :: state, current_case, last_outcome
@@ -2550,12 +2554,14 @@ contains
         integer, intent(out), optional :: ierr
         character(len=*), intent(out), optional :: message
         character(len=*), intent(out), optional :: status_text_out
+        character(len=*), intent(in), optional :: diagnostic
 
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
         type(gremlin_session_t) :: read_session
         type(gremlin_coverage_view_t) :: coverage_view
         type(gremlin_readiness_t) :: readiness
         character(len=PATH_LEN) :: local_message, lifecycle_path, event_message
+        character(len=PATH_LEN) :: diagnostic_text
         character(len=PATH_LEN) :: coverage_path
         integer :: status
         character(len=PATH_LEN) :: active_project, candidate_project
@@ -2563,6 +2569,8 @@ contains
 
         active_project = ''
         candidate_project = ''
+        diagnostic_text = ''
+        if (present(diagnostic)) diagnostic_text = diagnostic
         if (len_trim(active%identity) > 0) active_project = trim(active%project_root)
         if (len_trim(candidate%identity) > 0) candidate_project = trim(candidate%project_root)
         status_text = '{"protocol":1,"session_id":"'// &
@@ -2582,7 +2590,8 @@ contains
             trim(json_int(request%gate_required_count))// &
             ',"requirement_digest":"'//request%requirement_digest// &
             '","event_epoch":'//trim(json_int(request%event_epoch))// &
-            ',"input_changed":'//trim(json_bool(request%input_changed))//'}'
+            ',"input_changed":'//trim(json_bool(request%input_changed))// &
+            ',"diagnostic":"'//trim(json_escape_string(trim(diagnostic_text)))//'"}'
         call gremlin_session_publish(session, trim(status_text), status, local_message)
         if (status == 0) then
             call lifecycle_path_for_session(session, request, lifecycle_path, &
@@ -2613,7 +2622,8 @@ contains
             if (status == 0) then
                 call publish_lifecycle_transition(read_session, request, &
                     trim(lifecycle_path), state, active, candidate, current_case, last_outcome, &
-                    readiness, coverage_view, have_coverage, status, event_message)
+                    readiness, coverage_view, have_coverage, trim(diagnostic_text), &
+                    status, event_message)
             end if
             if (status /= 0) then
                 local_message = 'cannot publish Gremlin lifecycle transition: '// &
@@ -2627,7 +2637,7 @@ contains
 
     subroutine publish_lifecycle_transition(session, request, path, state, active, &
             candidate, current_case, last_outcome, readiness, coverage, have_coverage, &
-            ierr, message)
+            diagnostic, ierr, message)
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(in) :: request
         character(len=*), intent(in) :: path, state, current_case, last_outcome
@@ -2635,6 +2645,7 @@ contains
         type(gremlin_readiness_t), intent(in) :: readiness
         type(gremlin_coverage_view_t), intent(in) :: coverage
         logical, intent(in) :: have_coverage
+        character(len=*), intent(in) :: diagnostic
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         type(gremlin_lifecycle_event_t) :: previous
@@ -2666,7 +2677,7 @@ contains
         else if (trim(state) == 'capture_failed') then
             call append_lifecycle_event(session, request, path, 'capture_failed', &
                 active, candidate, candidate%identity, previous_generation, readiness, &
-                coverage, have_coverage, ierr, message)
+                coverage, have_coverage, ierr, message, diagnostic)
         else if (trim(state) == 'error') then
             call append_lifecycle_event(session, request, path, 'session_failed', &
                 active, candidate, active%identity, previous_generation, readiness, &
@@ -2864,7 +2875,7 @@ contains
 
     subroutine append_lifecycle_event(session, request, path, event_type, active, &
             candidate, subject_generation, previous_generation, readiness, coverage, &
-            have_coverage, ierr, message)
+            have_coverage, ierr, message, diagnostic)
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(in) :: request
         character(len=*), intent(in) :: path, event_type, subject_generation
@@ -2875,9 +2886,12 @@ contains
         logical, intent(in) :: have_coverage
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
+        character(len=*), intent(in), optional :: diagnostic
         type(gremlin_lifecycle_event_t) :: event
 
         event%event_type = trim(event_type)
+        event%diagnostic = ''
+        if (present(diagnostic)) event%diagnostic = diagnostic
         event%generation = trim(subject_generation)
         event%active_generation = trim(active%identity)
         event%candidate_generation = trim(candidate%identity)
