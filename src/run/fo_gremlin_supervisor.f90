@@ -867,7 +867,7 @@ contains
         integer :: owner_pid, ierr, n_selected, mandatory_count, seed
         integer :: n_args, spawn_exit, test_exit, sequence, release_error
         integer :: reproduction_timeout
-        logical :: have_reproduction_lease
+        logical :: have_reproduction_lease, executable_ok
 
         exitcode = 0
         have_reproduction_lease = .false.
