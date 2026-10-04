@@ -1,6 +1,6 @@
 # fo Gremlin implementation plan
 
-Updated 2026-10-04; planning input `eb99516fbf3d0e018fe9654f5a90a860c82a89ca`.
+Updated 2026-10-04; planning input `a15309a`.
 This is the complete provider plan for Gremlin, fo's continuous randomized
 regression-testing engine. External controllers own coding-worker orchestration.
 The
@@ -815,8 +815,12 @@ Implemented issue state:
   real partial-header and object/archive mismatch oracles, and portable
   index-free preflight. Exact Linux and Apple `/usr/bin/ar` focused gates, three
   Linux behavioral mutants, zero-process audits and independent review pass.
-  Generated compiler/linker helpers and the final interpreter inventory remain
-  open in #163; this focused slice does not claim the full migration complete.
+  `a15309a` replaces the generated gfortran/LLD shell programs, chmod/removal
+  commands and direct compiler/archive launches in `test_backend_gfortran` with
+  a standalone Fortran `execv` fixture plus argv APIs. Its focused gate and two
+  independent argv/status mutants pass review. Shared `test_backend_helpers.inc`
+  shell helpers, other generated helpers and the final interpreter inventory
+  remain open in #163; these slices do not claim the full migration complete.
 - #164 is complete at `d482807`: unique descriptor-held temporary publication,
   unstable-hash retry and write/close/crash recovery passed independent review,
   focused current-head testing and three production mutants. Its macOS rerun is
