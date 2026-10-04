@@ -71,11 +71,12 @@ module fo_input_inventory
     public :: input_inventory_revalidate
 
     interface
-        integer(c_int) function c_list_tree(root, manifest) &
-                bind(C, name='fo_c_generation_list_tree')
+        integer(c_int) function c_list_input_tree(root, manifest, &
+                exclude_root_outputs) bind(C, name='fo_c_generation_list_input_tree')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: root(*), manifest(*)
-        end function c_list_tree
+            integer(c_int), value :: exclude_root_outputs
+        end function c_list_input_tree
     end interface
 
 contains
@@ -540,9 +541,14 @@ contains
 
         ierr = 0
         message = ''
-        call validate_relative_path(relative_dir, rel, ierr, message)
-        if (ierr /= 0) return
-        source_dir = trim(project_root)//'/'//trim(rel)
+        if (trim(relative_dir) == '.') then
+            rel = ''
+        else
+            call validate_relative_path(relative_dir, rel, ierr, message)
+            if (ierr /= 0) return
+        end if
+        source_dir = trim(project_root)
+        if (len_trim(rel) > 0) source_dir = trim(source_dir)//'/'//trim(rel)
         inquire(file=trim(source_dir), exist=exists)
         if (.not. exists) then
             if (required) then
@@ -1013,13 +1019,22 @@ contains
         integer :: rc, unit, ios, kind, decode_status
         type(input_entry_t) :: entry
         character(kind=c_char, len=:), allocatable :: c_root, c_manifest
+        logical :: whole_root_scan
+        integer(c_int) :: exclude_root_outputs
 
         ierr = 1
         message = ''
         call make_tmpfile('fo-input-inventory', manifest)
-        c_root = trim(physical_root)//'/'//trim(prefix)//c_null_char
+        whole_root_scan = len_trim(prefix) == 0 .or. trim(prefix) == '.'
+        if (whole_root_scan) then
+            c_root = trim(physical_root)//c_null_char
+            exclude_root_outputs = 1_c_int
+        else
+            c_root = trim(physical_root)//'/'//trim(prefix)//c_null_char
+            exclude_root_outputs = 0_c_int
+        end if
         c_manifest = trim(manifest)//c_null_char
-        rc = c_list_tree(c_root, c_manifest)
+        rc = c_list_input_tree(c_root, c_manifest, exclude_root_outputs)
         if (rc /= 0) then
             call delete_tmpfile(trim(manifest))
             message = 'cannot enumerate declared input root: '//trim(alias)
@@ -1058,8 +1073,11 @@ contains
                 message = 'unknown record from input enumerator'
                 exit
             end select
-            relative = trim(prefix)//'/'//trim(relative)
-            if (ignored_input_path(trim(relative), kind == INPUT_DIRECTORY)) cycle
+            if (.not. whole_root_scan) then
+                relative = trim(prefix)//'/'//trim(relative)
+            end if
+            if (ignored_input_path(trim(relative), kind == INPUT_DIRECTORY, &
+                    whole_root_scan)) cycle
             if (.not. under_prefix(trim(relative), trim(prefix))) cycle
             if (trim(relative) == trim(prefix)) cycle
             entry = input_entry_t()
@@ -1177,14 +1195,17 @@ contains
         end if
     end function under_prefix
 
-    logical function ignored_input_path(path, is_directory)
+    logical function ignored_input_path(path, is_directory, whole_root_scan)
         character(len=*), intent(in) :: path
         logical, intent(in) :: is_directory
-        integer :: start, stop
+        logical, intent(in) :: whole_root_scan
+        integer :: start, stop, component_index
         character(len=128) :: component
 
         ignored_input_path = .false.
+        if (len_trim(path) == 0) return
         start = 1
+        component_index = 0
         do
             stop = index(path(start:), '/')
             if (stop == 0) then
@@ -1192,11 +1213,17 @@ contains
             else
                 component = path(start:start + stop - 2)
             end if
+            component_index = component_index + 1
             select case (trim(component))
-            case ('.git', '.hg', '.svn', '.bzr', '.gremlin', '.fo', &
-                    '.cache', 'build', 'cache', 'caches', 'session', &
-                    'sessions', 'log', 'logs')
+            case ('.git', '.hg', '.svn', '.bzr', '.gremlin', '.fo')
                 if (stop /= 0 .or. is_directory) then
+                    ignored_input_path = .true.
+                    return
+                end if
+            case ('.cache', 'build', 'cache', 'caches', 'session', &
+                    'sessions', 'log', 'logs')
+                if (whole_root_scan .and. component_index == 1 .and. &
+                        (stop /= 0 .or. is_directory)) then
                     ignored_input_path = .true.
                     return
                 end if
