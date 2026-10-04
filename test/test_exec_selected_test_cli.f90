@@ -8,15 +8,17 @@ program test_exec_selected_test_cli
     use fo_test_harness, only: finish_assertions
     implicit none
 
-    character(:), allocatable :: driver, scratch, project
-    character(len=512) :: compiler
-    logical :: found
+    character(:), allocatable :: driver, scratch, project, compiler_log
+    character(len=512) :: compiler, c_compiler, wrapper
+    logical :: found, c_found
     type(process_result_t) :: child
     type(string_list_t) :: command, environment
 
     call resolve_driver(driver)
     call make_scratch('fo-exec-selected-test', scratch)
     project = join_path(scratch, 'project')
+    compiler_log = join_path(scratch, 'compiler-argv')
+    wrapper = join_path(scratch, 'gfortran-recorder')
     call write_text(join_path(project, 'fpm.toml'), 'name = "exec_selected_test"'// &
         new_line('a'))
     call write_text(join_path(project, 'app/unselected_app.f90'), &
@@ -29,24 +31,26 @@ program test_exec_selected_test_cli
 
     call fs_find_executable('gfortran', compiler, found)
     call assert_true(found, 'selected-test oracle finds gfortran')
-    if (.not. found) then
+    call fs_find_executable('cc', c_compiler, c_found)
+    call assert_true(c_found, 'selected-test oracle finds a C compiler')
+    if (.not. found .or. .not. c_found) then
         call finish_assertions()
         stop 1
     end if
 
-    call write_text(join_path(scratch, 'compiler-wrapper'), &
-        '#!/bin/sh'//new_line('a')// &
-        'printf "%s\n" "$*" >> "'//join_path(scratch, 'compiler-argv')//'"'// &
-        new_line('a')//'exec "'//trim(compiler)//'" "$@"'//new_line('a'))
+    call write_text(join_path(scratch, 'compiler-wrapper.c'), wrapper_source())
     command = string_list_t()
-    call list_add(command, '+x')
-    call list_add(command, join_path(scratch, 'compiler-wrapper'))
-    call run_external('/bin/chmod', command, scratch, child)
-    call assert_process_ok(child, 'compiler argument recorder is executable')
+    call list_add(command, join_path(scratch, 'compiler-wrapper.c'))
+    call list_add(command, '-o')
+    call list_add(command, wrapper)
+    call run_external(trim(c_compiler), command, scratch, child)
+    call assert_process_ok(child, 'native compiler argv recorder builds')
 
     command = words([character(len=32) :: &
         'exec', 'selected_test', 'argument with spaces', 'second'])
-    call list_add(environment, 'FO_FC='//join_path(scratch, 'compiler-wrapper'))
+    call list_add(environment, 'FO_FC='//wrapper)
+    call list_add(environment, 'FO_TEST_REAL_COMPILER='//trim(compiler))
+    call list_add(environment, 'FO_TEST_COMPILER_LOG='//compiler_log)
     call list_add(environment, 'FO_EXEC_TEST_MARKER='//join_path(scratch, 'runs'))
     call run_fo(driver, command, project, join_path(scratch, 'fo-cache'), child, &
         environment)
@@ -57,12 +61,27 @@ program test_exec_selected_test_cli
     call assert_equal_string(read_text(join_path(scratch, 'runs')), 'run'// &
         new_line('a'), 'selected test process ran once')
 
-    call assert_true(index(read_text(join_path(scratch, 'compiler-argv')), &
+    call assert_true(index(read_text(compiler_log), &
         '/test/selected_test.f90') > 0, 'selected test source was compiled')
-    call assert_true(index(read_text(join_path(scratch, 'compiler-argv')), &
+    call assert_true(index(read_text(compiler_log), &
         '/app/unselected_app.f90') == 0, 'unselected app source was not compiled')
-    call assert_true(index(read_text(join_path(scratch, 'compiler-argv')), &
+    call assert_true(index(read_text(compiler_log), &
         '/test/unselected_test.f90') == 0, 'unselected test source was not compiled')
+
+    call write_text(compiler_log, '')
+    command = words([character(len=32) :: &
+        'exec', 'selected_test', 'argument with spaces', 'second'])
+    call run_fo(driver, command, project, join_path(scratch, 'fo-cache'), child, &
+        environment)
+    call assert_process_ok(child, 'warm fo exec runs the selected native test')
+    call assert_equal_string(child%stdout, &
+        '2'//new_line('a')//'argument with spaces'//new_line('a')//'second'// &
+        new_line('a'), 'warm selected test receives original argv')
+    call assert_equal_string(read_text(join_path(scratch, 'runs')), &
+        'run'//new_line('a')//'run'//new_line('a'), &
+        'warm selected test process runs once')
+    call assert_equal_string(read_text(compiler_log), '', &
+        'warm selected test needs no compiler or linker invocation')
 
     call remove_tree(scratch)
     call finish_assertions()
@@ -97,5 +116,26 @@ contains
             '    print "(a)", trim(arg)'//new_line('a')//'end do'// &
             new_line('a')//'end program selected_test'//new_line('a')
     end function selected_source
+
+    function wrapper_source() result(text)
+        character(:), allocatable :: text
+        text = '#include <stdio.h>'//new_line('a')// &
+            '#include <stdlib.h>'//new_line('a')// &
+            '#include <unistd.h>'//new_line('a')// &
+            'int main(int argc, char **argv) {'//new_line('a')// &
+            '    const char *real = getenv("FO_TEST_REAL_COMPILER");'// &
+            new_line('a')// &
+            '    const char *log = getenv("FO_TEST_COMPILER_LOG");'// &
+            new_line('a')// &
+            '    FILE *stream = log ? fopen(log, "a") : NULL;'//new_line('a')// &
+            '    if (!real || !stream) return 125;'//new_line('a')// &
+            '    for (int i = 1; i < argc; ++i) {'//new_line('a')// &
+            '        if (fprintf(stream, "%s\n", argv[i]) < 0) return 125;'// &
+            new_line('a')//'    }'//new_line('a')// &
+            '    if (fclose(stream) != 0) return 125;'//new_line('a')// &
+            '    argv[0] = (char *)real;'//new_line('a')// &
+            '    execv(real, argv);'//new_line('a')//'    return 127;'// &
+            new_line('a')//'}'//new_line('a')
+    end function wrapper_source
 
 end program test_exec_selected_test_cli
