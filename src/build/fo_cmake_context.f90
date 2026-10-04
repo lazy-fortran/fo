@@ -1,0 +1,395 @@
+module fo_cmake_context
+    use fo_fs, only: fs_make_dir, fs_collect_files
+    use fx_json_parse, only: json_parser_t, json_event_t, &
+        json_parser_init_strict, json_parser_next, JSON_OBJECT_START, &
+        JSON_OBJECT_END, JSON_ARRAY_START, JSON_ARRAY_END, JSON_KEY, &
+        JSON_STRING, JSON_BOOL, JSON_ERROR, JSON_END_OF_INPUT
+    implicit none
+    private
+
+    type, public :: cmake_context_t
+        character(:), allocatable :: source_root
+        character(:), allocatable :: build_root
+        character(:), allocatable :: generator
+        character(:), allocatable :: configuration
+        character(:), allocatable :: configure_preset
+        character(:), allocatable :: build_preset
+        character(:), allocatable :: test_preset
+        character(:), allocatable :: error
+        character(:), allocatable :: extra_args(:)
+        character(:), allocatable :: reported_generator
+        logical :: multi_config = .false.
+        logical :: has_codemodel = .false.
+        logical :: has_cache = .false.
+        logical :: has_toolchains = .false.
+        logical :: valid = .true.
+    end type cmake_context_t
+
+    public :: cmake_context_init, cmake_context_query, cmake_context_read_reply
+    public :: cmake_context_discover_build_root, cmake_context_build_path
+
+contains
+
+    subroutine cmake_context_init(context, source_root, build_root, generator, &
+            configuration, configure_preset, build_preset, extra_args, &
+            test_preset, argv)
+        type(cmake_context_t), intent(out) :: context
+        character(len=*), intent(in) :: source_root
+        character(len=*), intent(in), optional :: build_root, generator
+        character(len=*), intent(in), optional :: configuration
+        character(len=*), intent(in), optional :: configure_preset, build_preset
+        character(len=*), intent(in), optional :: extra_args
+        character(len=*), intent(in), optional :: test_preset, argv(:)
+        character(:), allocatable :: raw_args
+        integer :: i, env_length, env_status
+        logical :: explicit_build_root
+
+        context%source_root = trim(source_root)
+        context%build_root = 'build'
+        explicit_build_root = present(build_root)
+        if (present(build_root)) context%build_root = trim(build_root)
+        if (.not. present(build_root)) then
+            call get_environment_variable('FO_CMAKE_BUILD_DIR', &
+                length=env_length, status=env_status)
+            explicit_build_root = env_status == 0 .and. env_length > 0
+            call env_value('FO_CMAKE_BUILD_DIR', context%build_root)
+        end if
+        context%generator = ''
+        if (present(generator)) context%generator = trim(generator)
+        if (.not. present(generator)) call env_value('FO_CMAKE_GENERATOR', &
+            context%generator)
+        context%configuration = ''
+        if (present(configuration)) context%configuration = trim(configuration)
+        if (.not. present(configuration)) call env_value('FO_CMAKE_CONFIG', &
+            context%configuration)
+        context%configure_preset = ''
+        if (present(configure_preset)) &
+            context%configure_preset = trim(configure_preset)
+        if (.not. present(configure_preset)) call env_value( &
+            'FO_CMAKE_CONFIGURE_PRESET', context%configure_preset)
+        context%build_preset = ''
+        if (present(build_preset)) context%build_preset = trim(build_preset)
+        if (.not. present(build_preset)) &
+            call env_value('FO_CMAKE_BUILD_PRESET', context%build_preset)
+        context%test_preset = ''
+        if (present(test_preset)) context%test_preset = trim(test_preset)
+        if (.not. present(test_preset)) call env_value( &
+            'FO_CMAKE_TEST_PRESET', context%test_preset)
+
+        raw_args = ''
+        if (present(extra_args)) raw_args = extra_args
+        if (.not. present(extra_args)) call env_value('FO_CMAKE_ARGS', raw_args)
+        call parse_argv(raw_args, context%extra_args, context%error)
+        if (present(argv)) then
+            do i = 1, size(argv)
+                call append_arg(context%extra_args, trim(argv(i)))
+            end do
+        end if
+        context%valid = .not. allocated(context%error)
+        if (len_trim(context%source_root) == 0 .or. &
+                len_trim(context%build_root) == 0) then
+            context%valid = .false.
+            context%error = 'CMake source and build directories must be non-empty'
+        end if
+        if (len_trim(context%configure_preset) > 0 .and. &
+                len_trim(context%generator) > 0) then
+            context%valid = .false.
+            context%error = 'FO_CMAKE_GENERATOR cannot override a configure preset'
+        end if
+        if (len_trim(context%configure_preset) > 0 .and. explicit_build_root) then
+            context%valid = .false.
+            context%error = 'the configure preset owns the build directory; ' // &
+                'remove FO_CMAKE_BUILD_DIR or the explicit build directory'
+        end if
+    end subroutine cmake_context_init
+
+    subroutine cmake_context_query(context)
+        type(cmake_context_t), intent(in) :: context
+        character(:), allocatable :: query_dir
+
+        query_dir = cmake_context_build_path(context)// &
+            '/.cmake/api/v1/query/client-fo'
+        call fs_make_dir(query_dir)
+        call create_empty_file(query_dir//'/codemodel-v2')
+        call create_empty_file(query_dir//'/cache-v2')
+        call create_empty_file(query_dir//'/toolchains-v1')
+    end subroutine cmake_context_query
+
+    subroutine create_empty_file(path)
+        character(len=*), intent(in) :: path
+        integer :: unit, ios
+
+        open (newunit=unit, file=path, status='replace', action='write', &
+            iostat=ios)
+        if (ios == 0) close (unit)
+    end subroutine create_empty_file
+
+    subroutine cmake_context_discover_build_root(context)
+        type(cmake_context_t), intent(inout) :: context
+        character(len=4096) :: paths(128), line
+        character(:), allocatable :: marker, candidate
+        integer :: n_paths, i, unit, ios, root_len, last_slash
+
+        call fs_collect_files(trim(context%source_root), 'CMakeCache', '.txt', &
+            '', paths, n_paths)
+        marker = 'CMAKE_HOME_DIRECTORY:INTERNAL='//trim(context%source_root)
+        root_len = len_trim(context%source_root)
+        do i = 1, n_paths
+            open (newunit=unit, file=trim(paths(i)), status='old', &
+                action='read', iostat=ios)
+            if (ios /= 0) cycle
+            do
+                read (unit, '(a)', iostat=ios) line
+                if (ios /= 0) exit
+                if (index(line, marker) == 1) then
+                    close (unit)
+                    last_slash = index(trim(paths(i)), '/', back=.true.)
+                    if (last_slash == root_len + 1) then
+                        context%build_root = '.'
+                        return
+                    end if
+                    if (last_slash < root_len + 1) return
+                    candidate = paths(i)(root_len + 2:last_slash - 1)
+                    if (len(candidate) > 0) context%build_root = candidate
+                    return
+                end if
+            end do
+            close (unit)
+        end do
+    end subroutine cmake_context_discover_build_root
+
+    function cmake_context_build_path(context) result(path)
+        type(cmake_context_t), intent(in) :: context
+        character(:), allocatable :: path
+
+        if (context%build_root(1:1) == '/') then
+            path = context%build_root
+        else
+            path = trim(context%source_root)//'/'//trim(context%build_root)
+        end if
+    end function cmake_context_build_path
+
+    subroutine append_arg(values, token)
+        character(len=:), allocatable, intent(inout) :: values(:)
+        character(len=*), intent(in) :: token
+        character(len=:), allocatable :: grown(:)
+        integer :: old_count, old_len, new_len
+
+        if (len(token) == 0) return
+        old_count = 0
+        old_len = 0
+        if (allocated(values)) then
+            old_count = size(values)
+            old_len = len(values)
+        end if
+        new_len = max(old_len, len(token))
+        allocate (character(len=new_len) :: grown(old_count + 1))
+        if (old_count > 0) grown(1:old_count) = values
+        grown(old_count + 1) = token
+        call move_alloc(grown, values)
+    end subroutine append_arg
+
+    subroutine cmake_context_read_reply(context)
+        type(cmake_context_t), intent(inout) :: context
+        character(len=4096) :: paths(64)
+        character(:), allocatable :: input
+        integer :: n_paths
+
+        context%reported_generator = ''
+        context%multi_config = .false.
+        context%has_codemodel = .false.
+        context%has_cache = .false.
+        context%has_toolchains = .false.
+        call fs_collect_files(cmake_context_build_path(context)// &
+            '/.cmake/api/v1/reply', 'index-', '.json', &
+            '', paths, n_paths, recursive=.false.)
+        if (n_paths < 1) return
+        call read_file(trim(paths(n_paths)), input)
+        if (allocated(input)) call parse_reply(context, input)
+    end subroutine cmake_context_read_reply
+
+    subroutine parse_reply(context, input)
+        type(cmake_context_t), intent(inout) :: context
+        character(len=*), intent(in) :: input
+        type(json_parser_t) :: parser
+        type(json_event_t) :: event
+        character(:), allocatable :: key
+        integer :: depth, generator_depth, objects_depth
+
+        call json_parser_init_strict(parser, input)
+        depth = 0
+        generator_depth = -1
+        objects_depth = -1
+        key = ''
+        do
+            call json_parser_next(parser, event)
+            if (event%event_type == JSON_END_OF_INPUT) exit
+            if (event%event_type == JSON_ERROR) return
+            select case (event%event_type)
+            case (JSON_KEY)
+                key = event%string_val
+            case (JSON_OBJECT_START)
+                depth = depth + 1
+                if (key == 'generator') generator_depth = depth
+                key = ''
+            case (JSON_ARRAY_START)
+                depth = depth + 1
+                if (key == 'objects') objects_depth = depth
+                key = ''
+            case (JSON_OBJECT_END, JSON_ARRAY_END)
+                if (depth == generator_depth) generator_depth = -1
+                if (depth == objects_depth) objects_depth = -1
+                depth = depth - 1
+                key = ''
+            case (JSON_STRING)
+                if (depth == generator_depth) then
+                    if (key == 'name') context%reported_generator = event%string_val
+                    if (objects_depth > 0 .and. key == 'kind') then
+                        select case (event%string_val)
+                        case ('codemodel')
+                            context%has_codemodel = .true.
+                        case ('cache')
+                            context%has_cache = .true.
+                        case ('toolchains')
+                            context%has_toolchains = .true.
+                        end select
+                    end if
+                else if (objects_depth > 0 .and. key == 'kind') then
+                    select case (event%string_val)
+                    case ('codemodel')
+                        context%has_codemodel = .true.
+                    case ('cache')
+                        context%has_cache = .true.
+                    case ('toolchains')
+                        context%has_toolchains = .true.
+                    end select
+                end if
+                key = ''
+            case (JSON_BOOL)
+                if (depth == generator_depth .and. key == 'multiConfig') &
+                    context%multi_config = event%bool_val
+                key = ''
+            case default
+                key = ''
+            end select
+        end do
+    end subroutine parse_reply
+
+    subroutine read_file(path, text)
+        character(len=*), intent(in) :: path
+        character(:), allocatable, intent(out) :: text
+        integer :: unit, ios, file_size
+
+        inquire (file=path, size=file_size, iostat=ios)
+        if (ios /= 0 .or. file_size < 1) return
+        allocate (character(len=file_size) :: text)
+        open (newunit=unit, file=path, status='old', action='read', &
+            access='stream', form='unformatted', iostat=ios)
+        if (ios /= 0) then
+            deallocate (text)
+            return
+        end if
+        read (unit, iostat=ios) text
+        close (unit)
+        if (ios /= 0) deallocate (text)
+    end subroutine read_file
+
+    subroutine env_value(name, value)
+        character(len=*), intent(in) :: name
+        character(:), allocatable, intent(inout) :: value
+        integer :: n, status
+
+        call get_environment_variable(name, length=n, status=status)
+        if (status /= 0 .or. n < 1) return
+        deallocate (value)
+        allocate (character(len=n) :: value)
+        call get_environment_variable(name, value, status=status)
+        if (status /= 0) value = ''
+    end subroutine env_value
+
+    subroutine parse_argv(text, values, error)
+        character(len=*), intent(in) :: text
+        character(len=:), allocatable, intent(out) :: values(:)
+        character(len=:), allocatable, intent(out) :: error
+        character(:), allocatable :: token
+        character(len=1) :: quote, ch
+        integer :: i, n, count, max_len
+        logical :: escaped
+
+        count = 0
+        max_len = 1
+        quote = achar(0)
+        escaped = .false.
+        token = ''
+        n = len_trim(text)
+        do i = 1, n
+            ch = text(i:i)
+            if (escaped) then
+                token = token//ch
+                escaped = .false.
+            else if (ch == achar(92) .and. quote /= "'") then
+                escaped = .true.
+            else if (quote /= achar(0)) then
+                if (ch == quote) then
+                    quote = achar(0)
+                else
+                    token = token//ch
+                end if
+            else if (ch == "'" .or. ch == '"') then
+                quote = ch
+            else if (ch == ' ' .or. ch == achar(9)) then
+                if (len(token) > 0) then
+                    count = count + 1
+                    max_len = max(max_len, len(token))
+                    token = ''
+                end if
+            else
+                token = token//ch
+            end if
+        end do
+        if (escaped .or. quote /= achar(0)) then
+            error = 'FO_CMAKE_ARGS has an unterminated escape or quote'
+            allocate (character(len=1) :: values(0))
+            return
+        end if
+        if (len(token) > 0) then
+            count = count + 1
+            max_len = max(max_len, len(token))
+        end if
+        allocate (character(len=max_len) :: values(count))
+        count = 0
+        quote = achar(0)
+        escaped = .false.
+        token = ''
+        do i = 1, n
+            ch = text(i:i)
+            if (escaped) then
+                token = token//ch
+                escaped = .false.
+            else if (ch == achar(92) .and. quote /= "'") then
+                escaped = .true.
+            else if (quote /= achar(0)) then
+                if (ch == quote) then
+                    quote = achar(0)
+                else
+                    token = token//ch
+                end if
+            else if (ch == "'" .or. ch == '"') then
+                quote = ch
+            else if (ch == ' ' .or. ch == achar(9)) then
+                if (len(token) > 0) then
+                    count = count + 1
+                    values(count) = token
+                    token = ''
+                end if
+            else
+                token = token//ch
+            end if
+        end do
+        if (len(token) > 0) then
+            count = count + 1
+            values(count) = token
+        end if
+    end subroutine parse_argv
+
+end module fo_cmake_context
