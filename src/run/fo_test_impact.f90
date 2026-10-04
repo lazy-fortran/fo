@@ -272,10 +272,13 @@ contains
             character(len=1024), allocatable :: parts(:)
             integer :: k, e, n
 
-            n = 2 + dag%n_nodes + size(cases) + result%required_count
+            n = 2 + dag%n_nodes + size(cases) + result%required_count + &
+                result%widening_count
             allocate(parts(n))
             parts = ''
-            parts(1) = 'fo-test-impact-v1:'//baseline%digest
+            parts(1) = 'fo-test-impact-v1:'//baseline%digest//':'// &
+                logical_text(result%widened)//':'// &
+                logical_text(result%model_complete)
             parts(2) = candidate%digest
             e = 2
             do k = 1, dag%n_nodes
@@ -299,6 +302,10 @@ contains
                 e = e + 1
                 parts(e) = 'required:'//trim(result%required(k)%identity)//':'// &
                     trim(result%required(k)%reason)
+            end do
+            do k = 1, result%widening_count
+                e = e + 1
+                parts(e) = 'widening:'//trim(result%widening_reasons(k))
             end do
             result%model_identity = cache_digest(parts, size(parts))
         end subroutine compute_model_identity
