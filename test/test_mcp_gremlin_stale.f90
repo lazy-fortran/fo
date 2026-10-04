@@ -22,6 +22,7 @@ program test_mcp_gremlin_stale
     type(process_result_t) :: process
     type(json_value_t) :: response, payload, events, event, field, result
     integer :: exit_code, attempt
+    character(len=16) :: exit_text
 
     call gremlin_setup(driver, scratch, project, cache, state)
     call write_text(project//'/fpm.toml', &
@@ -56,9 +57,22 @@ program test_mcp_gremlin_stale
     call list_add(args, '0')
     call list_add(args, '--json')
     call gremlin_json(driver, project, cache, state, args, payload, process, 30000)
-    call assert_true(process%exit_code == 0, 'new CLI starts its independent lane')
+    if (process%exit_code /= 0) then
+        write (exit_text, '(i0)') process%exit_code
+        call assert_true(.false., 'new CLI failed to start lane (exit='//trim(exit_text)// &
+            '); stderr='//trim(process%stderr)//'; stdout='//trim(process%stdout))
+        call stop_lane_without_owner()
+        call mcp_session_shutdown(server, exit_code)
+        call finish_assertions()
+    end if
     session_id = json_string_value(json_member(payload, 'session_id'))
-    call assert_true(len(session_id) > 0, 'CLI publishes its independent owner ID')
+    if (len(session_id) == 0) then
+        call assert_true(.false., 'CLI response omitted its owner ID; stderr='// &
+            trim(process%stderr)//'; stdout='//trim(process%stdout))
+        call stop_lane_without_owner()
+        call mcp_session_shutdown(server, exit_code)
+        call finish_assertions()
+    end if
 
     do attempt = 1, 600
         arguments = '{"action":"gremlin_status","dir":'//mcp_quote(project)// &
@@ -99,6 +113,25 @@ program test_mcp_gremlin_stale
     call finish_assertions()
 
 contains
+
+    subroutine stop_lane_without_owner()
+        type(string_list_t) :: stop_args
+        type(json_value_t) :: stop_reply
+        type(process_result_t) :: stop_process
+
+        call list_add(stop_args, 'gremlin')
+        call list_add(stop_args, 'stop')
+        call list_add(stop_args, '--dir')
+        call list_add(stop_args, project)
+        call list_add(stop_args, '--lane')
+        call list_add(stop_args, 'new-cli-lane')
+        call list_add(stop_args, '--json')
+        call gremlin_json(driver, project, cache, state, stop_args, stop_reply, &
+            stop_process, 10000)
+        call assert_true(stop_process%exit_code == 0, &
+            'cleanup by lane name succeeds after start omitted its owner ID; stderr='// &
+            trim(stop_process%stderr))
+    end subroutine stop_lane_without_owner
 
     subroutine extract_payload(envelope, document)
         type(json_value_t), intent(in) :: envelope
