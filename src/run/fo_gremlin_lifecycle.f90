@@ -20,6 +20,7 @@ module fo_gremlin_lifecycle
         integer :: version = 1
         character(len=256) :: event_id = ''
         character(len=64) :: event_type = ''
+        character(len=4096) :: diagnostic = ''
         character(len=HASH_LEN) :: generation = ''
         character(len=HASH_LEN) :: active_generation = ''
         character(len=HASH_LEN) :: candidate_generation = ''
@@ -103,7 +104,7 @@ contains
         type(gremlin_lifecycle_event_t), intent(in) :: event
         character(len=256) :: event_id
         character(len=HASH_LEN) :: digest
-        character(len=4096) :: parts(1)
+        character(len=8192) :: parts(1)
 
         parts(1) = event_facts(event)
         digest = cache_digest(parts, 1)
@@ -134,6 +135,7 @@ contains
             '","active_generation":"'//trim(event%active_generation)// &
             '","candidate_generation":"'//trim(event%candidate_generation)// &
             '","previous_generation":"'//trim(event%previous_generation)// &
+            '","diagnostic":"'//trim(json_escape_string(trim(event%diagnostic)))// &
             '","phase":"'//trim(event%phase)//'","health":"'// &
             trim(event%health)//'","dirty":'//trim(json_bool(event%dirty))// &
             ',"local_gate_green":'//trim(json_bool(event%local_gate_green))// &
@@ -445,6 +447,7 @@ contains
         call extract_event_field(json, 'active_generation', event%active_generation)
         call extract_event_field(json, 'candidate_generation', event%candidate_generation)
         call extract_event_field(json, 'previous_generation', event%previous_generation)
+        call extract_event_field(json, 'diagnostic', event%diagnostic)
         call extract_event_field(json, 'phase', event%phase)
         call extract_event_field(json, 'health', event%health)
         call extract_event_field(json, 'verification_level', event%verification_level)
@@ -497,7 +500,7 @@ contains
 
     function event_facts(event) result(facts)
         type(gremlin_lifecycle_event_t), intent(in) :: event
-        character(len=4096) :: facts
+        character(len=8192) :: facts
 
         facts = trim(event%event_type)//'|'//trim(event%generation)//'|'// &
             trim(event%active_generation)//'|'//trim(event%candidate_generation)//'|'// &
@@ -510,7 +513,8 @@ contains
             int_text(event%full_required)//'|'//int_text(event%full_passed)//'|'// &
             int_text(event%full_failures)//'|'//int_text(event%epoch)//'|'// &
             int_text(event%epoch_cursor)//'|'//int_text(event%event_epoch)//'|'// &
-            event%requirement_digest//'|'//event%gate_token
+            event%requirement_digest//'|'//event%gate_token//'|'// &
+            trim(event%diagnostic)
     end function event_facts
 
     logical function valid_event_type(value)
