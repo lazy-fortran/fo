@@ -3,13 +3,15 @@ module fo_build_backend
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_mkdir_excl, fs_sleep_ms, &
         fs_pid_alive
     use fo_process, only: process_detect_nproc, process_getpid, &
-        process_getcwd, process_run_argv_logged, argv_push, argv_push_split
+        process_getcwd, process_run_argv_logged, argv_push
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names, gfortran_run_tests
-    use fo_compiler_flags, only: append_array_temporary_warning_flag
     use fo_test_budget, only: test_timeout_seconds, test_wall_cap_seconds
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         selected_compiler_command
+    use fo_cmake_context, only: cmake_context_t, cmake_context_init, &
+        cmake_context_query, cmake_context_read_reply, &
+        cmake_context_build_path, cmake_context_validate_hint
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
@@ -26,6 +28,7 @@ module fo_build_backend
     type :: backend_t
         integer :: kind = BACKEND_NONE
         character(len=512) :: project_dir = '.'
+        type(cmake_context_t) :: cmake
     end type backend_t
 
 contains
@@ -54,6 +57,7 @@ contains
                 trim(current)//'/CMakeLists.txt')
             if (force_cmake .and. has_cmake) then
                 b%kind = BACKEND_CMAKE
+                call cmake_context_init(b%cmake, trim(current))
                 return
             else if (force_fpm .and. has_fpm) then
                 b%kind = BACKEND_NATIVE
@@ -61,12 +65,14 @@ contains
             else if (.not. force_cmake .and. .not. force_fpm .and. &
                     has_fpm .and. has_cmake_tests) then
                 b%kind = BACKEND_CMAKE
+                call cmake_context_init(b%cmake, trim(current))
                 return
             else if (.not. force_cmake .and. .not. force_fpm .and. has_fpm) then
                 b%kind = BACKEND_NATIVE
                 return
             else if (.not. force_cmake .and. .not. force_fpm .and. has_cmake) then
                 b%kind = BACKEND_CMAKE
+                call cmake_context_init(b%cmake, trim(current))
                 return
             end if
 
@@ -182,7 +188,7 @@ contains
     end function detect_jobs
 
     subroutine backend_build(self, exitcode, flags, log_file, with_tests, use_cache)
-        type(backend_t), intent(in) :: self
+        type(backend_t), intent(inout) :: self
         integer, intent(out) :: exitcode
         character(len=*), intent(in), optional :: flags
         character(len=*), intent(in), optional :: log_file
@@ -232,7 +238,7 @@ contains
                     flags=flag_text, use_cache=use_cache)
             end if
         case (BACKEND_CMAKE)
-            call cmake_build(self%project_dir, flag_text, log_path, exitcode)
+            call cmake_build(self%cmake, flag_text, log_path, exitcode)
         end select
 
         call release_project_lock(lock_dir)
@@ -253,7 +259,7 @@ contains
     end function profile_flags
 
     subroutine backend_test(self, exitcode, include_slow, log_file, flags, use_cache)
-        type(backend_t), intent(in) :: self
+        type(backend_t), intent(inout) :: self
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
         character(len=*), intent(in), optional :: log_file
@@ -290,7 +296,7 @@ contains
                 include_slow=slow, flags=flag_text, build_only=.true., &
                 use_cache=use_cache)
         case (BACKEND_CMAKE)
-            call cmake_build(self%project_dir, flag_text, log_path, exitcode)
+            call cmake_build(self%cmake, flag_text, log_path, exitcode)
         end select
 
         call release_project_lock(lock_dir)
@@ -301,7 +307,7 @@ contains
                 call gfortran_run_tests(self%project_dir, log_path, exitcode, &
                     slow, no_names, 0, flags=flag_text)
             case (BACKEND_CMAKE)
-                call cmake_test(self%project_dir, '', slow, log_path, exitcode)
+                call cmake_test(self%cmake, '', slow, log_path, exitcode)
             end select
         end if
         if (exitcode == 124) then
@@ -315,7 +321,7 @@ contains
     subroutine backend_test_names(self, names, n_names, exitcode, include_slow, &
             log_file, flags, use_cache)
         use fo_scan, only: is_slow_test
-        type(backend_t), intent(in) :: self
+        type(backend_t), intent(inout) :: self
         character(len=128), intent(in) :: names(:)
         integer, intent(in) :: n_names
         integer, intent(out) :: exitcode
@@ -366,7 +372,7 @@ contains
                 log_path, exitcode, include_slow=slow, flags=flag_text, &
                 use_cache=use_cache, build_only=.true.)
         case (BACKEND_CMAKE)
-            call cmake_build(self%project_dir, flag_text, log_path, exitcode)
+            call cmake_build(self%cmake, flag_text, log_path, exitcode)
         end select
         call release_project_lock(lock_dir)
         if (exitcode /= 0) return
@@ -377,13 +383,13 @@ contains
                 fast_names, n_fast, flags=flag_text)
         case (BACKEND_CMAKE)
             call names_to_ctest_regex(fast_names, n_fast, regex)
-            call cmake_test(self%project_dir, regex, slow, log_path, exitcode)
+            call cmake_test(self%cmake, regex, slow, log_path, exitcode)
         end select
     end subroutine backend_test_names
 
     subroutine backend_test_affected(self, names, n_names, exitcode, &
             include_slow, log_file, flags, use_cache)
-        type(backend_t), intent(in) :: self
+        type(backend_t), intent(inout) :: self
         character(len=128), intent(in) :: names(:)
         integer, intent(in) :: n_names
         integer, intent(out) :: exitcode
@@ -401,52 +407,121 @@ contains
         end if
     end subroutine backend_test_affected
 
-    subroutine cmake_build(project_dir, flags, log_file, exitcode)
-        character(len=*), intent(in) :: project_dir, flags, log_file
+    subroutine cmake_build(context, flags, log_file, exitcode)
+        type(cmake_context_t), intent(inout) :: context
+        character(len=*), intent(in) :: flags, log_file
         integer, intent(out) :: exitcode
 
-        character(len=:), allocatable :: packed
+        character(len=:), allocatable :: packed, cache_file
         character(len=32) :: jobs_text
-        character(len=512) :: compiler, extra_args
-        character(len=1024) :: effective_flags
-        integer :: n_args
+        logical :: has_cache, hint_valid
+        integer :: n_args, i
+
+        if (.not. context%valid) then
+            write (error_unit, '(a,a)') 'fo: invalid CMake context: ', &
+                context%error
+            exitcode = 1
+            return
+        end if
+        if (len_trim(context%configure_preset) > 0 .and. &
+                .not. context%build_root_hint .and. &
+                len_trim(context%build_preset) == 0) then
+            write (error_unit, '(a)') &
+                'fo: configure preset build root is unknown; supply '// &
+                'FO_CMAKE_BUILD_DIR as a locator hint or select a build preset'
+            exitcode = 1
+            return
+        end if
 
         write (jobs_text, '(i0)') detect_jobs()
-        compiler = trim(selected_compiler_command())
-        effective_flags = flags
-        call append_array_temporary_warning_flag(compiler, effective_flags)
+        if (len_trim(context%configure_preset) == 0 .or. &
+                context%build_root_hint) &
+            call cmake_context_query(context)
+        cache_file = cmake_context_build_path(context)//'/CMakeCache.txt'
+        inquire (file=cache_file, exist=has_cache)
 
         n_args = 0
         call argv_push(packed, n_args, 'cmake')
-        call argv_push(packed, n_args, '-S')
-        call argv_push(packed, n_args, '.')
-        call argv_push(packed, n_args, '-B')
-        call argv_push(packed, n_args, 'build')
-        call argv_push(packed, n_args, '-G')
-        call argv_push(packed, n_args, 'Ninja')
-        call argv_push(packed, n_args, '-DCMAKE_Fortran_COMPILER='//trim(compiler))
-        if (len_trim(effective_flags) > 0) call argv_push(packed, n_args, &
-            '-DCMAKE_Fortran_FLAGS='//trim(effective_flags))
-        extra_args = ''
-        call get_environment_variable('FO_CMAKE_ARGS', extra_args)
-        call argv_push_split(packed, n_args, extra_args)
-        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
-            .false., environment_timeout('FO_BUILD_TIMEOUT', 300), exitcode)
+        if (len_trim(context%configure_preset) > 0) then
+            call argv_push(packed, n_args, '--preset')
+            call argv_push(packed, n_args, context%configure_preset)
+        else
+            call argv_push(packed, n_args, '-S')
+            call argv_push(packed, n_args, context%source_root)
+            call argv_push(packed, n_args, '-B')
+            call argv_push(packed, n_args, context%build_root)
+            if (len_trim(context%generator) > 0) then
+                call argv_push(packed, n_args, '-G')
+                call argv_push(packed, n_args, context%generator)
+            else if (.not. has_cache) then
+                call argv_push(packed, n_args, '-G')
+                call argv_push(packed, n_args, 'Ninja')
+            end if
+        end if
+        if (len_trim(context%configuration) > 0 .and. &
+                .not. context%multi_config .and. &
+                .not. generator_is_multi(context)) then
+            call argv_push(packed, n_args, &
+                '-DCMAKE_BUILD_TYPE='//context%configuration)
+        end if
+        if (len_trim(flags) > 0) call argv_push(packed, n_args, &
+            '-DCMAKE_Fortran_FLAGS='//trim(flags))
+        if (allocated(context%extra_args)) then
+            do i = 1, size(context%extra_args)
+                call argv_push(packed, n_args, context%extra_args(i))
+            end do
+        end if
+        call process_run_argv_logged(context%source_root, packed, n_args, &
+            log_file, .false., environment_timeout('FO_BUILD_TIMEOUT', 300), &
+            exitcode)
         if (exitcode /= 0) return
+        if (len_trim(context%configure_preset) > 0) then
+            if (context%build_root_hint) then
+                call cmake_context_read_reply(context)
+                call cmake_context_validate_hint(context, hint_valid)
+                if (.not. hint_valid) then
+                    write (error_unit, '(a,a)') &
+                        'fo: invalid CMake preset build-root hint: ', &
+                        context%error
+                    exitcode = 1
+                    return
+                end if
+            end if
+        else
+            call cmake_context_read_reply(context)
+        end if
 
         deallocate (packed)
         n_args = 0
         call argv_push(packed, n_args, 'cmake')
         call argv_push(packed, n_args, '--build')
-        call argv_push(packed, n_args, 'build')
+        if (len_trim(context%build_preset) > 0) then
+            call argv_push(packed, n_args, '--preset')
+            call argv_push(packed, n_args, context%build_preset)
+        else
+            if (len_trim(context%configure_preset) > 0 .and. &
+                    .not. context%build_root_hint) then
+                write (error_unit, '(a)') &
+                    'fo: CMake build needs a preset or build-root hint'
+                exitcode = 1
+                return
+            end if
+            call argv_push(packed, n_args, context%build_root)
+        end if
+        if (len_trim(context%configuration) > 0) then
+            call argv_push(packed, n_args, '--config')
+            call argv_push(packed, n_args, context%configuration)
+        end if
         call argv_push(packed, n_args, '-j')
         call argv_push(packed, n_args, jobs_text)
-        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
-            .true., environment_timeout('FO_BUILD_TIMEOUT', 300), exitcode)
+        call process_run_argv_logged(context%source_root, packed, n_args, &
+            log_file, .true., environment_timeout('FO_BUILD_TIMEOUT', 300), &
+            exitcode)
     end subroutine cmake_build
 
-    subroutine cmake_test(project_dir, regex, include_slow, log_file, exitcode)
-        character(len=*), intent(in) :: project_dir, regex, log_file
+    subroutine cmake_test(context, regex, include_slow, log_file, exitcode)
+        type(cmake_context_t), intent(in) :: context
+        character(len=*), intent(in) :: regex, log_file
         logical, intent(in) :: include_slow
         integer, intent(out) :: exitcode
 
@@ -455,7 +530,18 @@ contains
         logical :: has_tests
         integer :: n_args
 
-        inquire (file=trim(project_dir)//'/build/CTestTestfile.cmake', &
+        if (len_trim(context%configure_preset) > 0 .and. &
+                .not. context%build_root_hint .and. &
+                len_trim(context%test_preset) == 0) then
+            write (error_unit, '(a)') &
+                'fo: CTest root for configure preset is unknown; supply '// &
+                'FO_CMAKE_BUILD_DIR as a locator hint or select a test preset'
+            exitcode = 1
+            return
+        end if
+        has_tests = len_trim(context%test_preset) > 0
+        if (.not. has_tests) inquire ( &
+            file=cmake_context_build_path(context)//'/CTestTestfile.cmake', &
             exist=has_tests)
         if (.not. has_tests) then
             exitcode = 0
@@ -465,8 +551,17 @@ contains
         write (jobs_text, '(i0)') detect_jobs()
         n_args = 0
         call argv_push(packed, n_args, 'ctest')
-        call argv_push(packed, n_args, '--test-dir')
-        call argv_push(packed, n_args, 'build')
+        if (len_trim(context%test_preset) > 0) then
+            call argv_push(packed, n_args, '--preset')
+            call argv_push(packed, n_args, context%test_preset)
+        else
+            call argv_push(packed, n_args, '--test-dir')
+            call argv_push(packed, n_args, context%build_root)
+        end if
+        if (len_trim(context%configuration) > 0) then
+            call argv_push(packed, n_args, '-C')
+            call argv_push(packed, n_args, context%configuration)
+        end if
         call argv_push(packed, n_args, '--output-on-failure')
         call argv_push(packed, n_args, '--no-tests=error')
         call argv_push(packed, n_args, '-j')
@@ -490,9 +585,44 @@ contains
             test_wall_cap_seconds(budget=test_timeout_seconds())
         call argv_push(packed, n_args, '--timeout')
         call argv_push(packed, n_args, timeout_text)
-        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
+        call process_run_argv_logged(context%source_root, packed, n_args, log_file, &
             .false., 86400, exitcode)
     end subroutine cmake_test
+
+    logical function generator_is_multi(context) result(is_multi)
+        type(cmake_context_t), intent(in) :: context
+        character(len=512) :: generator, cache_file, line
+        integer :: unit, ios
+
+        generator = context%generator
+        if (len_trim(context%reported_generator) > 0) &
+            generator = context%reported_generator
+        if (index(generator, 'Visual Studio') == 1 .or. &
+                trim(generator) == 'Xcode' .or. &
+                trim(generator) == 'Ninja Multi-Config') then
+            is_multi = .true.
+            return
+        end if
+        cache_file = trim(context%source_root)//'/'//trim(context%build_root)// &
+            '/CMakeCache.txt'
+        open (newunit=unit, file=trim(cache_file), status='old', action='read', &
+            iostat=ios)
+        if (ios == 0) then
+            do
+                read (unit, '(a)', iostat=ios) line
+                if (ios /= 0) exit
+                if (index(line, 'CMAKE_GENERATOR:INTERNAL=') == 1) then
+                    is_multi = index(line, 'Visual Studio') > 0 .or. &
+                        index(line, 'Xcode') > 0 .or. &
+                        index(line, 'Ninja Multi-Config') > 0
+                    close (unit)
+                    return
+                end if
+            end do
+            close (unit)
+        end if
+        is_multi = .false.
+    end function generator_is_multi
 
     integer function environment_timeout(name, fallback) result(timeout)
         character(len=*), intent(in) :: name
