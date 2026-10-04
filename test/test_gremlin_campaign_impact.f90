@@ -11,15 +11,17 @@ program test_gremlin_campaign_impact
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state
-    character(:), allocatable :: marker, sentinel, lane, session, baseline, candidate
+    character(:), allocatable :: marker, sentinel, replaced_sentinel, selector_sentinel
+    character(:), allocatable :: lane, session, baseline, candidate, later
     character(:), allocatable :: marker_text
     character(len=32), parameter :: regression_case = 'test_regression'
+    character(len=32), parameter :: replaced_case = 'test_replaced_oracle'
     character(len=32), parameter :: affected_case = 'test_affected'
     character(len=32), parameter :: slow_affected_case = 'test_slow_affected'
     character(len=32), parameter :: background_case = 'test_background'
     type(process_result_t) :: process
     type(json_value_t) :: response, events, event
-    integer :: attempt, baseline_count, candidate_count
+    integer :: attempt, baseline_count, candidate_count, later_count
     integer :: regression_order, affected_order, regression_seed, affected_seed
     logical :: found
 
@@ -36,10 +38,13 @@ program test_gremlin_campaign_impact
     call make_directory(project//'/test')
     marker = scratch//'/case-markers.log'
     sentinel = scratch//'/regression-seen'
+    replaced_sentinel = scratch//'/replaced-oracle-seen'
+    selector_sentinel = scratch//'/selector-miss'
     lane = 'campaign-impact-oracle'
     call write_text(project//'/fpm.toml', &
         'name = "gremlin_campaign_impact_probe"'//new_line('a'))
     call write_shared_value(1)
+    call write_unrelated_value(1)
     call write_probe_cases()
     call start_campaign(session)
 
@@ -50,10 +55,10 @@ program test_gremlin_campaign_impact
         call read_events(response)
         events = json_member(response, 'events')
         call count_generation_receipts(events, '', baseline, baseline_count, found)
-        if (found .and. baseline_count >= 4) exit
+        if (found .and. baseline_count >= 5) exit
         call gremlin_wait_ms(50)
     end do
-    call assert_true(found .and. baseline_count == 4, &
+    call assert_true(found .and. baseline_count == 5, &
         'the baseline generation executes each public fixture case')
     if (.not. found .or. baseline_count < 4) then
         call gremlin_stop_lane(driver, project, cache, state, lane, session)
@@ -63,6 +68,7 @@ program test_gremlin_campaign_impact
     call assert_receipt(events, baseline, regression_case, 'FAIL', &
         'the initial regression is observed as a real failing execution')
 
+    call rewrite_replaced_oracle()
     call write_shared_value(2)
     candidate = ''
     candidate_count = 0
@@ -72,10 +78,10 @@ program test_gremlin_campaign_impact
         events = json_member(response, 'events')
         call count_generation_receipts(events, baseline, candidate, &
             candidate_count, found)
-        if (found .and. candidate_count >= 3) exit
+        if (found .and. candidate_count >= 5) exit
         call gremlin_wait_ms(50)
     end do
-    call assert_true(found .and. candidate_count == 4, &
+    call assert_true(found .and. candidate_count == 5, &
         'the candidate executes its pending failure, affected case, and finite background case')
     if (.not. found .or. candidate_count < 4) then
         call gremlin_stop_lane(driver, project, cache, state, lane, session)
@@ -85,12 +91,26 @@ program test_gremlin_campaign_impact
     events = json_member(response, 'events')
     call assert_receipt(events, candidate, regression_case, 'PASS', &
         'the old failure is rerun and passes in the candidate generation')
+    call assert_receipt(events, candidate, replaced_case, 'PASS', &
+        'the changed oracle is executed and passes in the candidate generation')
     call assert_receipt(events, candidate, affected_case, 'PASS', &
         'the test depending on the changed module executes and passes')
     call assert_receipt(events, candidate, slow_affected_case, 'PASS', &
         'the slow affected test remains a required campaign case')
     call assert_receipt(events, candidate, background_case, 'PASS', &
         'the existing finite background queue still executes a case')
+    call assert_equal_string(receipt_field(events, baseline, regression_case, &
+        'oracle_identity'), receipt_field(events, candidate, regression_case, &
+        'oracle_identity'), 'an unchanged oracle keeps a compatible identity')
+    call assert_equal_string(receipt_field(events, candidate, regression_case, &
+        'resolves_completion_id'), receipt_field(events, baseline, regression_case, &
+        'completion_id'), 'a current compatible pass links to the old failure')
+    call assert_equal_string(receipt_field(events, candidate, replaced_case, &
+        'resolves_completion_id'), '', &
+        'a changed oracle does not claim to resolve the old failure')
+    call assert_true(receipt_field(events, baseline, replaced_case, &
+        'oracle_identity') /= receipt_field(events, candidate, replaced_case, &
+        'oracle_identity'), 'a replaced oracle receives a distinct identity')
     regression_order = receipt_index(events, candidate, regression_case)
     affected_order = receipt_index(events, candidate, affected_case)
     call assert_true(regression_order > 0 .and. affected_order > regression_order, &
@@ -103,10 +123,50 @@ program test_gremlin_campaign_impact
 
     marker_text = read_text(marker)
     call assert_true(index(marker_text, trim(regression_case)) > 0 .and. &
+        index(marker_text, trim(replaced_case)) > 0 .and. &
         index(marker_text, trim(affected_case)) > 0 .and. &
         index(marker_text, trim(slow_affected_case)) > 0 .and. &
         index(marker_text, trim(background_case)) > 0, &
         'case markers confirm that executables ran and emitted output')
+
+    call write_text(selector_sentinel, 'selector miss fixture'//new_line('a'))
+    call write_unrelated_value(2)
+    later = ''
+    later_count = 0
+    found = .false.
+    do attempt = 1, 1200
+        call read_events(response)
+        events = json_member(response, 'events')
+        call count_generation_receipts(events, baseline, later, later_count, found, &
+            candidate)
+        if (found .and. later_count >= 5) exit
+        call gremlin_wait_ms(50)
+    end do
+    call assert_true(found .and. later_count == 5, &
+        'the unrelated next generation keeps finite background execution')
+    if (.not. found .or. later_count < 5) then
+        call gremlin_stop_lane(driver, project, cache, state, lane, session)
+        call finish_assertions()
+    end if
+    events = json_member(response, 'events')
+    call assert_receipt(events, later, replaced_case, 'PASS', &
+        'a pass from an incompatible replacement does not clear the old reproducer')
+    call assert_receipt(events, later, background_case, 'FAIL', &
+        'an out-of-set background failure remains a factual failure observation')
+    call assert_equal_string(receipt_field(events, later, replaced_case, &
+        'gate_required'), 'false', &
+        'an incompatible historical oracle no longer blocks the current gate')
+    call assert_equal_string(receipt_field(events, later, replaced_case, &
+        'resolves_completion_id'), '', &
+        'an incompatible historical oracle is not reported as repaired')
+    call assert_equal_string(receipt_field(events, later, background_case, &
+        'impact_triage'), 'suspected_selector_miss', &
+        'out-of-set failure is reported as a suspected selector miss')
+    call assert_equal_string(receipt_field(events, later, background_case, &
+        'gate_required'), 'false', 'the suspected miss was outside the frozen gate')
+    call assert_equal_string(receipt_field(events, later, regression_case, &
+        'gate_required'), 'false', &
+        'a current pass with a compatible oracle resolved its old failure')
     call gremlin_stop_lane(driver, project, cache, state, lane, session)
     call finish_assertions()
 
@@ -122,8 +182,6 @@ contains
         call list_add(arguments, project)
         call list_add(arguments, '--lane')
         call list_add(arguments, lane)
-        call list_add(arguments, '--target')
-        call list_add(arguments, trim(regression_case))
         call list_add(arguments, '--random-count')
         call list_add(arguments, '1')
         call list_add(arguments, '--seed')
@@ -166,12 +224,13 @@ contains
     end subroutine read_events
 
     subroutine count_generation_receipts(records, excluded_generation, &
-            generation, count, generation_found)
+            generation, count, generation_found, excluded_generation2)
         type(json_value_t), intent(in) :: records
         character(len=*), intent(in) :: excluded_generation
         character(:), allocatable, intent(inout) :: generation
         integer, intent(out) :: count
         logical, intent(out) :: generation_found
+        character(len=*), intent(in), optional :: excluded_generation2
         character(:), allocatable :: event_generation, case_id
         integer :: i
 
@@ -185,11 +244,17 @@ contains
                 event_generation = gremlin_field(event, 'generation')
                 if (len(event_generation) /= 64 .or. &
                         event_generation == excluded_generation) cycle
+                if (present(excluded_generation2)) then
+                    if (event_generation == excluded_generation2) cycle
+                end if
                 generation = event_generation
                 exit
             end do
         end if
         if (len(generation) /= 64 .or. generation == excluded_generation) return
+        if (present(excluded_generation2)) then
+            if (generation == excluded_generation2) return
+        end if
         generation_found = .true.
         do i = 1, json_size(records)
             event = json_element(records, i)
@@ -217,6 +282,22 @@ contains
         end do
         call assert_true(.false., message)
     end subroutine assert_receipt
+
+    function receipt_field(records, generation, case_id, field_name) result(value)
+        type(json_value_t), intent(in) :: records
+        character(len=*), intent(in) :: generation, case_id, field_name
+        character(:), allocatable :: value
+        integer :: i
+
+        value = ''
+        do i = 1, json_size(records)
+            event = json_element(records, i)
+            if (gremlin_field(event, 'generation') /= generation) cycle
+            if (gremlin_field(event, 'case_id') /= case_id) cycle
+            value = gremlin_field(event, field_name)
+            return
+        end do
+    end function receipt_field
 
     integer function receipt_index(records, generation, case_id)
         type(json_value_t), intent(in) :: records
@@ -255,8 +336,9 @@ contains
     logical function is_fixture_case(case_id)
         character(len=*), intent(in) :: case_id
 
-        is_fixture_case = case_id == regression_case .or. &
-            case_id == affected_case .or. case_id == slow_affected_case .or. &
+    is_fixture_case = case_id == regression_case .or. &
+        case_id == replaced_case .or. &
+        case_id == affected_case .or. case_id == slow_affected_case .or. &
             case_id == background_case
     end function is_fixture_case
 
@@ -272,9 +354,10 @@ contains
     end subroutine write_shared_value
 
     subroutine write_probe_cases()
-        character(:), allocatable :: regression, affected, slow_affected, background
+        character(:), allocatable :: regression, replaced, affected, slow_affected
+        character(:), allocatable :: background
         character(:), allocatable :: regression_body, affected_body, slow_body
-        character(:), allocatable :: background_body
+        character(:), allocatable :: background_body, replaced_body
 
         regression_body = 'integer :: unit, rc, ios'//new_line('a')// &
             'logical :: exists'//new_line('a')// &
@@ -289,6 +372,20 @@ contains
             ',status="new",iostat=ios)'//new_line('a')// &
             '  if (ios == 0) then'//new_line('a')// &
             '    close(unit)'//new_line('a')//'    error stop 9'//new_line('a')// &
+            '  end if'//new_line('a')//'end if'
+        replaced_body = 'integer :: unit, rc, ios'//new_line('a')// &
+            'logical :: exists'//new_line('a')// &
+            'open(newunit=unit,file='//fortran_quote(marker)// &
+            ',status="unknown",position="append")'//new_line('a')// &
+            'write(unit,"(a)") "'//trim(replaced_case)//'"'//new_line('a')// &
+            'close(unit)'//new_line('a')// &
+            'rc = test_sleep(1500000_c_int)'//new_line('a')// &
+            'inquire(file='//fortran_quote(replaced_sentinel)//',exist=exists)'// &
+            new_line('a')//'if (.not. exists) then'//new_line('a')// &
+            '  open(newunit=unit,file='//fortran_quote(replaced_sentinel)// &
+            ',status="new",iostat=ios)'//new_line('a')// &
+            '  if (ios == 0) then'//new_line('a')// &
+            '    close(unit)'//new_line('a')//'    error stop 10'//new_line('a')// &
             '  end if'//new_line('a')//'end if'
         affected_body = 'integer :: unit, rc'//new_line('a')// &
             'open(newunit=unit,file='//fortran_quote(marker)// &
@@ -305,22 +402,51 @@ contains
             'rc = test_sleep(1500000_c_int)'//new_line('a')// &
             'if (shared_value < 1) error stop 8'
         background_body = 'integer :: unit, rc'//new_line('a')// &
+            'logical :: exists'//new_line('a')// &
             'open(newunit=unit,file='//fortran_quote(marker)// &
             ',status="unknown",position="append")'//new_line('a')// &
             'write(unit,"(a)") "'//trim(background_case)//'"'//new_line('a')// &
             'close(unit)'//new_line('a')// &
-            'rc = test_sleep(1500000_c_int)'
+            'rc = test_sleep(1500000_c_int)'//new_line('a')// &
+            'inquire(file='//fortran_quote(selector_sentinel)//',exist=exists)'// &
+            new_line('a')//'if (exists) error stop 11'
         regression = test_source(regression_case, regression_body)
+        replaced = test_source(replaced_case, replaced_body)
         affected = test_source(affected_case, affected_body, &
             'use shared_mod, only: shared_value'//new_line('a'))
         slow_affected = test_source(slow_affected_case, slow_body, &
             'use shared_mod, only: shared_value'//new_line('a'))
         background = test_source(background_case, background_body)
         call write_text(project//'/test/'//trim(regression_case)//'.f90', regression)
+        call write_text(project//'/test/'//trim(replaced_case)//'.f90', replaced)
         call write_text(project//'/test/'//trim(affected_case)//'.f90', affected)
         call write_text(project//'/test/'//trim(slow_affected_case)//'.f90', slow_affected)
         call write_text(project//'/test/'//trim(background_case)//'.f90', background)
     end subroutine write_probe_cases
+
+    subroutine rewrite_replaced_oracle()
+        character(:), allocatable :: body
+
+        body = 'integer :: unit, rc'//new_line('a')// &
+            'open(newunit=unit,file='//fortran_quote(marker)// &
+            ',status="unknown",position="append")'//new_line('a')// &
+            'write(unit,"(a)") "'//trim(replaced_case)//'"'//new_line('a')// &
+            'close(unit)'//new_line('a')//'rc = test_sleep(1500000_c_int)'
+        call write_text(project//'/test/'//trim(replaced_case)//'.f90', &
+            test_source(replaced_case, body))
+    end subroutine rewrite_replaced_oracle
+
+    subroutine write_unrelated_value(value)
+        integer, intent(in) :: value
+        character(:), allocatable :: source
+        character(len=16) :: number
+
+        write(number, '(i0)') value
+        source = 'module unrelated_mod'//new_line('a')// &
+            '  implicit none'//new_line('a')//'  integer, parameter :: value = '// &
+            trim(number)//new_line('a')//'end module unrelated_mod'//new_line('a')
+        call write_text(project//'/src/unrelated_mod.f90', source)
+    end subroutine write_unrelated_value
 
     function test_source(name, body, extra_use) result(source)
         character(len=*), intent(in) :: name, body

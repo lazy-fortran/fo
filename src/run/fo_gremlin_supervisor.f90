@@ -1879,6 +1879,9 @@ contains
         request%has_previous_generation = was_active
         request%requirement_digest = ''
         request%gate_cases = ''
+        request%oracle_case_names = ''
+        request%oracle_case_identities = ''
+        request%oracle_case_count = 0
         call clear_campaign_impact(request)
         active = candidate
         have_active = .true.
@@ -1907,6 +1910,7 @@ contains
         request%requirement_digest = selection_request%requirement_digest
         request%gate_cases = selection_request%gate_cases
         request%gate_required_count = selection_request%gate_required_count
+        call copy_campaign_oracles(request, selection_request)
         call copy_campaign_impact(request, selection_request)
         if (inventory_status /= 0) then
             state_name = 'inventory_failed'
@@ -1968,6 +1972,8 @@ contains
         character(len=MAX_PATH) :: filenames(MAX_NODES)
         character(len=NAME_LEN) :: all_names(MAX_NODES), impacted(MAX_NODES)
         character(len=NAME_LEN) :: history(MAX_NODES), debt(MAX_NODES)
+        character(len=HASH_LEN) :: history_identity(MAX_NODES)
+        character(len=HASH_LEN) :: history_generation(MAX_NODES)
         character(len=NAME_LEN) :: priorities(MAX_NODES)
         type(coverage_epoch_t) :: coverage
         character(len=PATH_LEN) :: coverage_path
@@ -2035,15 +2041,16 @@ contains
             call append_priority_names(request%gate_cases, &
                 request%gate_required_count, priorities, n_priorities)
         else
-            n_history = 0
-            ! Historical failures stay pending until a newer PASS or a fresh
-            ! candidate receipt resolves them; they are not current failures.
-            call read_campaign_history(session, all_names, n_all, history, n_history, &
-                debt, n_debt, cursor_seed, ierr, message)
-            if (ierr /= 0) return
             empty_inventory = input_inventory_t()
             call campaign_impact_cases(project_dir, dag, filenames, all_names, &
-                n_all, impact_cases, n_impact_cases, ierr, message)
+                n_all, impact_cases, n_impact_cases, ierr, message, candidate_input)
+            if (ierr /= 0) return
+            n_history = 0
+            ! Only a later-generation PASS for the same oracle identity clears
+            ! history. Old names without compatible identity stay pending.
+            call read_campaign_history(session, all_names, n_all, history, n_history, &
+                history_identity, history_generation, impact_cases(:n_impact_cases), &
+                debt, n_debt, cursor_seed, ierr, message)
             if (ierr /= 0) return
             if (present(baseline_input) .and. present(candidate_input)) then
                 call test_impact_select(baseline_input, candidate_input, dag, &
@@ -2070,6 +2077,8 @@ contains
             call freeze_campaign_requirements(request, priorities, n_priorities, &
                 baseline_generation, generation_id, impact, baseline_input, &
                 candidate_input)
+            call freeze_campaign_oracles(request, all_names, n_all, &
+                impact_cases(:n_impact_cases))
         end if
         do i = 1, n_priorities
             if (.not. any(all_names(:n_all) == priorities(i))) then
@@ -2139,7 +2148,7 @@ contains
     end subroutine discover_campaign
 
     subroutine campaign_impact_cases(project_dir, dag, filenames, names, n_names, &
-            cases, n_cases, ierr, message)
+            cases, n_cases, ierr, message, candidate_input)
         character(len=*), intent(in) :: project_dir
         type(dag_t), intent(in) :: dag
         character(len=MAX_PATH), intent(in) :: filenames(:)
@@ -2148,6 +2157,7 @@ contains
         type(test_impact_case_t), intent(out) :: cases(:)
         integer, intent(out) :: n_cases, ierr
         character(len=*), intent(out) :: message
+        type(input_inventory_t), intent(in), optional :: candidate_input
 
         type(fpm_config_t), allocatable :: config
         type(scan_unit_t), allocatable :: units(:)
@@ -2186,6 +2196,11 @@ contains
                     units(j)%filename)
                 if (trim(source_name) /= trim(names(i))) cycle
                 matches = matches + 1
+                if (present(candidate_input)) then
+                    call case_oracle_identity(candidate_input, units(j)%filename, &
+                        trim(names(i)), cases(i)%identity, found)
+                    if (.not. found) cases(i)%dependency_complete = .false.
+                end if
                 do k = 1, dag%n_nodes
                     if (trim(filenames(k)) /= trim(units(j)%filename)) cycle
                     cases(i)%node_id = k
@@ -2195,10 +2210,143 @@ contains
             if (matches /= 1 .or. cases(i)%node_id == 0) then
                 cases(i)%dependency_complete = .false.
             end if
+            if (len_trim(cases(i)%identity) == 0) then
+                cases(i)%identity = 'test-oracle:'//trim(names(i))
+                cases(i)%dependency_complete = .false.
+            end if
         end do
         n_cases = n_names
         ierr = 0
     end subroutine campaign_impact_cases
+
+    subroutine case_oracle_identity(inventory, source_path, case_name, identity, found)
+        type(input_inventory_t), intent(in) :: inventory
+        character(len=*), intent(in) :: source_path, case_name
+        character(len=*), intent(out) :: identity
+        logical, intent(out) :: found
+
+        character(len=8192), allocatable :: parts(:)
+        character(len=PATH_LEN) :: entry_path
+        integer :: i, root, n_parts
+        logical :: source_found
+
+        identity = ''
+        found = .false.
+        if (.not. inventory%complete) return
+        if (.not. allocated(inventory%entries)) return
+        if (.not. allocated(inventory%roots)) return
+        allocate(parts(inventory%entry_count + 1))
+        parts = ''
+        parts(1) = 'fo-gremlin-oracle-v1:fo-test-json:'//trim(case_name)// &
+            ':slow='//trim(json_bool(is_slow_test(trim(case_name))))
+        source_found = .false.
+        n_parts = 1
+        do i = 1, inventory%entry_count
+            root = inventory_root_index(inventory, inventory%entries(i)%root_alias)
+            if (root == 0) cycle
+            entry_path = trim(inventory%roots(root)%physical_path)//'/'// &
+                trim(inventory%entries(i)%relative_path)
+            if (trim(entry_path) == trim(source_path) .and. &
+                    (trim(inventory%entries(i)%role) == 'test-oracle' .or. &
+                    trim(inventory%entries(i)%role) == 'test-main')) then
+                source_found = .true.
+                n_parts = n_parts + 1
+                parts(n_parts) = 'case-source:'//trim(inventory%entries(i)%relative_path)// &
+                    ':'//trim(inventory%entries(i)%content_digest)
+            else if (case_harness_role(trim(inventory%entries(i)%role))) then
+                n_parts = n_parts + 1
+                parts(n_parts) = 'shared-oracle:'//trim(inventory%entries(i)%role)//':'// &
+                    trim(inventory%entries(i)%relative_path)//':'// &
+                    trim(inventory%entries(i)%content_digest)
+            end if
+        end do
+        if (.not. source_found) return
+        identity = cache_digest(parts(:n_parts), n_parts)
+        found = len_trim(identity) == HASH_LEN
+    end subroutine case_oracle_identity
+
+    integer function inventory_root_index(inventory, alias) result(index_root)
+        type(input_inventory_t), intent(in) :: inventory
+        character(len=*), intent(in) :: alias
+        integer :: i, j
+
+        index_root = 0
+        if (.not. allocated(inventory%roots)) return
+        do i = 1, inventory%root_count
+            if (trim(inventory%roots(i)%canonical_alias) == trim(alias)) then
+                index_root = i
+                return
+            end if
+            do j = 1, inventory%roots(i)%alias_count
+                if (trim(inventory%roots(i)%aliases(j)) /= trim(alias)) cycle
+                index_root = i
+                return
+            end do
+        end do
+    end function inventory_root_index
+
+    logical function case_harness_role(role) result(is_harness)
+        character(len=*), intent(in) :: role
+
+        is_harness = trim(role) == 'test-support' .or. &
+            trim(role) == 'include' .or. trim(role) == 'project-manifest' .or. &
+            index(trim(role), 'test') > 0 .or. &
+            index(trim(role), 'fixture') > 0 .or. &
+            index(trim(role), 'argument') > 0 .or. &
+            index(trim(role), 'oracle') > 0
+    end function case_harness_role
+
+    subroutine freeze_campaign_oracles(request, names, n_names, cases)
+        type(gremlin_request_t), intent(inout) :: request
+        character(len=*), intent(in) :: names(:)
+        integer, intent(in) :: n_names
+        type(test_impact_case_t), intent(in) :: cases(:)
+        integer :: i
+
+        request%oracle_case_names = ''
+        request%oracle_case_identities = ''
+        request%oracle_case_count = min(n_names, size(request%oracle_case_names))
+        do i = 1, request%oracle_case_count
+            request%oracle_case_names(i) = names(i)
+            if (len_trim(cases(i)%identity) == HASH_LEN) then
+                request%oracle_case_identities(i) = cases(i)%identity
+            end if
+        end do
+    end subroutine freeze_campaign_oracles
+
+    subroutine copy_campaign_oracles(destination, source)
+        type(gremlin_request_t), intent(inout) :: destination
+        type(gremlin_request_t), intent(in) :: source
+
+        destination%oracle_case_names = source%oracle_case_names
+        destination%oracle_case_identities = source%oracle_case_identities
+        destination%oracle_case_count = source%oracle_case_count
+    end subroutine copy_campaign_oracles
+
+    function request_oracle_identity(request, case_name) result(identity)
+        type(gremlin_request_t), intent(in) :: request
+        character(len=*), intent(in) :: case_name
+        character(len=HASH_LEN) :: identity
+        integer :: i, n_cases
+
+        identity = ''
+        n_cases = max(0, min(request%oracle_case_count, &
+            size(request%oracle_case_names)))
+        do i = 1, n_cases
+            if (trim(request%oracle_case_names(i)) /= trim(case_name)) cycle
+            identity = request%oracle_case_identities(i)
+            return
+        end do
+    end function request_oracle_identity
+
+    logical function request_case_is_required(request, case_name) result(required)
+        type(gremlin_request_t), intent(in) :: request
+        character(len=*), intent(in) :: case_name
+        integer :: n_cases
+
+        n_cases = max(0, min(request%gate_required_count, size(request%gate_cases)))
+        required = any(request%gate_cases(:n_cases) == trim(case_name))
+    end function request_case_is_required
 
     subroutine freeze_campaign_requirements(request, priorities, n_priorities, &
             baseline_generation, candidate_generation, impact, baseline_input, &
@@ -2365,23 +2513,31 @@ contains
     end subroutine reconcile_coverage
 
     subroutine read_campaign_history(session, inventory, n_inventory, history, &
-            n_history, debt, n_debt, cursor_seed, ierr, message)
+            n_history, history_identity, history_generation, current_cases, debt, &
+            n_debt, cursor_seed, ierr, message)
         type(gremlin_session_t), intent(in) :: session
         character(len=*), intent(in) :: inventory(:)
         integer, intent(in) :: n_inventory
         character(len=*), intent(out) :: history(:), debt(:)
+        character(len=HASH_LEN), intent(out) :: history_identity(:)
+        character(len=HASH_LEN), intent(out) :: history_generation(:)
+        type(test_impact_case_t), intent(in) :: current_cases(:)
         integer, intent(out) :: n_history, n_debt, cursor_seed, ierr
         character(len=*), intent(out) :: message
 
         type(journal_record_t), allocatable :: records(:)
         character(len=NAME_LEN) :: case_name
+        character(len=HASH_LEN) :: oracle_identity, receipt_generation
         character(len=16) :: status_name, seed_text
         character(len=PATH_LEN) :: path
+        character(len=HASH_LEN), allocatable :: lineage_child(:), lineage_parent(:)
         integer(int64) :: cursor, next_cursor
-        integer :: journal_status, i, seed_value, ios
+        integer :: journal_status, i, j, history_index, seed_value, ios, n_lineage
         logical :: exists
 
         history = ''
+        history_identity = ''
+        history_generation = ''
         debt = ''
         n_history = 0
         n_debt = 0
@@ -2391,6 +2547,9 @@ contains
         path = trim(session%state_dir)//'/campaign-journal.jsonl'
         inquire(file=trim(path), exist=exists)
         if (.not. exists) return
+        call read_generation_lineage(session, lineage_child, lineage_parent, &
+            n_lineage, ierr, message)
+        if (ierr /= LIFECYCLE_OK) return
         cursor = 0_int64
         do
             call journal_read_page(trim(path), cursor, 64, &
@@ -2405,9 +2564,15 @@ contains
                 case_name = ''
                 status_name = ''
                 seed_text = ''
+                oracle_identity = ''
+                receipt_generation = ''
                 call extract_json_field(records(i)%json, 'case_id', case_name)
                 call extract_json_field(records(i)%json, 'status', status_name)
                 call extract_json_field(records(i)%json, 'seed', seed_text)
+                call extract_json_field(records(i)%json, 'oracle_identity', &
+                    oracle_identity)
+                call extract_json_field(records(i)%json, 'generation', &
+                    receipt_generation)
                 if (.not. any(inventory(:n_inventory) == case_name)) cycle
                 if (status_name /= 'PASS' .and. status_name /= 'FAIL' .and. &
                     status_name /= 'TIMEOUT') cycle
@@ -2415,9 +2580,28 @@ contains
                 if (ios == 0) cursor_seed = seed_value
                 call move_to_recent(case_name, debt, n_debt)
                 if (status_name == 'FAIL' .or. status_name == 'TIMEOUT') then
-                    call move_to_priority(case_name, history, n_history)
+                    history_index = 0
+                    do j = 1, n_history
+                        if (history(j) /= case_name) cycle
+                        history_index = j
+                        exit
+                    end do
+                    if (history_index > 0 .and. &
+                            len_trim(history_generation(history_index)) == HASH_LEN .and. &
+                            len_trim(receipt_generation) == HASH_LEN .and. &
+                            history_generation(history_index) /= receipt_generation) then
+                        if (generation_descends_from(history_generation(history_index), &
+                                receipt_generation, lineage_child, lineage_parent, &
+                                n_lineage)) cycle
+                    end if
+                    call move_to_priority(case_name, oracle_identity, &
+                        receipt_generation, history, history_identity, &
+                        history_generation, n_history)
                 else
-                    call remove_priority(case_name, history, n_history)
+                    call resolve_priority(case_name, oracle_identity, &
+                        receipt_generation, lineage_child, lineage_parent, &
+                        n_lineage, history, history_identity, history_generation, &
+                        n_history)
                 end if
             end do
             if (next_cursor <= cursor) then
@@ -2426,6 +2610,27 @@ contains
                 return
             end if
             cursor = next_cursor
+        end do
+        i = 1
+        do while (i <= n_history)
+            do j = 1, size(current_cases)
+                if (trim(current_cases(j)%public_name) /= trim(history(i))) cycle
+                if (len_trim(current_cases(j)%identity) == HASH_LEN .and. &
+                        len_trim(history_identity(i)) == HASH_LEN .and. &
+                        current_cases(j)%identity /= history_identity(i)) then
+                    if (i < n_history) then
+                        history(i:n_history - 1) = history(i + 1:n_history)
+                        history_identity(i:n_history - 1) = history_identity(i + 1:n_history)
+                        history_generation(i:n_history - 1) = history_generation(i + 1:n_history)
+                    end if
+                    history(n_history) = ''
+                    history_identity(n_history) = ''
+                    history_generation(n_history) = ''
+                    n_history = n_history - 1
+                    exit
+                end if
+            end do
+            if (j > size(current_cases)) i = i + 1
         end do
     end subroutine read_campaign_history
 
@@ -2457,43 +2662,246 @@ contains
         end if
     end subroutine move_to_recent
 
-    subroutine move_to_priority(name, values, count_values)
+    subroutine move_to_priority(name, identity, generation, values, identities, &
+            generations, count_values)
         character(len=*), intent(in) :: name
+        character(len=*), intent(in) :: identity, generation
         character(len=*), intent(inout) :: values(:)
+        character(len=*), intent(inout) :: identities(:)
+        character(len=*), intent(inout) :: generations(:)
         integer, intent(inout) :: count_values
         integer :: i
+        character(len=HASH_LEN) :: pending_identity
 
         do i = 1, count_values
             if (values(i) == name) then
-                if (i > 1) values(2:i) = values(1:i - 1)
+                pending_identity = identity
+                if (i > 1) then
+                    values(2:i) = values(1:i - 1)
+                    identities(2:i) = identities(1:i - 1)
+                    generations(2:i) = generations(1:i - 1)
+                end if
                 values(1) = name
+                identities(1) = pending_identity
+                generations(1) = generation
                 return
             end if
         end do
         if (count_values == min(size(values), GREMLIN_HISTORY_LIMIT)) then
             values(count_values) = ''
+            identities(count_values) = ''
+            generations(count_values) = ''
             count_values = count_values - 1
         end if
         count_values = count_values + 1
-        if (count_values > 1) values(2:count_values) = values(1:count_values - 1)
+        if (count_values > 1) then
+            values(2:count_values) = values(1:count_values - 1)
+            identities(2:count_values) = identities(1:count_values - 1)
+            generations(2:count_values) = generations(1:count_values - 1)
+        end if
         values(1) = name
+        identities(1) = identity
+        generations(1) = generation
     end subroutine move_to_priority
 
-    subroutine remove_priority(name, values, count_values)
+    subroutine resolve_priority(name, identity, generation, lineage_child, &
+            lineage_parent, n_lineage, values, identities, generations, count_values)
         character(len=*), intent(in) :: name
+        character(len=*), intent(in) :: identity, generation
+        character(len=HASH_LEN), intent(in) :: lineage_child(:), lineage_parent(:)
+        integer, intent(in) :: n_lineage
         character(len=*), intent(inout) :: values(:)
+        character(len=*), intent(inout) :: identities(:)
+        character(len=*), intent(inout) :: generations(:)
         integer, intent(inout) :: count_values
         integer :: i
 
         do i = 1, count_values
             if (values(i) /= name) cycle
+            if (len_trim(identity) == 0 .or. len_trim(identities(i)) == 0) return
+            if (identities(i) /= identity) return
+            if (.not. generation_descends_from(generation, generations(i), &
+                    lineage_child, lineage_parent, n_lineage)) return
             if (i < count_values) values(i:count_values - 1) = &
                 values(i + 1:count_values)
+            if (i < count_values) identities(i:count_values - 1) = &
+                identities(i + 1:count_values)
+            if (i < count_values) generations(i:count_values - 1) = &
+                generations(i + 1:count_values)
             values(count_values) = ''
+            identities(count_values) = ''
+            generations(count_values) = ''
             count_values = count_values - 1
             return
         end do
-    end subroutine remove_priority
+    end subroutine resolve_priority
+
+    subroutine read_generation_lineage(session, children, parents, count_edges, &
+            ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        character(len=HASH_LEN), allocatable, intent(out) :: children(:), parents(:)
+        integer, intent(out) :: count_edges, ierr
+        character(len=*), intent(out) :: message
+        type(gremlin_lifecycle_event_t), allocatable :: events(:)
+        character(len=PATH_LEN) :: path
+        integer(int64) :: cursor, next_cursor
+        integer :: n_events, i, j
+        logical :: has_more
+
+        allocate(children(MAX_NODES), parents(MAX_NODES))
+        children = ''
+        parents = ''
+        count_edges = 0
+        cursor = 0_int64
+        ierr = LIFECYCLE_OK
+        message = ''
+        path = trim(session%state_dir)//'/lifecycle.jsonl'
+        do
+            call gremlin_lifecycle_read_page(trim(path), cursor, 128, &
+                int(LIFECYCLE_MAX_EVENT, int64), events, n_events, next_cursor, &
+                has_more, ierr, message)
+            if (ierr /= LIFECYCLE_OK) return
+            do i = 1, n_events
+                if (events(i)%event_type /= 'generation_superseded') cycle
+                if (len_trim(events(i)%generation) /= HASH_LEN .or. &
+                        len_trim(events(i)%previous_generation) /= HASH_LEN) cycle
+                j = 1
+                do while (j <= count_edges)
+                    if (children(j) == events(i)%generation) exit
+                    j = j + 1
+                end do
+                if (j <= count_edges) then
+                    if (parents(j) /= events(i)%previous_generation) parents(j) = ''
+                    cycle
+                end if
+                if (count_edges == size(children)) cycle
+                count_edges = count_edges + 1
+                children(count_edges) = events(i)%generation
+                parents(count_edges) = events(i)%previous_generation
+            end do
+            if (.not. has_more) exit
+            if (next_cursor <= cursor) then
+                ierr = LIFECYCLE_INVALID
+                message = 'lifecycle cursor did not advance while reading generation lineage'
+                return
+            end if
+            cursor = next_cursor
+        end do
+    end subroutine read_generation_lineage
+
+    logical function generation_descends_from(generation, ancestor, children, parents, &
+            count_edges) &
+            result(descends)
+        integer, intent(in) :: count_edges
+        character(len=*), intent(in) :: generation, ancestor
+        character(len=HASH_LEN), intent(in) :: children(:), parents(:)
+        character(len=HASH_LEN) :: current
+        integer :: i, step
+
+        descends = .false.
+        if (len_trim(generation) /= HASH_LEN .or. len_trim(ancestor) /= HASH_LEN) return
+        current = generation
+        do step = 1, count_edges
+            if (current == ancestor) then
+                descends = step > 1
+                return
+            end if
+            do i = 1, count_edges
+                if (children(i) /= current) cycle
+                if (len_trim(parents(i)) /= HASH_LEN) return
+                current = parents(i)
+                exit
+            end do
+            if (i > count_edges) return
+        end do
+    end function generation_descends_from
+
+    subroutine campaign_failure_resolved_by(session, generation, case_name, &
+            oracle_identity, completion_id, ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        character(len=*), intent(in) :: generation, case_name, oracle_identity
+        character(len=*), intent(out) :: completion_id
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(journal_record_t), allocatable :: records(:)
+        character(len=HASH_LEN), allocatable :: lineage_child(:), lineage_parent(:)
+        character(len=HASH_LEN) :: receipt_generation, receipt_identity, pending_generation
+        character(len=256) :: receipt_id, pending_id
+        character(len=NAME_LEN) :: receipt_case
+        character(len=16) :: verdict
+        character(len=PATH_LEN) :: path
+        integer(int64) :: cursor, next_cursor
+        integer :: i, journal_status, n_lineage
+
+        completion_id = ''
+        pending_id = ''
+        receipt_generation = ''
+        pending_generation = ''
+        ierr = JOURNAL_OK
+        message = ''
+        if (len_trim(generation) /= HASH_LEN .or. &
+                len_trim(oracle_identity) /= HASH_LEN) return
+        call read_generation_lineage(session, lineage_child, lineage_parent, &
+            n_lineage, ierr, message)
+        if (ierr /= LIFECYCLE_OK) return
+        path = trim(session%state_dir)//'/campaign-journal.jsonl'
+        cursor = 0_int64
+        do
+            call journal_read_page(trim(path), cursor, 64, &
+                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, &
+                next_cursor, journal_status, message)
+            if (journal_status /= JOURNAL_OK) then
+                ierr = journal_status
+                return
+            end if
+            if (size(records) == 0) exit
+            do i = 1, size(records)
+                receipt_generation = ''
+                receipt_identity = ''
+                receipt_case = ''
+                receipt_id = ''
+                verdict = ''
+                call extract_json_field(records(i)%json, 'generation', &
+                    receipt_generation)
+                call extract_json_field(records(i)%json, 'oracle_identity', &
+                    receipt_identity)
+                call extract_json_field(records(i)%json, 'case_id', receipt_case)
+                call extract_json_field(records(i)%json, 'completion_id', receipt_id)
+                call extract_json_field(records(i)%json, 'status', verdict)
+                if (trim(receipt_case) /= trim(case_name) .or. &
+                        receipt_identity /= oracle_identity) cycle
+                if (verdict == 'FAIL' .or. verdict == 'TIMEOUT') then
+                    if (len_trim(pending_id) > 0) then
+                        if (generation_descends_from(pending_generation, &
+                                receipt_generation, lineage_child, lineage_parent, &
+                                n_lineage)) cycle
+                        if (receipt_generation /= pending_generation .and. &
+                                .not. generation_descends_from(receipt_generation, &
+                                pending_generation, lineage_child, lineage_parent, &
+                                n_lineage)) cycle
+                    end if
+                    pending_id = receipt_id
+                    pending_generation = receipt_generation
+                else if (verdict == 'PASS' .and. len_trim(pending_id) > 0) then
+                    if (generation_descends_from(receipt_generation, &
+                            pending_generation, lineage_child, lineage_parent, &
+                            n_lineage)) then
+                        pending_id = ''
+                        pending_generation = ''
+                    end if
+                end if
+            end do
+            if (next_cursor <= cursor) then
+                ierr = JOURNAL_INVALID
+                message = 'campaign journal cursor did not advance during resolution lookup'
+                return
+            end if
+            cursor = next_cursor
+        end do
+        if (len_trim(pending_id) == 0) return
+        if (generation_descends_from(generation, pending_generation, &
+                lineage_child, lineage_parent, n_lineage)) completion_id = pending_id
+    end subroutine campaign_failure_resolved_by
 
     subroutine cancel_test_case(session, generation, child, ierr, message)
         type(gremlin_session_t), intent(in) :: session
@@ -2638,6 +3046,7 @@ contains
             request%requirement_digest = next_request%requirement_digest
             request%gate_cases = next_request%gate_cases
             request%gate_required_count = next_request%gate_required_count
+            call copy_campaign_oracles(request, next_request)
             call copy_campaign_impact(request, next_request)
             if (ierr /= 0) then
                 state_name = 'inventory_failed'
@@ -2728,6 +3137,9 @@ contains
         logical, intent(in), optional :: gate_required
         logical :: credit, is_gate
         character(len=160) :: gate_identity
+        character(len=HASH_LEN) :: oracle_identity
+        character(len=256) :: oracle_field, impact_triage
+        character(len=256) :: resolves_field, resolves_completion
         character(len=256) :: completion_id
         character(len=32768) :: record
         character(len=16) :: journal_outcome
@@ -2748,8 +3160,39 @@ contains
         is_gate = .false.
         if (present(gate_required)) is_gate = gate_required
         gate_identity = ''
-        if (is_gate) gate_identity = ',"gate_required":true,"requirement_digest":"'// &
-            request%requirement_digest//'"'
+        if (credit .and. len_trim(request%requirement_digest) == HASH_LEN) then
+            gate_identity = ',"gate_required":'//trim(json_bool(is_gate))// &
+                ',"requirement_digest":"'//request%requirement_digest//'"'
+        else if (is_gate) then
+            gate_identity = ',"gate_required":true'
+        end if
+        oracle_identity = ''
+        oracle_field = ''
+        impact_triage = ''
+        resolves_field = ''
+        resolves_completion = ''
+        if (case_name /= '<build>') then
+            oracle_identity = request_oracle_identity(request, case_name)
+            oracle_field = ',"oracle_identity":"'//trim(oracle_identity)//'"'
+            if (credit .and. is_gate .and. outcome == 'PASS' .and. &
+                    len_trim(oracle_identity) == HASH_LEN) then
+                call campaign_failure_resolved_by(session, generation%identity, &
+                    case_name, oracle_identity, resolves_completion, status, message)
+                if (status /= LIFECYCLE_OK) then
+                    ierr = status
+                    return
+                end if
+                if (len_trim(resolves_completion) > 0) then
+                    resolves_field = ',"resolves_completion_id":"'// &
+                        trim(resolves_completion)//'"'
+                end if
+            end if
+            if (credit .and. .not. is_gate .and. outcome == 'FAIL') then
+                impact_triage = ',"impact_triage":"suspected_selector_miss",'// &
+                    '"triage_note":"reproduce on this generation and compare a '// &
+                    'compatible baseline/control before attribution"'
+            end if
+        end if
         receipt_identity = ',"evidence_kind":"reproduction"'
         if (credit) receipt_identity = ',"evidence_kind":"campaign"'
         if (credit .and. coverage_outcome(outcome)) then
@@ -2779,7 +3222,8 @@ contains
             '","outcome":"'//trim(journal_outcome)//'","status":"'// &
             trim(outcome)//'","exitcode":'// &
             trim(json_int(exitcode))//',"seed":'//trim(json_int(seed))// &
-            trim(receipt_identity)//trim(gate_identity)// &
+            trim(receipt_identity)//trim(gate_identity)//trim(oracle_field)// &
+            trim(resolves_field)//trim(impact_triage)// &
             ',"order":'//trim(json_int(case_index))//',"log_path":"'// &
             trim(json_escape_string(log_file))//'"}'
         call gremlin_get_session_journal_path(session%project_key, request%lane_id, &
@@ -3070,17 +3514,20 @@ contains
             if (ierr /= 0) return
         end if
 
-        ! Normal FAIL is retained only after the normal runner's repeat attempt.
-        ! A previous-generation PASS distinguishes a confirmed regression from
-        ! a newly observed failure. Flaky, timeout and infra are factual outcomes.
+        ! A prior PASS attributes a regression only for a required case with the
+        ! same oracle identity. Out-of-set failures remain suspected triage.
         failure_event = ''
         select case (trim(last_outcome))
         case ('FAIL')
-            call prior_generation_case_passed(session, active%identity, current_case, &
-                previous_pass, ierr, message)
-            if (ierr /= 0) return
             failure_event = 'test_failed'
-            if (previous_pass) failure_event = 'regression_confirmed'
+            if (request_case_is_required(request, current_case)) then
+                call prior_generation_case_passed(session, active%identity, &
+                    request%impact_baseline_generation, current_case, &
+                    request_oracle_identity(request, current_case), previous_pass, &
+                    ierr, message)
+                if (ierr /= 0) return
+                if (previous_pass) failure_event = 'regression_confirmed'
+            end if
         case ('FLAKY')
             failure_event = 'test_flaky'
         case ('TIMEOUT')
@@ -3141,21 +3588,33 @@ contains
         end if
     end subroutine publish_lifecycle_transition
 
-    subroutine prior_generation_case_passed(session, generation, case_name, passed, &
-            ierr, message)
+    subroutine prior_generation_case_passed(session, generation, baseline_generation, &
+            case_name, oracle_identity, passed, ierr, message)
         type(gremlin_session_t), intent(in) :: session
-        character(len=*), intent(in) :: generation, case_name
+        character(len=*), intent(in) :: generation, baseline_generation
+        character(len=*), intent(in) :: case_name, oracle_identity
         logical, intent(out) :: passed
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         type(journal_record_t), allocatable :: records(:)
-        character(len=HASH_LEN) :: receipt_generation
+        character(len=HASH_LEN) :: receipt_generation, receipt_identity
         character(len=NAME_LEN) :: receipt_case
         character(len=32) :: verdict
         integer(int64) :: cursor, next_cursor
         integer :: i
 
         passed = .false.
+        if (len_trim(oracle_identity) /= HASH_LEN) then
+            ierr = JOURNAL_OK
+            message = ''
+            return
+        end if
+        if (len_trim(baseline_generation) /= HASH_LEN .or. &
+                len_trim(generation) /= HASH_LEN) then
+            ierr = JOURNAL_OK
+            message = ''
+            return
+        end if
         cursor = 0_int64
         do
             call journal_read_page(session%state_dir//'/journal.jsonl', cursor, 64, &
@@ -3164,13 +3623,20 @@ contains
             if (ierr /= JOURNAL_OK) return
             if (size(records) == 0) return
             do i = 1, size(records)
+                receipt_generation = ''
+                receipt_case = ''
+                verdict = ''
+                receipt_identity = ''
                 call extract_json_field(records(i)%json, 'generation', receipt_generation)
                 call extract_json_field(records(i)%json, 'case_id', receipt_case)
                 call extract_json_field(records(i)%json, 'status', verdict)
+                call extract_json_field(records(i)%json, 'oracle_identity', &
+                    receipt_identity)
                 if (len_trim(receipt_generation) /= HASH_LEN) cycle
-                if (receipt_generation == generation) cycle
+                if (receipt_generation /= baseline_generation) cycle
                 if (trim(receipt_case) /= trim(case_name)) cycle
                 if (trim(verdict) /= 'PASS') cycle
+                if (receipt_identity /= oracle_identity) cycle
                 passed = .true.
                 return
             end do

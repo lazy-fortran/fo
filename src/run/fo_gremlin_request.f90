@@ -37,6 +37,9 @@ module fo_gremlin_request
         logical :: input_changed = .false.
         logical :: has_previous_generation = .false.
         character(len=NAME_LEN) :: gate_cases(MAX_NODES) = ''
+        character(len=NAME_LEN) :: oracle_case_names(MAX_NODES) = ''
+        character(len=HASH_LEN) :: oracle_case_identities(MAX_NODES) = ''
+        integer :: oracle_case_count = 0
         integer :: event_epoch = 0
         character(len=HASH_LEN) :: requirement_digest = ''
         integer :: gate_required_count = 0
