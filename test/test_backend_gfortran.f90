@@ -1,4 +1,5 @@
 program test_backend_gfortran
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
         detect_jobs, backend_build, backend_test, &
@@ -172,21 +173,6 @@ contains
         end if
         call fs_remove_file(log_file)
     end subroutine compile_backend_command_fixture
-
-    subroutine run_backend_argv(executable, arguments, log_file, exitcode)
-        character(len=*), intent(in) :: executable, arguments(:), log_file
-        integer, intent(out) :: exitcode
-        character(len=:), allocatable :: packed
-        integer :: n_args, i
-
-        n_args = 0
-        call argv_push(packed, n_args, trim(executable))
-        do i = 1, size(arguments)
-            call argv_push(packed, n_args, trim(arguments(i)))
-        end do
-        call process_run_argv_logged('', packed, n_args, trim(log_file), &
-            .false., 60, exitcode)
-    end subroutine run_backend_argv
 
     subroutine run_backend_program(executable, log_file, exitcode)
         character(len=*), intent(in) :: executable, log_file
@@ -483,33 +469,6 @@ contains
         write (u, '(a)') 'end program '//trim(name)
         close (u)
     end subroutine write_sleeping_test
-
-    subroutine set_env(name, value)
-        !! Set or clear an environment variable for this process.
-        use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
-        interface
-            function c_setenv(name, value, overwrite) bind(C, name='setenv') &
-                    result(ierr)
-                import :: c_char, c_int
-                character(kind=c_char), intent(in) :: name(*), value(*)
-                integer(c_int), value :: overwrite
-                integer(c_int) :: ierr
-            end function c_setenv
-            function c_unsetenv(name) bind(C, name='unsetenv') result(ierr)
-                import :: c_char, c_int
-                character(kind=c_char), intent(in) :: name(*)
-                integer(c_int) :: ierr
-            end function c_unsetenv
-        end interface
-        character(len=*), intent(in) :: name, value
-        integer(c_int) :: ierr
-
-        if (len_trim(value) == 0) then
-            ierr = c_unsetenv(trim(name)//c_null_char)
-        else
-            ierr = c_setenv(trim(name)//c_null_char, trim(value)//c_null_char, 1_c_int)
-        end if
-    end subroutine set_env
 
     subroutine test_gfortran_builds_manifest_example()
         character(len=512) :: project_dir, log_file, binary
