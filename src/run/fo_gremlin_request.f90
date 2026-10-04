@@ -231,12 +231,23 @@ contains
         character(len=PATH_LEN) :: value
         logical :: is_string
 
-        if (event%event_type /= JSON_INTEGER .and. &
-            field /= 1 .and. field /= 2 .and. field /= 8 .and. field /= 9 .and. &
-            field /= 10 .and. field /= 15 .and. field /= 16 .and. field /= 17 .and. &
-            field /= 19) then
+        if (field == 3 .or. field == 4 .or. field == 5 .or. field == 6 .or. &
+            field == 7 .or. field == 11 .or. field == 12 .or. field == 13 .or. &
+            field == 14 .or. field == 18) then
+            if (event%event_type == JSON_BOOL) then
+                ierr = 1
+                message = 'request field must be a JSON integer'
+                return
+            else if (event%event_type /= JSON_INTEGER .and. &
+                event%event_type /= JSON_STRING) then
+                ierr = 1
+                message = 'Gremlin request field has the wrong JSON type'
+                return
+            end if
+        end if
+        if (event%event_type == JSON_ERROR) then
             ierr = 1
-            message = 'request field must be a JSON integer'
+            message = 'malformed Gremlin request JSON'
             return
         end if
         value = ''
