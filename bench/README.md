@@ -9,20 +9,21 @@ correctness defects to reproduce and repair.
 [Issue #190](https://github.com/lazy-fortran/fo/issues/190) owns the real-edit
 benchmark and non-blocking workflow implementation.
 [Issue #145](https://github.com/lazy-fortran/fo/issues/145) owns automatic pinned
-third-party acquisition/reference comparisons. These are planned extensions;
-this documentation update does not implement the new runner or move CI jobs.
+third-party acquisition/reference comparisons. The ordinary CI workflow
+excludes this harness. A separate weekly/manual workflow runs its bounded
+harness checks and preserves raw JSONL evidence. This initial workflow still
+exercises the existing smoke workloads; real-edit workloads and pinned project
+acquisition remain follow-up work under #190/#145.
 
 ## Existing tool and important limitations
 
 The standalone native Fortran benchmark tool currently produces eight metrics
 and JSONL raw samples/exit statuses. Failed commands retain their output paths.
-`report --complete` checks that fixed inventory. Its current reporter also
-returns failure when hardcoded timing targets are exceeded; do not use that exit
-status as a development/main gate. #190 separates measurement validity, product
-correctness and advisory timing warnings and moves benchmark execution out of
-the normal CI job.
+`report --complete` checks that fixed inventory. Invalid evidence and measured
+command failures remain errors; timing target overruns print `WARN` and do not
+change the exit status. The thresholds are advisory.
 
-The existing `incremental_leaf` and `incremental_core` workloads **touch file
+The `metadata_touch_leaf` and `metadata_touch_core` workloads **touch file
 metadata without changing source bytes**. They measure revalidation/cache reuse,
 not real recompilation. The small `bigmod` and `many_tests` fixtures are smoke
 examples, not large-codebase evidence. Targets such as 100 or 200 ms are not

@@ -1,0 +1,78 @@
+name: Optional performance audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GIT_TERMINAL_PROMPT: 0
+      FO_DISABLE_SELF_REFRESH: "1"
+      FO_SELF_REFRESH: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install gfortran
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gfortran
+          gfortran --version | head -1
+
+      - name: Install fpm
+        run: |
+          sudo curl -L -o /usr/local/bin/fpm \
+            https://github.com/fortran-lang/fpm/releases/download/v0.13.0/fpm-0.13.0-linux-x86_64-gcc-12
+          sudo chmod +x /usr/local/bin/fpm
+          fpm --version
+
+      - name: Build and install fo
+        run: |
+          fpm build
+          fpm install --prefix "$HOME/.local"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build and test native audit harness
+        env:
+          FO_CACHE_DIR: ${{ runner.temp }}/fo-bench-driver-cache
+        run: |
+          fo_path="$HOME/.local/bin/fo"
+          test -x "$fo_path"
+          cd bench
+          "$fo_path" build
+          "$fo_path" test test_bench_driver
+
+      - name: Run optional bounded benchmark audit
+        working-directory: bench
+        env:
+          FO_CACHE_DIR: ${{ runner.temp }}/fo-bench-driver-cache
+        run: |
+          fo_path="$HOME/.local/bin/fo"
+          report_dir="$RUNNER_TEMP/fo-benchmark-report"
+          mkdir -p "$report_dir"
+          "$fo_path" exec fo-bench run \
+            --fo "$fo_path" --reps 1 \
+            --output "$report_dir/results.jsonl" \
+            --workloads "$GITHUB_WORKSPACE/bench/workloads"
+          "$fo_path" exec fo-bench report --complete \
+            "$report_dir/results.jsonl"
+          test "$(wc -l < "$report_dir/results.jsonl")" -eq 8
+          echo "FO_AUDIT_REPORT=$report_dir/results.jsonl" >> "$GITHUB_ENV"
+
+      - name: Retain raw audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fo-performance-audit-${{ github.run_id }}
+          path: ${{ runner.temp }}/fo-benchmark-report/results.jsonl
+          if-no-files-found: ignore

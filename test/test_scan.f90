@@ -1,8 +1,21 @@
 program test_scan
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_scan, only: scan_unit_t, scan_file, scan_file_regex, scan_dir, &
         scan_dir_regex, is_slow_test
+    use fo_test_harness, only: string_list_t, process_result_t, list_add
+    use fo_test_harness, only: make_scratch, join_path, make_directory, make_symlink
+    use fo_test_harness, only: write_text, remove_path, current_directory
+    use fo_test_harness, only: finish_assertions
+    use fo_test_cli, only: resolve_driver, run_fo
     implicit none
+
+    interface
+        integer(c_int) function c_chdir(path) bind(C, name='chdir')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+        end function c_chdir
+    end interface
 
     integer :: n_pass, n_fail
 
@@ -23,6 +36,8 @@ program test_scan
     call test_scan_intrinsic_skip()
     call test_slow_test_detection()
     call test_scan_dir_empty()
+    call test_source_discovery_directory_cycle()
+    call test_source_discovery_overlong_path()
     call test_scan_dir_path_with_spaces()
     call test_scan_dir_recovers_unparseable_source()
     call test_scan_dir_regex_legacy_source()
@@ -33,6 +48,7 @@ program test_scan
     call test_scan_classifies_test_by_directory()
 
     write (output_unit, '(a,i0,a,i0,a)') 'scan: ', n_pass, ' pass, ', n_fail, ' fail'
+    call finish_assertions()
     if (n_fail > 0) stop 1
 
 contains
@@ -421,6 +437,122 @@ contains
         call execute_command_line('rm -rf '//trim(dir))
     end subroutine test_scan_dir_empty
 
+    subroutine test_source_discovery_directory_cycle()
+        type(string_list_t) :: arguments
+        type(process_result_t) :: result
+        character(:), allocatable :: root, cache, driver
+
+        call make_scratch('fo-scan-cycle', root)
+        call make_scratch('fo-scan-cycle-cache', cache)
+        call make_directory(join_path(root, 'src/nested'))
+        call write_text(join_path(root, 'src/probe.f90'), &
+            'program scan_cycle_probe' // new_line('a') // &
+            'end program scan_cycle_probe' // new_line('a'))
+        call write_text(join_path(root, 'src/nested/support.f90'), &
+            'module scan_cycle_support' // new_line('a') // &
+            'implicit none' // new_line('a') // &
+            'end module scan_cycle_support' // new_line('a'))
+        call make_symlink('probe.f90', join_path(root, 'src/probe_alias.f90'))
+        call make_symlink('..', join_path(root, 'src/nested/back_to_src'))
+
+        call resolve_driver(driver)
+        call list_add(arguments, 'info')
+        call run_fo(driver, arguments, root, cache, result, timeout_ms=1500)
+
+        call assert(.not. result%runner_failed, &
+            'source cycle: public info process starts')
+        call assert(result%reaped, 'source cycle: public info child is reaped')
+        call assert(.not. result%timed_out, &
+            'source cycle: repeated directory identity terminates promptly')
+        call assert(result%exit_code == 0, &
+            'source cycle: public info succeeds')
+        call assert(index(result%stdout, 'files: 3') > 0, &
+            'source cycle: nested source and regular-file symlink are discovered')
+        call assert(result%elapsed_ms < 1500, &
+            'source cycle: public info completes inside its bound')
+
+        call remove_tree(root)
+        call remove_tree(cache)
+    end subroutine test_source_discovery_directory_cycle
+
+    subroutine test_source_discovery_overlong_path()
+        type(string_list_t) :: arguments
+        type(process_result_t) :: result
+        character(:), allocatable :: root, cache, driver, path, original_dir
+        character(len=200) :: segment
+        integer :: depth, i, change_status
+
+        call make_scratch('fo-scan-overlong', root)
+        call make_scratch('fo-scan-overlong-cache', cache)
+        call make_directory(join_path(root, 'src'))
+        call write_text(join_path(root, 'src/short.f90'), &
+            'module scan_short_source' // new_line('a') // &
+            'implicit none' // new_line('a') // &
+            'end module scan_short_source' // new_line('a'))
+        call current_directory(original_dir)
+
+        segment = repeat('a', len(segment))
+        path = root
+        depth = 0
+        change_status = change_directory(root)
+        call assert(change_status == 0, 'source path length: enter fixture root')
+        do while (len(path) < 4200 .and. change_status == 0)
+            call make_directory(segment)
+            change_status = change_directory(segment)
+            if (change_status == 0) then
+                depth = depth + 1
+                path = join_path(path, segment)
+            end if
+        end do
+        call assert(change_status == 0, 'source path length: create nested path')
+        call assert(len(path) > 4096, &
+            'source path length: fixture exceeds the scanner path capacity')
+        if (change_status == 0) then
+            call write_text('deep.f90', &
+                'module scan_deep_source' // new_line('a') // &
+                'implicit none' // new_line('a') // &
+                'end module scan_deep_source' // new_line('a'))
+        end if
+
+        change_status = change_directory(root)
+        call assert(change_status == 0, 'source path length: return to fixture root')
+        call resolve_driver(driver)
+        call list_add(arguments, 'info')
+        call run_fo(driver, arguments, root, cache, result, timeout_ms=1500)
+
+        call assert(.not. result%runner_failed, &
+            'source path length: public info process starts')
+        call assert(result%reaped, 'source path length: public info child is reaped')
+        call assert(.not. result%timed_out, &
+            'source path length: rejection stays bounded')
+        call assert(index(result%stderr, &
+            'fo: source scan path exceeds supported length') > 0, &
+            'source path length: truncation has an explicit diagnostic')
+        call assert(index(result%stdout, 'files:') == 0, &
+            'source path length: partial inventory is not reported')
+
+        change_status = change_directory(root)
+        if (change_status == 0) then
+            do i = 1, depth
+                change_status = change_directory(segment)
+                if (change_status /= 0) exit
+            end do
+        end if
+        if (change_status == 0) then
+            call remove_path('deep.f90')
+            do i = depth, 1, -1
+                change_status = change_directory('..')
+                if (change_status /= 0) exit
+                call remove_tree(segment)
+            end do
+        end if
+        call assert(change_status == 0, 'source path length: remove deep fixture')
+        change_status = change_directory(original_dir)
+        call assert(change_status == 0, 'source path length: restore test directory')
+        call remove_tree(root)
+        call remove_tree(cache)
+    end subroutine test_source_discovery_overlong_path
+
     subroutine test_scan_dir_path_with_spaces()
         type(scan_unit_t), allocatable :: units(:)
         integer :: n_units, ierr, n_tests
@@ -722,6 +854,20 @@ contains
 
         call remove_tree(dir)
     end subroutine test_scan_classifies_test_by_directory
+
+    integer function change_directory(path) result(status)
+        character(len=*), intent(in) :: path
+        character(kind=c_char), allocatable :: c_path(:)
+        integer :: i, n
+
+        n = len_trim(path)
+        allocate(c_path(n + 1))
+        do i = 1, n
+            c_path(i) = path(i:i)
+        end do
+        c_path(n + 1) = c_null_char
+        status = int(c_chdir(c_path))
+    end function change_directory
 
     subroutine make_tmp_path(prefix, path, suffix)
         character(len=*), intent(in) :: prefix, suffix

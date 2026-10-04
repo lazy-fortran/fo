@@ -1,16 +1,16 @@
 module fo_gremlin_request
     use, intrinsic :: iso_fortran_env, only: int64
     use fo_cache, only: HASH_LEN
-    use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init, &
+    use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
         json_parser_next, JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, &
-        JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_BOOL, &
-        JSON_ERROR, JSON_END_OF_INPUT
+        JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_BOOL, &
+        JSON_NULL_VAL, &
+        JSON_ERROR, JSON_END_OF_INPUT, JSON_ERR_TRAILING
     use fx_dag, only: MAX_NODES
     implicit none
     private
 
     integer, parameter :: NAME_LEN = 128, PATH_LEN = 4096
-    integer, parameter :: MAX_JSON_DEPTH = 64
     integer, parameter :: DEFAULT_RANDOM = 32, DEFAULT_CAMPAIGN = 60
     integer, parameter :: DEFAULT_CASE_TIMEOUT = 0, MAX_CASE_TIMEOUT = 86400
     integer, parameter :: MAX_LANE_LEN = 96
@@ -44,8 +44,8 @@ module fo_gremlin_request
         integer :: n_targets = 0
     end type gremlin_request_t
 
-    public :: gremlin_request_t, parse_request, is_hex_digest, &
-        gremlin_json_text_valid, gremlin_json_parser_next
+    public :: gremlin_request_t, parse_request, is_hex_digest, gremlin_json_text_valid
+    public :: gremlin_json_field
 
 contains
 
@@ -60,7 +60,8 @@ contains
         character(len=NAME_LEN) :: key
         character(len=:), allocatable :: raw_value
         logical :: seen(19)
-        integer :: field, value_start, value_end
+        integer :: field
+        logical :: trailing
 
         ierr = 1
         message = 'malformed Gremlin request JSON'
@@ -68,19 +69,18 @@ contains
             message = 'Gremlin request exceeds 65536 characters'
             return
         end if
-        if (.not. gremlin_json_text_valid(json)) then
-            if (strict_json_has_trailing(text=json)) &
-                message = 'trailing text after Gremlin request object'
+        if (.not. gremlin_json_text_valid(json, trailing)) then
+            if (trailing) message = 'trailing text after Gremlin request object'
             return
         end if
-        call json_parser_init(parser, json)
+        call json_parser_init_strict(parser, json)
         call json_parser_next(parser, event)
         if (event%event_type /= JSON_OBJECT_START) return
         seen = .false.
         do
             ierr = 1
             raw_value = ''
-            call gremlin_json_parser_next(parser, event)
+            call json_parser_next(parser, event)
             if (event%event_type == JSON_OBJECT_END) exit
             if (event%event_type /= JSON_KEY .or. .not. allocated(event%string_val)) return
             if (len(event%string_val) > len(key)) then
@@ -102,14 +102,9 @@ contains
                 return
             end if
             seen(field) = .true.
-            value_start = json_value_first(parser)
-            call gremlin_json_parser_next(parser, value_event)
-            value_end = parser%pos - 1
-            raw_value = parser%input(value_start:value_end)
-            if (field == 11 .or. field == 13 .or. field == 18) then
-                if (value_event%event_type == JSON_ERROR .and. &
-                    is_json_integer(raw_value)) value_event%event_type = JSON_INTEGER
-            end if
+            call json_parser_next(parser, value_event)
+            raw_value = ''
+            if (allocated(value_event%raw_val)) raw_value = value_event%raw_val
             if (value_event%event_type == JSON_ERROR) then
                 message = 'malformed Gremlin request JSON'
                 return
@@ -151,373 +146,80 @@ contains
         message = ''
     end subroutine parse_request
 
-    logical function gremlin_json_text_valid(text)
+    logical function gremlin_json_text_valid(text, trailing)
         character(len=*), intent(in) :: text
-        integer :: position
+        logical, intent(out), optional :: trailing
+        type(json_parser_t) :: parser
+        type(json_event_t) :: event
 
         gremlin_json_text_valid = .false.
-        position = 1
-        call strict_json_space(text, position)
-        call strict_json_value(text, position, 0, gremlin_json_text_valid)
-        if (.not. gremlin_json_text_valid) return
-        call strict_json_space(text, position)
-        gremlin_json_text_valid = position > len_trim(text)
+        if (present(trailing)) trailing = .false.
+        call json_parser_init_strict(parser, text)
+        do
+            call json_parser_next(parser, event)
+            if (event%event_type == JSON_ERROR) then
+                if (present(trailing)) trailing = event%error_code == JSON_ERR_TRAILING
+                return
+            end if
+            if (event%event_type == JSON_END_OF_INPUT) then
+                gremlin_json_text_valid = .true.
+                return
+            end if
+        end do
     end function gremlin_json_text_valid
 
-    logical function strict_json_has_trailing(text)
-        character(len=*), intent(in) :: text
-        integer :: position
-        logical :: valid
+    subroutine gremlin_json_field(text, name, value)
+        character(len=*), intent(in) :: text, name
+        character(len=*), intent(out) :: value
+        type(json_parser_t) :: parser
+        type(json_event_t) :: event
+        character(len=:), allocatable :: candidate
+        integer :: depth
+        logical :: waiting, found, duplicate
 
-        position = 1
-        call strict_json_space(text, position)
-        call strict_json_value(text, position, 0, valid)
-        if (.not. valid) then
-            strict_json_has_trailing = .false.
-            return
-        end if
-        call strict_json_space(text, position)
-        strict_json_has_trailing = position <= len_trim(text)
-    end function strict_json_has_trailing
-
-    recursive subroutine strict_json_value(text, position, depth, valid)
-        character(len=*), intent(in) :: text
-        integer, intent(inout) :: position
-        integer, intent(in) :: depth
-        logical, intent(out) :: valid
-        character(len=1) :: ch
-
-        valid = .false.
-        if (position > len_trim(text)) return
-        ch = text(position:position)
-        select case (ch)
-        case ('{')
-            call strict_json_object(text, position, depth + 1, valid)
-        case ('[')
-            call strict_json_array(text, position, depth + 1, valid)
-        case ('"')
-            call strict_json_string(text, position, valid)
-        case ('t')
-            call strict_json_literal(text, position, 'true', valid)
-        case ('f')
-            call strict_json_literal(text, position, 'false', valid)
-        case ('n')
-            call strict_json_literal(text, position, 'null', valid)
-        case ('-', '0':'9')
-            call strict_json_number(text, position, valid)
-        case default
-            return
-        end select
-    end subroutine strict_json_value
-
-    recursive subroutine strict_json_object(text, position, depth, valid)
-        character(len=*), intent(in) :: text
-        integer, intent(inout) :: position
-        integer, intent(in) :: depth
-        logical, intent(out) :: valid
-        logical :: member_valid
-
-        valid = .false.
-        if (depth > MAX_JSON_DEPTH) return
-        position = position + 1
-        call strict_json_space(text, position)
-        if (position <= len_trim(text)) then
-            if (text(position:position) == '}') then
-                position = position + 1
-                valid = .true.
-                return
-            end if
-        end if
+        value = ''
+        candidate = ''
+        depth = 0
+        waiting = .false.
+        found = .false.
+        duplicate = .false.
+        call json_parser_init_strict(parser, text)
         do
-            if (position > len_trim(text)) return
-            if (text(position:position) /= '"') return
-            call strict_json_string(text, position, member_valid)
-            if (.not. member_valid) return
-            call strict_json_space(text, position)
-            if (position > len_trim(text)) return
-            if (text(position:position) /= ':') return
-            position = position + 1
-            call strict_json_space(text, position)
-            call strict_json_value(text, position, depth, member_valid)
-            if (.not. member_valid) return
-            call strict_json_space(text, position)
-            if (position > len_trim(text)) return
-            if (text(position:position) == '}') then
-                position = position + 1
-                valid = .true.
-                return
-            end if
-            if (text(position:position) /= ',') return
-            position = position + 1
-            call strict_json_space(text, position)
-        end do
-    end subroutine strict_json_object
-
-    recursive subroutine strict_json_array(text, position, depth, valid)
-        character(len=*), intent(in) :: text
-        integer, intent(inout) :: position
-        integer, intent(in) :: depth
-        logical, intent(out) :: valid
-        logical :: item_valid
-
-        valid = .false.
-        if (depth > MAX_JSON_DEPTH) return
-        position = position + 1
-        call strict_json_space(text, position)
-        if (position <= len_trim(text)) then
-            if (text(position:position) == ']') then
-                position = position + 1
-                valid = .true.
-                return
-            end if
-        end if
-        do
-            call strict_json_value(text, position, depth, item_valid)
-            if (.not. item_valid) return
-            call strict_json_space(text, position)
-            if (position > len_trim(text)) return
-            if (text(position:position) == ']') then
-                position = position + 1
-                valid = .true.
-                return
-            end if
-            if (text(position:position) /= ',') return
-            position = position + 1
-            call strict_json_space(text, position)
-        end do
-    end subroutine strict_json_array
-
-    subroutine strict_json_string(text, position, valid, decoded)
-        character(len=*), intent(in) :: text
-        integer, intent(inout) :: position
-        logical, intent(out) :: valid
-        character(len=:), allocatable, intent(out), optional :: decoded
-        character(len=:), allocatable :: buffer
-        character(len=4) :: bytes
-        integer :: code, n, byte_count
-        character(len=1) :: ch
-        logical :: valid_code
-
-        valid = .false.
-        n = 0
-        if (present(decoded)) allocate (character(len=len(text)) :: buffer)
-        if (position > len_trim(text)) return
-        if (text(position:position) /= '"') return
-        position = position + 1
-        do while (position <= len_trim(text))
-            ch = text(position:position)
-            if (ch == '"') then
-                position = position + 1
-                valid = .true.
-                if (present(decoded)) decoded = buffer(:n)
-                return
-            end if
-            if (iachar(ch) < 32) return
-            if (ch == achar(92)) then
-                position = position + 1
-                if (position > len_trim(text)) return
-                ch = text(position:position)
-                select case (ch)
-                case ('"', achar(92), '/')
-                case ('b')
-                    ch = achar(8)
-                case ('f')
-                    ch = achar(12)
-                case ('n')
-                    ch = achar(10)
-                case ('r')
-                    ch = achar(13)
-                case ('t')
-                    ch = achar(9)
-                case ('u')
-                    call json_unicode_code(text, position, code, valid_code)
-                    if (.not. valid_code) return
-                    if (present(decoded)) then
-                        call json_utf8_bytes(code, bytes, byte_count)
-                        buffer(n + 1:n + byte_count) = bytes(:byte_count)
-                        n = n + byte_count
-                    end if
-                    position = position + 1
-                    cycle
-                case default
-                    return
-                end select
-            end if
-            if (present(decoded)) then
-                n = n + 1
-                buffer(n:n) = ch
-            end if
-            position = position + 1
-        end do
-    end subroutine strict_json_string
-
-    subroutine json_unicode_code(text, position, code, valid)
-        character(len=*), intent(in) :: text
-        integer, intent(inout) :: position
-        integer, intent(out) :: code
-        logical, intent(out) :: valid
-        integer :: digit, i, low
-
-        valid = .false.
-        code = 0
-        if (position + 4 > len(text)) return
-        do i = 1, 4
-            position = position + 1
-            digit = json_hex_digit(text(position:position))
-            if (digit < 0) return
-            code = code*16 + digit
-        end do
-        if (code >= 55296 .and. code <= 56319) then
-            if (position + 6 > len(text)) return
-            if (text(position + 1:position + 2) /= achar(92)//'u') return
-            position = position + 2
-            low = 0
-            do i = 1, 4
-                position = position + 1
-                digit = json_hex_digit(text(position:position))
-                if (digit < 0) return
-                low = low*16 + digit
-            end do
-            if (low < 56320 .or. low > 57343) return
-            code = 65536 + (code - 55296)*1024 + low - 56320
-        else if (code >= 56320 .and. code <= 57343) then
-            return
-        end if
-        valid = .true.
-    end subroutine json_unicode_code
-
-    subroutine json_utf8_bytes(code, bytes, n)
-        integer, intent(in) :: code
-        character(len=4), intent(out) :: bytes
-        integer, intent(out) :: n
-
-        bytes = ''
-        if (code < 128) then
-            n = 1
-            bytes(1:1) = achar(code)
-        else if (code < 2048) then
-            n = 2
-            bytes(1:1) = achar(192 + code/64)
-        else if (code < 65536) then
-            n = 3
-            bytes(1:1) = achar(224 + code/4096)
-        else
-            n = 4
-            bytes(1:1) = achar(240 + code/262144)
-            bytes(2:2) = achar(128 + mod(code/4096, 64))
-        end if
-        if (n >= 3) bytes(n - 1:n - 1) = achar(128 + mod(code/64, 64))
-        if (n >= 2) bytes(n:n) = achar(128 + mod(code, 64))
-    end subroutine json_utf8_bytes
-
-    subroutine gremlin_json_parser_next(parser, event)
-        type(json_parser_t), intent(inout) :: parser
-        type(json_event_t), intent(out) :: event
-        integer :: position
-        logical :: valid
-
-        position = json_value_first(parser)
-        call json_parser_next(parser, event)
-        if (event%event_type /= JSON_KEY .and. event%event_type /= JSON_STRING) return
-        ! fx drops non-ASCII Unicode escapes. Decode from the unchanged raw input
-        ! so keys, values and MCP forwarding retain their exact JSON meaning.
-        call strict_json_string(parser%input, position, valid, event%string_val)
-        if (.not. valid) event%event_type = JSON_ERROR
-    end subroutine gremlin_json_parser_next
-
-    subroutine strict_json_number(text, position, valid)
-        character(len=*), intent(in) :: text
-        integer, intent(inout) :: position
-        logical, intent(out) :: valid
-        integer :: first_digit
-
-        valid = .false.
-        if (text(position:position) == '-') position = position + 1
-        if (position > len_trim(text)) return
-        if (text(position:position) == '0') then
-            position = position + 1
-            if (position <= len_trim(text)) then
-                if (text(position:position) >= '0' .and. text(position:position) <= '9') return
-            end if
-        else if (text(position:position) >= '1' .and. text(position:position) <= '9') then
-            do while (position <= len_trim(text))
-                if (text(position:position) < '0' .or. text(position:position) > '9') exit
-                position = position + 1
-            end do
-        else
-            return
-        end if
-        if (position <= len_trim(text)) then
-            if (text(position:position) == '.') then
-                position = position + 1
-                first_digit = position
-                do while (position <= len_trim(text))
-                    if (text(position:position) < '0' .or. text(position:position) > '9') exit
-                    position = position + 1
-                end do
-                if (position == first_digit) return
-            end if
-        end if
-        if (position <= len_trim(text)) then
-            if (text(position:position) == 'e' .or. text(position:position) == 'E') then
-                position = position + 1
-                if (position <= len_trim(text)) then
-                    if (text(position:position) == '+' .or. text(position:position) == '-') &
-                        position = position + 1
+            call json_parser_next(parser, event)
+            select case (event%event_type)
+            case (JSON_OBJECT_START, JSON_ARRAY_START)
+                if (waiting) waiting = .false.
+                depth = depth + 1
+            case (JSON_OBJECT_END, JSON_ARRAY_END)
+                depth = depth - 1
+            case (JSON_KEY)
+                if (depth /= 1 .or. .not. allocated(event%string_val)) cycle
+                if (len(event%string_val) /= len(name)) cycle
+                if (event%string_val /= name) cycle
+                if (found .or. waiting) then
+                    duplicate = .true.
+                else
+                    waiting = .true.
                 end if
-                first_digit = position
-                do while (position <= len_trim(text))
-                    if (text(position:position) < '0' .or. text(position:position) > '9') exit
-                    position = position + 1
-                end do
-                if (position == first_digit) return
-            end if
-        end if
-        valid = .true.
-    end subroutine strict_json_number
-
-    subroutine strict_json_literal(text, position, literal, valid)
-        character(len=*), intent(in) :: text, literal
-        integer, intent(inout) :: position
-        logical, intent(out) :: valid
-
-        valid = .false.
-        if (position + len(literal) - 1 > len_trim(text)) return
-        if (text(position:position + len(literal) - 1) /= literal) return
-        position = position + len(literal)
-        valid = .true.
-    end subroutine strict_json_literal
-
-    subroutine strict_json_space(text, position)
-        character(len=*), intent(in) :: text
-        integer, intent(inout) :: position
-
-        do while (position <= len_trim(text))
-            select case (text(position:position))
-            case (' ', achar(9), achar(10), achar(13))
-                position = position + 1
-            case default
+            case (JSON_STRING)
+                if (.not. waiting) cycle
+                if (allocated(event%string_val)) candidate = event%string_val
+                found = .true.
+                waiting = .false.
+            case (JSON_INTEGER, JSON_REAL, JSON_BOOL, JSON_NULL_VAL)
+                if (.not. waiting) cycle
+                if (allocated(event%raw_val)) candidate = event%raw_val
+                found = .true.
+                waiting = .false.
+            case (JSON_ERROR)
+                return
+            case (JSON_END_OF_INPUT)
+                if (found .and. .not. duplicate .and. len(candidate) <= len(value)) &
+                    value = candidate
                 return
             end select
         end do
-    end subroutine strict_json_space
-
-    integer function json_hex_digit(character)
-        character(len=1), intent(in) :: character
-        integer :: code
-
-        code = iachar(character)
-        select case (code)
-        case (iachar('0'):iachar('9'))
-            json_hex_digit = code - iachar('0')
-        case (iachar('a'):iachar('f'))
-            json_hex_digit = code - iachar('a') + 10
-        case (iachar('A'):iachar('F'))
-            json_hex_digit = code - iachar('A') + 10
-        case default
-            json_hex_digit = -1
-        end select
-    end function json_hex_digit
+    end subroutine gremlin_json_field
 
     subroutine set_event_field(request, field, event, raw_value, ierr, message)
         type(gremlin_request_t), intent(inout) :: request
@@ -529,6 +231,25 @@ contains
         character(len=PATH_LEN) :: value
         logical :: is_string
 
+        if (field == 3 .or. field == 4 .or. field == 5 .or. field == 6 .or. &
+            field == 7 .or. field == 11 .or. field == 12 .or. field == 13 .or. &
+            field == 14 .or. field == 18) then
+            if (event%event_type == JSON_BOOL) then
+                ierr = 1
+                message = 'request field must be a JSON integer'
+                return
+            else if (event%event_type /= JSON_INTEGER .and. &
+                event%event_type /= JSON_STRING) then
+                ierr = 1
+                message = 'Gremlin request field has the wrong JSON type'
+                return
+            end if
+        end if
+        if (event%event_type == JSON_ERROR) then
+            ierr = 1
+            message = 'malformed Gremlin request JSON'
+            return
+        end if
         value = ''
         is_string = event%event_type == JSON_STRING
         if (is_string) then
@@ -546,11 +267,7 @@ contains
         else
             select case (event%event_type)
             case (JSON_INTEGER)
-                if (field == 11 .or. field == 13) then
-                    value = raw_value
-                else
-                    write (value, '(i0)') event%int_val
-                end if
+                value = raw_value
             case (JSON_BOOL)
                 if (event%bool_val) then
                     value = 'true'
@@ -566,22 +283,6 @@ contains
         call set_request_field(request, field, trim(value), is_string, ierr, message)
     end subroutine set_event_field
 
-    integer function json_value_first(parser)
-        type(json_parser_t), intent(in) :: parser
-        integer :: position
-
-        position = parser%pos
-        do while (position <= len(parser%input))
-            select case (parser%input(position:position))
-            case (' ', achar(9), achar(10), achar(13), ':', ',')
-                position = position + 1
-            case default
-                exit
-            end select
-        end do
-        json_value_first = position
-    end function json_value_first
-
     subroutine parse_target_events(parser, first, request, ierr, message)
         type(json_parser_t), intent(inout) :: parser
         type(json_event_t), intent(in) :: first
@@ -595,7 +296,7 @@ contains
         message = 'targets must be an array of strings'
         if (first%event_type /= JSON_ARRAY_START) return
         do
-            call gremlin_json_parser_next(parser, event)
+            call json_parser_next(parser, event)
             if (event%event_type == JSON_ARRAY_END) exit
             if (event%event_type /= JSON_STRING .or. &
                 .not. allocated(event%string_val)) return
@@ -780,11 +481,6 @@ contains
                 message = 'integer request field has the wrong JSON type'
                 return
             end if
-            if (.not. is_json_integer(value)) then
-                ierr = 1
-                message = 'request field must be a JSON integer'
-                return
-            end if
             if (field == 11 .or. field == 13 .or. field == 18) then
                 read (value, *, iostat=ios) wide
             else
@@ -891,26 +587,6 @@ contains
         end do
         is_hex_digest = .true.
     end function is_hex_digest
-
-    logical function is_json_integer(value)
-        character(len=*), intent(in) :: value
-        integer :: i, first
-
-        is_json_integer = .false.
-        first = 1
-        if (len_trim(value) == 0) return
-        if (value(1:1) == '-') first = 2
-        if (first > len_trim(value)) return
-        if (value(first:first) == '0') then
-            is_json_integer = first == len_trim(value)
-            return
-        end if
-        if (value(first:first) < '1' .or. value(first:first) > '9') return
-        do i = first + 1, len_trim(value)
-            if (value(i:i) < '0' .or. value(i:i) > '9') return
-        end do
-        is_json_integer = .true.
-    end function is_json_integer
 
     integer function hex_digit(character)
         character(len=1), intent(in) :: character
