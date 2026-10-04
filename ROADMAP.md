@@ -14,7 +14,7 @@ infrastructure. Environment/package/system management, scientific provenance
 capsules, proof/synthesis, containers, CI/promotion and agent orchestration are
 outside the product.
 
-Closed historical research scope includes #1/#3/#6/#7; #120 and #157 are now
+Closed historical research scope includes #1–#7; #120 and #157 are now
 closed not planned. Hermetic environments are supplied externally. Internal
 bench/project audits may use pinned disposable environments but do not become
 public fo environment-management features.
@@ -87,7 +87,7 @@ performance validation; #190 owns the new measurement work.
 | [#117](https://github.com/lazy-fortran/fo/issues/117) | Formatter identifier/keyword boundary correctness. |
 
 
-Closed out-of-scope research directions remain in issue history rather than the active roadmap: #120 proof/synthesis and #157 complete host toolchain/runtime capture, plus earlier capsule/Nix/FortOS issues #1/#3/#6/#7.
+Closed out-of-scope research directions remain in issue history rather than the active roadmap: #120 proof/synthesis and #157 complete host toolchain/runtime capture, plus earlier capsule/Nix/FortOS issues #1–#7.
 
 [ffc #798](https://github.com/lazy-fortran/ffc/issues/798) is a narrow consumer of
 fo's shared leaf/corpus runner and exact input model. fo's optional matrix may
