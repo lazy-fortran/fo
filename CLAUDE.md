@@ -12,7 +12,7 @@ their correctness/performance infrastructure.
 Do **not** expand fo into a Nix/Spack replacement, hermetic environment manager,
 container/sandbox platform, scientific workflow/provenance/capsule system,
 proof/synthesis framework, cluster scheduler, CI/promotion engine or coding-agent
-orchestrator. Historical capsule/Nix/FortOS issues #1/#3/#6/#7 are closed;
+orchestrator. Historical capsule/Nix/FortOS issues #1–#7 are closed;
 #120 and #157 are closed not planned for the same boundary.
 
 Record compiler/configuration identity sufficiently for cache invalidation and
