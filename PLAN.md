@@ -726,7 +726,7 @@ current correctness.
 ## Active delivery state
 
 **Execution is user-authorized in parallel mode.** The reviewed core is on fo
-`main`; PR #146 is merged. The current main head `8978ab4` includes the shared
+`main`; PR #146 is merged. The current main head `d434518` includes the shared
 Linux event watcher, finite crash-safe coverage, factual local-gate reporting,
 GCC 13.3 ownership repairs, Darwin archive portability, thirteen removed JS
 fixtures and side-effect-free install help. Exact combined focused gates passed
@@ -852,6 +852,13 @@ Implemented issue state:
   clock shim. Independent review approved strict JSON/Unicode, CLI/environment
   precedence, owned cleanup, failure output and exact eight-metric coverage.
   The exact integrated focused oracle and real complete smoke pass.
+- #181 is complete through `d434518`. The cache oracle now installs one unique
+  process-owned `FO_CACHE_DIR` before initialization, restores the caller's
+  exact set/unset state, proves two roots remain isolated, hashes and corrupts
+  the real v2 immutable blob under a containment guard, rejects the corrupt hit,
+  and republishes/restores the valid bytes. Exact current fx dependencies,
+  focused outer-override and unset/HOME runs, the 87-case fo gate and independent
+  review pass; no private transitive fx module is imported.
 - #143/#152 and PR #147 are closed without merge after the KISS review assigned
   agent scheduling to the external controller; no work-mode code enters core.
 - #145 has one bounded fpm row passing on the exact candidate, one independent
@@ -899,8 +906,14 @@ Implemented issue state:
   `b0fedbd4bd0179209ed26f20e0210cd2e37aa9e29d15a7bac18ebd0bcf33609f`.
   The fx dogfood5 lane remains resident after completing 18/18 green. The fo
   resident lane was stopped cleanly after plan-only generations and retained
-  private builds grew state to 2.0 GB; its evidence is preserved. fo uses focused
-  short-lived gates until #148/#165/#166 make residency relevant and bounded.
+  private builds grew state to 2.0 GB; its evidence is preserved. Fresh exact
+  `d434518` fo and current fx controller lanes were started again with isolated
+  state/cache and immediately reproduced #182: both publish `capture_failed`
+  because a test-only path dependency nested inside the project root is copied
+  over the already captured project tree, and public status omits the concrete
+  capture diagnostic. #182 now owns nested/external dependency capture semantics
+  and actionable failure evidence; focused one-shot gates remain the fallback
+  while that resident bootstrap defect is repaired.
 
 After each meaningful delivery, update this plan, workspace master and affected
 issues; commit and push the controller branch immediately. Preserve exact bases,
