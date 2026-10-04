@@ -684,8 +684,9 @@ completed entries below are retained as prerequisites and evidence:
     verification.
 18. [#174](https://github.com/lazy-fortran/fo/issues/174): initialize the shared
     change provider on Darwin with exact diagnostics and event semantics.
-19. Deliver the shared store in provider order: [fx #42](https://github.com/lazy-fortran/fx/issues/42),
-    then [fx #43](https://github.com/lazy-fortran/fx/issues/43) plus
+19. Deliver the shared store in provider order: **complete**
+    [fx #42](https://github.com/lazy-fortran/fx/issues/42), then
+    [fx #43](https://github.com/lazy-fortran/fx/issues/43) plus
     [fo #165](https://github.com/lazy-fortran/fo/issues/165), then
     [fo #166](https://github.com/lazy-fortran/fo/issues/166)/[#167](https://github.com/lazy-fortran/fo/issues/167),
     and finally [fx #44](https://github.com/lazy-fortran/fx/issues/44) plus
@@ -783,6 +784,11 @@ Implemented issue state:
   performed the install and replaced the shared bootstrap during #162 work. The
   controller restored the known binary immediately; help parsing needs an exact
   isolated-prefix no-mutation oracle.
+- fx #42 is complete on fx main through `6beeec4`: verified immutable blobs and
+  trees publish from retained descriptors, survive publication/cleanup races and
+  materialize safely on Linux/APFS. The deterministic premature-marker oracle
+  repaired the final test flake; independent review, Linux 100/100 and APFS
+  30/30 stress pass. fx #43 action/result publication is now active.
 - #171 provider work is delivered through `9331c04`: Darwin selects its native
   feature declarations before headers, the negative compile oracle proves the
   former macro defect, and state/portability/supervisor tests pass on Linux and
