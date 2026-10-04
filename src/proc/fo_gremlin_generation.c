@@ -541,6 +541,85 @@ int fo_c_generation_copy_declared_file(const char *source, const char *dest,
     return 0;
 }
 
+/* Capture one inventoried file through its physical root without following
+ * directory or leaf symlinks. The inventory's root identity also guards ABA. */
+int fo_c_generation_capture_file(const char *root, const char *relative,
+                                 const char *destination, long long device,
+                                 long long inode) {
+    char copy[8192];
+    char *part, *next;
+    int root_fd = -1, dir_fd = -1, input_fd = -1, rc = -1, saved;
+    struct stat root_st, before;
+    if (root == NULL || relative == NULL || destination == NULL ||
+        root[0] == '\0' || relative[0] == '\0' || relative[0] == '/' ||
+        strlen(relative) >= sizeof(copy)) {
+        errno = EINVAL;
+        return errno;
+    }
+    strcpy(copy, relative);
+    for (part = copy; *part != '\0';) {
+        next = strchr(part, '/');
+        if (next != NULL) *next = '\0';
+        if (*part == '\0' || strcmp(part, ".") == 0 ||
+            strcmp(part, "..") == 0) {
+            errno = EINVAL;
+            return errno;
+        }
+        if (next == NULL) break;
+        part = next + 1;
+    }
+    root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (root_fd < 0) goto done;
+    if (fstat(root_fd, &root_st) != 0 || root_st.st_dev != device ||
+        root_st.st_ino != inode) {
+        errno = EAGAIN;
+        goto done;
+    }
+    dir_fd = dup(root_fd);
+    if (dir_fd < 0) goto done;
+    part = copy;
+    while ((next = strchr(part, '/')) != NULL) {
+        *next = '\0';
+        input_fd = openat(dir_fd, part,
+                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (input_fd < 0) goto done;
+        close(dir_fd);
+        dir_fd = input_fd;
+        input_fd = -1;
+        part = next + 1;
+    }
+    input_fd = openat(dir_fd, part, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (input_fd < 0) goto done;
+    if (fstat(input_fd, &before) != 0 || !S_ISREG(before.st_mode)) {
+        errno = EINVAL;
+        goto done;
+    }
+    rc = copy_regular_file(input_fd, destination, &before,
+                           before.st_mode & 0777);
+done:
+    saved = errno;
+    if (input_fd >= 0) close(input_fd);
+    if (dir_fd >= 0) close(dir_fd);
+    if (root_fd >= 0) close(root_fd);
+    if (rc != 0) unlink(destination);
+    errno = saved;
+    return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
+}
+
+/* The inventory provider currently admits only leaf symlinks to regular files. */
+int fo_c_generation_create_link(const char *path, const char *target) {
+    if (path == NULL || target == NULL || path[0] == '\0' ||
+        target[0] == '\0' || strchr(target, '/') != NULL ||
+        strcmp(target, ".") == 0 || strcmp(target, "..") == 0 ||
+        target[0] == '/') {
+        errno = EINVAL;
+        return errno;
+    }
+    if (make_parent(path) != 0 || symlink(target, path) != 0)
+        return errno == 0 ? 1 : errno;
+    return 0;
+}
+
 static int freeze_tree_at(const char *root, const char *rel) {
     char path[8192];
     struct stat st;
