@@ -180,7 +180,7 @@ workloads and broader audit instrumentation remain open under #190/#145.
 | #189 | `agent/189-campaign` at `f2d83f5` | Frozen input-delta campaign selection, retained regression ordering and real executed-case oracle are published source only; combined verification pending. |
 | #161 | first slice integrated `6f68eb6` | Scoped Sol repair adds native stale-MCP and explicit failed-evidence retention. Exact combined five-target gate passes; schema-veto mutation rejects four behavioral faults. Six JS fixtures remain until workflow/replacement integration finishes. |
 | #151 | `agent/151-git-provenance` at `c1f2dd6` | Metadata-only execution-identity slice and native oracle are published source only. Declared/configure-consumed Git version remains a real input, not an ignored metadata change. |
-| #165/#175 | isolated Luna tasks at base `bcc676f` | Incomplete source frozen with hashes below; no tests/builds ran. Compact manifests reuse Fx storage, and the single `[[extra.fo.inputs]]` declaration shape feeds canonical inventory. Dependency/layout consumers remain incomplete. |
+| #165/#175 | #175 `86e8455` and `14c1f3b`; #165 source work | Declared fixture/configuration and capture context are in the combined candidate; multi-role repair and private-view consumer need focused verification. Compact manifests and resolved dependency consumers remain incomplete. |
 
 Fx Darwin repair is promoted on main `33baa0c`; #56 is closed. Exact task source
 `894ff9a` passes the two native lease/read-lease cases on faepmac1 (0.46s/1.33s)
@@ -205,13 +205,22 @@ Prepared fixture declarations/reproduction oracle `7cbe949` depend on #175's
 parser and #161's additive failed-evidence retention (`2e52d78`). This failing
 gate prevents #170 promotion despite its provider/pass/fail cleanup checks.
 
-Frozen incomplete patches, including untracked source: #175 diff SHA256
-`da2cf8ec5d3fff28727277ebc18fad40cb5768ce2c190005f295d925874fcb39`;
-#165 manifest-file SHA256
-`75a36291806b14329c6246c2b02bab5a9fe7fbed78b07b2f16ffd1948491cb7b`,
-with untracked-file patch SHA256
-`c01487d9b4efd6b6314726008316eecc68a35e599ac6e0269a5f9b38877b26f1`.
-These are local partial source, not completed implementation or test evidence.
+Current combined declared-input candidate is published on
+`gremlin/core-controller`. At exact `c5e6ef7`, config and execution-view
+checks pass, but the inventory check rejects a compatible multi-role fixture
+(three-target gate: 23.62s total). This is a provider defect, not grounds to
+weaken the existing oracle. #175 repair `14c1f3b` preserves compatible roles;
+#170 will materialize each physical fixture once and reject conflicting intent.
+The corrected combined candidate still needs the public preemption/reproduction
+gates. No resident integration lane is claimed running yet.
+
+Parallel source checkpoints remain unverified: #188 at `99b2665` replaces a
+shell command counter with a native Fortran wrapper; #193 at `99ae59c` adds
+CMake context/delegation; #161 at `0389611` tests CLI fallback with a native
+MCP peer advertising no Gremlin capability. The previous stale-MCP pass proves
+coexistence, not unsupported-peer parity; keep the old fixture until that exact
+replacement passes. #165 compact manifests and #189 campaign adoption remain
+source work. These checkpoints do not constitute whole-bootstrap completion.
 
 Source workers are active again. Start one resident integration lane after the
 declared-fixture preemption gate; temporary acceptance lanes have explicit owners
