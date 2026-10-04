@@ -165,6 +165,10 @@ contains
         status = c_mcp_wait(int(session%handle, c_int), 5000_c_int, c_exit_code)
         exit_code = int(c_exit_code)
         call assert_true(status == 0, 'MCP server exits and is reaped after shutdown')
+        if (status /= 0) then
+            call mcp_session_terminate(session)
+            return
+        end if
         call close_session(session)
     end subroutine mcp_session_shutdown
 
@@ -191,6 +195,7 @@ contains
         if (session%handle <= 0) return
         status = c_mcp_close(int(session%handle, c_int))
         call assert_true(status == 0, 'closes only reaped MCP session pipes')
+        if (status /= 0) return
         session%handle = 0
         session%pid = 0
         session%start_time = 0_c_int64_t
