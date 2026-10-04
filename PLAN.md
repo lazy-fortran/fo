@@ -473,7 +473,6 @@ does not itself close or reopen implementation issues.
 | Issues | Scoped responsibility |
 | --- | --- |
 | #56 / #59 | unsaved-buffer LSP and opt-in deep lint; do not add them to Gremlin's critical path |
-| #62 | fortrun retirement record; no second runner |
 | #117 | formatter token-boundary correctness |
 | #119 / #130 | lossless output, useful slow-child attribution and owned log retention |
 | #129 / #144 | link-result inventory/retention and atomic complete artifact publication |
@@ -483,6 +482,8 @@ does not itself close or reopen implementation issues.
 | #142 / #185 | reconnectable CLI/MCP parity, explicit persistent/task lifetimes, and removal of transport-owned execution |
 | #161 / #163 / #184 | native fixture migration, interpreter cleanup and lower test cost without weakening oracles |
 | #188 | test-only Git-dependency bootstrap without dummy root library or redundant full build |
+
+Closed administrative issue #62 (fortrun archive/retirement) is also not active fo implementation work.
 
 Closed out-of-scope research issues #120 (proof/synthesis) and #157 (complete
 host toolchain/runtime capture) remain historical references only; do not assign
