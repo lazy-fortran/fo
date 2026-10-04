@@ -210,7 +210,7 @@ Provider/config/view checks pass 3/3 at `2f6ed9e`; the actual app builds 71/71
 in 10.70s. Its production sources are unchanged through `fe89e3f` (only the
 independent oracle record parsing changed). Public preemption passes at
 `6dbebfe` (19.73s), concurrent reproduction at `6dbebfe` (3.53s), and frozen-token
-reproduction at `fe89e3f` (4.11s). The public installed driver now has SHA256
+reproduction at `fe89e3f` (4.11s). The driver used for these gates has SHA256
 `df74b3e42f837d8bc924f0b24404656dc27184c232aaa415072ba1b617445f1d`.
 The checks prove last-good retention, owned cancellation, frozen declared bytes,
 private concurrent outputs and retained failure evidence. They do not prove
@@ -226,13 +226,33 @@ The earlier compatible-role rejection, incomplete progress marker and log-footer
 parsing failures remain recorded evidence. They were repaired without weakening
 actual outcome, fixture content or ownership assertions.
 
-Parallel source checkpoints remain unverified: #188 at `99b2665` replaces a
-shell command counter with a native Fortran wrapper; #193 at `99ae59c` adds
-CMake context/delegation; #161 at `0389611` tests CLI fallback with a native
-MCP peer advertising no Gremlin capability. The previous stale-MCP pass proves
-coexistence, not unsupported-peer parity; keep the old fixture until that exact
-replacement passes. #165 compact manifests and #189 campaign adoption remain
-source work. These checkpoints do not constitute whole-bootstrap completion.
+Current delivery checkpoints (2026-10-04):
+
+- #193's first CMake context slice is promoted on main `8029f2d`. The native
+  backend gate passes 1/1; the actual app passes public C++ build/test, external
+  preset with an explicit metadata locator, and wrong-source locator rejection.
+  Installed and immutable driver SHA256 is
+  `78c85f47549caf67a61dd533ee4ced2214029e3117e515467ef4567a372d3345`.
+  This does not prove CMake Gremlin lifecycle or all File API acceptance. The
+  warm-build configure-avoidance follow-up `4294598` is source only.
+- #165 combined candidate `500a1c1` includes manifest capture, frozen inventory
+  recovery, dependency aliases and the private-view consumer. Two compile
+  defects were repaired; focused manifest/view/inventory verification is now
+  assigned. Compact direct manifest-to-session consumption remains unfinished.
+- #161's native unsupported-MCP peer and shutdown cleanup pass on candidate
+  `099371f`; a controlled current-capability peer is correctly rejected. Native
+  cancellation exposes a real shared reader defect: `read_text_file` truncates
+  lines at 512 characters. Repair the reader and rerun the public diagnostic
+  oracle before promotion. Native journal and coverage-restart ports are pushed
+  source checkpoints, not verified replacements; six JS fixtures remain.
+- #188's consumer gate fails because upstream FPM also rejects a test-only root
+  during `update --fetch-only`. Owning FPM repair `920393d` is source only.
+  Fo's current dependency bootstrap can compile the whole project with FPM and
+  then compile it again natively. A bounded fetch-only/native-DAG migration is
+  assigned; no verified slowdown repair or upstream completion is claimed.
+- #189 at `3bb2563` is frozen source work pending combined inventory integration.
+
+No full pipeline, whole-bootstrap completion or performance result is implied.
 
 Source workers are active again. Start one resident integration lane using the
 verified driver; temporary acceptance lanes have explicit owners
