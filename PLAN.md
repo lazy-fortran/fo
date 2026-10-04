@@ -391,8 +391,18 @@ README from `fo init` and `fo doc` output are real command behavior. No reposito
 documentation conformity tests were found in the initial audit; do not claim
 their removal. Review the 1,929-line backend include, 1,381-line process harness
 and large campaign/stat-memo fixtures for repeated setup/compilation and waits.
-CI currently repeats registered fixtures after `fpm test`; retain only repeats
-that exercise a distinct native-engine contract. Never wait for CI during edits.
+CI deduplication landed at `6f6605f`: 26 repeated registered target executions
+are replaced by one native `fo test test_mcp_system` dispatch smoke. Full FPM
+coverage, distinct standalone fixtures and opt-in refresh/install oracles remain;
+FPM's public-CLI fixtures now receive the explicit just-built installed driver.
+The exact focused integrated dispatch gate passes in 7.86 seconds. This does
+not claim a measured end-to-end CI speedup; the eliminated executions are counted.
+Never wait for CI during edits.
+
+[#187](https://github.com/lazy-fortran/fo/issues/187) fixes an observed slowdown:
+unknown `fo test` flags such as `--list` are currently ignored and can select
+the whole suite. Reject unsupported flags before discovery/build/test work.
+The accidental worker invocation was scoped-stopped and is not test evidence.
 
 Use completion/readiness barriers and bounded deadlines instead of arbitrary
 sleeps where the same fault remains detectable. Record affected cases, concrete
@@ -796,7 +806,7 @@ current correctness.
 ## Active delivery state
 
 **Execution is user-authorized in parallel mode.** The reviewed core is on fo
-`main`; PR #146 is merged. The current integration head `bf6000d` includes the shared
+`main`; PR #146 is merged. The code audit checkpoint `bce5b22` includes the shared
 Linux event watcher, finite crash-safe coverage, factual local-gate reporting,
 GCC 13.3 ownership repairs, Darwin archive portability, thirteen removed JS
 fixtures and side-effect-free install help. Exact combined focused gates passed
