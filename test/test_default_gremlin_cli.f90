@@ -12,7 +12,7 @@ program test_default_gremlin_cli
     type(string_list_t) :: arguments
     type(process_result_t) :: first, second, verify_result
     type(json_value_t) :: first_json, second_json
-    logical :: valid
+    logical :: valid, compiled_module_exists
 
     call gremlin_setup(driver, scratch, project, cache, state)
     call make_directory(join_path(project, 'test'))
@@ -68,6 +68,10 @@ program test_default_gremlin_cli
         'verify executes the static pipeline stage')
     call assert_contains(verify_result%stdout, 'Build: OK', &
         'verify executes the native build stage')
+    inquire (file=join_path(verify_dir, 'build/fo/mod/verify_module.mod'), &
+        exist=compiled_module_exists)
+    call assert_true(compiled_module_exists, &
+        'verify produces the native module artifact')
     call assert_contains(verify_result%stdout, 'All stages passed', &
         'verify reaches the prior pipeline completion path')
 
