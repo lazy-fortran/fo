@@ -54,11 +54,15 @@ jobs:
 
       - name: Verify fo is the binary just built
         run: |
-          command -v fo
-          fo --version || true
+          test -x "$HOME/.local/bin/fo"
+          "$HOME/.local/bin/fo" --version
 
       - name: Test
-        run: fpm test
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          export FO="$HOME/.local/bin/fo"
+          export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0
+          fpm test
 
       - name: Test Fortran benchmark driver and bounded smoke
         env:
@@ -80,72 +84,17 @@ jobs:
             "$RUNNER_TEMP/fo-bench-smoke.jsonl"
           test "$(wc -l < "$RUNNER_TEMP/fo-bench-smoke.jsonl")" -eq 8
 
-      - name: Test standalone Fortran CLI fixtures
+      - name: Test public fo test dispatch
         run: |
-          export FO="$(command -v fo)"
-          export FO_DISABLE_SELF_REFRESH=1
-          export FO_SELF_REFRESH=0
-          export FO_CACHE_DIR="$RUNNER_TEMP/fo-cli-tests"
-          fo test test_cmake_named_cli test_dependency_membership_cli \
-            test_dependency_shadow_cli test_dispatcher_cli test_exec_app_cli \
-            test_fmt_cli test_platform_link_cli test_program_names_cli \
-            test_targeted_materialization_cli test_test_results_json \
-            test_atomic_link_artifacts test_archive_publication test_test_os_link
-
-      - name: Test complete MCP JSON reports
-        run: FO="$(command -v fo)" fo test test_mcp_test_json
-        env:
-          FO_DISABLE_SELF_REFRESH: "1"
-          FO_SELF_REFRESH: "0"
-          FO_CACHE_DIR: ${{ runner.temp }}/fo-mcp-json
-
-      - name: Test MCP protocol and named eligibility in Fortran
-        run: |
-          export FO="$(command -v fo)"
-          export FO_DISABLE_SELF_REFRESH=1
-          export FO_SELF_REFRESH=0
-          FO_TEST_WALL_TIMEOUT=180 FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-system" \
-            fo test test_mcp_system
-          FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-named" fo test test_mcp_named_eligibility
-          FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-request" fo test test_mcp_request_structure
-          FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-ownership" fo test test_mcp_response_ownership
-
-      - name: Test Gremlin bootstrap lifecycle
-        run: |
-          export FO="$(command -v fo)"
+          export PATH="$HOME/.local/bin:$PATH"
+          export FO="$HOME/.local/bin/fo"
           export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0
-          FO_CACHE_DIR="$RUNNER_TEMP/fo-gremlin-bootstrap" fo test test_gremlin_bootstrap
+          FO_TEST_WALL_TIMEOUT=180 \
+          FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-system" \
+            "$HOME/.local/bin/fo" test test_mcp_system
 
       - name: Test Gremlin journal owner recovery
-        run: node test/test_gremlin_journal_recovery.js "$(command -v fo)"
-
-      - name: Test continuous generation preemption
-        run: |
-          export FO="$(command -v fo)"
-          export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0
-          FO_CACHE_DIR="$RUNNER_TEMP/fo-continuous-preemption" fo test test_continuous_preemption
-
-      - name: Test Gremlin campaign history
-        run: fo test test_gremlin_campaign_history
-
-      - name: Test Gremlin context provenance
-        run: |
-          export FO="$(command -v fo)"
-          export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0
-          FO_CACHE_DIR="$RUNNER_TEMP/fo-gremlin-provenance" fo test test_gremlin_context_provenance
-
-      - name: Test Gremlin timeout ordering
-        run: |
-          export FO="$(command -v fo)"
-          export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0
-          FO_CACHE_DIR="$RUNNER_TEMP/fo-gremlin-timeout-order" fo test test_gremlin_timeout_order
-
-      - name: Test Gremlin reproduction logs
-        run: |
-          export FO="$(command -v fo)"
-          export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0
-          FO_CACHE_DIR="$RUNNER_TEMP/fo-gremlin-reproduce" fo test test_gremlin_reproduce_logs
-          FO_CACHE_DIR="$RUNNER_TEMP/fo-gremlin-reproduce-concurrent" fo test test_gremlin_reproduce_concurrent_logs
+        run: node test/test_gremlin_journal_recovery.js "$HOME/.local/bin/fo"
 
       - name: Test Gremlin self refresh
         run: |
@@ -168,26 +117,20 @@ jobs:
           TMPDIR: /var/tmp
         run: |
           mkdir -p "$HOME" "$FO_CACHE_DIR"
-          driver="$(command -v fo)"
+          driver="$HOME/.local/bin/fo"
           FO_BIN="$driver" "$driver" test test_install_help
 
-      - name: Test Gremlin filesystem change capture
-        run: |
-          export FO="$(command -v fo)"
-          export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0
-          FO_CACHE_DIR="$RUNNER_TEMP/fo-gremlin-watch" fo test test_gremlin_watch
-
       - name: Test MCP Gremlin parity
-        run: node test/test_mcp_gremlin.js "$(command -v fo)"
+        run: node test/test_mcp_gremlin.js "$HOME/.local/bin/fo"
 
       - name: Test stale MCP recovery
-        run: node test/test_mcp_gremlin_stale.js "$(command -v fo)"
+        run: node test/test_mcp_gremlin_stale.js "$HOME/.local/bin/fo"
 
       - name: Test MCP cancellation backoff
-        run: node test/test_mcp_cancel_error.js "$(command -v fo)"
+        run: node test/test_mcp_cancel_error.js "$HOME/.local/bin/fo"
 
       - name: Test MCP cancellation cleanup probe
-        run: node test/test_mcp_cancel_error.js "$(command -v fo)" --cleanup-probe
+        run: node test/test_mcp_cancel_error.js "$HOME/.local/bin/fo" --cleanup-probe
 
       - name: Test asynchronous process lifecycle
         env:
@@ -200,7 +143,7 @@ jobs:
           FO_SELF_REFRESH: "0"
           FO_DISABLE_SELF_REFRESH: "1"
           TMPDIR: /var/tmp
-        run: node test/test_async_process_lifecycle.js "$(command -v fo)"
+        run: node test/test_async_process_lifecycle.js "$HOME/.local/bin/fo"
 
       - name: Test standalone asynchronous process C fixtures
         run: |
