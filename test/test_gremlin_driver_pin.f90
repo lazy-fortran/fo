@@ -1,9 +1,10 @@
 program test_gremlin_driver_pin
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: int64, real64
+    use fo_cache, only: HASH_LEN
     use fo_driver, only: driver_pin_t, driver_pin_current
     use fo_fs, only: fs_sleep_ms
-    use fx_hash, only: HASH_LEN, sha256_file
+    use fx_hash, only: sha256_file
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_directory, write_text, read_text, remove_path
     use fo_test_harness, only: file_exists, move_path, run_process, spawn_process

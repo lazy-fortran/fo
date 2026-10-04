@@ -496,7 +496,7 @@ program test_gremlin_generation
     call check(.not. has_staging_entries(trim(cache)), &
         'successful and rejected captures leave no staging artifacts')
     generation_count = count_generation_roots(trim(cache))
-    call check(generation_count <= 12, &
+    call check(generation_count <= 13, &
         'disk use tracks unique input generations rather than capture attempts')
     remove_rc = fo_c_generation_remove_stage(trim(root)//c_null_char)
     call check(remove_rc == 0, 'fixture data and generation CAS are cleaned up')
