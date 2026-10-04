@@ -29,9 +29,22 @@ On base `1c45a55`, patch SHA256 `12fd995d`, generation
 three-case required local gate: `test_stat_memo`,
 `test_gremlin_campaign_history`, and `test_gremlin_capture_pending`. Candidate
 driver SHA256 `a643b884` also passed `fo test test_gremlin_capture_pending` with
-both `FO` and `FO_BIN` set to that candidate. The lane's fourth random case was
-cancelled after the required gate turned green. The full 24-case gate remains
-to be rerun; no full-coverage or final-speed claim is made.
+both `FO` and `FO_BIN` set to that candidate.
+
+On clean commit `f310e24`, generation
+`776cb130c3ea809f5a5a0b84c5c172fbf969cdfa0f6d6cbeb93a534b90d7513c` was built
+and tested through candidate driver SHA256
+`a643b88469790cf5bb7d0f834a44a593f7e6a470b4ce8b4d5118eaca35f38218`. The
+first `--random 24` session, `582742-1791155656-236633237`, timed out
+`test_gremlin_campaign_history` at the default wall cap (exit 124); its case log
+SHA256 is `c4edd7bb89dc27ca43135fe122733b71db4946e7cbedef18e14b4ff69472d493`.
+The same generation passed that case with `FO_TEST_WALL_TIMEOUT=300`; the 10 s
+CPU budget was unchanged. Session `643490-1791156457-310338900` then recorded 28
+distinct PASS case receipts, including the required gate case and
+`test_gremlin_campaign_history`, with zero failures. The gate reached 1/1 and
+ordinary coverage reached 28/103. The lane was stopped after the sample and
+required gate; full-suite verification, persistent idle residency and final
+speed remain unverified.
 
 The initial utility/input-inventory/execution-view gate and contained-launch
 reproducer are independently exercised. Fx materialization/warm-hit repairs are
