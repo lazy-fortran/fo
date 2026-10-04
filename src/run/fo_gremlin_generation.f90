@@ -29,6 +29,7 @@ module fo_gremlin_generation
         character(len=HASH_LEN) :: driver_digest = ''
         integer(int64) :: driver_size = 0_int64
         type(generation_input_t), allocatable :: inputs(:)
+        type(input_inventory_t) :: input_inventory
     end type generation_context_t
 
     type, public :: generation_t
