@@ -5,7 +5,8 @@ module fo_gremlin_supervisor
     use fo_check, only: fo_changed_modules
     use fo_gremlin_context, only: capture_candidate
     use fo_gremlin_request, only: gremlin_request_t, parse_request, is_hex_digest
-    use fo_gremlin_generation, only: generation_t
+    use fo_gremlin_generation, only: generation_t, generation_driver_identity
+    use fo_driver, only: driver_pin_t, driver_pin_current, driver_pin_existing
     use fo_change_watch, only: change_watch_t, change_watch_init, &
         change_watch_poll, change_watch_close
     use fo_gremlin_journal, only: journal_append, journal_read_page, &
@@ -48,7 +49,7 @@ module fo_gremlin_supervisor
     use fo_util, only: extract_json_field, json_bool, json_int, make_tmpfile
     use fx_dag, only: dag_t, MAX_NODES
     use fx_json_build, only: json_escape_string
-    use fo_fs, only: fs_find_executable, fs_make_dir, fs_sleep_ms
+    use fo_fs, only: fs_make_dir, fs_sleep_ms
     use fo_gremlin_session, only: gremlin_resolve_read_session, &
         gremlin_load_terminal_session, gremlin_get_session_journal_path, &
         gremlin_stage_recovery_journal, gremlin_recover_owner_journal, &
@@ -167,13 +168,13 @@ contains
         integer, intent(out) :: exitcode
 
         type(gremlin_session_t) :: session
+        type(driver_pin_t) :: driver_pin
         character(len=PATH_LEN) :: message, status_text, owner_start
         character(len=128) :: session_id
         character(len=HASH_LEN) :: stored_policy
         integer :: ierr, owner_pid, pid, spawn_exit, i, n_args
         character(len=:), allocatable :: packed
         character(len=PATH_LEN) :: executable, log_file
-        logical :: executable_ok
 
         exitcode = 0
         call gremlin_session_acquire(project_dir, trim(request%lane_id), &
@@ -225,19 +226,22 @@ contains
                 end if
             end if
         end if
+        call driver_pin_current(session%state_dir, driver_pin, ierr, message)
+        if (ierr /= 0) then
+            call gremlin_session_release(session, spawn_exit, owner_start)
+            call error_response('start', 'cannot pin the running fo driver: '// &
+                trim(message), response)
+            exitcode = 2
+            return
+        end if
         call gremlin_session_release(session, ierr, message)
         if (ierr /= 0) then
-            call error_response('start', 'cannot reserve Gremlin owner: '//trim(message), &
-                response)
+            call error_response('start', &
+                'cannot reserve Gremlin owner: '//trim(message), response)
             exitcode = 2
             return
         end if
-        call find_self_executable(executable, executable_ok)
-        if (.not. executable_ok) then
-            call error_response('start', 'cannot locate the current fo executable', response)
-            exitcode = 2
-            return
-        end if
+        executable = driver_pin%path
         call make_tmpfile('fo-gremlin-launch', log_file)
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
@@ -264,7 +268,7 @@ contains
             call argv_push(packed, n_args, trim(request%targets(i)))
         end do
         call process_start_argv_logged(project_dir, packed, n_args, log_file, &
-            pid, spawn_exit)
+            pid, spawn_exit, 'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0')
         if (spawn_exit /= 0) then
             call error_response('start', 'cannot launch the Gremlin owner '// &
                 '(process setup error '//int_text(spawn_exit)//')', response)
@@ -848,6 +852,7 @@ contains
         type(gremlin_session_t) :: session
         type(gremlin_lease_t) :: reproduction_lease
         type(generation_t) :: generation
+        type(driver_pin_t) :: reproduction_pin
         type(gremlin_request_t) :: selection_request
         character(len=PATH_LEN) :: message, active_project, log_file, executable
         character(len=PATH_LEN) :: cleanup_message
@@ -862,7 +867,6 @@ contains
         integer :: owner_pid, ierr, n_selected, mandatory_count, seed
         integer :: n_args, spawn_exit, test_exit, sequence, release_error
         integer :: reproduction_timeout
-        logical :: executable_ok
         logical :: have_reproduction_lease
 
         exitcode = 0
@@ -919,6 +923,30 @@ contains
             return
         end if
         have_reproduction_lease = .true.
+        call generation_driver_identity(generation%root, generation%driver_digest, &
+            generation%driver_size, ierr, message)
+        if (ierr /= 0) then
+            call release_generation_lease(reproduction_lease, have_reproduction_lease, &
+                release_error, cleanup_message)
+            call release_if_owner(session, release_error, cleanup_message)
+            call error_response('reproduce', &
+                'cannot read generation driver identity: '//trim(message), response)
+            exitcode = 2
+            return
+        end if
+        call driver_pin_existing(session%state_dir, generation%driver_digest, &
+            generation%driver_size, reproduction_pin, ierr, message)
+        if (ierr /= 0) then
+            call release_generation_lease(reproduction_lease, have_reproduction_lease, &
+                release_error, cleanup_message)
+            call release_if_owner(session, release_error, cleanup_message)
+            call error_response('reproduce', &
+                'cannot validate the pinned generation driver: '// &
+                trim(message), response)
+            exitcode = 2
+            return
+        end if
+        generation%driver_path = reproduction_pin%path
         inquire (file=trim(active_project)//'/fpm.toml', exist=executable_ok)
         if (.not. executable_ok) then
             call release_generation_lease(reproduction_lease, have_reproduction_lease, &
@@ -955,16 +983,7 @@ contains
             exitcode = 2
             return
         end if
-        call find_self_executable(executable, executable_ok)
-        if (.not. executable_ok) then
-            call release_generation_lease(reproduction_lease, have_reproduction_lease, &
-                release_error, cleanup_message)
-            call release_if_owner(session, ierr, message)
-            call error_response('reproduce', 'cannot locate the current fo executable', &
-                response)
-            exitcode = 2
-            return
-        end if
+        executable = reproduction_pin%path
         ! The completion sequence is the reproduction execution ID. Allocate it
         ! before launch so its output path and durable receipt identify the same
         ! invocation, including concurrent reproductions in one live session.
@@ -1034,6 +1053,7 @@ contains
         integer, intent(out) :: exitcode
 
         type(gremlin_session_t) :: session
+        type(driver_pin_t) :: driver_pin
         type(gremlin_request_t) :: owner_request
         type(gremlin_lease_t) :: active_lease, candidate_lease
         type(generation_t) :: active_generation, candidate_generation
@@ -1147,6 +1167,17 @@ contains
             exitcode = 2
             return
         end if
+        call driver_pin_current(session%state_dir, driver_pin, ierr, message)
+        if (ierr /= 0) then
+            call release_if_owner(session, state_error, state_message)
+            call error_response('run', 'cannot pin the running fo driver: '// &
+                trim(message), response)
+            exitcode = 2
+            return
+        end if
+        session%driver_path = driver_pin%path
+        session%driver_digest = driver_pin%digest
+        session%driver_size = driver_pin%size
         call fs_make_dir(session%state_dir//'/logs')
         call publish_state(session, owner_request, 'starting', active_generation, &
             candidate_generation, '', completed, selected_count, campaign_seed, 'NONE', 0, &
@@ -1169,7 +1200,7 @@ contains
             exitcode = 2
             return
         end if
-        call capture_candidate(project_dir, candidate_generation, &
+        call capture_candidate(project_dir, driver_pin, candidate_generation, &
             capture_ok, registration_error, message, change_watch=change_watch)
         if (registration_error /= 0) then
             fatal_error = .true.
@@ -1349,7 +1380,8 @@ contains
             call gremlin_freshness_update(trim(freshness_path), 0, &
                 freshness_ticket, state_error)
             if (state_error /= 0) freshness_ticket = 0_int64
-            call maybe_capture_latest(project_dir, session, owner_request, active_generation, &
+            call maybe_capture_latest(project_dir, session, driver_pin, owner_request, &
+                active_generation, &
                 candidate_generation, have_active, have_candidate, last_failed_identity, &
                 build_child, candidate_lease, have_candidate_lease, capture_debounce_ms, &
                 change_watch, sequence, completed, selected_count, campaign_seed, &
@@ -1514,13 +1546,15 @@ contains
         call simple_response('run', request%lane_id, session%session_id, 'stopped', response)
     end subroutine run_owner
 
-    subroutine maybe_capture_latest(project_dir, session, request, active, candidate, &
+    subroutine maybe_capture_latest(project_dir, session, driver_pin, request, &
+            active, candidate, &
             have_active, have_candidate, last_failed, build_child, candidate_lease, &
             have_candidate_lease, capture_debounce_ms, change_watch, sequence, &
             completed, selected_count, seed, current_case, capture_failed, ierr, message, &
             provider_quiet)
         character(len=*), intent(in) :: project_dir
         type(gremlin_session_t), intent(in) :: session
+        type(driver_pin_t), intent(in) :: driver_pin
         type(gremlin_request_t), intent(inout) :: request
         type(generation_t), intent(in) :: active
         type(generation_t), intent(inout) :: candidate
@@ -1572,7 +1606,7 @@ contains
         end if
         if (capture_debounce_ms <= 0_int64 .or. now_ms < capture_debounce_ms) return
         capture_debounce_ms = 0_int64
-        call capture_candidate(project_dir, current, ok, &
+        call capture_candidate(project_dir, driver_pin, current, ok, &
             release_error, message, change_watch)
         if (release_error /= 0) then
             ierr = release_error
@@ -1665,15 +1699,23 @@ contains
         character(len=PATH_LEN) :: executable
         character(len=:), allocatable :: packed
         integer :: n_args, spawn_exit
-        logical :: executable_ok
+        logical :: exists
 
         child = child_t()
-        call find_self_executable(executable, executable_ok)
-        if (.not. executable_ok) then
+        if (generation%driver_digest /= session%driver_digest .or. &
+            generation%driver_size /= session%driver_size .or. &
+            len_trim(session%driver_path) == 0) then
             ierr = 1
-            message = 'cannot locate the current fo executable'
+            message = 'candidate generation does not match the pinned fo driver'
             return
         end if
+        inquire (file=trim(session%driver_path), exist=exists)
+        if (.not. exists) then
+            ierr = 1
+            message = 'pinned fo driver is missing; refusing to launch candidate build'
+            return
+        end if
+        executable = session%driver_path
         call log_path(session, 'build-'//generation%identity(1:16), child%log_file)
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
@@ -2261,7 +2303,7 @@ contains
         character(len=PATH_LEN) :: journal_message
         character(len=:), allocatable :: packed
         integer :: n_args, spawn_exit, journal_status, coverage_status
-        logical :: executable_ok
+        logical :: exists
         character(len=PATH_LEN) :: coverage_path
 
         child = child_t()
@@ -2270,12 +2312,20 @@ contains
         if (index_case < 1 .or. index_case > n_selected) return
         child%gate_required = any(request%gate_cases(:request%gate_required_count) == &
             selected(index_case))
-        call find_self_executable(executable, executable_ok)
-        if (.not. executable_ok) then
+        if (generation%driver_digest /= session%driver_digest .or. &
+            generation%driver_size /= session%driver_size .or. &
+            len_trim(session%driver_path) == 0) then
             ierr = 1
-            message = 'cannot locate the current fo executable'
+            message = 'test generation does not match the pinned fo driver'
             return
         end if
+        inquire (file=trim(session%driver_path), exist=exists)
+        if (.not. exists) then
+            ierr = 1
+            message = 'pinned fo driver is missing; refusing to launch test case'
+            return
+        end if
+        executable = session%driver_path
         write (log_name, '(a,i0,a,i0,a)') 'case-', campaign, '-', index_case, '.log'
         call log_path(session, trim(log_name), child%log_file)
         n_args = 0
@@ -2452,7 +2502,7 @@ contains
         logical :: credit, is_gate
         character(len=160) :: gate_identity
         character(len=256) :: completion_id
-        character(len=8192) :: record
+        character(len=32768) :: record
         character(len=16) :: journal_outcome
         character(len=PATH_LEN) :: journal_path
         character(len=PATH_LEN) :: coverage_path
@@ -2494,7 +2544,11 @@ contains
             '","session_id":"'//trim(json_escape_string(session%session_id))// &
             '","lane_id":"'//trim(json_escape_string(request%lane_id))// &
             '","generation":"'//generation%identity// &
-            '","case_id":"'//trim(json_escape_string(case_name))// &
+            '","driver_path":"'// &
+            trim(json_escape_string(trim(generation%driver_path)))// &
+            '","driver_digest":"'//generation%driver_digest// &
+            '","driver_size":'//trim(int64_text(generation%driver_size))// &
+            ',"case_id":"'//trim(json_escape_string(case_name))// &
             '","outcome":"'//trim(journal_outcome)//'","status":"'// &
             trim(outcome)//'","exitcode":'// &
             trim(json_int(exitcode))//',"seed":'//trim(json_int(seed))// &
@@ -2589,7 +2643,16 @@ contains
             trim(json_escape_string(session%session_id))//'","lane_id":"'// &
             trim(json_escape_string(request%lane_id))//'","policy_key":"'// &
             request_policy_key(request)//'","state":"'//trim(state)// &
-            '","active_generation":"'//trim(active%identity)// &
+            '","driver_path":"'// &
+            trim(json_escape_string(trim(session%driver_path)))// &
+            '","driver_digest":"'//trim(session%driver_digest)// &
+            '","driver_size":'//trim(int64_text(session%driver_size))// &
+            ',"active_driver_digest":"'//trim(active%driver_digest)// &
+            '","active_driver_size":'//trim(int64_text(active%driver_size))// &
+            ',"candidate_driver_digest":"'//trim(candidate%driver_digest)// &
+            '","candidate_driver_size":'// &
+            trim(int64_text(candidate%driver_size))// &
+            ',"active_generation":"'//trim(active%identity)// &
             '","candidate_generation":"'//trim(candidate%identity)// &
             '","active_project":"'//trim(json_escape_string(active_project))// &
             '","candidate_project":"'//trim(json_escape_string(candidate_project))// &
@@ -3177,23 +3240,6 @@ contains
         if (n_selected <= 0) return
         name = selected(1)
     end function current_test_name
-
-    subroutine find_self_executable(path, ok)
-        character(len=*), intent(out) :: path
-        logical, intent(out) :: ok
-
-        character(len=PATH_LEN) :: argument
-        integer :: status, length
-
-        argument = ''
-        call get_command_argument(0, argument, length, status)
-        ok = .false.
-        if (status == 0 .and. length > 0 .and. length <= len(argument)) then
-            call fs_find_executable(trim(argument), path, ok)
-            if (ok) return
-        end if
-        call fs_find_executable('fo', path, ok)
-    end subroutine find_self_executable
 
     subroutine log_path(session, filename, path)
         type(gremlin_session_t), intent(in) :: session

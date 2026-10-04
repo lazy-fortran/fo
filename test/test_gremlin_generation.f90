@@ -1,9 +1,11 @@
 program test_gremlin_generation
-    use, intrinsic :: iso_c_binding, only: c_char, c_null_char, c_int, c_size_t
+    use, intrinsic :: iso_c_binding, only: c_char, c_null_char, c_int, c_int64_t, &
+        c_size_t
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
+    use fo_cache, only: HASH_LEN
     use fo_fs, only: fs_make_dir, fs_rename, fs_write_text
     use fo_gremlin_generation, only: generation_context_t, generation_t, &
-        generation_capture
+        generation_capture, generation_driver_identity
     use fo_process, only: process_getpid
     implicit none
 
@@ -101,6 +103,8 @@ program test_gremlin_generation
     integer :: parallel_ierr_one, parallel_ierr_two
     integer :: parent_swap_count
     character(len=256) :: parallel_message_one, parallel_message_two
+    character(len=HASH_LEN) :: recorded_driver_digest
+    integer(c_int64_t) :: recorded_driver_size
     integer(c_int) :: remove_rc, symlink_rc, escaping_rc, chmod_rc
 
     n_pass = 0
@@ -145,6 +149,9 @@ program test_gremlin_generation
     context%environment = 'OMP_NUM_THREADS=1'
     context%base_commit = 'base-commit'
     context%patch_digest = 'uncommitted-patch-digest'
+    context%driver_path = '/state/driver-pins/test'
+    context%driver_digest = repeat('a', HASH_LEN)
+    context%driver_size = 1234_c_int64_t
     allocate (context%inputs(1))
     context%inputs(1)%label = 'path-dependency:../fortfront'
     context%inputs(1)%source_root = trim(dependency)
@@ -155,6 +162,22 @@ program test_gremlin_generation
     call check(race_ierr == 0, &
         'capture publishes an immutable generation with an in-tree file link')
     if (race_ierr /= 0) write (error_unit, '(a)') trim(message)
+    call check(first%driver_digest == context%driver_digest .and. &
+        first%driver_size == context%driver_size .and. &
+        first%driver_path == context%driver_path, &
+        'generation retains exact pinned driver metadata')
+    call generation_driver_identity(first%root, recorded_driver_digest, &
+        recorded_driver_size, race_ierr, message)
+    call check(race_ierr == 0 .and. &
+        recorded_driver_digest == context%driver_digest .and. &
+        recorded_driver_size == context%driver_size, &
+        'immutable generation metadata records the pinned driver identity')
+    context%driver_path = '/another/owned/path'
+    call generation_capture(trim(project), trim(cache), context, reused, race_ierr, &
+        message)
+    call check(race_ierr == 0 .and. reused%identity == first%identity, &
+        'pin pathname changes preserve execution identity for identical bytes')
+    context%driver_path = '/state/driver-pins/test'
     project_link = trim(root)//'/project-link'
     symlink_rc = c_symlink(trim(project)//c_null_char, &
         trim(project_link)//c_null_char)
@@ -384,6 +407,15 @@ program test_gremlin_generation
         metadata_changed%identity /= build_source_changed%identity, &
         'patch digest changes invalidate generation identity')
 
+    context%patch_digest = 'uncommitted-patch-digest'
+    context%driver_digest = repeat('b', HASH_LEN)
+    call generation_capture(trim(project), trim(cache), context, metadata_changed, &
+        race_ierr, message)
+    call check(race_ierr == 0 .and. &
+        metadata_changed%identity /= build_source_changed%identity, &
+        'pinned driver digest changes invalidate generation identity')
+    context%driver_digest = repeat('a', HASH_LEN)
+
     race_project = trim(root)//'/race-project'
     call fs_make_dir(trim(race_project)//'/src')
     call write_version_file(trim(race_project)//'/src/value.dat', 'A', &
@@ -392,6 +424,8 @@ program test_gremlin_generation
     race_context%flags = '-O0'
     race_context%base_commit = 'race-base'
     race_context%patch_digest = 'race-patch'
+    race_context%driver_digest = repeat('a', HASH_LEN)
+    race_context%driver_size = 1234_c_int64_t
     call run_capture_during_atomic_edits(trim(race_project), trim(cache), &
         race_context, race_generation, race_ierr, message, &
         atomic_edit_observed)
@@ -427,6 +461,8 @@ program test_gremlin_generation
     race_context%flags = '-O0'
     race_context%base_commit = 'descriptor-race-base'
     race_context%patch_digest = 'descriptor-race-patch'
+    race_context%driver_digest = repeat('a', HASH_LEN)
+    race_context%driver_size = 1234_c_int64_t
     call run_capture_during_parent_swaps(trim(link_race_project), &
         trim(link_race_cache), race_context, &
         race_generation, race_ierr, message, parent_swap_count)
@@ -514,6 +550,8 @@ contains
             trim(space_project)//'/alias'//c_null_char)
         call check(link_rc == 0, 'trailing-space link oracle fixture is created')
         space_context%toolchain = 'space-path-oracle'
+        space_context%driver_digest = repeat('a', HASH_LEN)
+        space_context%driver_size = 1234_c_int64_t
         call generation_capture(trim(space_project), trim(space_cache), &
             space_context, baseline, rc, message)
         call check(rc == 0, 'ordinary path spellings publish a baseline')
