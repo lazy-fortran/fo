@@ -13,11 +13,12 @@ Keep one useful resident Fo Gremlin lane running and develop through it.
 session, gate and failure evidence. The resident lane built and passed
 its four required cases; the controller published that locally green increment.
 Background coverage found async-start, driver-input and inherited test-directory
-failures and cleared readiness. The driver-input and directory fixes are pushed
-and pass three focused checks with driver `433ae625`. The owner is currently
-stopped to admit the async repair's focused gate; completed evidence is retained.
-Restart the resident with the verified replacement after that gate passes.
-Unrelated source promotions pause. This is actual Fo
+failures and cleared readiness. Those repairs are pushed at `318ecea`; driver
+`6e54f805` passes six focused reproducers and two existing process/session cleanup
+checks. Resident session `4014645-1791139032-043537972` is now running on the
+controller checkout with all four previous failures included in its eight-case
+required gate. Its new generation is being verified; earlier receipts remain.
+This is actual Fo
 dogfooding, not a claim of full verification or final speed.
 
 The initial utility/input-inventory/execution-view gate and contained-launch
