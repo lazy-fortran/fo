@@ -2980,8 +2980,12 @@ int fo_c_process_containment_required(void) {
     pid_t probe_pid;
     pid_t waited;
     int status = 0;
+    int seccomp_mode;
 
-    if (prctl(PR_GET_SECCOMP, 0, 0, 0, 0) != 2) return 0;
+    seccomp_mode = prctl(PR_GET_SECCOMP, 0, 0, 0, 0);
+    if (seccomp_mode < 0) return -1;
+    if (seccomp_mode == 0) return 0;
+    if (seccomp_mode != 2) return -1;
     probe_pid = fork();
     if (probe_pid < 0) return -1;
     if (probe_pid == 0) {
