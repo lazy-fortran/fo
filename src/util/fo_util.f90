@@ -1,5 +1,5 @@
 module fo_util
-    use, intrinsic :: iso_fortran_env, only: int64, real64
+    use, intrinsic :: iso_fortran_env, only: int64, real64, iostat_eor
     use, intrinsic :: iso_c_binding, only: c_int
     use fo_fs, only: fs_collect_files, fs_remove_file
     use fx_mcp, only: mcp_send_response, MCP_FRAME_UNKNOWN
@@ -106,18 +106,42 @@ contains
         character(len=*), intent(out) :: text
 
         character(len=512) :: buf
-        integer :: u, iostat, n
+        integer :: u, iostat, n, got, i, out_pos
+        integer(int64) :: record_len, trimmed_len, available
+        logical :: record_complete
 
         text = ''
         n = 0
         open (newunit=u, file=trim(path), status='old', iostat=iostat)
         if (iostat /= 0) return
         do
-            read (u, '(a)', iostat=iostat) buf
-            if (iostat /= 0) exit
-            if (n + len_trim(buf) + 1 > len(text)) exit
-            text(n + 1:n + len_trim(buf)) = trim(buf)
-            n = n + len_trim(buf)
+            record_len = 0_int64
+            trimmed_len = 0_int64
+            available = int(len(text) - n - 1, int64)
+            do
+                got = 0
+                read (u, '(a)', advance='no', size=got, iostat=iostat) buf
+                do i = 1, got
+                    record_len = record_len + 1_int64
+                    if (buf(i:i) /= ' ') trimmed_len = record_len
+                    if (record_len <= available) then
+                        out_pos = n + int(record_len)
+                        text(out_pos:out_pos) = buf(i:i)
+                    end if
+                end do
+                if (iostat == 0) cycle
+                record_complete = iostat == iostat_eor
+                exit
+            end do
+            if (.not. record_complete) then
+                if (n < len(text)) text(n + 1:) = ''
+                exit
+            end if
+            if (trimmed_len + 1_int64 > int(len(text) - n, int64)) then
+                if (n < len(text)) text(n + 1:) = ''
+                exit
+            end if
+            n = n + int(trimmed_len)
             n = n + 1
             text(n:n) = char(10)
         end do

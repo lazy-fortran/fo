@@ -2,7 +2,7 @@ program test_util
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
     use fo_fs, only: fs_collect_files, fs_make_dir, fs_remove_tree
-    use fo_util, only: make_tmpfile
+    use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file
     implicit none
 
     interface
@@ -25,6 +25,7 @@ program test_util
     n_pass = 0
     n_fail = 0
     call test_tmpdir_is_honoured()
+    call test_read_text_file_preserves_long_records()
     call test_profile_filter_ignores_compiler_name_in_basename()
     write (output_unit, '(a,i0,a,i0,a)') 'util: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -48,6 +49,26 @@ contains
         ierr = unsetenv('TMPDIR'//c_null_char)
         call assert(ierr == 0, 'unset TMPDIR succeeds')
     end subroutine test_tmpdir_is_honoured
+
+    subroutine test_read_text_file_preserves_long_records()
+        character(len=512) :: path
+        character(len=2048) :: text
+        character(:), allocatable :: long_line, expected
+        integer :: u
+
+        call make_tmpfile('fo-util-long-line', path)
+        long_line = repeat('x', 900)//'unique-tail-fo-util-41c7'
+        open (newunit=u, file=trim(path), status='replace')
+        write (u, '(a)') long_line
+        write (u, '(a)') 'following-short-record'
+        close (u)
+
+        call read_text_file(trim(path), text)
+        expected = long_line//char(10)//'following-short-record'//char(10)
+        call assert(text(1:len(expected)) == expected, &
+            'read_text_file preserves a long record, its tail, and following line')
+        call delete_tmpfile(path)
+    end subroutine test_read_text_file_preserves_long_records
 
     subroutine test_profile_filter_ignores_compiler_name_in_basename()
         character(len=512) :: root, gnu_dir, nvhpc_dir, path
