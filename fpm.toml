@@ -78,6 +78,11 @@ source-dir = "test"
 main = "test_exec_app_cli.f90"
 
 [[test]]
+name = "test_default_gremlin_cli"
+source-dir = "test"
+main = "test_default_gremlin_cli.f90"
+
+[[test]]
 name = "test_fmt_cli"
 source-dir = "test"
 main = "test_fmt_cli.f90"
