@@ -83,9 +83,10 @@ performance validation; #190 owns the new measurement work.
 | --- | --- |
 | [#56](https://github.com/lazy-fortran/fo/issues/56) | Unsaved-version LSP diagnostics; never build/test on every keystroke. |
 | [#59](https://github.com/lazy-fortran/fo/issues/59) | Explicit optional fluff deep lint, separate from cheap native checks. |
-| [#62](https://github.com/lazy-fortran/fo/issues/62) | fortrun salvage/retirement record, no second runner. |
 | [#117](https://github.com/lazy-fortran/fo/issues/117) | Formatter identifier/keyword boundary correctness. |
 
+
+#62 fortrun administration is closed not planned in the fo implementation roadmap.
 
 Closed out-of-scope research directions remain in issue history rather than the active roadmap: #120 proof/synthesis and #157 complete host toolchain/runtime capture, plus earlier capsule/Nix/FortOS issues #1–#7.
 
