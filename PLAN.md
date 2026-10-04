@@ -75,6 +75,16 @@ FPM/CMake/CTest runs are independent compatibility oracles; execution with those
 tools absent proves standalone support. The older CMake delegation plan remains
 an interim-backend reference until its native replacement scope is reconciled.
 
+The first standalone FPM slices are native manifest decoding
+[#201](https://github.com/lazy-fortran/fo/issues/201), path/pinned-Git dependencies
+[#202](https://github.com/lazy-fortran/fo/issues/202), namespaced registry resolution
+[#203](https://github.com/lazy-fortran/fo/issues/203), and explicit-prefix executable
+installation [#204](https://github.com/lazy-fortran/fo/issues/204).
+They do not close milestone 5: remaining target forms, profiles/preprocessing,
+dependency/metapackage/registry semantics, command/options parity and library/module
+installation require separate native behavioral acceptance. Unsupported forms get
+explicit diagnostics while those slices are implemented.
+
 CLI transitions are planned, not yet implemented: bare `fo` will start or attach
 to resident Gremlin, and the old staged delivery pipeline will move to `fo
 verify`. Until then, use the commands exposed by the current Fo build.

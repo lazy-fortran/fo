@@ -39,6 +39,31 @@ fortran-lang/fpm, selected fpm fixtures and stdlib/preprocessing/CMake examples.
 Acquisition is isolated and explicit; normal fo/test/Gremlin never downloads a
 benchmark matrix. Ordinary declared project dependency bootstrap is unchanged.
 
+## Delivery milestones
+
+Follow PLAN's six milestones: resident Fo Gremlin
+[#200](https://github.com/lazy-fortran/fo/issues/200), cleanup through that loop,
+FFC's FPM-only workflow, repairs for up to three confirmed current FFC failures,
+standalone FPM compatibility, then the required native ITpPlasma CMake profiles.
+Only demonstrated bootstrap blockers precede the first resident lane.
+
+The initial standalone FPM work is split into independently verifiable issues:
+
+| Issue | Fo-owned native scope |
+| --- | --- |
+| [#201](https://github.com/lazy-fortran/fo/issues/201) | Current Fo/FFC manifest subset and preserved Fo extensions. |
+| [#202](https://github.com/lazy-fortran/fo/issues/202) | Path and pinned-Git closure/acquisition without an FPM process. |
+| [#203](https://github.com/lazy-fortran/fo/issues/203) | Namespaced registry and version resolution. |
+| [#204](https://github.com/lazy-fortran/fo/issues/204) | Executable installation into an explicit prefix. |
+
+These are initial slices, not full FPM replacement. Required remaining acceptance
+includes all supported target declarations, features/profiles/preprocessing,
+remaining dependency/metapackage and registry behavior, public command/options
+parity, and library/module installation. Milestone 5 remains open until these
+are implemented and verified with FPM absent. Implement FPM semantics within Fo;
+generic libraries are allowed, FPM-specific source imports are not. The existing
+FPM-backed #188 repair is an interim consumer fix, separate from #202.
+
 ## Current implementation spine
 
 | Issues | Responsibility and dependency boundary |
