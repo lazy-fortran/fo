@@ -35,8 +35,12 @@ and no current failure at that initial gate, so the increment was pushed to main
 Background coverage then found failures and cleared readiness: nested async
 launches (`test_stat_memo`, stale-MCP public start), a driver-pin fixture using a
 workflow-only input, and nested test commands inheriting the outer private cwd.
-These now have separate scoped workers; unrelated source promotions pause.
-Keep this owned lane active for useful feedback. Full verification is not claimed.
+The cwd and driver-input repairs are on main `c1c6123`: rebuilt driver SHA256
+`433ae625` passes dev-dependency receipts, driver pin and execution view (3/3)
+with an explicit outer cwd hint. The owned lane was stopped/reaped to admit this
+focused verification. The general async repair is published at `93c01545` and
+under scoped source review; verify its new image, then restart the lane. Unrelated
+source promotions pause. Full verification is not claimed.
 
 The earlier stopped session and completed receipts remain. Initial source
 capture writes fell after the per-blob fix, but cumulative owner/reaped-child I/O
