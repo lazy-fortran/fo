@@ -2163,8 +2163,12 @@ contains
             message = 'coverage scheduler rejected eligible inventory or priorities'
             return
         end if
-        if (n_priorities == 0 .and. n_selected > 0) then
-            priorities(1) = selected(1)
+        if (n_priorities == 0) then
+            if (n_selected > 0) then
+                priorities(1) = selected(1)
+            else
+                priorities(1) = all_names(1)
+            end if
             n_priorities = 1
         end if
         if (len_trim(request%requirement_digest) /= HASH_LEN) then
@@ -2174,6 +2178,10 @@ contains
             request%requirement_digest = cache_digest(priorities, n_priorities)
         end if
         n_mandatory_selected = n_selected_priorities
+        call select_missing_gate_cases(session, generation_id, request, &
+            min(limit, size(selected)), selected, n_selected, &
+            n_mandatory_selected, ierr, message)
+        if (ierr /= 0) return
         if (request%shuffle) then
             call shuffle_gremlin_tests(selected, n_mandatory_selected, n_selected, &
                 seed, shuffle_status)
@@ -2183,6 +2191,76 @@ contains
             end if
         end if
     end subroutine discover_campaign
+
+    subroutine select_missing_gate_cases(session, generation, request, limit, &
+            selected, n_selected, n_mandatory, ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        character(len=*), intent(in) :: generation
+        type(gremlin_request_t), intent(in) :: request
+        integer, intent(in) :: limit
+        character(len=*), intent(inout) :: selected(:)
+        integer, intent(inout) :: n_selected, n_mandatory
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        type(journal_record_t), allocatable :: records(:)
+        character(len=NAME_LEN) :: pending(MAX_NODES)
+        character(len=HASH_LEN) :: receipt_generation, requirement
+        character(len=NAME_LEN) :: case_name
+        character(len=16) :: outcome, gate_required
+        logical :: attempted(MAX_NODES)
+        integer(int64) :: cursor, next_cursor
+        integer :: i, j, n_pending
+
+        ! Coverage may already be complete when a frozen generation is reused
+        ! with a different gate. Only actual receipts can discharge that gate.
+        attempted = .false.
+        cursor = 0_int64
+        ierr = 0
+        message = ''
+        do
+            call journal_read_page(session%state_dir//'/journal.jsonl', cursor, 64, &
+                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, next_cursor, &
+                ierr, message)
+            if (ierr /= JOURNAL_OK) return
+            if (size(records) == 0) exit
+            do i = 1, size(records)
+                call gremlin_json_field(records(i)%json, 'generation', &
+                    receipt_generation)
+                if (trim(receipt_generation) /= trim(generation)) cycle
+                call gremlin_json_field(records(i)%json, 'requirement_digest', &
+                    requirement)
+                if (requirement /= request%requirement_digest) cycle
+                call gremlin_json_field(records(i)%json, 'gate_required', gate_required)
+                if (trim(gate_required) /= 'true') cycle
+                call gremlin_json_field(records(i)%json, 'status', outcome)
+                if (outcome /= 'PASS' .and. .not. status_is_failure(outcome)) cycle
+                call gremlin_json_field(records(i)%json, 'case_id', case_name)
+                do j = 1, request%gate_required_count
+                    if (case_name == request%gate_cases(j)) attempted(j) = .true.
+                end do
+            end do
+            if (next_cursor <= cursor) then
+                ierr = JOURNAL_INVALID
+                message = 'Gremlin receipt cursor did not advance during gate selection'
+                return
+            end if
+            cursor = next_cursor
+        end do
+        pending = ''
+        n_pending = 0
+        do i = 1, request%gate_required_count
+            if (attempted(i)) cycle
+            n_pending = n_pending + 1
+            pending(n_pending) = request%gate_cases(i)
+        end do
+        call append_priority_names(selected, n_mandatory, pending, n_pending)
+        n_mandatory = min(n_pending, limit)
+        call append_priority_names(selected, n_selected, pending, n_pending)
+        n_selected = min(n_pending, limit)
+        selected = ''
+        selected(:n_selected) = pending(:n_selected)
+    end subroutine select_missing_gate_cases
 
     subroutine append_priority_names(source, n_source, destination, n_destination)
         character(len=*), intent(in) :: source(:)
