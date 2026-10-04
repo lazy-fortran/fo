@@ -2,6 +2,8 @@
 #ifndef _DARWIN_C_SOURCE
 #define _DARWIN_C_SOURCE 1
 #endif
+#elif defined(__linux__)
+#define _GNU_SOURCE
 #else
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -329,6 +331,26 @@ int fo_test_open_fds(void) {
     return count - 1; /* Exclude this directory's own descriptor. */
 }
 
+int fo_test_pipe_cloexec(int descriptors[2]) {
+    if (descriptors == NULL) return -1;
+#if defined(__linux__)
+    return pipe2(descriptors, O_CLOEXEC);
+#else
+    if (pipe(descriptors) != 0) return -1;
+    for (int i = 0; i < 2; i++) {
+        int flags = fcntl(descriptors[i], F_GETFD);
+        if (flags < 0 || fcntl(descriptors[i], F_SETFD, flags | FD_CLOEXEC) != 0) {
+            int error = errno;
+            close(descriptors[0]);
+            close(descriptors[1]);
+            errno = error;
+            return -1;
+        }
+    }
+    return 0;
+#endif
+}
+
 int fo_test_spawn(char *const arguments[], char *const environment[], const char *directory) {
     pid_t child = fork();
     if (child < 0) return -1;
@@ -355,6 +377,17 @@ int fo_test_spawn(char *const arguments[], char *const environment[], const char
         _exit(127);
     }
     (void)setpgid(child, child);
+    return (int)child;
+}
+
+/* A deliberately unowned same-group process for containment tests. */
+int fo_test_spawn_same_group_sentinel(void) {
+    pid_t child = fork();
+    if (child < 0) return -1;
+    if (child == 0) {
+        execl("/bin/sleep", "sleep", "30", (char *)NULL);
+        _exit(127);
+    }
     return (int)child;
 }
 
