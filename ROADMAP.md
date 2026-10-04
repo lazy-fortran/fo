@@ -39,7 +39,7 @@ freshness/result/process behavior before consumers can rely on it.
 | [#173](https://github.com/lazy-fortran/fo/issues/173) | Complete: accept documented platform archive index metadata while preserving exact expected-object verification. |
 | [#174](https://github.com/lazy-fortran/fo/issues/174) | Initialize and diagnose the shared Darwin change provider without adding a second polling engine. |
 | [#175](https://github.com/lazy-fortran/fo/issues/175) | Own one declared execution-input inventory shared by watcher relevance, compact generation capture and later action invalidation. |
-| [#176](https://github.com/lazy-fortran/fo/issues/176) | Replace shell/Python benchmark orchestration and reporting with a standalone Fortran driver. |
+| [#176](https://github.com/lazy-fortran/fo/issues/176) | Complete through `8431a6d`: standalone Fortran benchmark orchestration, JSONL reporting and exact inventory verification replace the shell/Python executables. |
 | [#177](https://github.com/lazy-fortran/fo/issues/177) | Complete: every command-local help path is side-effect free, including `fo install --help`. |
 
 Adjacent scope is [#56](https://github.com/lazy-fortran/fo/issues/56) LSP,

@@ -697,9 +697,9 @@ completed entries below are retained as prerequisites and evidence:
     native and Gremlin candidate builds through it; #167 migrates remaining
     test/run/reproduce/backend paths. Enable fx #44 collection only with #168's
     independently releasable fo roots, bounded policy and accounting.
-18. [#176](https://github.com/lazy-fortran/fo/issues/176): port the benchmark
-    driver/report from shell and Python to Fortran, then remove the final
-    repository-owned executable scripting-language tools.
+18. **Complete:** [#176](https://github.com/lazy-fortran/fo/issues/176): the
+    benchmark driver, JSONL reporter, complete-inventory check and independent
+    oracle are Fortran; the shell/Python executables are removed.
 19. **Complete:** [#177](https://github.com/lazy-fortran/fo/issues/177): make global and
     command-local help side-effect free. `fo install --help` must never build or
     replace the controller-owned installed driver.
@@ -817,9 +817,11 @@ Implemented issue state:
   Candidate `b7365a2` fixes reviewed CF lifetime and zero-timeout defects, but a
   third review rejected missing source-bound public lifecycle and Darwin error-
   injection evidence; the exact candidate is now with task-specific Sol.
-- #176 candidate `9cff88b` replaces the shell/Python benchmark driver/reporter,
-  passes its focused oracle, lint/format and real eight-metric smoke on exact
-  `8978ab4`, and is awaiting independent review.
+- #176 is complete through `8431a6d`: the shell/Python benchmark driver and
+  reporter are replaced by a standalone Fortran tool with a narrow C process/
+  clock shim. Independent review approved strict JSON/Unicode, CLI/environment
+  precedence, owned cleanup, failure output and exact eight-metric coverage.
+  The exact integrated focused oracle and real complete smoke pass.
 - #143/#152 and PR #147 are closed without merge after the KISS review assigned
   agent scheduling to the external controller; no work-mode code enters core.
 - #145 has one bounded fpm row passing on the exact candidate, one independent
