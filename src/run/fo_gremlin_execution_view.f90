@@ -1,7 +1,8 @@
 module fo_gremlin_execution_view
     !! Private per-invocation working directories over frozen Gremlin inputs.
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
-    use fo_fs, only: fs_make_dir, fs_mkdir_excl, fs_remove_tree
+    use fo_fs, only: fs_collect_files, fs_copy_exec, fs_make_dir, &
+        fs_mkdir_excl, fs_remove_tree
     use fo_input_inventory, only: input_entry_t, input_inventory_t, INPUT_FILE
     use fo_process, only: process_getpid
     use fo_util, only: make_tmpfile, delete_tmpfile
@@ -24,6 +25,7 @@ module fo_gremlin_execution_view
     end type execution_view_t
 
     public :: execution_view_create, execution_view_release
+    public :: execution_view_copy_app_outputs
 
     interface
         integer(c_int) function generation_copy_tree(source, destination, manifest) &
@@ -41,6 +43,75 @@ module fo_gremlin_execution_view
     end interface
 
 contains
+
+    subroutine execution_view_copy_app_outputs(build_project_root, &
+            execution_project_root, app_output_dir, legacy_bin_dir, ierr, message)
+        character(len=*), intent(in) :: build_project_root, execution_project_root
+        character(len=*), intent(in) :: app_output_dir, legacy_bin_dir
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        character(len=PATH_LEN) :: app_files(256), source, destination
+        character(len=PATH_LEN) :: relative, legacy_source, legacy_dest
+        integer :: n_files, i, root_len, source_len, last_slash, rc
+        logical :: exists
+
+        ierr = 0
+        message = ''
+        if (len_trim(build_project_root) == 0 .or. &
+                len_trim(execution_project_root) == 0 .or. &
+                len_trim(app_output_dir) == 0 .or. len_trim(legacy_bin_dir) == 0) then
+            ierr = 1
+            message = 'application output roots must be non-empty'
+            return
+        end if
+        if (trim(build_project_root) == trim(execution_project_root)) return
+
+        call fs_collect_files(trim(app_output_dir), '', '', '', app_files, &
+            n_files, .false.)
+        if (n_files >= size(app_files)) then
+            ierr = 1
+            message = 'application output inventory exceeds 256 files'
+            return
+        end if
+        root_len = len_trim(build_project_root)
+        do i = 1, n_files
+            source = trim(app_files(i))
+            source_len = len_trim(source)
+            if (source_len <= root_len + 1) cycle
+            if (source(:root_len) /= trim(build_project_root)) cycle
+            if (source(root_len + 1:root_len + 1) /= '/') cycle
+            relative = source(root_len + 2:source_len)
+            if (index(trim(relative), 'build/') /= 1) cycle
+            last_slash = index(trim(source), '/', back=.true.)
+            if (last_slash == 0) cycle
+
+            destination = trim(execution_project_root)//'/'//trim(relative)
+            call make_parent_directory(trim(destination))
+            rc = fs_copy_exec(trim(source), trim(destination))
+            if (rc /= 0) then
+                ierr = 1
+                message = 'cannot copy application output into execution view: '// &
+                    trim(relative)
+                return
+            end if
+
+            legacy_source = trim(legacy_bin_dir)//'/'// &
+                source(last_slash + 1:source_len)
+            inquire (file=trim(legacy_source), exist=exists)
+            if (.not. exists) cycle
+            legacy_dest = trim(execution_project_root)//'/'// &
+                trim(legacy_source(root_len + 2:len_trim(legacy_source)))
+            call make_parent_directory(trim(legacy_dest))
+            rc = fs_copy_exec(trim(legacy_source), trim(legacy_dest))
+            if (rc /= 0) then
+                ierr = 1
+                message = 'cannot copy legacy application output into execution view: '// &
+                    trim(legacy_dest)
+                return
+            end if
+        end do
+    end subroutine execution_view_copy_app_outputs
 
     subroutine execution_view_create(scratch_parent, generation_id, owner_key, &
             case_id, inventory, inventory_ready, inventory_complete, view, ierr, &

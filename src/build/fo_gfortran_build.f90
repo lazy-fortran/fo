@@ -13,6 +13,7 @@ module fo_gfortran_build
     use fo_stat_memo, only: memo_save, memo_hash_file
     use fo_build_tree, only: native_output_dir, native_profiles_dir, &
         native_record_profile
+    use fo_gremlin_execution_view, only: execution_view_copy_app_outputs
     use fo_test_budget, only: test_timeout_seconds, test_budget_seconds, &
         test_wall_cap_seconds, timeout_detail
     use fx_action_cache, only: cache_set_file_hash_hook
@@ -95,6 +96,17 @@ module fo_gfortran_build
     end interface
 
 contains
+
+    logical function gremlin_execution_view_requested() result(requested)
+        character(len=MAX_PATH) :: execution_cwd
+        integer :: status
+
+        execution_cwd = ''
+        call get_environment_variable('FO_GREMLIN_EXECUTION_CWD', execution_cwd, &
+            status=status)
+        requested = .false.
+        if (status == 0) requested = len_trim(execution_cwd) > 0
+    end function gremlin_execution_view_requested
 
     integer function native_jobs() result(jobs)
         character(len=32) :: value
@@ -607,7 +619,8 @@ contains
 
         call gfortran_build(project_dir, lf, exitcode, flags=flag_text, &
             use_cache=use_cache, up_to_date=build_current, &
-            tests_ready=tests_current, build_apps=.false., &
+            tests_ready=tests_current, &
+            build_apps=gremlin_execution_view_requested(), &
             apps_ready=apps_current, cached_test_dir=test_dir)
         if (exitcode /= 0) return
 
@@ -691,7 +704,8 @@ contains
 
         call gfortran_build(project_dir, lf, exitcode, flags=flag_text, &
             use_cache=use_cache, up_to_date=build_current, &
-            tests_ready=tests_current, build_apps=.false., &
+            tests_ready=tests_current, &
+            build_apps=gremlin_execution_view_requested(), &
             apps_ready=apps_current, cached_test_dir=test_dir)
         if (exitcode /= 0) return
 
@@ -916,6 +930,8 @@ contains
             exitcode = 1
             return
         end if
+        call prepare_test_app_outputs(project_dir, execution_cwd, bin_dir, exitcode)
+        if (exitcode /= 0) return
         call run_current_team(project_dir, execution_cwd, config, tests, n_tests)
         call report_current_tests(project_dir, log_file, tests, n_tests, warn_s, &
             exitcode)
@@ -923,6 +939,34 @@ contains
             if (allocated(tests(i)%args)) deallocate (tests(i)%args)
         end do
     end subroutine run_current_tests
+
+    subroutine prepare_test_app_outputs(project_dir, execution_cwd, bin_dir, ierr)
+        character(len=*), intent(in) :: project_dir, execution_cwd, bin_dir
+        integer, intent(out) :: ierr
+
+        character(len=MAX_PATH) :: message, app_output_dir
+        integer :: bin_marker
+
+        ierr = 0
+        if (trim(execution_cwd) == trim(project_dir)) return
+        message = ''
+        app_output_dir = bin_dir
+        bin_marker = len_trim(app_output_dir) - 3
+        if (bin_marker < 1) then
+            ierr = 1
+        else if (app_output_dir(bin_marker:bin_marker + 3) /= '/bin') then
+            ierr = 1
+        else
+            app_output_dir(bin_marker + 1:bin_marker + 3) = 'app'
+            call execution_view_copy_app_outputs(project_dir, execution_cwd, &
+                trim(app_output_dir), bin_dir, ierr, message)
+        end if
+        if (ierr /= 0) then
+            if (len_trim(message) == 0) &
+                message = 'cannot resolve profile app output directory'
+            write (error_unit, '(a)') 'fo: '//trim(message)
+        end if
+    end subroutine prepare_test_app_outputs
 
     function test_execution_cwd(project_dir) result(execution_cwd)
         character(len=*), intent(in) :: project_dir
@@ -2806,6 +2850,9 @@ contains
                 exitcode = 1
                 return
             end if
+            call prepare_test_app_outputs(project_dir, execution_cwd, bin_dir, &
+                exitcode)
+            if (exitcode /= 0) return
         end if
         test_flags = ''
         if (present(flags)) test_flags = flags

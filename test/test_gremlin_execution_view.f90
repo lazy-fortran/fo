@@ -2,7 +2,7 @@ program test_gremlin_execution_view
     use fo_cache, only: HASH_LEN, cache_file_digest
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_write_text
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
-        execution_view_release
+        execution_view_release, execution_view_copy_app_outputs
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, INPUT_FILE
     use fo_process, only: argv_push, process_getcwd, process_run_argv_logged
@@ -15,7 +15,8 @@ program test_gremlin_execution_view
     type(input_inventory_t) :: inventory, escaping, incomplete, invalid
     type(input_inventory_t) :: multirole, conflicting, aliased
     type(execution_view_t) :: first, second, partial, paired, rejected, alias_view
-    type(execution_view_t) :: build_view
+    type(execution_view_t) :: build_view, runtime_view
+    type(execution_view_t) :: reproduction_build_view, reproduction_runtime_view
     type(string_list_t) :: arguments, environment
     type(process_result_t) :: build_result, run_result
     character(len=512) :: root, views, source_file, text, message
@@ -24,7 +25,9 @@ program test_gremlin_execution_view
     character(len=HASH_LEN) :: source_digest, after_digest
     character(len=HASH_LEN) :: build_source_digest, build_source_after
     character(len=HASH_LEN) :: dependency_digest, dependency_after
+    character(len=HASH_LEN) :: candidate_app_digest, candidate_app_after
     character(len=512) :: argument, executable, current_dir, probe_log
+    character(len=512) :: runtime_output, unrelated_test, unrelated_build
     character(len=:), allocatable :: packed, driver
     integer :: n_args, probe_exit, cwd_status
     integer :: ierr, release_status, i
@@ -245,8 +248,29 @@ program test_gremlin_execution_view
     call fs_write_text(trim(build_source), &
         'program candidate_build_probe'//new_line('a')// &
         'use candidate_provider_mod, only: candidate_provider_value'//new_line('a')// &
+        'integer :: unit'//new_line('a')// &
         'print "(i0)", candidate_provider_value'//new_line('a')// &
+        'open(newunit=unit,file="app-output.txt",status="replace")'//new_line('a')// &
+        'write(unit,"(i0)") candidate_provider_value'//new_line('a')// &
+        'close(unit)'//new_line('a')// &
         'end program candidate_build_probe'//new_line('a'))
+    call fs_make_dir(trim(root)//'/bundle/project/test')
+    call fs_write_text(trim(root)//'/bundle/project/test/test_app_execution_view.f90', &
+        'program test_app_execution_view'//new_line('a')// &
+        '    integer :: command_status, exit_status, io_status, unit, value'//new_line('a')// &
+        '    logical :: exists'//new_line('a')// &
+        '    inquire(file="build/fo/app/candidate_build_probe", exist=exists)'// &
+        new_line('a')//'    if (.not. exists) error stop 11'//new_line('a')// &
+        '    call execute_command_line("build/fo/app/candidate_build_probe", &'// &
+        new_line('a')//'        cmdstat=command_status, exitstat=exit_status)'// &
+        new_line('a')//'    if (command_status /= 0) error stop 12'//new_line('a')// &
+        '    if (exit_status /= 0) error stop 13'//new_line('a')// &
+        '    open(newunit=unit,file="app-output.txt",status="old",iostat=io_status)'// &
+        new_line('a')//'    if (io_status /= 0) error stop 14'//new_line('a')// &
+        '    read(unit,*,iostat=io_status) value'//new_line('a')// &
+        '    close(unit)'//new_line('a')//'    if (io_status /= 0) error stop 15'// &
+        new_line('a')//'    if (value /= 73) error stop 16'//new_line('a')// &
+        'end program test_app_execution_view'//new_line('a'))
     call cache_file_digest(trim(build_source), build_source_digest)
     call cache_file_digest(trim(dependency_source), dependency_digest)
     call execution_view_create(trim(root)//'/views', repeat('b', HASH_LEN), &
@@ -282,6 +306,121 @@ program test_gremlin_execution_view
             else
                 call check(.false., 'candidate executable output is captured')
             end if
+        end if
+        call fs_remove_file(trim(build_view%cwd)//'/app-output.txt')
+        unrelated_test = trim(build_view%cwd)// &
+            '/build/fo/bin/unrelated_test_output'
+        unrelated_build = trim(build_view%cwd)//'/build/fo/lib/unrelated.a'
+        call fs_write_text(trim(unrelated_test), 'test executable')
+        call fs_write_text(trim(unrelated_build), 'unrelated build output')
+        call execution_view_create(trim(root)//'/views', repeat('c', HASH_LEN), &
+            'session-runtime-apps', 'test_case', inventory, .true., .true., &
+            runtime_view, ierr, message)
+        call check(ierr == 0 .and. runtime_view%active, &
+            'create a private test execution view for built applications')
+        if (runtime_view%active) then
+            call execution_view_copy_app_outputs(trim(build_view%cwd), &
+                trim(runtime_view%cwd), trim(build_view%cwd)//'/build/fo/app', &
+                trim(build_view%cwd)//'/build/fo/bin', ierr, message)
+            call check(ierr == 0, 'copy app outputs into the test execution view')
+            runtime_output = trim(runtime_view%cwd)//'/app-output.txt'
+            inquire(file=trim(runtime_view%cwd)// &
+                '/build/fo/app/candidate_build_probe', exist=exists)
+            call check(exists, 'Fo app-only output is present in the execution view')
+            inquire(file=trim(runtime_view%cwd)// &
+                '/build/fo/bin/candidate_build_probe', exist=exists)
+            call check(exists, 'legacy Fo app path is present in the execution view')
+            inquire(file=trim(runtime_view%cwd)// &
+                '/build/fo/bin/unrelated_test_output', exist=exists)
+            call check(.not. exists, 'test binaries are not copied from the build view')
+            inquire(file=trim(runtime_view%cwd)//'/build/fo/lib/unrelated.a', &
+                exist=exists)
+            call check(.not. exists, 'unrelated build outputs are not copied')
+            packed = ''
+            n_args = 0
+            call argv_push(packed, n_args, trim(runtime_view%cwd)// &
+                '/build/fo/app/candidate_build_probe')
+            call make_tmpfile('fo-view-app-run', probe_log)
+            call process_run_argv_logged(trim(runtime_view%cwd), packed, n_args, &
+                trim(probe_log), .false., 10, probe_exit)
+            call check(probe_exit == 0, &
+                'built app runs from the private execution view')
+            call read_text_file(trim(runtime_output), text)
+            call check(index(text, '73') > 0, &
+                'app writes its relative output in the view')
+            inquire(file=trim(build_view%cwd)//'/app-output.txt', exist=exists)
+            call check(.not. exists, 'app execution leaves the build view unchanged')
+            inquire(file=trim(root)//'/bundle/project/app-output.txt', exist=exists)
+            call check(.not. exists, 'app execution leaves the frozen bundle unchanged')
+            call delete_tmpfile(trim(probe_log))
+
+            call fs_remove_file(trim(runtime_output))
+            environment = string_list_t()
+            call list_add(environment, 'FO_JOBS=1')
+            call list_add(environment, 'FO_GREMLIN_EXECUTION_CWD='// &
+                trim(runtime_view%cwd))
+            arguments = string_list_t()
+            call list_add(arguments, 'test')
+            call list_add(arguments, 'test_app_execution_view')
+            call run_fo(driver, arguments, trim(build_view%cwd), &
+                trim(root)//'/build-view-cache', run_result, environment, 120000)
+            call check(run_result%exit_code == 0, &
+                'campaign-style test runs its app from the execution view')
+            inquire(file=trim(runtime_output), exist=exists)
+            call check(exists, 'campaign-style app writes only in the execution view')
+            inquire(file=trim(build_view%cwd)//'/app-output.txt', exist=exists)
+            call check(.not. exists, 'campaign-style app does not write in build view')
+
+            call execution_view_create(trim(root)//'/views', repeat('d', HASH_LEN), &
+                'session-reproduction-build', 'build', inventory, .true., .true., &
+                reproduction_build_view, ierr, message, &
+                candidate_bundle_root=trim(root)//'/bundle')
+            call check(ierr == 0 .and. reproduction_build_view%active, &
+                'create a fresh reproduction build view')
+            call execution_view_create(trim(root)//'/views', repeat('e', HASH_LEN), &
+                'session-reproduction-runtime', 'test_case', inventory, .true., .true., &
+                reproduction_runtime_view, ierr, message)
+            call check(ierr == 0 .and. reproduction_runtime_view%active, &
+                'create a fresh reproduction execution view')
+            if (reproduction_build_view%active .and. &
+                    reproduction_runtime_view%active) then
+                environment = string_list_t()
+                call list_add(environment, 'FO_JOBS=1')
+                call list_add(environment, 'FO_GREMLIN_EXECUTION_CWD='// &
+                    trim(reproduction_runtime_view%cwd))
+                arguments = string_list_t()
+                call list_add(arguments, 'test')
+                call list_add(arguments, 'test_app_execution_view')
+                call run_fo(driver, arguments, trim(reproduction_build_view%cwd), &
+                    trim(root)//'/build-view-cache', run_result, environment, 120000)
+                if (run_result%exit_code /= 0) then
+                    if (allocated(run_result%stdout)) print '(a)', run_result%stdout
+                    if (allocated(run_result%stderr)) print '(a)', run_result%stderr
+                end if
+                call check(run_result%exit_code == 0, &
+                    'reproduction-style test builds and runs its app in the view')
+                inquire(file=trim(reproduction_runtime_view%cwd)//'/app-output.txt', &
+                    exist=exists)
+                call check(exists, &
+                    'reproduction-style app writes inside its private execution view')
+                inquire(file=trim(reproduction_build_view%cwd)//'/app-output.txt', &
+                    exist=exists)
+                call check(.not. exists, &
+                    'reproduction-style app leaves its build view unchanged')
+            end if
+            call execution_view_release(reproduction_runtime_view, .false., &
+                release_status, message)
+            call execution_view_release(reproduction_build_view, .false., &
+                release_status, message)
+            call cache_file_digest(trim(build_view%cwd)// &
+                '/build/fo/app/candidate_build_probe', candidate_app_digest)
+            call fs_write_text(trim(runtime_view%cwd)// &
+                '/build/fo/app/candidate_build_probe', 'view-local replacement')
+            call cache_file_digest(trim(build_view%cwd)// &
+                '/build/fo/app/candidate_build_probe', candidate_app_after)
+            call check(candidate_app_after == candidate_app_digest, &
+                'changing the view-local app leaves the candidate artifact unchanged')
+            call execution_view_release(runtime_view, .false., release_status, message)
         end if
         call cache_file_digest(trim(build_source), build_source_after)
         call check(build_source_digest == build_source_after, &
