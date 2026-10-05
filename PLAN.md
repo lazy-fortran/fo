@@ -60,6 +60,19 @@ case logs remain under
 the build log SHA256 is `17fb0cbcb88cc5433435a38967c1ed1849f65e017da376de9716762f9c329d6c`.
 Full-suite verification and persistent idle residency remain unverified.
 
+Fo main commit `b3a387f4990d724fc6ca67041c62d0dcd3f2563e` bridges app outputs
+from the exact active profile into each private test execution view, including
+the fresh-build and cached-test paths. On base `d31db5c`, frozen patch SHA256
+`fe7899422999465159a9e4c456d18825843c3e436b770f84e75605ed00b7a29c` passed
+`test_gremlin_execution_view` through candidate driver SHA256
+`e83f708b1874fe7b403e3f6cd23946920026241203ac8a22f838e90123ffd711`. Gremlin
+generation `f41563173efcb27a7aa94ed67843c78b22e07150e57c69cbb70c506cb1c1b87c`
+passed the two-case gate (`test_gremlin_execution_view`,
+`test_gremlin_reproduce_logs`) and sampled `test_link_gc_sections`; its
+`local_gate_green` receipt is in session `1209314-1791168456-528134238`.
+Later exploratory cases `test_gremlin_nested_capture` and `test_gremlin_watch`
+also failed on unmodified main, so they are recorded as existing suite issues.
+
 Fo #186 has an initial source-policy slice on `main` at
 `485226135d8467a366342e2afd1f752b6997e934`, based on `0ea2244`. The native
 scanner and Fo watch filter now share the `.f90`, `.F90`, `.f`, and `.F` suffix
