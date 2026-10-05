@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.22)
+project(cmake_resident_input LANGUAGES Fortran)
+include(CTest)
+add_executable(marker marker.f90)
+add_test(NAME registered_marker COMMAND marker)
+set_tests_properties(registered_marker PROPERTIES PASS_REGULAR_EXPRESSION "marker passed")

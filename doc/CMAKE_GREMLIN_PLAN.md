@@ -79,3 +79,11 @@ authorized isolated resources; unrun rows remain visible.
 Earlier investigations and profile details remain in
 [the pre-revision plan](https://github.com/lazy-fortran/fo/blob/f74daf7/doc/CMAKE_GREMLIN_PLAN.md).
 Use those as evidence, not fixed architecture instructions.
+
+## CMake-only resident capture blocker
+
+The 2026-10-05 [minimal reproducer](reproducers/cmake-resident-input/README.md)
+records an observed FPM-manifest parse failure before CMake generation capture.
+Public delegated test/exec results do not establish resident support. The next
+repair must handle the CMake input inventory and frozen dependency/profile
+closure as well as backend selection, then recheck the original consumer.
