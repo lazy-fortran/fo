@@ -219,3 +219,19 @@ main = "test_async_process_boundary_slow.f90"
 name = "test_gremlin_process_boundary_slow"
 source-dir = "test"
 main = "test_gremlin_process_boundary_slow.f90"
+
+[[extra.fo.inputs]]
+path = "fpm.toml"
+role = "test-fixture"
+
+[[extra.fo.inputs]]
+path = "test-fixtures/gremlin_process_boundary/fpm.toml"
+role = "test-fixture"
+
+[[extra.fo.inputs]]
+path = "test-fixtures/gremlin_process_boundary/test_process_boundary.f90"
+role = "test-fixture"
+
+[[extra.fo.inputs]]
+path = "test-fixtures/gremlin_process_boundary/fo_boundary_signal.f90"
+role = "test-fixture"

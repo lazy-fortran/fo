@@ -296,11 +296,10 @@ program test_async_process_boundary_slow
         call check(c_getsid(int(scope_escaped_pid, c_int)) == &
             int(scope_escaped_pid, c_int), 'Darwin descendant owns its new session')
     else
-        call check(setsid_result == -1, 'Linux containment rejects descendant setsid')
-        call check(c_getsid(int(scope_escaped_pid, c_int)) > 0 .and. &
-            c_getsid(int(scope_escaped_pid, c_int)) == &
-            c_getsid(int(scope_child_pid, c_int)), &
-            'Linux descendant remains in the owned session')
+        call check(setsid_result == scope_escaped_pid .and. setsid_result > 0, &
+            'Linux descendant successfully escapes with setsid')
+        call check(c_getsid(int(scope_escaped_pid, c_int)) == &
+            int(scope_escaped_pid, c_int), 'Linux descendant owns its new session')
     end if
     scope_escaped_lines = line_count(trim(prefix)//'.scope-escaped.heartbeat')
     call check(wait_for_data(trim(prefix)//'.scope-state-dir'), &
@@ -743,8 +742,8 @@ contains
             if (child < 0_c_int) call process_exit(15)
             if (child == 0_c_int) then
                 escaped_sid = c_setsid()
-                ! Linux rejects session escape; Darwin tracks escaped descendants.
-                ! Keep the descendant alive so both platforms test stale cleanup.
+                ! Keep the separate-session descendant alive so both platforms
+                ! test stale cleanup through process identity and parent lineage.
                 write (result_text, '(i0)') escaped_sid
                 call write_text_file(target//'.scope-setsid', trim(result_text))
                 previous_handler = c_signal(15_c_int, c_funloc(ignore_term))

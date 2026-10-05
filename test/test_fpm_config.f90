@@ -10,6 +10,7 @@ program test_fpm_config
     n_fail = 0
 
     call test_parse_fo_own_toml()
+    call test_many_fo_inputs()
     call test_init_defaults()
     call test_parse_missing_file()
     call test_dotted_dependency_keys()
@@ -94,6 +95,55 @@ contains
             call assert(found_fx, 'dep fx present')
         end block
     end subroutine test_parse_fo_own_toml
+
+    subroutine test_many_fo_inputs()
+        integer, parameter :: input_count = 152
+        type(fpm_config_t) :: c
+        integer :: ierr, u, ios, i, attempt, clock_count, exitstat
+        character(len=64) :: suffix
+        character(len=:), allocatable :: dir
+        logical :: created
+
+        created = .false.
+        do attempt = 1, 64
+            call system_clock(clock_count)
+            write (suffix, '(i0,a,i0)') clock_count, '_', attempt
+            dir = '/var/tmp/fo_test_many_inputs_'//trim(suffix)
+            call execute_command_line('mkdir '//dir//' 2>/dev/null', &
+                wait=.true., exitstat=exitstat)
+            if (exitstat == 0) then
+                created = .true.
+                exit
+            end if
+        end do
+        if (.not. created) then
+            call assert(.false., 'many_fo_inputs: cannot create temp dir')
+            return
+        end if
+        open (newunit=u, file=dir//'/fpm.toml', status='replace', iostat=ios)
+        if (ios /= 0) then
+            call assert(.false., 'many_fo_inputs: cannot write fpm.toml')
+            call execute_command_line('rm -rf '//dir, wait=.true.)
+            return
+        end if
+        write (u, '(a)') 'name = "many-fo-inputs"'
+        do i = 1, input_count
+            write (u, '(a)') '[[extra.fo.inputs]]'
+            write (u, '(a,i0,a)') 'path = "input-', i, '.dat"'
+            write (u, '(a)') 'role = "test-fixture"'
+        end do
+        close (u)
+
+        call fpm_config_parse(dir, c, ierr)
+        call assert(ierr == 0, 'many_fo_inputs: 152 declarations parse')
+        if (ierr == 0) then
+            call assert(c%n_fo_inputs == input_count, &
+                'many_fo_inputs: all declarations retained')
+            call assert(trim(c%fo_inputs(input_count)%path) == &
+                'input-152.dat', 'many_fo_inputs: last declaration retained')
+        end if
+        call execute_command_line('rm -rf '//dir, wait=.true.)
+    end subroutine test_many_fo_inputs
 
     subroutine test_dotted_dependency_keys()
         type(fpm_config_t) :: c

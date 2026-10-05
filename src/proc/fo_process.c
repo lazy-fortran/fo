@@ -1491,9 +1491,10 @@ static int ensure_async_subreaper(void) {
     return 0;
 }
 
-/* Linux async descendants cannot leave the owned session. Native setpgid is
-   allowed for provider children; cancellation covers every group in the
-   session. Cover known syscall ABIs and reject unknown ABIs. */
+/* Linux descendants may create native sessions. Owners track live members by
+   birth identity and parent lineage for cancellation and stale recovery.
+   Reject session/group changes through known compatibility ABIs and reject
+   unknown architectures; strict fallback groups also deny native setpgid. */
 #if defined(__linux__)
 #if defined(FO_ASYNC_TEST_AARCH64) || defined(FO_ASYNC_TEST_ARM) || \
     defined(FO_ASYNC_TEST_X86_64) || defined(FO_ASYNC_TEST_UNSUPPORTED)
@@ -1564,8 +1565,9 @@ static const struct sock_filter async_group_filter[] = {
         BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K,
                  FO_ASYNC_X32_SYSCALL_BIT, 5, 0),
 #endif
+        /* Native descendant sessions remain inside the birth-validated tree. */
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FO_ASYNC_NATIVE_SETSID, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FO_ASYNC_NATIVE_SETPGID, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
@@ -2460,6 +2462,55 @@ static struct async_process *find_async_process(pid_t pid) {
     return NULL;
 }
 
+/* A subreaper may adopt an async owner after its launcher exits. Its durable
+   session record keeps the exact birth identity, so reap that child when it
+   exits even while its original async job is still running. */
+static int reap_registered_scope_children(const struct async_process *item) {
+#if defined(__APPLE__) || defined(__linux__)
+    static const char suffix[] = ".session";
+    DIR *directory;
+    struct dirent *entry;
+    int error = 0;
+
+    if (item == NULL || item->registry_dir[0] == '\0' ||
+        item->scope_owner_start[0] == '\0') return 0;
+    directory = opendir(item->registry_dir);
+    if (directory == NULL) return errno == ENOENT ? 0 : errno;
+    while ((entry = readdir(directory)) != NULL) {
+        struct recovery_session child = {0};
+        pid_t parent = 0, got;
+        uint64_t current_start = 0;
+        size_t name_length = strlen(entry->d_name);
+        int alive = 0;
+
+        if (name_length <= sizeof(suffix) - 1 ||
+            strcmp(entry->d_name + name_length - (sizeof(suffix) - 1),
+                   suffix) != 0) continue;
+        error = read_recovery_session(item->registry_dir, entry->d_name,
+                                      item->scope_owner_start, &child);
+        if (error == ENOENT) { error = 0; continue; }
+        if (error != 0) break;
+        if (child.pid == item->pid || find_async_process(child.pid) != NULL)
+            continue;
+        error = owned_process_details(child.pid, &parent, NULL, NULL,
+                                      &current_start, &alive);
+        if (error == ESRCH || error == ENOENT) { error = 0; continue; }
+        if (error != 0) break;
+        if (current_start != child.identity || parent != getpid() || alive)
+            continue;
+        do {
+            got = waitpid(child.pid, NULL, WNOHANG);
+        } while (got < 0 && errno == EINTR);
+        if (got < 0 && errno != ECHILD) { error = errno; break; }
+    }
+    if (closedir(directory) != 0 && error == 0) error = errno;
+    return error;
+#else
+    (void)item;
+    return 0;
+#endif
+}
+
 static void forget_async_process(struct async_process *item) {
     struct async_process **link = &async_processes;
     while (*link != NULL) {
@@ -2535,6 +2586,8 @@ static int verify_or_reap_async_leader(struct async_process *item) {
     error = register_async_descendants(item, force);
     if (error != 0) return error;
 #endif
+    error = reap_registered_scope_children(item);
+    if (error != 0) return error;
     error = observe_async_leader(item);
     if (error != 0) return error;
     if (!item->leader_done && !async_identity_matches(item)) {
@@ -2545,11 +2598,34 @@ static int verify_or_reap_async_leader(struct async_process *item) {
     return 0;
 }
 
-static void reap_owned_members(const struct async_process *item) {
+static int reap_owned_members(const struct async_process *item) {
     const struct owned_process_identity *member;
+    int pending = 0;
     for (member = item->members; member != NULL; member = member->next) {
-        if (process_start_identity(member->pid) == member->start)
+        if (process_start_identity(member->pid) == member->start) {
             (void)waitpid(member->pid, NULL, WNOHANG);
+            if (process_start_identity(member->pid) == member->start) pending++;
+        }
+    }
+    return pending;
+}
+
+/* A killed parent can turn its children into zombies after the first reap
+   sweep. The async leader can exit between its last poll and the live-process
+   scan too. Keep observing it and sweeping captured identities before
+   reporting successful cancellation. */
+static int finish_async_reaps(struct async_process *item) {
+    struct timespec now, deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) return errno;
+    add_seconds(&deadline, 1);
+    for (;;) {
+        int error = observe_async_leader(item);
+        int pending = reap_owned_members(item);
+        if (error != 0) return error;
+        if (item->leader_done && pending == 0) return 0;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return errno;
+        if (timespec_at_or_after(&now, &deadline)) return ETIMEDOUT;
+        sleep_ms(10);
     }
 }
 
@@ -2565,7 +2641,7 @@ static int terminate_async_group(struct async_process *item) {
 #endif
     exists = async_owner_exists(item);
     if (exists < 0) return errno;
-    if (!exists) return 0;
+    if (!exists) return finish_async_reaps(item);
     error = signal_async_owner(item, SIGTERM);
     if (error != 0) return error;
     clock_gettime(CLOCK_MONOTONIC, &deadline);
@@ -2574,11 +2650,11 @@ static int terminate_async_group(struct async_process *item) {
         error = observe_async_leader(item);
         if (error != 0) return error;
         if (item->leader_done) {
-            reap_owned_members(item);
+            (void)reap_owned_members(item);
         }
         exists = async_owner_exists(item);
         if (exists < 0) return errno;
-        if (!exists) return 0;
+        if (!exists) return finish_async_reaps(item);
         clock_gettime(CLOCK_MONOTONIC, &now);
         if (timespec_at_or_after(&now, &deadline)) break;
         sleep_ms(25);
@@ -2596,11 +2672,11 @@ static int terminate_async_group(struct async_process *item) {
         error = observe_async_leader(item);
         if (error != 0) return error;
         if (item->leader_done) {
-            reap_owned_members(item);
+            (void)reap_owned_members(item);
         }
         exists = async_owner_exists(item);
         if (exists < 0) return errno;
-        if (!exists) return 0;
+        if (!exists) return finish_async_reaps(item);
         clock_gettime(CLOCK_MONOTONIC, &now);
         if (timespec_at_or_after(&now, &deadline)) return ETIMEDOUT;
         sleep_ms(10);

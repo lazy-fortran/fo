@@ -236,15 +236,32 @@ contains
         character(:), allocatable :: source
         source = 'program test_progress'//new_line('a')// &
             'use probe, only: probe_value'//new_line('a')// &
-            'use, intrinsic :: iso_c_binding, only: c_int'//new_line('a')// &
-            'implicit none'//new_line('a')//fork_interface()// &
-            'integer :: unit, gate_unit, child, rc'//new_line('a')// &
+            'use, intrinsic :: iso_c_binding, only: c_char, c_int, c_size_t, &'//new_line('a')// &
+            '    c_ptr, c_associated, c_null_char'//new_line('a')// &
+            'implicit none'//new_line('a')// &
+            'interface'//new_line('a')// &
+            'function c_getcwd(buffer, size) bind(C, name="getcwd") result(pointer)'//new_line('a')// &
+            'import :: c_char, c_size_t, c_ptr'//new_line('a')// &
+            'character(kind=c_char), intent(out) :: buffer(*)'//new_line('a')// &
+            'integer(c_size_t), value :: size'//new_line('a')// &
+            'type(c_ptr) :: pointer'//new_line('a')// &
+            'end function c_getcwd'//new_line('a')// &
+            'end interface'//new_line('a')//fork_interface()// &
+            'integer :: unit, gate_unit, child, rc, i'//new_line('a')// &
             'character :: token'//new_line('a')// &
+            'character(kind=c_char) :: cwd_bytes(4096)'//new_line('a')// &
             'character(len=4096) :: execution_cwd'//new_line('a')// &
+            'type(c_ptr) :: cwd_pointer'//new_line('a')// &
             'if (probe_value == "A") then'//new_line('a')// &
-            "call get_environment_variable('FO_GREMLIN_EXECUTION_CWD',"// &
-            'execution_cwd,status=rc)'//new_line('a')// &
-            'if (rc /= 0) error stop 10'//new_line('a')// &
+            'cwd_bytes = c_null_char'//new_line('a')// &
+            'cwd_pointer = c_getcwd(cwd_bytes, int(size(cwd_bytes), c_size_t))'//new_line('a')// &
+            'if (.not. c_associated(cwd_pointer)) error stop 10'//new_line('a')// &
+            "execution_cwd = ''"//new_line('a')// &
+            'do i = 1, size(cwd_bytes)'//new_line('a')// &
+            'if (cwd_bytes(i) == c_null_char) exit'//new_line('a')// &
+            'execution_cwd(i:i) = cwd_bytes(i)'//new_line('a')// &
+            'end do'//new_line('a')// &
+            'if (i <= 1 .or. i > size(cwd_bytes)) error stop 10'//new_line('a')// &
             "open(newunit=unit,file='preempted-output.txt',status='replace')"// &
             new_line('a')// &
             "write(unit,'(a)') 'owned by A'"//new_line('a')// &

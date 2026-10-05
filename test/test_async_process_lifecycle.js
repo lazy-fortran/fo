@@ -364,14 +364,16 @@ async function main() {
     const escapeRun = await startRun(escaping, root);
     await waitFor(() => {
       const text = fs.existsSync(escapeFile) ? fs.readFileSync(escapeFile, 'utf8') : '';
-      return /(?:escaped|setsid-blocked:EPERM)/.test(text) &&
+      return /escaped:/.test(text) &&
         new Set(fixturePids(escapeFile)).size >= 2;
-    }, 5000, 'setsid escape or explicit rejection');
+    }, 5000, 'setsid descendant starts in an independent session');
     const escapePids = fixturePids(escapeFile);
     escapedPidsToClean = fs.readFileSync(escapeFile, 'utf8').split('\n').flatMap(line => {
       const match = line.match(/^escaped:(\d+):/);
       return match ? [Number(match[1])] : [];
     });
+    assert(escapedPidsToClean.length > 0,
+      'the native setsid escape actually runs before cancellation');
     const escapeCancel = await cancel(escaping, escapeRun);
     const stoppedAtReturn = countLines(escapeFile);
     assert(escapeCancel.value && escapeCancel.value.cancelled === true,

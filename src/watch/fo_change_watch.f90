@@ -183,6 +183,19 @@ contains
         ierr = 0
         watch%active(:) = .false.
         if (watch%n_roots > 0) watch%active(1) = .true.
+        if (allocated(context%input_inventory%roots)) then
+            do i = 1, context%input_inventory%root_count
+                root = canonical_or_entry( &
+                    context%input_inventory%roots(i)%physical_path)
+                if (len_trim(root) == 0) cycle
+                call change_watch_add_root(watch, trim(root), ierr, message)
+                if (ierr /= 0) return
+                do j = 1, watch%n_roots
+                    if (trim(watch%roots(j)) == trim(root)) &
+                        watch%active(j) = .true.
+                end do
+            end do
+        end if
         do i = 1, size(context%inputs)
             root = canonical_or_entry(context%inputs(i)%source_root)
             if (len_trim(root) == 0) cycle

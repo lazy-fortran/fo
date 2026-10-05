@@ -28,7 +28,7 @@ module fo_fpm_config
     integer, parameter :: MAX_FLAGS = 64
     integer, parameter :: MAX_EXES = 64
     integer, parameter :: MAX_TEST_ARG_SETS = 128
-    integer, parameter :: MAX_FO_INPUTS = 128
+    integer, parameter :: MAX_FO_INPUTS = 256
 
     type :: fpm_dep_t
         character(len=256) :: name = ''
