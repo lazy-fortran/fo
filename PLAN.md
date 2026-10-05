@@ -14,23 +14,26 @@ session, gate and failure evidence. Earlier async-start, driver-input and
 inherited test-directory repairs remain pushed at `318ecea`; driver `6e54f805`
 passes six focused reproducers and two existing process/session cleanup checks.
 
-Latest #200 milestone: Fo commit `2f2bf21` is on `main` (base
-`48fc48dde87da78320e43c6dbcaaa08b46cc2758`; source patch SHA256
-`e671c12e64fac11bc3c3dcea339c47c22a38fa986757056d1057c2cc03a68d32`). It
-fixes declared internal inputs beneath excluded build directories, Linux async
-descendant recovery/reaping, and the Fo FPM input declaration. Exact candidate
-driver SHA256 is
-`9f8dbdb20dc89f1af4f58932ea593201245f4becc4681893d17cbcd175aecf38`. Resident
-session `2454345-1791189839-035068226`, generation
-`b6a6f77eb6b7a827eb1325e466d9acdf8021c820876df1df1c33186bfee1ae7d`, passed
+Latest #200 milestone: Fo commit `090058a89bf4af5e9be32ab63443176a5994b683` is
+pushed to `main`, based on `9c213511a16becf7ea91a6ddd21e33aeb4006e23`; the
+source patch SHA256 is
+`a2a3ae408267e022a12bb9d2de7fe0ab890240363c1eb9a46822636722861629`. It makes
+readiness read the exact session receipt journal, accepts `random_count=0`, and
+quiesces once required gate targets pass. Candidate driver SHA256 is
+`8cf2187c35ab5b9e8fea493084aa32aba77b8d54a7851bf4bf070fb9ad7f86b5`.
+
+Clean-worktree Gremlin session `3403700-1791201746-795986148`, generation
+`be82a6e9397c76b729ba22b0dba31be1985e99403b48b813f2d89dae2e181ce3`, passed
 the 10-case required gate with zero failures. `test_gremlin_campaign_history`
-passed in 135.94 s with `FO_TEST_WALL_TIMEOUT=300`; ordinary coverage reached
-21/103 before the owner was stopped after unrelated inputs changed. One ordinary
-case was cancelled during that stop. Through the same exact driver,
-`test_gremlin_watch` passed in 41.92 s and `test_gremlin_public_readiness`
-passed in 90.77 s with the wall-time override unset. Full ordinary coverage is
-not a milestone gate. A clean-worktree resident lane reaching and remaining in
-quiescence is the final #200 check still pending.
+passed in 119.63 s with `FO_TEST_WALL_TIMEOUT=300`. The owner then reached
+quiescence with `local_gate_green=true`; a follow-up status 10 seconds later
+showed the same live session/generation, 10/10 gate receipts, and 8/103 ordinary
+PASS receipts (95 ordinary cases remained). The public candidate passed
+`test_gremlin_supervisor` and the full CLI/MCP Gremlin behavior test. That test
+confirmed MCP/CLI attachment, gate-only quiescence with ordinary cases left,
+and wakeup into a new green generation after an edit. Full ordinary coverage
+is not a #200 milestone gate. The preceding `9c21351` milestone also passed
+the resident Mac watch gate, including `test_gremlin_watch`.
 
 The prior 24-case session `4014645-1791139032-043537972` ended with an
 `INFRA_ERROR` when a nested campaign-history owner start returned ESTALE. Its
