@@ -767,6 +767,9 @@ contains
                 trim(bundle_root), destination, root_index, status, message)
             if (status /= 0) return
             do j = 1, inventory%roots(root_index)%alias_count
+                ! Several logical aliases may share one frozen destination.
+                if (any(inventory%roots(root_index)%bundle_paths(1:j - 1) == &
+                    inventory%roots(root_index)%bundle_paths(j))) cycle
                 destination = join_path( &
                     join_path(trim(bundle_root), &
                     trim(inventory%roots(root_index)%bundle_paths(j))), &

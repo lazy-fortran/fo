@@ -144,7 +144,7 @@ contains
             if (dep_kind(config%deps(i)) /= DEP_PATH) cycle
             call discover_path_dependency(trim(project_root), config%deps(i)%path, &
                 'dependency:'//trim(config%deps(i)%name), .true., inventory, &
-                ierr, message, 0, 'project')
+                ierr, message, 0, 'project', trim(project_root), 'project')
             if (ierr /= 0) then
                 call record_failure(inventory, message)
                 return
@@ -159,7 +159,7 @@ contains
             call discover_acquired_dependency(trim(dependency_root), &
                 'dependency:'//trim(config%deps(i)%name), &
                 'project/build/dependencies/'//trim(config%deps(i)%name), &
-                inventory, ierr, message, 0)
+                inventory, ierr, message, 0, trim(project_root), 'project')
             if (ierr /= 0) then
                 call record_failure(inventory, message)
                 return
@@ -170,7 +170,7 @@ contains
             call discover_path_dependency(trim(project_root), &
                 config%dev_deps(i)%path, &
                 'dependency:'//trim(config%dev_deps(i)%name), .true., inventory, &
-                ierr, message, 0, 'project')
+                ierr, message, 0, 'project', trim(project_root), 'project')
             if (ierr /= 0) then
                 call record_failure(inventory, message)
                 return
@@ -194,7 +194,8 @@ contains
                 call discover_acquired_dependency(trim(resolved_dev_deps(i)%dir), &
                     'dependency:'//trim(resolved_dev_deps(i)%name), &
                     'project/build/dependencies/'// &
-                    trim(resolved_dev_deps(i)%name), inventory, ierr, message, 0)
+                    trim(resolved_dev_deps(i)%name), inventory, ierr, message, 0, &
+                    trim(project_root), 'project')
                 if (ierr /= 0) then
                     call record_failure(inventory, message)
                     return
@@ -381,8 +382,10 @@ contains
     end subroutine input_inventory_revalidate
 
     recursive subroutine discover_acquired_dependency(dependency_root, alias, &
-            bundle_path, inventory, ierr, message, depth)
+            bundle_path, inventory, ierr, message, depth, acquisition_root, &
+            acquisition_bundle)
         character(len=*), intent(in) :: dependency_root, alias, bundle_path
+        character(len=*), intent(in) :: acquisition_root, acquisition_bundle
         type(input_inventory_t), intent(inout) :: inventory
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
@@ -421,7 +424,7 @@ contains
                 ' has an unreadable resolved FPM manifest')
             return
         end if
-        call mark_unmodeled_config(config, alias, inventory, dependency_root)
+        call mark_unmodeled_config(config, alias, inventory, acquisition_root)
         call add_root(inventory, alias, dependency_root, root_index, ierr, message, &
             trim(bundle_path))
         if (ierr /= 0) return
@@ -438,18 +441,21 @@ contains
             if (dep_kind(config%deps(i)) /= DEP_PATH) cycle
             call discover_path_dependency(trim(dependency_root), &
                 config%deps(i)%path, trim(alias)//'/'//trim(config%deps(i)%name), &
-                .true., inventory, ierr, message, depth + 1, trim(bundle_path))
+                .true., inventory, ierr, message, depth + 1, trim(bundle_path), &
+                acquisition_root, acquisition_bundle)
             if (ierr /= 0) return
         end do
         do i = 1, config%n_deps
             if (dep_kind(config%deps(i)) == DEP_PATH) cycle
-            child_root = trim(dependency_root)//'/build/dependencies/'// &
+            ! FPM acquires transitive Git packages in the root's flat tree.
+            child_root = trim(acquisition_root)//'/build/dependencies/'// &
                 trim(config%deps(i)%name)
             child_alias = trim(alias)//'/dependency:'//trim(config%deps(i)%name)
-            child_bundle = trim(bundle_path)//'/build/dependencies/'// &
+            child_bundle = trim(acquisition_bundle)//'/build/dependencies/'// &
                 trim(config%deps(i)%name)
             call discover_acquired_dependency(trim(child_root), trim(child_alias), &
-                trim(child_bundle), inventory, ierr, message, depth + 1)
+                trim(child_bundle), inventory, ierr, message, depth + 1, &
+                acquisition_root, acquisition_bundle)
             if (ierr /= 0) return
         end do
     end subroutine discover_acquired_dependency
@@ -581,9 +587,11 @@ contains
     end subroutine add_target_main
 
     recursive subroutine discover_path_dependency(parent_root, dependency_path, alias, &
-            follow_regular_deps, inventory, ierr, message, depth, parent_bundle)
+            follow_regular_deps, inventory, ierr, message, depth, parent_bundle, &
+            acquisition_root, acquisition_bundle)
         character(len=*), intent(in) :: parent_root, dependency_path, alias
         character(len=*), intent(in) :: parent_bundle
+        character(len=*), intent(in) :: acquisition_root, acquisition_bundle
         logical, intent(in) :: follow_regular_deps
         type(input_inventory_t), intent(inout) :: inventory
         integer, intent(out) :: ierr
@@ -630,7 +638,7 @@ contains
             message = 'cannot parse path dependency manifest: '//trim(alias)
             return
         end if
-        call mark_unmodeled_config(config, alias, inventory, dependency_root)
+        call mark_unmodeled_config(config, alias, inventory, acquisition_root)
         call add_root(inventory, alias, trim(dependency_root), root_index, &
             ierr, message, trim(bundle_path))
         if (ierr /= 0) return
@@ -649,18 +657,20 @@ contains
             call discover_path_dependency(trim(dependency_root), &
                 config%deps(i)%path, &
                 trim(alias)//'/'//trim(config%deps(i)%name), .true., &
-                inventory, ierr, message, depth + 1, trim(bundle_path))
+                inventory, ierr, message, depth + 1, trim(bundle_path), &
+                acquisition_root, acquisition_bundle)
             if (ierr /= 0) return
         end do
         do i = 1, config%n_deps
             if (dep_kind(config%deps(i)) == DEP_PATH) cycle
-            child_root = trim(dependency_root)//'/build/dependencies/'// &
+            child_root = trim(acquisition_root)//'/build/dependencies/'// &
                 trim(config%deps(i)%name)
             child_alias = trim(alias)//'/dependency:'//trim(config%deps(i)%name)
-            child_bundle = trim(bundle_path)//'/build/dependencies/'// &
+            child_bundle = trim(acquisition_bundle)//'/build/dependencies/'// &
                 trim(config%deps(i)%name)
             call discover_acquired_dependency(trim(child_root), trim(child_alias), &
-                trim(child_bundle), inventory, ierr, message, depth + 1)
+                trim(child_bundle), inventory, ierr, message, depth + 1, &
+                acquisition_root, acquisition_bundle)
             if (ierr /= 0) return
         end do
         ierr = 0

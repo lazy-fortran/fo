@@ -3,6 +3,13 @@ program test_gremlin_input_inventory
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, INPUT_FILE
     use fo_util, only: make_tmpfile
+    use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
+        execution_view_release
+    use fo_test_cli, only: resolve_driver, run_fo
+    use fo_test_harness, only: string_list_t, process_result_t, list_add
+    use fo_gremlin_generation, only: generation_context_t, generation_t, &
+        generation_capture
+    use fo_cache, only: cache_file_digest
     implicit none
 
     character(len=4096) :: fixture, project, dependency, leaf
@@ -190,9 +197,103 @@ program test_gremlin_input_inventory
         'acquired dependency source edit changes inventory digest')
 
     call check_whole_root_outputs(trim(fixture))
+    call check_flattened_git_dependencies(trim(fixture))
     call fs_remove_tree(trim(fixture))
 
 contains
+
+    subroutine check_flattened_git_dependencies(parent)
+        character(len=*), intent(in) :: parent
+        character(len=4096) :: root, provider, child
+        character(len=1024) :: message
+        character(len=:), allocatable :: driver, manifest
+        type(input_inventory_t) :: captured
+        type(input_declaration_t) :: none(0)
+        type(execution_view_t) :: view
+        type(generation_context_t) :: context
+        type(generation_t) :: generation
+        type(string_list_t) :: arguments, environment
+        type(process_result_t) :: result
+        integer :: status, release_status, scenario, answer
+
+        root = trim(parent)//'/flat-git-project'
+        provider = trim(root)//'/build/dependencies/provider'
+        child = trim(root)//'/build/dependencies/child'
+        call fs_make_dir(trim(root)//'/app')
+        call fs_make_dir(trim(provider)//'/src')
+        call fs_make_dir(trim(child)//'/src')
+        ! No Git metadata or reachable remotes: acquisition must not run.
+        call write(trim(provider)//'/fpm.toml', &
+            'name = "provider"'//new_line('a')//'[dependencies]'//new_line('a')// &
+            'child = { git = "https://invalid.invalid/child", rev = "'// &
+            repeat('1', 40)//'" }')
+        call write(trim(child)//'/fpm.toml', 'name = "child"')
+        call write(trim(provider)//'/src/provider.f90', &
+            'module provider_mod'//new_line('a')// &
+            'use child_mod, only: child_value'//new_line('a')// &
+            'integer, parameter :: provider_value = child_value + 5'// &
+            new_line('a')//'end module')
+        call write(trim(root)//'/app/flat_probe.f90', &
+            'program flat_probe'//new_line('a')// &
+            'use provider_mod, only: provider_value'//new_line('a')// &
+            'print "(i0)", provider_value'//new_line('a')//'end program')
+        call resolve_driver(driver)
+        context%driver_path = driver
+        call cache_file_digest(driver, context%driver_digest)
+        inquire(file=driver, size=context%driver_size)
+        do scenario = 1, 3
+            manifest = 'name = "flat-git-project"'//new_line('a')// &
+                '[dependencies]'//new_line('a')
+            if (scenario == 2) then
+                manifest = manifest// &
+                    'provider = { path = "build/dependencies/provider" }'
+            else
+                manifest = manifest// &
+                    'provider = { git = "https://invalid.invalid/provider", rev = "'// &
+                    repeat('2', 40)//'" }'
+            end if
+            if (scenario == 3) manifest = manifest//new_line('a')// &
+                'child = { git = "https://invalid.invalid/child", rev = "'// &
+                repeat('1', 40)//'" }'
+            call write(trim(root)//'/fpm.toml', manifest)
+            call write(trim(child)//'/src/child.f90', &
+                'module child_mod'//new_line('a')// &
+                'integer, parameter :: child_value = 37'//new_line('a')//'end module')
+            call input_inventory_discover(trim(root), none, captured, status, message)
+            call require(status == 0, 'discover flat Git fixture: '//trim(message))
+            call require(captured%complete, 'acquired Git closure is complete')
+            context%input_inventory = captured
+            call generation_capture(trim(root), trim(root)//'/generations', context, &
+                generation, status, message)
+            call require(status == 0, 'capture flat Git generation: '//trim(message))
+            call execution_view_create(trim(root)//'/views', generation%identity, &
+                'flat-git-oracle', 'build', generation%input_inventory, &
+                .true., generation%input_inventory_complete, view, status, message, &
+                candidate_bundle_root=trim(generation%root)//'/bundle')
+            call require(status == 0, 'create flat Git view: '//trim(message))
+            ! The answer must come from captured bytes, not this changed live leaf.
+            call write(trim(child)//'/src/child.f90', &
+                'module child_mod'//new_line('a')// &
+                'integer, parameter :: child_value = 100'//new_line('a')//'end module')
+            arguments = string_list_t()
+            environment = string_list_t()
+            call list_add(arguments, 'exec')
+            call list_add(arguments, 'flat_probe')
+            call list_add(environment, 'FO_JOBS=1')
+            call run_fo(driver, arguments, trim(view%cwd), trim(root)//'/fo-cache', &
+                result, environment, 120000)
+            if (allocated(result%stderr)) then
+                if (result%exit_code /= 0) print '(a)', result%stderr
+            end if
+            call require(result%exit_code == 0, 'build/run captured flat Git chain')
+            call require(allocated(result%stdout), 'capture flat Git answer')
+            read(result%stdout, *, iostat=status) answer
+            call require(status == 0, 'read flat Git answer')
+            call require(answer == 42, 'frozen transitive answer is 42')
+            call execution_view_release(view, .false., release_status, message)
+            call require(release_status == 0, 'release flat Git view: '//trim(message))
+        end do
+    end subroutine
 
     subroutine check_whole_root_outputs(parent)
         character(len=*), intent(in) :: parent
