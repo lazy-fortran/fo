@@ -3,7 +3,8 @@ module fo_gremlin_execution_view
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_fs, only: fs_collect_files, fs_copy_exec, fs_make_dir, &
         fs_mkdir_excl, fs_remove_tree
-    use fo_input_inventory, only: input_entry_t, input_inventory_t, INPUT_FILE
+    use fo_input_inventory, only: input_entry_t, input_inventory_t, INPUT_FILE, &
+        INPUT_DIRECTORY
     use fo_process, only: process_getpid
     use fo_util, only: make_tmpfile, delete_tmpfile
     implicit none
@@ -229,9 +230,51 @@ contains
 
         do i = 1, inventory%entry_count
             if (.not. execution_input_role(inventory%entries(i)%role)) cycle
+            if (inventory%entries(i)%kind == INPUT_DIRECTORY) then
+                root_index = find_root(inventory, inventory%entries(i)%root_alias)
+                if (root_index == 0) then
+                    call reject_view(view, &
+                        'declared runtime fixture has an unknown logical root', &
+                        ierr, message)
+                    return
+                end if
+                if (.not. safe_relative_path( &
+                        inventory%entries(i)%relative_path)) then
+                    call reject_view(view, &
+                        'declared runtime fixture path escapes its logical root', &
+                        ierr, message)
+                    return
+                end if
+                alias_root = ''
+                if (trim(inventory%entries(i)%root_alias) /= 'project') &
+                    alias_root = '.fo-inputs/'// &
+                        trim(inventory%entries(i)%root_alias)
+                destination = trim(view%root)
+                if (len_trim(alias_root) > 0) &
+                    destination = trim(destination)//'/'//trim(alias_root)
+                destination = trim(destination)//'/'// &
+                    trim(inventory%entries(i)%relative_path)
+                if (len_trim(destination) >= PATH_LEN) then
+                    call reject_view(view, &
+                        'declared runtime fixture path exceeds the supported length', &
+                        ierr, message)
+                    return
+                end if
+                call fs_make_dir(trim(destination))
+                inquire(file=trim(destination), exist=already_materialized)
+                if (.not. already_materialized) then
+                    call reject_view(view, &
+                        'cannot materialize declared runtime fixture directory: '// &
+                        trim(inventory%entries(i)%root_alias)//':'// &
+                        trim(inventory%entries(i)%relative_path), ierr, message)
+                    return
+                end if
+                cycle
+            end if
             if (inventory%entries(i)%kind /= INPUT_FILE) then
                 call reject_view(view, &
-                    'declared runtime fixture is not a regular file', ierr, message)
+                    'declared runtime fixture is not a regular file or directory', &
+                    ierr, message)
                 return
             end if
             root_index = find_root(inventory, inventory%entries(i)%root_alias)

@@ -189,6 +189,12 @@ contains
         call parse_request('start', '{"random_count":0}', request, ierr, message)
         call check(ierr == 0 .and. request%random_count == 0, &
             'accepts a gate-only campaign with no random sample')
+        call parse_request('reproduce', &
+            '{"case_id":"case_a","timeout_seconds":300}', &
+            request, ierr, message)
+        call check(ierr == 0 .and. trim(request%case_id) == 'case_a' .and. &
+            request%timeout_seconds == 300, &
+            'accepts a reproduction-specific case timeout')
         call parse_request('status', '{"lane_\u00e9id":"safe"}', &
             request, ierr, message)
         call check(ierr /= 0 .and. index(message, 'unsupported') > 0, &

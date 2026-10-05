@@ -1,8 +1,9 @@
 program test_gremlin_input_inventory
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_rename
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
-        input_inventory_discover, INPUT_FILE
-    use fo_util, only: make_tmpfile
+        input_inventory_discover, input_inventory_declarations_from_config, &
+        INPUT_FILE, INPUT_DIRECTORY
+    use fo_util, only: make_tmpfile, read_text_file
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release
     use fo_test_cli, only: resolve_driver, run_fo
@@ -198,6 +199,7 @@ program test_gremlin_input_inventory
 
     call check_whole_root_outputs(trim(fixture))
     call check_flattened_git_dependencies(trim(fixture))
+    call check_dependency_directory_inputs(trim(fixture))
     call fs_remove_tree(trim(fixture))
 
 contains
@@ -335,6 +337,99 @@ contains
             'whole-root generated directories do not affect inventory identity')
         call fs_remove_tree(trim(whole_root))
     end subroutine check_whole_root_outputs
+
+    subroutine check_dependency_directory_inputs(parent)
+        character(len=*), intent(in) :: parent
+        character(len=4096) :: root, dependency, message
+        character(len=1024) :: diagnostic
+        character(len=4096) :: text
+        character(len=:), allocatable :: driver
+        type(input_declaration_t), allocatable :: declarations(:)
+        type(input_inventory_t) :: captured
+        type(execution_view_t) :: view
+        type(generation_context_t) :: context
+        type(generation_t) :: generation
+        integer :: status, release_status
+
+        root = trim(parent)//'/dependency-directory-project'
+        dependency = trim(parent)//'/dependency-directory-fortfront'
+        call fs_make_dir(trim(root)//'/src')
+        call fs_make_dir(trim(dependency)//'/src')
+        call fs_make_dir(trim(dependency)//'/examples/f90')
+        call fs_make_dir(trim(dependency)//'/examples/lf')
+        call write(trim(root)//'/fpm.toml', &
+            'name = "dependency-directory-project"'//new_line('a')// &
+            '[dependencies]'//new_line('a')// &
+            'fortfront = { path = "../dependency-directory-fortfront" }'// &
+            new_line('a')// &
+            '[[extra.fo.inputs]]'//new_line('a')// &
+            'root = "dependency:fortfront"'//new_line('a')// &
+            'path = "examples/f90"'//new_line('a')// &
+            'kind = "directory"'//new_line('a')// &
+            'role = "test-fixture"'//new_line('a')// &
+            '[[extra.fo.inputs]]'//new_line('a')// &
+            'root = "dependency:fortfront"'//new_line('a')// &
+            'path = "examples/lf"'//new_line('a')// &
+            'kind = "directory"'//new_line('a')// &
+            'role = "test-fixture"')
+        call write(trim(root)//'/src/main.f90', 'program directory_probe')
+        call write(trim(dependency)//'/fpm.toml', 'name = "fortfront"')
+        call write(trim(dependency)//'/examples/f90/probe.f90', &
+            'program f90_probe')
+        call write(trim(dependency)//'/examples/lf/probe.lf', &
+            'program lf_probe')
+
+        call input_inventory_declarations_from_config(trim(root), declarations, &
+            status, diagnostic)
+        call require(status == 0, 'parse dependency directory declarations: '// &
+            trim(diagnostic))
+        call require(size(declarations) == 2, &
+            'both dependency directory declarations are parsed')
+        call require(declarations(1)%root_alias == 'dependency:fortfront' .and. &
+            declarations(1)%expected_kind == INPUT_DIRECTORY, &
+            'manifest selects a dependency root and directory kind')
+        call input_inventory_discover(trim(root), declarations, captured, status, &
+            diagnostic)
+        call require(status == 0 .and. captured%complete, &
+            'discover dependency directory inputs: '//trim(diagnostic))
+        call require(has_entry(captured, 'dependency:fortfront', &
+            'examples/f90/probe.f90', 'test-fixture'), &
+            'F90 directory files enter the dependency input inventory')
+        call require(has_entry(captured, 'dependency:fortfront', &
+            'examples/lf/probe.lf', 'test-fixture'), &
+            'LF directory files enter the dependency input inventory')
+
+        call resolve_driver(driver)
+        context%driver_path = driver
+        call cache_file_digest(driver, context%driver_digest)
+        inquire(file=driver, size=context%driver_size)
+        context%input_inventory = captured
+        call generation_capture(trim(root), trim(root)//'/generations', context, &
+            generation, status, diagnostic)
+        call require(status == 0, 'capture dependency directory generation: '// &
+            trim(diagnostic))
+        call execution_view_create(trim(root)//'/views', generation%identity, &
+            'dependency-directory-oracle', 'test-fixtures', &
+            generation%input_inventory, .true., &
+            generation%input_inventory_complete, view, status, diagnostic)
+        call require(status == 0, 'materialize dependency directory inputs: '// &
+            trim(diagnostic))
+        call read_text_file(trim(view%cwd)// &
+            '/.fo-inputs/dependency:fortfront/examples/f90/probe.f90', text)
+        call require(index(text, 'program f90_probe') > 0, &
+            'private view contains frozen dependency F90 bytes')
+        call write(trim(dependency)//'/examples/f90/probe.f90', &
+            'program changed_after_capture')
+        call read_text_file(trim(view%cwd)// &
+            '/.fo-inputs/dependency:fortfront/examples/f90/probe.f90', text)
+        call require(index(text, 'program f90_probe') > 0, &
+            'private view does not read later dependency edits')
+        call execution_view_release(view, .false., release_status, diagnostic)
+        call require(release_status == 0, &
+            'release dependency directory execution view: '//trim(diagnostic))
+        call fs_remove_tree(trim(root))
+        call fs_remove_tree(trim(dependency))
+    end subroutine check_dependency_directory_inputs
 
     subroutine discover(inventory, status, message)
         type(input_inventory_t), intent(out) :: inventory

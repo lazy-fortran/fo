@@ -57,9 +57,13 @@ module fo_fpm_config
     type, public :: fpm_input_t
         character(len=512) :: path = ''
         character(len=64) :: role = ''
+        character(len=256) :: root = ''
+        character(len=16) :: kind = 'file'
         logical :: writable_at_execution = .false.
         logical :: path_seen = .false.
         logical :: role_seen = .false.
+        logical :: root_seen = .false.
+        logical :: kind_seen = .false.
         logical :: writable_seen = .false.
     end type fpm_input_t
 
@@ -878,6 +882,32 @@ contains
             call extract_string(val, str_val)
             config%fo_inputs(slot)%role = trim(str_val)
             config%fo_inputs(slot)%role_seen = .true.
+        case ('root')
+            if (config%fo_inputs(slot)%root_seen) then
+                config%fo_input_parse_error = 'duplicate fixture input root field'
+                return
+            end if
+            call extract_string(val, str_val)
+            if (len_trim(str_val) == 0) then
+                config%fo_input_parse_error = 'fixture input root cannot be empty'
+                return
+            end if
+            config%fo_inputs(slot)%root = trim(str_val)
+            config%fo_inputs(slot)%root_seen = .true.
+        case ('kind')
+            if (config%fo_inputs(slot)%kind_seen) then
+                config%fo_input_parse_error = 'duplicate fixture input kind field'
+                return
+            end if
+            call extract_string(val, str_val)
+            select case (trim(str_val))
+            case ('file', 'directory')
+                config%fo_inputs(slot)%kind = trim(str_val)
+                config%fo_inputs(slot)%kind_seen = .true.
+            case default
+                config%fo_input_parse_error = &
+                    'fixture input kind must be file or directory'
+            end select
         case ('writable-at-execution')
             if (config%fo_inputs(slot)%writable_seen) then
                 config%fo_input_parse_error = &

@@ -306,9 +306,21 @@ contains
                 return
             end select
             declarations(i)%root_alias = 'project'
+            if (config%fo_inputs(i)%root_seen) &
+                declarations(i)%root_alias = trim(config%fo_inputs(i)%root)
             declarations(i)%relative_path = trim(config%fo_inputs(i)%path)
             declarations(i)%role = trim(config%fo_inputs(i)%role)
-            declarations(i)%expected_kind = INPUT_FILE
+            select case (trim(config%fo_inputs(i)%kind))
+            case ('file')
+                declarations(i)%expected_kind = INPUT_FILE
+            case ('directory')
+                declarations(i)%expected_kind = INPUT_DIRECTORY
+            case default
+                ierr = 1
+                message = 'unsupported fixture input kind: '// &
+                    trim(config%fo_inputs(i)%kind)
+                return
+            end select
             declarations(i)%writable_at_execution = &
                 config%fo_inputs(i)%writable_at_execution
         end do
@@ -1334,6 +1346,8 @@ contains
         type(input_declaration_t), intent(in) :: declaration
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
+        type(input_entry_t) :: directory_entry
+        character(len=PATH_LEN) :: relative_path
         integer :: root_index, i
 
         root_index = alias_root(inventory, declaration%root_alias)
@@ -1348,9 +1362,29 @@ contains
             message = 'declared input has an empty or invalid role'
             return
         end if
+        if (declaration%expected_kind == INPUT_DIRECTORY) then
+            call validate_relative_path(declaration%relative_path, relative_path, &
+                ierr, message)
+            if (ierr /= 0) return
+            directory_entry = input_entry_t()
+            directory_entry%root_alias = trim(declaration%root_alias)
+            directory_entry%relative_path = trim(relative_path)
+            directory_entry%role = trim(declaration%role)
+            directory_entry%kind = INPUT_DIRECTORY
+            directory_entry%mode = 0
+            directory_entry%writable_at_execution = &
+                declaration%writable_at_execution
+            call append_entry(inventory, directory_entry, ierr, message)
+            if (ierr /= 0) return
+            call scan_tree(inventory, root_index, declaration%root_alias, &
+                trim(inventory%roots(root_index)%physical_path), &
+                trim(relative_path), declaration%role, &
+                declaration%writable_at_execution, ierr, message)
+            return
+        end if
         if (declaration%expected_kind /= INPUT_FILE) then
             ierr = 1
-            message = 'only regular file declarations are currently supported'
+            message = 'only regular file and directory declarations are supported'
             return
         end if
         call add_file_entry(inventory, root_index, declaration%root_alias, &

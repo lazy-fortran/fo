@@ -83,6 +83,21 @@ test_oracle = ["test/data/reference.csv", "--strict"]
 The key is the public test name, and each quoted array element remains one
 argument. Test arguments participate in the cached test-result key.
 
+Gremlin can capture private test and runtime fixtures with
+`[[extra.fo.inputs]]`. Each row requires a `path` relative to its input root
+and a `role` of `test-fixture` or `runtime-fixture`; `root` defaults to
+`project`, and `kind` defaults to `file`. A directory declaration captures
+the tree recursively. Dependency-root fixtures are materialized below
+`.fo-inputs/<root-alias>` in each private execution view:
+
+```toml
+[[extra.fo.inputs]]
+root = "dependency:fortfront"
+path = "examples/f90"
+kind = "directory"
+role = "test-fixture"
+```
+
 Consolidated tests can opt into one dispatcher executable:
 
 ```toml

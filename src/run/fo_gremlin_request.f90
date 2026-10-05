@@ -356,6 +356,8 @@ contains
             request_field = 2
         else
             select case (key)
+            case ('timeout_seconds')
+                if (action == 'reproduce') request_field = 6
             case ('cursor')
                 if (action == 'status' .or. action == 'events' .or. &
                     action == 'wait' .or. action == 'failures') request_field = 11

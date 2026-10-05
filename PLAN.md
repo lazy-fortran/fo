@@ -138,6 +138,26 @@ The same candidate repaired Fx's lease row cap and captured FFC generation
 resident had stopped at publication with `cannot protect generation objects
 during publication`, which the Fx capacity reproducer now covers.
 
+The next FFC corpus case exposed two Fo defects: fixture declarations could not
+name a dependency root or directory, and `reproduce` rejected the
+`timeout_seconds` field already honored by its handler. On base
+`d51aa37a03b32f463ff821661da948e8847cb865`, source/test patch SHA256
+`959ad9f9d6ed4b8c791902c753651ac5c2906c5dc1452ea06792e3394cb12eb4` adds
+`root` and `kind` to `[[extra.fo.inputs]]`, recursively inventories declared
+directories, materializes their private execution-view paths, and accepts the
+reproduction timeout. The required four-case Gremlin gate passed in session
+`1129433-1791234376-597691208` on generation
+`93c33bfcaf2b82024ee2b03938b2b625bed0d9d0ab7f71d35f69e9a66fd6578d`:
+`test_gremlin_input_inventory`, `test_gremlin_execution_view`,
+`test_gremlin_reproduce_logs`, and `test_gremlin_supervisor` (4/4, zero
+failures; local gate green, full coverage incomplete). Candidate driver SHA256
+`c3e41b5bc5f6bfb5550832269092b69a53dedf47c62e21fa8fc1984153fc8b5d` also
+passed a public `gremlin reproduce --timeout-seconds 300` invocation for
+`test_gremlin_supervisor`. The read-only candidate copy is at
+`/var/tmp/fo-gremlin-driver-candidates/c3e41b5bc5f6bfb5550832269092b69a53dedf47c62e21fa8fc1984153fc8b5d/fo`.
+The Fo#175 consumer repair is locally gated; FFC's declared FortFront corpus
+fixtures are being checked on that candidate.
+
 ## Delivery order
 
 The kin6d CMake consumer exposed a profile-isolation defect: public Debug flags
