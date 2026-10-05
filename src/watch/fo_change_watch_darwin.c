@@ -362,10 +362,11 @@ int fo_change_native_reconcile(void *handle) {
         apple_error(w, "create event root list", "declared roots", ENOMEM);
         goto failed;
     }
+    /* watch --fmt writes through this process, so suppress its feedback. */
     w->stream = w->stream_create(NULL, apple_callback, &context, paths,
         kFSEventStreamEventIdSinceNow, 0.10,
         kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer |
-        kFSEventStreamCreateFlagWatchRoot);
+        kFSEventStreamCreateFlagWatchRoot | kFSEventStreamCreateFlagIgnoreSelf);
     if (!w->stream) {
         apple_error(w, "create recursive event stream", w->nroots ? w->roots[0] :
             "<no declared roots>", EIO);
