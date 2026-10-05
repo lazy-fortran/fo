@@ -17,7 +17,7 @@ module fo_build_backend
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
     public :: backend_build, backend_test, backend_test_names
     public :: backend_test_affected, backend_clean
-    public :: profile_flags
+    public :: profile_flags, backend_profile
     public :: BACKEND_NONE, BACKEND_NATIVE, BACKEND_CMAKE
 
     integer, parameter :: BACKEND_NONE = 0
@@ -258,6 +258,30 @@ contains
         flags = dialect%profile_flags(name)
     end function profile_flags
 
+    subroutine backend_profile(backend, name)
+        type(backend_t), intent(inout) :: backend
+        character(len=*), intent(in) :: name
+        character(len=len(name)) :: lowered
+        integer :: i, code
+
+        if (backend%kind /= BACKEND_CMAKE) return
+        if (len_trim(backend%cmake%configuration) > 0) return
+        lowered = name
+        do i = 1, len(name)
+            code = iachar(name(i:i))
+            if (code >= iachar('A') .and. code <= iachar('Z')) &
+                lowered(i:i) = achar(code + iachar('a') - iachar('A'))
+        end do
+        select case (trim(lowered))
+        case ('debug')
+            backend%cmake%configuration = 'Debug'
+        case ('release')
+            backend%cmake%configuration = 'Release'
+        case ('asan')
+            backend%cmake%configuration = 'ASan'
+        end select
+    end subroutine backend_profile
+
     subroutine backend_test(self, exitcode, include_slow, log_file, flags, use_cache)
         type(backend_t), intent(inout) :: self
         integer, intent(out) :: exitcode
@@ -412,7 +436,7 @@ contains
         character(len=*), intent(in) :: flags, log_file
         integer, intent(out) :: exitcode
 
-        character(len=:), allocatable :: packed, cache_file
+        character(len=:), allocatable :: packed, cache_file, configuration
         character(len=32) :: jobs_text
         logical :: has_cache, hint_valid
         integer :: n_args, i
@@ -420,6 +444,12 @@ contains
         if (.not. context%valid) then
             write (error_unit, '(a,a)') 'fo: invalid CMake context: ', &
                 context%error
+            exitcode = 1
+            return
+        end if
+        if (len_trim(flags) > 0 .and. len_trim(context%configuration) == 0) then
+            write (error_unit, '(a)') 'fo: CMake compiler flags require '// &
+                '--profile or FO_CMAKE_CONFIG to select their configuration'
             exitcode = 1
             return
         end if
@@ -464,8 +494,15 @@ contains
             call argv_push(packed, n_args, &
                 '-DCMAKE_BUILD_TYPE='//context%configuration)
         end if
-        if (len_trim(flags) > 0) call argv_push(packed, n_args, &
-            '-DCMAKE_Fortran_FLAGS='//trim(flags))
+        if (len_trim(flags) > 0) then
+            configuration = context%configuration
+            do i = 1, len(configuration)
+                if (configuration(i:i) >= 'a' .and. configuration(i:i) <= 'z') &
+                    configuration(i:i) = achar(iachar(configuration(i:i)) - 32)
+            end do
+            call argv_push(packed, n_args, &
+                '-DCMAKE_Fortran_FLAGS_'//configuration//'='//trim(flags))
+        end if
         if (allocated(context%extra_args)) then
             do i = 1, size(context%extra_args)
                 call argv_push(packed, n_args, context%extra_args(i))

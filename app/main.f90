@@ -7,7 +7,7 @@ program fo_main
     use fo_dag_bridge, only: build_dag_from_units
     use fo_build_backend, only: backend_t, detect_backend, backend_build, &
         backend_test, backend_test_names, backend_test_affected, BACKEND_NONE, &
-        BACKEND_NATIVE, BACKEND_CMAKE, profile_flags
+        BACKEND_NATIVE, BACKEND_CMAKE, profile_flags, backend_profile
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
         collect_failed_test_names, should_report_frontend_diagnostics, &
         MAX_TEST_RESULTS
@@ -777,6 +777,7 @@ contains
             write (error_unit, '(a)') 'fo: unknown run profile: '//trim(parsed%profile)
             stop 1
         end if
+        call backend_profile(b, parsed%profile)
         all_flags = trim(profile_flags(parsed%profile))
         if (len_trim(parsed%flags) > 0) then
             if (len_trim(all_flags) > 0) then
@@ -975,6 +976,7 @@ contains
             write (error_unit, '(a)') 'fo: unknown build profile: '//trim(profile)
             stop 1
         end if
+        call backend_profile(b, profile)
         all_flags = trim(profile_flags(profile))
         if (len_trim(flags) > 0) then
             if (len_trim(all_flags) > 0) then
@@ -1068,6 +1070,7 @@ contains
             write (error_unit, '(a)') 'fo: unknown build profile: '//trim(profile)
             stop 1
         end if
+        call backend_profile(b, profile)
         all_flags = trim(profile_flags(profile))
         if (len_trim(flags) > 0) then
             if (len_trim(all_flags) > 0) then
@@ -1275,6 +1278,7 @@ contains
             write (error_unit, '(a)') 'fo: unknown test profile: '//trim(profile)
             stop 1
         end if
+        call backend_profile(b, profile)
         all_flags = trim(profile_flags(profile))
         if (len_trim(flags) > 0) then
             if (len_trim(all_flags) > 0) then

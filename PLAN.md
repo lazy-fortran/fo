@@ -14,6 +14,24 @@ session, gate and failure evidence. Earlier async-start, driver-input and
 inherited test-directory repairs remain pushed at `318ecea`; driver `6e54f805`
 passes six focused reproducers and two existing process/session cleanup checks.
 
+Latest #200 milestone: Fo commit `2f2bf21` is on `main` (base
+`48fc48dde87da78320e43c6dbcaaa08b46cc2758`; source patch SHA256
+`e671c12e64fac11bc3c3dcea339c47c22a38fa986757056d1057c2cc03a68d32`). It
+fixes declared internal inputs beneath excluded build directories, Linux async
+descendant recovery/reaping, and the Fo FPM input declaration. Exact candidate
+driver SHA256 is
+`9f8dbdb20dc89f1af4f58932ea593201245f4becc4681893d17cbcd175aecf38`. Resident
+session `2454345-1791189839-035068226`, generation
+`b6a6f77eb6b7a827eb1325e466d9acdf8021c820876df1df1c33186bfee1ae7d`, passed
+the 10-case required gate with zero failures. `test_gremlin_campaign_history`
+passed in 135.94 s with `FO_TEST_WALL_TIMEOUT=300`; ordinary coverage reached
+21/103 before the owner was stopped after unrelated inputs changed. One ordinary
+case was cancelled during that stop. Through the same exact driver,
+`test_gremlin_watch` passed in 41.92 s and `test_gremlin_public_readiness`
+passed in 90.77 s with the wall-time override unset. Full ordinary coverage is
+not a milestone gate. A clean-worktree resident lane reaching and remaining in
+quiescence is the final #200 check still pending.
+
 The prior 24-case session `4014645-1791139032-043537972` ended with an
 `INFRA_ERROR` when a nested campaign-history owner start returned ESTALE. Its
 trace identified a stable root/member/owner process identity whose parent and
@@ -93,6 +111,25 @@ locally verified. Remaining fresh-view I/O is a demonstrated optimization target
 not a reason to restart an upfront architecture program.
 
 ## Delivery order
+
+The kin6d CMake consumer exposed a profile-isolation defect: public Debug flags
+were written into global `CMAKE_Fortran_FLAGS` and persisted into later native
+Release configuration. On base `2f2bf21` with scoped patch digest
+`8cbfa18f45234d1f1a2b6782fd6be888a76bc3dcedaa04edbd408b0dcfd0d7e5`,
+named profiles now select a configuration unless one is explicitly supplied,
+and compiler flags are scoped to that configuration. The native bootstrap
+candidate at `/var/tmp/fo-cmake-profile-driver-20261005/fo`, SHA256
+`6bb8bb26cf7374d8206f506ac36e36009ae8b26e195357648771938c435c9d02`,
+passes the public CLI regression and 73 backend assertions. Its independent
+fixture preserves project macros, checks actual Debug bounds failures, retains
+an explicit custom configuration, and executes the same-directory native
+Release preset without inherited Debug flags. The prior pinned driver fails
+this fixture. The original kin6d Debug gates pass 2/2 through the candidate;
+subsequent native Release gates pass 5/5 with global flags still empty.
+Native FPM was used for diagnostic bootstrap of this exact candidate after a
+duplicate cold Fo build remained incomplete; no cold-build pass is claimed.
+This repairs delegated profile behavior; native CMake input capture remains
+the separately documented milestone.
 
 1. Sustain resident Fo dogfooding and repair concrete workflow blockers.
 2. Substantially reduce maintained code and documentation through
