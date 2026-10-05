@@ -46,6 +46,20 @@ ordinary coverage reached 28/103. The lane was stopped after the sample and
 required gate; full-suite verification, persistent idle residency and final
 speed remain unverified.
 
+On clean `main` commit `ef5af56e2c5b7e1517950235d045ffc3dced9397`, the same
+driver built generation `776cb130c3ea809f5a5a0b84c5c172fbf969cdfa0f6d6cbeb93a534b90d7513c`.
+Session `763987-1791158219-395285111` (`resident-current-5case-20261005`)
+passed the exact five-case required gate: `test_stat_memo`,
+`test_gremlin_input_inventory`, `test_gremlin_execution_view`,
+`test_gremlin_campaign_history`, and `test_gremlin_capture_pending`. The
+controller set `FO_TEST_WALL_TIMEOUT=300` and a 300-second case wall bound; the
+campaign-history case passed in 106.20 seconds. The gate reached 5/5 with zero
+failures and ordinary coverage 5/103 before the owner was stopped. Build and
+case logs remain under
+`/var/tmp/fo-resident-development-20261005/fo/gremlin/projects/358e93b5c75070e9/4d74cc6b29c64e08/logs/`;
+the build log SHA256 is `17fb0cbcb88cc5433435a38967c1ed1849f65e017da376de9716762f9c329d6c`.
+Full-suite verification and persistent idle residency remain unverified.
+
 The initial utility/input-inventory/execution-view gate and contained-launch
 reproducer are independently exercised. Fx materialization/warm-hit repairs are
 locally verified. Remaining fresh-view I/O is a demonstrated optimization target,
