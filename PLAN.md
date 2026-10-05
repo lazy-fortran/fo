@@ -116,6 +116,28 @@ reproducer are independently exercised. Fx materialization/warm-hit repairs are
 locally verified. Remaining fresh-view I/O is a demonstrated optimization target,
 not a reason to restart an upfront architecture program.
 
+2026-10-05 FFC capture exposed two provenance gaps. On current Fo base
+`17db6d81e0cf86b2325da159aa62964755eb92e6`, patch SHA256
+`00ba377268b634e14eb7829e2a8c179acbb40458fdf719cff25387ef34fb231e` adds
+`LIBRARY_PATH` to the captured execution environment and bumps generation
+identity to v4 so the Git base commit and uncommitted patch digest affect the
+generation key. The typed manifest test verifies dependency-byte changes,
+metadata-only commits, dirty edits, isolated linker-path changes, and compiler
+path provenance. Candidate driver SHA256
+`4db8ba18608c0375506cc5e10c3d14fa98fcd28e812b44f508dfc4e7c0547fa2` passed
+`test_gremlin_context_provenance` in session
+`3999079-1791214209-696033962`, generation
+`9356d99c1b1eb2f74fbd2528b19093e1888107da30bf6a5ea0cd12a18b15b2b4`; case log
+SHA256 `35e5ad411fbb1ab5a9e5b6ddcfaecaa93930c9356f8c42cd4548ad9a18739ced`.
+This pass used the updated Fo base that arrived during the preceding run, so it
+also confirms that the new base commit produces a distinct generation.
+
+The same candidate repaired Fx's lease row cap and captured FFC generation
+`3825c278a877817415ca1ed82a49ff324439977af45ed8fb35462235edb8dc74` in session
+`4044827-1791215266-014327427`; the FFC build is underway. A prior Fo/Fortnum
+resident had stopped at publication with `cannot protect generation objects
+during publication`, which the Fx capacity reproducer now covers.
+
 ## Delivery order
 
 The kin6d CMake consumer exposed a profile-isolation defect: public Debug flags

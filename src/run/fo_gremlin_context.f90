@@ -330,6 +330,7 @@ contains
         call append_environment_value(context%environment, 'FFLAGS')
         call append_environment_value(context%environment, 'FPM_FC')
         call append_environment_value(context%environment, 'FPM_FFLAGS')
+        call append_environment_value(context%environment, 'LIBRARY_PATH')
         call append_environment_value(context%environment, 'OMP_NUM_THREADS')
         call make_tmpfile('fo-gremlin-git-head', log_file)
         call fs_find_executable('git', command_path, found)
