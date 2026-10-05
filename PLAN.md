@@ -32,8 +32,11 @@ PASS receipts (95 ordinary cases remained). The public candidate passed
 `test_gremlin_supervisor` and the full CLI/MCP Gremlin behavior test. That test
 confirmed MCP/CLI attachment, gate-only quiescence with ordinary cases left,
 and wakeup into a new green generation after an edit. Full ordinary coverage
-is not a #200 milestone gate. The preceding `9c21351` milestone also passed
-the resident Mac watch gate, including `test_gremlin_watch`.
+is not a #200 milestone gate. The exact candidate also passed
+`test_gremlin_public_readiness` in 78.85 s with the wall-time override unset;
+the oracle exercised timeout attribution, stale-token invalidation, owner
+restart, failure and repair. The preceding `9c21351` milestone also passed the
+resident Mac watch gate, including `test_gremlin_watch`.
 
 The prior 24-case session `4014645-1791139032-043537972` ended with an
 `INFRA_ERROR` when a nested campaign-history owner start returned ESTALE. Its
