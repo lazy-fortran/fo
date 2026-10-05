@@ -155,8 +155,8 @@ failures; local gate green, full coverage incomplete). Candidate driver SHA256
 passed a public `gremlin reproduce --timeout-seconds 300` invocation for
 `test_gremlin_supervisor`. The read-only candidate copy is at
 `/var/tmp/fo-gremlin-driver-candidates/c3e41b5bc5f6bfb5550832269092b69a53dedf47c62e21fa8fc1984153fc8b5d/fo`.
-The Fo#175 consumer repair is locally gated; FFC's declared FortFront corpus
-fixtures are being checked on that candidate.
+The Fo#175 consumer repair was pushed to `main` in commit `b88cc36`; FFC's
+declared FortFront corpus fixtures are being checked on that candidate.
 
 ## Delivery order
 
