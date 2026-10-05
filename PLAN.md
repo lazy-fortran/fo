@@ -60,6 +60,20 @@ case logs remain under
 the build log SHA256 is `17fb0cbcb88cc5433435a38967c1ed1849f65e017da376de9716762f9c329d6c`.
 Full-suite verification and persistent idle residency remain unverified.
 
+Fo #186 has an initial source-policy slice on `main` at
+`485226135d8467a366342e2afd1f752b6997e934`, based on `0ea2244`. The native
+scanner and Fo watch filter now share the `.f90`, `.F90`, `.f`, and `.F` suffix
+predicate. On the combined candidate, generation
+`879bfdb00dc63f10d4dd2258608bd26756452a47481c4fc96e988c5e7b6ebbc4` built and
+`test_scan` passed (gate 1/1, zero failures); the test checks discovery of all
+four suffixes. Logs are under
+`/var/tmp/fo-resident-development-20261005/fo/gremlin/projects/295419f1b143ec1c/8ba60bb1f57c3d77/logs/`;
+build log SHA256 `f48342a3c768c10755c75242e3cb3b2bc007264a6df556df608e6198a6eecd53`,
+case log SHA256 `23d4eec3e1d23dcac9b96589cbb34255060e42396fccb8af1b774bd09373a17e`.
+Broader inventory, exclusion and impact alignment remains open. A branch-only
+`.f` assertion in `test_gremlin_watch` timed out at the 300-second case limit
+without returning an assertion result; that test edit was excluded from main.
+
 The initial utility/input-inventory/execution-view gate and contained-launch
 reproducer are independently exercised. Fx materialization/warm-hit repairs are
 locally verified. Remaining fresh-view I/O is a demonstrated optimization target,
