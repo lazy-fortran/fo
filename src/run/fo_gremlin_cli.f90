@@ -433,6 +433,7 @@ contains
 
         write (unit, '(a)') 'usage: fo gremlin [start|status|wait|events|failures|reproduce|stop] [options]'
         write (unit, '(a)') '  start: --dir DIR --lane ID --target NAME --random N --seed N'
+        write (unit, '(a)') '         --random 0 quiesces after required targets pass'
         write (unit, '(a)') '         --only-changed --shuffle --campaign-seconds N --timeout-seconds N'
         write (unit, '(a)') '  reads: --session ID --cursor N --lifecycle-cursor N'
         write (unit, '(a)') '         --max-records N --max-bytes N'

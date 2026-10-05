@@ -504,9 +504,9 @@ contains
         end select
         select case (field)
         case (3)
-            if (request%random_count < 1 .or. request%random_count > DEFAULT_RANDOM) then
+            if (request%random_count < 0 .or. request%random_count > DEFAULT_RANDOM) then
                 ierr = 1
-                message = 'random_count must be between 1 and 32'
+                message = 'random_count must be between 0 and 32'
             end if
         case (5)
             if (request%campaign_seconds < 1 .or. request%campaign_seconds > DEFAULT_CAMPAIGN) then

@@ -242,7 +242,8 @@ async function waitForInitialSample(readStatus, seed, expectedCount, label) {
     latest = await readStatus();
     const events = Array.isArray(latest.events) ? latest.events : [];
     const sample = events.filter(event => event.seed === seed && event.case_id !== '<build>');
-    if (latest.seed !== seed && sample.length >= expectedCount) return sample;
+    if (latest.state === 'quiescent' && latest.seed === seed &&
+        sample.length >= expectedCount) return sample;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   throw new Error(`timed out waiting for the completed seeded sample from ${label}: `
@@ -262,6 +263,23 @@ async function waitForStopped(cwd, lane, sessionId, timeoutMs) {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   throw new Error(`Gremlin owner ${sessionId} did not stop`);
+}
+
+async function waitForQuiescent(readStatus, previousGeneration = '', timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = {};
+  while (Date.now() < deadline) {
+    latest = await readStatus();
+    if (latest.state === 'quiescent' && latest.local_gate_green &&
+        (!previousGeneration || latest.active_generation !== previousGeneration)) {
+      return latest;
+    }
+    if (latest.state === 'failed' || latest.state === 'stopped') {
+      throw new Error(`Gremlin did not return to quiescence: ${JSON.stringify(latest)}`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error(`timed out waiting for a green quiescent owner: ${JSON.stringify(latest)}`);
 }
 
 function gremlinOwnerPids(dir, lane) {
@@ -383,14 +401,19 @@ async function cleanupOwner(server, cwd, lane, knownId, mcpOwned, requestId) {
 async function main() {
   const fixture = path.join(scratch, 'project');
   const parityFixture = path.join(scratch, 'parity-project');
+  const gateOnlyFixture = path.join(scratch, 'gate-only-project');
   const markerRoot = path.join(scratch, 'markers');
   const blockedGate = path.join(markerRoot, 'mcp_blocked.gate');
   createGate(blockedGate);
   writeFixture(fixture, markerRoot);
   writeParityFixture(parityFixture);
+  writeParityFixture(gateOnlyFixture);
+  fs.writeFileSync(path.join(gateOnlyFixture, 'test/test_parity_d.f90'),
+    'program test_parity_d\nimplicit none\nend program test_parity_d\n');
   let sessionId = '';
   let parityMcpSessionId = '';
   let parityCliSessionId = '';
+  let gateOnlySessionId = '';
   let primaryError;
   if (!installed) {
     const built = spawnSync(driver, ['build'], { cwd: project, env, encoding: 'utf8',
@@ -416,7 +439,7 @@ async function main() {
     const startResult = payload(await server.call(3, {
       action: 'gremlin_start', dir: fixture, lane_id: 'mcp-probe',
       targets: ['test_mcp_pass', 'test_mcp_fail', 'test_mcp_blocked'],
-      seed: 1729, timeout_seconds: 5, campaign_seconds: 60
+      random_count: 0, seed: 1729, timeout_seconds: 5, campaign_seconds: 60
     }));
     assert.equal(startResult.isError, false, JSON.stringify(startResult.body));
     assert.ok(Date.now() - startedAt < 3000, 'background start returns promptly');
@@ -426,7 +449,7 @@ async function main() {
     sessionId = startResult.body.session_id;
     const duplicate = runFo(['gremlin', 'start', '--lane', 'mcp-probe',
       '--dir', fixture, '--target', 'test_mcp_pass', '--target', 'test_mcp_fail',
-      '--target', 'test_mcp_blocked', '--campaign-seconds', '60',
+      '--target', 'test_mcp_blocked', '--random', '0', '--campaign-seconds', '60',
       '--seed', '1729', '--timeout-seconds', '5'], fixture);
     assert.equal(duplicate.status, 0, duplicate.stdout + duplicate.stderr);
     const duplicateState = JSON.parse(duplicate.stdout.trim());
@@ -436,7 +459,7 @@ async function main() {
 
     const invalidInputs = [
       { name: 'random_count upper bound', cli: ['--random', '33'],
-        mcp: { random_count: 33 }, expected: 'random_count must be between 1 and 32' },
+        mcp: { random_count: 33 }, expected: 'random_count must be between 0 and 32' },
       { name: 'integer field wrong type', cli: ['--random', 'thirty-three'],
         mcp: { random_count: 'thirty-three' },
         expected: 'integer request field has the wrong JSON type' },
@@ -482,12 +505,11 @@ async function main() {
         ',"random_count":01}'
     ];
     for (let index = 0; index < malformedArguments.length; index++) {
-      const malformed = payload(await server.callRaw(40 + index,
-        malformedArguments[index]));
-      assert.equal(malformed.isError, true,
-        `malformed JSON case ${index} is rejected through raw MCP`);
-      assert.ok(String(malformed.body.error).includes('malformed Gremlin request JSON'),
-        `malformed JSON case ${index} has the shared parser error`);
+      const malformed = await server.callRaw(40 + index, malformedArguments[index]);
+      assert.equal(malformed.error?.code, -32600,
+        `malformed JSON-RPC case ${index} is rejected by the protocol parser`);
+      assert.equal(malformed.error?.message, 'invalid JSON-RPC request',
+        `malformed JSON-RPC case ${index} returns the protocol error`);
     }
 
     const largeCursor = 2147483648;
@@ -698,7 +720,7 @@ async function main() {
       }));
       assert.equal(result.isError, false, JSON.stringify(result.body));
       return result.body;
-    }, 1729, 2, 'MCP random selection');
+    }, 1729, 3, 'MCP random selection');
     const cliParitySample = await waitForInitialSample(() => {
       const result = runFo(['gremlin', 'status', '--dir', parityFixture,
         '--lane', 'cli-parity', '--session', parityCliSessionId,
@@ -706,20 +728,20 @@ async function main() {
       parityFixture);
       assert.equal(result.status, 0, result.stdout + result.stderr);
       return JSON.parse(result.stdout.trim());
-    }, 1729, 2, 'CLI random selection');
-    assert.equal(mcpParitySample.length, 2,
-      'MCP completed exactly the requested number of first-sample cases');
-    assert.equal(cliParitySample.length, 2,
-      'CLI completed exactly the requested number of first-sample cases');
+    }, 1729, 3, 'CLI random selection');
+    assert.equal(mcpParitySample.length, 3,
+      'MCP completed one priority case and two additional random cases');
+    assert.equal(cliParitySample.length, 3,
+      'CLI completed one priority case and two additional random cases');
     assert.ok(mcpParitySample.every(event => event.status === 'PASS'),
       'all MCP first-sample cases passed');
     assert.ok(cliParitySample.every(event => event.status === 'PASS'),
       'all CLI first-sample cases passed');
     const selectedCases = events => events.map(event => event.case_id).sort();
-    assert.equal(new Set(selectedCases(mcpParitySample)).size, 2,
-      'MCP first sample contains two distinct test cases');
-    assert.equal(new Set(selectedCases(cliParitySample)).size, 2,
-      'CLI first sample contains two distinct test cases');
+    assert.equal(new Set(selectedCases(mcpParitySample)).size, 3,
+      'MCP first sample contains three distinct test cases');
+    assert.equal(new Set(selectedCases(cliParitySample)).size, 3,
+      'CLI first sample contains three distinct test cases');
     assert.deepEqual(selectedCases(mcpParitySample), selectedCases(cliParitySample),
       'MCP and CLI map the same valid random count and seed to the same cases');
 
@@ -733,6 +755,49 @@ async function main() {
       '--lane', 'cli-parity', '--session', parityCliSessionId, '--json'], parityFixture);
     assert.equal(cliParityStop.status, 0, cliParityStop.stdout + cliParityStop.stderr);
     await waitForStopped(parityFixture, 'cli-parity', parityCliSessionId, 10000);
+
+    const gateOnlyStart = payload(await server.call(nextParityStatusId++, {
+      action: 'gremlin_start', dir: gateOnlyFixture, lane_id: 'mcp-gate-only',
+      targets: ['test_parity_a'], random_count: 0, seed: 20261005,
+      timeout_seconds: 5, campaign_seconds: 1
+    }));
+    assert.equal(gateOnlyStart.isError, false, JSON.stringify(gateOnlyStart.body));
+    gateOnlySessionId = gateOnlyStart.body.session_id;
+    assert.ok(gateOnlySessionId, 'zero-random MCP start returns an owner');
+    const cliGateOnlyAttach = runFo(['gremlin', 'start', '--dir', gateOnlyFixture,
+      '--lane', 'mcp-gate-only', '--target', 'test_parity_a', '--random', '0',
+      '--seed', '20261005', '--timeout-seconds', '5', '--campaign-seconds', '1'],
+    gateOnlyFixture);
+    assert.equal(cliGateOnlyAttach.status, 0,
+      cliGateOnlyAttach.stdout + cliGateOnlyAttach.stderr);
+    assert.equal(JSON.parse(cliGateOnlyAttach.stdout.trim()).session_id, gateOnlySessionId,
+      'zero-random CLI start attaches to the MCP owner');
+    const readGateOnlyStatus = async () => {
+      const result = payload(await server.call(nextParityStatusId++, {
+        action: 'gremlin_status', dir: gateOnlyFixture, lane_id: 'mcp-gate-only',
+        session_id: gateOnlySessionId, max_records: 8, max_bytes: 8192
+      }));
+      assert.equal(result.isError, false, JSON.stringify(result.body));
+      return result.body;
+    };
+    const firstQuiescent = await waitForQuiescent(readGateOnlyStatus);
+    assert.ok(firstQuiescent.coverage.ordinary.remaining > 0,
+      `gate-only completion leaves ordinary cases: ${JSON.stringify(firstQuiescent)}`);
+    const firstGeneration = firstQuiescent.active_generation;
+    fs.appendFileSync(path.join(gateOnlyFixture, 'test/test_parity_a.f90'),
+      '! relevant edit wakes a quiescent owner\n');
+    const secondQuiescent = await waitForQuiescent(readGateOnlyStatus, firstGeneration);
+    assert.notEqual(secondQuiescent.active_generation, firstGeneration,
+      'quiescent owner captures a new generation after a relevant edit');
+    assert.ok(secondQuiescent.gate_required > 0 &&
+      secondQuiescent.gate_passed === secondQuiescent.gate_required,
+    'all required gates pass again on the edited generation');
+    const gateOnlyStop = payload(await server.call(nextParityStatusId++, {
+      action: 'gremlin_stop', dir: gateOnlyFixture, lane_id: 'mcp-gate-only',
+      session_id: gateOnlySessionId
+    }));
+    assert.equal(gateOnlyStop.isError, false, JSON.stringify(gateOnlyStop.body));
+    await waitForStopped(gateOnlyFixture, 'mcp-gate-only', gateOnlySessionId, 10000);
 
     const originalMcpEvents = await collectMcpEvents(server, nextParityStatusId++,
       parityFixture, 'mcp-parity', parityMcpSessionId);
@@ -785,7 +850,8 @@ async function main() {
     for (const [cwd, lane, knownId, mcpOwned] of [
       [fixture, 'mcp-probe', sessionId, true],
       [parityFixture, 'mcp-parity', parityMcpSessionId, true],
-      [parityFixture, 'cli-parity', parityCliSessionId, false]
+      [parityFixture, 'cli-parity', parityCliSessionId, false],
+      [gateOnlyFixture, 'mcp-gate-only', gateOnlySessionId, true]
     ]) {
       try { await cleanupOwner(server, cwd, lane, knownId, mcpOwned, requestId); }
       catch (error) { cleanupErrors.push(error); }

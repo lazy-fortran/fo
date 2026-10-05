@@ -186,6 +186,9 @@ contains
             request, ierr, message)
         call check(ierr == 0 .and. request%cursor == 2147483648_int64, &
             'preserves a lifecycle cursor above the fx int32 range')
+        call parse_request('start', '{"random_count":0}', request, ierr, message)
+        call check(ierr == 0 .and. request%random_count == 0, &
+            'accepts a gate-only campaign with no random sample')
         call parse_request('status', '{"lane_\u00e9id":"safe"}', &
             request, ierr, message)
         call check(ierr /= 0 .and. index(message, 'unsupported') > 0, &

@@ -1398,7 +1398,8 @@ contains
             '"targets":{"type":"array","items":{"type":"string"}},'// &
             '"only_changed":{"type":"boolean"},'// &
             '"shuffle":{"type":"boolean"},'// &
-            '"random_count":{"type":"integer","minimum":1,"maximum":32},'// &
+            '"random_count":{"type":"integer","minimum":0,"maximum":32,'// &
+            '"description":"additional random cases; 0 quiesces after gate targets pass"},'// &
             '"seed":{"type":"integer"},'// &
             '"campaign_seconds":{"type":"integer","minimum":1,"maximum":60},'// &
             '"timeout_seconds":{"type":"integer","minimum":0,"maximum":86400},'// &

@@ -430,6 +430,7 @@ contains
         character(len=HASH_LEN) :: active_id, candidate_id, receipt_generation
         character(len=HASH_LEN) :: receipt_requirement
         character(len=128) :: status_name, case_id, raw
+        character(len=PATH_LEN) :: journal_path
         character(len=NAME_LEN) :: gate_cases(MAX_NODES)
         character(len=NAME_LEN) :: gate_pass_cases(MAX_NODES)
         integer(int64) :: cursor, next_cursor
@@ -517,8 +518,18 @@ contains
         gate_count = 0
         gate_passed = 0
         cursor = 0_int64
+        if (.not. allocated(session%project_key) .or. &
+            .not. allocated(session%lane_id) .or. &
+            .not. allocated(session%session_id)) then
+            ierr = 1
+            message = 'Gremlin session has no receipt journal identity'
+            return
+        end if
+        call gremlin_get_session_journal_path(trim(session%project_key), &
+            trim(session%lane_id), trim(session%session_id), journal_path, ierr, message)
+        if (ierr /= 0) return
         do
-            call journal_read_page(session%state_dir//'/journal.jsonl', cursor, 64, &
+            call journal_read_page(trim(journal_path), cursor, 64, &
                 int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, next_cursor, &
                 journal_status, message)
             if (journal_status /= JOURNAL_OK) then
@@ -1404,7 +1415,8 @@ contains
                         fatal_error = .true.
                         exit
                     end if
-                    call advance_campaign(session, owner_request, active_generation, selected, &
+                    call advance_campaign(project_dir, session, owner_request, &
+                        active_generation, selected, &
                         selected_count, test_index, campaign_seed, campaign_number, &
                         campaign_started_ms, test_child, ierr, message, completed, &
                         state_name, sequence)
@@ -1439,7 +1451,8 @@ contains
                         fatal_error = .true.
                         exit
                     end if
-                    call advance_campaign(session, owner_request, active_generation, selected, &
+                    call advance_campaign(project_dir, session, owner_request, &
+                        active_generation, selected, &
                         selected_count, test_index, campaign_seed, campaign_number, &
                         campaign_started_ms, test_child, ierr, message, completed, &
                         state_name, sequence)
@@ -2618,9 +2631,10 @@ contains
             child%case_name, completed, n_selected, seed, 'RUNNING', 0, ierr, message)
     end subroutine launch_selected_case
 
-    subroutine advance_campaign(session, request, generation, selected, n_selected, &
-            index_case, seed, campaign, campaign_started_ms, child, ierr, message, &
+    subroutine advance_campaign(project_dir, session, request, generation, selected, &
+            n_selected, index_case, seed, campaign, campaign_started_ms, child, ierr, message, &
             completed, state_name, sequence)
+        character(len=*), intent(in) :: project_dir
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(inout) :: request
         type(generation_t), intent(in) :: generation
@@ -2635,14 +2649,52 @@ contains
 
         integer(int64) :: now_ms
         integer :: status, mandatory_count, launch_error
+        integer :: owner_pid
         type(gremlin_request_t) :: next_request
         type(gremlin_coverage_view_t) :: coverage_view
+        type(gremlin_readiness_t) :: readiness
         character(len=PATH_LEN) :: launch_message, state_message
         character(len=PATH_LEN) :: coverage_path
+        character(len=128) :: active_session, owner_start
+        character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
 
         ierr = 0
         message = ''
         call clock_milliseconds(now_ms)
+        if (request%random_count == 0) then
+            call gremlin_session_read(project_dir, request%lane_id, &
+                active_session, owner_pid, owner_start, status_text, status, message)
+            if (status /= 0) then
+                ierr = status
+                return
+            end if
+            if (trim(active_session) /= trim(session%session_id)) then
+                ierr = 1
+                message = 'Gremlin owner identity changed before gate completion'
+                return
+            end if
+            coverage_path = trim(session%state_dir)//'/coverage-'// &
+                generation%identity//'.state'
+            call coverage_read_view_path(trim(coverage_path), generation%identity, &
+                coverage_view, status, message)
+            if (status == COVERAGE_OK) then
+                call compute_readiness(session, trim(status_text), coverage_view, &
+                    .true., readiness, ierr, message)
+                if (ierr /= 0) return
+                if (readiness%local_gate_green) then
+                    selected = ''
+                    n_selected = 0
+                    state_name = 'quiescent'
+                    call publish_state(session, request, state_name, generation, &
+                        generation, '', completed, n_selected, seed, 'NONE', 0, &
+                        ierr, message)
+                    return
+                end if
+            else if (status /= COVERAGE_NOT_FOUND) then
+                ierr = status
+                return
+            end if
+        end if
         if (index_case < n_selected .and. &
             now_ms - campaign_started_ms < &
             int(request%campaign_seconds, int64)*1000_int64) then
@@ -3127,13 +3179,24 @@ contains
         character(len=HASH_LEN) :: receipt_generation
         character(len=NAME_LEN) :: receipt_case
         character(len=32) :: verdict
+        character(len=PATH_LEN) :: journal_path
         integer(int64) :: cursor, next_cursor
         integer :: i
 
         passed = .false.
         cursor = 0_int64
+        if (.not. allocated(session%project_key) .or. &
+            .not. allocated(session%lane_id) .or. &
+            .not. allocated(session%session_id)) then
+            ierr = 1
+            message = 'Gremlin session has no receipt journal identity'
+            return
+        end if
+        call gremlin_get_session_journal_path(trim(session%project_key), &
+            trim(session%lane_id), trim(session%session_id), journal_path, ierr, message)
+        if (ierr /= 0) return
         do
-            call journal_read_page(session%state_dir//'/journal.jsonl', cursor, 64, &
+            call journal_read_page(trim(journal_path), cursor, 64, &
                 int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, next_cursor, &
                 ierr, message)
             if (ierr /= JOURNAL_OK) return
