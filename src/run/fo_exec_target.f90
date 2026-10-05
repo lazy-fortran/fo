@@ -1,6 +1,8 @@
 module fo_exec_target
     use fo_build_backend, only: backend_t, BACKEND_CMAKE, BACKEND_NATIVE
     use fo_build_tree, only: native_output_dir
+    use fo_cmake_context, only: cmake_context_t, cmake_context_init, &
+        cmake_context_build_path
     use fo_fs, only: fs_collect_files
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_gfortran_build, only: gfortran_app_source_name, gfortran_test_source_name
@@ -203,18 +205,27 @@ contains
         character(len=*), intent(in), optional :: flags
 
         character(len=1024) :: candidates(64)
+        character(:), allocatable :: build_root
+        type(cmake_context_t) :: context
         integer :: i, last_slash, n_candidates, n_exact
 
-        if (present(flags)) then
-            bin_path = native_output_dir(b%project_dir, flags, 'bin')//'/'// &
-                trim(target)
-        else
-            bin_path = trim(b%project_dir)//'/build/fo/bin/'//trim(target)
+        if (b%kind /= BACKEND_CMAKE) then
+            if (present(flags)) then
+                bin_path = native_output_dir(b%project_dir, flags, 'bin')//'/'// &
+                    trim(target)
+            else
+                bin_path = trim(b%project_dir)//'/build/fo/bin/'//trim(target)
+            end if
+            inquire (file=trim(bin_path), exist=found)
+            return
         end if
-        inquire (file=trim(bin_path), exist=found)
-        if (found .or. b%kind /= BACKEND_CMAKE) return
 
-        bin_path = trim(b%project_dir)//'/build/'//trim(target)
+        call cmake_context_init(context, b%project_dir)
+        found = .false.
+        bin_path = ''
+        if (.not. context%valid) return
+        build_root = cmake_context_build_path(context)
+        bin_path = build_root//'/'//trim(target)
         inquire (file=trim(bin_path), exist=found)
         if (found) return
 
@@ -224,14 +235,14 @@ contains
         ! anything it finds twice. Without this probe a target that is present
         ! at the canonical path is reported as missing purely because a stale
         ! sibling build tree exists.
-        bin_path = trim(b%project_dir)//'/build/bin/'//trim(target)
+        bin_path = build_root//'/bin/'//trim(target)
         inquire (file=trim(bin_path), exist=found)
         if (found) return
 
         last_slash = index(trim(target), '/', back=.true.)
         if (last_slash > 0) return
 
-        call fs_collect_files(trim(b%project_dir)//'/build', '', trim(target), '', &
+        call fs_collect_files(build_root, '', trim(target), '', &
             candidates, n_candidates)
         n_exact = 0
         do i = 1, n_candidates
