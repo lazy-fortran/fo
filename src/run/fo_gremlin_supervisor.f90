@@ -1227,7 +1227,7 @@ contains
             return
         end if
         execution_env = 'FO_BIN='//trim(executable)//';FO='//trim(executable)//';'// &
-            'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
+            'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
             'FO_GREMLIN_EXECUTION_CWD='//trim(execution_view%cwd)
         call process_start_argv_logged(trim(build_view%cwd), packed, n_args, &
             trim(log_file), owner_pid, spawn_exit, &
@@ -2010,7 +2010,7 @@ contains
         call argv_push(packed, n_args, 'build')
         call process_start_argv_logged(trim(child%execution_view%cwd), packed, &
             n_args, trim(child%log_file), child%pid, spawn_exit, &
-            'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0')
+            'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0')
         ierr = spawn_exit
         if (ierr /= 0) then
             message = 'cannot start candidate build'
@@ -2849,7 +2849,7 @@ contains
             generation%input_inventory_complete, child%execution_view, ierr, message)
         if (ierr /= 0) return
         execution_env = 'FO_BIN='//trim(executable)//';FO='//trim(executable)//';'// &
-            'FO_JOBS=1;FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
+            'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
             'FO_GREMLIN_EXECUTION_CWD='//trim(child%execution_view%cwd)
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
