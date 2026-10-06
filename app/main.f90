@@ -2075,11 +2075,16 @@ contains
     subroutine cmd_update()
         use fo_dep_update, only: dep_update_run
         type(backend_t) :: b
+        character(len=1024) :: update_error
         integer :: n_deps
         logical :: refreshed
 
         b = detect_backend('.')
-        call dep_update_run(trim(b%project_dir), n_deps, refreshed)
+        call dep_update_run(trim(b%project_dir), n_deps, refreshed, update_error)
+        if (len_trim(update_error) > 0) then
+            write (error_unit, '(a)') 'fo update: '//trim(update_error)
+            call process_exit(1)
+        end if
         if (.not. refreshed) then
             write (output_unit, '(a)') &
                 'no git or registry dependencies to refresh'

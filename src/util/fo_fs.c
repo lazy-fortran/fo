@@ -215,6 +215,47 @@ int fo_c_collect_files(const char *root, const char *infix, const char *suffix,
                           &used);
 }
 
+/* List direct dependency checkouts without traversing their Git object stores.
+   A .git file covers linked worktrees as well as ordinary .git directories. */
+int fo_c_collect_git_checkouts(const char *root, char *out, int cap,
+                               int item_cap) {
+    DIR *dir;
+    struct dirent *ent;
+    char child[PATH_MAX], marker[PATH_MAX];
+    struct stat st;
+    int used = 0, count = 0, length;
+
+    if (!fo_has(root) || out == NULL || cap <= 0 || item_cap <= 0) return -1;
+    dir = opendir(root);
+    if (dir == NULL) return (errno == ENOENT) ? 0 : -1;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+            continue;
+        length = snprintf(child, sizeof(child), "%s/%s", root, ent->d_name);
+        if (length < 0 || length >= (int)sizeof(child)) goto fail;
+        if (lstat(child, &st) != 0) goto fail;
+        if (!S_ISDIR(st.st_mode)) continue;
+        if (snprintf(marker, sizeof(marker), "%s/.git", child) >=
+            (int)sizeof(marker)) goto fail;
+        if (lstat(marker, &st) != 0) {
+            if (errno == ENOENT) continue;
+            goto fail;
+        }
+        if (!S_ISDIR(st.st_mode) && !S_ISREG(st.st_mode)) continue;
+        if (length >= item_cap || used + length + 1 > cap) goto fail;
+        memcpy(out + used, child, (size_t)length);
+        out[used + length] = '\0';
+        used += length + 1;
+        count++;
+    }
+    closedir(dir);
+    return count;
+
+fail:
+    closedir(dir);
+    return -1;
+}
+
 /* Atomic exclusive directory create, used as a cross-process lock: returns 0
    when this caller created the directory, 1 when it already existed, -1 on a
    hard error. */

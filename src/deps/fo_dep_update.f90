@@ -15,8 +15,11 @@ module fo_dep_update
     !! declared git dependencies whose source tree is gone while their objects
     !! remain, which is the silent case the build must never accept.
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, dep_kind, DEP_PATH
-    use fo_fs, only: fs_remove_tree, fs_remove_file, fs_stat
+    use fo_fs, only: fs_remove_tree, fs_remove_file, fs_stat, &
+        fs_collect_git_checkouts
     use fo_dep_resolve, only: normalize_path
+    use fo_process, only: process_run_argv_logged, argv_push
+    use fo_util, only: make_tmpfile, delete_tmpfile
     use, intrinsic :: iso_c_binding, only: c_long_long
     implicit none
     private
@@ -27,6 +30,7 @@ module fo_dep_update
 
     integer, parameter :: MAX_UPDATE_NAMES = 64
     integer, parameter :: MAX_PROFILE_DIRS = 512
+    integer, parameter :: MAX_CHECKOUTS = 512
 
 contains
 
@@ -60,7 +64,7 @@ contains
         end do
     end subroutine dep_update_missing_sources
 
-    subroutine dep_update_run(project_dir, n_deps, refreshed)
+    subroutine dep_update_run(project_dir, n_deps, refreshed, error_message)
         !! Remove the cached clones and the compiled dependency artifacts.
         !!
         !! The fpm profile directories are removed as well as the clone: leaving
@@ -69,6 +73,7 @@ contains
         character(len=*), intent(in) :: project_dir
         integer, intent(out) :: n_deps
         logical, intent(out) :: refreshed
+        character(len=*), intent(out), optional :: error_message
 
         type(fpm_config_t), allocatable :: config
         character(len=512) :: root
@@ -76,6 +81,7 @@ contains
 
         n_deps = 0
         refreshed = .false.
+        if (present(error_message)) error_message = ''
         allocate (config)
         call normalize_path(project_dir, root)
         call fpm_config_parse(root, config, ierr)
@@ -90,6 +96,16 @@ contains
         end do
         if (n_deps == 0) return
 
+        block
+            character(len=1024) :: problem
+            call check_dependency_checkouts(trim(root)//'/build/dependencies', &
+                problem)
+            if (len_trim(problem) > 0) then
+                if (present(error_message)) error_message = trim(problem)
+                return
+            end if
+        end block
+
         call fs_remove_tree(trim(root)//'/build/dependencies')
         ! fpm records the acquired dependency tree in build/cache.toml. Leaving
         ! it behind after the clones are gone does not make fpm re-fetch: it
@@ -99,6 +115,55 @@ contains
         call remove_profile_trees(trim(root)//'/build')
         refreshed = .true.
     end subroutine dep_update_run
+
+    subroutine check_dependency_checkouts(dependencies_dir, problem)
+        !! Inspect every immediate git checkout before removing any artifact.
+        !! This includes transitive dependencies not named in the root manifest.
+        character(len=*), intent(in) :: dependencies_dir
+        character(len=*), intent(out) :: problem
+
+        character(len=1024) :: checkouts(MAX_CHECKOUTS), status_log
+        character(len=:), allocatable :: args
+        integer :: n_args, exitcode, n_checkouts, i
+        integer(c_long_long) :: mtime, bytes
+        logical :: present_file, listed
+
+        problem = ''
+        call fs_collect_git_checkouts(dependencies_dir, checkouts, &
+            n_checkouts, listed)
+        if (.not. listed) then
+            problem = 'cannot inspect dependency checkouts: '// &
+                trim(dependencies_dir)
+            return
+        end if
+        do i = 1, n_checkouts
+            call make_tmpfile('fo-update-status', status_log)
+            args = ''
+            n_args = 0
+            call argv_push(args, n_args, 'git')
+            call argv_push(args, n_args, '-C')
+            call argv_push(args, n_args, trim(checkouts(i)))
+            call argv_push(args, n_args, 'status')
+            call argv_push(args, n_args, '--porcelain=v1')
+            call argv_push(args, n_args, '--untracked-files=all')
+            call argv_push(args, n_args, '--ignore-submodules=none')
+            call process_run_argv_logged('', args, n_args, trim(status_log), &
+                .false., 30, exitcode)
+            call fs_stat(trim(status_log), mtime, bytes, present_file)
+            call delete_tmpfile(trim(status_log))
+            if (exitcode /= 0 .or. .not. present_file) then
+                problem = 'cannot inspect dependency checkout: '// &
+                    trim(checkouts(i))
+                exit
+            end if
+            if (bytes > 0) then
+                problem = 'dependency checkout has local changes: '// &
+                    trim(checkouts(i))// &
+                    '; commit or stash them, then rerun fo update'
+                exit
+            end if
+        end do
+    end subroutine check_dependency_checkouts
 
     subroutine remove_profile_trees(build_dir)
         !! Drop the fpm bootstrap profile trees that hold dependency objects.

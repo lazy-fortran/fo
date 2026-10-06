@@ -14,6 +14,7 @@ module fo_fs
     public :: fs_copy_exec, fs_rename, fs_stat, fs_identity
     public :: fs_tree_fingerprint
     public :: fs_find_executable
+    public :: fs_collect_git_checkouts
 
     interface
         integer(c_int) function fo_c_rm_rf(path) bind(C, name='fo_c_rm_rf')
@@ -66,6 +67,14 @@ module fo_fs
             character(kind=c_char), intent(out) :: out(*)
             integer(c_int), value :: cap
         end function fo_c_collect_files
+
+        integer(c_int) function fo_c_collect_git_checkouts(root, out, cap, &
+                item_cap) bind(C, name='fo_c_collect_git_checkouts')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: root(*)
+            character(kind=c_char), intent(out) :: out(*)
+            integer(c_int), value :: cap, item_cap
+        end function fo_c_collect_git_checkouts
 
         integer(c_int) function fo_c_mkdir_excl(path) &
                 bind(C, name='fo_c_mkdir_excl')
@@ -206,6 +215,27 @@ contains
         call sort_items(items, n_items)
         deallocate (buf)
     end subroutine fs_collect_files
+
+    subroutine fs_collect_git_checkouts(root, items, n_items, ok)
+        !! Immediate children of root that have a .git directory or file.
+        character(len=*), intent(in) :: root
+        character(len=*), intent(out) :: items(:)
+        integer, intent(out) :: n_items
+        logical, intent(out) :: ok
+        character(kind=c_char), allocatable :: buf(:)
+        integer(c_int) :: rc
+
+        allocate (buf(FS_COLLECT_CAP))
+        rc = fo_c_collect_git_checkouts(trim(root)//c_null_char, buf, &
+            int(FS_COLLECT_CAP, c_int), int(len(items), c_int))
+        ok = rc >= 0 .and. rc <= size(items)
+        n_items = 0
+        if (ok) then
+            call unpack_buffer(buf, int(rc), items, n_items)
+            call sort_items(items, n_items)
+        end if
+        deallocate (buf)
+    end subroutine fs_collect_git_checkouts
 
     function fs_mkdir_excl(path) result(state)
         !! Atomic exclusive mkdir used as a lock: 0 created, 1 already existed,
