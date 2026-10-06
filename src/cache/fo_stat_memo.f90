@@ -96,13 +96,14 @@ contains
         integer, intent(out) :: ierr
         procedure(sha256_provider), optional :: provider
 
-        integer(c_long_long) :: mt, ct, sz
+        integer(c_long_long) :: mt, ct, sz, stable_mt, stable_ct, stable_size
         integer :: slot
         integer(c_int) :: stat_rc
         logical :: stable, cache_hit
 
         hash = ''
         ierr = 0
+        cache_hit = .false.
 
         !$omp critical (fo_stat_memo)
         if (.not. loaded) call load_impl()
@@ -120,20 +121,37 @@ contains
                     t_mtime(slot) == mt .and. t_ctime(slot) == ct .and. &
                     t_size(slot) == sz
             end if
-            if (cache_hit) then
-                hash = t_hash(slot)
-            else
-                call hash_with_stable_stat(path, mt, ct, sz, hash, ierr, stable, &
-                    provider)
-                if (ierr == 0 .and. stable .and. slot > 0) then
-                    t_used(slot) = .true.
-                    t_path(slot) = trim(path)
-                    t_mtime(slot) = mt
-                    t_ctime(slot) = ct
-                    t_size(slot) = sz
-                    t_hash(slot) = hash
-                    dirty = .true.
-                end if
+            if (cache_hit) hash = t_hash(slot)
+        end if
+        !$omp end critical (fo_stat_memo)
+
+        if (ierr /= 0 .or. cache_hit) return
+
+        ! Hashing can read a large object file. Keep it outside the table lock
+        ! so independent cold misses can make progress concurrently.
+        call hash_with_stable_stat(path, mt, ct, sz, hash, ierr, stable, provider)
+        if (ierr /= 0 .or. .not. stable) return
+        stable_mt = mt
+        stable_ct = ct
+        stable_size = sz
+
+        ! Another thread may have populated or displaced this slot while the
+        ! digest was computed. Publish only if the path still has this exact
+        ! stable fingerprint, using a freshly located slot.
+        !$omp critical (fo_stat_memo)
+        stat_rc = fo_c_stat_change_fingerprint( &
+            trim(path)//c_null_char, mt, ct, sz)
+        if (stat_rc == 0 .and. mt == stable_mt .and. ct == stable_ct .and. &
+            sz == stable_size) then
+            slot = find_slot(path)
+            if (slot > 0) then
+                t_used(slot) = .true.
+                t_path(slot) = trim(path)
+                t_mtime(slot) = mt
+                t_ctime(slot) = ct
+                t_size(slot) = sz
+                t_hash(slot) = hash
+                dirty = .true.
             end if
         end if
         !$omp end critical (fo_stat_memo)

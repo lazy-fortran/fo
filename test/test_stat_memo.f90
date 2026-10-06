@@ -1,3 +1,41 @@
+module stat_memo_parallel_oracle
+    use fx_hash, only: sha256_file
+    use fo_fs, only: fs_sleep_ms
+    implicit none
+    private
+    public :: parallel_provider, reset_parallel_oracle, max_parallel_hashes
+    integer, save :: active_hashes = 0
+    integer, save :: peak_hashes = 0
+contains
+    subroutine reset_parallel_oracle()
+        active_hashes = 0
+        peak_hashes = 0
+    end subroutine reset_parallel_oracle
+
+    integer function max_parallel_hashes() result(peak)
+        peak = peak_hashes
+    end function max_parallel_hashes
+
+    subroutine parallel_provider(path, hash, ierr)
+        character(len=*), intent(in) :: path
+        character(len=64), intent(out) :: hash
+        integer, intent(out) :: ierr
+        integer :: current_active
+
+        !$omp atomic update
+        active_hashes = active_hashes + 1
+        !$omp atomic read
+        current_active = active_hashes
+        !$omp critical (stat_memo_parallel_oracle)
+        peak_hashes = max(peak_hashes, current_active)
+        !$omp end critical (stat_memo_parallel_oracle)
+        call fs_sleep_ms(150)
+        call sha256_file(path, hash, ierr)
+        !$omp atomic update
+        active_hashes = active_hashes - 1
+    end subroutine parallel_provider
+end module stat_memo_parallel_oracle
+
 program test_stat_memo
     !! The persistent file-hash memo must return the true sha256, reuse it while
     !! (mtime,size) are unchanged, recompute when the file changes, and reload
@@ -11,6 +49,8 @@ program test_stat_memo
         process_poll_pid, process_cancel_pid, process_exit, argv_push
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_sleep_ms, &
         fs_stat, fs_collect_files, fs_rename
+    use stat_memo_parallel_oracle, only: parallel_provider, reset_parallel_oracle, &
+        max_parallel_hashes
     implicit none
     integer, parameter :: CROSS_FILES = 1024
     integer, parameter :: CRASH_FILES = 16383
@@ -86,6 +126,7 @@ program test_stat_memo
     call memo_reset()
 
     call test_matches_direct_sha256()
+    call test_concurrent_cold_misses(trim(temp_root))
     call test_recomputes_on_change()
     call test_recomputes_after_same_size_restored_mtime()
     call test_persists_across_reset()
@@ -135,6 +176,35 @@ contains
         call assert(trim(memo_h) == trim(direct_h), 'repeat hash stable')
         call fs_remove_file(trim(f))
     end subroutine test_matches_direct_sha256
+
+    subroutine test_concurrent_cold_misses(root)
+        character(len=*), intent(in) :: root
+        integer, parameter :: N = 4
+        character(len=512) :: paths(N)
+        character(len=64) :: hashes(N), direct
+        integer :: ierrs(N), i, direct_ierr
+
+        do i = 1, N
+            paths(i) = trim(root)//'/parallel-miss-'//char(iachar('0') + i)
+            call write_text(trim(paths(i)), repeat('parallel hash payload ', 128))
+        end do
+        call reset_parallel_oracle()
+        !$omp parallel do num_threads(N) schedule(static)
+        do i = 1, N
+            call memo_hash_file_for_test(trim(paths(i)), hashes(i), ierrs(i), &
+                parallel_provider)
+        end do
+        !$omp end parallel do
+
+        call assert(max_parallel_hashes() > 1, &
+            'independent cold misses hash concurrently')
+        do i = 1, N
+            call sha256_file(trim(paths(i)), direct, direct_ierr)
+            call assert(ierrs(i) == 0 .and. direct_ierr == 0 .and. &
+                hashes(i) == direct, 'parallel miss returns the file sha256')
+            call fs_remove_file(trim(paths(i)))
+        end do
+    end subroutine test_concurrent_cold_misses
 
     subroutine test_recomputes_on_change()
         character(len=512) :: f
