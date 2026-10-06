@@ -8,6 +8,8 @@ program test_gremlin_manifest
         input_inventory_discover, INPUT_FILE
     use fo_gremlin_generation, only: generation_context_t, generation_t, &
         generation_capture
+    use fo_generation_manifest, only: generation_manifest_metadata_t, &
+        generation_manifest_materialize
     use fo_process, only: process_getpid
     implicit none
 
@@ -171,6 +173,7 @@ program test_gremlin_manifest
             'module fo_test_os'), &
             'nested path dev dependency materializes source bytes')
     end if
+    if (ierr == 0) call verify_bundle_rebuild(first)
 
     conflicting = inventory
     conflict_entry = 0
@@ -248,6 +251,44 @@ program test_gremlin_manifest
     stop
 
 contains
+
+    subroutine verify_bundle_rebuild(generation)
+        type(generation_t), intent(in) :: generation
+        type(generation_manifest_metadata_t) :: rebuilt_metadata
+        type(input_inventory_t) :: rebuilt_inventory
+        character(len=512) :: bundle_root, payload_path
+        integer :: local_status, remove_status
+
+        bundle_root = trim(root)//'/rebuildable-bundle'
+        payload_path = trim(bundle_root)//'/project/fixture.dat'
+        call fs_make_dir(trim(bundle_root))
+        call generation_manifest_materialize(trim(generation%store_root), &
+            generation%manifest_id, trim(bundle_root), rebuilt_metadata, &
+            rebuilt_inventory, local_status, message)
+        call require(local_status == 0, &
+            'materialize bundle from durable generation manifest: '//trim(message))
+        if (local_status /= 0) return
+        call require(file_equals(trim(payload_path), 'source-one'), &
+            'rebuilt bundle contains the manifest payload bytes')
+        call require(c_access(trim(payload_path)//c_null_char, 1_c_int) == 0, &
+            'rebuilt bundle preserves the manifest executable mode')
+
+        remove_status = remove_tree(trim(bundle_root)//c_null_char)
+        call require(remove_status == 0, 'remove rebuildable bundle')
+        call fs_make_dir(trim(bundle_root))
+        call generation_manifest_materialize(trim(generation%store_root), &
+            generation%manifest_id, trim(bundle_root), rebuilt_metadata, &
+            rebuilt_inventory, local_status, message)
+        call require(local_status == 0, &
+            'rebuild deleted bundle from durable manifest: '//trim(message))
+        if (local_status /= 0) return
+        call require(file_equals(trim(payload_path), 'source-one'), &
+            'recovered bundle contains the manifest payload bytes')
+        call require(c_access(trim(payload_path)//c_null_char, 1_c_int) == 0, &
+            'recovered bundle preserves the manifest executable mode')
+        remove_status = remove_tree(trim(bundle_root)//c_null_char)
+        call require(remove_status == 0, 'remove temporary rebuilt bundle')
+    end subroutine verify_bundle_rebuild
 
     subroutine discover(result)
         type(input_inventory_t), intent(out) :: result

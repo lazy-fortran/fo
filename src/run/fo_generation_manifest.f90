@@ -7,7 +7,8 @@ module fo_generation_manifest
         immutable_store_init, immutable_store_put_blob, &
         immutable_store_hash_file, immutable_store_publication_lease_acquire, &
         immutable_store_root_set, immutable_store_lease_release, &
-        immutable_store_materialize_blob, IMMUTABLE_MATERIALIZE_COPY, &
+        immutable_store_materialize_blob, &
+        immutable_store_materialize_blob_ephemeral, IMMUTABLE_MATERIALIZE_COPY, &
         IMMUTABLE_OK
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_input_inventory, only: input_inventory_t, input_root_t, &
@@ -792,7 +793,7 @@ contains
                     call fs_make_dir(trim(destination))
                 case (INPUT_FILE)
                     call fs_make_dir(parent_path(trim(destination)))
-                    call immutable_store_materialize_blob(store, &
+                    call immutable_store_materialize_blob_ephemeral(store, &
                         trim(inventory%entries(i)%content_digest), &
                         trim(destination), inventory%entries(i)%mode, &
                         IMMUTABLE_MATERIALIZE_COPY, used_clone, status)
