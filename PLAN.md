@@ -25,15 +25,27 @@ overlap, `3e2dad1` avoids syncs in temporary execution-view copies, and
 `d4a2e82` avoids syncs in temporary manifest capture payloads. Fx `f12fc86`
 buffers lease snapshot writes; its large-fixture comparison fell from 483,226
 snapshot write calls to 968 with the same published bytes and passing lease
-behavior. The combined Fo build against Fx `f12fc86` passed focused manifest,
-copy, stat, update, capability and backend checks. Driver SHA256
-`a0e2dd52d4bf87e35ddedbcdcacecbfb5d77a2669002b7597ff818b8bbd1be05`
+behavior. Fx `92a59b8` indexes lease rows once; the 16,272-row focused warm
+fixture fell from 5.69 s to 2.92 s with lease behavior passing. Fx `165f9fe`
+adds an explicit ephemeral materialization API for rebuildable outputs, and
+Fo `f6eb7ac` uses it only for manifest generation bundles. The FX materialize
+oracle passed 70/70, and Fo's combined manifest oracle rebuilt a deleted
+bundle from the durable manifest with matching bytes and mode. The combined
+Fo build against Fx `165f9fe` passed focused manifest, execution-view, copy,
+stat, update and backend checks. Driver SHA256
+`0cacfdc8c5480c502525cc1a55cf1154ff2ebe06ef5303eb257c5b535a19adde`
 is installed. A fresh public Gremlin fixture with `FO_JOBS=2` observed compiler
-overlap and passed its required case (session `3045303-1791310716-570762741`,
-generation `fda4f20e`, local gate green). The exact FFC six-case recheck is
-running on lane `ffc-final-a0e2-20261006`; case outcomes are pending. Warm
-generation capture and artifact publication still show substantial latency on
-this large consumer, so further speed work needs focused measurement.
+overlap and passed its required case (session `3339325-1791312045-903989386`,
+generation `865ccdfb`, local gate green). The preceding FFC six-case recheck
+passed 6/6 with zero failures and `local_gate_green=true` in session
+`3046333-1791310754-498154325`, generation `cb0ca871`, on lane
+`ffc-final-a0e2-20261006`; the owner was then stopped cooperatively.
+Full FFC coverage remains open (503/509 unknown cases). This large consumer
+still spent minutes expanding and parsing FX's approximately 97,000 lease
+rows during the 516-action build. A bounded CPU sample attributed over 90%
+of sampled build time to `fields`, `is_object_identity` and `safe_field` in FX;
+that parser repair is now on FX `main`. A one-case warm FFC consumer recheck
+on the final installed driver is in progress on lane `ffc-final-0cac-20261006`.
 [#200](https://github.com/lazy-fortran/fo/issues/200) owns current source/driver,
 session, gate and failure evidence. Earlier async-start, driver-input and
 inherited test-directory repairs remain pushed at `318ecea`; driver `6e54f805`
