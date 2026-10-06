@@ -648,7 +648,7 @@ int fo_c_generation_capture_file(const char *root, const char *relative,
         goto done;
     }
     rc = copy_regular_file(input_fd, destination, &before,
-                           before.st_mode & 0777, 1);
+                           before.st_mode & 0777, 0);
 done:
     saved = errno;
     if (input_fd >= 0) close(input_fd);

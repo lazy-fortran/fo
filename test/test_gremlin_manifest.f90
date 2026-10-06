@@ -28,6 +28,11 @@ program test_gremlin_manifest
             character(kind=c_char), intent(in) :: path(*)
             integer(c_int), value :: mode
         end function c_chmod
+        integer(c_long) function copy_sync_count(reset) &
+                bind(C, name='fo_c_generation_copy_sync_count')
+            import :: c_int, c_long
+            integer(c_int), value :: reset
+        end function copy_sync_count
         integer(c_int) function c_symlink(target, path) bind(C, name='symlink')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: target(*), path(*)
@@ -88,6 +93,8 @@ program test_gremlin_manifest
         'module fo_test_os')
     call write(trim(project)//'/src/main.f90', 'program main')
     call write(trim(project)//'/fixture.dat', 'source-one')
+    status = c_chmod(trim(project)//'/fixture.dat'//c_null_char, 493_c_int)
+    call require(status == 0, 'fixture payload is executable')
     call write(trim(project)//'/src/target.dat', 'link-target')
     status = c_symlink('target.dat'//c_null_char, &
         trim(project)//'/src/alias.dat'//c_null_char)
@@ -129,13 +136,18 @@ program test_gremlin_manifest
     context%driver_digest = driver_digest
     context%driver_size = driver_size
     context%input_inventory = inventory
+    status = int(copy_sync_count(1_c_int), c_int)
     call generation_capture(trim(project), trim(cache), &
         context, first, ierr, message)
     call require(ierr == 0, 'canonical manifest generation capture: '//trim(message))
+    call require(copy_sync_count(0_c_int) == 0_c_long, &
+        'manifest capture payloads perform no per-file sync')
     if (ierr == 0) then
         first_file = trim(first%project_root)//'/fixture.dat'
         call require(file_equals(trim(first_file), 'source-one'), &
             'captured project file reconstructs from its blob')
+        call require(c_access(trim(first_file)//c_null_char, 1_c_int) == 0, &
+            'captured file preserves executable mode')
         first_file = trim(first%project_root)//'/src/alias.dat'
         call require(link_points_to(trim(first_file), 'target.dat'), &
             'manifest preserves literal symlink target')
