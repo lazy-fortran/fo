@@ -20,14 +20,20 @@ checkout's dirty Fx source was preserved. Fo `4a4349a` synchronizes the
 compiler capability probe; its delayed eight-thread oracle passed.
 Fx `918fb94` repaired the same-key restore race: a mixed-flag oracle failed
 6/640 before and passed 640/640 after the fix. Fo `43dcd04` now restores warm
-source actions in parallel. Five repeated focused warm fixtures and a fresh
-public Gremlin fixture passed with driver SHA256
-`20574b184c203eadd03ea6ed66e42b7c9918100ac3085d9f828306d65c09dffa`,
-now installed. The native main checkout built successfully after refreshing
-Fx to `918fb94`, but its 480-node warm build took about 4m16s at about one
-CPU core. An FFC six-case recheck reached 53/516 build nodes before it was
-cooperatively stopped with no case outcomes to repair the observed serial
-source-hash lock and per-file syncs in temporary Gremlin view copies.
+source actions in parallel. Fo `78e3c5c` allows independent source hashes to
+overlap, `3e2dad1` avoids syncs in temporary execution-view copies, and
+`d4a2e82` avoids syncs in temporary manifest capture payloads. Fx `f12fc86`
+buffers lease snapshot writes; its large-fixture comparison fell from 483,226
+snapshot write calls to 968 with the same published bytes and passing lease
+behavior. The combined Fo build against Fx `f12fc86` passed focused manifest,
+copy, stat, update, capability and backend checks. Driver SHA256
+`a0e2dd52d4bf87e35ddedbcdcacecbfb5d77a2669002b7597ff818b8bbd1be05`
+is installed. A fresh public Gremlin fixture with `FO_JOBS=2` observed compiler
+overlap and passed its required case (session `3045303-1791310716-570762741`,
+generation `fda4f20e`, local gate green). The exact FFC six-case recheck is
+running on lane `ffc-final-a0e2-20261006`; case outcomes are pending. Warm
+generation capture and artifact publication still show substantial latency on
+this large consumer, so further speed work needs focused measurement.
 [#200](https://github.com/lazy-fortran/fo/issues/200) owns current source/driver,
 session, gate and failure evidence. Earlier async-start, driver-input and
 inherited test-directory repairs remain pushed at `318ecea`; driver `6e54f805`
