@@ -35,6 +35,7 @@ program test_backend_gfortran
         call test_gfortran_private_change_keeps_dependent_cached()
         call test_gfortran_interface_change_rebuilds_dependent()
         call test_gfortran_parallel_test_loop_restores_cached_objects()
+        call test_gfortran_parallel_warm_restore()
         call test_gfortran_test_skips_app_but_build_restores_it()
         call test_gfortran_test_links_helper_modules_and_lib()
         call test_gfortran_named_test_links_helper_modules()
@@ -72,6 +73,9 @@ program test_backend_gfortran
         call report('backend_gfortran')
     else
         select case (trim(selector))
+        case ('parallel-warm-restore')
+            call test_gfortran_parallel_warm_restore()
+            call report('backend_gfortran/parallel-warm-restore')
         case ('dependency-bootstrap')
             call test_gfortran_bootstraps_git_dev_dependency_closure()
             call report('backend_gfortran/dependency-bootstrap')
@@ -84,6 +88,81 @@ program test_backend_gfortran
     end if
 
 contains
+
+    subroutine test_gfortran_parallel_warm_restore()
+        !! Independent modules restore together; the app consumes their .mods
+        !! only after the whole provider level has completed.
+        character(len=512) :: project_dir, log_file, source, binary, output
+        character(len=32) :: name, value
+        character(len=32) :: old_jobs
+        integer :: i, u, exitcode, n_first, n_restore, env_status
+
+        write (project_dir, '(a,i0)') &
+            '/var/tmp/fo_parallel_warm_restore-', process_getpid()
+        log_file = trim(project_dir)//'.log'
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/src')
+        call make_dir(trim(project_dir)//'/app')
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "parallel_warm_restore"'
+        close (u)
+
+        do i = 1, 12
+            write (name, '(a,i0)') 'provider_', i
+            write (value, '(i0)') i
+            source = trim(project_dir)//'/src/'//trim(name)//'.f90'
+            open (newunit=u, file=trim(source), status='replace')
+            write (u, '(a)') 'module '//trim(name)
+            write (u, '(a)') 'integer, parameter :: value = '//trim(value)
+            write (u, '(a)') 'end module '//trim(name)
+            close (u)
+        end do
+        source = trim(project_dir)//'/app/main.f90'
+        open (newunit=u, file=trim(source), status='replace')
+        write (u, '(a)') 'program main'
+        do i = 1, 12
+            write (name, '(a,i0)') 'provider_', i
+            write (u, '(a)') 'use '//trim(name)//', only: value_'// &
+                trim(name)//' => value'
+        end do
+        write (u, '(a)') 'integer :: total'
+        write (u, '(a)') 'total = 0'
+        do i = 1, 12
+            write (name, '(a,i0)') 'provider_', i
+            write (u, '(a)') 'total = total + value_'//trim(name)
+        end do
+        write (u, '(a)') 'if (total /= 78) error stop 1'
+        write (u, '(a)') 'print *, total'
+        write (u, '(a)') 'end program main'
+        close (u)
+
+        old_jobs = ''
+        call get_environment_variable('FO_JOBS', old_jobs, status=env_status)
+        call set_env('FO_JOBS', '8')
+        call gfortran_build(project_dir, log_file, exitcode, n_first)
+        call assert(exitcode == 0 .and. n_first == 13, &
+            'parallel warm restore fixture compiles all sources once')
+        call execute_command_line('rm -rf "'//trim(project_dir)// &
+            '/build/fo/obj" "'//trim(project_dir)//'/build/fo/mod"')
+        call gfortran_build(project_dir, log_file, exitcode, n_restore)
+        call assert(exitcode == 0 .and. n_restore == 0, &
+            'parallel warm restore reuses all cached actions')
+        binary = trim(project_dir)//'/build/fo/bin/parallel_warm_restore'
+        output = trim(project_dir)//'.out'
+        call execute_command_line('"'//trim(binary)//'" > "'// &
+            trim(output)//'"', exitstat=exitcode)
+        call assert(exitcode == 0 .and. file_contains(output, '78'), &
+            'dependent app executes with restored provider modules')
+
+        if (env_status == 0) then
+            call set_env('FO_JOBS', trim(old_jobs))
+        else
+            call set_env('FO_JOBS', '')
+        end if
+        call remove_tree(project_dir)
+        call execute_command_line('rm -f "'//trim(log_file)//'" "'// &
+            trim(output)//'"')
+    end subroutine test_gfortran_parallel_warm_restore
 
     subroutine test_compiler_baseline_flags_change_action_id()
         character(len=512) :: project_dir, log_file, gnu_wrapper, flang_wrapper

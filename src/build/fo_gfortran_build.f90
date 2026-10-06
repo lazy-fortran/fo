@@ -1699,10 +1699,10 @@ contains
         logical, allocatable :: is_prog(:), is_test_arr(:)
         integer, allocatable :: topo_order(:), node_levels(:)
         integer :: n_order, n_levels, lvl, total_source
-        logical :: has_cycle, restored
+        logical :: has_cycle
         logical :: allow_cache
         character(len=512) :: obj_path
-        character(len=4096) :: includes_flag, effective_flags
+        character(len=4096) :: includes_flag, effective_flags, action_flags
         character(len=512) :: c_line
         character(len=512), allocatable :: cfiles(:)
         character(len=MAX_PATH), allocatable :: compdb_sources(:)
@@ -1716,16 +1716,21 @@ contains
         type(cache_t) :: c
         integer :: cache_ierr
         character(len=HASH_LEN), allocatable :: old_mod_keys(:), new_mod_keys(:)
-        character(len=HASH_LEN) :: dep_keys(64), source_key
         character(len=HASH_LEN) :: output_id
-        integer :: n_dep
         integer, allocatable :: compile_nodes(:)
         character(len=HASH_LEN), allocatable :: compile_keys(:)
+        integer, allocatable :: level_nodes(:)
+        character(len=HASH_LEN), allocatable :: level_keys(:)
+        logical, allocatable :: level_restored(:)
         integer, allocatable :: compile_exits(:)
         character(len=512), allocatable :: per_logs(:)
-        integer :: n_compile, team_size
+        integer :: n_compile, n_level, team_size
         character(len=MAX_PATH) :: fname_local
         character(len=512) :: per_log_local
+        character(len=512) :: level_obj_path
+        character(len=HASH_LEN) :: level_dep_keys(64), level_source_key
+        integer :: level_dep_count
+        logical :: level_complete, level_hit
 
         n_src_objs = 0
         is_prog_arr = .false.
@@ -1736,6 +1741,8 @@ contains
         allocate (topo_order(MAX_NODES), node_levels(MAX_NODES))
         allocate (old_mod_keys(MAX_NODES), new_mod_keys(MAX_NODES))
         allocate (compile_nodes(MAX_NODES), compile_keys(MAX_NODES))
+        allocate (level_nodes(MAX_NODES), level_keys(MAX_NODES))
+        allocate (level_restored(MAX_NODES))
         allocate (compile_exits(MAX_NODES), per_logs(MAX_NODES))
         allocate (compdb_sources(MAX_NODES), compdb_objects(MAX_NODES))
 
@@ -1770,6 +1777,7 @@ contains
         call remove_shadow_mods(project_dir, dag)
         call make_includes_flag(mod_dir, dep_includes, n_dep_includes, includes_flag)
         effective_flags = with_user_flags(includes_flag, flags)
+        action_flags = compile_key_flags(flags)
 
         old_mod_keys = ''
         new_mod_keys = ''
@@ -1802,6 +1810,7 @@ contains
         if (cache_ierr == 0) then
             do lvl = 0, n_levels - 1
                 n_compile = 0
+                n_level = 0
                 compile_exits = 0
                 ii_failed = 0
 
@@ -1817,41 +1826,59 @@ contains
                     if (is_prog(node_id) .and. .not. app_program_selected( &
                         filenames(node_id), project_dir, app_dir, config)) cycle
 
+                    n_level = n_level + 1
+                    level_nodes(n_level) = node_id
+                end do
+
+                team_size = max(1, min(n_level, native_jobs()))
+                !$omp parallel do if(n_level > 1) num_threads(team_size) &
+                !$omp schedule(static) private(node_id, level_dep_keys, &
+                !$omp level_dep_count, level_complete, level_source_key, &
+                !$omp level_obj_path, level_hit)
+                do i = 1, n_level
+                    node_id = level_nodes(i)
+                    level_keys(i) = ''
+                    level_hit = .false.
+
                     call collect_dep_keys_source_order(all_units, n_all, dag, &
                         filenames(node_id), &
-                        new_mod_keys, dep_includes, &
-                        n_dep_includes, dep_keys, n_dep, &
-                        restored)
-                    if (.not. restored) then
-                        n_compile = n_compile + 1
-                        compile_nodes(n_compile) = node_id
-                        compile_keys(n_compile) = ''
+                        new_mod_keys, dep_includes, n_dep_includes, &
+                        level_dep_keys, level_dep_count, level_complete)
+                    if (.not. level_complete) then
+                        level_restored(i) = .false.
                         cycle
                     end if
-                    source_key = cache_key_for(filenames(node_id), compiler, &
-                        compile_key_flags(flags), dep_keys, n_dep)
+                    level_source_key = cache_key_for(filenames(node_id), compiler, &
+                        action_flags, level_dep_keys, level_dep_count)
+                    level_keys(i) = level_source_key
 
-                    call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
+                    call make_obj_path(filenames(node_id), project_dir, obj_dir, &
+                        level_obj_path)
                     if (cache_ierr == 0 .and. &
                         .not. source_may_emit_smod(filenames(node_id))) then
                         if (source_defines_module(filenames(node_id))) then
-                            call cache_restore_action(c, source_key, obj_path, &
-                                mod_dir, restored, required_mod_name= &
+                            call cache_restore_action(c, level_source_key, &
+                                level_obj_path, mod_dir, level_hit, required_mod_name= &
                                 dag%nodes(node_id)%label)
                         else
-                            call cache_restore_action(c, source_key, obj_path, &
-                                mod_dir, restored)
+                            call cache_restore_action(c, level_source_key, &
+                                level_obj_path, mod_dir, level_hit)
                         end if
-                        if (restored) then
+                        if (level_hit) then
                             call get_mod_key(dag%nodes(node_id)%label, mod_dir, &
                                 new_mod_keys(node_id))
                             call progress_step()
-                            cycle
                         end if
                     end if
+                    level_restored(i) = level_hit
+                end do
+                !$omp end parallel do
+
+                do i = 1, n_level
+                    if (level_restored(i)) cycle
                     n_compile = n_compile + 1
-                    compile_nodes(n_compile) = node_id
-                    compile_keys(n_compile) = source_key
+                    compile_nodes(n_compile) = level_nodes(i)
+                    compile_keys(n_compile) = level_keys(i)
                 end do
 
                 do ii = 1, n_compile
