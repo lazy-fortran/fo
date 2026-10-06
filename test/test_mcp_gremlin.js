@@ -434,6 +434,8 @@ async function main() {
       'gremlin_events', 'gremlin_failures', 'gremlin_reproduce', 'gremlin_stop']) {
       assert.ok(actions.includes(action), `tools/list advertises ${action}`);
     }
+    assert.deepEqual(listed.result.tools[0].inputSchema.properties.detail.enum,
+      ['summary', 'full'], 'tools/list advertises Gremlin response detail modes');
 
     const startedAt = Date.now();
     const startResult = payload(await server.call(3, {
@@ -634,11 +636,13 @@ async function main() {
     assert.equal(cliStatus.status, 0, cliStatus.stdout + cliStatus.stderr);
     const cliState = JSON.parse(cliStatus.stdout.trim());
     const mcpStatus = payload(await server.call(4, { action: 'gremlin_status',
-      ...identity })).body;
+      ...identity, detail: 'full' })).body;
     assert.deepEqual(cliState, mcpStatus, 'CLI and MCP status share the same core response');
 
     const waited = payload(await server.call(5, { action: 'gremlin_wait', ...identity,
       wait_ms: 100, cursor: 0, max_records: 8, max_bytes: 8192 })).body;
+    assert.equal(waited.detail, 'summary', 'MCP wait defaults to the bounded summary');
+    assert.ok(!Object.hasOwn(waited, 'events'), 'wait summary omits the durable event page');
     assert.equal(waited.session_id, sessionId,
       'MCP wait reconnects to the detached owner by session ID');
     assert.equal(waited.state, 'testing',
@@ -646,10 +650,31 @@ async function main() {
 
     const eventPage = payload(await server.call(6, { action: 'gremlin_events', ...identity,
       cursor: 0, max_records: 8, max_bytes: 8192 })).body;
+    assert.equal(eventPage.action, 'events', 'first events page keeps the events action');
     assert.ok(Array.isArray(eventPage.events), 'events action returns bounded receipts');
     const failureEvent = eventPage.events.find(event =>
       event.case_id === 'test_mcp_fail' && event.status === 'FAIL');
     assert.ok(failureEvent, 'events includes the known failing case');
+
+    const statusSummary = payload(await server.call(13, {
+      action: 'gremlin_status', ...identity
+    })).body;
+    assert.equal(statusSummary.detail, 'summary',
+      'MCP status defaults to the bounded summary');
+    assert.equal(statusSummary.session_id, sessionId,
+      'status summary retains the session identity');
+    assert.equal(statusSummary.lane_id, identity.lane_id,
+      'status summary retains the lane identity');
+    assert.ok(!Object.hasOwn(statusSummary, 'events'),
+      'status summary omits the durable event page');
+    assert.equal(statusSummary.latest_failure.case_id, 'test_mcp_fail',
+      'status summary retains the current failing case');
+    assert.equal(statusSummary.latest_failure.status, 'FAIL',
+      'status summary retains the failure status');
+    assert.equal(typeof statusSummary.latest_failure.log_path, 'string',
+      'status summary failure log path is a string');
+    assert.ok(statusSummary.latest_failure.log_path.length > 0,
+      'status summary retains the failure log path');
 
     const failures = payload(await server.call(7, { action: 'gremlin_failures', ...identity,
       cursor: 0, max_records: 8, max_bytes: 8192 })).body;
@@ -658,7 +683,7 @@ async function main() {
     'failures returns the known failed receipt');
 
     const page = payload(await server.call(8, { action: 'gremlin_status', ...identity,
-      cursor: 0, max_records: 8, max_bytes: 8192 })).body;
+      detail: 'full', cursor: 0, max_records: 8, max_bytes: 8192 })).body;
     assert.ok(Array.isArray(page.events), 'status returns bounded completion events');
     const verdicts = page.events.map(event => [event.case_id, event.status]);
     assert.ok(verdicts.some(([name, outcome]) => name === 'test_mcp_pass' && outcome === 'PASS'));

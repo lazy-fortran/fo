@@ -387,7 +387,8 @@ contains
         type(json_event_t) :: event, value_event
         character(len=:), allocatable :: raw_key, raw_value
         character(len=4096) :: decoded_dir
-        integer :: action_count, dir_count, value_start, value_end, dir_length
+        integer :: action_count, dir_count, detail_count
+        integer :: value_start, value_end, dir_length
         logical :: valid_string
 
         public_action = ''
@@ -398,6 +399,7 @@ contains
         ierr = 1
         action_count = 0
         dir_count = 0
+        detail_count = 0
         call json_parser_init_strict(parser, arguments)
         call json_parser_next(parser, event)
         if (event%event_type /= JSON_OBJECT_START) return
@@ -451,6 +453,8 @@ contains
                 end if
                 project_dir = decoded_dir(:dir_length)
             else
+                if (json_key_matches(event%string_val, len(event%string_val), 'detail')) &
+                    detail_count = detail_count + 1
                 call consume_json_value(parser, value_event, ierr)
                 if (ierr /= 0) then
                     message = 'malformed Gremlin request JSON'
@@ -472,6 +476,11 @@ contains
         if (.not. valid_string) then
             message = 'unknown Gremlin MCP action: '//trim(public_action)
             return
+        end if
+        if ((core_action == 'status' .or. core_action == 'wait') .and. &
+                detail_count == 0) then
+            if (len(request_json) > 1) request_json = request_json//','
+            request_json = request_json//'"detail":"summary"'
         end if
         request_json = request_json//'}'
         ierr = 0
@@ -1409,6 +1418,8 @@ contains
             '"max_records":{"type":"integer","minimum":1,"maximum":128},'// &
             '"max_bytes":{"type":"integer","minimum":1,"maximum":262144},'// &
             '"wait_ms":{"type":"integer","minimum":0,"maximum":30000},'// &
+            '"detail":{"type":"string","enum":["summary","full"],'// &
+            '"description":"gremlin_status/gremlin_wait response detail"},'// &
             '"wait_until":{"type":"string","enum":['// &
             '"local-gate-green","ordinary-verified","fully-verified",'// &
             '"quiescent","failure"]},'// &
