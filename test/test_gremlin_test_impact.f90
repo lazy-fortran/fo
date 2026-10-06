@@ -25,11 +25,12 @@ program test_gremlin_test_impact
     character(len=MAX_PATH) :: filenames(MAX_NODES)
     integer :: ierr, filesystem_status
     character(len=1024) :: message
-    character(len=4096) :: warm_cache, cold_cache, run_log
+    character(len=4096) :: warm_cache, cold_cache, run_log, generation_bundle
+    character(len=MAX_PATH) :: relative_path
     character(len=4096) :: cache_files(128)
     character(len=128) :: run_names(2)
     logical :: dependency_model_complete
-    integer :: run_exit, n_cache_files
+    integer :: run_exit, n_cache_files, i, mapped_nodes
 
     interface
         integer(c_int) function set_environment(name, value, overwrite) &
@@ -127,6 +128,31 @@ program test_gremlin_test_impact
         'represented transitive change preserves a complete narrow model')
     call require(.not. case_is_slow(selected, 'test_alpha'), &
         'ordinary affected case keeps its budget class')
+
+    call require(baseline%root_count == 1, &
+        'bundle mapping fixture has one declared input root')
+    generation_bundle = trim(fixture)//'/generation/bundle'
+    baseline%roots(1)%physical_path = trim(generation_bundle)
+    candidate%roots(1)%physical_path = trim(generation_bundle)
+    mapped_nodes = 0
+    do i = 1, dag%n_nodes
+        if (index(trim(filenames(i)), trim(project)//'/') /= 1) cycle
+        relative_path = filenames(i)(len_trim(project) + 2:len_trim(filenames(i)))
+        filenames(i) = trim(generation_bundle)//'/'// &
+            trim(baseline%roots(1)%bundle_paths(1))//'/'//trim(relative_path)
+        mapped_nodes = mapped_nodes + 1
+    end do
+    call require(mapped_nodes == dag%n_nodes, &
+        'bundle mapping fixture relocates every DAG source path')
+    call select(baseline, candidate, repeated)
+    call require(repeated%required_count == 1 .and. &
+        has_case(repeated, 'test_alpha') .and. repeated%model_complete .and. &
+        .not. repeated%widened, &
+        'generation-bundle paths still select only the changed source test')
+    baseline%roots(1)%physical_path = trim(project)
+    candidate%roots(1)%physical_path = trim(project)
+    call scan_model()
+
     call select(baseline, candidate, repeated)
     call require(same_selection(selected, repeated), &
         'selection and digest do not depend on action-cache warmth')

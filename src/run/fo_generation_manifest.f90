@@ -190,7 +190,8 @@ contains
                     trim(inventory%entries(i)%relative_path)
                 exit
             end if
-            call immutable_store_put_blob(store, trim(temp_payload), object_id, status)
+            call immutable_store_put_blob(store, trim(temp_payload), object_id, &
+                status, publication)
             call delete_tmpfile(trim(temp_payload))
             if (status /= IMMUTABLE_OK .or. &
                 object_id /= inventory%entries(i)%content_digest) then
@@ -203,7 +204,7 @@ contains
         end do
         if (status == IMMUTABLE_OK) then
             call immutable_store_put_blob(store, trim(manifest_path), object_id, &
-                status)
+                status, publication)
             if (status == IMMUTABLE_OK .and. object_id /= manifest_id) then
                 status = 1
                 message = 'serialized generation manifest changed during publication'
@@ -235,24 +236,24 @@ contains
         ierr = 0
     end subroutine generation_manifest_capture
 
+    !! Repository and patch identifiers remain manifest provenance; the input
+    !! inventory, toolchain, driver and execution settings define reuse.
     function generation_manifest_execution_identity(metadata, inventory) &
             result(identity)
         type(generation_manifest_metadata_t), intent(in) :: metadata
         type(input_inventory_t), intent(in) :: inventory
         character(len=HASH_LEN) :: identity
         character(len=32) :: driver_size
-        character(len=PATH_LEN * 4) :: parts(9)
+        character(len=PATH_LEN * 4) :: parts(7)
 
         write (driver_size, '(i0)') metadata%driver_size
-        parts(1) = 'fo-gremlin-execution-v4'
+        parts(1) = 'fo-gremlin-execution-v5'
         parts(2) = value_or_empty(metadata%toolchain)
         parts(3) = value_or_empty(metadata%flags)
         parts(4) = value_or_empty(metadata%environment)
-        parts(5) = value_or_empty(metadata%base_commit)
-        parts(6) = value_or_empty(metadata%patch_digest)
-        parts(7) = value_or_empty(metadata%driver_digest)
-        parts(8) = trim(driver_size)
-        parts(9) = inventory%digest
+        parts(5) = value_or_empty(metadata%driver_digest)
+        parts(6) = trim(driver_size)
+        parts(7) = inventory%digest
         identity = cache_digest(parts, size(parts))
     end function generation_manifest_execution_identity
 

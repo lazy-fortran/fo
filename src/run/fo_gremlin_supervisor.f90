@@ -6,6 +6,8 @@ module fo_gremlin_supervisor
     use fo_gremlin_context, only: capture_candidate, generation_inventory_restore
     use fo_gremlin_request, only: gremlin_request_t, parse_request, is_hex_digest, &
         gremlin_json_field
+    use fo_test_impact, only: test_impact_case_t, test_impact_result_t, &
+        test_impact_select
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
         json_parser_next, JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, &
         JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_ERROR, JSON_END_OF_INPUT
@@ -89,7 +91,7 @@ contains
         character(len=:), allocatable, intent(out) :: response_json
         integer, intent(out) :: exitcode
 
-        type(gremlin_request_t) :: request
+        type(gremlin_request_t), allocatable :: request
         type(gremlin_session_t) :: session
         character(len=PATH_LEN) :: error_message, owner_start
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
@@ -98,6 +100,7 @@ contains
 
         response_json = ''
         exitcode = 0
+        allocate (request)
         call parse_request(action, request_json, request, ierr, error_message)
         if (ierr /= 0) then
             call error_response(action, trim(error_message), response_json)
@@ -1123,7 +1126,7 @@ contains
 
         type(gremlin_session_t) :: session
         type(driver_pin_t) :: driver_pin
-        type(gremlin_request_t) :: owner_request
+        type(gremlin_request_t), allocatable :: owner_request
         type(gremlin_lease_t) :: active_lease, candidate_lease
         type(generation_t) :: active_generation, candidate_generation
         type(change_watch_t) :: change_watch
@@ -1134,7 +1137,7 @@ contains
         character(len=PATH_LEN) :: build_view_cleanup_message
         character(len=16) :: observed_outcome
         character(len=PATH_LEN) :: owner_start
-        character(len=NAME_LEN) :: selected(MAX_NODES)
+        character(len=NAME_LEN), allocatable :: selected(:)
         character(len=HASH_LEN) :: stored_policy
         character(len=65536) :: status_text
         character(len=128) :: stored_session_id
@@ -1154,6 +1157,7 @@ contains
         logical :: build_done, test_done, fatal_error
 
         exitcode = 0
+        allocate (owner_request, selected(MAX_NODES))
         active_generation = generation_t()
         candidate_generation = generation_t()
         owner_request = request
@@ -1881,7 +1885,7 @@ contains
         character(len=*), intent(out) :: message
 
         type(gremlin_lease_t) :: new_active_lease
-        type(gremlin_request_t) :: selection_request
+        type(gremlin_request_t), allocatable :: selection_request
         integer :: inventory_status, cancel_exit, mandatory_count, state_status
         integer :: release_status, pin_status
         character(len=PATH_LEN) :: state_message, release_message
@@ -1892,6 +1896,7 @@ contains
 
         ierr = 0
         message = ''
+        allocate (selection_request)
         was_active = have_active
         call record_build(session, request, candidate, build_exit, build_child%log_file, &
             sequence, ierr, message)
@@ -1924,6 +1929,10 @@ contains
             end if
             return
         end if
+        if (allocated(request%impact_cases)) deallocate(request%impact_cases)
+        request%n_impact_cases = 0
+        request%impact_all = .false.
+        if (was_active) call compute_generation_impact(active, candidate, request)
         call gremlin_generation_lease_acquire_at(candidate%root, new_active_lease, &
             ierr, message)
         if (ierr /= 0) then
@@ -2052,6 +2061,85 @@ contains
             seed, 'NONE', 0, ierr, message)
     end subroutine complete_build
 
+    subroutine compute_generation_impact(baseline, candidate, request)
+        type(generation_t), intent(inout) :: baseline, candidate
+        type(gremlin_request_t), intent(inout) :: request
+
+        type(dag_t) :: dag
+        type(test_impact_case_t), allocatable :: cases(:)
+        type(test_impact_result_t) :: impact
+        integer, allocatable :: changed_ids(:), affected_ids(:)
+        integer, allocatable :: candidate_ids(:), selected_node_ids(:)
+        integer :: n_changed, n_affected, n_cached, n_all, ierr, i
+        character(len=MAX_PATH), allocatable :: filenames(:)
+        character(len=NAME_LEN), allocatable :: all_names(:)
+        character(len=PATH_LEN) :: message
+        logical, allocatable :: is_test_arr(:)
+        logical :: dependency_model_complete
+
+        allocate (changed_ids(MAX_NODES), affected_ids(MAX_NODES), &
+            candidate_ids(MAX_NODES), selected_node_ids(MAX_NODES), &
+            filenames(MAX_NODES), all_names(MAX_NODES), is_test_arr(MAX_NODES))
+        if (allocated(request%impact_cases)) deallocate(request%impact_cases)
+        request%n_impact_cases = 0
+        request%impact_all = .false.
+        if (.not. baseline%input_inventory_ready) then
+            call generation_inventory_restore(baseline, ierr, message)
+            if (ierr /= 0) then
+                request%impact_all = .true.
+                return
+            end if
+        end if
+        if (.not. candidate%input_inventory_ready) then
+            call generation_inventory_restore(candidate, ierr, message)
+            if (ierr /= 0) then
+                request%impact_all = .true.
+                return
+            end if
+        end if
+        call fo_changed_modules(candidate%project_root, dag, changed_ids, &
+            n_changed, affected_ids, n_affected, n_cached, ierr, &
+            filenames=filenames, is_test_arr=is_test_arr)
+        if (ierr /= 0) then
+            request%impact_all = .true.
+            return
+        end if
+        do i = 1, dag%n_nodes
+            candidate_ids(i) = i
+        end do
+        call gfortran_selected_test_names(candidate%project_root, filenames, &
+            candidate_ids, dag%n_nodes, .true., all_names, n_all, &
+            selected_node_ids)
+        if (n_all == 0) then
+            request%impact_all = .true.
+            return
+        end if
+        allocate(cases(n_all))
+        do i = 1, n_all
+            cases(i)%public_name = all_names(i)
+            cases(i)%identity = 'gfortran-test:'//trim(all_names(i))
+            cases(i)%node_id = selected_node_ids(i)
+            cases(i)%eligible = .not. is_slow_test(all_names(i))
+            cases(i)%slow = is_slow_test(all_names(i))
+            cases(i)%dependency_complete = .true.
+        end do
+        dependency_model_complete = &
+            baseline%driver_digest == candidate%driver_digest .and. &
+            baseline%driver_size == candidate%driver_size
+        call test_impact_select(baseline%input_inventory, &
+            candidate%input_inventory, dag, filenames, cases, &
+            dependency_model_complete, impact, ierr, message)
+        if (ierr /= 0) then
+            request%impact_all = .true.
+            return
+        end if
+        request%n_impact_cases = min(impact%required_count, MAX_NODES)
+        allocate(request%impact_cases(request%n_impact_cases))
+        do i = 1, request%n_impact_cases
+            request%impact_cases(i) = impact%required(i)%public_name
+        end do
+    end subroutine compute_generation_impact
+
     subroutine discover_campaign(project_dir, generation_id, session, request, &
             selected, n_selected, &
             n_mandatory_selected, seed, ierr, message, bypass_coverage)
@@ -2066,20 +2154,24 @@ contains
 
         type(backend_t) :: backend
         type(dag_t) :: dag
-        integer :: changed_ids(MAX_NODES), affected_ids(MAX_NODES)
+        integer, allocatable :: changed_ids(:), affected_ids(:)
         integer :: n_changed, n_affected, n_cached, i, n_all, n_impacted
         integer :: n_history, n_debt, cursor_seed, n_priorities, limit
         integer :: n_selected_priorities
-        integer :: candidate_ids(MAX_NODES), shuffle_status, coverage_status
-        character(len=MAX_PATH) :: filenames(MAX_NODES)
-        character(len=NAME_LEN) :: all_names(MAX_NODES), impacted(MAX_NODES)
-        character(len=NAME_LEN) :: history(MAX_NODES), debt(MAX_NODES)
-        character(len=NAME_LEN) :: priorities(MAX_NODES)
+        integer, allocatable :: candidate_ids(:)
+        integer :: shuffle_status, coverage_status
+        character(len=MAX_PATH), allocatable :: filenames(:)
+        character(len=NAME_LEN), allocatable :: all_names(:), impacted(:)
+        character(len=NAME_LEN), allocatable :: history(:), debt(:), priorities(:)
         type(coverage_epoch_t) :: coverage
         character(len=PATH_LEN) :: coverage_path
-        logical :: is_test_arr(MAX_NODES)
+        logical, allocatable :: is_test_arr(:)
         logical :: reproduce_only
 
+        allocate (changed_ids(MAX_NODES), affected_ids(MAX_NODES), &
+            candidate_ids(MAX_NODES), filenames(MAX_NODES), &
+            all_names(MAX_NODES), impacted(MAX_NODES), history(MAX_NODES), &
+            debt(MAX_NODES), priorities(MAX_NODES), is_test_arr(MAX_NODES))
         selected = ''
         impacted = ''
         n_selected = 0
@@ -2113,7 +2205,19 @@ contains
             debt, n_debt, cursor_seed, ierr, message)
         if (ierr /= 0) return
         n_impacted = 0
-        if (request%only_changed .or. request%has_previous_generation) then
+        if (request%has_previous_generation) then
+            if (request%impact_all) then
+                do i = 1, n_all
+                    if (is_slow_test(all_names(i))) cycle
+                    call append_priority_names(all_names(i:i), 1, impacted, &
+                        n_impacted)
+                end do
+            else
+                if (request%n_impact_cases > 0) &
+                    call append_priority_names(request%impact_cases, &
+                        request%n_impact_cases, impacted, n_impacted)
+            end if
+        else if (request%only_changed) then
             call gfortran_selected_test_names(project_dir, filenames, affected_ids, &
                 n_affected, .false., impacted, n_impacted)
         end if

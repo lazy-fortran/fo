@@ -158,6 +158,21 @@ passed a public `gremlin reproduce --timeout-seconds 300` invocation for
 The Fo#175 consumer repair was pushed to `main` in commit `b88cc36`; FFC's
 declared FortFront corpus fixtures are being checked on that candidate.
 
+2026-10-06 Fo dogfood follow-up: the Gremlin candidate built against Fx
+`4f016abab099a92b3c1eb57aa3bb8da43481f0a6` and passed the five focused gates
+`test_gremlin_generation`, `test_gremlin_manifest`,
+`test_gremlin_input_inventory`, `test_gremlin_test_impact`, and
+`test_backend_gfortran` (5/5, zero failures). The gate-only lane reached
+quiescence with `local_gate_green=true` before it was stopped. Candidate driver
+SHA256 is
+`9dc4a415a8f4ef497867553447857503c1b83fdafa5429069c51f5bbc7ab57e8`; session
+`4137039-1791270183-328637191`, generation
+`8519015416f565b4a7cb2356536c82d285c08fb32a8ce1b2135c829c6fcfdf25`. This
+increment completes path mapping for materialized bundle inputs, keeps affected
+test selection exact across generations, and fixes execution identity so Git
+provenance remains recorded in manifests without invalidating execution reuse
+when only commit/patch metadata changes. The identity schema is now v5.
+
 ## Delivery order
 
 The kin6d CMake consumer exposed a profile-isolation defect: public Debug flags

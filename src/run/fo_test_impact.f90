@@ -222,29 +222,52 @@ contains
             type(input_entry_t), intent(in) :: entry
             integer, intent(out) :: id
             logical, intent(out) :: found
-            character(len=4096) :: abs_path
-            integer :: root, k
+            character(len=4096) :: candidate_paths(2), bundle_path
+            integer :: root, alias, path_index, k, j
 
             id = 0
             found = .false.
-            abs_path = ''
             do root = 1, inventory%root_count
-                if (trim(inventory%roots(root)%canonical_alias) /= &
-                        trim(entry%root_alias)) cycle
-                abs_path = trim(inventory%roots(root)%physical_path)//'/'// &
-                    trim(entry%relative_path)
-                exit
-            end do
-            if (len_trim(abs_path) == 0) return
-            do k = 1, min(dag%n_nodes, size(filenames))
-                if (trim(filenames(k)) /= trim(abs_path)) cycle
-                if (found) then
-                    found = .false.
-                    id = 0
-                    return
+                alias = 0
+                do j = 1, inventory%roots(root)%alias_count
+                    if (trim(inventory%roots(root)%aliases(j)) /= &
+                            trim(entry%root_alias)) cycle
+                    alias = j
+                    exit
+                end do
+                if (alias == 0) cycle
+
+                candidate_paths = ''
+                bundle_path = trim(inventory%roots(root)%bundle_paths(alias))
+                if (len_trim(inventory%roots(root)%physical_path) + 1 + &
+                        len_trim(entry%relative_path) < len(candidate_paths(1))) then
+                    candidate_paths(1) = &
+                        trim(inventory%roots(root)%physical_path)//'/'// &
+                        trim(entry%relative_path)
                 end if
-                found = .true.
-                id = k
+                if (len_trim(bundle_path) > 0 .and. &
+                        len_trim(inventory%roots(root)%physical_path) + 1 + &
+                        len_trim(bundle_path) + 1 + &
+                        len_trim(entry%relative_path) < len(candidate_paths(2))) then
+                    candidate_paths(2) = &
+                        trim(inventory%roots(root)%physical_path)//'/'// &
+                        trim(bundle_path)//'/'//trim(entry%relative_path)
+                end if
+
+                do path_index = 1, size(candidate_paths)
+                    if (len_trim(candidate_paths(path_index)) == 0) cycle
+                    do k = 1, min(dag%n_nodes, size(filenames))
+                        if (trim(filenames(k)) /= &
+                                trim(candidate_paths(path_index))) cycle
+                        if (found) then
+                            found = .false.
+                            id = 0
+                            return
+                        end if
+                        found = .true.
+                        id = k
+                    end do
+                end do
             end do
         end subroutine changed_node
 

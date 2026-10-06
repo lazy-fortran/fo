@@ -1617,7 +1617,7 @@
 
         call make_tmp_path('fo_test_worktree_bootstrap', base)
         primary = trim(base)//'/main/app'
-        pathdep = trim(base)//'/main/lib'
+        pathdep = trim(base)//'/worktrees/lib'
         gitdep = trim(base)//'/external'
         worktree = trim(base)//'/worktrees/x'
         call make_tmp_path('fo_backend_worktree_bootstrap', log_file)
@@ -1904,6 +1904,14 @@
         call make_dir(trim(leafdir)//'/src')
         call make_dir(trim(gitdir)//'/src')
         call make_dir(trim(appdir)//'/test')
+        ! fpm update --fetch-only needs a library or executable package; a
+        ! test-only manifest does not cause it to fetch its dev dependencies.
+        call make_dir(trim(appdir)//'/src')
+        open (newunit=u, file=trim(appdir)//'/src/app_marker.f90', &
+            status='replace')
+        write (u, '(a)') 'module app_marker'
+        write (u, '(a)') 'end module app_marker'
+        close (u)
         open (newunit=u, file=trim(leafdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "leafpath"'
         close (u)

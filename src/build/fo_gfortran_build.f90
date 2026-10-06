@@ -1157,7 +1157,7 @@ contains
     end function source_has_marker
 
     subroutine gfortran_selected_test_names(project_dir, filenames, node_ids, &
-            n_ids, include_slow, names, n_names)
+            n_ids, include_slow, names, n_names, selected_node_ids)
         !! Selection uses source identities, not DAG module labels. Marked
         !! module-only cases keep their filenames as public names; ordinary
         !! helper modules and the dispatcher's infrastructure are excluded.
@@ -1166,6 +1166,7 @@ contains
         logical, intent(in) :: include_slow
         character(len=*), intent(out) :: names(:)
         integer, intent(out) :: n_names
+        integer, intent(out), optional :: selected_node_ids(:)
 
         type(fpm_config_t), allocatable :: config
         type(scan_unit_t), allocatable :: units(:)
@@ -1175,6 +1176,7 @@ contains
 
         names = ''
         n_names = 0
+        if (present(selected_node_ids)) selected_node_ids = 0
         allocate (config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) return
@@ -1197,8 +1199,13 @@ contains
             if (.not. include_slow .and. is_slow_name(name)) cycle
             if (selected_test(name, names, n_names)) cycle
             if (n_names >= size(names)) exit
+            if (present(selected_node_ids)) then
+                if (n_names >= size(selected_node_ids)) exit
+            end if
             n_names = n_names + 1
             names(n_names) = name
+            if (present(selected_node_ids)) &
+                selected_node_ids(n_names) = node_ids(j)
         end do
     end subroutine gfortran_selected_test_names
 

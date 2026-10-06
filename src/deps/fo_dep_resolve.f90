@@ -125,10 +125,11 @@ contains
         character(len=*), intent(in) :: project_dir
         type(fpm_config_t), intent(inout) :: config
 
-        type(resolved_src_t) :: deps(MAX_RESOLVED), devs(MAX_RESOLVED)
+        type(resolved_src_t), allocatable :: deps(:), devs(:)
         type(fpm_config_t), allocatable :: dcfg
         integer :: n_deps, n_devs, n_unresolved, ierr, i, j
 
+        allocate (deps(MAX_RESOLVED), devs(MAX_RESOLVED))
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
         if (ierr /= 0) n_deps = 0
         call resolve_dev_dep_srcs(project_dir, devs, n_devs, ierr)

@@ -789,6 +789,8 @@ async function main() {
     const secondQuiescent = await waitForQuiescent(readGateOnlyStatus, firstGeneration);
     assert.notEqual(secondQuiescent.active_generation, firstGeneration,
       'quiescent owner captures a new generation after a relevant edit');
+    assert.equal(secondQuiescent.gate_required, 1,
+      'the edited target stays the only required gate when no other test input changed');
     assert.ok(secondQuiescent.gate_required > 0 &&
       secondQuiescent.gate_passed === secondQuiescent.gate_required,
     'all required gates pass again on the edited generation');

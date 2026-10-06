@@ -36,6 +36,9 @@ module fo_gremlin_request
         character(len=32) :: wait_until = ''
         logical :: input_changed = .false.
         logical :: has_previous_generation = .false.
+        character(len=NAME_LEN), allocatable :: impact_cases(:)
+        integer :: n_impact_cases = 0
+        logical :: impact_all = .false.
         character(len=NAME_LEN) :: gate_cases(MAX_NODES) = ''
         integer :: event_epoch = 0
         character(len=HASH_LEN) :: requirement_digest = ''
