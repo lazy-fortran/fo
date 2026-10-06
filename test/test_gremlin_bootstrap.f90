@@ -261,6 +261,8 @@ contains
         type(process_result_t) :: result
         call list_add(values, 'gremlin')
         call list_add(values, 'status')
+        call list_add(values, '--detail')
+        call list_add(values, 'full')
         call list_add(values, '--dir')
         call list_add(values, project)
         call list_add(values, '--lane')
@@ -453,6 +455,8 @@ contains
         do pass = 1, 300
             call list_add(values, 'gremlin')
             call list_add(values, 'status')
+            call list_add(values, '--detail')
+            call list_add(values, 'full')
             call list_add(values, '--dir')
             call list_add(values, root)
             call list_add(values, '--lane')

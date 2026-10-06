@@ -297,7 +297,7 @@ function start(targets) {
 
 function status(sessionId) {
   return json(['gremlin', 'status', '--dir', project, '--lane', lane,
-    '--session', sessionId, '--json']);
+    '--session', sessionId, '--detail', 'full', '--json']);
 }
 
 function assertReceiptSet(events, sessionId) {

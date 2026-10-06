@@ -233,6 +233,8 @@ contains
         type(string_list_t), intent(out) :: values
         call list_add(values, 'gremlin')
         call list_add(values, 'status')
+        call list_add(values, '--detail')
+        call list_add(values, 'full')
         call list_add(values, '--dir')
         call list_add(values, project)
         call list_add(values, '--lane')

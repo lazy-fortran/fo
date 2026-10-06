@@ -553,7 +553,12 @@ contains
         character(len=*), intent(in) :: arguments
         character(len=*), intent(out) :: json
         integer, intent(out) :: exitcode
-        call command(trim(prefix)//' gremlin '//arguments//' --dir '// &
+        character(len=4096) :: full_arguments
+        full_arguments = trim(arguments)
+        if (index(trim(arguments), 'status') == 1 .or. &
+                index(trim(arguments), 'wait') == 1) &
+            full_arguments = trim(arguments)//' --detail full'
+        call command(trim(prefix)//' gremlin '//trim(full_arguments)//' --dir '// &
             quote(trim(fixture))//' --lane public-readiness --json > '// &
             quote(trim(cli_file)), exitcode)
         call read_output(cli_file, json)
@@ -567,6 +572,8 @@ contains
         character(len=:), allocatable :: parameters
         parameters = '"action":"gremlin_'//action//'","dir":"'//trim(fixture)// &
             '","lane_id":"public-readiness"'
+        if (action == 'status' .or. action == 'wait') parameters = parameters// &
+            ',"detail":"full"'
         if (len_trim(condition) > 0) parameters = parameters// &
             ',"wait_until":"'//condition//'","wait_ms":0'
         open (newunit=rpc_unit, file=trim(rpc_input), status='replace')

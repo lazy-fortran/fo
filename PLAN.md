@@ -173,6 +173,23 @@ test selection exact across generations, and fixes execution identity so Git
 provenance remains recorded in manifests without invalidating execution reuse
 when only commit/patch metadata changes. The identity schema is now v5.
 
+2026-10-06 bounded Gremlin output candidate, based on pushed Fo main
+`a973a939f6daa5581cf6e0e246db1ab49e571574`: Sol recommended summary detail by
+default for status/wait, with full detail opt-in and paged event/failure reads.
+Before the change, a completed-lane MCP status reply was 19,443 text characters
+and CLI status was 22,239; one-record replies were 4,224 and 4,158 characters.
+The combined candidate adds core `summary|full` detail, CLI selection and MCP
+summary defaults. Summary retains state/counters and the current failure
+receipt, including build failures, while omitting event history and paging
+cursors. Luna's implementation commits are on
+`codex/fo-summary-combined-20261006`; the controller's build-failure receipt
+and output-size assertions are still being gated. After the focused gate passes,
+promote to `main`, install the exact MCP executable, and ask the user to
+reconnect Coeex once. The live MCP still runs the verbose build until then.
+The user requested cancellation before the focused gate completed; its lane is
+stopped with outcome `CANCELLED`, and no candidate build or test has run since.
+Before promotion, rerun the focused summary gate and MCP/CLI behavior checks.
+
 ## Delivery order
 
 The kin6d CMake consumer exposed a profile-isolation defect: public Debug flags

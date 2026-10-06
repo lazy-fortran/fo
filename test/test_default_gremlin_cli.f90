@@ -14,8 +14,11 @@ program test_default_gremlin_cli
     type(process_result_t) :: first, second, verify_result, query_result
     type(json_value_t) :: first_json, second_json, query_json, field
     logical :: valid, compiled_module_exists
+    integer :: summary_bytes, full_bytes
 
     call gremlin_setup(driver, scratch, project, cache, state)
+    summary_bytes = 0
+    full_bytes = 0
     call make_directory(join_path(project, 'test'))
     call write_text(join_path(project, 'fpm.toml'), 'name = "bare_gremlin_probe"'// &
         new_line('a'))
@@ -54,6 +57,7 @@ program test_default_gremlin_cli
         query_result)
     call check_summary_response(query_result, first_session, 'default status', &
         query_json)
+    summary_bytes = len_trim(query_result%stdout)
 
     call run_query('status', 'summary', .false., -1, driver, project, cache, &
         state, query_result)
@@ -63,6 +67,13 @@ program test_default_gremlin_cli
     call run_query('status', 'full', .false., -1, driver, project, cache, state, &
         query_result)
     call check_full_response(query_result, first_session, 'full status', query_json)
+    full_bytes = len_trim(query_result%stdout)
+    call assert_true(summary_bytes > 0 .and. summary_bytes < full_bytes, &
+        'default summary emits fewer bytes than full status')
+    call assert_true(summary_bytes <= 4096, &
+        'default status summary stays within the 4 KiB response budget')
+    write (*, '(a,i0,a,i0)') 'gremlin status bytes summary=', summary_bytes, &
+        ' full=', full_bytes
 
     call run_query('status', '', .true., -1, driver, project, cache, state, &
         query_result)
@@ -181,14 +192,10 @@ contains
         type(process_result_t), intent(in) :: result
         character(len=*), intent(in) :: expected_session, label
         type(json_value_t), intent(out) :: parsed
-        type(json_value_t) :: detail_field
 
         call assert_process_ok(result, label//' succeeds')
         call json_parse(result%stdout, parsed, valid, message)
         call assert_true(valid, label//' returns valid JSON: '//message)
-        detail_field = json_member(parsed, 'detail')
-        call assert_equal_string(json_string_value(detail_field), 'full', &
-            label//' reports full detail')
         call check_identity(parsed, expected_session, label)
         call check_page_fields(parsed, label)
     end subroutine check_full_response

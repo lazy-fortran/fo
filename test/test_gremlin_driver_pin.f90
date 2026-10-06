@@ -393,6 +393,8 @@ contains
         args = string_list_t()
         call list_add(args, 'gremlin')
         call list_add(args, 'status')
+        call list_add(args, '--detail')
+        call list_add(args, 'full')
         call list_add(args, '--dir')
         call list_add(args, project)
         call list_add(args, '--lane')

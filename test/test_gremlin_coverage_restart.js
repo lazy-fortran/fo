@@ -209,7 +209,7 @@ async function main() {
     'durable coverage state');
   const coverageBeforeReproduce = fs.readFileSync(coveragePath);
   const partialStatus = json(['gremlin', 'status', '--dir', project, '--lane', lane,
-    '--session', first.session_id, '--json']);
+    '--session', first.session_id, '--detail', 'full', '--json']);
   assert.equal(partialStatus.coverage.running, 1);
   assert.equal(partialStatus.coverage.unknown, 23);
   assert.equal(partialStatus.coverage.remaining, 23);
@@ -226,7 +226,7 @@ async function main() {
   assert.equal(stopAtBarrier.status, 0, stopAtBarrier.stdout + stopAtBarrier.stderr);
   await waitUntil(() => ownerPid() === 0, 'blocked owner stops before relaunch');
   const stoppedBeforeRelaunch = json(['gremlin', 'status', '--dir', project,
-    '--lane', lane, '--session', first.session_id, '--json']);
+    '--lane', lane, '--session', first.session_id, '--detail', 'full', '--json']);
   assert.equal(stoppedBeforeRelaunch.coverage.running, 0,
     'stopped status cannot claim an absent test child');
   assert.equal(stoppedBeforeRelaunch.coverage.cancelled, 1);
@@ -305,7 +305,7 @@ async function main() {
   let latestStatus;
   await waitUntil(() => {
     latestStatus = json(['gremlin', 'status', '--dir', project, '--lane', lane,
-      '--session', second.session_id, '--json']);
+      '--session', second.session_id, '--detail', 'full', '--json']);
     return latestStatus.coverage && latestStatus.coverage.full_coverage;
   }, 'forty current-epoch results and completion', 180000).catch(error => {
     throw new Error(`${error.message}; last status ${JSON.stringify(latestStatus)}`);
@@ -382,7 +382,7 @@ async function main() {
   await waitUntil(() => events(prioritySession.session_id, priorityLane).length >= 40,
     'priority-jump epoch coverage', 180000);
   const priorityStatus = json(['gremlin', 'status', '--dir', project, '--lane', priorityLane,
-    '--session', prioritySession.session_id, '--json']);
+    '--session', prioritySession.session_id, '--detail', 'full', '--json']);
   const priorityReceipts = events(prioritySession.session_id, priorityLane);
   const priorityTimeouts = new Set(priorityReceipts.filter(event => event.status === 'TIMEOUT')
     .map(event => event.case_id));

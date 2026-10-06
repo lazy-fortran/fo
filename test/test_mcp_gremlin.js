@@ -632,7 +632,8 @@ async function main() {
     const identity = { dir: fixture, lane_id: 'mcp-probe',
       session_id: startResult.body.session_id };
     const cliStatus = runFo(['gremlin', 'status', '--lane', 'mcp-probe',
-      '--session', startResult.body.session_id, '--dir', fixture, '--json'], fixture);
+      '--session', startResult.body.session_id, '--dir', fixture, '--detail', 'full',
+      '--json'], fixture);
     assert.equal(cliStatus.status, 0, cliStatus.stdout + cliStatus.stderr);
     const cliState = JSON.parse(cliStatus.stdout.trim());
     const mcpStatus = payload(await server.call(4, { action: 'gremlin_status',
@@ -741,7 +742,8 @@ async function main() {
     const mcpParitySample = await waitForInitialSample(async () => {
       const result = payload(await server.call(nextParityStatusId++, {
         action: 'gremlin_status', dir: parityFixture, lane_id: 'mcp-parity',
-        session_id: parityMcpSessionId, cursor: 0, max_records: 8, max_bytes: 8192
+        session_id: parityMcpSessionId, detail: 'full', cursor: 0,
+        max_records: 8, max_bytes: 8192
       }));
       assert.equal(result.isError, false, JSON.stringify(result.body));
       return result.body;
@@ -749,7 +751,8 @@ async function main() {
     const cliParitySample = await waitForInitialSample(() => {
       const result = runFo(['gremlin', 'status', '--dir', parityFixture,
         '--lane', 'cli-parity', '--session', parityCliSessionId,
-        '--cursor', '0', '--max-records', '8', '--max-bytes', '8192', '--json'],
+        '--detail', 'full', '--cursor', '0', '--max-records', '8',
+        '--max-bytes', '8192', '--json'],
       parityFixture);
       assert.equal(result.status, 0, result.stdout + result.stderr);
       return JSON.parse(result.stdout.trim());
@@ -800,7 +803,8 @@ async function main() {
     const readGateOnlyStatus = async () => {
       const result = payload(await server.call(nextParityStatusId++, {
         action: 'gremlin_status', dir: gateOnlyFixture, lane_id: 'mcp-gate-only',
-        session_id: gateOnlySessionId, max_records: 8, max_bytes: 8192
+        session_id: gateOnlySessionId, detail: 'full',
+        max_records: 8, max_bytes: 8192
       }));
       assert.equal(result.isError, false, JSON.stringify(result.body));
       return result.body;

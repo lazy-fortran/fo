@@ -66,6 +66,8 @@ module fo_gremlin_supervisor
     private
 
     integer, parameter :: NAME_LEN = 128, PATH_LEN = 4096
+    integer, parameter :: SUMMARY_DIAGNOSTIC_LIMIT = 1024
+    character(len=*), parameter :: SUMMARY_TRUNCATION = '...[truncated]'
     integer, parameter :: GREMLIN_HISTORY_LIMIT = 128
     integer, parameter :: GREMLIN_POLICY_RECEIPT_LIMIT = 512
 
@@ -719,28 +721,35 @@ contains
         message = ''
         compact = '{"action":"'//trim(action)//'","detail":"summary"'
         do i = 1, size(strings)
-            call gremlin_json_field(status_text, trim(strings(i)), value)
+            call gremlin_json_field(status_text, trim(strings(i)), value, .true.)
             if (len_trim(value) == 0) cycle
+            if (trim(strings(i)) == 'diagnostic' .and. &
+                    len_trim(value) > SUMMARY_DIAGNOSTIC_LIMIT) &
+                value = value(:SUMMARY_DIAGNOSTIC_LIMIT - len(SUMMARY_TRUNCATION))// &
+                    SUMMARY_TRUNCATION
             compact = compact//',"'//trim(strings(i))//'":"'// &
                 trim(json_escape_string(trim(value)))//'"'
         end do
         do i = 1, size(scalars)
-            call gremlin_json_field(status_text, trim(scalars(i)), value)
+            call gremlin_json_field(status_text, trim(scalars(i)), value, .true.)
             if (len_trim(value) == 0) cycle
             compact = compact//',"'//trim(scalars(i))//'":'//trim(value)
         end do
         generation = ''
         health = ''
         last_outcome = ''
-        call gremlin_json_field(status_text, 'active_generation', generation)
-        call gremlin_json_field(status_text, 'health', health)
-        call gremlin_json_field(status_text, 'last_outcome', last_outcome)
+        call gremlin_json_field(status_text, 'active_generation', generation, .true.)
+        if (len_trim(generation) == 0) &
+            call gremlin_json_field(status_text, 'candidate_generation', generation, &
+                .true.)
+        call gremlin_json_field(status_text, 'health', health, .true.)
+        call gremlin_json_field(status_text, 'last_outcome', last_outcome, .true.)
         failure_evidence = trim(health) == 'failure' .or. &
             status_is_failure(trim(last_outcome))
-        call gremlin_json_field(status_text, 'ordinary_failures', value)
+        call gremlin_json_field(status_text, 'ordinary_failures', value, .true.)
         read(value, *, iostat=ios) failure_count
         if (ios == 0) failure_evidence = failure_evidence .or. failure_count > 0
-        call gremlin_json_field(status_text, 'full_failures', value)
+        call gremlin_json_field(status_text, 'full_failures', value, .true.)
         read(value, *, iostat=ios) failure_count
         if (ios == 0) failure_evidence = failure_evidence .or. failure_count > 0
         latest = ''
@@ -763,7 +772,8 @@ contains
         character(len=*), intent(out) :: message
 
         type(journal_record_t), allocatable :: records(:)
-        character(len=128) :: record_generation, status, case_id, log_path
+        character(len=128) :: record_generation, status, case_id
+        character(len=PATH_LEN) :: log_path
         integer(int64) :: cursor, next_cursor, page_bytes
         integer :: i, journal_status, n_read, n_page
 

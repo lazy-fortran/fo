@@ -5,6 +5,7 @@ program test_gremlin_summary_request
         gremlin_session_publish, gremlin_session_release
     use fo_gremlin_request, only: gremlin_request_t, parse_request
     use fo_gremlin_supervisor, only: gremlin_handle
+    use fo_gremlin_journal, only: journal_append
     use fo_util, only: make_tmpfile
     implicit none
 
@@ -22,6 +23,8 @@ program test_gremlin_summary_request
     character(len=256) :: message
     character(len=512) :: state_root, project_dir
     character(len=8192) :: status_text
+    character(len=64) :: failure_generation
+    character(len=256) :: journal_record, journal_path
     character(len=:), allocatable :: response
     integer :: ierr, failures, exitcode, release_error
 
@@ -76,13 +79,37 @@ contains
             index(response, '"phase":') > 0 .and. &
             index(response, '"health":') > 0 .and. &
             index(response, '"local_gate_green":') > 0 .and. &
-            index(response, '"gate_required":') > 0, &
+            index(response, '"gate_required":0') > 0, &
             'summary returns its marker and compact readiness facts')
         call check(index(response, '"events"') == 0 .and. &
             index(response, '"next_cursor"') == 0 .and. &
             index(response, '"lifecycle_events"') == 0 .and. &
             index(response, '"next_lifecycle_cursor"') == 0, &
             'summary omits event data and paging cursors')
+        failure_generation = repeat('a', len(failure_generation))
+        journal_path = trim(session%state_dir)//'/campaign-journal.jsonl'
+        journal_record = '{"completion_id":"build-failure","outcome":"fail",'// &
+            '"status":"BUILD_FAIL","generation":"'//failure_generation// &
+            '","case_id":"<build>","log_path":"/tmp/fo-build.log"}'
+        call journal_append(trim(journal_path), 'build-failure', &
+            trim(journal_record), ierr, message)
+        call check(ierr == 0, 'records a current candidate build failure')
+        status_text = '{"protocol":1,"session_id":"'//trim(session%session_id)// &
+            '","lane_id":"summary-test","state":"build_failed",'// &
+            '"active_generation":"","candidate_generation":"'// &
+            failure_generation//'","health":"failure","completed":0,'// &
+            '"selected":0,"seed":0,"last_outcome":"BUILD_FAIL",'// &
+            '"last_exitcode":1,"gate_required":0,"requirement_digest":"",'// &
+            '"event_epoch":0,"input_changed":false,"diagnostic":""}'
+        call gremlin_session_publish(session, trim(status_text), ierr, message)
+        call check(ierr == 0, 'publishes a failed candidate generation')
+        call gremlin_handle('status', trim(project_dir), &
+            '{"lane_id":"summary-test","detail":"summary"}', response, exitcode)
+        call check(exitcode == 0 .and. &
+            index(response, '"latest_failure":{"generation":"'// &
+            failure_generation//'","case_id":"<build>","status":"BUILD_FAIL",'// &
+            '"log_path":"/tmp/fo-build.log"}') > 0, &
+            'summary locates a failed candidate when no active generation exists')
         call gremlin_session_release(session, release_error, message)
         call check(release_error == 0, 'releases summary fixture session')
         call fs_remove_tree(trim(state_root))

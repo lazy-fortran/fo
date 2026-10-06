@@ -172,14 +172,15 @@ contains
         end do
     end function gremlin_json_text_valid
 
-    subroutine gremlin_json_field(text, name, value)
+    subroutine gremlin_json_field(text, name, value, last)
         character(len=*), intent(in) :: text, name
         character(len=*), intent(out) :: value
+        logical, optional, intent(in) :: last
         type(json_parser_t) :: parser
         type(json_event_t) :: event
         character(len=:), allocatable :: candidate
         integer :: depth
-        logical :: waiting, found, duplicate
+        logical :: waiting, found, duplicate, take_last
 
         value = ''
         candidate = ''
@@ -187,6 +188,8 @@ contains
         waiting = .false.
         found = .false.
         duplicate = .false.
+        take_last = .false.
+        if (present(last)) take_last = last
         call json_parser_init_strict(parser, text)
         do
             call json_parser_next(parser, event)
@@ -201,7 +204,13 @@ contains
                 if (len(event%string_val) /= len(name)) cycle
                 if (event%string_val /= name) cycle
                 if (found .or. waiting) then
-                    duplicate = .true.
+                    if (take_last) then
+                        candidate = ''
+                        found = .false.
+                        waiting = .true.
+                    else
+                        duplicate = .true.
+                    end if
                 else
                     waiting = .true.
                 end if
