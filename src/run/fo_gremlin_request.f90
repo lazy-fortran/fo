@@ -34,6 +34,7 @@ module fo_gremlin_request
         logical :: fail_on_failure = .false.
         character(len=HASH_LEN) :: generation_id = ''
         character(len=32) :: wait_until = ''
+        character(len=8) :: detail = 'full'
         logical :: input_changed = .false.
         logical :: has_previous_generation = .false.
         character(len=NAME_LEN), allocatable :: impact_cases(:)
@@ -62,7 +63,7 @@ contains
         type(json_event_t) :: event, value_event
         character(len=NAME_LEN) :: key
         character(len=:), allocatable :: raw_value
-        logical :: seen(19)
+        logical :: seen(20)
         integer :: field
         logical :: trailing
 
@@ -377,6 +378,8 @@ contains
                 if (action == 'wait') request_field = 14
             case ('wait_until')
                 if (action == 'wait') request_field = 19
+            case ('detail')
+                if (action == 'status' .or. action == 'wait') request_field = 20
             case ('fail_on_failure')
                 if (action == 'wait') request_field = 15
             case ('case_id')
@@ -400,7 +403,7 @@ contains
         ierr = 0
         message = ''
         select case (field)
-        case (1, 2, 16, 17, 19)
+        case (1, 2, 16, 17, 19, 20)
             if (.not. is_string) then
                 ierr = 1
                 message = 'string request field has the wrong JSON type'
@@ -448,6 +451,12 @@ contains
                         'fully-verified, quiescent, or failure'
                     return
                 end if
+            case (20)
+                if (value /= 'summary' .and. value /= 'full') then
+                    ierr = 1
+                    message = 'detail must be summary or full'
+                    return
+                end if
             end select
             select case (field)
             case (1)
@@ -460,6 +469,8 @@ contains
                 request%generation_id = value
             case (19)
                 request%wait_until = value
+            case (20)
+                request%detail = value
             end select
         case (8, 9, 15)
             if (is_string) then

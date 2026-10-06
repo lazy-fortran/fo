@@ -407,8 +407,13 @@ contains
         end if
         enriched_status = status_with_coverage(trim(status_text), coverage_view, &
             readiness, have_coverage)
-        call response_with_events('status', enriched_status, session, request, .false., &
-            response, ierr, message)
+        if (trim(request%detail) == 'summary') then
+            call compact_summary(enriched_status, session, 'status', &
+                response, ierr, message)
+        else
+            call response_with_events('status', enriched_status, session, request, &
+                .false., response, ierr, message)
+        end if
         if (ierr /= 0) then
             call error_response('status', trim(message), response)
             exitcode = 2
@@ -684,6 +689,124 @@ contains
             ',"remaining":'//trim(json_int(remaining))//'}'
     end function verification_counts
 
+    subroutine compact_summary(status_text, session, action, response, &
+            ierr, message)
+        character(len=*), intent(in) :: status_text, action
+        type(gremlin_session_t), intent(in) :: session
+        character(len=:), allocatable, intent(out) :: response
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        character(len=4096) :: value
+        character(len=HASH_LEN) :: generation
+        character(len=32) :: health, last_outcome
+        integer :: failure_count, ios
+        logical :: failure_evidence
+        character(len=:), allocatable :: compact, latest
+        character(len=32), parameter :: strings(*) = [character(len=32) :: &
+            'session_id', 'lane_id', 'state', 'phase', 'health', 'current_test', &
+            'active_generation', 'candidate_generation', 'last_outcome', &
+            'diagnostic', 'verification_level', 'requirement_digest', 'wait_until']
+        character(len=32), parameter :: scalars(*) = [character(len=32) :: &
+            'input_changed', 'dirty', 'local_gate_green', 'fully_verified', &
+            'completed', 'selected', 'seed', 'last_exitcode', 'event_epoch', &
+            'gate_required', 'gate_passed', 'ordinary_required', 'ordinary_passed', &
+            'ordinary_failures', 'full_required', 'full_passed', 'full_failures', &
+            'wait_satisfied', 'wait_timed_out', 'wait_terminal', 'failure_observed']
+        integer :: i
+
+        ierr = 0
+        message = ''
+        compact = '{"action":"'//trim(action)//'","detail":"summary"'
+        do i = 1, size(strings)
+            call gremlin_json_field(status_text, trim(strings(i)), value)
+            if (len_trim(value) == 0) cycle
+            compact = compact//',"'//trim(strings(i))//'":"'// &
+                trim(json_escape_string(trim(value)))//'"'
+        end do
+        do i = 1, size(scalars)
+            call gremlin_json_field(status_text, trim(scalars(i)), value)
+            if (len_trim(value) == 0) cycle
+            compact = compact//',"'//trim(scalars(i))//'":'//trim(value)
+        end do
+        generation = ''
+        health = ''
+        last_outcome = ''
+        call gremlin_json_field(status_text, 'active_generation', generation)
+        call gremlin_json_field(status_text, 'health', health)
+        call gremlin_json_field(status_text, 'last_outcome', last_outcome)
+        failure_evidence = trim(health) == 'failure' .or. &
+            status_is_failure(trim(last_outcome))
+        call gremlin_json_field(status_text, 'ordinary_failures', value)
+        read(value, *, iostat=ios) failure_count
+        if (ios == 0) failure_evidence = failure_evidence .or. failure_count > 0
+        call gremlin_json_field(status_text, 'full_failures', value)
+        read(value, *, iostat=ios) failure_count
+        if (ios == 0) failure_evidence = failure_evidence .or. failure_count > 0
+        latest = ''
+        if (failure_evidence) then
+            call latest_generation_failure(session, trim(generation), latest, ierr, &
+                message)
+            if (ierr /= 0) return
+        end if
+        if (len(latest) > 0) compact = compact//',"latest_failure":'//latest
+        compact = compact//',"retrieval_hint":"Use detail=full for complete status or '
+        compact = compact//'action=events/failures with cursors for event pages."}'
+        response = compact
+    end subroutine compact_summary
+
+    subroutine latest_generation_failure(session, generation, result, ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        character(len=*), intent(in) :: generation
+        character(len=:), allocatable, intent(out) :: result
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        type(journal_record_t), allocatable :: records(:)
+        character(len=128) :: record_generation, status, case_id, log_path
+        integer(int64) :: cursor, next_cursor, page_bytes
+        integer :: i, journal_status, n_read, n_page
+
+        result = ''
+        ierr = JOURNAL_OK
+        message = ''
+        if (len_trim(generation) /= HASH_LEN) return
+        cursor = 0_int64
+        n_read = 0
+        do while (n_read < GREMLIN_POLICY_RECEIPT_LIMIT)
+            n_page = min(64, GREMLIN_POLICY_RECEIPT_LIMIT - n_read)
+            page_bytes = int(n_page, int64) * int(JOURNAL_MAX_RECORD_BYTES, int64)
+            call journal_read_page(trim(session%state_dir)//'/campaign-journal.jsonl', &
+                cursor, n_page, page_bytes, records, next_cursor, journal_status, &
+                message)
+            if (journal_status /= JOURNAL_OK) then
+                ierr = journal_status
+                return
+            end if
+            do i = 1, size(records)
+                record_generation = ''
+                status = ''
+                call gremlin_json_field(records(i)%json, 'generation', &
+                    record_generation)
+                call gremlin_json_field(records(i)%json, 'status', status)
+                if (trim(record_generation) /= trim(generation)) cycle
+                if (.not. status_is_failure(trim(status))) cycle
+                case_id = ''
+                log_path = ''
+                call gremlin_json_field(records(i)%json, 'case_id', case_id)
+                call gremlin_json_field(records(i)%json, 'log_path', log_path)
+                result = '{"generation":"'// &
+                    trim(json_escape_string(trim(generation)))// &
+                    '","case_id":"'//trim(json_escape_string(trim(case_id)))// &
+                    '","status":"'//trim(json_escape_string(trim(status)))// &
+                    '","log_path":"'//trim(json_escape_string(trim(log_path)))//'"}'
+            end do
+            n_read = n_read + size(records)
+            if (next_cursor <= cursor .or. size(records) < n_page) exit
+            cursor = next_cursor
+        end do
+    end subroutine latest_generation_failure
+
     subroutine handle_events(project_dir, request, response, exitcode)
         character(len=*), intent(in) :: project_dir
         type(gremlin_request_t), intent(in) :: request
@@ -701,17 +824,22 @@ contains
         integer, intent(out) :: exitcode
 
         character(len=PATH_LEN) :: message
+        character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
         character(len=32) :: state_name, health, phase_name, verification, fact
         character(len=:), allocatable :: status_json, wait_name, decorated
         character(len=:), allocatable :: durable_failure_report
         type(gremlin_readiness_t) :: readiness
         type(gremlin_request_t) :: poll_request, failure_request
+        type(gremlin_session_t) :: session
         integer :: ierr, until_kind, elapsed, sleep_ms, failure_exitcode
+        integer :: owner_pid
         integer(int64) :: started_ms, now_ms, next_cursor, next_lifecycle_cursor
         logical :: satisfied, failed, timed_out, terminal, has_events
         logical :: legacy_failure_wait
+        logical :: is_live
 
         poll_request = request
+        poll_request%detail = 'full'
         until_kind = gremlin_wait_code(request%wait_until)
         wait_name = trim(request%wait_until)
         legacy_failure_wait = until_kind == 0 .and. request%fail_on_failure
@@ -806,7 +934,7 @@ contains
             return
         end if
         durable_failure_report = ''
-        if (failed) then
+        if (failed .and. trim(request%detail) == 'full') then
             failure_request = request
             failure_request%cursor = 0_int64
             failure_request%lifecycle_cursor = 0_int64
@@ -824,7 +952,24 @@ contains
         if (len(durable_failure_report) > 1) decorated = decorated// &
             ',"durable_failure_report":'//durable_failure_report
         decorated = decorated//'}'
-        response = decorated
+        if (trim(request%detail) == 'summary') then
+            call gremlin_resolve_read_session(project_dir, request, session, &
+                status_text, owner_pid, is_live, ierr, message)
+            if (ierr /= 0) then
+                call error_response('wait', trim(message), response)
+                exitcode = 2
+                return
+            end if
+            call compact_summary(decorated, session, 'wait', response, &
+                ierr, message)
+            if (ierr /= 0) then
+                call error_response('wait', trim(message), response)
+                exitcode = 2
+                return
+            end if
+        else
+            response = decorated
+        end if
         exitcode = 0
         if (legacy_failure_wait .and. failed) exitcode = 1
     end subroutine handle_wait
