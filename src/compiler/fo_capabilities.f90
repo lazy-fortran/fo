@@ -46,53 +46,55 @@ contains
         character(len=512) :: tmpdir, source, object, log
         character(len=:), allocatable :: packed
         integer :: unit, io_status, exitcode, n_args
-        logical :: object_exists
+        logical :: object_exists, cache_hit
 
         supported = .false.
         if (len_trim(flags) == 0) return
+        !$omp critical (fo_section_probe)
+        cache_hit = .false.
         if (section_probe_done) then
             if (trim(command) == trim(section_probe_command) &
                 .and. trim(flags) == trim(section_probe_flags)) then
                 supported = section_probe_supported
-                return
+                cache_hit = .true.
             end if
         end if
-        section_probe_command = command
-        section_probe_flags = flags
-        section_probe_done = .true.
-        section_probe_supported = .false.
-        call make_tmpfile('fo_cap_sections', tmpdir)
-        call fs_make_dir(trim(tmpdir))
-        source = trim(tmpdir)//'/probe.f90'
-        object = trim(tmpdir)//'/probe.o'
-        log = trim(tmpdir)//'/probe.log'
-        open (newunit=unit, file=source, status='replace', iostat=io_status)
-        if (io_status /= 0) then
+        if (.not. cache_hit) then
+            call make_tmpfile('fo_cap_sections', tmpdir)
+            call fs_make_dir(trim(tmpdir))
+            source = trim(tmpdir)//'/probe.f90'
+            object = trim(tmpdir)//'/probe.o'
+            log = trim(tmpdir)//'/probe.log'
+            open (newunit=unit, file=source, status='replace', iostat=io_status)
+            if (io_status == 0) then
+                write (unit, '(a)') 'module fo_section_probe'
+                write (unit, '(a)') 'implicit none'
+                write (unit, '(a)') 'integer :: value = 3'
+                write (unit, '(a)') 'contains'
+                write (unit, '(a)') 'integer function get_value()'
+                write (unit, '(a)') 'get_value = value'
+                write (unit, '(a)') 'end function get_value'
+                write (unit, '(a)') 'end module fo_section_probe'
+                close (unit)
+                n_args = 0
+                call argv_push(packed, n_args, trim(command))
+                call argv_push_split(packed, n_args, trim(flags))
+                call argv_push(packed, n_args, '-c')
+                call argv_push(packed, n_args, trim(source))
+                call argv_push(packed, n_args, '-o')
+                call argv_push(packed, n_args, trim(object))
+                call process_run_argv_logged(trim(tmpdir), packed, n_args, &
+                    trim(log), .false., 30, exitcode)
+                inquire (file=object, exist=object_exists)
+                supported = exitcode == 0 .and. object_exists
+            end if
             call fs_remove_tree(trim(tmpdir))
-            return
+            section_probe_command = command
+            section_probe_flags = flags
+            section_probe_supported = supported
+            section_probe_done = .true.
         end if
-        write (unit, '(a)') 'module fo_section_probe'
-        write (unit, '(a)') 'implicit none'
-        write (unit, '(a)') 'integer :: value = 3'
-        write (unit, '(a)') 'contains'
-        write (unit, '(a)') 'integer function get_value()'
-        write (unit, '(a)') 'get_value = value'
-        write (unit, '(a)') 'end function get_value'
-        write (unit, '(a)') 'end module fo_section_probe'
-        close (unit)
-        n_args = 0
-        call argv_push(packed, n_args, trim(command))
-        call argv_push_split(packed, n_args, trim(flags))
-        call argv_push(packed, n_args, '-c')
-        call argv_push(packed, n_args, trim(source))
-        call argv_push(packed, n_args, '-o')
-        call argv_push(packed, n_args, trim(object))
-        call process_run_argv_logged(trim(tmpdir), packed, n_args, trim(log), &
-            .false., 30, exitcode)
-        inquire (file=object, exist=object_exists)
-        supported = exitcode == 0 .and. object_exists
-        section_probe_supported = supported
-        call fs_remove_tree(trim(tmpdir))
+        !$omp end critical (fo_section_probe)
     end function compiler_supports_section_splitting
 
     subroutine detect_capabilities(cap)

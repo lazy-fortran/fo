@@ -1,10 +1,12 @@
 program test_section_capability
+    use omp_lib, only: omp_get_dynamic, omp_set_dynamic
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
     use fo_capabilities, only: compiler_supports_section_splitting
     use fo_compiler_dialect, only: selected_compiler_command
     use fo_fs, only: fs_find_executable, fs_make_dir, fs_remove_tree
     use fo_gfortran_build, only: gfortran_test
+    use fo_process, only: process_getpid
     use fo_util, only: make_tmpfile
     implicit none
 
@@ -28,6 +30,7 @@ program test_section_capability
 
     compiler = selected_compiler_command()
     call get_environment_variable('FO_FC', old_compiler, status=environment_status)
+    call check_concurrent_section_probe()
     if (compiler_supports_section_splitting(trim(compiler), &
         '--fo-unsupported-section-probe-flag')) &
         error stop 'unknown compiler flag was accepted'
@@ -49,6 +52,43 @@ program test_section_capability
     if (status /= 0) error stop 'cannot restore compiler selection'
 
 contains
+
+    subroutine check_concurrent_section_probe()
+        !! The first compiler probe remains in flight while the other workers
+        !! ask for the same result. A published placeholder would report false.
+        character(len=512) :: probe_dir, wrapper, gfortran_path
+        logical :: results(8), compiler_found, old_dynamic
+        integer :: i, unit, chmod_status, count
+
+        call fs_find_executable('gfortran', gfortran_path, compiler_found)
+        if (.not. compiler_found) return
+        call system_clock(count)
+        write (probe_dir, '(a,i0,a,i0)') &
+            '/var/tmp/fo_parallel_section_probe-', process_getpid(), '-', count
+        call fs_make_dir(trim(probe_dir))
+        wrapper = trim(probe_dir)//'/slow-gfortran'
+        open (newunit=unit, file=trim(wrapper), status='replace')
+        write (unit, '(a)') '#!/bin/sh'
+        write (unit, '(a)') 'sleep 0.5'
+        write (unit, '(a)') 'exec "'//trim(gfortran_path)//'" "$@"'
+        close (unit)
+        call execute_command_line('chmod +x "'//trim(wrapper)//'"', &
+            exitstat=chmod_status)
+        if (chmod_status /= 0) error stop 'cannot prepare section probe wrapper'
+
+        old_dynamic = omp_get_dynamic()
+        call omp_set_dynamic(.false.)
+        !$omp parallel do num_threads(8) schedule(static)
+        do i = 1, size(results)
+            results(i) = compiler_supports_section_splitting(trim(wrapper), &
+                '-ffunction-sections')
+        end do
+        !$omp end parallel do
+        call omp_set_dynamic(old_dynamic)
+        if (.not. all(results)) &
+            error stop 'concurrent section probes disagreed about compiler support'
+        call fs_remove_tree(trim(probe_dir))
+    end subroutine check_concurrent_section_probe
 
     subroutine check_native_source(command)
         character(len=*), intent(in) :: command
