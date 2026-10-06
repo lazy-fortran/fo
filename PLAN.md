@@ -32,20 +32,26 @@ Fo `f6eb7ac` uses it only for manifest generation bundles. The FX materialize
 oracle passed 70/70, and Fo's combined manifest oracle rebuilt a deleted
 bundle from the durable manifest with matching bytes and mode. The combined
 Fo build against Fx `165f9fe` passed focused manifest, execution-view, copy,
-stat, update and backend checks. Driver SHA256
-`0cacfdc8c5480c502525cc1a55cf1154ff2ebe06ef5303eb257c5b535a19adde`
+stat, update and backend checks. Fx `22a6530` now caches validated immutable
+lease snapshots across same-process actions. Its focused lease gate passed
+normally and with OpenMP, including concurrent cold roots, child-process
+replacement, collection and corrupt-snapshot rejection; warm fixture runtime
+fell from 3.67 s to 2.08 s before the added concurrency assertions. The
+combined Fo build against Fx `22a6530` passed the affected manifest,
+execution-view, stat, update and backend checks. Driver SHA256
+`3ce5ca366981ba94e2de3b8a3adb308dc56052e6e7e002138c5549d9432c31a5`
 is installed. A fresh public Gremlin fixture with `FO_JOBS=2` observed compiler
-overlap and passed its required case (session `3339325-1791312045-903989386`,
-generation `865ccdfb`, local gate green). The preceding FFC six-case recheck
+overlap and passed its required case (session `3381163-1791313181-144997158`,
+generation `a11d55f2`, local gate green). The preceding FFC six-case recheck
 passed 6/6 with zero failures and `local_gate_green=true` in session
 `3046333-1791310754-498154325`, generation `cb0ca871`, on lane
 `ffc-final-a0e2-20261006`; the owner was then stopped cooperatively.
-Full FFC coverage remains open (503/509 unknown cases). This large consumer
-still spent minutes expanding and parsing FX's approximately 97,000 lease
-rows during the 516-action build. A bounded CPU sample attributed over 90%
-of sampled build time to `fields`, `is_object_identity` and `safe_field` in FX;
-that parser repair is now on FX `main`. A one-case warm FFC consumer recheck
-on the final installed driver is in progress on lane `ffc-final-0cac-20261006`.
+Full FFC coverage remains open (503/509 unknown cases). The final installed
+driver passed a separate 1/1 FFC consumer gate on generation `30dd180c`
+(session `3382726-1791313223-162516488`), then the owner stopped
+cooperatively. With the cache, the warm FFC build reached 291/516 actions at
+about 53 s; the preceding driver reached 86/516 at a similar point. This is
+measured improvement on the actual consumer, not a full-suite speed claim.
 [#200](https://github.com/lazy-fortran/fo/issues/200) owns current source/driver,
 session, gate and failure evidence. Earlier async-start, driver-input and
 inherited test-directory repairs remain pushed at `318ecea`; driver `6e54f805`
