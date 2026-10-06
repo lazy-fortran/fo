@@ -10,14 +10,21 @@ preserving supported behavior and independently demonstrated correctness.
 
 Keep one useful resident Fo Gremlin lane running and develop through it.
 Fo `22f6dd3` removed Gremlin's forced `FO_JOBS=1` from candidate builds,
-selected tests and reproduction. The exact candidate driver SHA256
-`5bac5856a5e9425b804ec3a46f75708d8dfed195fa5fa79bd3cc755878e5b413` is
-installed. In a fresh public Gremlin fixture with `FO_JOBS=2`, independent
+selected tests and reproduction. In a fresh public Gremlin fixture with
+`FO_JOBS=2`, independent
 compiler actions overlapped, the dependent source built, and the required test
 passed in session `2886283-1791306950-470690383` with the local gate green.
+Fo `f551f5a` protects dirty generated Git dependency checkouts during
+`fo update`; its public CLI fixture passed 18 checks and the current Fo
+checkout's dirty Fx source was preserved. Fo `4a4349a` synchronizes the
+compiler capability probe; its delayed eight-thread oracle passed. The
+installed driver SHA256 is
+`db82d20a89909136cb39a3d150e95327bc9d83cb418d895dd2255409fa11eb76`.
 The FFC 516-node consumer gate still needs a run through this driver. Warm
-action restoration within each dependency level remains serial and is the
-next concrete speed repair; no cache correctness defect has been established.
+action restoration within each dependency level remains serial. A proposed
+parallel restore exposed an intermittent Fx same-key restore failure, traced
+to a shared compiler-generated string length; repair Fx and recheck the Fo
+consumer before promoting parallel restoration.
 [#200](https://github.com/lazy-fortran/fo/issues/200) owns current source/driver,
 session, gate and failure evidence. Earlier async-start, driver-input and
 inherited test-directory repairs remain pushed at `318ecea`; driver `6e54f805`
