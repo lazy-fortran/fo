@@ -173,22 +173,35 @@ test selection exact across generations, and fixes execution identity so Git
 provenance remains recorded in manifests without invalidating execution reuse
 when only commit/patch metadata changes. The identity schema is now v5.
 
-2026-10-06 bounded Gremlin output candidate, based on pushed Fo main
-`a973a939f6daa5581cf6e0e246db1ab49e571574`: Sol recommended summary detail by
-default for status/wait, with full detail opt-in and paged event/failure reads.
-Before the change, a completed-lane MCP status reply was 19,443 text characters
-and CLI status was 22,239; one-record replies were 4,224 and 4,158 characters.
-The combined candidate adds core `summary|full` detail, CLI selection and MCP
-summary defaults. Summary retains state/counters and the current failure
-receipt, including build failures, while omitting event history and paging
-cursors. Luna's implementation commits are on
-`codex/fo-summary-combined-20261006`; the controller's build-failure receipt
-and output-size assertions are still being gated. After the focused gate passes,
-promote to `main`, install the exact MCP executable, and ask the user to
-reconnect Coeex once. The live MCP still runs the verbose build until then.
-The user requested cancellation before the focused gate completed; its lane is
-stopped with outcome `CANCELLED`, and no candidate build or test has run since.
-Before promotion, rerun the focused summary gate and MCP/CLI behavior checks.
+2026-10-06 bounded Gremlin output change, based on Fo main
+`a973a939f6daa5581cf6e0e246db1ab49e571574`: summary detail is now the CLI/MCP
+default for status and wait; full status remains opt-in, with event/failure
+pages available separately. Before the change, a completed-lane MCP status
+reply was 19,443 text characters and CLI status was 22,239. The focused CLI
+oracle now asserts that default status is smaller than full detail, stays within
+4 KiB, and omits event pages and cursors. MCP assertions cover summary defaults
+and retention of the latest failure receipt.
+
+The controller fixed a summary lookup defect found during the first run: a
+read-only session held the terminal journal directory, while current failures
+live in the lane campaign journal. Summary now resolves the lane state directory
+and filters receipts to the exact session and generation. The regression fixture
+places an older session's failure on the same generation and verifies that the
+current session's receipt is returned. Frozen source/test patch SHA256 on base
+`14d052367a25a67df157ebfda43f4d1d9fa5795b` is
+`bc80999f0b5988a61705dcb031afc50869c03167812e8c9a28b58dc8a2c73495`.
+
+Pinned bootstrap driver SHA256 `9dc4a415a8f4ef497867553447857503c1b83fdafa5429069c51f5bbc7ab57e8`
+built generation `9cf1ecc76cbc3a39449a30076c154f5bfc0255b8888dc6013aee573112b0aec3`.
+Session `1521629-1791282052-162327391` passed `test_gremlin_summary_request`
+(gate 1/1, zero failures; `local_gate_green=true` before the lane was stopped).
+The exact candidate driver SHA256 is
+`7c1dedd168e07e7eea7a29f4d4abe60492c7a4cdce1e71cc3c09e7d0bb760e81`; it passed
+`test_default_gremlin_cli` with both `FO` and `FO_BIN` pinned to that image, and
+`node test/test_mcp_gremlin.js <candidate>` passed the MCP status/wait, failure
+receipt and paging checks. Full ordinary coverage is not claimed. Promote this
+locally verified candidate to `main`, install it, and check whether Coeex needs
+to reconnect to reload the MCP server.
 
 ## Delivery order
 

@@ -88,12 +88,20 @@ contains
             'summary omits event data and paging cursors')
         failure_generation = repeat('a', len(failure_generation))
         journal_path = trim(session%state_dir)//'/campaign-journal.jsonl'
-        journal_record = '{"completion_id":"build-failure","outcome":"fail",'// &
+        journal_record = '{"completion_id":"build-failure","session_id":"'// &
+            trim(session%session_id)//'","outcome":"fail",'// &
             '"status":"BUILD_FAIL","generation":"'//failure_generation// &
             '","case_id":"<build>","log_path":"/tmp/fo-build.log"}'
         call journal_append(trim(journal_path), 'build-failure', &
             trim(journal_record), ierr, message)
         call check(ierr == 0, 'records a current candidate build failure')
+        journal_record = '{"completion_id":"old-build-failure",'// &
+            '"session_id":"old-session","outcome":"fail",'// &
+            '"status":"BUILD_FAIL","generation":"'//failure_generation// &
+            '","case_id":"old-build","log_path":"/tmp/old-build.log"}'
+        call journal_append(trim(journal_path), 'old-build-failure', &
+            trim(journal_record), ierr, message)
+        call check(ierr == 0, 'records another session failure on the same generation')
         status_text = '{"protocol":1,"session_id":"'//trim(session%session_id)// &
             '","lane_id":"summary-test","state":"build_failed",'// &
             '"active_generation":"","candidate_generation":"'// &
@@ -109,7 +117,8 @@ contains
             index(response, '"latest_failure":{"generation":"'// &
             failure_generation//'","case_id":"<build>","status":"BUILD_FAIL",'// &
             '"log_path":"/tmp/fo-build.log"}') > 0, &
-            'summary locates a failed candidate when no active generation exists')
+            'summary locates a failed candidate when no active generation exists: '// &
+            trim(response))
         call gremlin_session_release(session, release_error, message)
         call check(release_error == 0, 'releases summary fixture session')
         call fs_remove_tree(trim(state_root))

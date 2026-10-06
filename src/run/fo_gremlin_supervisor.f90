@@ -700,6 +700,7 @@ contains
         character(len=*), intent(out) :: message
 
         character(len=4096) :: value
+        character(len=PATH_LEN) :: journal_state_dir
         character(len=HASH_LEN) :: generation
         character(len=32) :: health, last_outcome
         integer :: failure_count, ios
@@ -754,8 +755,11 @@ contains
         if (ios == 0) failure_evidence = failure_evidence .or. failure_count > 0
         latest = ''
         if (failure_evidence) then
-            call latest_generation_failure(session, trim(generation), latest, ierr, &
-                message)
+            call gremlin_session_state_dir(trim(session%project_key), &
+                trim(session%lane_id), journal_state_dir, ierr, message)
+            if (ierr /= 0) return
+            call latest_generation_failure(trim(journal_state_dir), &
+                trim(session%session_id), trim(generation), latest, ierr, message)
             if (ierr /= 0) return
         end if
         if (len(latest) > 0) compact = compact//',"latest_failure":'//latest
@@ -764,15 +768,15 @@ contains
         response = compact
     end subroutine compact_summary
 
-    subroutine latest_generation_failure(session, generation, result, ierr, message)
-        type(gremlin_session_t), intent(in) :: session
-        character(len=*), intent(in) :: generation
+    subroutine latest_generation_failure(state_dir, session_id, generation, result, &
+            ierr, message)
+        character(len=*), intent(in) :: state_dir, session_id, generation
         character(len=:), allocatable, intent(out) :: result
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
         type(journal_record_t), allocatable :: records(:)
-        character(len=128) :: record_generation, status, case_id
+        character(len=128) :: record_session_id, record_generation, status, case_id
         character(len=PATH_LEN) :: log_path
         integer(int64) :: cursor, next_cursor, page_bytes
         integer :: i, journal_status, n_read, n_page
@@ -786,7 +790,7 @@ contains
         do while (n_read < GREMLIN_POLICY_RECEIPT_LIMIT)
             n_page = min(64, GREMLIN_POLICY_RECEIPT_LIMIT - n_read)
             page_bytes = int(n_page, int64) * int(JOURNAL_MAX_RECORD_BYTES, int64)
-            call journal_read_page(trim(session%state_dir)//'/campaign-journal.jsonl', &
+            call journal_read_page(trim(state_dir)//'/campaign-journal.jsonl', &
                 cursor, n_page, page_bytes, records, next_cursor, journal_status, &
                 message)
             if (journal_status /= JOURNAL_OK) then
@@ -794,11 +798,15 @@ contains
                 return
             end if
             do i = 1, size(records)
+                record_session_id = ''
                 record_generation = ''
                 status = ''
+                call gremlin_json_field(records(i)%json, 'session_id', &
+                    record_session_id)
                 call gremlin_json_field(records(i)%json, 'generation', &
                     record_generation)
                 call gremlin_json_field(records(i)%json, 'status', status)
+                if (trim(record_session_id) /= trim(session_id)) cycle
                 if (trim(record_generation) /= trim(generation)) cycle
                 if (.not. status_is_failure(trim(status))) cycle
                 case_id = ''
