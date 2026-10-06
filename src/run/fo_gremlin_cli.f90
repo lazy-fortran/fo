@@ -233,6 +233,11 @@ contains
             call append_field('targets', trim(raw), keys, values, n_fields)
         end if
 
+        if ((trim(action) == 'status' .or. trim(action) == 'wait') .and. &
+            .not. field_present(keys, n_fields, 'detail')) then
+            call add_string_field('detail', 'summary', keys, values, n_fields)
+        end if
+
         request_json = '{'
         do j = 1, n_fields
             if (j > 1) request_json = request_json//','
@@ -298,6 +303,10 @@ contains
             needs_value = .true.
         case ('--wait-ms', '--timeout-ms')
             key = 'wait_ms'
+            needs_value = .true.
+        case ('--detail')
+            key = 'detail'
+            kind = 'string'
             needs_value = .true.
         case ('--failure', '--fail-on-failure')
             key = 'fail_on_failure'
@@ -437,6 +446,7 @@ contains
         write (unit, '(a)') '         --only-changed --shuffle --campaign-seconds N --timeout-seconds N'
         write (unit, '(a)') '  reads: --session ID --cursor N --lifecycle-cursor N'
         write (unit, '(a)') '         --max-records N --max-bytes N'
+        write (unit, '(a)') '  reads: --detail summary|full (status/wait default: summary)'
         write (unit, '(a)') '  wait: --wait-ms N --failure or --until CONDITION'
         write (unit, '(a)') '  reproduce: ID or --case ID; optional --generation ID'
         write (unit, '(a)') '  output is the shared Gremlin JSON response; --json is accepted'

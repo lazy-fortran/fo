@@ -5,13 +5,14 @@ program test_default_gremlin_cli
     use fo_test_harness, only: assert_process_ok, finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_run, gremlin_stop_lane
     use fo_test_json, only: json_value_t, json_parse, json_member, json_string_value
+    use fo_test_json, only: json_invalid
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state, verify_dir
     character(:), allocatable :: first_session, second_session, message
     type(string_list_t) :: arguments
-    type(process_result_t) :: first, second, verify_result
-    type(json_value_t) :: first_json, second_json
+    type(process_result_t) :: first, second, verify_result, query_result
+    type(json_value_t) :: first_json, second_json, query_json, field
     logical :: valid, compiled_module_exists
 
     call gremlin_setup(driver, scratch, project, cache, state)
@@ -48,6 +49,53 @@ program test_default_gremlin_cli
     call assert_equal_string(second_session, first_session, &
         'bare and explicit starts attach to the exact same owner')
     if (len(first_session) == 0) first_session = second_session
+
+    call run_query('status', '', .false., -1, driver, project, cache, state, &
+        query_result)
+    call check_summary_response(query_result, first_session, 'default status', &
+        query_json)
+
+    call run_query('status', 'summary', .false., -1, driver, project, cache, &
+        state, query_result)
+    call check_summary_response(query_result, first_session, &
+        'explicit summary status', query_json)
+
+    call run_query('status', 'full', .false., -1, driver, project, cache, state, &
+        query_result)
+    call check_full_response(query_result, first_session, 'full status', query_json)
+
+    call run_query('status', '', .true., -1, driver, project, cache, state, &
+        query_result)
+    call check_summary_response(query_result, first_session, &
+        'status with --json', query_json)
+
+    call run_query('wait', '', .false., 0, driver, project, cache, state, &
+        query_result)
+    call check_summary_response(query_result, first_session, 'default wait', &
+        query_json)
+    field = json_member(query_json, 'action')
+    call assert_equal_string(json_string_value(field), 'wait', &
+        'wait retains its action marker')
+
+    call run_query('wait', 'summary', .false., 0, driver, project, cache, state, &
+        query_result)
+    call check_summary_response(query_result, first_session, &
+        'explicit summary wait', query_json)
+
+    call run_query('wait', 'full', .false., 0, driver, project, cache, state, &
+        query_result)
+    call check_full_response(query_result, first_session, 'full wait', query_json)
+
+    call run_query('events', '', .false., -1, driver, project, cache, state, &
+        query_result)
+    call assert_process_ok(query_result, 'default events query succeeds')
+    call json_parse(query_result%stdout, query_json, valid, message)
+    call assert_true(valid, 'events returns valid JSON: '//message)
+    field = json_member(query_json, 'action')
+    call assert_equal_string(json_string_value(field), 'events', &
+        'events retains its action marker')
+    call check_page_fields(query_json, 'default events')
+
     if (len(first_session) > 0) &
         call gremlin_stop_lane(driver, project, cache, state, 'default', first_session)
 
@@ -77,5 +125,117 @@ program test_default_gremlin_cli
 
     call remove_tree(scratch)
     call finish_assertions()
-    write (*, '(a)') 'default-gremlin-cli: bare start/attach and verify routing pass'
+    write (*, '(a)') 'default-gremlin-cli: summary/full routing and verify pass'
+contains
+
+    subroutine run_query(action, detail, include_json, wait_ms, driver, project, &
+            cache, state, result)
+        character(len=*), intent(in) :: action, detail, driver, project, cache, state
+        logical, intent(in) :: include_json
+        integer, intent(in) :: wait_ms
+        type(process_result_t), intent(out) :: result
+        character(len=32) :: wait_text
+        type(string_list_t) :: query_args
+
+        query_args = string_list_t()
+        call list_add(query_args, 'gremlin')
+        call list_add(query_args, action)
+        call list_add(query_args, '--dir')
+        call list_add(query_args, project)
+        call list_add(query_args, '--lane')
+        call list_add(query_args, 'default')
+        if (len_trim(detail) > 0) then
+            call list_add(query_args, '--detail')
+            call list_add(query_args, detail)
+        end if
+        if (wait_ms >= 0) then
+            write (wait_text, '(i0)') wait_ms
+            call list_add(query_args, '--wait-ms')
+            call list_add(query_args, trim(wait_text))
+        end if
+        if (include_json) call list_add(query_args, '--json')
+        call gremlin_run(driver, project, cache, state, query_args, result, &
+            timeout=30000)
+    end subroutine run_query
+
+    subroutine check_summary_response(result, expected_session, label, parsed)
+        type(process_result_t), intent(in) :: result
+        character(len=*), intent(in) :: expected_session, label
+        type(json_value_t), intent(out) :: parsed
+        type(json_value_t) :: detail_field
+
+        call assert_process_ok(result, label//' succeeds')
+        call json_parse(result%stdout, parsed, valid, message)
+        call assert_true(valid, label//' returns valid JSON: '//message)
+        detail_field = json_member(parsed, 'detail')
+        call assert_equal_string(json_string_value(detail_field), 'summary', &
+            label//' reports summary detail')
+        call check_identity(parsed, expected_session, label)
+        call check_absent(parsed, 'events', label)
+        call check_absent(parsed, 'lifecycle_events', label)
+        call check_absent(parsed, 'next_cursor', label)
+        call check_absent(parsed, 'next_lifecycle_cursor', label)
+    end subroutine check_summary_response
+
+    subroutine check_full_response(result, expected_session, label, parsed)
+        type(process_result_t), intent(in) :: result
+        character(len=*), intent(in) :: expected_session, label
+        type(json_value_t), intent(out) :: parsed
+        type(json_value_t) :: detail_field
+
+        call assert_process_ok(result, label//' succeeds')
+        call json_parse(result%stdout, parsed, valid, message)
+        call assert_true(valid, label//' returns valid JSON: '//message)
+        detail_field = json_member(parsed, 'detail')
+        call assert_equal_string(json_string_value(detail_field), 'full', &
+            label//' reports full detail')
+        call check_identity(parsed, expected_session, label)
+        call check_page_fields(parsed, label)
+    end subroutine check_full_response
+
+    subroutine check_identity(parsed, expected_session, label)
+        type(json_value_t), intent(in) :: parsed
+        character(len=*), intent(in) :: expected_session, label
+        type(json_value_t) :: field_value
+
+        field_value = json_member(parsed, 'lane_id')
+        call assert_equal_string(json_string_value(field_value), 'default', &
+            label//' retains lane identity')
+        field_value = json_member(parsed, 'session_id')
+        call assert_equal_string(json_string_value(field_value), expected_session, &
+            label//' retains session identity')
+        field_value = json_member(parsed, 'state')
+        call assert_true(len(json_string_value(field_value)) > 0, &
+            label//' retains state identity')
+    end subroutine check_identity
+
+    subroutine check_page_fields(parsed, label)
+        type(json_value_t), intent(in) :: parsed
+        character(len=*), intent(in) :: label
+
+        call check_present(parsed, 'events', label)
+        call check_present(parsed, 'lifecycle_events', label)
+        call check_present(parsed, 'next_cursor', label)
+        call check_present(parsed, 'next_lifecycle_cursor', label)
+    end subroutine check_page_fields
+
+    subroutine check_absent(parsed, name, label)
+        type(json_value_t), intent(in) :: parsed
+        character(len=*), intent(in) :: name, label
+        type(json_value_t) :: field_value
+
+        field_value = json_member(parsed, name)
+        call assert_true(field_value%kind == json_invalid, &
+            label//' omits '//name)
+    end subroutine check_absent
+
+    subroutine check_present(parsed, name, label)
+        type(json_value_t), intent(in) :: parsed
+        character(len=*), intent(in) :: name, label
+        type(json_value_t) :: field_value
+
+        field_value = json_member(parsed, name)
+        call assert_true(field_value%kind /= json_invalid, &
+            label//' retains '//name)
+    end subroutine check_present
 end program test_default_gremlin_cli
