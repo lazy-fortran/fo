@@ -199,9 +199,15 @@ The exact candidate driver SHA256 is
 `7c1dedd168e07e7eea7a29f4d4abe60492c7a4cdce1e71cc3c09e7d0bb760e81`; it passed
 `test_default_gremlin_cli` with both `FO` and `FO_BIN` pinned to that image, and
 `node test/test_mcp_gremlin.js <candidate>` passed the MCP status/wait, failure
-receipt and paging checks. Full ordinary coverage is not claimed. Promote this
-locally verified candidate to `main`, install it, and check whether Coeex needs
-to reconnect to reload the MCP server.
+receipt and paging checks. Commit `0d9ef7fa38b8f4b60f680a9b380696eb3a223fcf`
+is pushed to Fo `main`. The installed Fo 0.3.2 binary at
+`/home/ert/.local/bin/fo` has SHA256
+`95222d18cff2b3dfe82dce41827ddcdae202465fe7680d0a9afca5db2a6c9280`. On the
+same failed session, installed CLI summary output is 1,210 bytes versus 16,173
+bytes for full detail, and retains the current latest failure receipt. Full
+ordinary coverage is not claimed. The active MCP connector returned
+`Transport closed` after its old workers were stopped; reconnect the Codex
+session to launch the stdio server from the installed binary.
 
 ## Delivery order
 
