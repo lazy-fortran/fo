@@ -10,6 +10,15 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <stdatomic.h>
+
+/* Exposed only as a focused native oracle for copy durability behavior. */
+static atomic_ulong generation_copy_sync_count;
+
+unsigned long fo_c_generation_copy_sync_count(int reset) {
+    if (reset) return atomic_exchange(&generation_copy_sync_count, 0);
+    return atomic_load(&generation_copy_sync_count);
+}
 
 #define FO_GENERATION_FORTRAN_PATH_LEN 4096
 
@@ -325,7 +334,8 @@ static int list_names(int dir_fd, struct name_list *names) {
 }
 
 static int copy_regular_file(int input, const char *target,
-                             const struct stat *before, mode_t output_mode) {
+                             const struct stat *before, mode_t output_mode,
+                             int sync_output) {
     int output;
     char buffer[65536];
     ssize_t n;
@@ -349,11 +359,14 @@ static int copy_regular_file(int input, const char *target,
         goto fail;
     }
     if (fchmod(output, output_mode & 0777) != 0) goto fail;
-    if (fsync(output) != 0) {
-        int saved = errno;
-        close(output);
-        errno = saved;
-        return -1;
+    if (sync_output) {
+        atomic_fetch_add(&generation_copy_sync_count, 1);
+        if (fsync(output) != 0) {
+            int saved = errno;
+            close(output);
+            errno = saved;
+            return -1;
+        }
     }
     return close(output);
 fail:
@@ -367,7 +380,8 @@ fail:
 
 static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
                               const char *dest, FILE *manifest,
-                              int copy_files, int exclusion_policy) {
+                              int copy_files, int exclusion_policy,
+                              int sync_output) {
     struct name_list names;
     size_t i;
     if (rel[0] != '\0' && write_path(manifest, 'D', 0, rel) != 0) return -1;
@@ -402,7 +416,7 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
             } else {
                 rc = walk_directory_at(root_fd, child_fd, child, dest,
                                        manifest, copy_files,
-                                       exclusion_policy);
+                                       exclusion_policy, sync_output);
                 close(child_fd);
             }
         } else if (S_ISLNK(st.st_mode)) {
@@ -459,7 +473,8 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
                     rc = -1;
                 } else if (make_parent(target) != 0 ||
                            copy_regular_file(input, target, &st,
-                                             st.st_mode & 0777) != 0) {
+                                             st.st_mode & 0777,
+                                             sync_output) != 0) {
                     rc = -1;
                 }
                 close(input);
@@ -480,12 +495,12 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
 }
 
 static int walk_tree(const char *root, const char *dest, FILE *manifest,
-                     int copy_files, int exclusion_policy) {
+                     int copy_files, int exclusion_policy, int sync_output) {
     int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     int rc;
     if (root_fd < 0) return -1;
     rc = walk_directory_at(root_fd, root_fd, "", dest, manifest, copy_files,
-                           exclusion_policy);
+                           exclusion_policy, sync_output);
     close(root_fd);
     return rc;
 }
@@ -496,7 +511,7 @@ int fo_c_generation_list_tree(const char *root, const char *manifest) {
     if (validate_tree_root(root) != 0) return errno == 0 ? 1 : errno;
     out = fopen(manifest, "w");
     if (out == NULL) return errno == 0 ? 1 : errno;
-    rc = walk_tree(root, "", out, 0, 1);
+    rc = walk_tree(root, "", out, 0, 1, 1);
     if (fclose(out) != 0 && rc == 0) rc = -1;
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
@@ -508,7 +523,7 @@ int fo_c_generation_list_input_tree(const char *root, const char *manifest,
     if (validate_tree_root(root) != 0) return errno == 0 ? 1 : errno;
     out = fopen(manifest, "w");
     if (out == NULL) return errno == 0 ? 1 : errno;
-    rc = walk_tree(root, "", out, 0, exclude_root_outputs != 0 ? 2 : 0);
+    rc = walk_tree(root, "", out, 0, exclude_root_outputs != 0 ? 2 : 0, 1);
     if (fclose(out) != 0 && rc == 0) rc = -1;
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
@@ -521,7 +536,21 @@ int fo_c_generation_copy_tree(const char *root, const char *dest,
     if (make_dirs(dest) != 0) return errno == 0 ? 1 : errno;
     out = fopen(manifest, "w");
     if (out == NULL) return errno == 0 ? 1 : errno;
-    rc = walk_tree(root, dest, out, 1, 1);
+    rc = walk_tree(root, dest, out, 1, 1, 1);
+    if (fclose(out) != 0 && rc == 0) rc = -1;
+    return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
+}
+
+/* Reconstructable invocation views need complete bytes, not durable writes. */
+int fo_c_generation_copy_tree_ephemeral(const char *root, const char *dest,
+                                       const char *manifest) {
+    FILE *out;
+    int rc;
+    if (validate_tree_root(root) != 0) return errno == 0 ? 1 : errno;
+    if (make_dirs(dest) != 0) return errno == 0 ? 1 : errno;
+    out = fopen(manifest, "w");
+    if (out == NULL) return errno == 0 ? 1 : errno;
+    rc = walk_tree(root, dest, out, 1, 1, 0);
     if (fclose(out) != 0 && rc == 0) rc = -1;
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
@@ -553,7 +582,7 @@ int fo_c_generation_copy_declared_file(const char *source, const char *dest,
         errno = saved;
         return errno == 0 ? 1 : errno;
     }
-    rc = copy_regular_file(input, dest, &before, mode);
+    rc = copy_regular_file(input, dest, &before, mode, 1);
     saved = errno;
     close(input);
     if (rc != 0) {
@@ -619,7 +648,7 @@ int fo_c_generation_capture_file(const char *root, const char *relative,
         goto done;
     }
     rc = copy_regular_file(input_fd, destination, &before,
-                           before.st_mode & 0777);
+                           before.st_mode & 0777, 1);
 done:
     saved = errno;
     if (input_fd >= 0) close(input_fd);

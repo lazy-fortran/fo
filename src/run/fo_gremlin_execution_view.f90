@@ -29,11 +29,12 @@ module fo_gremlin_execution_view
     public :: execution_view_copy_app_outputs
 
     interface
-        integer(c_int) function generation_copy_tree(source, destination, manifest) &
-                bind(C, name='fo_c_generation_copy_tree')
+        integer(c_int) function generation_copy_tree_ephemeral( &
+                source, destination, manifest) &
+                bind(C, name='fo_c_generation_copy_tree_ephemeral')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: source(*), destination(*), manifest(*)
-        end function generation_copy_tree
+        end function generation_copy_tree_ephemeral
 
         integer(c_int) function copy_declared_file(source, destination, writable) &
                 bind(C, name='fo_c_generation_copy_declared_file')
@@ -207,7 +208,8 @@ contains
                 return
             end if
             call make_tmpfile('fo-build-view-manifest', copy_manifest)
-            tree_rc = generation_copy_tree(trim(candidate_bundle_root)//c_null_char, &
+            tree_rc = generation_copy_tree_ephemeral( &
+                trim(candidate_bundle_root)//c_null_char, &
                 trim(view%root)//c_null_char, trim(copy_manifest)//c_null_char)
             call delete_tmpfile(copy_manifest)
             if (tree_rc /= 0) then
