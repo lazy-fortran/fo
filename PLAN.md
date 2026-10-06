@@ -1,6 +1,6 @@
 # Fo delivery goals
 
-Updated 2026-10-05. This plan orders delivery; issues define observable success.
+Updated 2026-10-06. This plan orders delivery; issues define observable success.
 [Goals and architectural freedom](doc/GOAL_DRIVEN_DEVELOPMENT.md) applies to
 every task. Make architectural decisions as soon as required and as late as
 possible. Agents may simplify, consolidate or replace internal mechanisms while
@@ -9,6 +9,15 @@ preserving supported behavior and independently demonstrated correctness.
 ## Current goal
 
 Keep one useful resident Fo Gremlin lane running and develop through it.
+Fo `22f6dd3` removed Gremlin's forced `FO_JOBS=1` from candidate builds,
+selected tests and reproduction. The exact candidate driver SHA256
+`5bac5856a5e9425b804ec3a46f75708d8dfed195fa5fa79bd3cc755878e5b413` is
+installed. In a fresh public Gremlin fixture with `FO_JOBS=2`, independent
+compiler actions overlapped, the dependent source built, and the required test
+passed in session `2886283-1791306950-470690383` with the local gate green.
+The FFC 516-node consumer gate still needs a run through this driver. Warm
+action restoration within each dependency level remains serial and is the
+next concrete speed repair; no cache correctness defect has been established.
 [#200](https://github.com/lazy-fortran/fo/issues/200) owns current source/driver,
 session, gate and failure evidence. Earlier async-start, driver-input and
 inherited test-directory repairs remain pushed at `318ecea`; driver `6e54f805`
