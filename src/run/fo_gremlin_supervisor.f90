@@ -1,7 +1,11 @@
 module fo_gremlin_supervisor
     use, intrinsic :: iso_fortran_env, only: int64, error_unit
     use fo_build_backend, only: BACKEND_NATIVE, backend_t, detect_backend
-    use fo_cache, only: HASH_LEN, cache_digest
+    use fo_cache, only: HASH_LEN, cache_digest, cache_store_root
+    use fx_action_result_store, only: action_result_store_t, &
+        action_result_store_init, action_result_maintenance_tick, ACTION_RESULT_OK
+    use fx_immutable_root_compact, only: immutable_store_compact_generation_roots
+    use fx_immutable_store, only: IMMUTABLE_OK
     use fo_check, only: fo_changed_modules
     use fo_gremlin_context, only: capture_candidate, generation_inventory_restore, &
         common_generation_cas_root
@@ -1315,17 +1319,17 @@ contains
         integer :: cancel_error, release_error, capture_error, state_error
         integer :: registration_error
         integer :: build_view_cleanup_status
-        integer :: owner_pid, i
+        integer :: owner_pid, i, cache_cursor, cache_status
         integer :: sequence, campaign_seed, campaign_number, test_index
         integer(int64) :: capture_debounce_ms, campaign_started_ms, freshness_ticket
-        integer(int64) :: last_idle_reap_ms, now_ms
+        integer(int64) :: last_idle_reap_ms, last_cache_maintenance_ms, now_ms
         character(len=PATH_LEN) :: freshness_path
         real :: test_timeout
         logical :: have_active, have_candidate, stop_requested, capture_ok
         logical :: capture_failed, provider_quiet
         logical :: have_active_lease, have_candidate_lease
         logical :: active_pinned, candidate_pinned
-        logical :: build_done, test_done, fatal_error
+        logical :: build_done, test_done, fatal_error, cache_warning_reported
 
         exitcode = 0
         allocate (owner_request, selected(MAX_NODES))
@@ -1342,6 +1346,9 @@ contains
         capture_debounce_ms = 0_int64
         campaign_started_ms = 0_int64
         last_idle_reap_ms = 0_int64
+        last_cache_maintenance_ms = 0_int64
+        cache_cursor = 0
+        cache_warning_reported = .false.
         have_active = .false.
         have_candidate = .false.
         have_active_lease = .false.
@@ -1406,6 +1413,12 @@ contains
             exitcode = 2
             return
         end if
+        call maintain_fo_cache(cache_cursor, cache_status)
+        if (cache_status /= 0) then
+            write (error_unit, '(a,i0)') 'Gremlin cache maintenance: ', cache_status
+            cache_warning_reported = .true.
+        end if
+        call clock_milliseconds(last_cache_maintenance_ms)
         call gremlin_recover_owner_journal(project_dir, session, ierr, message)
         if (ierr /= 0) then
             call release_if_owner(session, state_error, state_message)
@@ -1520,6 +1533,14 @@ contains
                         exit
                     end if
                     last_idle_reap_ms = now_ms
+                end if
+                if (now_ms - last_cache_maintenance_ms >= 5000_int64) then
+                    call maintain_fo_cache(cache_cursor, cache_status)
+                    if (cache_status /= 0 .and. .not. cache_warning_reported) &
+                        write (error_unit, '(a,i0)') &
+                            'Gremlin cache maintenance: ', cache_status
+                    cache_warning_reported = cache_status /= 0
+                    last_cache_maintenance_ms = now_ms
                 end if
             end if
             call gremlin_session_stop_requested(session, stop_requested, ierr, message)
@@ -1846,8 +1867,31 @@ contains
         end if
         if (state_error /= 0) write (error_unit, '(a)') &
             'Gremlin generation cleanup: '//trim(state_message)
+        call maintain_fo_cache(cache_cursor, cache_status)
+        if (cache_status /= 0) write (error_unit, '(a,i0)') &
+            'Gremlin cache maintenance at stop: ', cache_status
         call simple_response('run', request%lane_id, session%session_id, 'stopped', response)
     end subroutine run_owner
+
+    subroutine maintain_fo_cache(scan_cursor, ierr)
+        integer, intent(inout) :: scan_cursor
+        integer, intent(out) :: ierr
+        type(action_result_store_t) :: store
+        character(len=PATH_LEN) :: root
+        integer :: scanned, retired, deleted, scanned_rows, compacted
+        integer :: action_status, compact_status
+
+        call cache_store_root(root)
+        call action_result_store_init(store, trim(root), ierr)
+        if (ierr /= ACTION_RESULT_OK) return
+        call action_result_maintenance_tick(store, scanned, retired, deleted, &
+            action_status)
+        call immutable_store_compact_generation_roots(store%objects, &
+            4096, 1, 4096, scanned_rows, compacted, compact_status, scan_cursor)
+        ierr = action_status
+        if (ierr == ACTION_RESULT_OK .and. compact_status /= IMMUTABLE_OK) &
+            ierr = compact_status
+    end subroutine maintain_fo_cache
 
     subroutine maybe_capture_latest(project_dir, session, driver_pin, request, &
             active, candidate, &

@@ -31,6 +31,22 @@ a 240-byte isolated lease snapshot; GC preserved the children until release
 and then reclaimed them. Existing global roots still occupy 8,260,961 bytes
 and 107,636 metadata rows, so exact-group migration is required to remove
 their write amplification without discarding live worktree/version ownership.
+Fo `3d3a655` removes dead APIs, aliases and historical docs, migrates cache
+consumers off v1, and reaps adopted Gremlin children while idle. The combined
+current-Fx focused gate passed `test_cache`, `test_backend`, `test_mcp_system`,
+`test_gremlin_supervisor`, and `test_async_adopted_reap` (5/5); the installed
+release binary SHA256
+`b13261e72f425a73e47171beb3496f59be3997d52067b3d040e3ba5e779e8933`
+passed a separate 2/2 cache/adopted-child check. The initial gate failure came
+from Fo's stale generated Fx checkout at `22a6530`; `fo update` fetched current
+Fx `c75ed04` before the passing gate.
+Fx `e236bd0` can now replace an unchanged inactive old blob-root group with a
+verified tree under an exact metadata compare-and-replace; its focused lease,
+GC and compaction gate passed 3/3. Fo invokes bounded Fx action retirement and
+one-group root compaction at owner start, during idle periods and on stop.
+Against Fx `e236bd0`, Fo's `test_cache`, `test_gremlin_manifest` and
+`test_gremlin_supervisor` passed 3/3. The global old-root population still
+needs a live owner pass and measured post-migration snapshot.
 Fo `22f6dd3` removed Gremlin's forced `FO_JOBS=1` from candidate builds,
 selected tests and reproduction. In a fresh public Gremlin fixture with
 `FO_JOBS=2`, independent compiler actions overlapped, the dependent source built,
