@@ -39,6 +39,16 @@ passed its required case 1/1 on generation
 `727dd1fd06319203897695b79fd75642478e70ae939cb465bcfea6cdf6c23d89`
 with `local_gate_green=true`. The initial red fixture expected the old result
 after changing its source; correcting that oracle removed the false failure.
+Fo #119's CTest result parser now preserves complete logical lines and
+deferred-length names, and reports malformed records explicitly rather than
+returning partial JSON. The public fixture retained 402 results, including two
+names over 1,200 characters, and rejected a malformed record. Exact candidate
+driver SHA256 `8ae5d8c316aad8934cb13ee00e0a702eb96de643eece54d1d5f7e4c3449d16aa`
+passed the direct case 1/1 and resident session `3658970-1791382533-920280692`
+passed its required case 1/1 on generation
+`8e8245fa155c7ad1e369f5274f20d42613008e017c812d18d6bab0885f33d431`
+with `local_gate_green=true`. Fo #119 stays open for distinct `fo check` and
+Gremlin result surfaces that still have fixed name limits.
 
 Keep one useful resident Fo Gremlin lane running and develop through it.
 Fo `190d3e8` restores a single expected `.smod` output from the shared action
