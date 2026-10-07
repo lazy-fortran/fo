@@ -53,6 +53,16 @@ passed its required case 1/1 on generation
 `8e8245fa155c7ad1e369f5274f20d42613008e017c812d18d6bab0885f33d431`
 with `local_gate_green=true`. Fo #119 stays open for distinct `fo check` and
 Gremlin result surfaces that still have fixed name limits.
+Fo `309a883` advances those surfaces: check JSON is growable, FPM manifest
+test names and Gremlin request/runner/coverage paths retain supported long
+names, and oversized request/manifest input fails explicitly. Heap-backed
+name buffers avoid the 8 MiB stack crashes exposed by the new oracles. Exact
+candidate SHA256 `4064578434b0e8740d71688bd167e7a36333cec7d45abeb3abac697e35cab806`
+passed the public 185-character check name in compact and full JSON, focused
+tests, and resident session `3884540-1791387062-304791062` gate 6/6 on
+generation `8832acb1e69dc70200fb1e756cb3e3859de23447eabb7973cc548c1476ca2205`
+with `local_gate_green=true`. #119 remains open for its broader result-status,
+Unicode, pagination and malformed-input acceptance outside these name paths.
 Fo #151's exact-driver contract now also has a metadata-only commit receipt
 oracle. It locates the same PASS completion and log after an empty commit on an
 unchanged generation. Exact current-source driver SHA256
