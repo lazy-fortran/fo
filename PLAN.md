@@ -1,6 +1,6 @@
 # Fo delivery goals
 
-Updated 2026-10-06. This plan orders delivery; issues define observable success.
+Updated 2026-10-07. This plan orders delivery; issues define observable success.
 [Goals and architectural freedom](doc/GOAL_DRIVEN_DEVELOPMENT.md) applies to
 every task. Make architectural decisions as soon as required and as late as
 possible. Agents may simplify, consolidate or replace internal mechanisms while
@@ -9,6 +9,14 @@ preserving supported behavior and independently demonstrated correctness.
 ## Current goal
 
 Keep one useful resident Fo Gremlin lane running and develop through it.
+The 2026-10-07 housekeeping candidate scopes child temporary files to private
+execution views, reaps abandoned scratch on owner replacement, removes probe
+logs, uses `/var/tmp` by default, and removes owned read-only scratch trees.
+Its exact candidate driver SHA256 is
+`2eda4f4ac3d7a04f550d43d38123f5fe8937f9a235a0b306a0d2f822eb834254`.
+The focused execution-view, session-state, input-inventory and utility cases
+passed 4/4; the v5 provenance oracle passed separately. Fx global cache GC
+remains gated on live publication and generation-root ownership repairs.
 Fo `22f6dd3` removed Gremlin's forced `FO_JOBS=1` from candidate builds,
 selected tests and reproduction. In a fresh public Gremlin fixture with
 `FO_JOBS=2`, independent compiler actions overlapped, the dependent source built,

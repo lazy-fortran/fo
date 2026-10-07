@@ -117,20 +117,20 @@ program test_gremlin_context_provenance
         'dependency:provenance_dep', 'src/provenance_dep.f90'), &
         'dependency bytes independently change its captured digest')
 
-    ! A metadata-only commit changes the independently measured Git base while source
-    ! inputs and diff stay constant. A following uncommitted edit changes patch digest.
+    ! A metadata-only commit preserves the execution identity and its original
+    ! provenance. A following source edit captures the new Git base and patch.
     before_metadata = metadata
     call git_command(project, [character(len=32) :: &
         'git', 'commit', '--allow-empty', '-qm', 'metadata only'])
     call git_command(project, [character(len=32) :: 'git', 'rev-parse', 'HEAD'], independent_head)
+    baseline = capture_count()
     call touch_directory(project)
-    previous = generation
-    call wait_generation(session, lane, previous, generation)
+    call wait_capture(baseline)
+    call assert_equal_string(capture_generation(), generation, &
+        'metadata-only commit reuses the execution generation')
     call read_generation_manifest(generation, metadata, inventory)
-    call assert_equal_string(metadata%base_commit//new_line('a'), independent_head, &
-        'metadata commit base equals independent Git HEAD')
-    call assert_true(metadata%base_commit /= initial_metadata%base_commit, &
-        'metadata commit changes the Git base')
+    call assert_equal_string(metadata%base_commit, before_metadata%base_commit, &
+        'reused manifest retains its original Git provenance')
     call assert_equal_string(metadata%patch_digest, before_metadata%patch_digest, &
         'metadata commit preserves source diff digest')
     previous = generation
@@ -138,7 +138,11 @@ program test_gremlin_context_provenance
         read_text(project//'/test/test_provenance.f90')//'! dirty patch variant'//new_line('a'))
     call wait_generation(session, lane, previous, generation)
     call read_generation_manifest(generation, metadata, inventory)
-    call assert_true(metadata%patch_digest /= initial_metadata%patch_digest, &
+    call assert_equal_string(metadata%base_commit//new_line('a'), independent_head, &
+        'source edit records the independently queried new Git HEAD')
+    call assert_true(metadata%base_commit /= before_metadata%base_commit, &
+        'source edit advances manifest Git provenance')
+    call assert_true(metadata%patch_digest /= before_metadata%patch_digest, &
         'uncommitted patch input changes patch digest')
     call stop_lane(lane, session)
     probes = read_text(calls)
@@ -224,6 +228,18 @@ contains
         item = json_member(value, 'count')
         count = int(json_number_value(item))
     end function capture_count
+
+    function capture_generation() result(identity)
+        character(:), allocatable :: identity
+        type(json_value_t) :: value, item
+        logical :: valid
+        character(:), allocatable :: message
+
+        call json_parse(read_text(counter), value, valid, message)
+        call assert_true(valid, 'capture observer publishes valid generation JSON')
+        item = json_member(value, 'generation')
+        identity = json_string_value(item)
+    end function capture_generation
 
     subroutine wait_capture(before)
         integer, intent(in) :: before
@@ -333,6 +349,14 @@ contains
         end if
         call gremlin_run(driver, project, cache, state, args, result, extra, 30000)
         call assert_true(result%exit_code == 0, 'starts provenance session '//lane_id)
+        if (result%exit_code /= 0) then
+            write (*, '(a,i0)') 'provenance start exit: ', result%exit_code
+            if (allocated(result%stderr)) write (*, '(a)') &
+                result%stderr(:min(1000, len(result%stderr)))
+            if (allocated(result%stdout)) write (*, '(a)') &
+                result%stdout(:min(1000, len(result%stdout)))
+            error stop 1
+        end if
         call json_parse(result%stdout, value, valid, message)
         call assert_true(valid, 'Gremlin start returns JSON: '//message)
     end subroutine start_lane

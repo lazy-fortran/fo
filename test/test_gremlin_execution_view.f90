@@ -69,6 +69,9 @@ program test_gremlin_execution_view
         'session-case-1', 'test_case', inventory, .true., .true., first, ierr, message)
     call check(ierr == 0 .and. first%active .and. first%complete, &
         'create a complete private fixture view')
+    inquire(file=trim(first%tmpdir), exist=exists)
+    call check(exists, 'execution view owns a private temporary directory')
+    call fs_write_text(trim(first%tmpdir)//'/owned.tmp', 'disposable scratch')
     first_fixture = trim(first%cwd)//'/fixtures/input.txt'
     call read_text_file(trim(first_fixture), text)
     call check(index(text, 'frozen fixture') > 0, 'materialize the declared fixture')
@@ -119,6 +122,8 @@ program test_gremlin_execution_view
     call execution_view_release(first, .true., release_status, message)
     inquire(file=trim(first_fixture), exist=exists)
     call check(exists, 'retained failure view keeps its fixture evidence')
+    inquire(file=trim(first%tmpdir)//'/owned.tmp', exist=exists)
+    call check(.not. exists, 'retained failure view drops temporary scratch')
     call execution_view_release(second, .false., release_status, message)
     inquire(file=trim(second_output), exist=exists)
     call check(.not. exists, 'owned inactive view cleanup removes its scratch')
@@ -278,6 +283,8 @@ program test_gremlin_execution_view
         build_view, ierr, message, candidate_bundle_root=trim(root)//'/bundle')
     call check(ierr == 0 .and. build_view%active, &
         'candidate build view copies the frozen project')
+    inquire(file=trim(build_view%tmpdir), exist=exists)
+    call check(exists, 'candidate build view also owns private scratch')
     if (build_view%active) then
         call resolve_driver(driver)
         environment = string_list_t()

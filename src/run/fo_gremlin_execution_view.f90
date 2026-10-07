@@ -15,6 +15,7 @@ module fo_gremlin_execution_view
     type, public :: execution_view_t
         character(len=PATH_LEN) :: root = ''
         character(len=PATH_LEN) :: cwd = ''
+        character(len=PATH_LEN) :: tmpdir = ''
         character(len=PATH_LEN) :: owner_key = ''
         character(len=128) :: case_id = ''
         character(len=64) :: generation_id = ''
@@ -225,6 +226,8 @@ contains
                     'candidate bundle does not contain a project root', ierr, message)
                 return
             end if
+            call create_private_scratch(view, ierr, message)
+            if (ierr /= 0) return
             ierr = 0
             message = trim(view%diagnostic)
             return
@@ -363,9 +366,29 @@ contains
                 return
             end if
         end do
+        call create_private_scratch(view, ierr, message)
+        if (ierr /= 0) return
         ierr = 0
         message = trim(view%diagnostic)
     end subroutine execution_view_create
+
+    subroutine create_private_scratch(view, ierr, message)
+        type(execution_view_t), intent(inout) :: view
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        ierr = 0
+        message = ''
+        if (len_trim(view%root) + len('/.fo-tmp') >= PATH_LEN) then
+            call reject_view(view, 'execution view scratch path is too long', &
+                ierr, message)
+            return
+        end if
+        view%tmpdir = trim(view%root)//'/.fo-tmp'
+        if (fs_mkdir_excl(trim(view%tmpdir)) /= 0) &
+            call reject_view(view, 'cannot create private execution scratch', &
+                ierr, message)
+    end subroutine create_private_scratch
 
     subroutine reject_view(view, diagnostic, ierr, message)
         type(execution_view_t), intent(inout) :: view
@@ -379,6 +402,8 @@ contains
         call execution_view_release(view, .false., cleanup_status, cleanup_message)
         ierr = 1
         message = trim(diagnostic)
+        if (cleanup_status /= 0) message = trim(message)//'; '// &
+            trim(cleanup_message)
     end subroutine reject_view
 
     subroutine execution_view_release(view, retain, ierr, message)
@@ -391,11 +416,23 @@ contains
         message = ''
         if (.not. view%active .or. len_trim(view%root) == 0) return
         if (retain) then
+            if (len_trim(view%tmpdir) > 0) then
+                call fs_remove_tree(trim(view%tmpdir), ierr)
+                if (ierr /= 0) then
+                    message = 'cannot remove retained view scratch: '// &
+                        trim(view%tmpdir)
+                    return
+                end if
+            end if
             view%retain_on_failure = .true.
             view%active = .false.
             return
         end if
-        call fs_remove_tree(trim(view%root))
+        call fs_remove_tree(trim(view%root), ierr)
+        if (ierr /= 0) then
+            message = 'cannot remove owned execution view: '//trim(view%root)
+            return
+        end if
         view%active = .false.
     end subroutine execution_view_release
 

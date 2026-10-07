@@ -37,20 +37,42 @@ int fo_c_rm_rf(const char *path) {
 
     dir = opendir(path);
     if (dir == NULL) return -1;
-    while ((ent = readdir(dir)) != NULL) {
+    if (st.st_uid == geteuid() &&
+        ((st.st_mode & S_IWUSR) == 0 || (st.st_mode & S_IXUSR) == 0) &&
+        fchmod(dirfd(dir), st.st_mode | S_IWUSR | S_IXUSR) != 0) {
+        int chmod_error = errno;
+        closedir(dir);
+        errno = chmod_error;
+        return -1;
+    }
+    for (;;) {
+        int read_error;
+        errno = 0;
+        ent = readdir(dir);
+        if (ent == NULL) {
+            read_error = errno;
+            if (closedir(dir) != 0 && read_error == 0) read_error = errno;
+            if (read_error != 0) {
+                errno = read_error;
+                return -1;
+            }
+            break;
+        }
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
             continue;
         if (snprintf(child, sizeof(child), "%s/%s", path, ent->d_name) >=
             (int)sizeof(child)) {
             closedir(dir);
+            errno = ENAMETOOLONG;
             return -1;
         }
         if (fo_c_rm_rf(child) != 0) {
+            int child_error = errno;
             closedir(dir);
+            errno = child_error;
             return -1;
         }
     }
-    closedir(dir);
     if (rmdir(path) != 0 && errno != ENOENT) return -1;
     return 0;
 }

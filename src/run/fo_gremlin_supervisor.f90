@@ -54,7 +54,7 @@ module fo_gremlin_supervisor
     use fo_process, only: argv_push, process_cancel_pid, &
         process_poll_pid, process_start_argv_logged, process_set_async_scope
     use fo_scan_types, only: MAX_PATH
-    use fo_util, only: json_bool, json_int, make_tmpfile
+    use fo_util, only: json_bool, json_int
     use fx_dag, only: dag_t, MAX_NODES
     use fx_json_build, only: json_escape_string
     use fo_fs, only: fs_make_dir, fs_sleep_ms, fs_remove_tree
@@ -254,7 +254,8 @@ contains
             return
         end if
         executable = driver_pin%path
-        call make_tmpfile('fo-gremlin-launch', log_file)
+        call fs_make_dir(trim(session%state_dir)//'/logs')
+        call log_path(session, 'launcher.log', log_file)
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'gremlin')
@@ -1228,7 +1229,8 @@ contains
         end if
         execution_env = 'FO_BIN='//trim(executable)//';FO='//trim(executable)//';'// &
             'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
-            'FO_GREMLIN_EXECUTION_CWD='//trim(execution_view%cwd)
+            'FO_GREMLIN_EXECUTION_CWD='//trim(execution_view%cwd)//';'// &
+            'TMPDIR='//trim(execution_view%tmpdir)
         call process_start_argv_logged(trim(build_view%cwd), packed, n_args, &
             trim(log_file), owner_pid, spawn_exit, &
             trim(execution_env))
@@ -2010,7 +2012,8 @@ contains
         call argv_push(packed, n_args, 'build')
         call process_start_argv_logged(trim(child%execution_view%cwd), packed, &
             n_args, trim(child%log_file), child%pid, spawn_exit, &
-            'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0')
+            'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;TMPDIR='// &
+            trim(child%execution_view%tmpdir))
         ierr = spawn_exit
         if (ierr /= 0) then
             message = 'cannot start candidate build'
@@ -2850,7 +2853,8 @@ contains
         if (ierr /= 0) return
         execution_env = 'FO_BIN='//trim(executable)//';FO='//trim(executable)//';'// &
             'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
-            'FO_GREMLIN_EXECUTION_CWD='//trim(child%execution_view%cwd)
+            'FO_GREMLIN_EXECUTION_CWD='//trim(child%execution_view%cwd)//';'// &
+            'TMPDIR='//trim(child%execution_view%tmpdir)
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'test')

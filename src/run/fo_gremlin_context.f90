@@ -325,6 +325,7 @@ contains
             else
                 context%toolchain = trim(compiler_path)//':version-unavailable'
             end if
+            call delete_tmpfile(log_file)
         end if
         call append_environment_value(context%environment, 'FC')
         call append_environment_value(context%environment, 'FFLAGS')
@@ -354,6 +355,7 @@ contains
         else
             base_commit = 'unavailable'
         end if
+        call delete_tmpfile(log_file)
         context%base_commit = trim(base_commit)
         call fs_tree_fingerprint(project_dir, .true., tree_sum, tree_mixed, &
             tree_count, fingerprint_ok)
@@ -384,6 +386,7 @@ contains
         else
             context%patch_digest = context_text_digest('git-unavailable|'//trim(fingerprint))
         end if
+        call delete_tmpfile(log_file)
     end subroutine capture_context
 
     logical function dev_dependency_is_path(config, dependency_name)

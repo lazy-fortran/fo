@@ -136,12 +136,15 @@ module fo_fs
 
 contains
 
-    subroutine fs_remove_tree(path)
+    subroutine fs_remove_tree(path, ierr)
         !! Recursive delete (rm -rf). Missing path is success.
         character(len=*), intent(in) :: path
+        integer, intent(out), optional :: ierr
         integer(c_int) :: rc
+        if (present(ierr)) ierr = 0
         if (len_trim(path) == 0) return
         rc = fo_c_rm_rf(trim(path)//c_null_char)
+        if (present(ierr)) ierr = int(rc)
     end subroutine fs_remove_tree
 
     subroutine fs_remove_file(path)

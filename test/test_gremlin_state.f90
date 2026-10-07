@@ -185,7 +185,9 @@ contains
         character(len=128) :: root, lane_id, stale_id, new_id
         character(len=256) :: message
         character(len=512) :: cmd
+        character(len=1024) :: state_dir, scratch_file, evidence_file
         integer :: ierr, u
+        logical :: exists
         type(gremlin_session_t) :: session
 
         call test_root(root)
@@ -195,10 +197,23 @@ contains
         call execute_command_line(trim(cmd), exitstat=ierr, cmdstat=u)
         call assert(u == 0 .and. ierr == 0, 'crashed-owner fixture exits cleanly')
         call read_single_line(trim(root)//'/stale.result', stale_id)
+        call gremlin_session_state_dir('.', trim(lane_id), state_dir, ierr, message)
+        call assert(ierr == 0, 'stale lane state is addressable')
+        scratch_file = trim(state_dir)//'/views/execution-orphan/.fo-tmp/owned.tmp'
+        evidence_file = trim(state_dir)//'/views/execution-orphan/fixture.txt'
+        call execute_command_line('mkdir -p '// &
+            trim(state_dir)//'/views/execution-orphan/.fo-tmp', exitstat=ierr)
+        call assert(ierr == 0, 'create an abandoned private execution view')
+        call touch(trim(scratch_file))
+        call touch(trim(evidence_file))
         call gremlin_session_acquire('.', trim(lane_id), session, ierr, message)
         new_id = session%session_id
         call assert(ierr == 0 .and. session%owner, &
             'dead owner record is recovered after its process exits')
+        inquire (file=trim(scratch_file), exist=exists)
+        call assert(.not. exists, 'recovered owner removes abandoned private scratch')
+        inquire (file=trim(evidence_file), exist=exists)
+        call assert(exists, 'recovered owner preserves retained fixture evidence')
         call assert(trim(new_id) /= trim(stale_id), &
             'recovery creates a new session instead of attaching stale identity')
         call gremlin_session_release(session, ierr, message)

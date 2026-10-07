@@ -54,10 +54,10 @@ contains
         call get_environment_variable('TMPDIR', tmpdir, length=tmpdir_len, &
             status=tmpdir_status)
         if (tmpdir_status /= 0 .or. tmpdir_len <= 0 .or. tmpdir_len > len(tmpdir)) then
-            tmpdir = '/tmp'
+            tmpdir = '/var/tmp'
         else
             tmpdir = trim(tmpdir)
-            if (len_trim(tmpdir) == 0) tmpdir = '/tmp'
+            if (len_trim(tmpdir) == 0) tmpdir = '/var/tmp'
         end if
         if (tmpdir(len_trim(tmpdir):len_trim(tmpdir)) == '/') then
             write (path, '(a,a,a,i0,a,i0,a,i0,a)') trim(tmpdir), trim(prefix), '-', &

@@ -49,6 +49,45 @@ static uint64_t hash_bytes(uint64_t h, const unsigned char *s) {
 int fo_gremlin_process_matches(int pid, const char *start);
 int fo_c_recover_async_scope(const char *state_dir, int owner_pid,
                              const char *owner_start);
+int fo_c_rm_rf(const char *path);
+
+/* A replacement owner has already recovered the previous owner's children.
+   Preserve retained execution views but discard their disposable scratch. */
+static int cleanup_view_scratch(const char *state_dir) {
+    char views[PATH_MAX], view[PATH_MAX], scratch[PATH_MAX];
+    struct stat st;
+    struct dirent *entry;
+    DIR *directory;
+    int e = 0;
+
+    if (snprintf(views, sizeof(views), "%s/views", state_dir) >= (int)sizeof(views))
+        return ENAMETOOLONG;
+    if (lstat(views, &st) != 0) return errno == ENOENT ? 0 : errno;
+    if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) return EPERM;
+    directory = opendir(views);
+    if (directory == NULL) return errno;
+    for (;;) {
+        errno = 0;
+        entry = readdir(directory);
+        if (entry == NULL) { e = errno; break; }
+        if (strncmp(entry->d_name, "execution-", 10) != 0) continue;
+        if (snprintf(view, sizeof(view), "%s/%s", views, entry->d_name) >=
+            (int)sizeof(view) ||
+            snprintf(scratch, sizeof(scratch), "%s/.fo-tmp", view) >=
+            (int)sizeof(scratch)) { e = ENAMETOOLONG; break; }
+        if (lstat(view, &st) != 0) { e = errno; break; }
+        if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) { e = EPERM; break; }
+        if (lstat(scratch, &st) != 0) {
+            if (errno == ENOENT) continue;
+            e = errno;
+            break;
+        }
+        if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) { e = EPERM; break; }
+        if (fo_c_rm_rf(scratch) != 0) { e = errno ? errno : EIO; break; }
+    }
+    if (closedir(directory) != 0 && e == 0) e = errno;
+    return e;
+}
 
 static int state_path(const char *project, const char *lane, char *out,
                       size_t cap, char *canonical, size_t canonical_cap,
@@ -289,6 +328,8 @@ int fo_gremlin_session_acquire(const char *project, const char *lane,
     } else if (e != ENOENT) {
         goto fail;
     }
+    e = cleanup_view_scratch(dir);
+    if (e != 0) goto fail;
     e = read_recovery_source(dir, recovered, (size_t)recoveredcap);
     if (e != 0 && e != ENOENT) goto fail;
     if (e == ENOENT) {
