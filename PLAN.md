@@ -61,8 +61,14 @@ candidate SHA256 `4064578434b0e8740d71688bd167e7a36333cec7d45abeb3abac697e35cab8
 passed the public 185-character check name in compact and full JSON, focused
 tests, and resident session `3884540-1791387062-304791062` gate 6/6 on
 generation `8832acb1e69dc70200fb1e756cb3e3859de23447eabb7973cc548c1476ca2205`
-with `local_gate_green=true`. #119 remains open for its broader result-status,
-Unicode, pagination and malformed-input acceptance outside these name paths.
+with `local_gate_green=true`. Fo `21cbf1e` also rejects malformed CTest-shaped
+result rows instead of silently omitting them. Its exact worker candidate
+SHA256 `6143923325bb5e9152066303c6a09f785974d28dd59a93c8f9bb4506f2cd29f4`
+passed the direct parser case 1/1 and a focused resident 1/1 gate on generation
+`9eeb8ef688c5d106959f343557cd464bd2d31f4b5707fd598fa16fc52e16fc3d`;
+the exact combined main candidate passed 1/1 before promotion. #119 remains
+open for broader result-status, Unicode, pagination and malformed-input
+acceptance outside these paths.
 Fo #151's exact-driver contract now also has a metadata-only commit receipt
 oracle. It locates the same PASS completion and log after an empty commit on an
 unchanged generation. Exact current-source driver SHA256
