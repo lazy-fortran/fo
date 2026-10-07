@@ -2132,7 +2132,7 @@ contains
         integer :: inventory_status, cancel_exit, mandatory_count, state_status
         integer :: release_status, pin_status
         character(len=PATH_LEN) :: state_message, release_message
-        character(len=PATH_LEN) :: coverage_path
+        character(len=PATH_LEN) :: coverage_path, discovery_diagnostic
         type(gremlin_coverage_view_t) :: coverage_view
         character(len=NAME_LEN) :: active_case
         logical :: was_active
@@ -2416,7 +2416,6 @@ contains
         character(len=MAX_PATH), allocatable :: filenames(:)
         character(len=NAME_LEN), allocatable :: all_names(:), impacted(:)
         character(len=NAME_LEN), allocatable :: history(:), debt(:), priorities(:)
-        character(len=PATH_LEN) :: discovery_diagnostic
         type(coverage_epoch_t) :: coverage
         character(len=PATH_LEN) :: coverage_path
         logical, allocatable :: is_test_arr(:)
