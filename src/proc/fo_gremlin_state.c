@@ -800,12 +800,106 @@ static int generation_prune_path(const char *root) {
     }
     e = remove_generated_tree(canonical);
     if (e == 0 && unlink(registered) != 0 && errno != ENOENT) e = errno;
-    if (e == 0 && unlink(root_record) != 0 && errno != ENOENT) e = errno;
     if (e == 0) e = sync_directory(dir);
     flock(lfd, LOCK_UN);
     close(lfd);
     flock(gfd, LOCK_UN);
     close(gfd);
+    return e;
+}
+
+/* Keep the root locator after prune until Fo has released its durable Fx roots.
+   A repeated prune can then finish a release interrupted by process death. */
+int fo_gremlin_generation_recorded_root(const char *id, char *root, int cap) {
+    char dir[PATH_MAX];
+    int e;
+    if (cap < 2) return EINVAL;
+    e = generation_state_path_id(id, dir, sizeof(dir));
+    return e == 0 ? read_generation_root(dir, root, (size_t)cap) : e;
+}
+
+int fo_gremlin_generation_mark_release(const char *root, const char *store,
+                                       const char *owner) {
+    char dir[PATH_MAX], canonical[PATH_MAX], guard[PATH_MAX], record[PATH_MAX + 128];
+    int e = generation_state_path(root, dir, sizeof(dir), canonical, sizeof(canonical));
+    if (e) return e;
+    if (!store || store[0] != '/' || !owner || strlen(owner) != 64) return EINVAL;
+    for (const char *p = store; *p; ++p)
+        if (*p == '\n' || *p == '\r') return EINVAL;
+    for (const char *p = owner; *p; ++p)
+        if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f'))) return EINVAL;
+    if (snprintf(guard, sizeof(guard), "%s/guard.lock", dir) >= (int)sizeof(guard))
+        return ENAMETOOLONG;
+    int fd = open(guard, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    if (fd < 0) return errno;
+    if (flock(fd, LOCK_EX) != 0) { e = errno; close(fd); return e; }
+    if (!generation_valid_at(dir, canonical)) e = ENOENT;
+    if (e == 0) {
+        int n = snprintf(record, sizeof(record), "%s\n%s\n", store, owner);
+        if (n < 0 || n >= (int)sizeof(record)) e = ENAMETOOLONG;
+        else e = atomic_write_file(dir, "pending-root-release", record, (size_t)n);
+    }
+    flock(fd, LOCK_UN);
+    close(fd);
+    return e;
+}
+
+int fo_gremlin_generation_pending_release(const char *id, char *store,
+                                          int store_cap, char *owner, int owner_cap) {
+    char dir[PATH_MAX], path[PATH_MAX], record[PATH_MAX + 128];
+    char *separator, *end;
+    int e = generation_state_path_id(id, dir, sizeof(dir));
+    if (e) return e;
+    if (store_cap < 2 || owner_cap < 65 ||
+        snprintf(path, sizeof(path), "%s/pending-root-release", dir) >=
+            (int)sizeof(path)) return EINVAL;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return errno;
+    ssize_t n = read(fd, record, sizeof(record) - 1);
+    e = n < 0 ? errno : 0;
+    if (close(fd) != 0 && e == 0) e = errno;
+    if (e) return e;
+    record[n] = '\0';
+    separator = strchr(record, '\n');
+    if (!separator) return EINVAL;
+    *separator++ = '\0';
+    end = strchr(separator, '\n');
+    if (!end || end[1] != '\0') return EINVAL;
+    *end = '\0';
+    if (strlen(separator) != 64 || record[0] != '/' ||
+        strlen(record) >= (size_t)store_cap ||
+        strlen(separator) >= (size_t)owner_cap) return EINVAL;
+    strcpy(store, record);
+    strcpy(owner, separator);
+    return 0;
+}
+
+int fo_gremlin_generation_forget(const char *id) {
+    char dir[PATH_MAX], guard[PATH_MAX], root[PATH_MAX], path[PATH_MAX];
+    struct stat st;
+    int e = generation_state_path_id(id, dir, sizeof(dir));
+    if (e) return e;
+    if (snprintf(guard, sizeof(guard), "%s/guard.lock", dir) >= (int)sizeof(guard))
+        return ENAMETOOLONG;
+    int fd = open(guard, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    if (fd < 0) return errno;
+    if (flock(fd, LOCK_EX) != 0) { e = errno; close(fd); return e; }
+    e = read_generation_root(dir, root, sizeof(root));
+    if (e == 0 && lstat(root, &st) == 0) e = EBUSY;
+    if (e == 0 && errno != ENOENT) e = errno;
+    if (e == 0) {
+        if (snprintf(path, sizeof(path), "%s/pending-root-release", dir) >=
+            (int)sizeof(path)) e = ENAMETOOLONG;
+        else if (unlink(path) != 0 && errno != ENOENT) e = errno;
+    }
+    if (e == 0) {
+        if (snprintf(path, sizeof(path), "%s/root", dir) >= (int)sizeof(path))
+            e = ENAMETOOLONG;
+        else if (unlink(path) != 0 && errno != ENOENT) e = errno;
+    }
+    if (e == 0) e = sync_directory(dir);
+    flock(fd, LOCK_UN);
+    close(fd);
     return e;
 }
 

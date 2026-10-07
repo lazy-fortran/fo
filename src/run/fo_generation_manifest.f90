@@ -6,7 +6,8 @@ module fo_generation_manifest
     use fx_immutable_store, only: immutable_store_t, immutable_lease_t, &
         immutable_store_init, immutable_store_put_blob, &
         immutable_store_hash_file, immutable_store_publication_lease_acquire, &
-        immutable_store_root_set, immutable_store_lease_release, &
+        immutable_store_root_set, immutable_store_reason_release, &
+        immutable_store_lease_release, &
         immutable_store_materialize_blob, &
         immutable_store_materialize_blob_ephemeral, IMMUTABLE_MATERIALIZE_COPY, &
         IMMUTABLE_OK
@@ -37,6 +38,7 @@ module fo_generation_manifest
     public :: generation_manifest_capture, generation_manifest_load
     public :: generation_manifest_materialize
     public :: generation_manifest_execution_identity
+    public :: generation_manifest_release
 
     interface
         integer(c_int) function fo_c_generation_create_link(path, target) &
@@ -57,9 +59,10 @@ module fo_generation_manifest
 
 contains
 
-    subroutine generation_manifest_capture(store_root, metadata, inventory, &
-            manifest_id, ierr, message)
+    subroutine generation_manifest_capture(store_root, root_owner, metadata, &
+            inventory, manifest_id, ierr, message)
         character(len=*), intent(in) :: store_root
+        character(len=*), intent(in) :: root_owner
         type(generation_manifest_metadata_t), intent(in) :: metadata
         type(input_inventory_t), intent(in) :: inventory
         character(len=HASH_LEN), intent(out) :: manifest_id
@@ -81,6 +84,10 @@ contains
         message = ''
         if (len_trim(store_root) == 0) then
             message = 'an immutable object store root is required'
+            return
+        end if
+        if (.not. is_hex_digest(trim(root_owner))) then
+            message = 'generation root owner is invalid'
             return
         end if
         if (.not. allocated(metadata%execution_identity)) then
@@ -222,7 +229,7 @@ contains
         end if
         if (status == IMMUTABLE_OK) then
             call immutable_store_root_set(store, 'fo-generation', &
-                trim(metadata%execution_identity), &
+                trim(root_owner), &
                 'generation-'//trim(metadata%execution_identity), &
                 kinds(:n_ids), ids(:n_ids), status)
         end if
@@ -236,6 +243,21 @@ contains
         end if
         ierr = 0
     end subroutine generation_manifest_capture
+
+    subroutine generation_manifest_release(store_root, generation_id, root_owner, &
+            ierr)
+        character(len=*), intent(in) :: store_root, generation_id, root_owner
+        integer, intent(out) :: ierr
+        type(immutable_store_t) :: store
+
+        ierr = 1
+        if (.not. is_hex_digest(trim(generation_id)) .or. &
+            .not. is_hex_digest(trim(root_owner))) return
+        call immutable_store_init(store, trim(store_root), ierr)
+        if (ierr /= IMMUTABLE_OK) return
+        call immutable_store_reason_release(store, 'fo-generation', &
+            trim(root_owner), 'generation-'//trim(generation_id), ierr)
+    end subroutine generation_manifest_release
 
     !! Repository and patch identifiers remain manifest provenance; the input
     !! inventory, toolchain, driver and execution settings define reuse.

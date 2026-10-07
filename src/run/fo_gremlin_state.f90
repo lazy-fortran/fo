@@ -1,6 +1,8 @@
 module fo_gremlin_state
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, c_size_t
     use, intrinsic :: iso_fortran_env, only: int64
+    use fo_generation_manifest, only: generation_manifest_release
+    use fx_immutable_store, only: IMMUTABLE_OK
     implicit none
     private
 
@@ -206,6 +208,49 @@ module fo_gremlin_state
             integer(c_int), value :: cap
             integer(c_int) :: ierr
         end function c_generation_root
+
+        function c_generation_recorded_root(id, root, cap) &
+                bind(C, name='fo_gremlin_generation_recorded_root') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: id(*)
+            character(kind=c_char), intent(out) :: root(*)
+            integer(c_int), value :: cap
+            integer(c_int) :: ierr
+        end function c_generation_recorded_root
+
+        function c_generation_mark_release(root, store, owner) &
+                bind(C, name='fo_gremlin_generation_mark_release') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: root(*), store(*), owner(*)
+            integer(c_int) :: ierr
+        end function c_generation_mark_release
+
+        function c_generation_pending_release(id, store, store_cap, owner, owner_cap) &
+                bind(C, name='fo_gremlin_generation_pending_release') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: id(*)
+            character(kind=c_char), intent(out) :: store(*), owner(*)
+            integer(c_int), value :: store_cap, owner_cap
+            integer(c_int) :: ierr
+        end function c_generation_pending_release
+
+        function c_generation_forget(id) &
+                bind(C, name='fo_gremlin_generation_forget') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: id(*)
+            integer(c_int) :: ierr
+        end function c_generation_forget
+
+        integer(c_int) function c_generation_lock(path) &
+                bind(C, name='fo_c_generation_lock')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+        end function c_generation_lock
+
+        subroutine c_generation_unlock(fd) bind(C, name='fo_c_generation_unlock')
+            import :: c_int
+            integer(c_int), value :: fd
+        end subroutine c_generation_unlock
     end interface
 
 contains
@@ -491,11 +536,19 @@ contains
         character(len=*), intent(in) :: generation_id
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
+        character(len=PATH_LEN) :: root
+        character(kind=c_char) :: c_root(PATH_LEN)
         integer(c_int) :: c_error
 
-        c_error = c_generation_prune(trim(generation_id)//c_null_char)
-        ierr = int(c_error)
-        message = error_text(ierr)
+        call gremlin_generation_root(generation_id, root, ierr, message)
+        if (ierr /= 0) then
+            c_root = c_null_char
+            c_error = c_generation_recorded_root( &
+                trim(generation_id)//c_null_char, c_root, int(PATH_LEN, c_int))
+            if (c_error /= 0_c_int) return
+            root = c_string(c_root)
+        end if
+        call gremlin_generation_prune_at(trim(root), ierr, message)
     end subroutine gremlin_generation_prune
 
     subroutine gremlin_generation_register_at(root, ierr, message)
@@ -544,12 +597,117 @@ contains
         character(len=*), intent(in) :: root
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-        integer(c_int) :: c_error
+        character(len=PATH_LEN) :: lock_path, store_root
+        character(len=ID_LEN) :: root_owner
+        character(kind=c_char) :: c_store(PATH_LEN), c_owner(ID_LEN)
+        integer(c_int) :: c_error, lock_fd
+        integer :: slash, locator_status
+        logical :: has_manifest, legacy_manifest, exists, pending
 
-        c_error = c_generation_prune_at(trim(root)//c_null_char)
-        ierr = int(c_error)
-        message = error_text(ierr)
+        ierr = 1
+        message = ''
+        slash = index(trim(root), '/', back=.true.)
+        if (slash < 2 .or. slash >= len_trim(root)) then
+            message = 'generation root path is invalid'
+            return
+        end if
+        lock_path = root(:slash - 1)//'/.locks/'//root(slash + 1:len_trim(root))
+        lock_fd = c_generation_lock(trim(lock_path)//c_null_char)
+        if (lock_fd < 0_c_int) then
+            message = 'cannot lock generation publication during prune'
+            return
+        end if
+        inquire (file=trim(root), exist=exists)
+        c_store = c_null_char
+        c_owner = c_null_char
+        c_error = c_generation_pending_release( &
+            root(slash + 1:len_trim(root))//c_null_char, c_store, &
+            int(PATH_LEN, c_int), c_owner, int(ID_LEN, c_int))
+        pending = c_error == 0_c_int
+        if (c_error /= 0_c_int .and. c_error /= 2_c_int) then
+            ierr = int(c_error)
+            message = 'cannot read pending generation root release'
+            call c_generation_unlock(lock_fd)
+            return
+        end if
+        if (pending) then
+            store_root = c_string(c_store)
+            root_owner = c_string(c_owner)
+        end if
+        if (.not. exists .and. .not. pending) then
+            c_error = c_generation_forget( &
+                root(slash + 1:len_trim(root))//c_null_char)
+            ierr = int(c_error)
+            message = error_text(ierr)
+            call c_generation_unlock(lock_fd)
+            return
+        end if
+        inquire (file=trim(root)//'/manifest.id', exist=has_manifest)
+        legacy_manifest = .false.
+        if (has_manifest .and. .not. pending) then
+            call read_generation_locator(trim(root)//'/store.root', store_root, &
+                locator_status)
+            if (locator_status == 0) call read_generation_locator( &
+                trim(root)//'/root.owner', root_owner, locator_status)
+            if (locator_status /= 0) then
+                ! Legacy generations used a shared execution-identity owner.
+                ! Prune their materialization but retain that ambiguous root.
+                legacy_manifest = .true.
+            else
+                c_error = c_generation_mark_release(trim(root)//c_null_char, &
+                    trim(store_root)//c_null_char, trim(root_owner)//c_null_char)
+                if (c_error /= 0_c_int) then
+                    ierr = int(c_error)
+                    message = 'cannot durably record pending generation root release'
+                    call c_generation_unlock(lock_fd)
+                    return
+                end if
+                pending = .true.
+            end if
+        end if
+
+        if (exists) then
+            c_error = c_generation_prune_at(trim(root)//c_null_char)
+            ierr = int(c_error)
+            message = error_text(ierr)
+        else
+            ierr = 0
+            message = ''
+        end if
+        if (ierr == 0 .and. pending) then
+            call generation_manifest_release(trim(store_root), &
+                root(slash + 1:len_trim(root)), trim(root_owner), ierr)
+            if (ierr /= IMMUTABLE_OK) &
+                message = 'generation pruned; pending Fx root release remains'
+        end if
+        if (ierr == 0) then
+            c_error = c_generation_forget( &
+                root(slash + 1:len_trim(root))//c_null_char)
+            ierr = int(c_error)
+            if (ierr /= 0) message = 'generation pruned but locator cleanup failed'
+            if (ierr == 0 .and. legacy_manifest) &
+                message = 'legacy generation pruned; shared Fx root retained'
+        end if
+        call c_generation_unlock(lock_fd)
     end subroutine gremlin_generation_prune_at
+
+    subroutine read_generation_locator(path, value, ierr)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(out) :: value
+        integer, intent(out) :: ierr
+        integer :: unit, ios
+
+        value = ''
+        ierr = 1
+        open (newunit=unit, file=trim(path), status='old', action='read', iostat=ios)
+        if (ios /= 0) return
+        read (unit, '(a)', iostat=ios) value
+        close (unit)
+        if (ios /= 0 .or. len_trim(value) == 0) return
+        if (index(value, achar(0)) /= 0 .or. &
+            index(value, achar(10)) /= 0 .or. index(value, achar(13)) /= 0) return
+        ierr = 0
+    end subroutine read_generation_locator
 
     subroutine gremlin_generation_root(generation_id, root, ierr, message)
         character(len=*), intent(in) :: generation_id

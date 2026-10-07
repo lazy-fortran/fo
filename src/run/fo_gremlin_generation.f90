@@ -12,7 +12,8 @@ module fo_gremlin_generation
         input_inventory_discover, input_entry_t, INPUT_FILE, INPUT_DIRECTORY
     use fo_generation_manifest, only: generation_manifest_metadata_t, &
         generation_manifest_capture, generation_manifest_load, &
-        generation_manifest_materialize, generation_manifest_execution_identity
+        generation_manifest_materialize, generation_manifest_execution_identity, &
+        generation_manifest_release
     implicit none
     private
 
@@ -446,7 +447,8 @@ contains
         type(immutable_store_t) :: store
         character(len=PATH_LEN) :: store_root, base, cache, capture_dir, stage
         character(len=PATH_LEN) :: lock_path, manifest_path
-        character(len=HASH_LEN) :: manifest_id
+        character(len=PATH_LEN) :: owner_path(1)
+        character(len=HASH_LEN) :: manifest_id, root_owner
         character(len=32) :: clock_text
         integer :: status, attempt, clock_count, fd
         integer(c_int) :: crc
@@ -479,6 +481,8 @@ contains
         end if
         generation%identity = metadata%execution_identity
         generation%root = cache
+        owner_path(1) = trim(cache)
+        root_owner = cache_digest(owner_path, 1)
         generation%project_root = trim(cache)//'/bundle/project'
         generation%driver_path = context%driver_path
         generation%driver_digest = context%driver_digest
@@ -556,7 +560,7 @@ contains
         end if
         store_root = trim(store%root_dir)
 
-        call generation_manifest_capture(trim(store_root), metadata, &
+        call generation_manifest_capture(trim(store_root), root_owner, metadata, &
             context%input_inventory, manifest_id, status, message)
         if (status /= 0) then
             call fo_c_generation_unlock(int(fd, c_int))
@@ -572,6 +576,8 @@ contains
         end do
         if (attempt > 32) then
             message = 'cannot allocate manifest generation staging directory'
+            call release_failed_manifest(store_root, generation%identity, &
+                root_owner, message)
             call fo_c_generation_unlock(int(fd, c_int))
             return
         end if
@@ -580,6 +586,8 @@ contains
         if (status /= 0) then
             message = 'cannot create manifest generation stage'
             crc = fo_c_generation_remove_stage(trim(capture_dir)//c_null_char)
+            if (crc == 0) call release_failed_manifest(store_root, &
+                generation%identity, root_owner, message)
             call fo_c_generation_unlock(int(fd, c_int))
             return
         end if
@@ -593,6 +601,10 @@ contains
         if (status == 0) then
             call write_manifest_store(trim(stage)//'/store.root', store_root, status)
             if (status /= 0) message = 'cannot write generation store locator'
+        end if
+        if (status == 0) then
+            call write_manifest_id(trim(stage)//'/root.owner', root_owner, status)
+            if (status /= 0) message = 'cannot write generation root owner locator'
         end if
         if (status == 0) then
             call write_manifest_identity(trim(stage)//'/identity.txt', metadata, &
@@ -617,6 +629,11 @@ contains
             end if
             if (status == 0) then
                 crc = fo_c_generation_freeze_tree( &
+                    trim(stage)//'/root.owner'//c_null_char)
+                if (crc /= 0) status = int(crc)
+            end if
+            if (status == 0) then
+                crc = fo_c_generation_freeze_tree( &
                     trim(stage)//'/identity.txt'//c_null_char)
                 if (crc /= 0) status = int(crc)
             end if
@@ -634,6 +651,9 @@ contains
             if (len_trim(message) == 0) &
                 message = 'cannot publish immutable manifest generation'
             crc = fo_c_generation_remove_stage(trim(capture_dir)//c_null_char)
+            inquire (file=trim(cache), exist=exists)
+            if (crc == 0 .and. .not. exists) call release_failed_manifest( &
+                store_root, generation%identity, root_owner, message)
             call fo_c_generation_unlock(int(fd, c_int))
             return
         end if
@@ -654,6 +674,17 @@ contains
         generation%patch_digest = value_or_empty(context%patch_digest)
         ierr = 0
     end subroutine generation_capture_inventory
+
+    subroutine release_failed_manifest(store_root, generation_id, root_owner, message)
+        character(len=*), intent(in) :: store_root, generation_id, root_owner
+        character(len=*), intent(inout) :: message
+        integer :: status
+
+        call generation_manifest_release(trim(store_root), trim(generation_id), &
+            trim(root_owner), status)
+        if (status /= IMMUTABLE_OK) message = trim(message)// &
+            '; failed generation root could not be released'
+    end subroutine release_failed_manifest
 
     subroutine generation_load_inventory(generation, ierr, message)
         type(generation_t), intent(inout) :: generation
