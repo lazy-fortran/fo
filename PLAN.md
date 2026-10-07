@@ -73,10 +73,17 @@ passed `test_gremlin_reproduce_logs`, `test_gremlin_execution_view` and
 `a43957c5f6e5eed29461f35e14dd36bbd221f0553fa4ff09d3308c7cc9c51402`.
 Nested CLI checks used that candidate, including a normal stop and replay.
 The currently installed Fo release SHA256 is
-`3510671d89c610075d759861f010e70952783eb19daacc25e294924240ccdd3e`;
-it includes Fx `fb726d6` with orphan snapshot temp recovery. Existing stopped
-session views and unregistered older generation bundles still need one-time
-reclamation after exact inactivity checks.
+`aca4dc39ee22384a204e9bd24b0a5ae06f5f18fc107b11b0199e2bdb7a775931`;
+it includes Fx `fb726d6` with orphan snapshot temp recovery. An exact
+inactivity check removed 166 stopped-session execution views (1.86 GiB) and
+134 unregistered older generation bundles (2.4 GB), preserving active and
+registered artifacts. Fo `3b6c19b` now retains concrete Gremlin discovery
+errors in terminal status and launcher output. Its exact candidate passed the
+new nested public CLI oracle through Fo Gremlin (1/1, generation
+`74e4d8e3a4f0fe7ddb30b248dc1da30baf771964d9771f194d338b1acb9e98c8`).
+The original FortFront consumer then exposed the actual remaining blocker:
+Fo excludes a test source that defines a module followed by a program from
+the eligible inventory. A focused scanner repair is in verification.
 Fo `22f6dd3` removed Gremlin's forced `FO_JOBS=1` from candidate builds,
 selected tests and reproduction. In a fresh public Gremlin fixture with
 `FO_JOBS=2`, independent compiler actions overlapped, the dependent source built,
