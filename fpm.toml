@@ -216,6 +216,11 @@ source-dir = "test"
 main = "test_async_process_boundary_slow.f90"
 
 [[test]]
+name = "test_async_adopted_reap"
+source-dir = "test"
+main = "test_async_adopted_reap.f90"
+
+[[test]]
 name = "test_gremlin_process_boundary_slow"
 source-dir = "test"
 main = "test_gremlin_process_boundary_slow.f90"

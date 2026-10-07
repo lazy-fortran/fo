@@ -2511,6 +2511,38 @@ static int reap_registered_scope_children(const struct async_process *item) {
 #endif
 }
 
+/* The Gremlin owner is a Linux subreaper. A nested Fo process may exit before
+   reaping a short-lived child; the adopted zombie then has no live launcher or
+   async handle. Reap only direct, already-dead children outside this process's
+   registered async leaders, whose exit status must remain available to poll. */
+static int reap_adopted_scope_zombies(const struct async_process *item) {
+#ifdef __linux__
+    pid_t *pids = NULL;
+    size_t count = 0;
+    int error;
+    if (item->registry_dir[0] == '\0') return 0;
+    error = owned_list_processes(&pids, &count);
+    if (error != 0) return error;
+    for (size_t i = 0; i < count; i++) {
+        pid_t parent = 0, got;
+        int alive = 1;
+        if (find_async_process(pids[i]) != NULL) continue;
+        error = owned_process_details(pids[i], &parent, NULL, NULL,
+                                      NULL, &alive);
+        if (error != 0) { error = 0; continue; }
+        if (parent != getpid() || alive) continue;
+        do { got = waitpid(pids[i], NULL, WNOHANG); }
+        while (got < 0 && errno == EINTR);
+        if (got < 0 && errno != ECHILD) { error = errno; break; }
+    }
+    free(pids);
+    return error;
+#else
+    (void)item;
+    return 0;
+#endif
+}
+
 static void forget_async_process(struct async_process *item) {
     struct async_process **link = &async_processes;
     while (*link != NULL) {
@@ -2587,6 +2619,8 @@ static int verify_or_reap_async_leader(struct async_process *item) {
     if (error != 0) return error;
 #endif
     error = reap_registered_scope_children(item);
+    if (error != 0) return error;
+    error = reap_adopted_scope_zombies(item);
     if (error != 0) return error;
     error = observe_async_leader(item);
     if (error != 0) return error;
