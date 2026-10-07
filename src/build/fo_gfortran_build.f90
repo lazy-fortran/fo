@@ -1722,6 +1722,8 @@ contains
         integer, allocatable :: level_nodes(:)
         character(len=HASH_LEN), allocatable :: level_keys(:)
         logical, allocatable :: level_restored(:)
+        logical, allocatable :: smod_cacheable(:)
+        character(len=2 * MAX_NAME + 1), allocatable :: smod_names(:)
         integer, allocatable :: compile_exits(:)
         character(len=512), allocatable :: per_logs(:)
         integer :: n_compile, n_level, team_size
@@ -1743,6 +1745,8 @@ contains
         allocate (compile_nodes(MAX_NODES), compile_keys(MAX_NODES))
         allocate (level_nodes(MAX_NODES), level_keys(MAX_NODES))
         allocate (level_restored(MAX_NODES))
+        allocate (smod_cacheable(MAX_NODES))
+        allocate (smod_names(MAX_NODES))
         allocate (compile_exits(MAX_NODES), per_logs(MAX_NODES))
         allocate (compdb_sources(MAX_NODES), compdb_objects(MAX_NODES))
 
@@ -1781,6 +1785,8 @@ contains
 
         old_mod_keys = ''
         new_mod_keys = ''
+        smod_names = ''
+        smod_cacheable = .true.
         call load_mod_keys(mod_dir, dag, n_order, topo_order, old_mod_keys)
         call cache_init(c, cache_ierr)
         allow_cache = .true.
@@ -1799,6 +1805,8 @@ contains
                 project_dir, example_dir)) cycle
             if (is_prog(node_id) .and. .not. app_program_selected( &
                 filenames(node_id), project_dir, app_dir, config)) cycle
+            call source_smod_name(filenames(node_id), dag%nodes(node_id)%label, &
+                smod_names(node_id), smod_cacheable(node_id))
             total_source = total_source + 1
             n_compdb = n_compdb + 1
             compdb_sources(n_compdb) = filenames(node_id)
@@ -1854,19 +1862,20 @@ contains
 
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, &
                         level_obj_path)
-                    if (cache_ierr == 0 .and. &
-                        .not. source_may_emit_smod(filenames(node_id))) then
+                    if (cache_ierr == 0 .and. smod_cacheable(node_id)) then
                         if (source_defines_module(filenames(node_id))) then
                             call cache_restore_action(c, level_source_key, &
                                 level_obj_path, mod_dir, level_hit, required_mod_name= &
-                                dag%nodes(node_id)%label)
+                                dag%nodes(node_id)%label, required_smod_name= &
+                                trim(smod_names(node_id)))
                         else
                             call cache_restore_action(c, level_source_key, &
-                                level_obj_path, mod_dir, level_hit)
+                                level_obj_path, mod_dir, level_hit, &
+                                required_smod_name=trim(smod_names(node_id)))
                         end if
                         if (level_hit) then
                             call get_mod_key(dag%nodes(node_id)%label, mod_dir, &
-                                new_mod_keys(node_id))
+                                new_mod_keys(node_id), smod_names(node_id))
                             call progress_step()
                         end if
                     end if
@@ -1893,6 +1902,8 @@ contains
                     fname_local = filenames(node_id)
                     per_log_local = per_logs(ii)
                     call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
+                    if (len_trim(smod_names(node_id)) > 0) call fs_remove_file( &
+                        trim(mod_dir)//'/'//trim(smod_names(node_id))//'.smod')
                     call compile_f90(project_dir, fname_local, obj_path, &
                         effective_flags, &
                         per_log_local, compile_exits(ii))
@@ -1930,10 +1941,12 @@ contains
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, &
                         obj_path)
                     call get_mod_key(dag%nodes(node_id)%label, mod_dir, &
-                        new_mod_keys(node_id))
-                    if (len_trim(compile_keys(ii)) > 0) then
+                        new_mod_keys(node_id), smod_names(node_id))
+                    if (len_trim(compile_keys(ii)) > 0 .and. &
+                        smod_cacheable(node_id)) then
                         call cache_store_action(c, compile_keys(ii), obj_path, mod_dir, &
-                            dag%nodes(node_id)%label, output_id, cache_ierr)
+                            dag%nodes(node_id)%label, output_id, cache_ierr, &
+                            smod_name=trim(smod_names(node_id)))
                     end if
                 end do
                 do ii = 1, n_compile
@@ -2031,29 +2044,61 @@ contains
         selected = manifest_executable_selected(config, app_dir, stem)
     end function app_program_selected
 
-    logical function source_may_emit_smod(path) result(may_emit)
-        character(len=*), intent(in) :: path
+    subroutine source_smod_name(path, label, smod_name, cacheable)
+        character(len=*), intent(in) :: path, label
+        character(len=*), intent(out) :: smod_name
+        logical, intent(out) :: cacheable
 
-        character(len=512) :: line, lower
-        integer :: u, ios
+        character(len=512) :: line, lower, ancestor
+        integer :: u, ios, open_pos, close_pos, colon_pos, comment_pos
+        integer :: n_modules, n_submodules
 
-        may_emit = .false.
+        smod_name = ''
+        cacheable = .true.
+        n_modules = 0
+        n_submodules = 0
         open (newunit=u, file=trim(path), status='old', iostat=ios)
-        if (ios /= 0) return
+        if (ios /= 0) then
+            cacheable = .false.
+            return
+        end if
         do
             read (u, '(a)', iostat=ios) line
             if (ios /= 0) exit
             lower = adjustl(line)
             call lowercase_inplace(lower)
-            if (starts_with_submodule(lower) .or. &
-                index(lower, 'module subroutine') == 1 .or. &
-                index(lower, 'module function') == 1) then
-                may_emit = .true.
-                exit
+            comment_pos = index(lower, '!')
+            if (comment_pos > 0) lower(comment_pos:) = ''
+            if (starts_with_submodule(lower)) then
+                n_submodules = n_submodules + 1
+                open_pos = index(lower, '(')
+                close_pos = index(lower, ')')
+                if (close_pos <= open_pos + 1) then
+                    cacheable = .false.
+                    exit
+                end if
+                ancestor = adjustl(lower(open_pos + 1:close_pos - 1))
+                colon_pos = index(ancestor, ':')
+                if (colon_pos > 0) ancestor = ancestor(:colon_pos - 1)
+                smod_name = trim(ancestor)//'@'//trim(label)
+                cycle
+            end if
+            if (index(lower, 'submodule') == 1) cacheable = .false.
+            if (index(lower, 'module ') == 1 .and. &
+                index(lower, ' function ') == 0 .and. &
+                index(lower, ' subroutine ') == 0 .and. &
+                index(lower, ' procedure ') == 0) n_modules = n_modules + 1
+            if (index(lower, 'module ') == 1 .and. &
+                (index(lower, ' subroutine ') > 0 .or. &
+                index(lower, ' function ') > 0 .or. &
+                index(lower, ' procedure ') > 0)) then
+                if (n_submodules == 0) smod_name = label
             end if
         end do
         close (u)
-    end function source_may_emit_smod
+        if (n_modules + n_submodules > 1) cacheable = .false.
+        if (.not. cacheable) smod_name = ''
+    end subroutine source_smod_name
 
     subroutine lowercase_inplace(text)
         character(len=*), intent(inout) :: text
@@ -2515,12 +2560,14 @@ contains
         close (u)
     end subroutine save_mod_keys
 
-    subroutine get_mod_key(label, mod_dir, key)
+    subroutine get_mod_key(label, mod_dir, key, smod_name)
         character(len=*), intent(in) :: label, mod_dir
         character(len=HASH_LEN), intent(out) :: key
+        character(len=*), intent(in), optional :: smod_name
 
         character(len=MAX_NAME) :: lower_label
         character(len=512) :: modpath
+        character(len=HASH_LEN) :: smod_key
         integer :: i
 
         lower_label = label
@@ -2531,6 +2578,16 @@ contains
 
         modpath = trim(mod_dir)//'/'//trim(lower_label)//'.mod'
         call hash_mod_file(modpath, key)
+        if (.not. present(smod_name)) return
+        if (len_trim(smod_name) == 0) return
+        call hash_mod_file(trim(mod_dir)//'/'//trim(smod_name)//'.smod', smod_key)
+        if (len_trim(smod_key) == 0) then
+            key = ''
+        else if (len_trim(key) == 0) then
+            key = smod_key
+        else
+            key = cache_digest([key, smod_key], 2)
+        end if
     end subroutine get_mod_key
 
     subroutine remove_shadow_mods(project_dir, dag)

@@ -25,20 +25,22 @@ module fo_cache
 contains
 
     subroutine cache_restore_action(c, action_id, obj_path, mod_dir, restored, &
-            output_id, required_mod_name)
+            output_id, required_mod_name, required_smod_name)
         type(cache_t), intent(in) :: c
         character(len=*), intent(in) :: action_id, obj_path, mod_dir
         logical, intent(out) :: restored
         character(len=HASH_LEN), intent(out), optional :: output_id
         character(len=*), intent(in), optional :: required_mod_name
+        character(len=*), intent(in), optional :: required_smod_name
 
         logical :: mod_exists
 
         if (present(output_id)) then
             call fx_cache_restore_action(c, action_id, obj_path, mod_dir, restored, &
-                output_id)
+                output_id, required_smod_name)
         else
-            call fx_cache_restore_action(c, action_id, obj_path, mod_dir, restored)
+            call fx_cache_restore_action(c, action_id, obj_path, mod_dir, restored, &
+                required_smod_name=required_smod_name)
         end if
         if (.not. restored .or. .not. present(required_mod_name)) return
         inquire (file=trim(mod_dir)//'/'//trim(required_mod_name)//'.mod', &
