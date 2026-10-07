@@ -17,9 +17,14 @@ Its exact candidate driver SHA256 is
 The focused execution-view, session-state, input-inventory and utility cases
 passed 4/4; the v5 provenance oracle passed separately. Fo `2be13db` gives
 each manifest materialization its own durable Fx root, releases it after a
-safe explicit generation prune, and retries interrupted release. Automatic
-generation retirement still needs atomic register-and-lease admission and
-per-materialization sidecar identity; legacy shared roots remain retained.
+safe explicit generation prune, and retries interrupted release. Fo `6dc64ad`
+adds materialization-specific state, atomic register-and-lease admission, and
+bounded inactive generation pruning on owner handoff and stop. Its exact
+two-case resident gate passed 2/2 with zero current failures on generation
+`82d90b21d391ed885856e59c46532416a7dba23ce6d426edbbfcf80dec7082af`.
+Old ambiguous shared roots remain retained until ownership can be established;
+the new namespace bounds prune victims at eight per pass but still scans all
+sidecars. Compact Fx tree roots and automatic cold cache retirement are next.
 Fo `22f6dd3` removed Gremlin's forced `FO_JOBS=1` from candidate builds,
 selected tests and reproduction. In a fresh public Gremlin fixture with
 `FO_JOBS=2`, independent compiler actions overlapped, the dependent source built,
