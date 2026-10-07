@@ -49,7 +49,8 @@ module fo_gremlin_supervisor
         gremlin_session_publish, gremlin_session_read, gremlin_session_release, &
         gremlin_session_recovery_complete, gremlin_session_state_dir, &
         gremlin_session_request_stop, gremlin_session_stop_requested, &
-        gremlin_lease_release, &
+        gremlin_lease_release, gremlin_lease_group_t, &
+        gremlin_host_lease_acquire_weighted, gremlin_host_lease_release, &
         gremlin_generation_lease_acquire_at, gremlin_generation_pin_at, &
         gremlin_generation_prune_inactive, &
         GREMLIN_STATE_TEXT_MAX
@@ -59,7 +60,7 @@ module fo_gremlin_supervisor
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_process, only: argv_push, process_cancel_pid, &
         process_poll_pid, process_reap_adopted_scope_zombies, &
-        process_start_argv_logged, process_set_async_scope
+        process_start_argv_logged, process_set_async_scope, process_detect_nproc
     use fo_scan_types, only: MAX_PATH
     use fo_util, only: json_bool, json_int
     use fx_dag, only: dag_t, MAX_NODES
@@ -77,6 +78,8 @@ module fo_gremlin_supervisor
     character(len=*), parameter :: SUMMARY_TRUNCATION = '...[truncated]'
     integer, parameter :: GREMLIN_HISTORY_LIMIT = 128
     integer, parameter :: GREMLIN_POLICY_RECEIPT_LIMIT = 512
+    integer, parameter :: GREMLIN_HEAVY_LANE_CAPACITY = 2
+    character(len=*), parameter :: GREMLIN_HEAVY_LEASE = 'gremlin-heavy-work'
 
 
     type :: child_t
@@ -1042,12 +1045,14 @@ contains
 
         type(gremlin_session_t) :: session
         type(gremlin_lease_t) :: reproduction_lease
+        type(gremlin_lease_group_t) :: reproduction_work_lease
         type(generation_t) :: generation
         type(execution_view_t) :: execution_view, build_view
         type(driver_pin_t) :: reproduction_pin
         type(gremlin_request_t) :: selection_request
         character(len=PATH_LEN) :: message, active_project, log_file, executable
         character(len=PATH_LEN) :: cleanup_message
+        character(len=PATH_LEN) :: work_release_message
         character(len=PATH_LEN) :: generation_root
         character(len=32) :: reproduction_id
         character(len=NAME_LEN) :: selected(MAX_NODES)
@@ -1059,13 +1064,14 @@ contains
         character(len=:), allocatable :: packed, execution_env
         integer :: owner_pid, ierr, n_selected, mandatory_count, seed
         integer :: n_args, spawn_exit, test_exit, sequence, release_error
-        integer :: reproduction_timeout
+        integer :: reproduction_timeout, work_release_error
         character(len=128) :: view_owner
-        logical :: retain_view
+        logical :: retain_view, have_reproduction_work_lease, stop_requested
         logical :: have_reproduction_lease, executable_ok
 
         exitcode = 0
         have_reproduction_lease = .false.
+        have_reproduction_work_lease = .false.
         call gremlin_session_read(project_dir, trim(request%lane_id), session_id, &
             owner_pid, owner_start, status_text, ierr, message)
         if (ierr /= 0) then
@@ -1229,6 +1235,20 @@ contains
             exitcode = 2
             return
         end if
+        call acquire_heavy_work_slot(session, reproduction_work_lease, &
+            have_reproduction_work_lease, .false., stop_requested, ierr, message)
+        if (ierr /= 0) then
+            call execution_view_release(execution_view, .false., release_error, &
+                cleanup_message)
+            call execution_view_release(build_view, .false., release_error, &
+                cleanup_message)
+            call release_generation_lease(reproduction_lease, &
+                have_reproduction_lease, release_error, cleanup_message)
+            call release_if_owner(session, release_error, cleanup_message)
+            call error_response('reproduce', trim(message), response)
+            exitcode = 2
+            return
+        end if
         execution_env = 'FO_BIN='//trim(executable)//';FO='//trim(executable)//';'// &
             'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
             'FO_GREMLIN_EXECUTION_CWD='//trim(execution_view%cwd)//';'// &
@@ -1261,8 +1281,18 @@ contains
         call record_immediate_case(session, request, generation, request%case_id, &
             test_exit, trim(outcome), sequence, 1, seed, trim(log_file), ierr, message, &
             credit_coverage=.false., gate_required=.true.)
+        call release_heavy_work_slot(reproduction_work_lease, &
+            have_reproduction_work_lease, work_release_error, work_release_message)
         call release_generation_lease(reproduction_lease, have_reproduction_lease, &
             release_error, cleanup_message)
+        if (work_release_error /= 0) then
+            call release_if_owner(session, release_error, cleanup_message)
+            call error_response('reproduce', &
+                'cannot release Gremlin host work slot: '//trim(work_release_message), &
+                response)
+            exitcode = 2
+            return
+        end if
         if (release_error /= 0) then
             call error_response('reproduce', 'cannot release generation lease: '// &
                 trim(cleanup_message), response)
@@ -1295,6 +1325,7 @@ contains
         type(driver_pin_t) :: driver_pin
         type(gremlin_request_t), allocatable :: owner_request
         type(gremlin_lease_t) :: active_lease, candidate_lease
+        type(gremlin_lease_group_t) :: heavy_work_lease
         type(generation_t) :: active_generation, candidate_generation
         type(change_watch_t) :: change_watch
         type(child_t) :: build_child, test_child
@@ -1320,7 +1351,7 @@ contains
         real :: test_timeout
         logical :: have_active, have_candidate, stop_requested, capture_ok
         logical :: capture_failed, provider_quiet
-        logical :: have_active_lease, have_candidate_lease
+        logical :: have_active_lease, have_candidate_lease, have_heavy_work_lease
         logical :: active_pinned, candidate_pinned
         logical :: build_done, test_done, fatal_error, cache_warning_reported
 
@@ -1346,6 +1377,7 @@ contains
         have_candidate = .false.
         have_active_lease = .false.
         have_candidate_lease = .false.
+        have_heavy_work_lease = .false.
         active_pinned = .false.
         candidate_pinned = .false.
         last_failed_identity = ''
@@ -1464,7 +1496,15 @@ contains
             have_candidate = .true.
             have_candidate_lease = .true.
             if (.not. fatal_error) then
-                call start_build(session, candidate_generation, build_child, ierr, message)
+                call acquire_heavy_work_slot(session, heavy_work_lease, &
+                    have_heavy_work_lease, .true., stop_requested, ierr, message)
+                if (ierr /= 0) then
+                    fatal_error = .true.
+                    fatal_message = trim(message)
+                else if (.not. stop_requested) then
+                    call start_build(session, candidate_generation, build_child, &
+                        ierr, message)
+                end if
                 if (ierr /= 0) then
                     launch_error = ierr
                     fatal_message = 'cannot start initial candidate build '// &
@@ -1493,7 +1533,7 @@ contains
                         if (release_error /= 0) fatal_message = &
                             'cannot release failed candidate lease: '//trim(state_message)
                     end if
-                else
+                else if (.not. stop_requested) then
                     call publish_state(session, owner_request, 'building', active_generation, &
                         candidate_generation, '', completed, selected_count, campaign_seed, &
                         'NONE', 0, state_error, state_message)
@@ -1674,7 +1714,8 @@ contains
             call maybe_capture_latest(project_dir, session, driver_pin, owner_request, &
                 active_generation, &
                 candidate_generation, have_active, have_candidate, last_failed_identity, &
-                build_child, candidate_lease, have_candidate_lease, capture_debounce_ms, &
+                build_child, candidate_lease, have_candidate_lease, heavy_work_lease, &
+                have_heavy_work_lease, stop_requested, capture_debounce_ms, &
                 change_watch, sequence, completed, selected_count, campaign_seed, &
                 current_test_name(selected, selected_count), capture_failed, ierr, message, &
                 provider_quiet)
@@ -1697,6 +1738,16 @@ contains
                     exit
                 end if
                 ierr = 0
+            end if
+            if (build_child%pid <= 0 .and. test_child%pid <= 0 .and. &
+                    have_heavy_work_lease) then
+                call release_heavy_work_slot(heavy_work_lease, &
+                    have_heavy_work_lease, ierr, message)
+                if (ierr /= 0) then
+                    fatal_message = trim(message)
+                    fatal_error = .true.
+                    exit
+                end if
             end if
             if (freshness_ticket > 0_int64 .and. &
                 (owner_request%input_changed .or. provider_quiet)) &
@@ -1744,6 +1795,9 @@ contains
                 call release_generation_lease(active_lease, have_active_lease, &
                     state_error, state_message)
                 if (state_error /= 0) fatal_message = trim(state_message)
+                call release_heavy_work_slot(heavy_work_lease, &
+                    have_heavy_work_lease, state_error, state_message)
+                if (state_error /= 0) fatal_message = trim(state_message)
             else if (build_child%pid > 0 .and. len_trim(candidate_generation%root) > 0) then
                 call gremlin_generation_pin_at(candidate_generation%root, .true., &
                     state_error, state_message)
@@ -1768,7 +1822,7 @@ contains
             exitcode = 2
             return
         end if
-        stop_requested = test_child%pid > 0 .or. build_child%pid > 0
+        stop_requested = stop_requested .or. test_child%pid > 0 .or. build_child%pid > 0
         cancel_error = 0
         if (test_child%pid > 0) then
             call cancel_test_case(session, active_generation, test_child, &
@@ -1805,6 +1859,8 @@ contains
             state_error, state_message)
         if (state_error == 0) call release_generation_lease(active_lease, &
             have_active_lease, state_error, state_message)
+        if (state_error == 0) call release_heavy_work_slot(heavy_work_lease, &
+            have_heavy_work_lease, state_error, state_message)
         if (state_error /= 0) then
             call publish_state(session, owner_request, 'error', active_generation, &
                 candidate_generation, '', completed, selected_count, campaign_seed, &
@@ -1887,10 +1943,87 @@ contains
             ierr = compact_status
     end subroutine maintain_fo_cache
 
+    subroutine acquire_heavy_work_slot(session, lease, held, honor_stop, &
+            stop_requested, ierr, message)
+        type(gremlin_session_t), intent(in) :: session
+        type(gremlin_lease_group_t), intent(inout) :: lease
+        logical, intent(inout) :: held
+        logical, intent(in) :: honor_stop
+        logical, intent(out) :: stop_requested
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        logical :: busy
+        integer :: weight
+
+        ierr = 0
+        message = ''
+        stop_requested = .false.
+        if (held) return
+        weight = gremlin_heavy_work_weight()
+        do
+            call gremlin_host_lease_acquire_weighted(GREMLIN_HEAVY_LEASE, &
+                GREMLIN_HEAVY_LANE_CAPACITY, weight, lease, busy, ierr, message)
+            if (ierr == 0) then
+                held = .true.
+                return
+            end if
+            if (.not. busy) then
+                message = 'cannot acquire Gremlin host work slot: '//trim(message)
+                return
+            end if
+            if (honor_stop) then
+                call gremlin_session_stop_requested(session, stop_requested, &
+                    ierr, message)
+                if (ierr /= 0) then
+                    message = 'cannot check Gremlin stop while waiting for host '// &
+                        'work slot: '//trim(message)
+                    return
+                end if
+                if (stop_requested) return
+            end if
+            call fs_sleep_ms(100)
+        end do
+    end subroutine acquire_heavy_work_slot
+
+    subroutine release_heavy_work_slot(lease, held, ierr, message)
+        type(gremlin_lease_group_t), intent(inout) :: lease
+        logical, intent(inout) :: held
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        ierr = 0
+        message = ''
+        if (.not. held) return
+        call gremlin_host_lease_release(lease, ierr, message)
+        if (ierr == 0) held = .false.
+        if (ierr /= 0) message = &
+            'cannot release Gremlin host work slot: '//trim(message)
+    end subroutine release_heavy_work_slot
+
+    integer function gremlin_heavy_work_weight() result(weight)
+        character(len=32) :: value
+        integer :: jobs, status, parse_status
+
+        ! Match native_jobs(): unset/invalid FO_JOBS keeps the host default.
+        jobs = process_detect_nproc()
+        if (jobs < 1) jobs = 1
+        call get_environment_variable('FO_JOBS', value, status=status)
+        if (status == 0 .and. len_trim(value) > 0) then
+            read (value, *, iostat=parse_status) jobs
+            if (parse_status /= 0 .or. jobs < 1) then
+                jobs = process_detect_nproc()
+                if (jobs < 1) jobs = 1
+            end if
+        end if
+        weight = min(GREMLIN_HEAVY_LANE_CAPACITY, jobs)
+    end function gremlin_heavy_work_weight
+
     subroutine maybe_capture_latest(project_dir, session, driver_pin, request, &
             active, candidate, &
             have_active, have_candidate, last_failed, build_child, candidate_lease, &
-            have_candidate_lease, capture_debounce_ms, change_watch, sequence, &
+            have_candidate_lease, heavy_work_lease, have_heavy_work_lease, &
+            stop_requested, capture_debounce_ms, change_watch, sequence, &
             completed, selected_count, seed, current_case, capture_failed, ierr, message, &
             provider_quiet)
         character(len=*), intent(in) :: project_dir
@@ -1905,6 +2038,9 @@ contains
         type(child_t), intent(inout) :: build_child
         type(gremlin_lease_t), intent(inout) :: candidate_lease
         logical, intent(inout) :: have_candidate_lease
+        type(gremlin_lease_group_t), intent(inout) :: heavy_work_lease
+        logical, intent(inout) :: have_heavy_work_lease
+        logical, intent(inout) :: stop_requested
         integer(int64), intent(inout) :: capture_debounce_ms
         type(change_watch_t), intent(inout) :: change_watch
         integer, intent(inout) :: sequence
@@ -2000,6 +2136,13 @@ contains
         if (current%identity == last_failed) then
             call gremlin_lease_release(current_lease, release_error, message)
             if (release_error /= 0) ierr = release_error
+            return
+        end if
+        call acquire_heavy_work_slot(session, heavy_work_lease, &
+            have_heavy_work_lease, .true., stop_requested, ierr, message)
+        if (ierr /= 0 .or. stop_requested) then
+            call gremlin_lease_release(current_lease, release_error, message)
+            if (ierr == 0 .and. release_error /= 0) ierr = release_error
             return
         end if
         candidate = current

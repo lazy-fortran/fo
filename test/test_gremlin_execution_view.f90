@@ -389,6 +389,8 @@ program test_gremlin_execution_view
                 reproduction_runtime_view, ierr, message)
             call check(ierr == 0 .and. reproduction_runtime_view%active, &
                 'create a fresh reproduction execution view')
+            call check(reproduction_build_view%root /= reproduction_runtime_view%root, &
+                'back-to-back build and runtime views publish to distinct directories')
             if (reproduction_build_view%active .and. &
                     reproduction_runtime_view%active) then
                 environment = string_list_t()

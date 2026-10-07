@@ -578,12 +578,14 @@ static int lease_dir(const char *kind, char *dir, size_t cap) {
     return make_dirs(dir);
 }
 
-int fo_gremlin_lease_acquire(const char *kind, int capacity, int *fdout, int *slot) {
-    if (capacity < 1 || capacity > 1024) return EINVAL;
-    *fdout = -1;
-    *slot = -1;
-    char dir[PATH_MAX], config[PATH_MAX];
-    int e = lease_dir(kind, dir, sizeof(dir)); if (e) return e;
+static int lease_acquire_in_dir_weighted(const char *dir, int capacity, int weight,
+                                         int *fds, int *slots) {
+    if (capacity < 1 || capacity > 1024 || weight < 1 || weight > capacity)
+        return EINVAL;
+    for (int i = 0; i < weight; ++i) { fds[i] = -1; slots[i] = -1; }
+    int acquired = 0;
+    char config[PATH_MAX];
+    int e;
     if (snprintf(config, sizeof(config), "%s/config.lock", dir) >= (int)sizeof(config)) return ENAMETOOLONG;
     int cfd = open(config, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
     if (cfd < 0) return errno;
@@ -597,26 +599,91 @@ int fo_gremlin_lease_acquire(const char *kind, int capacity, int *fdout, int *sl
     for (int i = 0; i < (oldcap > capacity ? oldcap : capacity); ++i) {
         char path[PATH_MAX]; snprintf(path, sizeof(path), "%s/slot-%04d.lock", dir, i);
         int sfd = open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-        if (sfd < 0) { e = errno; goto done; }
+        if (sfd < 0) { e = errno; goto undo; }
         if (flock(sfd, LOCK_EX | LOCK_NB) == 0) {
-            if (i < capacity && *fdout < 0) { *fdout = sfd; *slot = i; }
+            if (i < capacity && acquired < weight) {
+                fds[acquired] = sfd;
+                slots[acquired] = i;
+                acquired++;
+            }
             else { flock(sfd, LOCK_UN); close(sfd); }
-        } else if (errno == EWOULDBLOCK || errno == EAGAIN) active++;
-        else { e = errno; close(sfd); goto done; }
+        } else if (errno == EWOULDBLOCK || errno == EAGAIN) {
+            active++;
+            close(sfd);
+        }
+        else { e = errno; close(sfd); goto undo; }
     }
     if (oldcap != 0 && oldcap != capacity && active > 0) { e = EBUSY; goto no_slot; }
-    if (*fdout < 0) { e = EAGAIN; goto done; }
+    if (acquired < weight) { e = EAGAIN; goto no_slot; }
     char value[32]; int n = snprintf(value, sizeof(value), "%d\n", capacity);
     e = atomic_write_file(dir, "capacity", value, (size_t)n);
     if (e) goto undo;
     goto done;
 no_slot:
-    if (*fdout >= 0) { flock(*fdout, LOCK_UN); close(*fdout); *fdout = -1; }
+    for (int i = 0; i < acquired; ++i) {
+        flock(fds[i], LOCK_UN);
+        close(fds[i]);
+        fds[i] = -1;
+        slots[i] = -1;
+    }
     goto done;
 undo:
-    if (*fdout >= 0) { flock(*fdout, LOCK_UN); close(*fdout); *fdout = -1; }
+    for (int i = 0; i < acquired; ++i) {
+        flock(fds[i], LOCK_UN);
+        close(fds[i]);
+        fds[i] = -1;
+        slots[i] = -1;
+    }
 done:
     flock(cfd, LOCK_UN); close(cfd); return e;
+}
+
+static int lease_acquire_in_dir(const char *dir, int capacity, int *fdout, int *slot) {
+    return lease_acquire_in_dir_weighted(dir, capacity, 1, fdout, slot);
+}
+
+int fo_gremlin_lease_acquire(const char *kind, int capacity, int *fdout, int *slot) {
+    if (capacity < 1 || capacity > 1024) return EINVAL;
+    *fdout = -1;
+    *slot = -1;
+    char dir[PATH_MAX];
+    int e = lease_dir(kind, dir, sizeof(dir));
+    if (e) return e;
+    return lease_acquire_in_dir(dir, capacity, fdout, slot);
+}
+
+static int host_lease_base(char *base, size_t cap) {
+    struct stat st;
+    int n = snprintf(base, cap, "/var/tmp/fo-gremlin-admission-%lu",
+                     (unsigned long)geteuid());
+    if (n < 0 || n >= (int)cap) return ENAMETOOLONG;
+    if (mkdir(base, 0700) == 0) {
+        if (chmod(base, 0700) != 0) return errno;
+    } else if (errno != EEXIST) {
+        return errno;
+    }
+    if (lstat(base, &st) != 0) return errno;
+    if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
+        (st.st_mode & 0777) != 0700) return EPERM;
+    return 0;
+}
+
+int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
+                                           int weight, int *fds, int *slots) {
+    char base[PATH_MAX], dir[PATH_MAX];
+    int e = host_lease_base(base, sizeof(base));
+    if (e) return e;
+    uint64_t h = hash_bytes(UINT64_C(1469598103934665603),
+                            (const unsigned char *)kind);
+    if (snprintf(dir, sizeof(dir), "%s/fo/gremlin/leases/%016llx", base,
+                 (unsigned long long)h) >= (int)sizeof(dir)) return ENAMETOOLONG;
+    e = make_dirs(dir);
+    if (e) return e;
+    return lease_acquire_in_dir_weighted(dir, capacity, weight, fds, slots);
+}
+
+int fo_gremlin_lease_is_busy(int error) {
+    return error == EAGAIN || error == EWOULDBLOCK;
 }
 
 int fo_gremlin_lease_release(int fd) {

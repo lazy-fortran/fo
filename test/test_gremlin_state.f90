@@ -14,6 +14,16 @@ program test_gremlin_state
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: root(*), manifest(*)
         end function fo_c_generation_list_tree
+        integer(c_int) function c_setenv(name, value, overwrite) &
+                bind(C, name='setenv')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: name(*), value(*)
+            integer(c_int), value :: overwrite
+        end function c_setenv
+        integer(c_int) function c_unsetenv(name) bind(C, name='unsetenv')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: name(*)
+        end function c_unsetenv
     end interface
 
     integer :: n_pass = 0, n_fail = 0
@@ -53,6 +63,16 @@ program test_gremlin_state
         call lease_child(trim(lane), trim(ready), trim(gate), trim(result), &
             trim(done))
         stop
+    case ('--host-lease-child')
+        call get_command_argument(2, lane)
+        call get_command_argument(3, arg)
+        call get_command_argument(4, ready)
+        call get_command_argument(5, result)
+        call get_command_argument(6, done)
+        call get_command_argument(7, seen)
+        call host_lease_child(trim(lane), trim(arg), trim(ready), trim(result), &
+            trim(done), trim(seen))
+        stop
     case ('--generation-lease-child')
         call get_command_argument(2, lane)
         call get_command_argument(3, ready)
@@ -67,6 +87,7 @@ program test_gremlin_state
     call test_concurrent_sessions(trim(executable))
     call test_stale_owner_recovery(trim(executable))
     call test_capacity_leases(trim(executable))
+    call test_host_weighted_leases(trim(executable))
     call test_generation_pins(trim(executable))
     call test_bounded_generation_prune()
     call test_root(root)
@@ -254,6 +275,106 @@ contains
         call wait_file(trim(root)//'/lease-3.result.released', 500)
         call wait_file(trim(root)//'/lease-4.result.released', 500)
     end subroutine test_capacity_leases
+
+    subroutine test_host_weighted_leases(exe)
+        character(len=*), intent(in) :: exe
+        character(len=128) :: root, resource
+        character(len=512) :: command, base, ready, result
+        character(len=4096) :: previous_state, isolated_state
+        character(len=12) :: number
+        integer :: i, cmd_status, ierr, count, slot1, slot2, busy
+        integer :: env_status, env_rc
+        integer :: successes, busy_count, slots(2)
+        type(gremlin_lease_t) :: legacy_lease
+        logical :: exists
+
+        call test_root(root)
+        write (resource, '(a,i0)') 'host-weighted-', process_getpid()
+        do i = 1, 3
+            write (base, '(a,"/host-lease-",i0)') trim(root), i
+            write (number, '(i0)') i
+            command = '"'//trim(exe)//'" --host-lease-child '// &
+                trim(resource)//' 1 '//trim(base)//'.ready '// &
+                trim(base)//'.result '//trim(root)//'/state-'//trim(number)//' '// &
+                trim(root)//'/xdg-'//trim(number)// &
+                ' >/dev/null 2>&1 &'
+            call execute_command_line(trim(command), cmdstat=cmd_status)
+            call assert(cmd_status == 0, 'host weighted contender starts')
+        end do
+        successes = 0
+        busy_count = 0
+        do i = 1, 3
+            write (base, '(a,"/host-lease-",i0)') trim(root), i
+            call wait_file(trim(base)//'.ready', 500)
+            call wait_file(trim(base)//'.result', 500)
+            open (newunit=cmd_status, file=trim(base)//'.result', status='old')
+            read (cmd_status, *) ierr, count, slot1, slot2, busy
+            close (cmd_status)
+            if (ierr == 0) then
+                successes = successes + 1
+                if (count == 1 .and. successes <= size(slots)) &
+                    slots(successes) = slot1
+            else if (busy == 1) then
+                busy_count = busy_count + 1
+            end if
+        end do
+        call assert(successes == 2 .and. busy_count == 1, &
+            'three host lease contenders with distinct state/XDG roots admit only two')
+        if (successes == 2) call assert(slots(1) /= slots(2), &
+            'host lease contenders occupy distinct capacity slots')
+        do i = 1, 3
+            write (base, '(a,"/host-lease-",i0)') trim(root), i
+            call wait_file(trim(base)//'.result.released', 1500)
+        end do
+
+        ! Weight two must be acquired atomically and exclude a weight-one owner.
+        base = trim(root)//'/host-heavy'
+        command = '"'//trim(exe)//'" --host-lease-child '//trim(resource)// &
+            ' 2 '//trim(base)//'.ready '//trim(base)//'.result '// &
+            trim(root)//'/heavy-state '//trim(root)//'/heavy-xdg >/dev/null 2>&1 &'
+        call execute_command_line(trim(command), cmdstat=cmd_status)
+        call wait_file(trim(base)//'.ready', 500)
+        call wait_file(trim(base)//'.result', 500)
+        open (newunit=cmd_status, file=trim(base)//'.result', status='old')
+        read (cmd_status, *) ierr, count, slot1, slot2, busy
+        close (cmd_status)
+        call assert(ierr == 0 .and. count == 2 .and. busy == 0 .and. &
+            slot1 /= slot2, 'weight-two admission atomically owns both slots')
+        base = trim(root)//'/host-light'
+        command = '"'//trim(exe)//'" --host-lease-child '//trim(resource)// &
+            ' 1 '//trim(base)//'.ready '//trim(base)//'.result '// &
+            trim(root)//'/light-state '//trim(root)//'/light-xdg >/dev/null 2>&1 &'
+        call execute_command_line(trim(command), cmdstat=cmd_status)
+        call wait_file(trim(base)//'.ready', 500)
+        call wait_file(trim(base)//'.result', 500)
+        open (newunit=cmd_status, file=trim(base)//'.result', status='old')
+        read (cmd_status, *) ierr, count, slot1, slot2, busy
+        close (cmd_status)
+        call assert(ierr /= 0 .and. busy == 1, &
+            'weight-two host lease excludes another contender without partial admission')
+        call wait_file(trim(root)//'/host-heavy.result.released', 1500)
+        call execute_command_line('rm -rf '//trim(root)//'/host-lease-* '// &
+            trim(root)//'/host-heavy* '//trim(root)//'/host-light*')
+
+        call get_environment_variable('FO_GREMLIN_STATE_DIR', previous_state, &
+            status=env_status)
+        isolated_state = trim(root)//'/invalid-capacity-state'
+        env_rc = c_setenv('FO_GREMLIN_STATE_DIR'//c_null_char, &
+            trim(isolated_state)//c_null_char, 1_c_int)
+        call assert(env_rc == 0, 'isolated legacy lease state root is selected')
+        call gremlin_lease_acquire('legacy-invalid-capacity', 0, legacy_lease, &
+            ierr, command)
+        inquire (file=trim(isolated_state), exist=exists)
+        call assert(ierr /= 0 .and. .not. exists, &
+            'legacy invalid capacity is rejected before filesystem side effects')
+        if (env_status == 0) then
+            env_rc = c_setenv('FO_GREMLIN_STATE_DIR'//c_null_char, &
+                trim(previous_state)//c_null_char, 1_c_int)
+        else
+            env_rc = c_unsetenv('FO_GREMLIN_STATE_DIR'//c_null_char)
+        end if
+        call assert(env_rc == 0, 'legacy lease state root is restored')
+    end subroutine test_host_weighted_leases
 
     subroutine test_generation_pins(exe)
         character(len=*), intent(in) :: exe
@@ -540,6 +661,34 @@ contains
         call touch(trim(result_file)//'.released')
     end subroutine lease_child
 
+    subroutine host_lease_child(resource, weight_text, ready_file, result_file, &
+            state_dir, xdg_dir)
+        character(len=*), intent(in) :: resource, weight_text, ready_file, result_file
+        character(len=*), intent(in) :: state_dir, xdg_dir
+        type(gremlin_lease_group_t) :: group
+        character(len=256) :: message
+        integer :: ierr, unit, weight
+        logical :: busy
+
+        read (weight_text, *) weight
+        ierr = int(c_setenv('FO_GREMLIN_STATE_DIR'//c_null_char, &
+            trim(state_dir)//c_null_char, 1_c_int))
+        ierr = int(c_setenv('XDG_CACHE_HOME'//c_null_char, &
+            trim(xdg_dir)//c_null_char, 1_c_int))
+        call gremlin_host_lease_acquire_weighted(trim(resource), 2, &
+            weight, group, busy, ierr, message)
+        open (newunit=unit, file=result_file, status='replace')
+        write (unit, *) ierr, group%count, group%members(1)%slot, &
+            group%members(2)%slot, merge(1, 0, busy)
+        close (unit)
+        call touch(ready_file)
+        if (ierr == 0) then
+            call execute_command_line('sleep 8')
+            call gremlin_host_lease_release(group, ierr, message)
+        end if
+        call touch(trim(result_file)//'.released')
+    end subroutine host_lease_child
+
     subroutine start_session_child(exe, lane_id, ready_file, gate_file, result_file, &
             done_file, seen_file)
         character(len=*), intent(in) :: exe, lane_id, ready_file, gate_file
@@ -629,9 +778,16 @@ contains
     subroutine test_root(root)
         character(len=*), intent(out) :: root
         character(len=64) :: suffix
+        character(len=4096) :: temp_root
+        integer :: env_status
 
         write (suffix, '(i0)') process_getpid()
-        root = '/var/tmp/fo_gremlin_state_test_'//trim(suffix)
+        call get_environment_variable('TMPDIR', temp_root, status=env_status)
+        if (env_status == 0 .and. len_trim(temp_root) > 0) then
+            root = trim(temp_root)//'/fo_gremlin_state_test_'//trim(suffix)
+        else
+            root = '/var/tmp/fo_gremlin_state_test_'//trim(suffix)
+        end if
         call execute_command_line('mkdir -p '//trim(root))
     end subroutine test_root
 

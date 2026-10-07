@@ -11,6 +11,7 @@ module fo_gremlin_execution_view
     private
 
     integer, parameter :: PATH_LEN = 4096, NAME_LEN = 1024
+    integer, save :: execution_view_serial = 0
 
     type, public :: execution_view_t
         character(len=PATH_LEN) :: root = ''
@@ -130,7 +131,7 @@ contains
 
         character(len=PATH_LEN) :: source, destination, alias_root, bundle_path
         character(len=PATH_LEN) :: candidate, published, copy_manifest
-        integer :: root_index, i, j, attempt, copy_rc, clock_count
+        integer :: root_index, i, j, attempt, copy_rc, clock_count, serial
         integer(c_int) :: writable, tree_rc
         logical :: already_materialized
 
@@ -154,11 +155,12 @@ contains
             return
         end if
         call system_clock(clock_count)
+        serial = next_execution_view_serial()
         attempt = 0
         do
             attempt = attempt + 1
-            write(candidate, '(a,"/.building-execution-",i0,"-",i0,"-",i0)') &
-                trim(scratch_parent), process_getpid(), clock_count, attempt
+            write(candidate, '(a,"/.building-execution-",i0,"-",i0,"-",i0,"-",i0)') &
+                trim(scratch_parent), process_getpid(), clock_count, serial, attempt
             if (len_trim(candidate) >= PATH_LEN) then
                 message = 'execution view path exceeds the supported length'
                 return
@@ -381,22 +383,38 @@ contains
         character(len=*), intent(out) :: published
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-        integer :: rc, marker
+        integer :: rc, marker, collision
+        logical :: exists
 
         published = ''
         ierr = 1
         message = 'execution view reservation is invalid'
         marker = index(view%root, '/.building-execution-', back=.true.)
         if (marker == 0) return
-        published = trim(parent)//'/execution-'//view%root(marker + 21:)
-        if (len_trim(published) >= PATH_LEN) then
-            message = 'execution view path exceeds the supported length'
-            return
-        end if
+        collision = 0
+        do
+            if (collision == 0) then
+                published = trim(parent)//'/execution-'//view%root(marker + 21:)
+            else
+                write(published, '(a,"/execution-",a,"-",i0)') trim(parent), &
+                    view%root(marker + 21:len_trim(view%root)), collision
+            end if
+            if (len_trim(published) >= PATH_LEN) then
+                message = 'execution view path exceeds the supported length'
+                return
+            end if
+            inquire (file=trim(published), exist=exists)
+            if (.not. exists) exit
+            collision = collision + 1
+            if (collision >= 32) then
+                call reject_view(view, 'cannot reserve a unique published execution view', &
+                    ierr, message)
+                return
+            end if
+        end do
         rc = fs_rename(trim(view%root), trim(published))
         if (rc /= 0) then
-            call reject_view(view, 'cannot publish owned execution view', &
-                ierr, message)
+            call reject_view(view, 'cannot publish owned execution view', ierr, message)
             return
         end if
         view%root = trim(published)
@@ -409,6 +427,13 @@ contains
         ierr = 0
         message = ''
     end subroutine publish_execution_view
+
+    integer function next_execution_view_serial() result(serial)
+        !$omp critical (fo_execution_view_serial)
+        execution_view_serial = execution_view_serial + 1
+        serial = execution_view_serial
+        !$omp end critical (fo_execution_view_serial)
+    end function next_execution_view_serial
 
     subroutine create_private_scratch(view, ierr, message)
         type(execution_view_t), intent(inout) :: view

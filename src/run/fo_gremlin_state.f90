@@ -9,6 +9,7 @@ module fo_gremlin_state
     integer, parameter, public :: GREMLIN_STATE_TEXT_MAX = 65536
     integer, parameter :: PATH_LEN = 4096, ID_LEN = 128, START_LEN = 64
     integer, parameter :: DRIVER_DIGEST_LEN = 64
+    integer, parameter :: LEASE_GROUP_MAX = 2
 
     type, public :: gremlin_session_t
         character(len=:), allocatable :: state_dir
@@ -32,6 +33,11 @@ module fo_gremlin_state
         integer :: lock_fd = -1
     end type gremlin_lease_t
 
+    type, public :: gremlin_lease_group_t
+        type(gremlin_lease_t) :: members(LEASE_GROUP_MAX)
+        integer :: count = 0
+    end type gremlin_lease_group_t
+
     public :: gremlin_session_acquire, gremlin_session_publish
     public :: gremlin_session_read, gremlin_session_release
     public :: gremlin_session_state_dir
@@ -39,6 +45,7 @@ module fo_gremlin_state
     public :: gremlin_session_request_stop, gremlin_session_stop_requested
     public :: gremlin_session_process_matches
     public :: gremlin_lease_acquire, gremlin_lease_release
+    public :: gremlin_host_lease_acquire_weighted, gremlin_host_lease_release
     public :: gremlin_generation_register_lease_at
     public :: gremlin_generation_lease_acquire_at
     public :: gremlin_generation_pin_at, gremlin_generation_prune_at
@@ -131,6 +138,22 @@ module fo_gremlin_state
             integer(c_int), intent(inout) :: fd, slot
             integer(c_int) :: ierr
         end function c_lease_acquire
+
+        function c_host_lease_acquire_weighted(kind, capacity, weight, fds, slots) &
+                bind(C, name='fo_gremlin_host_lease_acquire_weighted') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: kind(*)
+            integer(c_int), value :: capacity, weight
+            integer(c_int), intent(out) :: fds(*), slots(*)
+            integer(c_int) :: ierr
+        end function c_host_lease_acquire_weighted
+
+        function c_lease_is_busy(ierr) bind(C, name='fo_gremlin_lease_is_busy') &
+                result(is_busy)
+            import :: c_int
+            integer(c_int), value :: ierr
+            integer(c_int) :: is_busy
+        end function c_lease_is_busy
 
         function c_lease_release(fd) &
                 bind(C, name='fo_gremlin_lease_release') result(ierr)
@@ -431,6 +454,61 @@ contains
         lease%slot = int(slot)
         lease%lock_fd = int(fd)
     end subroutine gremlin_lease_acquire
+
+    subroutine gremlin_host_lease_acquire_weighted(resource, capacity, weight, &
+            group, busy, ierr, message)
+        character(len=*), intent(in) :: resource
+        integer, intent(in) :: capacity, weight
+        type(gremlin_lease_group_t), intent(out) :: group
+        logical, intent(out) :: busy
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        integer(c_int) :: fds(LEASE_GROUP_MAX), slots(LEASE_GROUP_MAX), c_error
+        integer :: i
+
+        group = gremlin_lease_group_t()
+        if (weight < 1 .or. weight > LEASE_GROUP_MAX .or. capacity < weight) then
+            busy = .false.
+            ierr = 1
+            message = 'invalid host lease capacity or weight'
+            return
+        end if
+        fds = -1_c_int
+        slots = -1_c_int
+        c_error = c_host_lease_acquire_weighted(trim(resource)//c_null_char, &
+            int(capacity, c_int), int(weight, c_int), fds, slots)
+        ierr = int(c_error)
+        busy = c_lease_is_busy(c_error) /= 0_c_int
+        message = error_text(ierr)
+        if (ierr /= 0) return
+        group%count = weight
+        do i = 1, weight
+            group%members(i)%resource = trim(resource)
+            group%members(i)%slot = int(slots(i))
+            group%members(i)%lock_fd = int(fds(i))
+        end do
+    end subroutine gremlin_host_lease_acquire_weighted
+
+    subroutine gremlin_host_lease_release(group, ierr, message)
+        type(gremlin_lease_group_t), intent(inout) :: group
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        integer :: i, release_error
+        integer(c_int) :: c_error
+
+        ierr = 0
+        message = ''
+        do i = 1, group%count
+            if (group%members(i)%lock_fd < 0) cycle
+            c_error = c_lease_release(int(group%members(i)%lock_fd, c_int))
+            release_error = int(c_error)
+            group%members(i)%lock_fd = -1
+            group%members(i)%slot = -1
+            if (ierr == 0 .and. release_error /= 0) ierr = release_error
+        end do
+        group%count = 0
+        message = error_text(ierr)
+    end subroutine gremlin_host_lease_release
 
     subroutine gremlin_lease_release(lease, ierr, message)
         type(gremlin_lease_t), intent(inout) :: lease
