@@ -150,7 +150,7 @@ contains
             return
         end if
         if (len_trim(project_root) >= PATH_LEN .or. &
-            len_trim(cas_root) + len('/gremlin/generations') + 1 + HASH_LEN + &
+            len_trim(cas_root) + len('/gremlin/generations-v2') + 1 + HASH_LEN + &
             len('/bundle/project') >= PATH_LEN) then
             message = 'generation root path exceeds the supported length'
             return
@@ -237,8 +237,8 @@ contains
             end if
         end do
 
-        call fs_make_dir(trim(cas_root)//'/gremlin/generations')
-        base = trim(cas_root)//'/gremlin/generations'
+        call fs_make_dir(trim(cas_root)//'/gremlin/generations-v2')
+        base = trim(cas_root)//'/gremlin/generations-v2'
         call fs_make_dir(trim(base)//'/.capture')
         call system_clock(clock_count, clock_rate)
         do attempt = 1, 32
@@ -471,7 +471,7 @@ contains
             message = 'cannot resolve the shared immutable object store'
             return
         end if
-        base = trim(cas_root)//'/gremlin/generations'
+        base = trim(cas_root)//'/gremlin/generations-v2'
         cache = trim(base)//'/'//metadata%execution_identity
         if (len_trim(base) + len('/.capture/manifest-') + 64 >= PATH_LEN .or. &
             len_trim(cache) + len('/bundle/project') >= PATH_LEN .or. &

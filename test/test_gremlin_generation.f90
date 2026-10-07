@@ -626,7 +626,7 @@ contains
         manifest = trim(root)//'/atomic-stage.list'
         do attempt = 1, 5000
             rc = fo_c_generation_list_tree(trim(cache_path)// &
-                '/gremlin/generations/.capture'//c_null_char, &
+                '/gremlin/generations-v2/.capture'//c_null_char, &
                 trim(manifest)//c_null_char)
             if (rc == 0) then
                 open (newunit=unit, file=trim(manifest), status='old', &
@@ -639,7 +639,7 @@ contains
                             '/stage/bundle/project/'//trim(relative_file)) == 0) &
                             cycle
                         staged_file = trim(cache_path)// &
-                            '/gremlin/generations/.capture/'//trim(record(7:))
+                            '/gremlin/generations-v2/.capture/'//trim(record(7:))
                         if (file_is_byte_value(trim(staged_file), expected, &
                             n_bytes)) then
                             wait_for_completed_stage_copy = .true.
@@ -800,7 +800,7 @@ contains
         has_staging_entries = .false.
         manifest = trim(root)//'/staging.list'
         rc = fo_c_generation_list_tree(trim(cache_root)// &
-            '/gremlin/generations/.capture'//c_null_char, &
+            '/gremlin/generations-v2/.capture'//c_null_char, &
             trim(manifest)//c_null_char)
         if (rc /= 0) return
         open (newunit=unit, file=trim(manifest), status='old', action='read', &
@@ -819,7 +819,7 @@ contains
         count = 0
         manifest = trim(root)//'/generation-list.txt'
         rc = fo_c_generation_list_tree(trim(cache_root)// &
-            '/gremlin/generations'//c_null_char, trim(manifest)//c_null_char)
+            '/gremlin/generations-v2'//c_null_char, trim(manifest)//c_null_char)
         if (rc /= 0) return
         open (newunit=unit, file=trim(manifest), status='old', action='read', &
             iostat=ios)

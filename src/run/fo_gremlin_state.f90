@@ -39,11 +39,10 @@ module fo_gremlin_state
     public :: gremlin_session_request_stop, gremlin_session_stop_requested
     public :: gremlin_session_process_matches
     public :: gremlin_lease_acquire, gremlin_lease_release
-    public :: gremlin_generation_register, gremlin_generation_lease_acquire
-    public :: gremlin_generation_pin, gremlin_generation_prune
-    public :: gremlin_generation_register_at, gremlin_generation_lease_acquire_at
+    public :: gremlin_generation_register_lease_at
+    public :: gremlin_generation_lease_acquire_at
     public :: gremlin_generation_pin_at, gremlin_generation_prune_at
-    public :: gremlin_generation_root
+    public :: gremlin_generation_prune_inactive
 
     interface
         function c_session_state_dir(project, lane, dir, cap) &
@@ -140,42 +139,13 @@ module fo_gremlin_state
             integer(c_int) :: ierr
         end function c_lease_release
 
-        function c_generation_register(id) &
-                bind(C, name='fo_gremlin_generation_register') result(ierr)
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: id(*)
-            integer(c_int) :: ierr
-        end function c_generation_register
-
-        function c_generation_lease_acquire(id, fd) &
-                bind(C, name='fo_gremlin_generation_lease_acquire') result(ierr)
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: id(*)
-            integer(c_int), intent(out) :: fd
-            integer(c_int) :: ierr
-        end function c_generation_lease_acquire
-
-        function c_generation_pin(id, pinned) &
-                bind(C, name='fo_gremlin_generation_pin') result(ierr)
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: id(*)
-            integer(c_int), value :: pinned
-            integer(c_int) :: ierr
-        end function c_generation_pin
-
-        function c_generation_prune(id) &
-                bind(C, name='fo_gremlin_generation_prune') result(ierr)
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: id(*)
-            integer(c_int) :: ierr
-        end function c_generation_prune
-
-        function c_generation_register_at(root) &
-                bind(C, name='fo_gremlin_generation_register_at') result(ierr)
+        function c_generation_register_lease_at(root, fd) &
+                bind(C, name='fo_gremlin_generation_register_lease_at') result(ierr)
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: root(*)
+            integer(c_int), intent(out) :: fd
             integer(c_int) :: ierr
-        end function c_generation_register_at
+        end function c_generation_register_lease_at
 
         function c_generation_lease_acquire_at(root, fd) &
                 bind(C, name='fo_gremlin_generation_lease_acquire_at') result(ierr)
@@ -200,23 +170,15 @@ module fo_gremlin_state
             integer(c_int) :: ierr
         end function c_generation_prune_at
 
-        function c_generation_root(id, root, cap) &
-                bind(C, name='fo_gremlin_generation_root') result(ierr)
+        function c_generation_prune_candidates(root, paths, slot_size, limit, &
+                min_age) bind(C, name='fo_gremlin_generation_prune_candidates') &
+                result(count)
             import :: c_char, c_int
-            character(kind=c_char), intent(in) :: id(*)
-            character(kind=c_char), intent(out) :: root(*)
-            integer(c_int), value :: cap
-            integer(c_int) :: ierr
-        end function c_generation_root
-
-        function c_generation_recorded_root(id, root, cap) &
-                bind(C, name='fo_gremlin_generation_recorded_root') result(ierr)
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: id(*)
-            character(kind=c_char), intent(out) :: root(*)
-            integer(c_int), value :: cap
-            integer(c_int) :: ierr
-        end function c_generation_recorded_root
+            character(kind=c_char), intent(in) :: root(*)
+            character(kind=c_char), intent(out) :: paths(*)
+            integer(c_int), value :: slot_size, limit, min_age
+            integer(c_int) :: count
+        end function c_generation_prune_candidates
 
         function c_generation_mark_release(root, store, owner) &
                 bind(C, name='fo_gremlin_generation_mark_release') result(ierr)
@@ -225,19 +187,19 @@ module fo_gremlin_state
             integer(c_int) :: ierr
         end function c_generation_mark_release
 
-        function c_generation_pending_release(id, store, store_cap, owner, owner_cap) &
+        function c_generation_pending_release(root, store, store_cap, owner, owner_cap) &
                 bind(C, name='fo_gremlin_generation_pending_release') result(ierr)
             import :: c_char, c_int
-            character(kind=c_char), intent(in) :: id(*)
+            character(kind=c_char), intent(in) :: root(*)
             character(kind=c_char), intent(out) :: store(*), owner(*)
             integer(c_int), value :: store_cap, owner_cap
             integer(c_int) :: ierr
         end function c_generation_pending_release
 
-        function c_generation_forget(id) &
+        function c_generation_forget(root) &
                 bind(C, name='fo_gremlin_generation_forget') result(ierr)
             import :: c_char, c_int
-            character(kind=c_char), intent(in) :: id(*)
+            character(kind=c_char), intent(in) :: root(*)
             integer(c_int) :: ierr
         end function c_generation_forget
 
@@ -490,77 +452,26 @@ contains
         end if
     end subroutine gremlin_lease_release
 
-    subroutine gremlin_generation_register(generation_id, ierr, message)
-        character(len=*), intent(in) :: generation_id
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        integer(c_int) :: c_error
 
-        c_error = c_generation_register(trim(generation_id)//c_null_char)
-        ierr = int(c_error)
-        message = error_text(ierr)
-    end subroutine gremlin_generation_register
 
-    subroutine gremlin_generation_lease_acquire(generation_id, lease, ierr, message)
-        character(len=*), intent(in) :: generation_id
+
+
+    subroutine gremlin_generation_register_lease_at(root, lease, ierr, message)
+        character(len=*), intent(in) :: root
         type(gremlin_lease_t), intent(out) :: lease
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         integer(c_int) :: fd, c_error
 
         fd = -1_c_int
-        c_error = c_generation_lease_acquire(trim(generation_id)//c_null_char, fd)
+        c_error = c_generation_register_lease_at(trim(root)//c_null_char, fd)
         ierr = int(c_error)
         message = error_text(ierr)
         if (ierr /= 0) return
-        lease%resource = 'generation:'//trim(generation_id)
+        lease%resource = 'generation:'//trim(root)
         lease%slot = 0
         lease%lock_fd = int(fd)
-    end subroutine gremlin_generation_lease_acquire
-
-    subroutine gremlin_generation_pin(generation_id, pinned, ierr, message)
-        character(len=*), intent(in) :: generation_id
-        logical, intent(in) :: pinned
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        integer(c_int) :: c_error, c_pinned
-
-        c_pinned = 0_c_int
-        if (pinned) c_pinned = 1_c_int
-        c_error = c_generation_pin(trim(generation_id)//c_null_char, c_pinned)
-        ierr = int(c_error)
-        message = error_text(ierr)
-    end subroutine gremlin_generation_pin
-
-    subroutine gremlin_generation_prune(generation_id, ierr, message)
-        character(len=*), intent(in) :: generation_id
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        character(len=PATH_LEN) :: root
-        character(kind=c_char) :: c_root(PATH_LEN)
-        integer(c_int) :: c_error
-
-        call gremlin_generation_root(generation_id, root, ierr, message)
-        if (ierr /= 0) then
-            c_root = c_null_char
-            c_error = c_generation_recorded_root( &
-                trim(generation_id)//c_null_char, c_root, int(PATH_LEN, c_int))
-            if (c_error /= 0_c_int) return
-            root = c_string(c_root)
-        end if
-        call gremlin_generation_prune_at(trim(root), ierr, message)
-    end subroutine gremlin_generation_prune
-
-    subroutine gremlin_generation_register_at(root, ierr, message)
-        character(len=*), intent(in) :: root
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        integer(c_int) :: c_error
-
-        c_error = c_generation_register_at(trim(root)//c_null_char)
-        ierr = int(c_error)
-        message = error_text(ierr)
-    end subroutine gremlin_generation_register_at
+    end subroutine gremlin_generation_register_lease_at
 
     subroutine gremlin_generation_lease_acquire_at(root, lease, ierr, message)
         character(len=*), intent(in) :: root
@@ -621,7 +532,7 @@ contains
         c_store = c_null_char
         c_owner = c_null_char
         c_error = c_generation_pending_release( &
-            root(slash + 1:len_trim(root))//c_null_char, c_store, &
+            trim(root)//c_null_char, c_store, &
             int(PATH_LEN, c_int), c_owner, int(ID_LEN, c_int))
         pending = c_error == 0_c_int
         if (c_error /= 0_c_int .and. c_error /= 2_c_int) then
@@ -636,7 +547,7 @@ contains
         end if
         if (.not. exists .and. .not. pending) then
             c_error = c_generation_forget( &
-                root(slash + 1:len_trim(root))//c_null_char)
+                trim(root)//c_null_char)
             ierr = int(c_error)
             message = error_text(ierr)
             call c_generation_unlock(lock_fd)
@@ -682,7 +593,7 @@ contains
         end if
         if (ierr == 0) then
             c_error = c_generation_forget( &
-                root(slash + 1:len_trim(root))//c_null_char)
+                trim(root)//c_null_char)
             ierr = int(c_error)
             if (ierr /= 0) message = 'generation pruned but locator cleanup failed'
             if (ierr == 0 .and. legacy_manifest) &
@@ -690,6 +601,41 @@ contains
         end if
         call c_generation_unlock(lock_fd)
     end subroutine gremlin_generation_prune_at
+
+    subroutine gremlin_generation_prune_inactive(anchor, ierr, message, min_age)
+        character(len=*), intent(in) :: anchor
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        integer, intent(in), optional :: min_age
+        integer, parameter :: LIMIT = 8
+        character(kind=c_char) :: roots(PATH_LEN * LIMIT)
+        integer(c_int) :: count
+        integer :: age, i, status
+        character(len=PATH_LEN) :: root, detail
+
+        age = 60
+        if (present(min_age)) age = min_age
+        roots = c_null_char
+        count = c_generation_prune_candidates(trim(anchor)//c_null_char, roots, &
+            int(PATH_LEN, c_int), int(LIMIT, c_int), int(age, c_int))
+        ierr = 0
+        message = ''
+        if (count < 0_c_int) then
+            ierr = -int(count)
+            message = 'cannot list inactive generations: '//error_text(ierr)
+            return
+        end if
+        do i = 1, int(count)
+            root = c_string(roots((i - 1) * PATH_LEN + 1:i * PATH_LEN))
+            call gremlin_generation_prune_at(trim(root), status, detail)
+            if (status == 0 .or. status == 2 .or. status == 16) cycle
+            if (ierr == 0) then
+                ierr = status
+                message = 'cannot prune inactive generation '//trim(root)//': '// &
+                    trim(detail)
+            end if
+        end do
+    end subroutine gremlin_generation_prune_inactive
 
     subroutine read_generation_locator(path, value, ierr)
         character(len=*), intent(in) :: path
@@ -709,22 +655,6 @@ contains
         ierr = 0
     end subroutine read_generation_locator
 
-    subroutine gremlin_generation_root(generation_id, root, ierr, message)
-        character(len=*), intent(in) :: generation_id
-        character(len=*), intent(out) :: root
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        character(kind=c_char) :: c_root(len(root))
-        integer(c_int) :: c_error
-
-        c_root = c_null_char
-        c_error = c_generation_root(trim(generation_id)//c_null_char, c_root, &
-            int(len(root), c_int))
-        ierr = int(c_error)
-        message = error_text(ierr)
-        root = ''
-        if (ierr == 0) root = c_string(c_root)
-    end subroutine gremlin_generation_root
 
     function c_string(buffer) result(value)
         character(kind=c_char), intent(in) :: buffer(:)

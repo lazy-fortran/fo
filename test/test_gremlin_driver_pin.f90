@@ -193,7 +193,7 @@ contains
         size_text = int64_text(expected_size)
         call assert_true(size_status == 0 .and. expected_size > 0_int64, &
             'read the supplied A image size independently')
-        identity_text = read_text(state//'/fo/gremlin/generations/'// &
+        identity_text = read_text(state//'/fo/gremlin/generations-v2/'// &
             next_generation//'/identity.txt')
         call assert_true(index(identity_text, 'driver_digest='//expected_digest) > 0, &
             'generation identity persists the exact A digest')

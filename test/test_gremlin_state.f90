@@ -1,6 +1,5 @@
 program test_gremlin_state
-    use, intrinsic :: iso_c_binding, only: c_associated, c_char, c_int, c_int64_t, &
-        c_null_char, c_ptr
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_int64_t, c_null_char
     use, intrinsic :: iso_fortran_env, only: output_unit
     use fo_cache, only: HASH_LEN
     use fo_gremlin_state
@@ -10,13 +9,6 @@ program test_gremlin_state
     implicit none
 
     interface
-        function c_realpath(path, resolved) bind(C, name='realpath') result(pointer)
-            import :: c_char, c_ptr
-            character(kind=c_char), intent(in) :: path(*)
-            character(kind=c_char), intent(out) :: resolved(*)
-            type(c_ptr) :: pointer
-        end function c_realpath
-
         integer(c_int) function fo_c_generation_list_tree(root, manifest) &
                 bind(C, name='fo_c_generation_list_tree')
             import :: c_char, c_int
@@ -76,6 +68,7 @@ program test_gremlin_state
     call test_stale_owner_recovery(trim(executable))
     call test_capacity_leases(trim(executable))
     call test_generation_pins(trim(executable))
+    call test_bounded_generation_prune()
     call test_root(root)
     call execute_command_line('rm -rf '//trim(root))
 
@@ -265,16 +258,14 @@ contains
     subroutine test_generation_pins(exe)
         character(len=*), intent(in) :: exe
         character(len=256) :: root, project, cache, source, manifest_before
-        character(len=256) :: manifest_after, actual_root, lease_ready
+        character(len=256) :: manifest_after, lease_ready
         character(len=256) :: lease_gate, lease_result
         character(len=256) :: message
         integer :: ierr, u, child_error, ios
         integer(c_int) :: list_rc
-        character(kind=c_char) :: canonical_buffer(4096)
-        character(len=:), allocatable :: canonical_root
-        type(c_ptr) :: canonical_pointer
         type(generation_context_t) :: context
         type(generation_t) :: generation
+        type(gremlin_lease_t) :: lease
         logical :: exists
 
         call test_root(root)
@@ -308,26 +299,17 @@ contains
             trim(manifest_before)//c_null_char)
         call assert(list_rc == 0, 'immutable snapshot manifest is captured')
 
-        call gremlin_generation_register_at(trim(generation%root), ierr, message)
+        call gremlin_generation_register_lease_at(trim(generation%root), &
+            lease, ierr, message)
+        if (ierr == 0) call gremlin_lease_release(lease, ierr, message)
         call assert(ierr == 0, 'actual immutable snapshot registers through sidecar')
-        canonical_buffer = c_null_char
-        canonical_pointer = c_realpath(trim(generation%root)//c_null_char, &
-            canonical_buffer)
-        call assert(c_associated(canonical_pointer), &
-            'snapshot root resolves to its canonical path')
-        canonical_root = c_buffer_string(canonical_buffer)
-        call gremlin_generation_root(trim(generation%identity), actual_root, ierr, message)
-        call assert(ierr == 0 .and. trim(actual_root) == trim(canonical_root), &
-            'generation identity resolves to its canonical snapshot root')
         call gremlin_generation_pin_at(trim(generation%root), .true., ierr, message)
         call assert(ierr == 0, 'immutable generation pins outside the bundle')
-        call gremlin_generation_pin(trim(generation%identity), .true., ierr, message)
-        call assert(ierr == 0, 'generation ID pin resolves to its sidecar')
         call gremlin_generation_prune_at(trim(generation%root), ierr, message)
         call assert(ierr /= 0, 'pinned immutable generation cannot be pruned')
         inquire (file=trim(generation%root), exist=exists)
         call assert(exists, 'pinned immutable generation remains on disk')
-        call gremlin_generation_pin(trim(generation%identity), .false., ierr, message)
+        call gremlin_generation_pin_at(trim(generation%root), .false., ierr, message)
         call assert(ierr == 0, 'immutable generation unpins outside the bundle')
         lease_ready = trim(root)//'/lease.ready'
         lease_gate = trim(root)//'/lease.go'
@@ -342,7 +324,7 @@ contains
         if (ios /= 0) child_error = ios
         call assert(child_error == 0, 'separate process acquires immutable generation lease')
         if (child_error /= 0) return
-        call gremlin_generation_prune(trim(generation%identity), ierr, message)
+        call gremlin_generation_prune_at(trim(generation%root), ierr, message)
         call assert(ierr /= 0, 'active lease prevents immutable generation pruning')
         inquire (file=trim(generation%root), exist=exists)
         call assert(exists, 'leased immutable generation remains on disk')
@@ -359,10 +341,60 @@ contains
         call assert(ierr == 0, 'released immutable generation prunes successfully')
         inquire (file=trim(generation%root), exist=exists)
         call assert(.not. exists, 'successful prune removes sealed snapshot tree')
-        call gremlin_generation_root(trim(generation%identity), actual_root, ierr, message)
+        call gremlin_generation_lease_acquire_at(trim(generation%root), &
+            lease, ierr, message)
         call assert(ierr /= 0, 'pruned generation no longer resolves from sidecar')
         call execute_command_line('rm -rf '//trim(root))
     end subroutine test_generation_pins
+
+    subroutine test_bounded_generation_prune()
+        character(len=256) :: root, base, snapshot, message
+        character(len=12) :: number
+        type(gremlin_lease_t) :: lease
+        integer :: i, ierr, remaining
+        logical :: exists
+
+        call test_root(root)
+        base = trim(root)//'/bounded-generations'
+        call execute_command_line('mkdir -p '//trim(base)//'/.locks')
+        do i = 1, 9
+            write (number, '(i0)') i
+            snapshot = trim(base)//'/snapshot-'//trim(number)
+            call execute_command_line('mkdir -p '//trim(snapshot))
+            call execute_command_line('chmod 555 '//trim(snapshot))
+            call gremlin_generation_register_lease_at(trim(snapshot), lease, &
+                ierr, message)
+            call assert(ierr == 0, 'bounded fixture registers frozen generation')
+            if (ierr /= 0) return
+            call gremlin_lease_release(lease, ierr, message)
+            call assert(ierr == 0, 'bounded fixture releases registration lease')
+            if (ierr /= 0) return
+        end do
+        call gremlin_generation_prune_inactive(trim(base)//'/snapshot-1', &
+            ierr, message, min_age=0)
+        if (ierr /= 0) write (output_unit, '(a,i0,2a)') &
+            '  bounded prune error ', ierr, ': ', trim(message)
+        call assert(ierr == 0, 'bounded inactive scan completes')
+        remaining = 0
+        do i = 1, 9
+            write (number, '(i0)') i
+            inquire (file=trim(base)//'/snapshot-'//trim(number), exist=exists)
+            if (exists) remaining = remaining + 1
+        end do
+        call assert(remaining == 1, 'one scan prunes at most eight generations')
+        call gremlin_generation_prune_inactive(trim(base)//'/snapshot-1', &
+            ierr, message, min_age=0)
+        if (ierr /= 0) write (output_unit, '(a,i0,2a)') &
+            '  bounded retry error ', ierr, ': ', trim(message)
+        call assert(ierr == 0, 'second bounded scan completes')
+        remaining = 0
+        do i = 1, 9
+            write (number, '(i0)') i
+            inquire (file=trim(base)//'/snapshot-'//trim(number), exist=exists)
+            if (exists) remaining = remaining + 1
+        end do
+        call assert(remaining == 0, 'later scan retires remaining generation')
+    end subroutine test_bounded_generation_prune
 
     subroutine generation_lease_child(snapshot_root, ready_file, gate_file, result_file)
         character(len=*), intent(in) :: snapshot_root, ready_file, gate_file
@@ -603,22 +635,6 @@ contains
         call execute_command_line('mkdir -p '//trim(root))
     end subroutine test_root
 
-    function c_buffer_string(buffer) result(value)
-        character(kind=c_char), intent(in) :: buffer(:)
-        character(len=:), allocatable :: value
-
-        integer :: i, n
-
-        n = 0
-        do i = 1, size(buffer)
-            if (buffer(i) == c_null_char) exit
-            n = n + 1
-        end do
-        allocate (character(len=n) :: value)
-        do i = 1, n
-            value(i:i) = buffer(i)
-        end do
-    end function c_buffer_string
 
     subroutine touch(file)
         character(len=*), intent(in) :: file

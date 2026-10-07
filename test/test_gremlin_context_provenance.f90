@@ -287,7 +287,7 @@ contains
         character(:), allocatable :: generation_root, store_root, manifest_id
         integer :: ierr
 
-        generation_root = state//'/fo/gremlin/generations/'//trim(generation_id)
+        generation_root = state//'/fo/gremlin/generations-v2/'//trim(generation_id)
         store_root = first_line(read_text(generation_root//'/store.root'))
         manifest_id = first_line(read_text(generation_root//'/manifest.id'))
         call generation_manifest_load(store_root, manifest_id, value, &

@@ -1,9 +1,10 @@
 module fo_gremlin_supervisor
-    use, intrinsic :: iso_fortran_env, only: int64
+    use, intrinsic :: iso_fortran_env, only: int64, error_unit
     use fo_build_backend, only: BACKEND_NATIVE, backend_t, detect_backend
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_check, only: fo_changed_modules
-    use fo_gremlin_context, only: capture_candidate, generation_inventory_restore
+    use fo_gremlin_context, only: capture_candidate, generation_inventory_restore, &
+        common_generation_cas_root
     use fo_gremlin_request, only: gremlin_request_t, parse_request, is_hex_digest, &
         gremlin_json_field
     use fo_test_impact, only: test_impact_case_t, test_impact_result_t, &
@@ -46,7 +47,8 @@ module fo_gremlin_supervisor
         gremlin_session_request_stop, gremlin_session_stop_requested, &
         gremlin_lease_release, &
         gremlin_generation_lease_acquire_at, gremlin_generation_pin_at, &
-        gremlin_generation_root, GREMLIN_STATE_TEXT_MAX
+        gremlin_generation_prune_inactive, &
+        GREMLIN_STATE_TEXT_MAX
     use fo_gfortran_build, only: gfortran_selected_test_names
     use fo_scan, only: is_slow_test
     use fo_test_budget, only: test_budget_seconds, test_wall_cap_seconds
@@ -262,9 +264,9 @@ contains
         call argv_push(packed, n_args, 'run')
         call argv_push(packed, n_args, '--dir')
         call argv_push(packed, n_args, trim(project_dir))
-        call argv_push(packed, n_args, '--lane-id')
+        call argv_push(packed, n_args, '--lane')
         call argv_push(packed, n_args, trim(request%lane_id))
-        call argv_push(packed, n_args, '--random-count')
+        call argv_push(packed, n_args, '--random')
         call argv_push(packed, n_args, int_text(request%random_count))
         call argv_push(packed, n_args, '--seed')
         call argv_push(packed, n_args, int_text(request%seed))
@@ -1097,7 +1099,7 @@ contains
             exitcode = 2
             return
         end if
-        call gremlin_generation_root(trim(active_identity), generation_root, ierr, message)
+        call common_generation_cas_root(generation_root, ierr, message)
         if (ierr /= 0) then
             call release_if_owner(session, release_error, cleanup_message)
             call error_response('reproduce', 'cannot resolve requested generation: '// &
@@ -1105,6 +1107,8 @@ contains
             exitcode = 2
             return
         end if
+        generation_root = trim(generation_root)//'/gremlin/generations-v2/'// &
+            trim(active_identity)
         active_project = trim(generation_root)//'/bundle/project'
         generation%identity = active_identity
         generation%root = generation_root
@@ -1441,6 +1445,7 @@ contains
             return
         end if
         call capture_candidate(project_dir, driver_pin, candidate_generation, &
+            candidate_lease, &
             capture_ok, registration_error, message, change_watch=change_watch)
         if (registration_error /= 0) then
             fatal_error = .true.
@@ -1448,14 +1453,7 @@ contains
         end if
         if (capture_ok .and. registration_error == 0) then
             have_candidate = .true.
-            call gremlin_generation_lease_acquire_at(candidate_generation%root, &
-                candidate_lease, ierr, message)
-            if (ierr /= 0) then
-                fatal_error = .true.
-                fatal_message = 'cannot lease captured generation: '//trim(message)
-            else
-                have_candidate_lease = .true.
-            end if
+            have_candidate_lease = .true.
             if (.not. fatal_error) then
                 call start_build(session, candidate_generation, build_child, ierr, message)
                 if (ierr /= 0) then
@@ -1822,6 +1820,15 @@ contains
             call fs_remove_tree(trim(active_generation%build_project_root))
             active_generation%build_project_root = ''
         end if
+        if (len_trim(candidate_generation%root) > 0) then
+            call gremlin_generation_prune_inactive(candidate_generation%root, &
+                state_error, state_message)
+        else if (len_trim(active_generation%root) > 0) then
+            call gremlin_generation_prune_inactive(active_generation%root, &
+                state_error, state_message)
+        end if
+        if (state_error /= 0) write (error_unit, '(a)') &
+            'Gremlin generation cleanup: '//trim(state_message)
         call simple_response('run', request%lane_id, session%session_id, 'stopped', response)
     end subroutine run_owner
 
@@ -1853,6 +1860,7 @@ contains
         character(len=*), intent(out) :: message
 
         type(generation_t) :: current
+        type(gremlin_lease_t) :: current_lease
         character(len=PATH_LEN) :: changed_path
         logical :: ok, got_event
         integer(int64) :: now_ms
@@ -1885,7 +1893,7 @@ contains
         end if
         if (capture_debounce_ms <= 0_int64 .or. now_ms < capture_debounce_ms) return
         capture_debounce_ms = 0_int64
-        call capture_candidate(project_dir, driver_pin, current, ok, &
+        call capture_candidate(project_dir, driver_pin, current, current_lease, ok, &
             release_error, message, change_watch)
         if (release_error /= 0) then
             ierr = release_error
@@ -1897,7 +1905,11 @@ contains
             return
         end if
         if (have_candidate) then
-            if (current%identity == candidate%identity) return
+            if (current%identity == candidate%identity) then
+                call gremlin_lease_release(current_lease, release_error, message)
+                if (release_error /= 0) ierr = release_error
+                return
+            end if
             if (build_child%pid > 0) then
                 call cancel_owned_process(build_child%pid, ierr)
                 if (ierr /= 0) then
@@ -1919,22 +1931,26 @@ contains
         end if
         if (have_active) then
             if (current%identity == active%identity) then
+                call gremlin_lease_release(current_lease, release_error, message)
+                if (release_error /= 0) then
+                    ierr = release_error
+                    return
+                end if
                 request%input_changed = .false.
                 call publish_state(session, request, 'testing', active, current, &
                     current_case, completed, selected_count, seed, 'NONE', 0, ierr, message)
                 return
             end if
         end if
-        if (current%identity == last_failed) return
-        candidate = current
-        have_candidate = .true.
-        call gremlin_generation_lease_acquire_at(candidate%root, candidate_lease, &
-            ierr, message)
-        if (ierr /= 0) then
-            have_candidate = .false.
-            message = 'cannot lease candidate generation: '//trim(message)
+        if (current%identity == last_failed) then
+            call gremlin_lease_release(current_lease, release_error, message)
+            if (release_error /= 0) ierr = release_error
             return
         end if
+        candidate = current
+        have_candidate = .true.
+        candidate_lease = current_lease
+        current_lease%lock_fd = -1
         have_candidate_lease = .true.
         call start_build(session, candidate, build_child, spawn_error, message)
         if (spawn_error /= 0) then
@@ -2225,6 +2241,12 @@ contains
         call publish_state(session, request, state_name, active, candidate, &
             current_test_name(selected, selected_count), completed, selected_count, &
             seed, 'NONE', 0, ierr, message)
+        if (ierr == 0 .and. was_active) then
+            call gremlin_generation_prune_inactive(active%root, state_status, &
+                release_message)
+            if (state_status /= 0) write (error_unit, '(a)') &
+                'Gremlin generation cleanup: '//trim(release_message)
+        end if
     end subroutine complete_build
 
     subroutine compute_generation_impact(baseline, candidate, request)

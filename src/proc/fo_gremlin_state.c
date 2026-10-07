@@ -578,22 +578,6 @@ static int remove_generated_tree(const char *path) {
     return rmdir(path) == 0 ? 0 : errno;
 }
 
-static int generation_base(char *base, size_t cap) {
-    const char *value = getenv("FO_GREMLIN_STATE_DIR");
-    if (!value || !*value) value = getenv("XDG_CACHE_HOME");
-    char fallback[PATH_MAX];
-    if (!value || !*value) {
-        const char *home = getenv("HOME");
-        if (!home || !*home) return ENOENT;
-        if (snprintf(fallback, sizeof(fallback), "%s/.cache", home) >= (int)sizeof(fallback))
-            return ENAMETOOLONG;
-        value = fallback;
-    }
-    if (snprintf(base, cap, "%s/fo/gremlin/generation-state", value) >= (int)cap)
-        return ENAMETOOLONG;
-    return make_dirs(base);
-}
-
 static int valid_generation_id(const char *id) {
     size_t n = strlen(id);
     if (n == 0 || n > 120) return 0;
@@ -605,32 +589,106 @@ static int valid_generation_id(const char *id) {
     return 1;
 }
 
-static int generation_state_path_id(const char *id, char *dir, size_t cap) {
-    char base[PATH_MAX];
-    int e;
-    if (!valid_generation_id(id)) return EINVAL;
-    e = generation_base(base, sizeof(base));
-    if (e) return e;
-    if (snprintf(dir, cap, "%s/%s", base, id) >= (int)cap) return ENAMETOOLONG;
-    return make_dirs(dir);
-}
+static int read_generation_root(const char *dir, char *root, size_t cap);
 
 static int generation_state_path(const char *root, char *dir, size_t cap,
                                  char *canonical, size_t canonical_cap) {
     struct stat st;
-    char resolved[PATH_MAX];
-    const char *id;
+    char resolved[PATH_MAX], parent[PATH_MAX], parent_real[PATH_MAX];
+    const char *id, *slash;
     int e;
-    if (!realpath(root, resolved)) return errno;
+    if (!root || root[0] != '/') return EINVAL;
+    slash = strrchr(root, '/');
+    if (!slash || !valid_generation_id(slash + 1)) return EINVAL;
+    if (realpath(root, resolved)) {
+        if (lstat(resolved, &st) != 0) return errno;
+        if (!S_ISDIR(st.st_mode) || (st.st_mode & 0222) != 0) return EPERM;
+    } else {
+        if (errno != ENOENT) return errno;
+        if ((size_t)(slash - root) >= sizeof(parent)) return ENAMETOOLONG;
+        memcpy(parent, root, (size_t)(slash - root));
+        parent[slash - root] = '\0';
+        if (!realpath(parent, parent_real)) return errno;
+        if (snprintf(resolved, sizeof(resolved), "%s/%s", parent_real,
+                     slash + 1) >= (int)sizeof(resolved)) return ENAMETOOLONG;
+    }
     if (strlen(resolved) + 1 > canonical_cap) return ENAMETOOLONG;
-    if (lstat(resolved, &st) != 0) return errno;
-    if (!S_ISDIR(st.st_mode) || (st.st_mode & 0222) != 0) return EPERM;
     id = strrchr(resolved, '/');
     id = id ? id + 1 : resolved;
     if (!valid_generation_id(id)) return EINVAL;
     strcpy(canonical, resolved);
-    e = generation_state_path_id(id, dir, cap);
+    slash = strrchr(resolved, '/');
+    if (snprintf(dir, cap, "%.*s/.state/%s", (int)(slash - resolved),
+                 resolved, id) >= (int)cap) return ENAMETOOLONG;
+    e = make_dirs(dir);
     return e;
+}
+
+/* Return at most limit inactive candidates from this materialization's store.
+   Each path occupies one PATH_MAX-sized slot in roots.  The pruning operation
+   rechecks the guard, pin, and lease after this advisory scan. */
+int fo_gremlin_generation_prune_candidates(const char *anchor, char *roots,
+                                           int slot_size, int limit,
+                                           int min_age_seconds) {
+    char dir[PATH_MAX], canonical[PATH_MAX], base[PATH_MAX];
+    int e = generation_state_path(anchor, dir, sizeof(dir), canonical,
+                                  sizeof(canonical));
+    if (e) return -e;
+    if (!roots || slot_size < PATH_MAX || limit < 1 || limit > 32 ||
+        min_age_seconds < 0) return -EINVAL;
+    char *slash = strrchr(dir, '/');
+    if (!slash) return -EINVAL;
+    size_t nbase = (size_t)(slash - dir);
+    memcpy(base, dir, nbase);
+    base[nbase] = '\0';
+    DIR *stream = opendir(base);
+    if (!stream) return -errno;
+    int count = 0, scan_error = 0;
+    time_t now = time(NULL);
+    struct dirent *entry;
+    while (count < limit) {
+        errno = 0;
+        entry = readdir(stream);
+        if (!entry) { scan_error = errno; break; }
+        if (!valid_generation_id(entry->d_name)) continue;
+        char sidecar[PATH_MAX], record[PATH_MAX], pinned[PATH_MAX];
+        char lease[PATH_MAX], pending[PATH_MAX], stored[PATH_MAX + 1];
+        struct stat st;
+        if (snprintf(sidecar, sizeof(sidecar), "%s/%s", base, entry->d_name) >=
+                (int)sizeof(sidecar) ||
+            snprintf(record, sizeof(record), "%s/registered", sidecar) >=
+                (int)sizeof(record) ||
+            snprintf(pinned, sizeof(pinned), "%s/pinned", sidecar) >=
+                (int)sizeof(pinned) ||
+            snprintf(lease, sizeof(lease), "%s/lease.lock", sidecar) >=
+                (int)sizeof(lease) ||
+            snprintf(pending, sizeof(pending), "%s/pending-root-release", sidecar) >=
+                (int)sizeof(pending)) continue;
+        if (lstat(sidecar, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        int has_pending = lstat(pending, &st) == 0 && S_ISREG(st.st_mode);
+        if (lstat(record, &st) == 0 && S_ISREG(st.st_mode)) {
+            if (now < st.st_mtime || now - st.st_mtime < min_age_seconds) continue;
+        } else if (!has_pending) continue;
+        if (lstat(pinned, &st) == 0) continue;
+        if (read_generation_root(sidecar, stored, sizeof(stored)) != 0) continue;
+        char expected[PATH_MAX];
+        if (snprintf(expected, sizeof(expected), "%.*s/%s",
+                     (int)(nbase - strlen("/.state")), base, entry->d_name) >=
+            (int)sizeof(expected)) continue;
+        if (strcmp(stored, expected) != 0) continue;
+        int fd = open(lease, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+        if (fd < 0) continue;
+        int idle = flock(fd, LOCK_EX | LOCK_NB) == 0;
+        if (idle) flock(fd, LOCK_UN);
+        close(fd);
+        if (!idle) continue;
+        memcpy(roots + (size_t)count * (size_t)slot_size,
+               stored, strlen(stored) + 1);
+        ++count;
+    }
+    if (closedir(stream) != 0 && scan_error == 0) scan_error = errno;
+    if (scan_error != 0) return -scan_error;
+    return count;
 }
 
 static int read_generation_root(const char *dir, char *root, size_t cap) {
@@ -666,22 +724,7 @@ static int generation_valid_at(const char *dir, const char *canonical) {
     return lstat(marker, &st) == 0 && S_ISREG(st.st_mode);
 }
 
-static int generation_resolve(const char *id, char *root, size_t cap) {
-    char dir[PATH_MAX], stored[PATH_MAX + 1], resolved[PATH_MAX];
-    struct stat st;
-    int e = generation_state_path_id(id, dir, sizeof(dir));
-    if (e) return e;
-    e = read_generation_root(dir, stored, sizeof(stored));
-    if (e) return e;
-    if (strlen(stored) + 1 > cap) return ENAMETOOLONG;
-    if (!realpath(stored, resolved)) return errno;
-    if (strcmp(stored, resolved) != 0 || !generation_valid_at(dir, resolved)) return ENOENT;
-    if (lstat(resolved, &st) != 0) return errno;
-    strcpy(root, resolved);
-    return 0;
-}
-
-static int generation_register_path(const char *root) {
+static int generation_register_path(const char *root, int *lease_fd) {
     char dir[PATH_MAX], canonical[PATH_MAX], guard[PATH_MAX], record[PATH_MAX + 1];
     struct stat st;
     int e = generation_state_path(root, dir, sizeof(dir), canonical, sizeof(canonical));
@@ -703,9 +746,23 @@ static int generation_register_path(const char *root) {
             else e = atomic_write_file(dir, "root", record, (size_t)n);
         }
     }
-    if (e == 0) e = atomic_write_file(dir, "registered", "generation-v1\n", 14);
+    if (e == 0 && !generation_valid_at(dir, canonical))
+        e = atomic_write_file(dir, "registered", "generation-v1\n", 14);
     if (e == 0) e = sync_directory(dir);
     if (lstat(canonical, &st) != 0 && e == 0) e = errno;
+    if (e == 0) {
+        char lease[PATH_MAX];
+        if (snprintf(lease, sizeof(lease), "%s/lease.lock", dir) >=
+            (int)sizeof(lease)) e = ENAMETOOLONG;
+        else {
+            int lfd = open(lease, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+            if (lfd < 0) e = errno;
+            else if (flock(lfd, LOCK_SH | LOCK_NB) != 0) {
+                e = errno;
+                close(lfd);
+            } else *lease_fd = lfd;
+        }
+    }
     flock(fd, LOCK_UN);
     close(fd);
     return e;
@@ -808,16 +865,6 @@ static int generation_prune_path(const char *root) {
     return e;
 }
 
-/* Keep the root locator after prune until Fo has released its durable Fx roots.
-   A repeated prune can then finish a release interrupted by process death. */
-int fo_gremlin_generation_recorded_root(const char *id, char *root, int cap) {
-    char dir[PATH_MAX];
-    int e;
-    if (cap < 2) return EINVAL;
-    e = generation_state_path_id(id, dir, sizeof(dir));
-    return e == 0 ? read_generation_root(dir, root, (size_t)cap) : e;
-}
-
 int fo_gremlin_generation_mark_release(const char *root, const char *store,
                                        const char *owner) {
     char dir[PATH_MAX], canonical[PATH_MAX], guard[PATH_MAX], record[PATH_MAX + 128];
@@ -844,11 +891,13 @@ int fo_gremlin_generation_mark_release(const char *root, const char *store,
     return e;
 }
 
-int fo_gremlin_generation_pending_release(const char *id, char *store,
+int fo_gremlin_generation_pending_release(const char *root, char *store,
                                           int store_cap, char *owner, int owner_cap) {
-    char dir[PATH_MAX], path[PATH_MAX], record[PATH_MAX + 128];
+    char dir[PATH_MAX], canonical[PATH_MAX], path[PATH_MAX];
+    char record[PATH_MAX + 128];
     char *separator, *end;
-    int e = generation_state_path_id(id, dir, sizeof(dir));
+    int e = generation_state_path(root, dir, sizeof(dir), canonical,
+                                  sizeof(canonical));
     if (e) return e;
     if (store_cap < 2 || owner_cap < 65 ||
         snprintf(path, sizeof(path), "%s/pending-root-release", dir) >=
@@ -874,18 +923,21 @@ int fo_gremlin_generation_pending_release(const char *id, char *store,
     return 0;
 }
 
-int fo_gremlin_generation_forget(const char *id) {
-    char dir[PATH_MAX], guard[PATH_MAX], root[PATH_MAX], path[PATH_MAX];
+int fo_gremlin_generation_forget(const char *root) {
+    char dir[PATH_MAX], canonical[PATH_MAX], guard[PATH_MAX], path[PATH_MAX];
+    char recorded[PATH_MAX + 1];
     struct stat st;
-    int e = generation_state_path_id(id, dir, sizeof(dir));
+    int e = generation_state_path(root, dir, sizeof(dir), canonical,
+                                  sizeof(canonical));
     if (e) return e;
     if (snprintf(guard, sizeof(guard), "%s/guard.lock", dir) >= (int)sizeof(guard))
         return ENAMETOOLONG;
     int fd = open(guard, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
     if (fd < 0) return errno;
     if (flock(fd, LOCK_EX) != 0) { e = errno; close(fd); return e; }
-    e = read_generation_root(dir, root, sizeof(root));
-    if (e == 0 && lstat(root, &st) == 0) e = EBUSY;
+    e = read_generation_root(dir, recorded, sizeof(recorded));
+    if (e == 0 && strcmp(recorded, canonical) != 0) e = EEXIST;
+    if (e == 0 && lstat(recorded, &st) == 0) e = EBUSY;
     if (e == 0 && errno != ENOENT) e = errno;
     if (e == 0) {
         if (snprintf(path, sizeof(path), "%s/pending-root-release", dir) >=
@@ -903,13 +955,10 @@ int fo_gremlin_generation_forget(const char *id) {
     return e;
 }
 
-int fo_gremlin_generation_register_at(const char *root) {
-    return generation_register_path(root);
-}
-
-int fo_gremlin_generation_root(const char *id, char *root, int cap) {
-    if (cap < 2) return EINVAL;
-    return generation_resolve(id, root, (size_t)cap);
+int fo_gremlin_generation_register_lease_at(const char *root, int *fdout) {
+    if (!fdout) return EINVAL;
+    *fdout = -1;
+    return generation_register_path(root, fdout);
 }
 
 int fo_gremlin_generation_lease_acquire_at(const char *root, int *fdout) {
@@ -922,28 +971,4 @@ int fo_gremlin_generation_pin_at(const char *root, int pinned) {
 
 int fo_gremlin_generation_prune_at(const char *root) {
     return generation_prune_path(root);
-}
-
-int fo_gremlin_generation_register(const char *id) {
-    char root[PATH_MAX];
-    int e = generation_resolve(id, root, sizeof(root));
-    return e == 0 ? generation_register_path(root) : e;
-}
-
-int fo_gremlin_generation_lease_acquire(const char *id, int *fdout) {
-    char root[PATH_MAX];
-    int e = generation_resolve(id, root, sizeof(root));
-    return e == 0 ? generation_lease_path(root, fdout) : e;
-}
-
-int fo_gremlin_generation_pin(const char *id, int pinned) {
-    char root[PATH_MAX];
-    int e = generation_resolve(id, root, sizeof(root));
-    return e == 0 ? generation_pin_path(root, pinned) : e;
-}
-
-int fo_gremlin_generation_prune(const char *id) {
-    char root[PATH_MAX];
-    int e = generation_resolve(id, root, sizeof(root));
-    return e == 0 ? generation_prune_path(root) : e;
 }

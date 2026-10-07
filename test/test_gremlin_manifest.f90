@@ -10,9 +10,9 @@ program test_gremlin_manifest
         generation_capture
     use fo_generation_manifest, only: generation_manifest_metadata_t, &
         generation_manifest_materialize
-    use fo_gremlin_state, only: gremlin_generation_register_at, &
+    use fo_gremlin_state, only: gremlin_generation_register_lease_at, &
         gremlin_generation_pin_at, gremlin_generation_prune_at, &
-        gremlin_generation_prune
+        gremlin_generation_prune_inactive, gremlin_lease_t, gremlin_lease_release
     use fx_immutable_store, only: immutable_store_t, immutable_lease_t, &
         immutable_store_init, immutable_store_graph_read_lease_acquire, &
         immutable_store_lease_release, IMMUTABLE_OK, IMMUTABLE_MISSING
@@ -283,8 +283,20 @@ program test_gremlin_manifest
 
 contains
 
+    subroutine register_generation(path, status, detail)
+        character(len=*), intent(in) :: path
+        integer, intent(out) :: status
+        character(len=*), intent(out) :: detail
+        type(gremlin_lease_t) :: lease
+
+        call gremlin_generation_register_lease_at(path, lease, status, detail)
+        if (status /= 0) return
+        call gremlin_lease_release(lease, status, detail)
+    end subroutine register_generation
+
     subroutine verify_root_lifecycle()
         type(immutable_store_t) :: store
+        type(gremlin_lease_t) :: other_lease
         character(len=512) :: failed_stage
         character(len=512) :: owner_path(1)
         character(len=HASH_LEN) :: failed_owner
@@ -293,14 +305,11 @@ contains
         local_status = c_setenv('FO_CACHE_DIR'//c_null_char, &
             trim(cache)//c_null_char, 1_c_int)
         call require(local_status == 0, 'root oracle uses the first Fx store')
-        local_status = c_setenv('FO_GREMLIN_STATE_DIR'//c_null_char, &
-            trim(root)//'/state'//c_null_char, 1_c_int)
-        call require(local_status == 0, 'root oracle isolates generation sidecars')
         call immutable_store_init(store, trim(first%store_root), local_status)
         call require(local_status == IMMUTABLE_OK, &
             'shared Fx store opens for lifecycle oracle')
         if (local_status /= IMMUTABLE_OK) return
-        call gremlin_generation_register_at(trim(first%root), local_status, message)
+        call register_generation(trim(first%root), local_status, message)
         call require(local_status == 0, 'first generation registers for pruning')
         call assert_generation_root(store, first, .true., &
             'first generation owns durable Fx roots')
@@ -315,6 +324,10 @@ contains
             'two worktrees have separate materializations of the same version')
         call assert_generation_root(store, other_worktree, .true., &
             'second worktree independently owns Fx roots')
+        call gremlin_generation_register_lease_at(trim(other_worktree%root), &
+            other_lease, local_status, message)
+        call require(local_status == 0, &
+            'same-version worktree registers and leases independently')
 
         call gremlin_generation_pin_at(trim(first%root), .true., &
             local_status, message)
@@ -326,19 +339,22 @@ contains
         call gremlin_generation_pin_at(trim(first%root), .false., &
             local_status, message)
         call require(local_status == 0, 'first generation can be unpinned')
-        call gremlin_generation_prune_at(trim(first%root), local_status, message)
+        call gremlin_generation_prune_inactive(trim(first%root), local_status, &
+            message, min_age=3600)
+        call require(local_status == 0, 'young generation scan succeeds')
+        call assert_generation_root(store, first, .true., &
+            'age floor preserves young generation roots')
+        call gremlin_generation_prune_inactive(trim(first%root), local_status, &
+            message, min_age=0)
         call require(local_status == 0, &
-            'unprotected first generation prunes: '//trim(message))
+            'inactive first generation prunes: '//trim(message))
         call assert_generation_root(store, first, .false., &
             'pruned generation releases its Fx roots')
         call assert_generation_root(store, other_worktree, .true., &
             'pruning one worktree preserves the other worktree roots')
-        call gremlin_generation_register_at(trim(other_worktree%root), &
-            local_status, message)
-        call require(local_status == 0, 'second worktree generation registers')
 
-        call fs_make_dir(trim(cache_failed)//'/gremlin/generations/.capture')
-        failed_stage = trim(cache_failed)//'/gremlin/generations/.capture'
+        call fs_make_dir(trim(cache_failed)//'/gremlin/generations-v2/.capture')
+        failed_stage = trim(cache_failed)//'/gremlin/generations-v2/.capture'
         local_status = c_chmod(trim(failed_stage)//c_null_char, 365_c_int)
         call require(local_status == 0, 'failure fixture makes capture stage read-only')
         context%flags = 'failed-publication-oracle'
@@ -356,6 +372,11 @@ contains
 
         call gremlin_generation_prune_at(trim(other_worktree%root), &
             local_status, message)
+        call require(local_status /= 0, 'second worktree lease prevents prune')
+        call gremlin_lease_release(other_lease, local_status, message)
+        call require(local_status == 0, 'second worktree lease releases')
+        call gremlin_generation_prune_at(trim(other_worktree%root), &
+            local_status, message)
         call require(local_status == 0, 'second worktree generation prunes')
         call assert_generation_root(store, other_worktree, .false., &
             'second worktree releases its own roots')
@@ -364,7 +385,7 @@ contains
             legacy_worktree, local_status, message)
         call require(local_status == 0, 'legacy-shaped generation captures')
         if (local_status /= 0) return
-        call gremlin_generation_register_at(trim(legacy_worktree%root), &
+        call register_generation(trim(legacy_worktree%root), &
             local_status, message)
         call require(local_status == 0, 'legacy-shaped generation registers')
         local_status = c_chmod(trim(legacy_worktree%root)//c_null_char, 493_c_int)
@@ -385,7 +406,7 @@ contains
             crash_worktree, local_status, message)
         call require(local_status == 0, 'crash recovery generation captures')
         if (local_status /= 0) return
-        call gremlin_generation_register_at(trim(crash_worktree%root), &
+        call register_generation(trim(crash_worktree%root), &
             local_status, message)
         call require(local_status == 0, 'crash recovery generation registers')
         call read_root_owner(crash_worktree, failed_owner, local_status)
@@ -398,7 +419,8 @@ contains
         call require(local_status == 0, 'simulated crash follows materialization prune')
         call assert_root_owner(store, failed_owner, .true., &
             'crash window retains pending durable root')
-        call gremlin_generation_prune(crash_worktree%identity, local_status, message)
+        call gremlin_generation_prune_at(trim(crash_worktree%root), &
+            local_status, message)
         call require(local_status == 0, &
             'repeated prune completes interrupted Fx release: '//trim(message))
         call assert_root_owner(store, failed_owner, .false., &

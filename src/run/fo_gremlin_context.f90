@@ -10,7 +10,7 @@ module fo_gremlin_context
     use fo_driver, only: driver_pin_t
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, input_inventory_declarations_from_config
-    use fo_gremlin_state, only: gremlin_generation_register_at
+    use fo_gremlin_state, only: gremlin_generation_register_lease_at, gremlin_lease_t
     use fo_change_watch, only: change_watch_t, change_watch_add_context
     use fo_process, only: argv_push, process_cancel_pid, process_poll_pid, &
         process_start_argv_logged
@@ -22,14 +22,16 @@ module fo_gremlin_context
     integer, parameter :: PATH_LEN = 4096
 
     public :: capture_candidate, generation_inventory_restore
+    public :: common_generation_cas_root
 
 contains
 
-    subroutine capture_candidate(project_dir, driver_pin, generation, ok, &
+    subroutine capture_candidate(project_dir, driver_pin, generation, lease, ok, &
             registration_error, message, change_watch)
         character(len=*), intent(in) :: project_dir
         type(driver_pin_t), intent(in) :: driver_pin
         type(generation_t), intent(out) :: generation
+        type(gremlin_lease_t), intent(out) :: lease
         logical, intent(out) :: ok
         integer, intent(out) :: registration_error
         character(len=*), intent(out) :: message
@@ -88,7 +90,7 @@ contains
         call generation_inventory_restore(generation, ierr, watch_message)
         ! Inventory failure does not invalidate immutable source/build evidence.
         ! Consumers must inspect input_inventory_complete and its diagnostic.
-        call gremlin_generation_register_at(generation%root, ierr, message)
+        call gremlin_generation_register_lease_at(generation%root, lease, ierr, message)
         ok = ierr == 0
         if (ierr /= 0) registration_error = ierr
         if (.not. ok) return

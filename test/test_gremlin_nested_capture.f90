@@ -251,13 +251,13 @@ contains
     function generation_identity(value) result(path)
         character(len=*), intent(in) :: value
         character(:), allocatable :: path
-        path = state//'/fo/gremlin/generations/'//trim(value)//'/identity.txt'
+        path = state//'/fo/gremlin/generations-v2/'//trim(value)//'/identity.txt'
     end function generation_identity
 
     function generation_project(value) result(path)
         character(len=*), intent(in) :: value
         character(:), allocatable :: path
-        path = state//'/fo/gremlin/generations/'//trim(value)//'/bundle/project'
+        path = state//'/fo/gremlin/generations-v2/'//trim(value)//'/bundle/project'
     end function generation_project
 
     function identity_line(document, prefix) result(line)
