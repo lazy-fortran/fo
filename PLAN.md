@@ -30,6 +30,15 @@ passed the public MCP request structure case 1/1 and resident session
 `3510542-1791380001-608643440` passed its required case 1/1 on generation
 `4313ebbf80feeb7bc7a545d9b88a1f219e0fa08c1c6214227d6a7d56cf662296`
 with `local_gate_green=true`. Further #205 reduction remains open.
+Fo #132's existing cold and warm dispatcher routes passed an added public
+negative check: a stale private case executable cannot replace the shared
+dispatcher. Candidate `3955210`, driver SHA256
+`6e3f3c38bd475a889ab5a3dbbc2225aecec7ad3f82dfb66e347cd0ad891d8dc8`,
+passed the direct case 1/1 and resident session `3629199-1791381968-197556150`
+passed its required case 1/1 on generation
+`727dd1fd06319203897695b79fd75642478e70ae939cb465bcfea6cdf6c23d89`
+with `local_gate_green=true`. The initial red fixture expected the old result
+after changing its source; correcting that oracle removed the false failure.
 
 Keep one useful resident Fo Gremlin lane running and develop through it.
 Fo `190d3e8` restores a single expected `.smod` output from the shared action
