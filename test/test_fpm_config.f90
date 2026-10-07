@@ -13,6 +13,7 @@ program test_fpm_config
     call test_parse_fo_own_toml()
     call test_many_fo_inputs()
     call test_init_defaults()
+    call test_reparse_resets_defaults()
     call test_parse_missing_file()
     call test_dotted_dependency_keys()
     call test_dependency_source_conflicts()
@@ -57,6 +58,88 @@ contains
         call assert(c%n_deps == 0, 'default n_deps = 0')
         call assert(c%n_dev_deps == 0, 'default n_dev_deps = 0')
     end subroutine test_init_defaults
+
+    subroutine test_reparse_resets_defaults()
+        type(fpm_config_t) :: c
+        character(len=512) :: dir
+        integer :: ierr, u, ios, status
+
+        call make_tmpfile('fo-fpm-config-reparse', dir)
+        call execute_command_line('mkdir "'//trim(dir)//'"', &
+            exitstat=status)
+        if (status /= 0) then
+            call assert(.false., 'reparse: fixture directory created')
+            return
+        end if
+        open (newunit=u, file=trim(dir)//'/fpm.toml', status='replace', &
+            iostat=ios)
+        if (ios /= 0) then
+            call assert(.false., 'reparse: nondefault manifest created')
+            call execute_command_line('rmdir "'//trim(dir)//'"')
+            return
+        end if
+        write (u, '(a)') 'name = "reused-config"'
+        write (u, '(a)') 'version = "1.2.3"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'dep = { git = "https://example.invalid/dep", '// &
+            'rev = "0123456789abcdef" }'
+        write (u, '(a)') '[[test]]'
+        write (u, '(a)') 'name = "special"'
+        write (u, '(a)') 'main = "special.f90"'
+        write (u, '(a)') '[extra.fo]'
+        write (u, '(a)') 'test-timeout = 17'
+        write (u, '(a)') 'debug-info = "full"'
+        write (u, '(a)') 'pic = true'
+        write (u, '(a)') 'link = "shared"'
+        write (u, '(a)') 'dispatcher = "suite"'
+        write (u, '(a)') '[extra.fo.test-args]'
+        write (u, '(a)') 'special = ["--flag"]'
+        write (u, '(a)') '[[extra.fo.inputs]]'
+        write (u, '(a)') 'path = "fixture.dat"'
+        write (u, '(a)') 'role = "test-fixture"'
+        close (u)
+
+        call fpm_config_parse(trim(dir), c, ierr)
+        call assert(ierr == 0, 'reparse: nondefault manifest parses')
+        call assert(c%n_deps == 1, 'reparse: dependency recorded')
+        if (c%n_deps == 1) then
+            call assert(allocated(c%deps(1)%rev), &
+                'reparse: dependency revision allocated')
+        end if
+        call assert(c%n_tests == 1, 'reparse: named test recorded')
+        call assert(c%n_test_arg_sets == 1, 'reparse: test arguments recorded')
+        call assert(c%n_fo_inputs == 1, 'reparse: input declaration recorded')
+        call assert(c%test_timeout == 17, 'reparse: nondefault timeout recorded')
+        call assert(c%pic .and. c%link_shared, &
+            'reparse: nondefault build settings recorded')
+
+        open (newunit=u, file=trim(dir)//'/fpm.toml', status='replace', &
+            iostat=ios)
+        if (ios /= 0) then
+            call assert(.false., 'reparse: minimal manifest opened')
+            call execute_command_line('rm -rf "'//trim(dir)//'"')
+            return
+        end if
+        write (u, '(a)') 'name = "fresh-config"'
+        close (u)
+        call fpm_config_parse(trim(dir), c, ierr)
+        call assert(ierr == 0, 'reparse: minimal manifest parses')
+        call assert(trim(c%name) == 'fresh-config', &
+            'reparse: new name replaces prior name')
+        call assert(trim(c%version) == '', 'reparse: version resets')
+        call assert(trim(c%source_dir) == 'src', 'reparse: source dir default')
+        call assert(c%n_deps == 0 .and. c%n_tests == 0 .and. &
+            c%n_test_arg_sets == 0 .and. c%n_fo_inputs == 0, &
+            'reparse: prior declarations are cleared')
+        call assert(c%test_timeout == 0 .and. trim(c%debug_info) == '' .and. &
+            .not. c%pic .and. .not. c%link_shared .and. &
+            trim(c%dispatcher) == '', 'reparse: extra settings reset')
+        call assert(.not. allocated(c%deps(1)%rev), &
+            'reparse: dependency revision deallocated')
+        call assert(.not. allocated(c%test_arg_sets(1)%args), &
+            'reparse: test args deallocated')
+        call execute_command_line('rm -rf "'//trim(dir)//'"')
+    end subroutine test_reparse_resets_defaults
 
     subroutine test_parse_missing_file()
         type(fpm_config_t) :: c

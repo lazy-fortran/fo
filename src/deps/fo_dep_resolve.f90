@@ -6,7 +6,8 @@ module fo_dep_resolve
     !! transitively here. FPM stores the flattened Git closure in the root
     !! build/dependencies directory. Registry sources remain unresolved until
     !! a provider for FPM's registry cache is available.
-    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, dep_kind, &
+    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, &
+        fpm_config_allocate, dep_kind, &
         DEP_PATH, DEP_GIT, DEP_REGISTRY, add_link_lib
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
@@ -45,7 +46,7 @@ contains
         n_registry = 0
         ierr = 0
         call normalize_path(project_dir, root)
-        allocate (root_config)
+        call fpm_config_allocate(root_config)
         call fpm_config_parse(root, root_config, ierr)
         if (ierr /= 0) return
         call walk(root, out, n_out, n_unresolved, n_registry, ierr, 0, &
@@ -70,7 +71,7 @@ contains
 
         n_out = 0
         ierr = 0
-        allocate (cfg)
+        call fpm_config_allocate(cfg)
         call normalize_path(project_dir, root)
         call fpm_config_parse(root, cfg, ierr)
         if (ierr /= 0) return
@@ -135,7 +136,7 @@ contains
         call resolve_dev_dep_srcs(project_dir, devs, n_devs, ierr)
         if (ierr /= 0) n_devs = 0
 
-        allocate (dcfg)
+        call fpm_config_allocate(dcfg)
         do i = 1, n_deps
             call fpm_config_parse(trim(deps(i)%dir), dcfg, ierr)
             if (ierr /= 0) cycle
@@ -173,7 +174,7 @@ contains
             ierr = 1
             return
         end if
-        allocate (cfg)
+        call fpm_config_allocate(cfg)
         call fpm_config_parse(dir, cfg, ierr)
         if (ierr /= 0) then
             write (error_unit, '(a)') 'fo: invalid dependency manifest '// &
@@ -280,7 +281,7 @@ contains
             ierr = 1
             return
         end if
-        allocate (dcfg)
+        call fpm_config_allocate(dcfg)
         call fpm_config_parse(dep_dir, dcfg, derr)
         ierr = derr
         if (ierr /= 0) then

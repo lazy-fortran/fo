@@ -83,6 +83,9 @@ program test_backend_gfortran
         case ('process-tree-timeout')
             call test_process_tree_supervision()
             call report('backend_gfortran/process-tree-timeout')
+        case ('named-stack')
+            call test_gfortran_named_tests_fit_default_stack()
+            call report('backend_gfortran/named-stack')
         case default
             write (error_unit, '(a)') 'unknown backend_gfortran subcase: '// &
                 trim(selector)

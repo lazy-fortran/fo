@@ -15,6 +15,7 @@ module fo_dep_update
     !! declared git dependencies whose source tree is gone while their objects
     !! remain, which is the silent case the build must never accept.
     use fo_fpm_config, only: fpm_config_t, fpm_dep_t, fpm_config_parse, &
+        fpm_config_allocate, &
         dep_kind, DEP_PATH, DEP_GIT
     use fo_fs, only: fs_remove_tree, fs_remove_file, fs_stat, fs_make_dir, &
         fs_rename, fs_write_text, &
@@ -83,7 +84,7 @@ contains
         n_visited = n_visited + 1
         visited(n_visited) = trim(package_dir)
 
-        allocate (config)
+        call fpm_config_allocate(config)
         call fpm_config_parse(package_dir, config, parse_ierr)
         if (parse_ierr /= 0) then
             ierr = parse_ierr
@@ -454,7 +455,7 @@ contains
         logical :: ok
 
         n_names = 0
-        allocate (config)
+        call fpm_config_allocate(config)
         call normalize_path(project_dir, root)
         call fpm_config_parse(root, config, ierr)
         if (ierr /= 0) return
@@ -488,7 +489,7 @@ contains
         n_deps = 0
         refreshed = .false.
         if (present(error_message)) error_message = ''
-        allocate (config)
+        call fpm_config_allocate(config)
         call normalize_path(project_dir, root)
         call fpm_config_parse(root, config, ierr)
         if (ierr /= 0) return

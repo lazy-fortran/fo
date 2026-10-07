@@ -1,5 +1,6 @@
 module fo_gfortran_build
-    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, manifest_exe_name, &
+    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, &
+        fpm_config_allocate, manifest_exe_name, &
         manifest_executable_selected, &
         manifest_test_name, manifest_test_args, manifest_example_name, dep_kind, &
         DEP_PATH, DEP_GIT, DEP_REGISTRY
@@ -191,7 +192,8 @@ contains
             return
         end if
 
-        allocate (config, dep_includes(MAX_DEP_DIRS), dep_objs(MAX_DEP_OBJS), &
+        call fpm_config_allocate(config)
+        allocate (dep_includes(MAX_DEP_DIRS), dep_objs(MAX_DEP_OBJS), &
             src_objs(MAX_SRC_OBJS), is_prog_arr(MAX_SRC_OBJS))
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) then
@@ -307,7 +309,7 @@ contains
 
         exitcode = 0
         allocate (deps(MAX_RESOLVED))
-        allocate (dep_config)
+        call fpm_config_allocate(dep_config)
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr, &
             n_registry)
         if (ierr /= 0) return
@@ -637,7 +639,7 @@ contains
             return
         end if
 
-        allocate (config)
+        call fpm_config_allocate(config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) then
             exitcode = 1
@@ -726,7 +728,7 @@ contains
             return
         end if
 
-        allocate (config)
+        call fpm_config_allocate(config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) then
             exitcode = 1
@@ -777,7 +779,7 @@ contains
 
         exitcode = 1
         if (n_names < 0 .or. n_names > size(names)) return
-        allocate (config)
+        call fpm_config_allocate(config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) return
         lf = log_file
@@ -921,7 +923,7 @@ contains
             exitcode = 1
             return
         end if
-        allocate (config)
+        call fpm_config_allocate(config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) then
             exitcode = 1
@@ -1019,7 +1021,7 @@ contains
         call scan_dir_cached(trim(project_dir)//'/'//trim(test_dir), units, &
             n_units, ierr)
         if (ierr /= 0) return
-        allocate (config)
+        call fpm_config_allocate(config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) return
         call select_current_tests(project_dir, config, units, n_units, test_dir, &
@@ -1098,7 +1100,7 @@ contains
         logical :: has_dispatcher
 
         exists = .false.
-        allocate (config)
+        call fpm_config_allocate(config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) return
         call scan_dir(trim(project_dir)//'/'//trim(config%test_dir), &
@@ -1182,7 +1184,7 @@ contains
         names = ''
         n_names = 0
         if (present(selected_node_ids)) selected_node_ids = 0
-        allocate (config)
+        call fpm_config_allocate(config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) return
         call scan_dir(trim(project_dir)//'/'//trim(config%test_dir), &
@@ -1461,7 +1463,7 @@ contains
         n_dep_objs = 0
         n_obj_seen = 0
         allocate (deps(MAX_RESOLVED), obj_basenames(MAX_DEP_OBJS))
-        allocate (dep_config)
+        call fpm_config_allocate(dep_config)
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr, &
             n_registry)
         if (ierr /= 0) return
@@ -2210,7 +2212,8 @@ contains
         integer :: ierr, i, j, k, n_candidates, n_scanned, old_n
         logical :: found, added
 
-        allocate (config, dep_config)
+        call fpm_config_allocate(config)
+        call fpm_config_allocate(dep_config)
         allocate (candidates(0))
         n_candidates = 0
         call fpm_config_parse(project_dir, config, ierr)
@@ -2971,7 +2974,7 @@ contains
         run_cpu = -1.0
         call scan_dir(trim(project_dir)//'/'//trim(test_dir), tunits, n_tests, ierr)
         if (n_tests == 0) return
-        allocate (manifest_config)
+        call fpm_config_allocate(manifest_config)
         call fpm_config_parse(project_dir, manifest_config, ierr)
         if (ierr /= 0) return
         test_timeout = test_timeout_seconds(manifest_config)
@@ -5171,7 +5174,7 @@ contains
         candidate = ''
         dep_root = ''
 
-        allocate (config)
+        call fpm_config_allocate(config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) return
 

@@ -5,7 +5,7 @@ module fo_fpm_config
     implicit none
     private
     public :: fpm_dep_t, fpm_exe_t, fpm_config_t
-    public :: fpm_config_init, fpm_config_parse
+    public :: fpm_config_init, fpm_config_parse, fpm_config_allocate
     public :: dep_kind, DEP_PATH, DEP_GIT, DEP_REGISTRY
     public :: manifest_exe_name, manifest_test_name, manifest_example_name
     public :: manifest_executable_selected
@@ -173,8 +173,18 @@ contains
         end if
     end function dep_kind
 
+    subroutine fpm_config_allocate(config)
+        !! Isolate compiler default-initialization scratch from caller frames.
+        !! Traversal retains heap configs across recursive calls; allocating
+        !! them inline also retains a large compiler temporary on the stack.
+        type(fpm_config_t), allocatable, intent(out) :: config
+
+        allocate (config)
+    end subroutine fpm_config_allocate
+
     subroutine fpm_config_init(c)
-        type(fpm_config_t), intent(out) :: c
+        type(fpm_config_t), intent(inout) :: c
+        integer :: i
 
         c%name = ''
         c%version = ''
@@ -186,6 +196,9 @@ contains
         c%auto_executables = .true.
         c%auto_tests = .true.
         c%auto_examples = .true.
+        c%install_library = .false.
+        c%install_test = .false.
+        c%install_module_dir = ''
         c%openmp = .false.
         c%blas = .false.
         c%mpi = .false.
@@ -197,21 +210,87 @@ contains
         c%implicit_external = .false.
         c%n_deps = 0
         c%n_dev_deps = 0
+        do i = 1, MAX_DEPS
+            c%deps(i)%name = ''
+            c%deps(i)%git = ''
+            c%deps(i)%branch = ''
+            c%deps(i)%tag = ''
+            if (allocated(c%deps(i)%rev)) deallocate (c%deps(i)%rev)
+            c%deps(i)%path = ''
+            c%deps(i)%version = '*'
+            c%deps(i)%path_seen = .false.
+            c%deps(i)%git_seen = .false.
+            c%deps(i)%branch_seen = .false.
+            c%deps(i)%tag_seen = .false.
+            c%deps(i)%rev_seen = .false.
+        end do
+        do i = 1, MAX_DEV_DEPS
+            c%dev_deps(i)%name = ''
+            c%dev_deps(i)%git = ''
+            c%dev_deps(i)%branch = ''
+            c%dev_deps(i)%tag = ''
+            if (allocated(c%dev_deps(i)%rev)) deallocate (c%dev_deps(i)%rev)
+            c%dev_deps(i)%path = ''
+            c%dev_deps(i)%version = '*'
+            c%dev_deps(i)%path_seen = .false.
+            c%dev_deps(i)%git_seen = .false.
+            c%dev_deps(i)%branch_seen = .false.
+            c%dev_deps(i)%tag_seen = .false.
+            c%dev_deps(i)%rev_seen = .false.
+        end do
         c%n_link_libs = 0
+        c%link_libs = ''
         c%n_external_modules = 0
+        c%external_modules = ''
         c%n_flags = 0
+        c%flags = ''
         c%n_exes = 0
+        do i = 1, MAX_EXES
+            c%exes(i)%name = ''
+            c%exes(i)%main = 'main.f90'
+            c%exes(i)%source_dir = 'app'
+            c%tests(i)%name = ''
+            c%tests(i)%main = 'main.f90'
+            c%tests(i)%source_dir = 'app'
+            c%examples(i)%name = ''
+            c%examples(i)%main = 'main.f90'
+            c%examples(i)%source_dir = 'app'
+        end do
         c%n_tests = 0
         c%n_examples = 0
         c%n_test_arg_sets = 0
+        do i = 1, MAX_TEST_ARG_SETS
+            c%test_arg_sets(i)%name = ''
+            if (allocated(c%test_arg_sets(i)%args)) &
+                deallocate (c%test_arg_sets(i)%args)
+        end do
         c%n_fo_inputs = 0
+        do i = 1, MAX_FO_INPUTS
+            c%fo_inputs(i)%path = ''
+            c%fo_inputs(i)%role = ''
+            c%fo_inputs(i)%root = ''
+            c%fo_inputs(i)%kind = 'file'
+            c%fo_inputs(i)%writable_at_execution = .false.
+            c%fo_inputs(i)%path_seen = .false.
+            c%fo_inputs(i)%role_seen = .false.
+            c%fo_inputs(i)%root_seen = .false.
+            c%fo_inputs(i)%kind_seen = .false.
+            c%fo_inputs(i)%writable_seen = .false.
+        end do
         c%fo_input_parse_error = ''
         c%dependency_parse_error = ''
+        c%test_timeout = 0
+        c%slow_test_timeout = 0
+        c%test_wall_timeout = 0
+        c%debug_info = ''
+        c%pic = .false.
+        c%link_shared = .false.
+        c%dispatcher = ''
     end subroutine fpm_config_init
 
     subroutine fpm_config_parse(project_dir, config, ierr)
         character(len=*), intent(in) :: project_dir
-        type(fpm_config_t), intent(out) :: config
+        type(fpm_config_t), intent(inout) :: config
         integer, intent(out) :: ierr
 
         character(len=1025) :: line
