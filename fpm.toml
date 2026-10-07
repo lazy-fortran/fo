@@ -168,6 +168,11 @@ source-dir = "test"
 main = "test_change_watch_provider.f90"
 
 [[test]]
+name = "test_gremlin_discovery_diagnostic"
+source-dir = "test"
+main = "test_gremlin_discovery_diagnostic.f90"
+
+[[test]]
 name = "test_gremlin_reproduce_logs"
 source-dir = "test"
 main = "test_gremlin_reproduce_logs.f90"

@@ -1757,7 +1757,7 @@ contains
             call publish_state(session, owner_request, 'error', active_generation, &
                 candidate_generation, current_test_name(selected, selected_count), &
                 completed, selected_count, campaign_seed, 'INFRA_ERROR', 1, &
-                state_error, state_message)
+                state_error, state_message, diagnostic=trim(fatal_message))
             if (state_error /= 0) fatal_message = trim(state_message)
             if (cancel_error /= 0) fatal_message = &
                 'process cancellation failed: '//trim(int_text(cancel_error))
@@ -2275,12 +2275,16 @@ contains
         if (inventory_status /= 0) then
             state_name = 'inventory_failed'
             selected_count = 0
+            discovery_diagnostic = trim(message)
+            if (len_trim(discovery_diagnostic) == 0) &
+                discovery_diagnostic = 'discovery returned an unspecified error'
             call publish_state(session, request, state_name, active, candidate, '', &
                 completed, selected_count, seed, 'INFRA_ERROR', inventory_status, &
-                ierr, message)
+                ierr, message, diagnostic=trim(discovery_diagnostic))
             if (ierr == 0) then
                 ierr = inventory_status
-                message = 'cannot discover the frozen test inventory'
+                message = 'cannot discover the frozen test inventory: '// &
+                    trim(discovery_diagnostic)
             end if
             return
         end if
@@ -2412,6 +2416,7 @@ contains
         character(len=MAX_PATH), allocatable :: filenames(:)
         character(len=NAME_LEN), allocatable :: all_names(:), impacted(:)
         character(len=NAME_LEN), allocatable :: history(:), debt(:), priorities(:)
+        character(len=PATH_LEN) :: discovery_diagnostic
         type(coverage_epoch_t) :: coverage
         character(len=PATH_LEN) :: coverage_path
         logical, allocatable :: is_test_arr(:)
