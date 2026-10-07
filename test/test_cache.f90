@@ -3,7 +3,7 @@ program test_cache
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_cache, only: cache_t, cache_init, cache_key_for, cache_lookup, &
         cache_store_action, cache_restore_action, cache_schema, &
-        cache_store_root, cache_debug_write_action_record, HASH_LEN
+        cache_store_root, HASH_LEN
     use fo_process, only: process_getpid
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_write_text
     use fx_hash, only: sha256_file
@@ -46,8 +46,6 @@ program test_cache
     call test_miss()
     call test_action_persistence()
     call test_corrupt_payload_misses()
-    call test_stale_action_record_misses()
-    call test_wrong_schema_misses()
     call test_partial_temp_ignored()
     call test_large_file_hashes_full_source()
     call test_schema_and_root()
@@ -165,7 +163,7 @@ contains
         type(cache_t) :: c
         integer :: ierr
         character(len=512) :: obj_path, mod_dir, mod_path
-        character(len=HASH_LEN) :: action_id, output_id
+        character(len=HASH_LEN) :: action_id, output_id, restored_id
         logical :: restored
 
         call cache_init(c, ierr)
@@ -183,8 +181,11 @@ contains
 
         call fs_remove_file(trim(obj_path))
         call fs_remove_file(trim(mod_path))
-        call cache_restore_action(c, action_id, obj_path, mod_dir, restored)
+        call cache_restore_action(c, action_id, obj_path, mod_dir, restored, &
+            restored_id, 'm')
         call assert(restored, 'action restore reports success')
+        call assert(restored_id == output_id .and. output_id /= repeat(' ', HASH_LEN), &
+            'restored action retains its output identity')
         call assert(file_contains(obj_path, 'object payload'), &
             'object restored from action cache')
         call assert(file_contains(mod_path, 'module payload'), &
@@ -245,7 +246,8 @@ contains
         type(cache_t) :: c
         integer :: ierr
         character(len=512) :: obj_path, mod_dir
-        character(len=HASH_LEN) :: action_id, output_id
+        character(len=HASH_LEN) :: action_id, output_id, restored_id
+        logical :: restored
 
         call cache_init(c, ierr)
         call make_tmp_path('fo_cache_persist_obj', obj_path, '.o')
@@ -261,13 +263,24 @@ contains
         call assert(cache_lookup(c, action_id), &
             'action cache persists across init')
         call fs_remove_file(trim(obj_path))
+        call fs_remove_file(trim(mod_dir)//'/persist_mod.mod')
+        call cache_restore_action(c, action_id, obj_path, mod_dir, restored, &
+            restored_id, 'persist_mod')
+        call assert(restored, 'fresh cache handle restores the action')
+        call assert(restored_id == output_id, &
+            'fresh cache handle retains the action output identity')
+        call assert(file_contains(obj_path, 'persist object'), &
+            'fresh cache handle restores object bytes')
+        call assert(file_contains(trim(mod_dir)//'/persist_mod.mod', 'persist mod'), &
+            'fresh cache handle restores module bytes')
+        call fs_remove_file(trim(obj_path))
         call fs_remove_tree(trim(mod_dir))
     end subroutine test_action_persistence
 
     subroutine test_corrupt_payload_misses()
         type(cache_t) :: c
-        integer :: ierr, status, root_len
-        character(len=512) :: obj_path, mod_dir, store_root, blob_root
+        integer :: ierr, status
+        character(len=512) :: obj_path, mod_dir, store_root
         character(len=HASH_LEN) :: action_id, output_id
         character(len=HASH_LEN) :: object_id, recovered_id
         character(len=:), allocatable :: payload_path
@@ -284,25 +297,12 @@ contains
             output_id, ierr)
         call assert(ierr == 0, 'store action before payload corruption')
         call assert(cache_lookup(c, action_id), &
-            'action imports into the active immutable cache before corruption')
+            'action is available in the immutable cache before corruption')
         ! The active blob namespace is keyed by the payload's raw SHA-256.
         call sha256_file(trim(obj_path), object_id, ierr)
         call assert(ierr == 0, 'hash active object payload')
         call cache_store_root(store_root)
-        root_len = len_trim(store_root)
-        if (root_len >= 9) then
-            ! Older callers expose store/v1; current callers expose store/v2.
-            if (store_root(root_len - 8:root_len) == '/store/v1') then
-                blob_root = store_root(:root_len - 9)//'/store/v2'
-            else if (store_root(root_len - 8:root_len) == '/store/v2') then
-                blob_root = trim(store_root)
-            else
-                blob_root = trim(store_root)//'/store/v2'
-            end if
-        else
-            blob_root = trim(store_root)//'/store/v2'
-        end if
-        payload_path = trim(blob_root)//'/blobs/sha256/'// &
+        payload_path = trim(store_root)//'/blobs/sha256/'// &
             object_id(1:2)//'/'//trim(object_id)
         if (index(payload_path, trim(test_cache_root)//'/') == 1) then
             status = c_chmod(payload_path//c_null_char, 384_c_int)
@@ -346,40 +346,6 @@ contains
         call fs_remove_tree(trim(mod_dir))
     end subroutine test_corrupt_payload_misses
 
-    subroutine test_stale_action_record_misses()
-        type(cache_t) :: c
-        integer :: ierr
-        character(len=HASH_LEN) :: action_id
-        character(len=512) :: record
-
-        call cache_init(c, ierr)
-        action_id = repeat('d', HASH_LEN)
-        record = 'schema 1'//achar(10)//'kind compile'//achar(10)// &
-            'output '//repeat('1', HASH_LEN)//achar(10)// &
-            'object '//repeat('2', HASH_LEN)//' 1'//achar(10)
-        call cache_debug_write_action_record(c, action_id, record, ierr)
-        call assert(ierr == 0, 'debug stale action write succeeds')
-        call assert(.not. cache_lookup(c, action_id), &
-            'stale action record with missing payload misses')
-    end subroutine test_stale_action_record_misses
-
-    subroutine test_wrong_schema_misses()
-        type(cache_t) :: c
-        integer :: ierr
-        character(len=HASH_LEN) :: action_id
-        character(len=512) :: record
-
-        call cache_init(c, ierr)
-        action_id = repeat('e', HASH_LEN)
-        record = 'schema 999'//achar(10)//'kind compile'//achar(10)// &
-            'output '//repeat('3', HASH_LEN)//achar(10)// &
-            'object '//repeat('4', HASH_LEN)//' 1'//achar(10)
-        call cache_debug_write_action_record(c, action_id, record, ierr)
-        call assert(ierr == 0, 'debug wrong schema write succeeds')
-        call assert(.not. cache_lookup(c, action_id), &
-            'wrong schema action record misses')
-    end subroutine test_wrong_schema_misses
-
     subroutine test_partial_temp_ignored()
         type(cache_t) :: c
         integer :: ierr
@@ -389,9 +355,9 @@ contains
         call cache_init(c, ierr)
         action_id = 'fa'//repeat('0', HASH_LEN - 2)
         call cache_store_root(root)
-        shard = trim(root)//'/fa'
+        shard = trim(root)//'/actions/sha256/fa'
         call fs_make_dir(trim(shard))
-        temp_path = trim(shard)//'/.tmp.'//trim(action_id)//'-a'
+        temp_path = trim(shard)//'/.tmp.123.1'
         call write_text(temp_path, 'partial action')
         call assert(.not. cache_lookup(c, action_id), &
             'partial temp file is ignored by lookup')
@@ -419,12 +385,16 @@ contains
 
     subroutine test_schema_and_root()
         character(len=512) :: text, override
+        logical :: obsolete_store_exists
 
         call cache_schema(text)
         call assert(trim(text) == 'action-output-v2', 'cache schema is reported')
         call cache_store_root(text)
-        ! FO_CACHE_DIR overrides the immutable action-result store root; the
-        ! legacy action-record store remains under store/v1.
+        inquire (file=trim(test_cache_root)//'/store/v1', &
+            exist=obsolete_store_exists)
+        call assert(.not. obsolete_store_exists, &
+            'cache operations create no obsolete store')
+        ! FO_CACHE_DIR overrides the immutable action-result store root.
         call get_environment_variable('FO_CACHE_DIR', override)
         if (len_trim(override) > 0) then
             call assert(trim(text) == trim(override)//'/store/v2', &

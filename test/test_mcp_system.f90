@@ -117,10 +117,10 @@ program test_mcp_system
 
     project = join_path(scratch, 'clean-project')
     cache = join_path(scratch, 'clean-cache')
-    marker = join_path(cache, 'store/v1/marker')
+    marker = join_path(cache, 'store/v2/marker')
     framed = .true.
     call make_directory(join_path(project, 'build'))
-    call make_directory(join_path(cache, 'store/v1'))
+    call make_directory(join_path(cache, 'store/v2'))
     call write_text(join_path(project, 'fpm.toml'), 'name = "mcp_clean_fixture"' // new_line('a'))
     call write_text(marker, 'keep')
     input = ''

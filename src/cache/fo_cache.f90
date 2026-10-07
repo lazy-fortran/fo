@@ -8,8 +8,7 @@ module fo_cache
         fx_cache_restore_action => cache_restore_action, &
         cache_store_action, cache_action_mod_key, cache_store_binary, &
         cache_restore_binary, cache_binary_matches, cache_digest, &
-        cache_file_digest, hash_mod_file, cache_debug_write_action_record, &
-        cache_debug_corrupt_object_payload
+        cache_file_digest, hash_mod_file
     implicit none
     private
 
@@ -22,7 +21,6 @@ module fo_cache
         cache_store_action, cache_action_mod_key
     public :: cache_store_binary, cache_restore_binary, cache_binary_matches
     public :: cache_digest, cache_file_digest, hash_mod_file
-    public :: cache_debug_write_action_record, cache_debug_corrupt_object_payload
 
 contains
 

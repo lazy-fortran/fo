@@ -253,7 +253,7 @@ contains
     end subroutine test_cmake_exec_target_resolution
 
     subroutine test_backend_clean_keeps_shared_store()
-        use fo_cache, only: cache_root
+        use fo_cache, only: cache_store_root
         character(len=512) :: project_dir, root, sentinel, marker
         logical :: build_removed, store_removed, marker_exists, sentinel_exists
         integer :: u
@@ -264,9 +264,9 @@ contains
         open (newunit=u, file=trim(marker), status='replace')
         write (u, '(a)') 'x'
         close (u)
-        call cache_root(root)
-        call execute_command_line('mkdir -p '//trim(root)//'/store/v1')
-        sentinel = trim(root)//'/store/v1/clean_sentinel'
+        call cache_store_root(root)
+        call execute_command_line('mkdir -p '//trim(root))
+        sentinel = trim(root)//'/clean_sentinel'
         open (newunit=u, file=trim(sentinel), status='replace')
         write (u, '(a)') 'x'
         close (u)
@@ -284,16 +284,16 @@ contains
     end subroutine test_backend_clean_keeps_shared_store
 
     subroutine test_backend_clean_purge_removes_store()
-        use fo_cache, only: cache_root
+        use fo_cache, only: cache_store_root
         character(len=512) :: project_dir, root, sentinel
         logical :: build_removed, store_removed, sentinel_exists
         integer :: u
 
         call make_tmp_path('fo_test_clean_purge', project_dir)
         call execute_command_line('mkdir -p '//trim(project_dir))
-        call cache_root(root)
-        call execute_command_line('mkdir -p '//trim(root)//'/store/v1')
-        sentinel = trim(root)//'/store/v1/purge_sentinel'
+        call cache_store_root(root)
+        call execute_command_line('mkdir -p '//trim(root))
+        sentinel = trim(root)//'/purge_sentinel'
         open (newunit=u, file=trim(sentinel), status='replace')
         write (u, '(a)') 'x'
         close (u)
