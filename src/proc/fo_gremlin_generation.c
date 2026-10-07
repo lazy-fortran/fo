@@ -621,7 +621,10 @@ int fo_c_generation_capture_file(const char *root, const char *relative,
         *next = '/';
         part = next + 1;
     }
-    root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    /* FPM path dependencies may declare a symlink as their root. Following
+     * that one root link is safe here: the captured directory identity must
+     * still match the inventory, and all descendants remain no-follow. */
+    root_fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (root_fd < 0) goto done;
     if (fstat(root_fd, &root_st) != 0 || root_st.st_dev != device ||
         root_st.st_ino != inode) {

@@ -339,8 +339,9 @@ contains
     end subroutine check_whole_root_outputs
 
     subroutine check_dependency_directory_inputs(parent)
+        use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
         character(len=*), intent(in) :: parent
-        character(len=4096) :: root, dependency, message
+        character(len=4096) :: root, dependency, dependency_target, message
         character(len=1024) :: diagnostic
         character(len=4096) :: text
         character(len=:), allocatable :: driver
@@ -351,12 +352,23 @@ contains
         type(generation_t) :: generation
         integer :: status, release_status
 
+        interface
+            integer(c_int) function c_symlink(target, path) bind(C, name='symlink')
+                import :: c_char, c_int
+                character(kind=c_char), intent(in) :: target(*), path(*)
+            end function c_symlink
+        end interface
+
         root = trim(parent)//'/dependency-directory-project'
         dependency = trim(parent)//'/dependency-directory-fortfront'
+        dependency_target = trim(parent)//'/dependency-directory-fortfront-target'
         call fs_make_dir(trim(root)//'/src')
-        call fs_make_dir(trim(dependency)//'/src')
-        call fs_make_dir(trim(dependency)//'/examples/f90')
-        call fs_make_dir(trim(dependency)//'/examples/lf')
+        call fs_make_dir(trim(dependency_target)//'/src')
+        call fs_make_dir(trim(dependency_target)//'/examples/f90')
+        call fs_make_dir(trim(dependency_target)//'/examples/lf')
+        call require(c_symlink(trim(dependency_target)//c_null_char, &
+            trim(dependency)//c_null_char) == 0, &
+            'declared path dependency root is a symlink')
         call write(trim(root)//'/fpm.toml', &
             'name = "dependency-directory-project"'//new_line('a')// &
             '[dependencies]'//new_line('a')// &
@@ -373,10 +385,10 @@ contains
             'kind = "directory"'//new_line('a')// &
             'role = "test-fixture"')
         call write(trim(root)//'/src/main.f90', 'program directory_probe')
-        call write(trim(dependency)//'/fpm.toml', 'name = "fortfront"')
-        call write(trim(dependency)//'/examples/f90/probe.f90', &
+        call write(trim(dependency_target)//'/fpm.toml', 'name = "fortfront"')
+        call write(trim(dependency_target)//'/examples/f90/probe.f90', &
             'program f90_probe')
-        call write(trim(dependency)//'/examples/lf/probe.lf', &
+        call write(trim(dependency_target)//'/examples/lf/probe.lf', &
             'program lf_probe')
 
         call input_inventory_declarations_from_config(trim(root), declarations, &
@@ -418,17 +430,26 @@ contains
             '/.fo-inputs/dependency:fortfront/examples/f90/probe.f90', text)
         call require(index(text, 'program f90_probe') > 0, &
             'private view contains frozen dependency F90 bytes')
-        call write(trim(dependency)//'/examples/f90/probe.f90', &
+        call write(trim(dependency_target)//'/examples/f90/probe.f90', &
             'program changed_after_capture')
         call read_text_file(trim(view%cwd)// &
             '/.fo-inputs/dependency:fortfront/examples/f90/probe.f90', text)
         call require(index(text, 'program f90_probe') > 0, &
             'private view does not read later dependency edits')
+        call input_inventory_discover(trim(root), declarations, runtime, status, &
+            diagnostic)
+        call require(status == 0 .and. runtime%complete, &
+            'rediscover symlink dependency after target edit: '//trim(diagnostic))
+        call require(runtime%digest /= captured%digest, &
+            'target edits through declared symlink change inventory identity')
+        call require(has_entry(runtime, 'dependency:fortfront', &
+            'examples/f90/probe.f90', 'test-fixture'), &
+            'symlink dependency provenance remains the declared alias')
         call execution_view_release(view, .false., release_status, diagnostic)
         call require(release_status == 0, &
             'release dependency directory execution view: '//trim(diagnostic))
         call fs_remove_tree(trim(root))
-        call fs_remove_tree(trim(dependency))
+        call fs_remove_tree(trim(dependency_target))
     end subroutine check_dependency_directory_inputs
 
     subroutine discover(inventory, status, message)
