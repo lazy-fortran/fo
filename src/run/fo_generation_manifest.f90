@@ -4,6 +4,7 @@ module fo_generation_manifest
         c_null_char
     use, intrinsic :: iso_fortran_env, only: int64
     use fx_immutable_store, only: immutable_store_t, immutable_lease_t, &
+        immutable_tree_entry_t, IMMUTABLE_BLOB, &
         immutable_store_init, immutable_store_put_blob, &
         immutable_store_hash_file, immutable_store_publication_lease_acquire, &
         immutable_store_root_set, immutable_store_reason_release, &
@@ -11,6 +12,10 @@ module fo_generation_manifest
         immutable_store_materialize_blob, &
         immutable_store_materialize_blob_ephemeral, IMMUTABLE_MATERIALIZE_COPY, &
         IMMUTABLE_OK
+    use fx_immutable_tree, only: immutable_store_put_tree
+    use fx_immutable_manifest, only: immutable_entries_canonical, &
+        immutable_manifest_serialize
+    use fx_hash, only: sha256_string
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_input_inventory, only: input_inventory_t, input_root_t, &
         input_entry_t, input_declaration_t, INPUT_FILE, INPUT_DIRECTORY, &
@@ -71,9 +76,14 @@ contains
 
         type(immutable_store_t) :: store
         type(immutable_lease_t) :: publication
+        type(immutable_tree_entry_t), allocatable :: tree_entries(:), &
+            canonical_entries(:)
         character(len=HASH_LEN), allocatable :: ids(:)
-        character(len=HASH_LEN) :: object_id
+        character(len=HASH_LEN) :: object_id, tree_id, published_tree_id, &
+            root_ids(1)
         character(len=4), allocatable :: kinds(:)
+        character(len=4) :: root_kinds(1)
+        character(len=:), allocatable :: tree_manifest
         character(len=PATH_LEN) :: manifest_path, source_path, temp_payload
         integer :: status, i, j, n_ids, lease_status, root_index
         logical :: seen
@@ -136,8 +146,8 @@ contains
             return
         end if
 
-        allocate (ids(inventory%entry_count + 1), &
-            kinds(inventory%entry_count + 1))
+        allocate (ids(inventory%entry_count + 2), &
+            kinds(inventory%entry_count + 2))
         n_ids = 0
         do i = 1, inventory%entry_count
             if (inventory%entries(i)%kind /= INPUT_FILE) cycle
@@ -168,10 +178,30 @@ contains
         n_ids = n_ids + 1
         ids(n_ids) = manifest_id
         kinds(n_ids) = 'blob'
+        allocate (tree_entries(n_ids))
+        do j = 1, n_ids
+            tree_entries(j)%path = ids(j)
+            tree_entries(j)%role = 'input'
+            tree_entries(j)%object_id = ids(j)
+            tree_entries(j)%mode = 420
+            tree_entries(j)%kind = IMMUTABLE_BLOB
+        end do
+        tree_entries(n_ids)%role = 'manifest'
+        call immutable_entries_canonical(tree_entries, canonical_entries, status)
+        if (status /= IMMUTABLE_OK) then
+            message = 'cannot encode canonical generation object tree'
+            call delete_tmpfile(trim(manifest_path))
+            manifest_id = ''
+            return
+        end if
+        tree_manifest = immutable_manifest_serialize(canonical_entries)
+        tree_id = sha256_string(tree_manifest)
+        ids(n_ids + 1) = tree_id
+        kinds(n_ids + 1) = 'tree'
         call immutable_store_publication_lease_acquire(store, &
             'fo-generation-capture', store%writer_start, &
             'generation-'//trim(metadata%execution_identity), &
-            kinds(:n_ids), ids(:n_ids), publication, status)
+            kinds(:n_ids + 1), ids(:n_ids + 1), publication, status)
         if (status /= IMMUTABLE_OK) then
             message = 'cannot protect generation objects during publication'
             call delete_tmpfile(trim(manifest_path))
@@ -219,6 +249,16 @@ contains
             end if
         end if
         if (status == IMMUTABLE_OK) then
+            call immutable_store_put_tree(store, canonical_entries, &
+                published_tree_id, status)
+            if (status /= IMMUTABLE_OK) &
+                message = 'cannot publish verified generation object tree'
+            if (status == IMMUTABLE_OK .and. published_tree_id /= tree_id) then
+                status = 1
+                message = 'published generation object tree changed identity'
+            end if
+        end if
+        if (status == IMMUTABLE_OK) then
             if (len(project_source_root(inventory)) == 0) then
                 status = 1
                 message = 'canonical inventory has no project source root'
@@ -228,10 +268,12 @@ contains
             end if
         end if
         if (status == IMMUTABLE_OK) then
+            root_kinds(1) = 'tree'
+            root_ids(1) = tree_id
             call immutable_store_root_set(store, 'fo-generation', &
                 trim(root_owner), &
                 'generation-'//trim(metadata%execution_identity), &
-                kinds(:n_ids), ids(:n_ids), status)
+                root_kinds, root_ids, status)
         end if
         call immutable_store_lease_release(store, publication, lease_status)
         call delete_tmpfile(trim(manifest_path))

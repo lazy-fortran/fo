@@ -9,13 +9,17 @@ program test_gremlin_manifest
     use fo_gremlin_generation, only: generation_context_t, generation_t, &
         generation_capture
     use fo_generation_manifest, only: generation_manifest_metadata_t, &
-        generation_manifest_materialize
+        generation_manifest_materialize, generation_manifest_capture, &
+        generation_manifest_execution_identity, generation_manifest_release
     use fo_gremlin_state, only: gremlin_generation_register_lease_at, &
         gremlin_generation_pin_at, gremlin_generation_prune_at, &
         gremlin_generation_prune_inactive, gremlin_lease_t, gremlin_lease_release
     use fx_immutable_store, only: immutable_store_t, immutable_lease_t, &
         immutable_store_init, immutable_store_graph_read_lease_acquire, &
-        immutable_store_lease_release, IMMUTABLE_OK, IMMUTABLE_MISSING
+        immutable_store_lease_release, immutable_store_blob_path, &
+        immutable_store_tree_path, IMMUTABLE_OK, IMMUTABLE_MISSING
+    use fx_immutable_tree, only: immutable_store_verify_tree
+    use fx_immutable_gc, only: immutable_store_collect
     use fo_process, only: process_getpid
     implicit none
 
@@ -277,6 +281,7 @@ program test_gremlin_manifest
     call write(trim(project)//'/fixture.dat', 'source-one')
     call discover(inventory)
     context%input_inventory = inventory
+    call verify_tree_root()
     if (len_trim(first%root) > 0) call verify_root_lifecycle()
     call remove_fixture(trim(root))
     stop
@@ -293,6 +298,126 @@ contains
         if (status /= 0) return
         call gremlin_lease_release(lease, status, detail)
     end subroutine register_generation
+
+    subroutine verify_tree_root()
+        type(immutable_store_t) :: isolated_store
+        type(generation_manifest_metadata_t) :: metadata, restored_metadata
+        type(input_inventory_t) :: restored_inventory
+        character(len=512) :: isolated_root, snapshot, line, restore_root
+        character(len=HASH_LEN) :: owner, manifest_id, tree_id
+        character(len=:), allocatable :: prefix
+        integer :: local_status, unit, read_status, root_rows, compact_rows
+        integer :: tree_children
+        integer :: scanned, deleted, entry
+        integer(int64) :: snapshot_bytes, allocated_bytes, reclaimed_bytes
+
+        isolated_root = trim(root)//'/isolated-tree-store'
+        metadata%toolchain = context%toolchain
+        metadata%flags = context%flags
+        metadata%environment = context%environment
+        metadata%driver_digest = context%driver_digest
+        metadata%driver_size = context%driver_size
+        metadata%base_commit = context%base_commit
+        metadata%patch_digest = context%patch_digest
+        metadata%execution_identity = generation_manifest_execution_identity( &
+            metadata, inventory)
+        owner = cache_digest([isolated_root], 1)
+        call generation_manifest_capture(trim(isolated_root), owner, metadata, &
+            inventory, manifest_id, local_status, message)
+        call require(local_status == 0, &
+            'isolated generation tree captures: '//trim(message))
+        call immutable_store_init(isolated_store, trim(isolated_root), local_status)
+        call require(local_status == IMMUTABLE_OK, 'tree oracle store opens')
+
+        snapshot = trim(isolated_root)//'/.fx-metadata/leases'
+        inquire (file=trim(snapshot), size=snapshot_bytes, iostat=local_status)
+        call require(local_status == 0, 'tree root snapshot has a measured size')
+        prefix = 'R||fo-generation|'//owner//'|generation-'// &
+            metadata%execution_identity//'|tree|'
+        root_rows = 0
+        compact_rows = 0
+        tree_id = ''
+        open (newunit=unit, file=trim(snapshot), status='old', &
+            action='read', iostat=local_status)
+        call require(local_status == 0, 'tree root snapshot opens')
+        do
+            read (unit, '(a)', iostat=read_status) line
+            if (read_status /= 0) exit
+            if (index(line, trim(prefix)) == 1) then
+                root_rows = root_rows + 1
+                tree_id = line(len(prefix) + 1:len(prefix) + HASH_LEN)
+            end if
+            if (index(line, 'O|') == 1) compact_rows = compact_rows + 1
+        end do
+        close (unit)
+        call require(root_rows == 1 .and. compact_rows == 0, &
+            'N generation children occupy one durable tree root row')
+        call immutable_store_verify_tree(isolated_store, tree_id, local_status)
+        call require(local_status == IMMUTABLE_OK, &
+            'committed generation tree verifies every referenced child')
+        tree_children = -1
+        open (newunit=unit, file=immutable_store_tree_path(isolated_store, tree_id), &
+            status='old', action='read', iostat=local_status)
+        call require(local_status == 0, 'committed tree manifest opens')
+        do
+            read (unit, '(a)', iostat=read_status) line
+            if (read_status /= 0) exit
+            tree_children = tree_children + 1
+        end do
+        close (unit)
+        call require(tree_children > 1, &
+            'tree root references multiple payload and manifest children')
+        write (*, '(a,i0,a,i0,a,i0,a,i0)') &
+            'TREE ROOT METADATA: children=', tree_children, &
+            ' durable_rows=', root_rows, ' compact_rows=', compact_rows, &
+            ' snapshot_bytes=', snapshot_bytes
+        call immutable_store_collect(isolated_store, 10000, 10000, &
+            0_int64, 0_int64, 0, scanned, allocated_bytes, deleted, &
+            reclaimed_bytes, local_status)
+        call require(local_status == IMMUTABLE_OK, 'rooted tree survives GC')
+        call require(file_exists(immutable_store_tree_path(isolated_store, tree_id)), &
+            'durable generation tree survives GC')
+        call require(file_exists( &
+            immutable_store_blob_path(isolated_store, manifest_id)), &
+            'generation manifest survives GC through tree root')
+        do entry = 1, inventory%entry_count
+            if (inventory%entries(entry)%kind /= INPUT_FILE) cycle
+            call require(file_exists(immutable_store_blob_path(isolated_store, &
+                inventory%entries(entry)%content_digest)), &
+                'generation input survives GC through tree root')
+        end do
+        restore_root = trim(root)//'/isolated-restored'
+        call generation_manifest_materialize(trim(isolated_root), manifest_id, &
+            trim(restore_root), restored_metadata, restored_inventory, &
+            local_status, message)
+        call require(local_status == 0, &
+            'rooted generation rematerializes after GC: '//trim(message))
+        call require(file_equals(trim(restore_root)//'/project/fixture.dat', &
+            'source-one'), 'rooted input remains readable after GC')
+        call require(file_equals(trim(restore_root)// &
+            '/project/test-support/fo_test_os/src/fo_test_os.f90', &
+            'module fo_test_os'), 'nested rooted input remains readable after GC')
+        call generation_manifest_release(trim(isolated_root), &
+            metadata%execution_identity, owner, local_status)
+        call require(local_status == IMMUTABLE_OK, &
+            'isolated generation tree root releases')
+        call immutable_store_collect(isolated_store, 10000, 10000, &
+            0_int64, 0_int64, 0, scanned, allocated_bytes, deleted, &
+            reclaimed_bytes, local_status)
+        call require(local_status == IMMUTABLE_OK, 'released tree is collected')
+        call require(.not. file_exists( &
+            immutable_store_tree_path(isolated_store, tree_id)), &
+            'released generation tree is reclaimed')
+        call require(.not. file_exists( &
+            immutable_store_blob_path(isolated_store, manifest_id)), &
+            'released manifest child is reclaimed')
+        do entry = 1, inventory%entry_count
+            if (inventory%entries(entry)%kind /= INPUT_FILE) cycle
+            call require(.not. file_exists(immutable_store_blob_path(isolated_store, &
+                inventory%entries(entry)%content_digest)), &
+                'released input child is reclaimed')
+        end do
+    end subroutine verify_tree_root
 
     subroutine verify_root_lifecycle()
         type(immutable_store_t) :: store
