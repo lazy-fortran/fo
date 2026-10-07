@@ -177,10 +177,16 @@ contains
         if (status_pos == 0) return
         call extract_ctest_name(tail(:status_pos - 1), name)
         if (len_trim(name) == 0) return
-        timing = adjustl(tail(status_pos + status_width:))
-        if (timing(1:1) == ':') timing = adjustl(timing(2:))
+        if (status_pos + status_width > len(tail)) return
+        timing = trim(adjustl(tail(status_pos + status_width:)))
+        if (len(timing) == 0) return
+        if (timing(1:1) == ':') then
+            if (len(timing) == 1) return
+            timing = trim(adjustl(timing(2:)))
+        end if
+        if (len(timing) == 0) return
         read (timing, *, iostat=time_iostat) secs
-        if (time_iostat /= 0) secs = 0.0
+        if (time_iostat /= 0) return
         iostat = 0
     end subroutine parse_ctest_result_line
 
