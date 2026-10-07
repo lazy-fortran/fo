@@ -111,6 +111,21 @@ program test_dispatcher_cli
     binary_listing = 'test_dispatcher' // new_line('a') // 'test_plain' // new_line('a')
     call assert_equal_string(result%stdout, binary_listing, &
         'dispatcher has one shared executable and one plain executable')
+    call assert_file_absent(join_path(scratch, 'build/fo/bin/test_alpha'), &
+        'named dispatcher case has no private executable')
+
+    ! A stale private executable must not take precedence over the configured
+    ! dispatcher when the public test name is selected.
+    call write_text(join_path(scratch, 'build/fo/bin/test_alpha'), &
+        '#!/bin/sh' // new_line('a') // &
+        'echo stale-private > test_alpha.receipt' // new_line('a'))
+    call run_external('/bin/chmod', words([character(len=512) :: '755', &
+        join_path(scratch, 'build/fo/bin/test_alpha')]), scratch, result)
+    call assert_process_ok(result, 'make stale private test executable runnable')
+    call expect_cases(words([character(len=32) :: 'test', 'test_alpha']), &
+        [character(len=32) :: 'test_alpha'], [character(len=32) :: 'test_alpha'], &
+        [character(len=64) :: 'alpha-updated'])
+    call remove_path(join_path(scratch, 'build/fo/bin/test_alpha'))
 
     marker_manifest = '[[test]]' // new_line('a') // 'name = "test_marker_only"' // &
         new_line('a') // 'source-dir = "test"' // new_line('a') // &
