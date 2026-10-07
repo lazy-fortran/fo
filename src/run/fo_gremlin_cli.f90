@@ -1,5 +1,5 @@
 module fo_gremlin_cli
-    use, intrinsic :: iso_fortran_env, only: output_unit
+    use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_gremlin_supervisor, only: gremlin_handle
     use fo_process, only: process_exit
     use fx_json_build, only: json_escape_string
@@ -91,10 +91,6 @@ contains
                 request_json = '{}'
                 return
             end if
-            if (arg == '--json') then
-                i = i + 1
-                cycle
-            end if
 
             if (len_trim(arg) == 0) then
                 i = i + 1
@@ -160,23 +156,9 @@ contains
             end if
 
             if (.not. recognized) then
-                call unknown_option_name(trim(name), raw)
-                if (has_equal) then
-                    value = json_string(trim(value))
-                    call append_field(trim(raw), value, keys, values, n_fields)
-                else if (i < n_tokens) then
-                    if (.not. looks_like_option(tokens(i + 1))) then
-                        value = json_string(trim(tokens(i + 1)))
-                        call append_field(trim(raw), value, keys, values, n_fields)
-                        i = i + 1
-                    else
-                        call append_field(trim(raw), 'true', keys, values, n_fields)
-                    end if
-                else
-                    call append_field(trim(raw), 'true', keys, values, n_fields)
-                end if
-                i = i + 1
-                cycle
+                write (error_unit, '(a)') &
+                    'fo gremlin: unknown option '//trim(name)
+                call process_exit(2)
             end if
 
             missing_value = .false.
@@ -256,11 +238,11 @@ contains
         needs_value = .false.
         recognized = .true.
         select case (trim(option))
-        case ('--lane', '--lane-id')
+        case ('--lane')
             key = 'lane_id'
             kind = 'string'
             needs_value = .true.
-        case ('--session', '--session-id')
+        case ('--session')
             key = 'session_id'
             kind = 'string'
             needs_value = .true.
@@ -274,7 +256,7 @@ contains
         case ('--shuffle')
             key = 'shuffle'
             kind = 'bool'
-        case ('--random', '--random-count')
+        case ('--random')
             key = 'random_count'
             needs_value = .true.
         case ('--seed')
@@ -301,62 +283,33 @@ contains
         case ('--max-bytes')
             key = 'max_bytes'
             needs_value = .true.
-        case ('--wait-ms', '--timeout-ms')
+        case ('--wait-ms')
             key = 'wait_ms'
             needs_value = .true.
         case ('--detail')
             key = 'detail'
             kind = 'string'
             needs_value = .true.
-        case ('--failure', '--fail-on-failure')
+        case ('--failure')
             key = 'fail_on_failure'
             kind = 'bool'
         case ('--until')
             key = 'wait_until'
             kind = 'string'
             needs_value = .true.
-        case ('--case', '--case-id')
+        case ('--case')
             key = 'case_id'
             kind = 'string'
             needs_value = .true.
-        case ('--generation', '--generation-id')
+        case ('--generation')
             key = 'generation_id'
             kind = 'string'
             needs_value = .true.
         case default
             recognized = .false.
-            call unknown_option_name(trim(option), key)
             kind = 'unknown'
         end select
     end subroutine option_spec
-
-    subroutine unknown_option_name(option, key)
-        character(len=*), intent(in) :: option
-        character(len=*), intent(out) :: key
-        integer :: i, start, target
-
-        key = ''
-        start = 1
-        do while (start <= len_trim(option))
-            if (option(start:start) /= '-') exit
-            start = start + 1
-        end do
-        if (start > len_trim(option)) then
-            key = 'argument'
-            return
-        end if
-        do i = start, len_trim(option)
-            target = i - start + 1
-            if (target > len(key)) exit
-            if (option(i:i) == '-') then
-                key(target:target) = '_'
-            else if (option(i:i) == '=') then
-                exit
-            else
-                key(target:target) = option(i:i)
-            end if
-        end do
-    end subroutine unknown_option_name
 
     subroutine add_string_field(key, value, keys, values, n_fields)
         character(len=*), intent(in) :: key, value
@@ -449,7 +402,7 @@ contains
         write (unit, '(a)') '  reads: --detail summary|full (status/wait default: summary)'
         write (unit, '(a)') '  wait: --wait-ms N --failure or --until CONDITION'
         write (unit, '(a)') '  reproduce: ID or --case ID; optional --generation ID'
-        write (unit, '(a)') '  output is the shared Gremlin JSON response; --json is accepted'
+        write (unit, '(a)') '  output is the shared Gremlin JSON response'
     end subroutine print_gremlin_usage
 
 end module fo_gremlin_cli

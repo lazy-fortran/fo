@@ -43,7 +43,6 @@ program test_default_gremlin_cli
     call list_add(arguments, project)
     call list_add(arguments, '--lane')
     call list_add(arguments, 'default')
-    call list_add(arguments, '--json')
     call gremlin_run(driver, project, cache, state, arguments, second, timeout=30000)
     call assert_process_ok(second, 'explicit Gremlin start attaches')
     call json_parse(second%stdout, second_json, valid, message)
@@ -53,18 +52,50 @@ program test_default_gremlin_cli
         'bare and explicit starts attach to the exact same owner')
     if (len(first_session) == 0) first_session = second_session
 
-    call run_query('status', '', .false., -1, driver, project, cache, state, &
+    arguments = string_list_t()
+    call list_add(arguments, 'gremlin')
+    call list_add(arguments, 'status')
+    call list_add(arguments, '--lane-id')
+    call list_add(arguments, 'default')
+    call gremlin_run(driver, project, cache, state, arguments, query_result, &
+        timeout=30000)
+    call assert_true(query_result%exit_code == 2, &
+        'removed Gremlin option is rejected')
+    call assert_contains(query_result%stderr, 'unknown option --lane-id', &
+        'removed Gremlin option has a clear diagnostic')
+
+    arguments = string_list_t()
+    call list_add(arguments, 'format')
+    call gremlin_run(driver, project, cache, state, arguments, query_result, &
+        timeout=30000)
+    call assert_true(query_result%exit_code /= 0, &
+        'removed format command is rejected')
+    call list_add(arguments, '--help')
+    call gremlin_run(driver, project, cache, state, arguments, query_result, &
+        timeout=30000)
+    call assert_true(query_result%exit_code /= 0, &
+        'removed format command has no help entry')
+
+    arguments = string_list_t()
+    call list_add(arguments, 'check')
+    call list_add(arguments, '--json')
+    call gremlin_run(driver, project, cache, state, arguments, query_result, &
+        timeout=30000)
+    call assert_true(query_result%exit_code /= 0, &
+        'removed check JSON spelling is rejected')
+
+    call run_query('status', '', -1, driver, project, cache, state, &
         query_result)
     call check_summary_response(query_result, first_session, 'default status', &
         query_json)
     summary_bytes = len_trim(query_result%stdout)
 
-    call run_query('status', 'summary', .false., -1, driver, project, cache, &
+    call run_query('status', 'summary', -1, driver, project, cache, &
         state, query_result)
     call check_summary_response(query_result, first_session, &
         'explicit summary status', query_json)
 
-    call run_query('status', 'full', .false., -1, driver, project, cache, state, &
+    call run_query('status', 'full', -1, driver, project, cache, state, &
         query_result)
     call check_full_response(query_result, first_session, 'full status', query_json)
     full_bytes = len_trim(query_result%stdout)
@@ -75,12 +106,7 @@ program test_default_gremlin_cli
     write (*, '(a,i0,a,i0)') 'gremlin status bytes summary=', summary_bytes, &
         ' full=', full_bytes
 
-    call run_query('status', '', .true., -1, driver, project, cache, state, &
-        query_result)
-    call check_summary_response(query_result, first_session, &
-        'status with --json', query_json)
-
-    call run_query('wait', '', .false., 0, driver, project, cache, state, &
+    call run_query('wait', '', 0, driver, project, cache, state, &
         query_result)
     call check_summary_response(query_result, first_session, 'default wait', &
         query_json)
@@ -88,16 +114,16 @@ program test_default_gremlin_cli
     call assert_equal_string(json_string_value(field), 'wait', &
         'wait retains its action marker')
 
-    call run_query('wait', 'summary', .false., 0, driver, project, cache, state, &
+    call run_query('wait', 'summary', 0, driver, project, cache, state, &
         query_result)
     call check_summary_response(query_result, first_session, &
         'explicit summary wait', query_json)
 
-    call run_query('wait', 'full', .false., 0, driver, project, cache, state, &
+    call run_query('wait', 'full', 0, driver, project, cache, state, &
         query_result)
     call check_full_response(query_result, first_session, 'full wait', query_json)
 
-    call run_query('events', '', .false., -1, driver, project, cache, state, &
+    call run_query('events', '', -1, driver, project, cache, state, &
         query_result)
     call assert_process_ok(query_result, 'default events query succeeds')
     call json_parse(query_result%stdout, query_json, valid, message)
@@ -139,10 +165,9 @@ program test_default_gremlin_cli
     write (*, '(a)') 'default-gremlin-cli: summary/full routing and verify pass'
 contains
 
-    subroutine run_query(action, detail, include_json, wait_ms, driver, project, &
+    subroutine run_query(action, detail, wait_ms, driver, project, &
             cache, state, result)
         character(len=*), intent(in) :: action, detail, driver, project, cache, state
-        logical, intent(in) :: include_json
         integer, intent(in) :: wait_ms
         type(process_result_t), intent(out) :: result
         character(len=32) :: wait_text
@@ -164,7 +189,6 @@ contains
             call list_add(query_args, '--wait-ms')
             call list_add(query_args, trim(wait_text))
         end if
-        if (include_json) call list_add(query_args, '--json')
         call gremlin_run(driver, project, cache, state, query_args, result, &
             timeout=30000)
     end subroutine run_query

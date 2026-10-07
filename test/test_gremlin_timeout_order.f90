@@ -204,7 +204,6 @@ contains
         call list_add(values, '1729')
         call list_add(values, '--timeout-seconds')
         call list_add(values, '5')
-        call list_add(values, '--json')
         call list_add(environment, 'PATH='//compiler_dir//':'//path_value)
         if (block_probe) then
             call list_add(environment, 'FO_TIMEOUT_VERSION_HOLD='//hold)
@@ -234,7 +233,6 @@ contains
         call list_add(values, owner)
         call list_add(values, '--cursor')
         call list_add(values, '0')
-        call list_add(values, '--json')
         call gremlin_json(driver, project, cache, state, values, value, result, 30000)
     end subroutine status_now
 

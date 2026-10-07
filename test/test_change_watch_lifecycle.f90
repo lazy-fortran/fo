@@ -43,7 +43,7 @@ program test_change_watch_lifecycle
         ! Foreground run avoids the detached-owner launch barrier. Its first
         ! candidate build reaches containment only after real watcher setup and
         ! generation capture, so this observes the public boundary directly.
-        call cli('run --random-count 1 --campaign-seconds 2', status, output, &
+        call cli('run --random 1 --campaign-seconds 2', status, output, &
             'foreground-174')
         print '(a,i0,2a)', 'public foreground exit=', status, ' ', trim(output)
         call require(status /= 0, 'Darwin foreground containment blocker disappeared')
@@ -54,7 +54,7 @@ program test_change_watch_lifecycle
         call require(index(output, 'change watcher') == 0, &
             'Darwin foreground lifecycle failed during watcher setup')
     end if
-    call cli('start --random-count 1 --campaign-seconds 2', status, output)
+    call cli('start --random 1 --campaign-seconds 2', status, output)
     print '(a,i0,2a)', 'public start exit=', status, ' ', trim(output)
     if (darwin) then
         call require(status /= 0, 'Darwin containment blocker unexpectedly disappeared')
@@ -126,7 +126,7 @@ contains
         selected_lane = 'watcher-174'
         if (present(lane)) selected_lane = lane
         call execute_command_line(prefix//arguments//' --dir '//quote(trim(fixture))// &
-            ' --lane '//trim(selected_lane)//' --json > '//quote(trim(log_file))//' 2>&1', &
+            ' --lane '//trim(selected_lane)//' > '//quote(trim(log_file))//' 2>&1', &
             exitstat=exitcode, cmdstat=launch_error)
         call require(launch_error == 0, 'cannot execute the worktree CLI')
         text = ''

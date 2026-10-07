@@ -324,7 +324,6 @@ contains
         call list_add(values, '60')
         call list_add(values, '--timeout-seconds')
         call list_add(values, '30')
-        call list_add(values, '--json')
         call gremlin_run(driver, project, cache, state, values, result, timeout=30000)
         call json_parse(result%stdout, response, valid, message)
         call assert_true(result%exit_code == 0 .and. valid, 'starts lane A: '//message)
@@ -351,7 +350,6 @@ contains
         call list_add(values, '60')
         call list_add(values, '--timeout-seconds')
         call list_add(values, '30')
-        call list_add(values, '--json')
         call gremlin_run(driver, other, cache, state, values, result, timeout=30000)
         call json_parse(result%stdout, response, valid, message)
         call assert_true(result%exit_code == 0 .and. valid, 'starts unrelated lane: '//message)
@@ -402,7 +400,6 @@ contains
         call list_add(values, owner)
         call list_add(values, '--cursor')
         call list_add(values, '0')
-        call list_add(values, '--json')
         call gremlin_json(driver, project, cache, state, values, value, result, 30000)
     end subroutine status_now
 

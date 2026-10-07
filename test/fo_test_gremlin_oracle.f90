@@ -102,6 +102,7 @@ contains
         call make_directory(project)
         call make_directory(cache)
         call make_directory(state)
+        call make_directory(join_path(state, 'tmp'))
         call make_directory(join_path(scratch, 'home'))
         call make_directory(join_path(scratch, 'xdg-cache'))
         call set_env('HOME', join_path(scratch, 'home'))
@@ -117,7 +118,7 @@ contains
         call set_env('FO_SLOW_TEST_WALL_TIMEOUT', '')
         call set_env('FO_SELF_REFRESH', '0')
         call set_env('FO_DISABLE_SELF_REFRESH', '1')
-        call set_env('TMPDIR', '/var/tmp')
+        call set_env('TMPDIR', join_path(state, 'tmp'))
         if (present(capture_counter)) then
             capture_counter = join_path(scratch, 'capture-counter.json')
             call set_env('FO_GREMLIN_TEST_CAPTURE_COUNTER', capture_counter)
@@ -152,7 +153,7 @@ contains
         call list_add(child_environment, 'FO_DISABLE_SELF_REFRESH=1')
         call list_add(child_environment, 'FO_SELF_REFRESH=0')
         call list_add(child_environment, 'FO_JOBS=1')
-        call list_add(child_environment, 'TMPDIR=/var/tmp')
+        call list_add(child_environment, 'TMPDIR='//join_path(state, 'tmp'))
         if (present(environment)) then
             if (allocated(environment%items)) then
                 do i = 1, size(environment%items)
@@ -360,7 +361,6 @@ contains
         call list_add(args, lane)
         call list_add(args, '--session')
         call list_add(args, owner)
-        call list_add(args, '--json')
         call gremlin_json(driver, project, cache, state, args, stop_reply, &
             stop_process, 10000)
         call assert_true(stop_process%exit_code == 0, &

@@ -57,6 +57,11 @@ program test_mcp_cancel_error
     call assert_equal_integer(error_code, -32602, &
         'idle cancellation rejects a stale public run ID')
 
+    call mcp_session_call(server, '{"action":"check","mode":"start",'// &
+        '"json":"agent","root":'//mcp_quote(project)//'}', response)
+    call assert_equal_integer(rpc_error_code(response), -32602, &
+        'removed agent JSON mode is rejected before starting a check')
+
     start_arguments = '{"action":"check","mode":"start","root":'// &
         mcp_quote(project)//'}'
     call mcp_session_call(server, start_arguments, response)
@@ -171,8 +176,8 @@ program test_mcp_cancel_error
     diagnostics = response_text(response)
     call write_text(scratch//'/early-diagnostics.txt', diagnostics)
     call read_full_check(diagnostics, full_check)
-    call assert_true(.not. json_boolean_value(json_member(full_check, 'tests_ok')), &
-        'full completed receipt retains the failing test outcome')
+    call assert_true(.not. json_boolean_value(json_member(full_check, 'ok')), &
+        'full completed receipt retains the failed check outcome')
     compiler_log = json_string_value(json_member(full_check, 'log_path'))
     call assert_true(len(compiler_log) > 0, &
         'full completed receipt references its retained compiler output artifact')

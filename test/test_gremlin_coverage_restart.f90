@@ -198,7 +198,6 @@ program test_gremlin_coverage_restart
     call list_add(args, '128')
     call list_add(args, '--max-bytes')
     call list_add(args, '262144')
-    call list_add(args, '--json')
     call gremlin_json(driver, project, cache, state, args, report, process, 10000)
     events = json_member(report, 'events')
     interrupted_pass = .false.
@@ -233,7 +232,7 @@ contains
         call list_add(args, project)
         call list_add(args, '--lane')
         call list_add(args, lane)
-        call list_add(args, '--random-count')
+        call list_add(args, '--random')
         call list_add(args, '4')
         call list_add(args, '--seed')
         call list_add(args, '1729')
@@ -241,7 +240,6 @@ contains
         call list_add(args, '60')
         call list_add(args, '--timeout-seconds')
         call list_add(args, '10')
-        call list_add(args, '--json')
         call gremlin_json(driver, project, cache, state, args, report, process, 30000)
         call assert_true(process%exit_code == 0, 'campaign start command returns success')
     end subroutine start_campaign
@@ -261,7 +259,6 @@ contains
         call list_add(args, lane)
         call list_add(args, '--session')
         call list_add(args, owner_id)
-        call list_add(args, '--json')
         call gremlin_json(driver, project, cache, state, args, document, process, 10000)
         call assert_true(process%exit_code == 0, 'status reads the selected owner session')
     end subroutine query_status

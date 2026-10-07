@@ -101,7 +101,7 @@ function collectCliEvents(cwd, laneId, sessionId) {
   while (true) {
     const result = runFo(['gremlin', 'events', '--dir', cwd, '--lane', laneId,
       '--session', sessionId, '--cursor', String(cursor), '--max-records', '128',
-      '--max-bytes', '262144', '--json'], cwd);
+      '--max-bytes', '262144'], cwd);
     assert.equal(result.status, 0, result.stdout + result.stderr);
     const page = JSON.parse(result.stdout.trim());
     assert.ok(page.events.length <= 128, 'CLI page respects the record bound');
@@ -254,7 +254,7 @@ async function waitForStopped(cwd, lane, sessionId, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const result = runFo(['gremlin', 'status', '--lane', lane, '--session',
-      sessionId, '--dir', cwd, '--json'], cwd);
+      sessionId, '--dir', cwd], cwd);
     if (result.status === 0) {
       try {
         if (JSON.parse(result.stdout.trim()).state === 'stopped') return;
@@ -289,8 +289,7 @@ function gremlinOwnerPids(dir, lane) {
     try {
       const args = fs.readFileSync(`/proc/${entry}/cmdline`).toString().split('\0');
       const command = args.indexOf('gremlin');
-      const laneAt = args.indexOf('--lane-id') >= 0
-        ? args.indexOf('--lane-id') : args.indexOf('--lane');
+      const laneAt = args.indexOf('--lane');
       const dirAt = args.indexOf('--dir');
       if (command >= 0 && args[command + 1] === 'run' &&
           laneAt >= 0 && args[laneAt + 1] === lane &&
@@ -337,7 +336,7 @@ async function cleanupOwner(server, cwd, lane, knownId, mcpOwned, requestId) {
   if (!ownerId) {
     try {
       const current = runFo(['gremlin', 'status', '--lane', lane,
-        '--dir', cwd, '--json'], cwd);
+        '--dir', cwd], cwd);
       if (current.status === 0) ownerId = JSON.parse(current.stdout.trim()).session_id;
     } catch (_) { /* continue to exact process-group cleanup */ }
   }
@@ -355,7 +354,7 @@ async function cleanupOwner(server, cwd, lane, knownId, mcpOwned, requestId) {
     let current;
     try {
       current = runFo(['gremlin', 'status', '--lane', lane,
-        '--session', ownerId, '--dir', cwd, '--json'], cwd);
+        '--session', ownerId, '--dir', cwd], cwd);
     } catch (_) { /* stop and exact process-group fallback still have a chance */ }
     if (current && current.status === 0) {
       try {
@@ -373,7 +372,7 @@ async function cleanupOwner(server, cwd, lane, knownId, mcpOwned, requestId) {
         assert.equal(response.isError, false, JSON.stringify(response.body));
       } else {
         const stopped = runFo(['gremlin', 'stop', '--lane', lane,
-          '--session', ownerId, '--dir', cwd, '--json'], cwd);
+          '--session', ownerId, '--dir', cwd], cwd);
         assert.equal(stopped.status, 0, stopped.stdout + stopped.stderr);
       }
       await waitForStopped(cwd, lane, ownerId, 3000);
@@ -517,7 +516,7 @@ async function main() {
     const largeCursor = 2147483648;
     const cliWideCursor = runFo(['gremlin', 'events', '--dir', fixture,
       '--lane', 'mcp-probe', '--session', sessionId, '--cursor',
-      String(largeCursor), '--max-records', '1', '--json'], fixture);
+      String(largeCursor), '--max-records', '1'], fixture);
     assert.equal(cliWideCursor.status, 2,
       'wide cursor is parsed before the journal range check');
     const mcpWideCursor = payload(await server.call(50, {
@@ -632,8 +631,8 @@ async function main() {
     const identity = { dir: fixture, lane_id: 'mcp-probe',
       session_id: startResult.body.session_id };
     const cliStatus = runFo(['gremlin', 'status', '--lane', 'mcp-probe',
-      '--session', startResult.body.session_id, '--dir', fixture, '--detail', 'full',
-      '--json'], fixture);
+      '--session', startResult.body.session_id, '--dir', fixture, '--detail', 'full'],
+      fixture);
     assert.equal(cliStatus.status, 0, cliStatus.stdout + cliStatus.stderr);
     const cliState = JSON.parse(cliStatus.stdout.trim());
     const mcpStatus = payload(await server.call(4, { action: 'gremlin_status',
@@ -752,7 +751,7 @@ async function main() {
       const result = runFo(['gremlin', 'status', '--dir', parityFixture,
         '--lane', 'cli-parity', '--session', parityCliSessionId,
         '--detail', 'full', '--cursor', '0', '--max-records', '8',
-        '--max-bytes', '8192', '--json'],
+        '--max-bytes', '8192'],
       parityFixture);
       assert.equal(result.status, 0, result.stdout + result.stderr);
       return JSON.parse(result.stdout.trim());
@@ -780,7 +779,7 @@ async function main() {
     assert.equal(parityStop.isError, false, JSON.stringify(parityStop.body));
     await waitForStopped(parityFixture, 'mcp-parity', parityMcpSessionId, 10000);
     const cliParityStop = runFo(['gremlin', 'stop', '--dir', parityFixture,
-      '--lane', 'cli-parity', '--session', parityCliSessionId, '--json'], parityFixture);
+      '--lane', 'cli-parity', '--session', parityCliSessionId], parityFixture);
     assert.equal(cliParityStop.status, 0, cliParityStop.stdout + cliParityStop.stderr);
     await waitForStopped(parityFixture, 'cli-parity', parityCliSessionId, 10000);
 
@@ -867,7 +866,7 @@ async function main() {
       let active = true;
       if (sessionId) {
         const current = runFo(['gremlin', 'status', '--lane', 'mcp-probe',
-          '--session', sessionId, '--dir', fixture, '--json'], fixture);
+          '--session', sessionId, '--dir', fixture], fixture);
         if (current.status === 0) {
           try { active = JSON.parse(current.stdout.trim()).state !== 'stopped'; }
           catch (_) { /* the owner may be between state publications */ }

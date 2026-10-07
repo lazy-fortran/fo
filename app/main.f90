@@ -17,7 +17,7 @@ program fo_main
     use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds
     use fo_fs, only: fs_stat
     use fo_build_tree, only: native_output_dir
-    use fo_check_output, only: check_result_json, check_result_compact_json, &
+    use fo_check_output, only: check_result_compact_json, &
         check_result_full_json
     use fo_test_results, only: test_result_entry_t, &
         parse_test_results, format_test_results_human, format_test_results_json
@@ -105,7 +105,7 @@ program fo_main
         call cmd_info()
     case ('lint')
         call cmd_lint()
-    case ('fmt', 'format')
+    case ('fmt')
         call cmd_fmt()
     case ('clean')
         call cmd_clean()
@@ -371,10 +371,8 @@ contains
         write (output_unit, '(a)') &
             '  build --native [-o <exe>] <source>...  compile and link with ffc'
         write (output_unit, '(a)') '  check      build + test, one-line status'
-        write (output_unit, '(a)') '  check --json  build + test, JSON status'
         write (output_unit, '(a)') '  check --json=compact  bounded agent JSON'
         write (output_unit, '(a)') '  check --json=full  JSON status with diagnostics'
-        write (output_unit, '(a)') '  check --agent  compact JSON for opencode/Qwen'
         write (output_unit, '(a)') '  changed    list changed and affected modules'
         write (output_unit, '(a)') '  graph      module dependency graph'
         write (output_unit, '(a)') '  graph --dot  graph in Graphviz DOT format'
@@ -414,6 +412,10 @@ contains
             handled = .true.
             if (argument_count >= 2) then
                 call get_command_argument(2, arg)
+                if (trim(arg) == 'format') then
+                    write (error_unit, '(a)') 'fo: unknown command: format'
+                    call process_exit(1)
+                end if
                 call print_command_help(trim(arg))
             else
                 call print_usage()
@@ -425,6 +427,7 @@ contains
             handled = .true.
             return
         end if
+        if (command == 'format') return
         if (command == 'exec' .or. command == 'run') then
             i = 2
             do while (i <= argument_count)
@@ -487,8 +490,8 @@ contains
             write (output_unit, '(a)') '  --help, -h  show this help without deleting files'
         case ('check')
             write (output_unit, '(a)') &
-                'usage: fo check [--json|--json=compact|--json=full|--agent]'
-        case ('fmt', 'format')
+                'usage: fo check [--json=compact|--json=full]'
+        case ('fmt')
             write (output_unit, '(a)') 'usage: fo fmt [--changed] [--check] [paths...]'
             write (output_unit, '(a)') '  -h, --help  show this help without formatting files'
         case default
@@ -576,7 +579,7 @@ contains
 
         if (has_arg('--help') .or. has_arg('-h')) then
             write (output_unit, '(a)') &
-                'usage: fo check [--json|--json=compact|--json=full|--agent]'
+                'usage: fo check [--json=compact|--json=full]'
             return
         end if
         call check_output_mode(output_mode, mode_ierr)
@@ -587,7 +590,7 @@ contains
         end if
 
         cap_json = ''
-        if (output_mode == 3) then
+        if (output_mode == 2) then
             call detect_capabilities(cap)
             call capabilities_json(cap, cap_json)
         end if
@@ -605,22 +608,12 @@ contains
 
         select case (output_mode)
         case (1)
-            write (output_unit, '(a)') trim(check_result_json(res))
+            write (output_unit, '(a)') trim(check_result_compact_json(res))
             if (.not. (res%build_ok .and. res%tests_ok) .or. &
                 frontend_had_error) call process_exit(1)
             return
         case (2)
-            write (output_unit, '(a)') trim(check_result_compact_json(res))
-            if (.not. (res%build_ok .and. res%tests_ok) .or. &
-                frontend_had_error) call process_exit(1)
-            return
-        case (3)
             write (output_unit, '(a)') trim(check_result_full_json(res, cap_json))
-            if (.not. (res%build_ok .and. res%tests_ok) .or. &
-                frontend_had_error) call process_exit(1)
-            return
-        case (4)
-            write (output_unit, '(a)') trim(check_result_compact_json(res))
             if (.not. (res%build_ok .and. res%tests_ok) .or. &
                 frontend_had_error) call process_exit(1)
             return
@@ -875,14 +868,10 @@ contains
         do i = 2, command_argument_count()
             call get_command_argument(i, arg)
             select case (trim(arg))
-            case ('--json')
-                mode = 1
             case ('--json=compact')
-                mode = 2
+                mode = 1
             case ('--json=full')
-                mode = 3
-            case ('--agent')
-                mode = 4
+                mode = 2
             case default
                 ierr = 1
                 return
@@ -2025,10 +2014,9 @@ contains
         end if
 
         ! Default clean is project-scoped: drop only this project's build/ tree
-        ! (a disposable view that fo regenerates from the cache). The store at
-        ! ~/.cache/fo/store/v1 is the shared, content-addressed source of truth
-        ! across all projects; wiping it on a per-project clean cold-starts every
-        ! other project. Purge it only when explicitly asked.
+        ! (a disposable view that fo regenerates). The content-addressed cache
+        ! is shared across projects; purging it forces cold builds elsewhere.
+        ! Purge it only when explicitly asked.
         purge_store = .false.
         stale_only = .false.
         keep = CLEAN_STALE_DEFAULT_KEEP

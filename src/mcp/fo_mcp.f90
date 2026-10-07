@@ -581,6 +581,12 @@ contains
         character(len=514) :: dir_prefix
         call extract_json_string_member(line, 'json', json_mode, &
             option_count, option_error)
+        if (option_count > 1 .or. (option_count == 1 .and. &
+                (option_error /= 0 .or. &
+                (trim(json_mode) /= 'compact' .and. trim(json_mode) /= 'full')))) then
+            call jsonrpc_error(id_str, -32602, 'invalid json mode', response)
+            return
+        end if
         want_full = option_error == 0 .and. option_count == 1 .and. &
             trim(json_mode) == 'full'
         cap_json = ''
@@ -1074,13 +1080,16 @@ contains
             return
         end if
         if (root_count == 0 .or. len_trim(root) == 0) root = '.'
-        output_mode = 'agent'
+        output_mode = 'compact'
         call extract_json_string_member(line, 'json', output_mode, &
             mode_count, mode_error)
-        if (mode_error /= 0 .or. mode_count /= 1 .or. &
-            (output_mode /= 'agent' .and. output_mode /= 'full')) then
-            output_mode = 'agent'
+        if (mode_count > 1 .or. (mode_count == 1 .and. &
+                (mode_error /= 0 .or. &
+                (output_mode /= 'compact' .and. output_mode /= 'full')))) then
+            call jsonrpc_error(id_str, -32602, 'invalid json mode', response)
+            return
         end if
+        if (mode_count == 0) output_mode = 'compact'
         started_before = async_state%queue%started
         call async_state%queue%request(root, output_mode, ierr)
         if (ierr /= 0) then

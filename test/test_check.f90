@@ -2,8 +2,8 @@ program test_check
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_check, only: check_result_t, fo_check_run, &
         should_report_frontend_diagnostics
-    use fo_check_output, only: check_result_json, check_result_compact_json, &
-        check_result_full_json, fo_check_write
+    use fo_check_output, only: check_result_compact_json, &
+        check_result_full_json
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, &
         array_temporary_warnings_from_log
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
@@ -27,11 +27,9 @@ program test_check
     call test_check_keeps_child_crash_as_target_failure()
     call test_check_rejects_zero_exit_with_failing_summary()
     call test_frontend_diagnostics_only_enrich_compiler_failure()
-    call test_check_result_json()
     call test_check_result_compact_json_success()
     call test_check_result_compact_json_failure()
     call test_check_result_full_json_diagnostics()
-    call test_check_write_outputs()
     call test_diagnostic_timeout_hint()
     call test_diagnostic_crash_hint()
     call test_diagnostic_unknown_line()
@@ -225,14 +223,11 @@ contains
         call assert(index(res%error_msg, 'exit') > 0, &
             'contradiction is explained in the error summary')
 
-        line = check_result_json(res)
-        call assert(index(line, '"tests_ok":false') > 0, &
-            'json tests_ok agrees with the failing suite status')
-        call assert(index(line, '"status":"fail"') > 0, &
-            'json keeps the failing suite status')
         line = check_result_compact_json(res)
         call assert(index(line, '"ok":false') > 0, &
-            'agent json ok agrees with the failing suite status')
+            'json status agrees with the failing suite status')
+        call assert(index(line, '"status":"fail"') > 0, &
+            'json keeps the failing suite status')
 
         call execute_command_line('rm -rf '//trim(project_dir))
     end subroutine test_check_rejects_zero_exit_with_failing_summary
@@ -269,38 +264,6 @@ contains
         write (u, '(a)') 'end program test_lying'
         close (u)
     end subroutine make_lying_test_project
-
-    subroutine test_check_result_json()
-        type(check_result_t) :: res
-        character(len=8192) :: line
-
-        res%build_ok = .true.
-        res%tests_ok = .false.
-        res%n_modules = 7
-        res%n_cached = 3
-        res%n_changed = 2
-        res%n_affected = 5
-        res%elapsed = 0.25
-        res%error_msg = 'bad "quote" '//achar(92)//'path'
-
-        line = check_result_json(res)
-
-        call assert(index(line, '"build_ok":true') > 0, &
-            'json includes build_ok boolean')
-        call assert(index(line, '"tests_ok":false') > 0, &
-            'json includes tests_ok boolean')
-        call assert(index(line, '"modules":7') > 0, &
-            'json includes module count')
-        call assert(index(line, '"elapsed_s":0.250') > 0, &
-            'json includes valid elapsed number')
-        if (index(line, 'bad '//achar(92)//'"quote') <= 0) then
-            write (error_unit, '(a,a)') 'json line: ', trim(line)
-        end if
-        call assert(index(line, 'bad '//achar(92)//'"quote') > 0, &
-            'json escapes quotes')
-        call assert(index(line, achar(92)//achar(92)//'path') > 0, &
-            'json escapes backslashes')
-    end subroutine test_check_result_json
 
     subroutine test_check_result_compact_json_success()
         type(check_result_t) :: res
@@ -340,11 +303,14 @@ contains
         res%tests_ok = .false.
         res%stage = 'test'
         res%target = 'test_x'
-        res%summary = 'test_x returned exit code 1'
+        res%summary = 'test_x returned "bad" '//achar(92)//'path'
         res%hint = 'make this test faster or mark it slow'
         res%rerun = 'fo test test_x'
         res%log_path = '/tmp/fo-test.log'
         res%elapsed = 0.5
+        res%n_failed_tests = 2
+        res%failed_tests(1) = 'test_x'
+        res%failed_tests(2) = 'test_y'
 
         line = check_result_compact_json(res)
 
@@ -354,8 +320,9 @@ contains
             'compact failure includes stage')
         call assert(index(line, '"target":"test_x"') > 0, &
             'compact failure includes target')
-        call assert(index(line, '"summary":"test_x returned exit code 1"') > 0, &
-            'compact failure includes summary')
+        call assert(index(line, 'test_x returned '//achar(92)//'"bad'// &
+            achar(92)//'" '//achar(92)//achar(92)//'path') > 0, &
+            'compact failure escapes diagnostic text')
         call assert(index(line, '"hint":"make this test faster or mark it slow"') > 0, &
             'compact failure includes hint')
         call assert(index(line, '"rerun":"fo test test_x"') > 0, &
@@ -364,6 +331,8 @@ contains
             'compact failure includes log path')
         call assert(index(line, '"elapsed_s":0.500') > 0, &
             'compact failure includes numeric elapsed_s')
+        call assert(index(line, '"failed_tests":["test_x","test_y"]') > 0, &
+            'compact failure includes every failing target')
         call assert(len_trim(line) < 8192, 'compact failure stays bounded')
     end subroutine test_check_result_compact_json_failure
 
@@ -385,8 +354,8 @@ contains
 
         line = check_result_full_json(res, '')
 
-        call assert(index(line, '"build_ok":false') > 0, &
-            'full json keeps legacy fields')
+        call assert(index(line, '"ok":false') > 0, &
+            'full json reports failed status')
         call assert(index(line, '"diagnostics":[{') > 0, &
             'full json includes diagnostics array')
         call assert(index(line, '"kind":"build"') > 0, &
@@ -400,35 +369,6 @@ contains
         call assert(index(line, '"log_path":"/tmp/fo-build.log"') > 0, &
             'full json includes log path')
     end subroutine test_check_result_full_json_diagnostics
-
-    subroutine test_check_write_outputs()
-        character(len=512) :: project_dir, json_path, text_path
-        integer :: ierr
-
-        call make_tmp_path('fo_writer_project', project_dir)
-        call make_tmp_path('fo_writer_json', json_path)
-        call make_tmp_path('fo_writer_text', text_path)
-        call make_ok_project(project_dir)
-
-        call fo_check_write(trim(project_dir)//'/src', 'json', json_path, ierr)
-        call assert(ierr == 0, 'check writer accepts json mode')
-        call assert(file_contains(json_path, '"build_ok":true'), &
-            'check writer writes json output')
-
-        call fo_check_write(project_dir, 'text', text_path, ierr)
-        call assert(ierr == 0, 'check writer accepts text mode')
-        call assert(file_contains(text_path, 'OK modules='), &
-            'check writer writes text output')
-
-        call fo_check_write(project_dir, 'bad-mode', text_path, ierr)
-        call assert(ierr == 2, 'check writer rejects invalid mode')
-        call assert(file_contains(text_path, 'OK modules='), &
-            'invalid writer mode leaves prior output untouched')
-
-        call execute_command_line('rm -f '//trim(json_path))
-        call execute_command_line('rm -f '//trim(text_path))
-        call remove_dir(project_dir)
-    end subroutine test_check_write_outputs
 
     subroutine test_diagnostic_timeout_hint()
         type(diagnostic_t) :: diag
@@ -514,8 +454,8 @@ contains
         call queue%request(root_a, 'check', ierr)
         call assert(ierr == 0, 'first queue request succeeds')
         call assert(queue%state == RUN_RUNNING, 'first queue request starts')
-        call queue%request(root_b, 'agent', ierr)
-        call queue%request(root_c, 'json', ierr)
+        call queue%request(root_b, 'json=compact', ierr)
+        call queue%request(root_c, 'json=compact', ierr)
 
         call assert(queue%started == 1, &
             'active queue stores pending requests without extra start')
@@ -524,7 +464,7 @@ contains
         call assert(queue%rerun_pending, 'active queue records pending rerun')
         call assert(trim(queue%pending_root) == trim(root_c), &
             'queue keeps newest pending root')
-        call assert(trim(queue%pending_mode) == 'json', &
+        call assert(trim(queue%pending_mode) == 'json=compact', &
             'queue keeps newest pending mode')
 
         call queue%finish(0)
@@ -582,7 +522,7 @@ contains
         call make_dir(root_b)
 
         call queue%request(root_a, 'check', ierr)
-        call queue%request(root_b, 'agent', ierr)
+        call queue%request(root_b, 'json=compact', ierr)
         call queue%finish(1)
 
         call assert(queue%last_exitcode == 1, &
@@ -993,37 +933,6 @@ contains
             'full json without cap_json omits capabilities')
     end subroutine test_full_json_includes_capabilities
 
-    subroutine make_ok_project(project_dir)
-        character(len=*), intent(in) :: project_dir
-        integer :: u
-
-        call execute_command_line('rm -rf '//trim(project_dir))
-        call execute_command_line('mkdir -p '//trim(project_dir)//'/src')
-        call execute_command_line('mkdir -p '//trim(project_dir)//'/test')
-
-        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
-        write (u, '(a)') 'name = "fo_writer_project"'
-        close (u)
-
-        open (newunit=u, file=trim(project_dir)//'/src/ok.f90', &
-            status='replace')
-        write (u, '(a)') 'module ok'
-        write (u, '(a)') 'implicit none'
-        write (u, '(a)') 'contains'
-        write (u, '(a)') 'subroutine noop()'
-        write (u, '(a)') 'end subroutine noop'
-        write (u, '(a)') 'end module ok'
-        close (u)
-
-        open (newunit=u, file=trim(project_dir)//'/test/test_ok.f90', &
-            status='replace')
-        write (u, '(a)') 'program test_ok'
-        write (u, '(a)') 'use ok, only: noop'
-        write (u, '(a)') 'call noop()'
-        write (u, '(a)') 'end program test_ok'
-        close (u)
-    end subroutine make_ok_project
-
     subroutine make_bad_project(project_dir)
         character(len=*), intent(in) :: project_dir
         integer :: u
@@ -1121,26 +1030,6 @@ contains
 
         call execute_command_line('rm -rf '//trim(path))
     end subroutine remove_dir
-
-    logical function file_contains(path, needle)
-        character(len=*), intent(in) :: path, needle
-
-        character(len=1024) :: line
-        integer :: u, iostat
-
-        file_contains = .false.
-        open (newunit=u, file=trim(path), status='old', iostat=iostat)
-        if (iostat /= 0) return
-        do
-            read (u, '(a)', iostat=iostat) line
-            if (iostat /= 0) exit
-            if (index(line, needle) > 0) then
-                file_contains = .true.
-                exit
-            end if
-        end do
-        close (u)
-    end function file_contains
 
     subroutine test_compact_json_includes_test_results()
         type(check_result_t) :: res

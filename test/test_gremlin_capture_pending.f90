@@ -349,7 +349,7 @@ contains
             'FO_GREMLIN_STATE_DIR='//quote(trim(state_directory))//' '// &
             'FO_FC='//quote(trim(compiler_wrapper))//' '//quote(trim(driver_path))
         call command(prefix//' gremlin '//arguments//' --dir '//quote(trim(fixture))// &
-            ' --lane capture-pending --json > '//quote(trim(cli_file)), exitcode)
+            ' --lane capture-pending > '//quote(trim(cli_file)), exitcode)
         call read_output(cli_file, json)
     end subroutine cli
 

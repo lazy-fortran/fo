@@ -46,7 +46,6 @@ program test_gremlin_reproduce_logs
     call gremlin_start_args(arguments, project, lane, 'test_reproduce_anchor')
     call list_add(arguments, '--seed')
     call list_add(arguments, '1729')
-    call list_add(arguments, '--json')
     call gremlin_json(driver, project, cache, state, arguments, started, process, &
         30000)
     session = member_text(started, 'session_id')
@@ -201,7 +200,6 @@ contains
         call list_add(args, owner)
         call list_add(args, '--cursor')
         call list_add(args, '0')
-        call list_add(args, '--json')
         call gremlin_json(driver, project, cache, state, args, value, result, 30000)
     end subroutine status_now
 
@@ -300,7 +298,6 @@ contains
         call list_add(args, session)
         call list_add(args, '--generation')
         call list_add(args, generation)
-        call list_add(args, '--json')
         if (present(cache_root)) then
             call gremlin_run(driver, project, cache_root, state, args, result, &
                 timeout=120000)

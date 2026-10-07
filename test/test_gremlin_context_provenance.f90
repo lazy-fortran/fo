@@ -340,7 +340,6 @@ contains
         logical :: valid
         character(:), allocatable :: message
         call gremlin_start_args(args, project, lane_id, 'test_provenance')
-        call list_add(args, '--json')
         if (len(override) > 0) call list_add(extra, override)
         if (present(additional_override)) then
             if (len_trim(additional_override) > 0) then
@@ -380,7 +379,6 @@ contains
             call list_add(args, lane_id)
             call list_add(args, '--session')
             call list_add(args, owner)
-            call list_add(args, '--json')
             call gremlin_json(driver, project, cache, state, args, value, result, 30000)
             current_generation = field(value, 'active_generation')
             if (len(current_generation) == 64 .and. current_generation /= old_generation) return

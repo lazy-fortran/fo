@@ -138,7 +138,6 @@ contains
         lane = 'driver-pin-ab'
         args = string_list_t()
         call gremlin_start_args(args, project, lane, 'test_driver_pin_case')
-        call list_add(args, '--json')
         environment = string_list_t()
         call list_add(environment, 'FO_B_MARKER='//marker)
         call gremlin_run(public_driver, project, cache, state, args, process, &
@@ -403,7 +402,6 @@ contains
         call list_add(args, session)
         call list_add(args, '--cursor')
         call list_add(args, '0')
-        call list_add(args, '--json')
         call gremlin_json(driver, project, cache, state, args, document, process, 30000)
     end subroutine status_now
 
@@ -449,7 +447,6 @@ contains
         call list_add(args, lane)
         call list_add(args, '--session')
         call list_add(args, session)
-        call list_add(args, '--json')
         call gremlin_json(driver, project, cache, state, args, document, process, 30000)
     end subroutine stop_lane
 

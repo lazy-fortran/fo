@@ -110,7 +110,6 @@ contains
         call list_add(arguments, '1')
         call list_add(arguments, '--seed')
         call list_add(arguments, '17')
-        call list_add(arguments, '--json')
         call gremlin_json(driver, project, cache, state, arguments, document, &
             process, 30000)
         owner = gremlin_field(document, 'session_id')
@@ -135,7 +134,6 @@ contains
         call list_add(arguments, condition)
         call list_add(arguments, '--wait-ms')
         call list_add(arguments, '30000')
-        call list_add(arguments, '--json')
         call gremlin_json(driver, project, cache, state, arguments, document, &
             process, 35000)
         call assert_true(process%exit_code == 0 .and. &

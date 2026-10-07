@@ -2955,8 +2955,7 @@ void fo_c_start_argv_logged(const char *cwd, const char *args, int args_len,
 void fo_c_start_fo_check(const char *project_dir, const char *mode,
                          const char *output_file, int *pid_out,
                          int *exitcode) {
-    static const char args_agent[] = "fo\0check\0--agent\0";
-    static const char args_json[] = "fo\0check\0--json\0";
+    static const char args_compact[] = "fo\0check\0--json=compact\0";
     static const char args_full[] = "fo\0check\0--json=full\0";
     const char *packed;
     int args_len;
@@ -2966,15 +2965,12 @@ void fo_c_start_fo_check(const char *project_dir, const char *mode,
         *exitcode = EINVAL;
         return;
     }
-    if (strcmp(mode, "full") == 0 || strcmp(mode, "json=full") == 0) {
+    if (strcmp(mode, "full") == 0) {
         packed = args_full;
         args_len = (int)sizeof(args_full) - 1;
-    } else if (strcmp(mode, "json") == 0) {
-        packed = args_json;
-        args_len = (int)sizeof(args_json) - 1;
     } else {
-        packed = args_agent;
-        args_len = (int)sizeof(args_agent) - 1;
+        packed = args_compact;
+        args_len = (int)sizeof(args_compact) - 1;
     }
     fo_c_start_argv_logged(project_dir, packed, args_len, 3, output_file, NULL,
                            pid_out, exitcode);

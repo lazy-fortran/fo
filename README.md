@@ -19,11 +19,8 @@ Current Git/registry bootstrap and installation still invoke FPM, and the curren
 CMake backend invokes CMake/CTest; standalone parity remains under development
 in [PLAN.md](PLAN.md).
 
-Environment management, containers/sandboxing, CI governance, agent scheduling
-and scientific proof/synthesis/workflow systems remain outside fo's scope. The older capsule/provenance/Nix/FortOS
-experiments remain historical closed issues (#1–#7); `fo prove` /
-synthesis (#120) and complete host toolchain/runtime capture (#157) are also
-closed as out of scope.
+Environment management, containers, CI governance, agent scheduling and
+scientific proof or synthesis systems remain outside fo's scope.
 
 For reproducibility, fo uses content-based cache/action identities, explicit
 project inputs, deterministic selection/replay where supported, and explicit
@@ -50,7 +47,7 @@ fo test --random 12 --seed 1729
 fo gremlin                continuous generation-aware build and testing
 fo run [options] NAME      build and run an application or example
 fo exec NAME [ARGS...]     build and run any fo executable target
-fo check [--json...]       compact build and test status
+fo check --json=compact    compact build and test status
 fo changed                 changed modules and reverse dependents
 fo graph [--dot]           module dependency graph
 fo lint                    native source checks and compiler warnings
@@ -106,7 +103,7 @@ fo exec --release --no-build solver input.nml
 `fo exec` options go before the target; everything after it is passed to the
 program unchanged.
 
-The default output is intentionally quieter than fpm. `fo check --agent` and
+The default output is intentionally quieter than fpm. `fo check --json=compact` and
 MCP checks return one bounded JSON object with the failure, hint, rerun command,
 and log path.
 

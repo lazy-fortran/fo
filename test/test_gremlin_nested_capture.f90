@@ -167,7 +167,6 @@ contains
         call gremlin_start_args(args, project, lane_id, 'test_path_dependencies')
         call list_add(args, '--seed')
         call list_add(args, '1729')
-        call list_add(args, '--json')
         call gremlin_json(driver, project, cache, state, args, response, process, 30000)
         call assert_true(process%exit_code == 0, 'starts the resident fixture lane')
         owner = gremlin_field(response, 'session_id')
@@ -208,7 +207,6 @@ contains
         call list_add(args, lane_id)
         call list_add(args, '--session')
         call list_add(args, owner)
-        call list_add(args, '--json')
         call gremlin_json(driver, project, cache, state, args, document, process, 30000)
     end subroutine status_for
 

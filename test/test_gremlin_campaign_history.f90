@@ -419,14 +419,13 @@ contains
         logical :: found
 
         args = 'gremlin start --dir '//shell_quote(project_path)// &
-            ' --lane '//shell_quote(lane)//' --random-count '//int_text(random_count)// &
+            ' --lane '//shell_quote(lane)//' --random '//int_text(random_count)// &
             ' --seed '//int_text(seed)//' --campaign-seconds 60'// &
             ' --timeout-seconds 5'
         if (shuffle) args = args//' --shuffle'
         do i = 1, n_requested
             args = args//' --target '//shell_quote(trim(requested(i)))
         end do
-        args = args//' --json'
         call run_cli(project_path, args, output, errors, exit_status)
         call require(exit_status == 0, 'starts Gremlin session: '//trim(errors)// &
             ' '//trim(output))
@@ -444,15 +443,13 @@ contains
         logical :: found, owner_exited
 
         args = 'gremlin stop --dir '//shell_quote(project_path)// &
-            ' --lane '//shell_quote(lane)//' --session '//shell_quote(session_id)// &
-            ' --json'
+            ' --lane '//shell_quote(lane)//' --session '//shell_quote(session_id)
         call run_cli(project_path, args, output, errors, command_status)
         exit_status = 1
         if (command_status /= 0) return
         do attempt = 1, 200
             args = 'gremlin status --dir '//shell_quote(project_path)// &
-                ' --lane '//shell_quote(lane)//' --session '//shell_quote(session_id)// &
-                ' --json'
+                ' --lane '//shell_quote(lane)//' --session '//shell_quote(session_id)
             call run_cli(project_path, args, output, errors, command_status)
             if (command_status == 0) then
                 call json_extract_string(output, 'state', state, found)
@@ -518,7 +515,7 @@ contains
 
         args = 'gremlin events --dir '//shell_quote(project_path)// &
             ' --lane '//shell_quote(lane)//' --session '//shell_quote(session_id)// &
-            ' --cursor 0 --max-records 128 --max-bytes 262144 --json'
+            ' --cursor 0 --max-records 128 --max-bytes 262144'
         call run_cli(project_path, args, output, errors, exit_status)
         if (exit_status /= 0) then
             n_events = 0

@@ -128,7 +128,7 @@ async function interruptRestart(library, mode) {
   const gate = createGate(path.join(markerRoot, `restart-${mode}.fifo`));
   const child = spawn(fo, ['gremlin', mode === 'owner' ? 'start' : 'run',
     '--dir', project, '--lane', lane,
-    '--random-count', '32', '--seed', '1729', '--target', 'test_blocked'], {
+    '--random', '32', '--seed', '1729', '--target', 'test_blocked'], {
     cwd: project, stdio: 'ignore', env: { ...env, LD_PRELOAD: library,
       RECOVERY_BARRIER_OWNER: ownerFile(), RECOVERY_BARRIER_MODE: mode,
       RECOVERY_BARRIER_READY: ready, RECOVERY_BARRIER_GATE: gate }
@@ -266,8 +266,7 @@ function ownerIdentity(sessionId) {
   assert.ok(command >= 0 && argv[command + 1] === 'run',
     'recorded process is the Gremlin supervisor');
   assert.equal(argv[argv.indexOf('--dir') + 1], fs.realpathSync(project));
-  const laneFlag = argv.indexOf('--lane-id') >= 0 ? '--lane-id' : '--lane';
-  assert.equal(argv[argv.indexOf(laneFlag) + 1], lane);
+  assert.equal(argv[argv.indexOf('--lane') + 1], lane);
   return { ...identity, sessionId };
 }
 
@@ -291,13 +290,13 @@ async function waitForOwnerExit(identity, timeoutMs) {
 
 function start(targets) {
   return json(['gremlin', 'start', '--dir', project, '--lane', lane,
-    '--random-count', '32', '--seed', '1729', '--campaign-seconds', '60',
+    '--random', '32', '--seed', '1729', '--campaign-seconds', '60',
     '--timeout-seconds', '5', ...targets.flatMap(name => ['--target', name])]);
 }
 
 function status(sessionId) {
   return json(['gremlin', 'status', '--dir', project, '--lane', lane,
-    '--session', sessionId, '--detail', 'full', '--json']);
+    '--session', sessionId, '--detail', 'full']);
 }
 
 function assertReceiptSet(events, sessionId) {
@@ -443,7 +442,7 @@ async function main() {
     for (const sessionId of sessionsToStop) {
       try {
         run(['gremlin', 'stop', '--dir', project, '--lane', lane,
-          '--session', sessionId, '--json']);
+          '--session', sessionId]);
       } catch (_) { /* owner may already have exited */ }
     }
     if (ownerToStop) {

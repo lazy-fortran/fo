@@ -261,16 +261,16 @@ contains
         call list_add(cli_args, action)
         call list_add(cli_args, '--dir')
         call list_add(cli_args, project_dir)
-        call list_add(cli_args, '--lane-id')
+        call list_add(cli_args, '--lane')
         call list_add(cli_args, lane)
         if (len_trim(session) > 0) then
-            call list_add(cli_args, '--session-id')
+            call list_add(cli_args, '--session')
             call list_add(cli_args, session)
         end if
         if (action == 'start') then
             call list_add(cli_args, '--target')
             call list_add(cli_args, 'test_process_boundary')
-            call list_add(cli_args, '--random-count')
+            call list_add(cli_args, '--random')
             call list_add(cli_args, '1')
             call list_add(cli_args, '--seed')
             call list_add(cli_args, '172')

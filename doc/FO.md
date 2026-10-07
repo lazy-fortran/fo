@@ -1,4 +1,4 @@
-# fo architecture and compatibility
+# fo architecture
 
 ## Product boundary
 
@@ -141,7 +141,7 @@ or replace CMake's target model.
 
 ## Agent interfaces
 
-`fo check --agent` and MCP check return a bounded JSON result. MCP supports
+`fo check --json=compact` and MCP check return a bounded JSON result. MCP supports
 check, status, diagnostics, cancellation, build, test, graph, info, changed,
 clean, lint, format, and release installation. MCP clean preserves the shared
 CAS unless `cache=true`. MCP installation accepts a prefix and always requests
@@ -160,9 +160,3 @@ resolution, and separate submodule bodies remain documented unsupported cases.
 
 The LSP surface reports compiler-backed diagnostics on save. It does not claim
 to replace a full semantic Fortran language server.
-
-`fo_compiler_service` defines a compiler-library request/result boundary and
-explicit LFortran and Fortfront adapters. Both adapters are unavailable stubs:
-the native build path does not instantiate or invoke them. Wiring either one
-requires independent module-file, diagnostic, runtime-library, and concurrency
-correctness tests first.

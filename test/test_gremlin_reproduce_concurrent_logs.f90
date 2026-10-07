@@ -34,7 +34,6 @@ program test_gremlin_reproduce_concurrent_logs
     call gremlin_start_args(args, project, lane, 'test_reproduce_anchor')
     call list_add(args, '--seed')
     call list_add(args, '1729')
-    call list_add(args, '--json')
     call gremlin_json(driver, project, cache, state, args, report, process, 120000)
     session = field(report, 'session_id')
     call assert_true(len(session) > 0, 'start returns an owner session')
@@ -202,7 +201,6 @@ contains
         call list_add(values, session)
         call list_add(values, '--generation')
         call list_add(values, generation)
-        call list_add(values, '--json')
     end subroutine reproduction_args
 
     subroutine wait_for_anchor(owner, active_generation)
@@ -243,7 +241,6 @@ contains
         call list_add(values, owner)
         call list_add(values, '--cursor')
         call list_add(values, '0')
-        call list_add(values, '--json')
     end subroutine status_args
 
     subroutine wait_for_logs(owner, active_generation, first, second)

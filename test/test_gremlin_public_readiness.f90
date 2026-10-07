@@ -559,7 +559,7 @@ contains
                 index(trim(arguments), 'wait') == 1) &
             full_arguments = trim(arguments)//' --detail full'
         call command(trim(prefix)//' gremlin '//trim(full_arguments)//' --dir '// &
-            quote(trim(fixture))//' --lane public-readiness --json > '// &
+            quote(trim(fixture))//' --lane public-readiness > '// &
             quote(trim(cli_file)), exitcode)
         call read_output(cli_file, json)
     end subroutine cli

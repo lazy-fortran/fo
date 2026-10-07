@@ -60,7 +60,6 @@ program test_gremlin_watch
     call gremlin_fifo(gate)
     call write_blocked_test()
     call gremlin_start_args(args, project, lane, 'test_watch')
-    call list_add(args, '--json')
     call gremlin_json(driver, project, cache, state, args, response, process, 120000)
     session = field(response, 'session_id')
     call assert_true(len(session) > 0, 'watch session starts')
@@ -130,7 +129,6 @@ program test_gremlin_watch
 
     failed_counter = scratch//'/missing-observer-parent/counter.json'
     call gremlin_start_args(args, project, 'watch-observer-error', 'test_watch')
-    call list_add(args, '--json')
     call list_add(bad_observer, 'FO_GREMLIN_TEST_CAPTURE_COUNTER='//failed_counter)
     call gremlin_run(driver, project, cache, state, args, process, bad_observer, 120000)
     call assert_equal_integer(process%exit_code, 0, 'observer-error lane still starts')
@@ -317,7 +315,6 @@ contains
         call list_add(values, owner)
         call list_add(values, '--cursor')
         call list_add(values, '0')
-        call list_add(values, '--json')
         call gremlin_json(driver, project, cache, state, values, document, result, 30000)
     end subroutine status_for
 
@@ -338,7 +335,6 @@ contains
             call list_add(values, lane_id)
             call list_add(values, '--session')
             call list_add(values, owner)
-            call list_add(values, '--json')
             call gremlin_json(driver, project, cache, state, values, document, result, 30000)
             if (len(field(document, 'active_generation')) > 0) return
             call gremlin_wait_ms(100)

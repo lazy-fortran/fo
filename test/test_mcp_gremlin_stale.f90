@@ -130,7 +130,6 @@ program test_mcp_gremlin_stale
     call list_add(args, 'test_stale_fail')
     call list_add(args, '--target')
     call list_add(args, 'test_stale_blocked')
-    call list_add(args, '--json')
     call system_clock(started_at, clock_rate)
     call gremlin_json(driver, project, cache, state, args, payload, process, 30000)
     call system_clock(finished_at)
@@ -255,7 +254,6 @@ program test_mcp_gremlin_stale
     call list_add(args, '8')
     call list_add(args, '--max-bytes')
     call list_add(args, '8192')
-    call list_add(args, '--json')
     call gremlin_json(driver, project, cache, state, args, payload, process, 10000)
     call assert_true(process%exit_code == 0, &
         'public paginated status succeeds while the old MCP peer stays connected')
@@ -389,7 +387,6 @@ contains
         call list_add(query, 'new-cli-lane')
         call list_add(query, '--session')
         call list_add(query, session_id)
-        call list_add(query, '--json')
         if (action == 'events') then
             call list_add(query, '--cursor')
             call list_add(query, '0')
@@ -416,7 +413,6 @@ contains
         call list_add(stop_args, project)
         call list_add(stop_args, '--lane')
         call list_add(stop_args, 'new-cli-lane')
-        call list_add(stop_args, '--json')
         call gremlin_json(driver, project, cache, state, stop_args, stop_reply, &
             stop_process, 10000)
         call assert_true(stop_process%exit_code == 0, &

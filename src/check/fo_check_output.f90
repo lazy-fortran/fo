@@ -1,14 +1,11 @@
 module fo_check_output
     use fo_util, only: json_bool, json_int
     use fx_json_build, only: json_escape_string
-    use fo_check, only: check_result_t, fo_check_run
-    use fo_capabilities, only: capabilities_t, detect_capabilities, &
-        capabilities_json
+    use fo_check, only: check_result_t
     implicit none
     private
-    public :: check_result_text, check_result_json
+    public :: check_result_text
     public :: check_result_compact_json, check_result_full_json
-    public :: fo_check_write
 
 contains
 
@@ -58,39 +55,6 @@ contains
         end if
     end function check_result_text
 
-    function check_result_json(res) result(line)
-        type(check_result_t), intent(in) :: res
-        character(len=8192) :: line
-
-        character(len=32) :: modules, cached, changed, affected, elapsed
-
-        write (modules, '(i0)') res%n_modules
-        write (cached, '(i0)') res%n_cached
-        write (changed, '(i0)') res%n_changed
-        write (affected, '(i0)') res%n_affected
-        write (elapsed, '(f12.3)') res%elapsed
-
-        line = '{'
-        line = trim(line)//'"build_ok":'//trim(json_bool(res%build_ok))
-        line = trim(line)//',"tests_ok":'//trim(json_bool(res%tests_ok))
-        line = trim(line)//',"modules":'//trim(modules)
-        line = trim(line)//',"cached":'//trim(cached)
-        line = trim(line)//',"changed":'//trim(changed)
-        line = trim(line)//',"affected":'//trim(affected)
-        if (res%n_in_cycle > 0) &
-            line = trim(line)//',"in_cycle":'//trim(json_int(res%n_in_cycle))
-        line = trim(line)//',"elapsed_s":'//trim(adjustl(elapsed))
-        line = trim(line)//',"error":"'
-        line = trim(line)//trim(json_escape_string(res%error_msg))//'"'
-        if (res%n_test_results > 0) then
-            line = trim(line)//',"test_summary":"'// &
-                trim(test_summary_str(res))//'"'
-            line = trim(line)//trim(test_results_json(res))
-        end if
-        line = trim(line)//trim(failed_tests_json(res))
-        line = trim(line)//'}'
-    end function check_result_json
-
     function failed_tests_json(res) result(s)
         !! Every failing test target by name, so an agent sees the full set in
         !! one call instead of only the primary diagnostic.
@@ -109,21 +73,6 @@ contains
         end do
         s = trim(s)//']'
     end function failed_tests_json
-
-    function test_summary_str(res) result(s)
-        type(check_result_t), intent(in) :: res
-        character(len=64) :: s
-
-        integer :: total_pass, total_fail, i
-
-        total_pass = 0
-        total_fail = 0
-        do i = 1, res%n_test_results
-            total_pass = total_pass + res%test_results(i)%n_pass
-            total_fail = total_fail + res%test_results(i)%n_fail
-        end do
-        write (s, '(i0,a,i0,a)') total_pass, ' pass, ', total_fail, ' fail'
-    end function test_summary_str
 
     function test_results_json(res) result(s)
         type(check_result_t), intent(in) :: res
@@ -155,9 +104,10 @@ contains
 
         character(len=2048) :: base
 
-        base = make_agent_json(res, .false.)
+        base = make_agent_json(res)
         line = base(1:len_trim(base) - 1)
-        line = trim(line)//trim(test_results_json(res))//'}'
+        line = trim(line)//trim(test_results_json(res))// &
+            trim(failed_tests_json(res))//'}'
     end function check_result_compact_json
 
     function check_result_full_json(res, cap_json_str) result(line)
@@ -167,14 +117,8 @@ contains
 
         character(len=8192) :: base
 
-        base = check_result_json(res)
+        base = check_result_compact_json(res)
         line = base(1:len_trim(base) - 1)
-        line = trim(line)//',"stage":"'//trim(json_escape_string(res%stage))//'"'
-        line = trim(line)//',"target":"'//trim(json_escape_string(res%target))//'"'
-        line = trim(line)//',"summary":"'//trim(json_escape_string(agent_summary(res)))//'"'
-        line = trim(line)//',"hint":"'//trim(json_escape_string(res%hint))//'"'
-        line = trim(line)//',"rerun":"'//trim(json_escape_string(res%rerun))//'"'
-        line = trim(line)//',"log_path":"'//trim(json_escape_string(res%log_path))//'"'
         if (res%build_ok .and. res%tests_ok) then
             line = trim(line)//',"diagnostics":[]'
         else
@@ -201,9 +145,8 @@ contains
         end if
     end function check_result_full_json
 
-    function make_agent_json(res, include_legacy) result(line)
+    function make_agent_json(res) result(line)
         type(check_result_t), intent(in) :: res
-        logical, intent(in) :: include_legacy
         character(len=2048) :: line
 
         character(len=32) :: elapsed
@@ -224,70 +167,7 @@ contains
         line = trim(line)//',"modules":'//trim(json_int(res%n_modules))
         line = trim(line)//',"cached":'//trim(json_int(res%n_cached))
         line = trim(line)//',"changed":'//trim(json_int(res%n_changed))
-        if (include_legacy) then
-            line = trim(line)//',"legacy":'//trim(check_result_json(res))
-        end if
         line = trim(line)//'}'
     end function make_agent_json
-
-    subroutine fo_check_write(dir, mode, output_path, ierr)
-        character(len=*), intent(in) :: dir, mode, output_path
-        integer, intent(out) :: ierr
-
-        type(check_result_t) :: res
-        type(capabilities_t) :: cap
-        character(len=2048) :: cap_json
-        character(len=16384) :: line
-        integer :: u, io
-        logical :: need_caps
-
-        ierr = 0
-        if (len_trim(output_path) == 0) then
-            ierr = 3
-            return
-        end if
-        select case (trim(mode))
-        case ('', 'text', 'json', 'json=compact', 'compact', &
-                'json=full', 'full', 'agent')
-        case default
-            ierr = 2
-            return
-        end select
-
-        need_caps = (trim(mode) == 'json=full' .or. trim(mode) == 'full')
-        cap_json = ''
-        if (need_caps) then
-            call detect_capabilities(cap)
-            call capabilities_json(cap, cap_json)
-        end if
-
-        call fo_check_run(dir, res)
-        select case (trim(mode))
-        case ('', 'text')
-            line = check_result_text(res)
-        case ('json')
-            line = check_result_json(res)
-        case ('json=compact', 'compact')
-            line = check_result_compact_json(res)
-        case ('json=full', 'full')
-            line = check_result_full_json(res, cap_json)
-        case ('agent')
-            line = check_result_compact_json(res)
-        case default
-            ierr = 2
-            return
-        end select
-
-        open (newunit=u, file=trim(output_path), status='replace', &
-            action='write', iostat=io)
-        if (io /= 0) then
-            ierr = 3
-            return
-        end if
-        write (u, '(a)') trim(line)
-        close (u)
-
-        if (.not. (res%build_ok .and. res%tests_ok)) ierr = 1
-    end subroutine fo_check_write
 
 end module fo_check_output

@@ -176,7 +176,6 @@ contains
         call list_add(values, '60')
         call list_add(values, '--timeout-seconds')
         call list_add(values, '10')
-        call list_add(values, '--json')
     end subroutine start_args
 
     subroutine write_generation(version, invalid)
@@ -271,7 +270,6 @@ contains
         call list_add(values, owner)
         call list_add(values, '--cursor')
         call list_add(values, '0')
-        call list_add(values, '--json')
         call gremlin_json(driver, project, cache, state, values, value, result, 30000)
     end subroutine status_now
 
@@ -433,7 +431,6 @@ contains
         call list_add(values, 'test_lane_b')
         call list_add(values, '--campaign-seconds')
         call list_add(values, '60')
-        call list_add(values, '--json')
         call gremlin_run(driver, root, cache, state, values, result, timeout=30000)
         call json_parse(result%stdout, value, ok, error)
         call assert_true(ok, 'lane B start returns JSON: '//error)
@@ -465,7 +462,6 @@ contains
             call list_add(values, owner)
             call list_add(values, '--cursor')
             call list_add(values, '0')
-            call list_add(values, '--json')
             call gremlin_json(driver, root, cache, state, values, value, result, 30000)
             events = json_member(value, 'events')
             do j = 1, json_size(events)
