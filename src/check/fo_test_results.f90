@@ -79,6 +79,10 @@ contains
                         trim(status) == 'TIMEOUT') then
                         entries(n_entries)%exit_code = 1
                     end if
+                else if (looks_like_ctest_result_line(line)) then
+                    ierr = 1
+                    close (u)
+                    return
                 end if
             end if
         end do
@@ -189,6 +193,23 @@ contains
         if (time_iostat /= 0) return
         iostat = 0
     end subroutine parse_ctest_result_line
+
+    logical function looks_like_ctest_result_line(line) result(is_result)
+        character(len=*), intent(in) :: line
+
+        character(len=:), allocatable :: prefix
+        integer :: test_pos, slash_pos
+
+        is_result = .false.
+        test_pos = index(line, ' Test')
+        if (test_pos <= 1) return
+        prefix = trim(adjustl(line(:test_pos - 1)))
+        slash_pos = index(prefix, '/')
+        if (slash_pos <= 1 .or. slash_pos >= len(prefix)) return
+        if (verify(prefix(:slash_pos - 1), '0123456789') /= 0) return
+        if (verify(prefix(slash_pos + 1:), '0123456789') /= 0) return
+        is_result = .true.
+    end function looks_like_ctest_result_line
 
     subroutine find_ctest_status(text, status, pos, width)
         character(len=*), intent(in) :: text

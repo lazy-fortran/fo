@@ -106,6 +106,12 @@ program test_test_results_json
     call parse_test_results(join_path(scratch, 'malformed-results.log'), &
         parsed, n_parsed, parse_error)
     call assert_true(parse_error /= 0, 'malformed result is rejected explicitly')
+    call write_text(join_path(scratch, 'malformed-ctest-results.log'), &
+        '1/1 Test #1: test_missing_status'//new_line('a'))
+    call parse_test_results(join_path(scratch, 'malformed-ctest-results.log'), &
+        parsed, n_parsed, parse_error)
+    call assert_true(parse_error /= 0, &
+        'malformed CTest result is rejected instead of silently omitted')
     call remove_tree(scratch)
     call finish_assertions()
     write(*, '(a,i0,a,i0,a)') 'test-results-json: ', name_count, &
