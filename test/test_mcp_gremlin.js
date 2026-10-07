@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Exercise Gremlin through the real MCP server and shared CLI core.
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -17,9 +18,11 @@ const env = { ...process.env, HOME: path.join(scratch, 'home'),
   XDG_CACHE_HOME: path.join(scratch, 'xdg-cache'),
   FO_PREFIX: path.join(scratch, 'prefix'),
   FO_GREMLIN_STATE_DIR: path.join(scratch, 'gremlin-state'),
-  TMPDIR: '/var/tmp', FO_SELF_REFRESH: '0', FO_DISABLE_SELF_REFRESH: '1',
+  TMPDIR: process.env.TMPDIR || path.join(scratch, 'tmp'),
+  FO_SELF_REFRESH: '0', FO_DISABLE_SELF_REFRESH: '1',
   FO_CACHE_DIR: path.join(scratch, 'cache') };
 fs.mkdirSync(env.HOME, { recursive: true });
+fs.mkdirSync(env.TMPDIR, { recursive: true });
 
 function runFo(args, cwd) {
   const command = installed ? args : ['exec', '--no-build', '--cwd', cwd, 'fo', ...args];
@@ -81,6 +84,42 @@ function findJournalForSession(stateRoot, sessionId) {
     }
   }
   throw new Error(`journal not found for stopped Gremlin session ${sessionId}`);
+}
+
+function cacheTreeSnapshot(root) {
+  const rows = [];
+  const visit = current => {
+    if (!fs.existsSync(current)) return;
+    const entries = fs.readdirSync(current, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      const stats = fs.lstatSync(full, { bigint: true });
+      const row = { path: path.relative(root, full), mode: stats.mode.toString(),
+        size: stats.size.toString(), mtimeNs: stats.mtimeNs.toString(),
+        ctimeNs: stats.ctimeNs.toString() };
+      if (entry.isDirectory()) row.type = 'directory';
+      else if (entry.isFile()) {
+        row.type = 'file';
+        row.sha256 = crypto.createHash('sha256').update(fs.readFileSync(full)).digest('hex');
+      } else if (entry.isSymbolicLink()) {
+        row.type = 'symlink';
+        row.target = fs.readlinkSync(full);
+      } else row.type = 'other';
+      rows.push(row);
+      if (entry.isDirectory()) visit(full);
+    }
+  };
+  visit(root);
+  return JSON.stringify(rows);
+}
+
+function bounded(promise, label, timeoutMs = 3000) {
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} exceeded ${timeoutMs} ms`)),
+      timeoutMs);
+  })]).finally(() => clearTimeout(timer));
 }
 
 function seedDurableReceipts(journal, sessionId, laneId, generation, count) {
@@ -812,6 +851,19 @@ async function main() {
     assert.ok(firstQuiescent.coverage.ordinary.remaining > 0,
       `gate-only completion leaves ordinary cases: ${JSON.stringify(firstQuiescent)}`);
     const firstGeneration = firstQuiescent.active_generation;
+    const quietCacheSnapshot = cacheTreeSnapshot(env.FO_CACHE_DIR);
+    assert.notEqual(quietCacheSnapshot, '[]',
+      'the quiescence check observes a populated private cache');
+    const quietReceipts = await collectMcpEvents(server, nextParityStatusId++,
+      gateOnlyFixture, 'mcp-gate-only', gateOnlySessionId);
+    await new Promise(resolve => setTimeout(resolve, 11000));
+    const quietStatus = await bounded(readGateOnlyStatus(), 'quiescent status');
+    assert.equal(quietStatus.state, 'quiescent', 'owner remains quiescent');
+    assert.equal(cacheTreeSnapshot(env.FO_CACHE_DIR), quietCacheSnapshot,
+      'quiescent owner performs no cache writes or deletes over two maintenance periods');
+    assert.deepEqual(await collectMcpEvents(server, nextParityStatusId++,
+      gateOnlyFixture, 'mcp-gate-only', gateOnlySessionId), quietReceipts,
+    'quiescent maintenance interval leaves receipts unchanged');
     fs.appendFileSync(path.join(gateOnlyFixture, 'test/test_parity_a.f90'),
       '! relevant edit wakes a quiescent owner\n');
     const secondQuiescent = await waitForQuiescent(readGateOnlyStatus, firstGeneration);
@@ -822,10 +874,10 @@ async function main() {
     assert.ok(secondQuiescent.gate_required > 0 &&
       secondQuiescent.gate_passed === secondQuiescent.gate_required,
     'all required gates pass again on the edited generation');
-    const gateOnlyStop = payload(await server.call(nextParityStatusId++, {
+    const gateOnlyStop = payload(await bounded(server.call(nextParityStatusId++, {
       action: 'gremlin_stop', dir: gateOnlyFixture, lane_id: 'mcp-gate-only',
       session_id: gateOnlySessionId
-    }));
+    }), 'quiescent owner stop'));
     assert.equal(gateOnlyStop.isError, false, JSON.stringify(gateOnlyStop.body));
     await waitForStopped(gateOnlyFixture, 'mcp-gate-only', gateOnlySessionId, 10000);
 

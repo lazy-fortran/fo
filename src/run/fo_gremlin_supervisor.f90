@@ -1518,7 +1518,8 @@ contains
                     end if
                     last_idle_reap_ms = now_ms
                 end if
-                if (now_ms - last_cache_maintenance_ms >= 5000_int64) then
+                if (state_name /= 'quiescent' .and. &
+                        now_ms - last_cache_maintenance_ms >= 5000_int64) then
                     call maintain_fo_cache(cache_cursor, cache_status)
                     if (cache_status /= 0 .and. .not. cache_warning_reported) &
                         write (error_unit, '(a,i0)') &
