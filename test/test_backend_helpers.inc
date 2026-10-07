@@ -1314,11 +1314,14 @@
     subroutine test_gfortran_bootstraps_git_dependency()
         type(backend_t) :: b
         integer :: exitcode, u, ios, path_status, path_length, compile_exit
+        integer :: n_calls
         character(len=512) :: base, leafdir, libdir, appdir, log_file, outfile
         character(len=512) :: compiler, real_fpm, wrapper_dir, fpm_log
         character(len=512) :: wrapper, compile_log, source_root
         character(:), allocatable :: prior_path
-        character(len=512) :: line, fpm_call
+        character(len=512) :: line
+        character(len=512) :: marker_direct, marker_leaf
+        character(len=80) :: identity_direct, identity_leaf
         logical :: compiler_found, fpm_found, exists
 
         call make_tmp_path('fo_test_gitdep', base)
@@ -1430,27 +1433,27 @@
         inquire (file=trim(appdir)//'/build/fo/mod/leafmod.mod', exist=exists)
         call assert(exists, 'transitive module is compiled by the native DAG')
 
-        open (newunit=u, file=trim(fpm_log), status='old', iostat=ios)
-        fpm_call = ''
-        if (ios == 0) then
-            read (u, '(a)', iostat=ios) fpm_call
-            close (u)
-        end if
-        call assert(trim(fpm_call) == 'fpm update --fetch-only', &
-            'fpm argv records fetch-only and never requests a build')
+        call count_file_lines(fpm_log, n_calls)
+        call assert(n_calls == 0, 'git-only bootstrap invokes no FPM process')
+        ! Native checkouts are materialized once. A marker written into each
+        ! one must keep its device, inode and mtime through a warm build.
+        marker_direct = trim(appdir)//'/build/dependencies/deplib/fo-marker'
+        marker_leaf = trim(appdir)//'/build/dependencies/leafdep/fo-marker'
+        call write_checkout_marker(marker_direct)
+        call write_checkout_marker(marker_leaf)
+        identity_direct = checkout_marker_identity(marker_direct)
+        identity_leaf = checkout_marker_identity(marker_leaf)
+        call assert(identity_direct /= 'missing' .and. &
+            identity_leaf /= 'missing', 'cold build leaves a marker in each checkout')
 
         call backend_build(b, exitcode, log_file=log_file)
         call assert(exitcode == 0, 'warm git dependency build remains current')
-        line = ''
-        open (newunit=u, file=trim(fpm_log), status='old', iostat=ios)
-        if (ios == 0) then
-            read (u, '(a)', iostat=ios) fpm_call
-            read (u, '(a)', iostat=ios) line
-            close (u)
-        else
-            line = 'missing argv log'
-        end if
-        call assert(trim(line) == '', 'warm build performs no second fpm call')
+        call assert(checkout_marker_identity(marker_direct) == identity_direct, &
+            'warm build performs no second materialization of deplib')
+        call assert(checkout_marker_identity(marker_leaf) == identity_leaf, &
+            'warm build performs no second materialization of leafdep')
+        call count_file_lines(fpm_log, n_calls)
+        call assert(n_calls == 0, 'warm git dependency build invokes no FPM process')
 
         outfile = trim(base)//'/out.txt'
         call execute_command_line(trim(appdir)//'/build/fo/bin/depapp > '// &
@@ -1852,6 +1855,8 @@
         type(backend_t) :: b
         integer :: exitcode, u, ios, path_status, path_length, n_calls
         character(len=512) :: base, leafdir, gitdir, appdir, log_file
+        character(len=512) :: marker
+        character(len=80) :: cold_identity
         character(len=512) :: compiler, real_fpm, wrapper_dir, fpm_log
         character(len=512) :: wrapper, compile_log, source_root
         character(:), allocatable :: prior_path
@@ -1975,10 +1980,12 @@
         call assert(ios == 0 .and. trim(line) == '21', &
             'named test observes linked transitive Fortran and C result')
         call count_file_lines(fpm_log, n_calls)
-        call read_first_line(fpm_log, line, ios)
-        call assert(n_calls == 1 .and. ios == 0 .and. &
-            trim(line) == 'fpm update --fetch-only', &
-            'cold Git dev bootstrap issues one fetch-only FPM call')
+        call assert(n_calls == 0, 'cold Git dev bootstrap invokes no FPM process')
+        marker = trim(appdir)//'/build/dependencies/gitdev/fo-marker'
+        call write_checkout_marker(marker)
+        cold_identity = checkout_marker_identity(marker)
+        call assert(cold_identity /= 'missing', &
+            'cold build leaves a marker in the Git dev checkout')
 
         open (newunit=u, file=trim(leafdir)//'/src/leaf.f90', status='replace')
         write (u, '(a)') 'module leaf'
@@ -2003,7 +2010,9 @@
         call assert(ios == 0 .and. trim(line) == '32', &
             'warm test output reflects changed transitive Fortran and C sources')
         call count_file_lines(fpm_log, n_calls)
-        call assert(n_calls == 1, 'warm dev source edit does not refetch checkout')
+        call assert(n_calls == 0, 'warm dev source edit invokes no FPM process')
+        call assert(checkout_marker_identity(marker) == cold_identity, &
+            'warm dev source edit does not refetch checkout')
 
         call execute_command_line('rm -f "'//trim(leafdir)//'/fpm.toml"')
         call backend_test(b, exitcode, log_file=log_file)
@@ -2044,6 +2053,32 @@
         end do
         close (u)
     end subroutine count_file_lines
+
+    subroutine write_checkout_marker(path)
+        !! Mark a materialized Git checkout. A re-fetch replaces its tree, so
+        !! the marker is then missing or has a new identity.
+        character(len=*), intent(in) :: path
+        integer :: u
+
+        open (newunit=u, file=trim(path), status='replace')
+        write (u, '(a)') 'fo checkout marker'
+        close (u)
+    end subroutine write_checkout_marker
+
+    function checkout_marker_identity(path) result(identity)
+        !! Device, inode and mtime of a checkout marker, or 'missing'.
+        character(len=*), intent(in) :: path
+        character(len=80) :: identity
+        integer(c_long_long) :: device, inode, mtime_ns, bytes
+        logical :: id_ok, stat_ok
+
+        call fs_identity(trim(path), device, inode, id_ok)
+        call fs_stat(trim(path), mtime_ns, bytes, stat_ok)
+        identity = 'missing'
+        if (id_ok .and. stat_ok) then
+            write (identity, '(3(i0,1x))') device, inode, mtime_ns
+        end if
+    end function checkout_marker_identity
 
     subroutine first_match(dir, infix, path)
         !! Return the first file under dir whose name contains infix. Shell-based

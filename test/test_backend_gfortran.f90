@@ -1,5 +1,5 @@
 program test_backend_gfortran
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
         detect_jobs, backend_build, backend_test, &
@@ -12,7 +12,7 @@ program test_backend_gfortran
         HASH_LEN
     use fo_process, only: process_getpid, process_getcwd, &
         process_run_argv_logged, argv_push
-    use fo_fs, only: fs_find_executable, fs_remove_file
+    use fo_fs, only: fs_find_executable, fs_remove_file, fs_identity, fs_stat
     use fo_compiler_flags, only: append_array_temporary_warning_flag, append_pipe_flag
     use fo_linker_policy, only: linker_should_try_lld
     use fx_dag, only: MAX_NODES

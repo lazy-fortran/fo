@@ -1,5 +1,5 @@
 program test_backend
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
         detect_jobs, backend_build, backend_test, &
@@ -10,7 +10,7 @@ program test_backend
     use fo_fpm_config, only: fpm_config_t
     use fo_process, only: process_getpid, process_getcwd, &
         process_run_argv_logged, argv_push
-    use fo_fs, only: fs_find_executable
+    use fo_fs, only: fs_find_executable, fs_identity, fs_stat
     use fo_exec_target, only: resolve_exec_target
     implicit none
     integer :: n_pass, n_fail
