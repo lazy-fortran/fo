@@ -58,6 +58,9 @@ passed its required case 1/1 on generation
 `6e5d7ae3e2e08cbcc78ed2fb84feac292025743de716cc1e13c318be4c05cedd`
 with `local_gate_green=true`. The first red assertion compared different source
 generations; the corrected oracle compares the exact pre-commit completion.
+The installed Fo CLI is now the verified current-source binary SHA256
+`d7d033fc5037a3d12c3b151f4653b1b0b24854613cf22e9e32004a0dde7ad425`.
+Existing MCP server processes retain their prior image until client reconnect.
 
 Keep one useful resident Fo Gremlin lane running and develop through it.
 Fo `190d3e8` restores a single expected `.smod` output from the shared action
