@@ -115,8 +115,17 @@ resident session `3947508-1791388344-967411682` passed 2/2 on generation
 with `local_gate_green=true`. The controller's temporary combined candidate
 SHA256 `2e0184d10d11a772be5793b4cedbf098b7ad26f4123d64e213052eb1439c5aea`
 passed the two recovery cases plus the #119 summary case 3/3 before main
-integration. #183 stays open for remaining crash-seam and stale-generation
-injection acceptance.
+integration. The remaining #183 crash-seam and stale-generation injection
+acceptance follows below.
+Fo `ff688ba` completes that #183 acceptance with an independent native marker
+crash/restart and stale-generation receipt fixture. Exact worker candidate
+SHA256 `2ce4ea4eaf4b5ddb65a5183b6f5732ec10a1eea6333f1215365777bbed8233b5`
+passed two raw runs, a clean public 3/3 gate and resident 3/3 gate on generation
+`161e3807262ca5cd2a5ded2f603f98647dc9bda349e4716518f52f6010433c36`
+with `local_gate_green=true`. The exact combined main candidate SHA256
+`940f63e3dfa8782769d64b1350093010e9d2243e6b19d7cd63232add0d04a25a`
+passed the three recovery cases 3/3 before promotion. #183 is complete;
+110 unrelated cases remain UNKNOWN in the focused resident inventory.
 Fo `5770cf7` routes test-harness scratch through the task's `TMPDIR`, with
 `/var/tmp` fallback and registered cleanup. Its direct private-TMPDIR oracle
 passed 1/1; resident session `3997205-1791389278-854770813` passed its
