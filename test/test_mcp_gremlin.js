@@ -9,7 +9,8 @@ const path = require('node:path');
 const project = path.resolve(__dirname, '..');
 const installed = process.argv[2];
 const driver = installed || process.env.FO || 'fo';
-const scratch = fs.mkdtempSync('/var/tmp/fo-core-150-json-mcp-');
+const scratch = fs.mkdtempSync(path.join(process.env.TMPDIR || '/var/tmp',
+  'fo-core-150-json-mcp-'));
 if (process.platform !== 'linux' || !fs.existsSync('/proc')) {
   console.log('mcp-gremlin: skipped (requires Linux async process containment)');
   process.exit(0);
@@ -505,7 +506,8 @@ async function main() {
         expected: 'integer request field has the wrong JSON type' },
       { name: 'unknown property', cli: ['--not-a-field', 'value'],
         mcp: { not_a_field: 'value' },
-        expected: 'unsupported Gremlin request field: not_a_field' },
+        expected: 'unsupported Gremlin request field: not_a_field',
+        cliExpected: 'fo gremlin: unknown option --not-a-field' },
       { name: 'duplicate field', cli: ['--lane', 'duplicate-lane'],
         expected: 'duplicate Gremlin request field: lane_id',
         mcpRaw: `{"action":"gremlin_start","dir":${JSON.stringify(fixture)},` +
@@ -517,9 +519,15 @@ async function main() {
       const cli = runFo(['gremlin', 'start', '--dir', fixture,
         '--lane', invalidLane, ...invalid.cli], fixture);
       assert.notEqual(cli.status, 0, `${invalid.name} fails through CLI`);
-      const cliBody = JSON.parse(cli.stdout.trim());
-      assert.ok(cliBody.error.includes(invalid.expected),
-        `${invalid.name} has the expected validation error: ${JSON.stringify(cliBody)}`);
+      let cliBody;
+      if (invalid.cliExpected) {
+        assert.ok((cli.stdout + cli.stderr).includes(invalid.cliExpected),
+          `${invalid.name} has the expected CLI parse error`);
+      } else {
+        cliBody = JSON.parse(cli.stdout.trim());
+        assert.ok(cliBody.error.includes(invalid.expected),
+          `${invalid.name} has the expected validation error: ${JSON.stringify(cliBody)}`);
+      }
       const mcpResponse = invalid.mcpRaw
         ? await server.callRaw(invalidId++, invalid.mcpRaw)
         : await server.call(invalidId++, {
@@ -530,8 +538,13 @@ async function main() {
       assert.equal(mcpResult.isError, true,
         `${invalid.name} is returned as an MCP tool error`);
       const mcpBody = mcpResult.body;
-      assert.deepEqual(mcpBody, cliBody,
-        `${invalid.name} returns the same shared-core error through MCP and CLI`);
+      if (invalid.cliExpected) {
+        assert.ok(mcpBody.error.includes(invalid.expected),
+          `${invalid.name} has the expected MCP request error`);
+      } else {
+        assert.deepEqual(mcpBody, cliBody,
+          `${invalid.name} returns the same shared-core error through MCP and CLI`);
+      }
     }
 
     const malformedArguments = [
