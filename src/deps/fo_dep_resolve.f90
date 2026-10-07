@@ -50,7 +50,7 @@ contains
         call fpm_config_parse(root, root_config, ierr)
         if (ierr /= 0) return
         call walk(root, out, n_out, n_unresolved, n_registry, ierr, 0, &
-            root_config)
+            root_config, .true.)
         if (n_registry > 0) call drop_git_sources(out, n_out)
         if (present(n_registry_out)) n_registry_out = n_registry
     end subroutine resolve_dep_srcs
@@ -98,7 +98,7 @@ contains
                     kind, ierr)
                 if (ierr /= 0) return
                 call walk(dep_dir, out, n_out, n_unresolved, n_registry, ierr, &
-                    1, cfg)
+                    1, cfg, .false.)
                 if (ierr /= 0) return
             end if
         end do
@@ -154,13 +154,18 @@ contains
     end subroutine merge_dep_link_libs
 
     recursive subroutine walk(dir, out, n_out, n_unresolved, n_registry, &
-            ierr, depth, root_config)
+            ierr, depth, root_config, root_walked)
+        !! root_walked is true when the root's own entries are walked as well,
+        !! and then they count a missing Git or registry provider. A nested edge
+        !! shadowed by one is not counted again. Dev-dependency closures never
+        !! walk the root's entries, so there the shadowed edge is the one count.
         character(len=*), intent(in) :: dir
         type(resolved_src_t), intent(inout) :: out(MAX_RESOLVED)
         integer, intent(inout) :: n_out, n_unresolved, n_registry
         integer, intent(out) :: ierr
         integer, intent(in) :: depth
         type(fpm_config_t), intent(in) :: root_config
+        logical, intent(in) :: root_walked
 
         type(fpm_config_t), allocatable :: cfg
         integer :: i, k, kind, root_kind
@@ -185,10 +190,10 @@ contains
         do i = 1, cfg%n_deps
             kind = dep_kind(cfg%deps(i))
             root_kind = kind
+            shadowed = .false.
             if (kind == DEP_PATH) then
                 ! If the root pins this package through Git, use that
                 ! flattened checkout instead of a second path copy.
-                shadowed = .false.
                 do k = 1, root_config%n_deps
                     if (trim(root_config%deps(k)%name) /= &
                             trim(cfg%deps(i)%name)) cycle
@@ -199,7 +204,7 @@ contains
                 end do
                 if (shadowed) then
                     if (root_kind /= DEP_GIT) then
-                        n_unresolved = n_unresolved + 1
+                        if (.not. root_walked) n_unresolved = n_unresolved + 1
                         cycle
                     end if
                     dep_dir = trim(root_config%project_dir)// &
@@ -216,7 +221,10 @@ contains
                 cycle
             end if
             if (.not. has_manifest(dep_dir)) then
-                if (root_kind == DEP_GIT) n_unresolved = n_unresolved + 1
+                if (root_kind == DEP_GIT) then
+                    if (.not. shadowed .or. .not. root_walked) &
+                        n_unresolved = n_unresolved + 1
+                end if
                 if (root_kind == DEP_PATH) then
                     write (error_unit, '(a)') 'fo: missing dependency manifest '// &
                         trim(dep_dir)//'/fpm.toml'
@@ -240,7 +248,7 @@ contains
                     root_kind, ierr)
                 if (ierr /= 0) return
                 call walk(dep_dir, out, n_out, n_unresolved, n_registry, &
-                    ierr, depth + 1, root_config)
+                    ierr, depth + 1, root_config, root_walked)
                 if (ierr /= 0) return
             end if
         end do
