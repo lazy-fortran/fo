@@ -65,7 +65,8 @@ contains
 
         call write_text(release, 'release' // nl)
         call wait_for_exit(peer, status)
-        call assert_equal_integer(status, 0, 'running peer exits normally')
+        call assert_equal_integer(status, 0, &
+            'running peer exits normally before its release deadline')
         call assert_equal_string(read_text(output), 'one' // nl, &
             'running peer keeps the binary it started with')
 
@@ -140,6 +141,9 @@ contains
     end subroutine check_owned_staging_survives_cleanup
 
     function probe_source(version) result(text)
+        !! Fixture app that stays alive until release.marker appears. Its release
+        !! deadline is 1200 polls of 0.05 s, about 60 s. Expiry exits with status
+        !! 3 and publishes no result, so the test reports it as a failure.
         character(len=*), intent(in) :: version
         character(:), allocatable :: text
 
@@ -158,6 +162,8 @@ contains
             '        if (released) exit' // nl // &
             '        call execute_command_line("/bin/sleep 0.05")' // nl // &
             '    end do' // nl // &
+            '    inquire (file="release.marker", exist=released)' // nl // &
+            '    if (.not. released) error stop 3' // nl // &
             '    open (newunit=unit_id, file="result.txt", ' // &
             'status="replace")' // nl // &
             '    write (unit_id, "(a)") version' // nl // &
@@ -328,6 +334,9 @@ contains
     end subroutine wait_for_exit
 
     subroutine pause_briefly()
+        !! Poll interval only, never an ordering step. Both callers are bounded
+        !! waits: wait_for_file on started.marker, and wait_for_exit on the peer's
+        !! status, which only poll_process can observe because it reaps the peer.
         type(process_result_t) :: ignored
         type(string_list_t) :: args
 
