@@ -44,6 +44,7 @@ program test_backend_gfortran
         call test_compiler_switch_clears_the_tree()
         call test_slow_test_gets_its_own_timeout()
         call test_test_budget_respects_available_clock()
+        call test_process_tree_supervision()
         call test_gfortran_builds_manifest_example()
         call test_gfortran_preprocesses_lowercase_f90()
         call test_gfortran_builds_nested_auto_example()
@@ -79,6 +80,9 @@ program test_backend_gfortran
         case ('dependency-bootstrap')
             call test_gfortran_bootstraps_git_dev_dependency_closure()
             call report('backend_gfortran/dependency-bootstrap')
+        case ('process-tree-timeout')
+            call test_process_tree_supervision()
+            call report('backend_gfortran/process-tree-timeout')
         case default
             write (error_unit, '(a)') 'unknown backend_gfortran subcase: '// &
                 trim(selector)
@@ -486,6 +490,195 @@ contains
         call remove_tree(project_dir)
         call fs_remove_file(log_file)
     end subroutine test_test_budget_respects_available_clock
+
+    subroutine test_process_tree_supervision()
+        use, intrinsic :: iso_c_binding, only: c_int
+        interface
+            integer(c_int) function c_kill(pid, signal) bind(C, name='kill')
+                import :: c_int
+                integer(c_int), value :: pid, signal
+            end function c_kill
+        end interface
+        character(len=512) :: project_dir, log_file, tmpdir, source, pid_file
+        character(len=64) :: selected(1)
+        integer :: u, exitcode, clock, pid, sentinel_pid, env_status
+        integer(c_int) :: rc
+        logical :: alive
+
+        call get_environment_variable('TMPDIR', tmpdir, status=env_status)
+        if (env_status /= 0 .or. len_trim(tmpdir) == 0) &
+            error stop 'process-tree fixture requires a task-private TMPDIR'
+        call system_clock(clock)
+        write (project_dir, '(a,a,i0,a,i0)') trim(tmpdir), &
+            '/fo_backend_process_tree-', process_getpid(), '-', clock
+        call remove_tree(trim(project_dir))
+        call make_dir(trim(project_dir)//'/test')
+        log_file = trim(project_dir)//'/test.log'
+        source = trim(project_dir)//'/test/test_process_tree.f90'
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "process-tree"'
+        write (u, '(a)') '[extra.fo]'
+        write (u, '(a)') 'test-timeout = 1'
+        write (u, '(a)') 'test-wall-timeout = 2'
+        write (u, '(a)') '[[test]]'
+        write (u, '(a)') 'name = "test_process_tree"'
+        write (u, '(a)') 'source-dir = "test"'
+        write (u, '(a)') 'main = "test_process_tree.f90"'
+        close (u)
+        open (newunit=u, file=trim(source), status='replace')
+        write (u, '(a)') 'program test_process_tree'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'character(len=16) :: mode'
+        write (u, '(a)') 'character(len=512) :: pid_file, command'
+        write (u, '(a)') 'integer :: status, env_status'
+        write (u, '(a)') 'call get_environment_variable(''FO_TEST_CHILD_MODE'', mode, status=env_status)'
+        write (u, '(a)') 'if (env_status /= 0) error stop ''missing child mode'''
+        write (u, '(a)') 'call get_environment_variable(''FO_TEST_CHILD_PID_FILE'', pid_file, status=env_status)'
+        write (u, '(a)') 'if (env_status /= 0) error stop ''missing child PID path'''
+        write (u, '(a)') 'select case (trim(mode))'
+        write (u, '(a)') 'case (''busy'')'
+        write (u, '(a)') 'command = "sh -c ''echo $$ > "//trim(pid_file)// &'
+        write (u, '(a)') '    "; while :; do :; done''"'
+        write (u, '(a)') 'case (''blocked'')'
+        write (u, '(a)') 'command = "sh -c ''sleep 30 & echo $! > "//trim(pid_file)// &'
+        write (u, '(a)') '    "; wait''"'
+        write (u, '(a)') 'case (''complete'')'
+        write (u, '(a)') 'command = "sh -c ''sleep 30 & echo $! > "//trim(pid_file)//"''"'
+        write (u, '(a)') 'case default'
+        write (u, '(a)') 'error stop ''invalid child mode'''
+        write (u, '(a)') 'end select'
+        write (u, '(a)') 'call execute_command_line(trim(command), exitstat=status)'
+        write (u, '(a)') 'if (status /= 0) error stop ''child command failed'''
+        write (u, '(a)') 'write (*, ''(a)'') ''PARENT_COMPLETE'''
+        write (u, '(a)') 'end program test_process_tree'
+        close (u)
+
+        pid_file = trim(project_dir)//'/sentinel.pid'
+        call execute_command_line("sh -c 'sleep 60 & echo $! > "// &
+            trim(pid_file)//"'", exitstat=exitcode)
+        call assert(exitcode == 0, 'starts an unrelated process sentinel')
+        sentinel_pid = read_process_id(pid_file)
+        call assert(sentinel_pid > 0, 'records the unrelated sentinel PID')
+        alive = process_is_alive(sentinel_pid)
+        call assert(alive, 'unrelated sentinel is running before the fixture')
+
+        selected(1) = 'test_process_tree'
+        call set_env('FO_TEST_TIMEOUT', '')
+        call set_env('FO_TEST_WALL_TIMEOUT', '')
+        call run_process_tree_case(project_dir, log_file, selected, 'busy', .true., &
+            .true., sentinel_pid)
+        call run_process_tree_case(project_dir, log_file, selected, 'busy', .false., &
+            .true., sentinel_pid)
+        call run_process_tree_case(project_dir, log_file, selected, 'blocked', .true., &
+            .true., sentinel_pid)
+        call run_process_tree_case(project_dir, log_file, selected, 'blocked', .false., &
+            .true., sentinel_pid)
+        call run_process_tree_case(project_dir, log_file, selected, 'complete', .true., &
+            .false., sentinel_pid)
+        call run_process_tree_case(project_dir, log_file, selected, 'complete', .false., &
+            .false., sentinel_pid)
+
+        rc = c_kill(int(sentinel_pid, c_int), 9_c_int)
+        call assert(rc == 0, 'stops the exact unrelated sentinel')
+        call set_env('FO_TEST_CHILD_MODE', '')
+        call set_env('FO_TEST_CHILD_PID_FILE', '')
+        call set_env('FO_TEST_TIMEOUT', '')
+        call set_env('FO_TEST_WALL_TIMEOUT', '')
+        call remove_tree(trim(project_dir))
+    end subroutine test_process_tree_supervision
+
+    subroutine run_process_tree_case(project_dir, log_file, selected, mode, named, &
+            expect_timeout, sentinel_pid)
+        use, intrinsic :: iso_c_binding, only: c_int
+        interface
+            integer(c_int) function c_kill(pid, signal) bind(C, name='kill')
+                import :: c_int
+                integer(c_int), value :: pid, signal
+            end function c_kill
+        end interface
+        character(len=*), intent(in) :: project_dir, log_file, mode
+        character(len=*), intent(in) :: selected(:)
+        logical, intent(in) :: named, expect_timeout
+        integer, intent(in) :: sentinel_pid
+        character(len=512) :: pid_file
+        integer :: exitcode, pid, clock
+        integer(c_int) :: rc
+        logical :: alive
+
+        call system_clock(clock)
+        write (pid_file, '(a,a,a,i0)') trim(project_dir), '/child-', trim(mode), clock
+        call fs_remove_file(trim(pid_file))
+        call fs_remove_file(trim(log_file))
+        call set_env('FO_TEST_CHILD_MODE', trim(mode))
+        call set_env('FO_TEST_CHILD_PID_FILE', trim(pid_file))
+        if (named) then
+            call gfortran_test_names(project_dir, selected, 1, log_file, exitcode)
+        else
+            call gfortran_test(project_dir, log_file, exitcode)
+        end if
+        if (expect_timeout) then
+            call assert(exitcode /= 0, trim(mode)//' child hits the bounded wall cap')
+            call assert(file_contains(log_file, &
+                'test process itself used only '), &
+                trim(mode)//' timeout identifies CPU as test-process-only')
+            call assert(.not. file_contains(log_file, 'deadlocked'), &
+                trim(mode)//' timeout does not infer deadlock from parent CPU')
+        else
+            call assert(exitcode == 0, 'completed test returns success before wall cap')
+            call assert(file_contains(log_file, 'TEST_RESULT test_process_tree PASS'), &
+                'completed test records PASS before child cleanup')
+        end if
+        pid = read_process_id(pid_file)
+        call assert(pid > 0, trim(mode)//' fixture records its child PID')
+        if (pid > 0) then
+            alive = process_is_alive(pid)
+            call assert(.not. alive, trim(mode)//' child is cleaned after its parent')
+            if (alive) rc = c_kill(int(pid, c_int), 9_c_int)
+        end if
+        alive = process_is_alive(sentinel_pid)
+        call assert(alive, 'process-group cleanup preserves unrelated sentinel')
+    end subroutine run_process_tree_case
+
+    integer function read_process_id(path) result(pid)
+        character(len=*), intent(in) :: path
+        integer :: unit, io_status
+
+        pid = -1
+        open (newunit=unit, file=trim(path), status='old', action='read', &
+            iostat=io_status)
+        if (io_status /= 0) return
+        read (unit, *, iostat=io_status) pid
+        close (unit)
+        if (io_status /= 0) pid = -1
+    end function read_process_id
+
+    logical function process_is_alive(pid) result(alive)
+        use, intrinsic :: iso_c_binding, only: c_int
+        interface
+            integer(c_int) function c_kill(process, signal) bind(C, name='kill')
+                import :: c_int
+                integer(c_int), value :: process, signal
+            end function c_kill
+        end interface
+        integer, intent(in) :: pid
+        character(len=1024) :: stat_path, stat_line
+        integer :: unit, io_status, close_index
+
+        alive = .false.
+        if (pid <= 0) return
+        alive = c_kill(int(pid, c_int), 0_c_int) == 0
+        if (.not. alive) return
+        write (stat_path, '(a,i0,a)') '/proc/', pid, '/stat'
+        open (newunit=unit, file=trim(stat_path), status='old', &
+            action='read', iostat=io_status)
+        if (io_status /= 0) return
+        read (unit, '(a)', iostat=io_status) stat_line
+        close (unit)
+        if (io_status /= 0) return
+        close_index = index(stat_line, ')')
+        if (close_index > 0 .and. close_index + 2 <= len_trim(stat_line)) &
+            alive = stat_line(close_index + 2:close_index + 2) /= 'Z'
+    end function process_is_alive
 
     logical function host_can_measure_child_cpu(project_dir) result(supported)
         !! Select the expected clock independently of the process runner.

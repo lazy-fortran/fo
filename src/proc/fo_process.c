@@ -1219,6 +1219,10 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                 struct rusage usage;
                 long long own = budget != NULL ? child_cpu_ms(accounted_pid) : -1;
 
+                /* The leader's zombie keeps its private process-group ID
+                   anchored while we terminate any background descendants.
+                   The seccomp monitor owns cleanup when this group is shared. */
+                if (isolated_group) (void)kill(-pid, SIGKILL);
                 while (wait4(pid, &status, 0, &usage) < 0) {
                     if (errno == EINTR) continue;
                     if (pid_fd >= 0) close(pid_fd);
@@ -1305,7 +1309,21 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
             }
         }
     } else {
-        while (waitpid(pid, &status, 0) < 0) {
+        siginfo_t info;
+        int waited;
+
+        memset(&info, 0, sizeof(info));
+        do {
+            waited = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT);
+        } while (waited < 0 && errno == EINTR);
+        if (waited < 0 || info.si_pid != pid) {
+            if (report_fd >= 0) close(report_fd);
+            return 1;
+        }
+        /* Keep the completed leader unreaped until its isolated children are
+           gone, so the numeric group ID cannot be reused during cleanup. */
+        if (isolated_group) (void)kill(-pid, SIGKILL);
+        while (wait4(pid, &status, 0, NULL) < 0) {
             if (errno == EINTR) continue;
             if (report_fd >= 0) close(report_fd);
             return 1;

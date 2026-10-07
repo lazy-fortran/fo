@@ -89,11 +89,11 @@ contains
         case (TIMEOUT_WALL)
             if (cpu_seconds >= 0.0) then
                 write (buf, '(a,i0,a,f0.1,a)') 'wall-clock cap of ', wall_cap, &
-                    ' s exceeded with only ', cpu_seconds, &
-                    ' s CPU used (blocked, sleeping or deadlocked?)'
+                    ' s exceeded; test process itself used only ', cpu_seconds, &
+                    ' s CPU (descendant CPU is not included)'
             else
                 write (buf, '(a,i0,a)') 'wall-clock cap of ', wall_cap, &
-                    ' s exceeded'
+                    ' s exceeded; test-process CPU is unavailable'
             end if
         case (TIMEOUT_UNMEASURED)
             write (buf, '(a,i0,a)') 'budget of ', budget, ' s exceeded in wall '// &
