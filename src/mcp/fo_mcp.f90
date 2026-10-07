@@ -733,11 +733,14 @@ contains
         call parse_test_results(tmpfile, entries, n_entries, ierr)
         call extract_json_string_member(line, 'json', json_mode, &
             mode_count, mode_error)
-        if (ierr == 0 .and. &
+        if (ierr /= 0) then
+            output_text = 'fo: could not parse test results'
+            exitcode = 1
+        else if (&
             mode_error == 0 .and. mode_count == 1 .and. &
             (json_mode == 'compact' .or. json_mode == 'full')) then
             call format_test_results_json(entries, n_entries, exitcode, output_text)
-        else if (ierr == 0 .and. n_entries > 0) then
+        else if (n_entries > 0) then
             call format_test_results_human(entries, n_entries, tmpfile, &
                 n_names == 0, human_output)
             output_text = trim(human_output)

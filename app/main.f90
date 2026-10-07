@@ -1478,7 +1478,7 @@ contains
     end function env_flag
 
     subroutine report_test_result(exitcode, test_log, summary_mode, use_json)
-        integer, intent(in) :: exitcode
+        integer, intent(inout) :: exitcode
         character(len=*), intent(in) :: test_log
         logical, intent(in) :: summary_mode
         logical, intent(in) :: use_json
@@ -1494,6 +1494,18 @@ contains
         character(len=16) :: secs_out
 
         call parse_test_results(test_log, entries, n_entries, parse_ierr)
+        if (parse_ierr /= 0) then
+            exitcode = 1
+            if (use_json) then
+                write (output_unit, '(a)') '{"tests":[],"summary":'// &
+                    '{"passed":0,"failed":0,"skipped":0,'// &
+                    '"total_seconds":0},"exit_code":1,'// &
+                    '"error":"could not parse test results"}'
+            else
+                write (error_unit, '(a)') 'fo: could not parse test results'
+            end if
+            return
+        end if
 
         ! `fo test` normally prints an aggregate count and the failures, and the
         ! per-test log is deleted. A CI that diffs the fail-name set against a

@@ -11,7 +11,7 @@ program test_test_results_json
     implicit none
 
     integer, parameter :: name_count = 402
-    character(len=256) :: names(name_count)
+    character(len=1400) :: names(name_count)
     character(:), allocatable :: driver, scratch, cmake, test_name, command_name
     type(process_result_t) :: result
     type(string_list_t) :: arguments, environment
@@ -29,8 +29,8 @@ program test_test_results_json
     names(398) = 'test_quoted_"name'
     names(399) = 'test_backslash_\name'
     names(400) = 'test_late_failure'
-    names(401) = 'test_long_name_' // repeat('a', 170)
-    names(402) = 'test_long_name_' // repeat('b', 210)
+    names(401) = 'test_long_name_' // repeat('a', 1200)
+    names(402) = 'test_long_name_' // repeat('b', 1300)
 
     cmake = 'cmake_minimum_required(VERSION 3.20)' // new_line('a') // &
         'project(fo_json_report NONE)' // new_line('a') // 'enable_testing()' // new_line('a')

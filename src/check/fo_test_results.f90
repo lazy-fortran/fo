@@ -13,7 +13,7 @@ module fo_test_results
     integer, parameter :: MAX_TEST_RESULTS_ENTRIES = 256
 
     type :: test_result_entry_t
-        character(len=1024) :: name
+        character(len=:), allocatable :: name
         character(len=10)   :: status
         real                :: seconds
         integer             :: exit_code
@@ -27,8 +27,7 @@ contains
         integer, intent(out) :: n_entries
         integer, intent(out) :: ierr
 
-        character(len=1024) :: line
-        character(len=1024) :: name
+        character(len=:), allocatable :: line, name
         character(len=10) :: status
         character(len=10) :: exit_str
         real :: secs
@@ -43,21 +42,29 @@ contains
             return
         end if
         do
-            read (u, '(a)', iostat=ios) line
-            if (ios /= 0) exit
+            call read_logical_line(u, line, ios)
+            if (ios == iostat_end) exit
+            if (ios /= 0) then
+                ierr = 1
+                close (u)
+                return
+            end if
             if (index(line, 'TEST_RESULT ') == 1) then
+                call parse_test_result_line(line, name, status, exit_str, secs, iostat)
+                if (iostat /= 0) then
+                    ierr = 1
+                    close (u)
+                    return
+                end if
                 if (n_entries >= size(entries)) call grow_entries(entries)
                 n_entries = n_entries + 1
-                call parse_test_result_line(line, name, status, exit_str, secs, iostat)
-                if (iostat == 0) then
-                    entries(n_entries)%name = name
-                    entries(n_entries)%status = status
-                    entries(n_entries)%seconds = secs
-                    entries(n_entries)%exit_code = 0
-                    if (trim(exit_str) /= '-') then
-                        read (exit_str, *, iostat=iostat) entries(n_entries)%exit_code
-                        if (iostat /= 0) entries(n_entries)%exit_code = 1
-                    end if
+                entries(n_entries)%name = name
+                entries(n_entries)%status = status
+                entries(n_entries)%seconds = secs
+                entries(n_entries)%exit_code = 0
+                if (trim(exit_str) /= '-') then
+                    read (exit_str, *, iostat=iostat) entries(n_entries)%exit_code
+                    if (iostat /= 0) entries(n_entries)%exit_code = 1
                 end if
             else
                 call parse_ctest_result_line(line, name, status, secs, iostat)
@@ -89,13 +96,37 @@ contains
         call move_alloc(bigger, entries)
     end subroutine grow_entries
 
+    subroutine read_logical_line(unit, line, iostat)
+        integer, intent(in) :: unit
+        character(:), allocatable, intent(out) :: line
+        integer, intent(out) :: iostat
+
+        character(len=1024) :: chunk
+        integer :: count
+
+        line = ''
+        do
+            count = 0
+            read (unit, '(a)', advance='no', size=count, iostat=iostat) chunk
+            if (count > 0) line = line//chunk(:count)
+            if (iostat == 0) cycle
+            if (iostat == iostat_eor) then
+                iostat = 0
+            else if (iostat == iostat_end .and. len(line) > 0) then
+                iostat = 0
+            end if
+            return
+        end do
+    end subroutine read_logical_line
+
     subroutine parse_test_result_line(line, name, status, exit_str, secs, iostat)
         character(len=*), intent(in) :: line
-        character(len=*), intent(out) :: name, status, exit_str
+        character(len=:), allocatable, intent(out) :: name
+        character(len=*), intent(out) :: status, exit_str
         real, intent(out) :: secs
         integer, intent(out) :: iostat
 
-        character(len=1024) :: name_local
+        character(len=:), allocatable :: name_local
         character(len=128) :: status_local, exit_local
         character(len=10) :: secs_str
 
@@ -117,12 +148,12 @@ contains
 
     subroutine parse_ctest_result_line(line, name, status, secs, iostat)
         character(len=*), intent(in) :: line
-        character(len=*), intent(out) :: name, status
+        character(len=:), allocatable, intent(out) :: name
+        character(len=*), intent(out) :: status
         real, intent(out) :: secs
         integer, intent(out) :: iostat
 
-        character(len=2048) :: tail
-        character(len=1024) :: timing
+        character(len=:), allocatable :: tail, timing
         integer :: test_pos, hash_offset, hash_pos
         integer :: colon_offset, colon_pos, status_pos, status_width
         integer :: time_iostat
@@ -196,9 +227,9 @@ contains
 
     subroutine extract_ctest_name(text, name)
         character(len=*), intent(in) :: text
-        character(len=*), intent(out) :: name
+        character(len=:), allocatable, intent(out) :: name
 
-        character(len=2048) :: local
+        character(len=:), allocatable :: local
         integer :: padding
 
         local = adjustl(text)
@@ -210,10 +241,11 @@ contains
     subroutine parse_test_result_fields(line, name, status, exit_str, &
             secs_str, iostat)
         character(len=*), intent(in) :: line
-        character(len=*), intent(out) :: name, status, exit_str, secs_str
+        character(len=:), allocatable, intent(out) :: name
+        character(len=*), intent(out) :: status, exit_str, secs_str
         integer, intent(out) :: iostat
 
-        character(len=1024) :: name_local
+        character(len=:), allocatable :: name_local
         character(len=128) :: status_local, exit_local
         character(len=10) :: secs_local
 
@@ -247,7 +279,7 @@ contains
     subroutine extract_word(line, word_num, word)
         character(len=*), intent(in) :: line
         integer, intent(in) :: word_num
-        character(len=*), intent(out) :: word
+        character(len=:), allocatable, intent(out) :: word
 
         integer :: pos, start_pos, word_count
 
@@ -393,7 +425,7 @@ contains
 
         character(len=1024) :: chunk
         character(len=:), allocatable :: line
-        character(len=160) :: start_marker, end_marker
+        character(len=:), allocatable :: start_marker, end_marker
         integer :: u, ios, count
         logical :: in_block
 
