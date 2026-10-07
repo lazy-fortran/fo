@@ -72,7 +72,7 @@ module fo_gremlin_supervisor
     implicit none
     private
 
-    integer, parameter :: NAME_LEN = 128, PATH_LEN = 4096
+    integer, parameter :: NAME_LEN = 1024, PATH_LEN = 4096
     integer, parameter :: SUMMARY_DIAGNOSTIC_LIMIT = 1024
     character(len=*), parameter :: SUMMARY_TRUNCATION = '...[truncated]'
     integer, parameter :: GREMLIN_HISTORY_LIMIT = 128
@@ -447,7 +447,7 @@ contains
         type(journal_record_t), allocatable :: records(:)
         character(len=HASH_LEN) :: active_id, candidate_id, receipt_generation
         character(len=HASH_LEN) :: receipt_requirement
-        character(len=128) :: status_name, case_id, raw
+        character(len=NAME_LEN) :: status_name, case_id, raw
         character(len=PATH_LEN) :: journal_path
         character(len=NAME_LEN) :: gate_cases(MAX_NODES)
         character(len=NAME_LEN) :: gate_pass_cases(MAX_NODES)
@@ -784,7 +784,8 @@ contains
         character(len=*), intent(out) :: message
 
         type(journal_record_t), allocatable :: records(:)
-        character(len=128) :: record_session_id, record_generation, status, case_id
+        character(len=128) :: record_session_id, record_generation
+        character(len=NAME_LEN) :: status, case_id
         character(len=PATH_LEN) :: log_path
         integer(int64) :: cursor, next_cursor, page_bytes
         integer :: i, journal_status, n_read, n_page
@@ -3982,7 +3983,7 @@ contains
         character(len=*), intent(in) :: log_file, case_name
         character(len=16) :: outcome
         character(len=8192) :: line
-        character(len=NAME_LEN) :: result_name
+        character(len=:), allocatable :: result_name
         character(len=32) :: result_status, verdict
         type(json_parser_t) :: parser
         type(json_event_t) :: event
@@ -4066,7 +4067,6 @@ contains
                     if (depth /= 3 .or. .not. test_object) cycle
                     if (.not. allocated(event%string_val)) cycle
                     if (want_name) then
-                        if (len(event%string_val) > len(result_name)) malformed = .true.
                         result_name = event%string_val
                     end if
                     if (want_status) then

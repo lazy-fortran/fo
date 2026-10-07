@@ -10,7 +10,7 @@ module fo_gremlin_request
     implicit none
     private
 
-    integer, parameter :: NAME_LEN = 128, PATH_LEN = 4096
+    integer, parameter :: NAME_LEN = 1024, PATH_LEN = 4096
     integer, parameter :: DEFAULT_RANDOM = 32, DEFAULT_CAMPAIGN = 60
     integer, parameter :: DEFAULT_CASE_TIMEOUT = 0, MAX_CASE_TIMEOUT = 86400
     integer, parameter :: MAX_LANE_LEN = 96
@@ -18,7 +18,7 @@ module fo_gremlin_request
     type :: gremlin_request_t
         character(len=MAX_LANE_LEN) :: lane_id = 'default'
         character(len=128) :: session_id = ''
-        character(len=128) :: case_id = ''
+        character(len=NAME_LEN) :: case_id = ''
         integer :: random_count = DEFAULT_RANDOM
         integer :: seed = 0
         integer :: campaign_seconds = DEFAULT_CAMPAIGN
@@ -39,11 +39,12 @@ module fo_gremlin_request
         character(len=NAME_LEN), allocatable :: impact_cases(:)
         integer :: n_impact_cases = 0
         logical :: impact_all = .false.
-        character(len=NAME_LEN) :: gate_cases(MAX_NODES) = ''
+        ! Keep name inventories off the stack when requests are copied for polling.
+        character(len=NAME_LEN), allocatable :: gate_cases(:)
         integer :: event_epoch = 0
         character(len=HASH_LEN) :: requirement_digest = ''
         integer :: gate_required_count = 0
-        character(len=NAME_LEN) :: targets(MAX_NODES) = ''
+        character(len=NAME_LEN), allocatable :: targets(:)
         integer :: n_targets = 0
     end type gremlin_request_t
 
@@ -79,6 +80,9 @@ contains
         call json_parser_init_strict(parser, json)
         call json_parser_next(parser, event)
         if (event%event_type /= JSON_OBJECT_START) return
+        allocate (request%gate_cases(MAX_NODES), request%targets(MAX_NODES))
+        request%gate_cases = ''
+        request%targets = ''
         seen = .false.
         do
             ierr = 1
@@ -319,7 +323,7 @@ contains
             item = ''
             if (len_trim(event%string_val) == 0 .or. &
                 len(event%string_val) > len(item)) then
-                message = 'target names must be nonempty and at most 128 characters'
+                message = 'target names must be nonempty and at most 1024 characters'
                 return
             end if
             item = event%string_val
@@ -436,7 +440,7 @@ contains
             case (16)
                 if (len_trim(value) == 0 .or. len_trim(value) > len(request%case_id)) then
                     ierr = 1
-                    message = 'case_id must be nonempty and at most 128 characters'
+                    message = 'case_id must be nonempty and at most 1024 characters'
                     return
                 end if
             case (17)

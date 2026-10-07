@@ -149,15 +149,15 @@ contains
         integer :: affected_ids(MAX_NODES), n_affected
         integer :: n_cached, i, n_test_names
         real(real64) :: t0, t1
-        character(len=128) :: test_names(MAX_NODES)
-        character(len=MAX_PATH) :: filenames(MAX_NODES)
-        character(len=MAX_PATH) :: changed_files(MAX_NODES)
+        character(len=4096), allocatable :: test_names(:)
+        character(len=MAX_PATH), allocatable :: filenames(:), changed_files(:)
         character(len=512) :: build_log, test_log
-        character(len=128) :: failed_tests(MAX_TEST_RESULTS)
+        character(len=4096) :: failed_tests(MAX_TEST_RESULTS)
         integer :: n_failed_tests
         logical :: is_test_arr(MAX_NODES), has_cycle
 
-        allocate (units(MAX_UNITS))
+        allocate (units(MAX_UNITS), test_names(MAX_NODES), &
+            filenames(MAX_NODES), changed_files(MAX_NODES))
 
         t0 = wall_time_seconds()
 
@@ -705,7 +705,7 @@ contains
         !! binaries to find them -- which serves stale artifacts when sources
         !! changed since the last fo run. The full list keeps everything inside
         !! fo, where the content-addressed cache guarantees fresh binaries.
-        character(len=128), intent(in) :: failed(:)
+        character(len=4096), intent(in) :: failed(:)
         integer, intent(in) :: n_failed
         integer :: i
 
@@ -1144,18 +1144,20 @@ contains
         integer :: affected_ids(MAX_NODES), n_affected
         integer :: n_cached, ierr, i, n_test_names, n_arg_names
         integer :: random_count, random_seed, clock_count
+        integer :: argument_status
         logical :: only_changed, include_all, verbose, use_json, skip_next
         logical :: end_options, flags_seen
-        character(len=256) :: arg
-        character(len=128) :: test_names(MAX_NODES)
-        character(len=128) :: random_candidates(MAX_NODES)
+        character(len=1024) :: arg
+        character(len=1024), allocatable :: test_names(:), random_candidates(:)
         character(len=512) :: test_log, flags
         character(len=64) :: profile
         character(len=1024) :: all_flags
         logical :: is_test_arr(MAX_NODES)
-        character(len=MAX_PATH) :: filenames(MAX_NODES)
+        character(len=MAX_PATH), allocatable :: filenames(:)
         integer :: candidate_ids(MAX_NODES)
 
+        allocate (test_names(MAX_NODES), random_candidates(MAX_NODES), &
+            filenames(MAX_NODES))
         only_changed = .false.
         include_all = .false.
         verbose = .false.
@@ -1169,14 +1171,19 @@ contains
         skip_next = .false.
         end_options = .false.
         do i = 2, command_argument_count()
-            call get_command_argument(i, arg)
+            call get_command_argument(i, arg, status=argument_status)
+            if (argument_status /= 0) then
+                write (error_unit, '(a)') &
+                    'fo: test argument exceeds the 1024-character bound'
+                call process_exit(2)
+            end if
             if (skip_next) then
                 skip_next = .false.
                 cycle
             end if
             if (end_options) then
                 n_arg_names = n_arg_names + 1
-                test_names(n_arg_names) = arg(1:128)
+                test_names(n_arg_names) = trim(arg)
                 cycle
             end if
             if (trim(arg) == '--') then
@@ -1237,7 +1244,7 @@ contains
                 if (arg(1:1) == '-') &
                     call test_usage_error('unknown option: '//trim(arg))
                 n_arg_names = n_arg_names + 1
-                test_names(n_arg_names) = arg(1:128)
+                test_names(n_arg_names) = trim(arg)
             end select
         end do
 
@@ -1287,7 +1294,7 @@ contains
                     if (.not. include_all .and. &
                         is_slow_test(dag%nodes(i)%label)) cycle
                     n_test_names = n_test_names + 1
-                    random_candidates(n_test_names) = dag%nodes(i)%label(1:128)
+                    random_candidates(n_test_names) = dag%nodes(i)%label
                 end do
             end if
             if (random_seed == 0) then
@@ -1368,7 +1375,7 @@ contains
                     if (is_test_arr(affected_ids(i))) then
                         n_test_names = n_test_names + 1
                         test_names(n_test_names) = &
-                            dag%nodes(affected_ids(i))%label(1:128)
+                            dag%nodes(affected_ids(i))%label
                     end if
                 end do
             end if
@@ -1488,7 +1495,7 @@ contains
         character(len=:), allocatable :: json_output
         character(len=16384) :: human_output
         type(diagnostic_t) :: diag
-        character(len=128) :: failed_tests(MAX_TEST_RESULTS)
+        character(len=4096) :: failed_tests(MAX_TEST_RESULTS)
         integer :: n_failed_tests, i
         character(len=8) :: exit_out
         character(len=16) :: secs_out

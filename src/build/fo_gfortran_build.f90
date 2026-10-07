@@ -69,7 +69,7 @@ module fo_gfortran_build
 
     type, private :: current_test_t
         !! One selected test: what to run, where its log went, how it ended.
-        character(len=128) :: name = ''
+        character(len=MAX_PATH) :: name = ''
         character(len=MAX_PATH) :: bin = ''
         character(len=512) :: log = ''
         character(len=:), allocatable :: args
@@ -673,7 +673,7 @@ contains
     subroutine gfortran_test_names(project_dir, names, n_names, log_file, &
             exitcode, include_slow, n_compiled, flags, use_cache, build_only)
         character(len=*), intent(in) :: project_dir, log_file
-        character(len=128), intent(in) :: names(:)
+        character(len=*), intent(in) :: names(:)
         integer, intent(in) :: n_names
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
@@ -763,7 +763,7 @@ contains
         character(len=*), intent(in) :: project_dir, log_file
         integer, intent(out) :: exitcode
         logical, intent(in) :: include_slow
-        character(len=128), intent(in) :: names(:)
+        character(len=*), intent(in) :: names(:)
         integer, intent(in) :: n_names
         character(len=*), intent(in), optional :: flags
 
@@ -1069,7 +1069,7 @@ contains
         character(len=*), intent(in) :: test_dir
         type(scan_unit_t), intent(in) :: units(:)
         integer, intent(in) :: n_units
-        character(len=128) :: name
+        character(len=MAX_PATH) :: name
         integer :: i
 
         available = .false.
@@ -1089,7 +1089,7 @@ contains
         character(len=*), intent(in) :: project_dir, name
         type(fpm_config_t), allocatable :: config
         type(scan_unit_t), allocatable :: units(:)
-        character(len=128) :: public_name
+        character(len=MAX_PATH) :: public_name
         integer :: i, n_units, ierr
         logical :: has_dispatcher
 
@@ -1171,7 +1171,7 @@ contains
 
         type(fpm_config_t), allocatable :: config
         type(scan_unit_t), allocatable :: units(:)
-        character(len=128) :: name
+        character(len=MAX_PATH) :: name
         integer :: i, j, n_units, ierr
         logical :: has_dispatcher
 
@@ -1224,7 +1224,7 @@ contains
         type(current_test_t), allocatable, intent(out) :: tests(:)
         integer, intent(out) :: n_tests
 
-        character(len=128) :: name
+        character(len=MAX_PATH) :: name
         integer :: i
         logical :: has_dispatcher
 
@@ -2778,7 +2778,7 @@ contains
     function gfortran_test_source_name(config, test_dir, source) result(name)
         type(fpm_config_t), intent(in) :: config
         character(len=*), intent(in) :: test_dir, source
-        character(len=128) :: name, public_name
+        character(len=MAX_PATH) :: name, public_name
 
         call file_basename(source, name)
         public_name = manifest_test_name(config, test_dir, name)
@@ -2789,7 +2789,7 @@ contains
         !! Classify a selected program using the same naming rules as linking.
         type(fpm_config_t), intent(in) :: config
         character(len=*), intent(in) :: source
-        character(len=128) :: name
+        character(len=MAX_PATH) :: name
         character(len=512) :: obj_path
 
         name = ''
@@ -2802,7 +2802,7 @@ contains
     function app_binary_name(config, obj_path) result(name)
         type(fpm_config_t), intent(in) :: config
         character(len=*), intent(in) :: obj_path
-        character(len=128) :: name, manifest_name, object_name
+        character(len=MAX_PATH) :: name, manifest_name, object_name
         logical :: is_example
 
         call file_basename(obj_path, object_name)
@@ -2875,7 +2875,7 @@ contains
         integer, intent(in) :: n_lib_objs
         character(len=128), intent(in) :: link_libs(*)
         integer, intent(in) :: n_link_libs
-        character(len=128), intent(in) :: selected_names(:)
+        character(len=*), intent(in) :: selected_names(:)
         integer, intent(in) :: n_selected
         logical, intent(in) :: include_slow
         integer, intent(out) :: exitcode
@@ -2895,7 +2895,7 @@ contains
         character(len=512), allocatable :: run_logs(:)
         character(len=512), allocatable :: run_bins(:)
         character(len=HASH_LEN), allocatable :: run_keys(:)
-        character(len=128), allocatable :: run_names(:)
+        character(len=MAX_PATH), allocatable :: run_names(:)
         character(len=4096), allocatable :: run_args(:)
         logical, allocatable :: run_compiled(:)
         logical, allocatable :: ran(:), flaky(:)
@@ -2907,7 +2907,7 @@ contains
         logical :: allow_cache
         character(len=512) :: obj_path, bin_path
         character(len=4096) :: incl_flag
-        character(len=128) :: tname
+        character(len=MAX_PATH) :: tname
         character(len=MAX_PATH) :: fname_local
         character(len=512) :: log_local, rerun_log
         type(cache_t) :: c
@@ -4046,7 +4046,7 @@ contains
         character(len=*), intent(in) :: log_file
 
         integer :: i
-        character(len=128) :: tname
+        character(len=MAX_PATH) :: tname
 
         do i = 1, n_run
             if (run_exits(i) /= 0) cycle
@@ -4117,7 +4117,7 @@ contains
 
     logical function selected_test(name, selected_names, n_selected) result(found)
         character(len=*), intent(in) :: name
-        character(len=128), intent(in) :: selected_names(:)
+        character(len=*), intent(in) :: selected_names(:)
         integer, intent(in) :: n_selected
         integer :: i
 

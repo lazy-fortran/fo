@@ -10,14 +10,14 @@ module fo_gremlin_execution_view
     implicit none
     private
 
-    integer, parameter :: PATH_LEN = 4096
+    integer, parameter :: PATH_LEN = 4096, NAME_LEN = 1024
 
     type, public :: execution_view_t
         character(len=PATH_LEN) :: root = ''
         character(len=PATH_LEN) :: cwd = ''
         character(len=PATH_LEN) :: tmpdir = ''
         character(len=PATH_LEN) :: owner_key = ''
-        character(len=128) :: case_id = ''
+        character(len=NAME_LEN) :: case_id = ''
         character(len=64) :: generation_id = ''
         character(len=64) :: inventory_digest = ''
         logical :: active = .false.

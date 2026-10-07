@@ -344,9 +344,9 @@ contains
 
     subroutine backend_test_names(self, names, n_names, exitcode, include_slow, &
             log_file, flags, use_cache)
-        use fo_scan, only: is_slow_test
+        use fo_scan, only: is_slow_test, MAX_PATH
         type(backend_t), intent(inout) :: self
-        character(len=128), intent(in) :: names(:)
+        character(len=*), intent(in) :: names(:)
         integer, intent(in) :: n_names
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
@@ -355,7 +355,7 @@ contains
         logical, intent(in), optional :: use_cache
 
         integer :: i, lock_ierr
-        character(len=128) :: fast_names(MAX_TEST_TARGETS)
+        character(len=MAX_PATH) :: fast_names(MAX_TEST_TARGETS)
         logical :: slow
         integer :: n_fast
         character(len=512) :: log_path, lock_dir, flag_text
@@ -414,7 +414,7 @@ contains
     subroutine backend_test_affected(self, names, n_names, exitcode, &
             include_slow, log_file, flags, use_cache)
         type(backend_t), intent(inout) :: self
-        character(len=128), intent(in) :: names(:)
+        character(len=*), intent(in) :: names(:)
         integer, intent(in) :: n_names
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
@@ -676,7 +676,7 @@ contains
     end function environment_timeout
 
     subroutine names_to_ctest_regex(names, n_names, regex)
-        character(len=128), intent(in) :: names(MAX_TEST_TARGETS)
+        character(len=*), intent(in) :: names(MAX_TEST_TARGETS)
         integer, intent(in) :: n_names
         character(len=*), intent(out) :: regex
 

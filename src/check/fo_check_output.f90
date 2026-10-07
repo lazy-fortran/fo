@@ -59,7 +59,7 @@ contains
         !! Every failing test target by name, so an agent sees the full set in
         !! one call instead of only the primary diagnostic.
         type(check_result_t), intent(in) :: res
-        character(len=4096) :: s
+        character(len=:), allocatable :: s
         integer :: i
 
         if (res%n_failed_tests == 0) then
@@ -76,7 +76,7 @@ contains
 
     function test_results_json(res) result(s)
         type(check_result_t), intent(in) :: res
-        character(len=4096) :: s
+        character(len=:), allocatable :: s
 
         integer :: i
 
@@ -100,9 +100,9 @@ contains
 
     function check_result_compact_json(res) result(line)
         type(check_result_t), intent(in) :: res
-        character(len=8192) :: line
+        character(len=:), allocatable :: line
 
-        character(len=2048) :: base
+        character(len=:), allocatable :: base
 
         base = make_agent_json(res)
         line = base(1:len_trim(base) - 1)
@@ -113,9 +113,9 @@ contains
     function check_result_full_json(res, cap_json_str) result(line)
         type(check_result_t), intent(in) :: res
         character(len=*), intent(in) :: cap_json_str
-        character(len=16384) :: line
+        character(len=:), allocatable :: line
 
-        character(len=8192) :: base
+        character(len=:), allocatable :: base
 
         base = check_result_compact_json(res)
         line = base(1:len_trim(base) - 1)
@@ -147,7 +147,7 @@ contains
 
     function make_agent_json(res) result(line)
         type(check_result_t), intent(in) :: res
-        character(len=2048) :: line
+        character(len=:), allocatable :: line
 
         character(len=32) :: elapsed
         logical :: ok

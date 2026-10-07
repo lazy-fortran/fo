@@ -49,13 +49,13 @@ module fo_fpm_config
     ! not after the source stem, so `main = "main.f90"` under `name = "demo"`
     ! links to `demo`, not the package name.
     type :: fpm_exe_t
-        character(len=128) :: name = ''
+        character(len=1024) :: name = ''
         character(len=256) :: main = 'main.f90'
         character(len=256) :: source_dir = 'app'
     end type fpm_exe_t
 
     type :: fpm_test_args_t
-        character(len=128) :: name = ''
+        character(len=1024) :: name = ''
         character(len=:), allocatable :: args
     end type fpm_test_args_t
 
@@ -73,7 +73,7 @@ module fo_fpm_config
     end type fpm_input_t
 
     type :: fpm_config_t
-        character(len=128) :: name = ''
+        character(len=1024) :: name = ''
         character(len=32)  :: version = ''
         character(len=256) :: source_dir = 'src'
         character(len=256) :: app_dir = 'app'
@@ -214,7 +214,8 @@ contains
         type(fpm_config_t), intent(out) :: config
         integer, intent(out) :: ierr
 
-        character(len=1024) :: line, key, val, section
+        character(len=1025) :: line
+        character(len=1024) :: key, val, section
         ! accumulated value for multi-line arrays (flags = [\n  "...",\n])
         character(len=4096) :: accum
         logical :: in_array
@@ -239,6 +240,13 @@ contains
         do
             read (u, '(a)', iostat=ios) line
             if (ios /= 0) exit
+            if (len_trim(line) == len(line)) then
+                write (error_unit, '(a)') &
+                    'fo: fpm.toml line exceeds 1024 characters'
+                ierr = 1
+                close (u)
+                return
+            end if
             call strip_comment(line)
             line = adjustl(line)
             if (len_trim(line) == 0) cycle
@@ -393,7 +401,7 @@ contains
         character(len=*), intent(in) :: key, val
         type(fpm_config_t), intent(inout) :: config
 
-        character(len=512) :: str_val
+        character(len=1024) :: str_val
 
         select case (trim(key))
         case ('name')
@@ -444,7 +452,7 @@ contains
         character(len=*), intent(in) :: key, val
         type(fpm_config_t), intent(inout) :: config
 
-        character(len=256) :: str_val
+        character(len=1024) :: str_val
 
         select case (trim(key))
         case ('source-dir')
@@ -474,7 +482,7 @@ contains
     subroutine parse_install(key, val, config)
         character(len=*), intent(in) :: key, val
         type(fpm_config_t), intent(inout) :: config
-        character(len=256) :: str_val
+        character(len=1024) :: str_val
 
         select case (trim(key))
         case ('library')
@@ -490,7 +498,7 @@ contains
     subroutine parse_library(key, val, config)
         character(len=*), intent(in) :: key, val
         type(fpm_config_t), intent(inout) :: config
-        character(len=256) :: str_val
+        character(len=1024) :: str_val
 
         if (trim(key) /= 'source-dir') return
         call extract_string(val, str_val)
@@ -500,7 +508,7 @@ contains
     subroutine parse_fortran(key, val, config)
         character(len=*), intent(in) :: key, val
         type(fpm_config_t), intent(inout) :: config
-        character(len=256) :: str_val
+        character(len=1024) :: str_val
 
         select case (trim(key))
         case ('implicit-typing')
@@ -537,7 +545,7 @@ contains
         character(len=*), intent(in) :: key, val
         type(fpm_exe_t), intent(inout) :: exe
 
-        character(len=256) :: str_val
+        character(len=1024) :: str_val
 
         call extract_string(val, str_val)
         if (len_trim(str_val) == 0) return
@@ -556,7 +564,7 @@ contains
         !! whose main-source stem and source-dir match, or '' when none applies.
         type(fpm_config_t), intent(in) :: config
         character(len=*), intent(in) :: app_dir, stem
-        character(len=128) :: name
+        character(len=1024) :: name
         character(len=256) :: main_stem
         integer :: i, dot
 
@@ -589,7 +597,7 @@ contains
     function manifest_test_name(config, test_dir, stem) result(name)
         type(fpm_config_t), intent(in) :: config
         character(len=*), intent(in) :: test_dir, stem
-        character(len=128) :: name
+        character(len=1024) :: name
         character(len=256) :: main_stem
         integer :: i, dot, slash
 
@@ -628,7 +636,7 @@ contains
     function manifest_example_name(config, example_dir, stem) result(name)
         type(fpm_config_t), intent(in) :: config
         character(len=*), intent(in) :: example_dir, stem
-        character(len=128) :: name
+        character(len=1024) :: name
         character(len=256) :: main_stem
         integer :: i, dot, slash
 
@@ -654,7 +662,7 @@ contains
         integer, intent(inout) :: n_deps
 
         character(len=256) :: name, field
-        character(len=512) :: str_val
+        character(len=1024) :: str_val
         integer :: dot, i, found
 
         dot = index(trim(name_key), '.')
@@ -801,7 +809,7 @@ contains
         type(fpm_config_t), intent(inout) :: config
 
         integer :: pos, start, n
-        character(len=128) :: name
+        character(len=1024) :: name
         logical :: in_str
 
         pos = 1
@@ -927,7 +935,7 @@ contains
     subroutine parse_fo_input(key, val, config)
         character(len=*), intent(in) :: key, val
         type(fpm_config_t), intent(inout) :: config
-        character(len=512) :: str_val
+        character(len=1024) :: str_val
         integer :: slot
 
         if (config%n_fo_inputs <= 0) then

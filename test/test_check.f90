@@ -1051,6 +1051,10 @@ contains
         call assert(index(json, '"test_cache"') > 0, 'compact json has test name')
         call assert(index(json, '"pass":8') > 0, 'compact json has pass count')
         call assert(index(json, '"fail":0') > 0, 'compact json has fail count')
+        res%test_results(2)%name = 'test_'//repeat('n', 1200)
+        json = check_result_compact_json(res)
+        call assert(index(json, trim(res%test_results(2)%name)) > 0, &
+            'compact json preserves a long public test result name')
     end subroutine test_compact_json_includes_test_results
 
     subroutine test_full_json_includes_test_results()

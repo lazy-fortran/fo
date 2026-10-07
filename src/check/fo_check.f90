@@ -23,7 +23,7 @@ module fo_check
     integer, parameter :: MAX_TEST_RESULTS = 64
 
     type :: test_result_t
-        character(len=128) :: name = ''
+        character(len=4096) :: name = ''
         integer :: n_pass = 0
         integer :: n_fail = 0
         character(len=8) :: status = ''
@@ -41,7 +41,7 @@ module fo_check
         real :: elapsed = 0.0
         character(len=512) :: error_msg = ''
         character(len=32) :: stage = 'done'
-        character(len=128) :: target = ''
+        character(len=4096) :: target = ''
         character(len=512) :: summary = ''
         character(len=256) :: hint = ''
         character(len=256) :: rerun = ''
@@ -51,7 +51,7 @@ module fo_check
         integer :: diag_column = 0
         type(test_result_t) :: test_results(MAX_TEST_RESULTS)
         integer :: n_test_results = 0
-        character(len=128) :: failed_tests(MAX_TEST_RESULTS) = ''
+        character(len=4096) :: failed_tests(MAX_TEST_RESULTS) = ''
         integer :: n_failed_tests = 0
     end type check_result_t
 
@@ -423,13 +423,14 @@ contains
         character(len=512) :: build_log, test_log
         character(len=512) :: no_project
         character(len=512) :: project_dir
-        character(len=128) :: test_names(MAX_NODES)
+        character(len=4096), allocatable :: test_names(:)
         integer :: i, n_test_names
         logical :: is_test_arr(MAX_NODES)
-        character(len=MAX_PATH) :: filenames(MAX_NODES)
+        character(len=MAX_PATH), allocatable :: filenames(:)
         type(backend_t) :: b
 
         t0 = wall_time_seconds()
+        allocate (filenames(MAX_NODES), test_names(MAX_NODES))
 
         b = detect_backend(dir)
         project_dir = b%project_dir
@@ -625,8 +626,8 @@ contains
         type(test_result_t), intent(out) :: results(MAX_TEST_RESULTS)
         integer, intent(out) :: n_results
 
-        character(len=512) :: line
-        character(len=128) :: name
+        character(len=4096) :: line
+        character(len=4096) :: name
         integer :: u, iostat, io, colon_pos, pass_pos, fail_pos, comma_pos
         integer :: n_pass, n_fail
 
@@ -673,12 +674,12 @@ contains
         !! full set. A single failing target then never hides the others, which is
         !! what otherwise pushes a user to run the raw binaries (and get stale ones).
         character(len=*), intent(in) :: log_file
-        character(len=128), intent(out) :: names(MAX_TEST_RESULTS)
+        character(len=4096), intent(out) :: names(MAX_TEST_RESULTS)
         integer, intent(out) :: n_names
 
         character(len=*), parameter :: pfx = 'fo: test target '
-        character(len=1024) :: line
-        character(len=128) :: nm
+        character(len=4096) :: line
+        character(len=4096) :: nm
         integer :: u, ios, p, q, j
         logical :: seen
 

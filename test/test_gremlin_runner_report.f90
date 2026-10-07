@@ -4,6 +4,7 @@ program test_gremlin_runner_report
     implicit none
 
     character(:), allocatable :: scratch, log_path
+    character(:), allocatable :: long_target
     character(len=*), parameter :: target = 'test_relative_pass'
     character(len=*), parameter :: pass_record = &
         '{"name":"test_relative_pass","status":"pass","seconds":0.01,"output":""}'
@@ -53,6 +54,10 @@ program test_gremlin_runner_report
     call invalid(pass_report//' trailing', 'trailing garbage')
     call invalid('{"tests":[{"name":"'//target//repeat('x', 150)// &
         '","status":"pass"}]}', 'overlong name cannot match by truncation')
+    long_target = target//repeat('x', 1500)
+    call check_named('{"tests":[{"name":"'//long_target// &
+        '","status":"pass"}]}', long_target, 'PASS', &
+        'long result name is matched without truncation')
     call invalid('{"tests":[{"name":"test_relative_pass","status":"pass'// &
         repeat(' ', 40)//'extra"}]}', 'overlong status cannot match by truncation')
     call invalid('{"tests":[{"name":"test_relative_pass","status":"fail",'// &
@@ -76,5 +81,15 @@ contains
 
         call check(report, 'INFRA_ERROR', description)
     end subroutine invalid
+
+    subroutine check_named(report, requested_name, expected, description)
+        character(len=*), intent(in) :: report, requested_name, expected, description
+        character(len=16) :: observed
+
+        call write_text(log_path, report//new_line('a'))
+        observed = runner_case_outcome(log_path, requested_name)
+        call assert_true(trim(observed) == expected, description// &
+            ': expected '//expected//', observed '//trim(observed))
+    end subroutine check_named
 
 end program test_gremlin_runner_report

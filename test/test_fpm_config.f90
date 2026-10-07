@@ -1,7 +1,7 @@
 program test_fpm_config
     use, intrinsic :: iso_fortran_env, only: output_unit
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_config_init, &
-        manifest_test_args
+        manifest_test_args, manifest_test_name
     use fo_util, only: make_tmpfile
     implicit none
 
@@ -23,6 +23,7 @@ program test_fpm_config
     call test_flags_multiline_array()
     call test_preprocess_macros()
     call test_per_test_arguments()
+    call test_long_test_name_and_overlong_line()
     call test_external_modules_array()
     call test_implicit_typing_allowed()
 
@@ -517,6 +518,35 @@ contains
             'per_test_arguments: argument boundaries are retained')
         call execute_command_line('rm -rf '//dir, wait=.true.)
     end subroutine test_per_test_arguments
+
+    subroutine test_long_test_name_and_overlong_line()
+        type(fpm_config_t) :: config
+        character(len=512) :: dir
+        character(len=:), allocatable :: long_name, parsed_name
+        integer :: ierr, unit, status
+
+        call make_tmpfile('fo-fpm-long-test-name', dir)
+        call execute_command_line('mkdir '//trim(dir), exitstat=status)
+        call assert(status == 0, 'long test name: fixture directory created')
+        long_name = 'check_'//repeat('n', 700)
+        open (newunit=unit, file=trim(dir)//'/fpm.toml', status='replace')
+        write (unit, '(a)') 'name = "long-name-fixture"'
+        write (unit, '(a)') '[[test]]'
+        write (unit, '(a)') 'name = "'//long_name//'"'
+        write (unit, '(a)') 'main = "test_long_name.f90"'
+        close (unit)
+        call fpm_config_parse(dir, config, ierr)
+        parsed_name = manifest_test_name(config, 'test', 'test_long_name')
+        call assert(ierr == 0 .and. parsed_name == long_name, &
+            'long test name: manifest name survives parsing and selection')
+
+        open (newunit=unit, file=trim(dir)//'/fpm.toml', status='replace')
+        write (unit, '(a)') 'name = "'//repeat('x', 1020)//'"'
+        close (unit)
+        call fpm_config_parse(dir, config, ierr)
+        call assert(ierr /= 0, 'long test name: rejects a line beyond parser bound')
+        call execute_command_line('rm -rf '//trim(dir), wait=.true.)
+    end subroutine test_long_test_name_and_overlong_line
 
     subroutine test_external_modules_array()
         !! libneo declares its system modules as a multi-line array; the parser

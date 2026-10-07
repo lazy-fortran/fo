@@ -11,8 +11,8 @@ module fo_test_impact
     integer, parameter, public :: IMPACT_WIDENED = 2
 
     type, public :: test_impact_case_t
-        character(len=128) :: public_name = ''
-        character(len=512) :: identity = ''
+        character(len=1024) :: public_name = ''
+        character(len=2048) :: identity = ''
         integer :: node_id = 0
         logical :: eligible = .true.
         logical :: slow = .false.
@@ -20,8 +20,8 @@ module fo_test_impact
     end type test_impact_case_t
 
     type, public :: test_impact_selected_t
-        character(len=128) :: public_name = ''
-        character(len=512) :: identity = ''
+        character(len=1024) :: public_name = ''
+        character(len=2048) :: identity = ''
         character(len=256) :: reason = ''
         integer :: classification = 0
         logical :: slow = .false.
