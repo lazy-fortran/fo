@@ -134,6 +134,14 @@ required case 1/1 on generation
 with `local_gate_green=true`. The exact combined main candidate passed the
 same case 1/1 before promotion. Task worktrees and scratch were removed.
 
+Fo `26e1049` preserves the failed first attempt's diagnostic when an isolated
+retry passes, and reports both attempt outcomes in human and JSON output.
+The public `test_flaky_output_cli` passed directly and in a one-target resident
+gate (`local_gate_green=true`, 1/1). The exact combined-main candidate SHA256
+`0d36ab6ab935f7c961d27b4e1efa136e7d88b23fc1a409da76d495b42ca9dc88`
+passed the same public case 1/1 before main promotion. Completed task and
+combined worktrees were removed.
+
 Keep one useful resident Fo Gremlin lane running and develop through it.
 Fo `190d3e8` restores a single expected `.smod` output from the shared action
 cache in fresh execution views and bypasses sources with multiple outputs. Its
