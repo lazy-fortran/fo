@@ -2,6 +2,7 @@ program test_fpm_config
     use, intrinsic :: iso_fortran_env, only: output_unit
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_config_init, &
         manifest_test_args
+    use fo_util, only: make_tmpfile
     implicit none
 
     integer :: n_pass, n_fail
@@ -14,6 +15,7 @@ program test_fpm_config
     call test_init_defaults()
     call test_parse_missing_file()
     call test_dotted_dependency_keys()
+    call test_dependency_source_conflicts()
     call test_blas_metapackage()
     call test_source_metapackages()
     call test_system_metapackages()
@@ -189,6 +191,59 @@ contains
         end if
         call execute_command_line('rm -rf '//dir, wait=.true.)
     end subroutine test_dotted_dependency_keys
+
+    subroutine test_dependency_source_conflicts()
+        type(fpm_config_t) :: c
+        character(len=512) :: dir
+        character(len=160), parameter :: entries(6) = [character(len=160) :: &
+            'dep = { path = ".", git = "https://example.invalid/dep" }', &
+            'dep = { git = "https://example.invalid/dep", '// &
+            'branch = "main", tag = "v1" }', &
+            'dep.branch = "main"', &
+            'dep = { path = "", git = "https://example.invalid/dep" }', &
+            'dep = { path = "." }', &
+            'dep = { git = "https://example.invalid/dep", tag = "v1" }' ]
+        character(len=32), parameter :: sections(6) = [character(len=32) :: &
+            '[dependencies]', '[dependencies]', '[dev-dependencies]', &
+            '[dependencies]', '[dependencies]', '[dependencies]' ]
+        character(len=80), parameter :: expected(4) = [character(len=80) :: &
+            'both path and git', 'only one of branch, tag, or rev', &
+            'Git selector without git', 'both path and git' ]
+        integer :: i, u, ios, status
+
+        call make_tmpfile('fo-dep-source-conflicts', dir)
+        call execute_command_line('mkdir '//trim(dir), exitstat=status)
+        if (status /= 0) then
+            call assert(.false., 'dependency conflict fixture directory created')
+            return
+        end if
+        do i = 1, size(entries)
+            open (newunit=u, file=trim(dir)//'/fpm.toml', &
+                status='replace', iostat=ios)
+            if (ios /= 0) then
+                call assert(.false., 'dependency conflict manifest created')
+                exit
+            end if
+            write (u, '(a)') 'name = "dependency-source-fixture"'
+            write (u, '(a)') trim(sections(i))
+            write (u, '(a)') trim(entries(i))
+            close (u)
+            call fpm_config_parse(trim(dir), c, status)
+            if (i <= size(expected)) then
+                call assert(status /= 0, 'conflicting dependency rejected')
+                call assert(index(c%dependency_parse_error, trim(expected(i))) > 0, &
+                    'conflict diagnostic identifies the cause')
+                call assert(index(c%dependency_parse_error, 'dep') > 0, &
+                    'conflict diagnostic names the dependency')
+            else
+                call assert(status == 0, 'valid dependency source accepted')
+            end if
+        end do
+        open (newunit=u, file=trim(dir)//'/fpm.toml', status='old', iostat=ios)
+        if (ios == 0) close (u, status='delete')
+        call execute_command_line('rmdir '//trim(dir), exitstat=status)
+        call assert(status == 0, 'dependency conflict fixture cleaned')
+    end subroutine test_dependency_source_conflicts
 
     subroutine test_blas_metapackage()
         !! The oracle is the provider contract: when pkg-config has a BLAS

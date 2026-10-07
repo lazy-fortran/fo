@@ -38,6 +38,11 @@ module fo_fpm_config
         character(len=:), allocatable :: rev
         character(len=512) :: path = ''
         character(len=32)  :: version = '*'
+        logical :: path_seen = .false.
+        logical :: git_seen = .false.
+        logical :: branch_seen = .false.
+        logical :: tag_seen = .false.
+        logical :: rev_seen = .false.
     end type fpm_dep_t
 
     ! An explicit [[executable]] entry. fpm names the built binary after `name`,
@@ -106,6 +111,7 @@ module fo_fpm_config
         integer :: n_fo_inputs = 0
         type(fpm_input_t) :: fo_inputs(MAX_FO_INPUTS)
         character(len=512) :: fo_input_parse_error = ''
+        character(len=512) :: dependency_parse_error = ''
         ! [extra.fo] test budgets in seconds; 0 leaves fo's default. The
         ! FO_TEST_TIMEOUT, FO_SLOW_TEST_TIMEOUT and FO_TEST_WALL_TIMEOUT
         ! environment variables override these per invocation.
@@ -154,8 +160,7 @@ contains
 
     pure function dep_kind(dep) result(kind)
         !! Classify a parsed dependency by which source field the manifest set.
-        !! path wins over git wins over a bare version (registry), matching how
-        !! fpm treats a dependency table.
+        !! The parser rejects conflicting sources before classification.
         type(fpm_dep_t), intent(in) :: dep
         integer :: kind
 
@@ -201,6 +206,7 @@ contains
         c%n_test_arg_sets = 0
         c%n_fo_inputs = 0
         c%fo_input_parse_error = ''
+        c%dependency_parse_error = ''
     end subroutine fpm_config_init
 
     subroutine fpm_config_parse(project_dir, config, ierr)
@@ -213,7 +219,7 @@ contains
         character(len=4096) :: accum
         logical :: in_array
         character(len=1024) :: pending_key
-        integer :: u, ios
+        integer :: u, ios, i
 
         call fpm_config_init(config)
         config%project_dir = trim(project_dir)
@@ -339,8 +345,49 @@ contains
             ierr = 1
             return
         end if
+        do i = 1, config%n_deps
+            call validate_dependency(config%deps(i), 'dependencies', &
+                config%dependency_parse_error)
+            if (len_trim(config%dependency_parse_error) > 0) exit
+        end do
+        if (len_trim(config%dependency_parse_error) == 0) then
+            do i = 1, config%n_dev_deps
+                call validate_dependency(config%dev_deps(i), 'dev-dependencies', &
+                    config%dependency_parse_error)
+                if (len_trim(config%dependency_parse_error) > 0) exit
+            end do
+        end if
+        if (len_trim(config%dependency_parse_error) > 0) then
+            write (error_unit, '(a)') 'fo: fpm.toml: '// &
+                trim(config%dependency_parse_error)
+            ierr = 1
+            return
+        end if
         if (ierr == 0) call resolve_metapackages(config, ierr)
     end subroutine fpm_config_parse
+
+    subroutine validate_dependency(dep, section, error)
+        type(fpm_dep_t), intent(in) :: dep
+        character(len=*), intent(in) :: section
+        character(len=*), intent(out) :: error
+        integer :: selectors
+
+        error = ''
+        selectors = 0
+        if (dep%branch_seen) selectors = selectors + 1
+        if (dep%tag_seen) selectors = selectors + 1
+        if (dep%rev_seen) selectors = selectors + 1
+        if (dep%path_seen .and. dep%git_seen) then
+            error = '['//section//'] dependency "'//trim(dep%name)// &
+                '" cannot have both path and git'
+        else if (selectors > 1) then
+            error = '['//section//'] dependency "'//trim(dep%name)// &
+                '" can have only one of branch, tag, or rev'
+        else if (selectors > 0 .and. .not. dep%git_seen) then
+            error = '['//section//'] dependency "'//trim(dep%name)// &
+                '" has a Git selector without git'
+        end if
+    end subroutine validate_dependency
 
     subroutine parse_top_level(key, val, config)
         character(len=*), intent(in) :: key, val
@@ -634,14 +681,19 @@ contains
         call extract_string(val, str_val)
         select case (trim(field))
         case ('git')
+            deps(found)%git_seen = .true.
             deps(found)%git = trim(str_val)
         case ('branch')
+            deps(found)%branch_seen = .true.
             deps(found)%branch = trim(str_val)
         case ('tag')
+            deps(found)%tag_seen = .true.
             deps(found)%tag = trim(str_val)
         case ('rev')
+            deps(found)%rev_seen = .true.
             deps(found)%rev = trim(str_val)
         case ('path')
+            deps(found)%path_seen = .true.
             deps(found)%path = trim(str_val)
         case ('version')
             deps(found)%version = trim(str_val)
@@ -673,14 +725,19 @@ contains
                 call extract_string(ivals(i), str_val)
                 select case (trim(ikeys(i)))
                 case ('git')
+                    dep%git_seen = .true.
                     dep%git = trim(str_val)
                 case ('branch')
+                    dep%branch_seen = .true.
                     dep%branch = trim(str_val)
                 case ('tag')
+                    dep%tag_seen = .true.
                     dep%tag = trim(str_val)
                 case ('rev')
+                    dep%rev_seen = .true.
                     dep%rev = trim(str_val)
                 case ('path')
+                    dep%path_seen = .true.
                     dep%path = trim(str_val)
                 end select
             end do

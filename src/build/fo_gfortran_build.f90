@@ -194,7 +194,8 @@ contains
             src_objs(MAX_SRC_OBJS), is_prog_arr(MAX_SRC_OBJS))
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) then
-            write (error_unit, '(a)') 'fo: no fpm.toml found in '//trim(project_dir)
+            write (error_unit, '(a)') 'fo: cannot read or validate fpm.toml in '// &
+                trim(project_dir)
             exitcode = 1
             return
         end if
