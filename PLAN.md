@@ -9,6 +9,24 @@ preserving supported behavior and independently demonstrated correctness.
 ## Current goal
 
 Keep one useful resident Fo Gremlin lane running and develop through it.
+Fo `190d3e8` restores a single expected `.smod` output from the shared action
+cache in fresh execution views and bypasses sources with multiple outputs. Its
+independent fixture counted zero source compiler calls in the second view,
+checked restored interfaces and executable behavior, and covered include
+invalidation and the multi-output bypass. Its pinned candidate driver SHA256
+`09d0e252eca6875bb3c3ffb435be1fbc04f7eeb0674421cf57198b4d5742b885`
+passed the focused Gremlin gate 1/1. FFC consumer commit `8d82881` then passed
+the conformance smoke and full FortFront corpus cases 2/2 in generation
+`2b905e37f9470e67979828e754fad6019a54ac54bb3db3a508b70710c8b47645`.
+Fo `58586b4` keeps an explicit `--target ... --random 0` gate focused after a
+source edit. Its public edit/rebuild fixture failed on the pre-fix driver and
+passed on candidate SHA256
+`5d6ba22ff566db1a4a24c643aafcd5045f7153a9d951d9ab50707469643a53d7`.
+The same candidate passed a resident 1/1 gate with zero failures in session
+`3131773-1791372424-658412454`, generation
+`022ff62a21dacbe16a0ba25a6f7d9921d68add0fd7498edabca0b722f3b38853`.
+Continue bounded FFC discovery; full Fo and FFC inventories remain open.
+
 The 2026-10-07 housekeeping candidate scopes child temporary files to private
 execution views, reaps abandoned scratch on owner replacement, removes probe
 logs, uses `/var/tmp` by default, and removes owned read-only scratch trees.
