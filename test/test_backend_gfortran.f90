@@ -71,6 +71,7 @@ program test_backend_gfortran
         call test_gfortran_warns_about_array_temporaries()
         call test_gfortran_named_tests_fit_default_stack()
         call test_gfortran_passes_manifest_test_arguments()
+        call test_backend_tmpdir()
         call report('backend_gfortran')
     else
         select case (trim(selector))
@@ -86,6 +87,11 @@ program test_backend_gfortran
         case ('named-stack')
             call test_gfortran_named_tests_fit_default_stack()
             call report('backend_gfortran/named-stack')
+        case ('tmpdir')
+            call test_backend_tmpdir()
+            call report('backend_gfortran/tmpdir')
+        case ('tmpdir-child')
+            call emit_backend_tmp_path()
         case default
             write (error_unit, '(a)') 'unknown backend_gfortran subcase: '// &
                 trim(selector)
@@ -104,8 +110,7 @@ contains
         character(len=32) :: old_jobs
         integer :: i, u, exitcode, n_first, n_restore, env_status
 
-        write (project_dir, '(a,i0)') &
-            '/var/tmp/fo_parallel_warm_restore-', process_getpid()
+        call make_tmp_path('fo_parallel_warm_restore', project_dir)
         log_file = trim(project_dir)//'.log'
         call remove_tree(project_dir)
         call make_dir(trim(project_dir)//'/src')

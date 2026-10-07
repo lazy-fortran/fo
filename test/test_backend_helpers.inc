@@ -79,14 +79,19 @@
                 integer(c_int) :: ierr
             end function unsetenv
         end interface
-        character(len=512) :: cache_dir
-        integer :: status
+        character(len=512) :: cache_dir, tmpdir
+        integer :: status, tmp_status
         integer(c_int) :: ierr
 
         cache_dir = ''
         call get_environment_variable('FO_CACHE_DIR', cache_dir, status=status)
+        tmpdir = ''
+        call get_environment_variable('TMPDIR', tmpdir, status=tmp_status)
+        if (tmp_status == -1) error stop 'TMPDIR exceeds backend fixture buffer'
+        if (tmp_status /= 0 .or. len_trim(tmpdir) == 0) tmpdir = '/var/tmp'
         if (status == 0) then
-            if (index(trim(cache_dir), '/tmp/fo_backend_cache-') == 1) then
+            if (index(trim(cache_dir), &
+                trim(tmpdir)//'/fo_backend_cache-') == 1) then
                 call remove_tree(cache_dir)
                 ierr = unsetenv('FO_CACHE_DIR'//c_null_char)
             end if
@@ -2457,16 +2462,89 @@
         character(len=*), intent(in) :: prefix
         character(len=*), intent(out) :: path
 
-        integer :: count
+        integer :: count, status
         integer, save :: serial = 0
+        character(len=512) :: tmpdir
 
         serial = serial + 1
         call system_clock(count)
-        ! Include the pid so the parallel test_backend* processes never collide
-        ! on a scratch path (that was a cross-test race under parallel execution).
-        write (path, '(a,a,a,i0,a,i0,a,i0)') '/tmp/', trim(prefix), '-', &
-            process_getpid(), '-', count, '-', serial
+        tmpdir = ''
+        call get_environment_variable('TMPDIR', tmpdir, status=status)
+        if (status == -1) error stop 'TMPDIR exceeds backend fixture buffer'
+        if (status /= 0 .or. len_trim(tmpdir) == 0) tmpdir = '/var/tmp'
+        ! Include the pid so parallel test_backend* processes never collide.
+        write (path, '(a,a,a,a,i0,a,i0,a,i0)') trim(tmpdir), '/', &
+            trim(prefix), '-', process_getpid(), '-', count, '-', serial
     end subroutine make_tmp_path
+
+    subroutine test_backend_tmpdir()
+        character(len=512) :: tmpdir, base_tmpdir, old_tmpdir, executable
+        character(len=512) :: path, other_path, fallback_path
+        character(len=512) :: first_file, second_file, first_path, second_path
+        character(len=1024) :: command
+        integer :: exitcode, status, ios
+        logical :: exists
+
+        old_tmpdir = ''
+        call get_environment_variable('TMPDIR', old_tmpdir, status=status)
+        if (status == -1) error stop 'TMPDIR exceeds backend fixture buffer'
+        base_tmpdir = old_tmpdir
+        if (status /= 0 .or. len_trim(base_tmpdir) == 0) &
+            base_tmpdir = '/var/tmp'
+        write (tmpdir, '(a,a,i0)') trim(base_tmpdir), &
+            '/fo_backend_tmpdir-', process_getpid()
+        call remove_tree(trim(tmpdir))
+        call make_dir(trim(tmpdir))
+        call set_env('TMPDIR', '')
+        call make_tmp_path('fo_tmpdir_fallback', fallback_path)
+        call assert(index(trim(fallback_path), '/var/tmp/') == 1, &
+            'unset TMPDIR falls back to /var/tmp')
+        call set_env('TMPDIR', trim(tmpdir))
+        call make_tmp_path('fo_tmpdir_fixture', path)
+        call make_tmp_path('fo_tmpdir_fixture', other_path)
+        call assert(index(trim(path), trim(tmpdir)//'/') == 1, &
+            'backend scratch path uses the private TMPDIR')
+        call assert(trim(path) /= trim(other_path), &
+            'two backend scratch paths in one process are distinct')
+        call make_dir(trim(path))
+        inquire (file=trim(path), exist=exists)
+        call assert(exists, 'backend scratch directory is created in TMPDIR')
+        call remove_tree(trim(path))
+        inquire (file=trim(path), exist=exists)
+        call assert(.not. exists, 'backend scratch directory is removed normally')
+
+        call get_command_argument(0, executable)
+        first_file = trim(tmpdir)//'/first-path'
+        second_file = trim(tmpdir)//'/second-path'
+        command = '"'//trim(executable)//'" tmpdir-child > "'// &
+            trim(first_file)//'" & "'//trim(executable)// &
+            '" tmpdir-child > "'//trim(second_file)//'" & wait'
+        call execute_command_line(trim(command), exitstat=exitcode)
+        call assert(exitcode == 0, 'parallel backend fixture processes complete')
+        call read_first_line(first_file, first_path, ios)
+        call assert(ios == 0, 'first parallel process reports its scratch path')
+        call read_first_line(second_file, second_path, ios)
+        call assert(ios == 0, 'second parallel process reports its scratch path')
+        call assert(index(trim(first_path), trim(tmpdir)//'/') == 1 .and. &
+            index(trim(second_path), trim(tmpdir)//'/') == 1 .and. &
+            trim(first_path) /= trim(second_path), &
+            'parallel backend processes get distinct paths under private TMPDIR')
+        command = 'test -z "$(find "'//trim(tmpdir)// &
+            '" -name "fo_backend_cache-*" -print -quit)"'
+        call execute_command_line(trim(command), exitstat=exitcode)
+        call assert(exitcode == 0, &
+            'parallel backend fixture processes leave no cache scratch')
+        call set_env('TMPDIR', trim(old_tmpdir))
+        call remove_tree(trim(tmpdir))
+    end subroutine test_backend_tmpdir
+
+    subroutine emit_backend_tmp_path()
+        character(len=512) :: path
+
+        call make_tmp_path('fo_tmpdir_child', path)
+        write (output_unit, '(a)') trim(path)
+        call cleanup_backend_cache()
+    end subroutine emit_backend_tmp_path
 
     subroutine make_dir(path)
         character(len=*), intent(in) :: path
