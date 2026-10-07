@@ -8,8 +8,8 @@ preserving supported behavior and independently demonstrated correctness.
 
 ## Current goal
 
-Fo `7f82d82` is pushed to `main`; the installed release CLI remains SHA256
-`2ce17e70200e627f84456341b942d604c8f88fe9695606a99bf1e964c37dd3ff`.
+Fo `d4ca369` is pushed to `main`; the installed release CLI SHA256 is
+`240bc5954b75de9ec074c859d22bec3b9139881fd38b8472a94a4adbb8a76b2c`.
 The exact combined source candidate SHA256
 `ba6114b6ef430323a621d2b4bc9cf12692cf93e6054065c74307eeb59e0fc502`
 passed three focused direct checks and a resident 3/3 gate with
@@ -24,10 +24,14 @@ the worker's fresh resident gate passed 1/1 with `local_gate_green=true`.
 test descendants after leader completion and corrects the wall/CPU diagnostic;
 #134 is closed. `225f430` reads CTest result status after dot padding so
 status words in test names remain intact; #119 stays open for its other
-acceptance cases. The full backend case `test_gfortran_named_tests_fit_default_stack`
-still segfaults under an 8192 KiB stack on the unchanged base and is tracked
-as #206; its focused repair is in progress. Existing MCP server processes need
-client reconnect to load the installed image.
+acceptance cases. The #206 default-stack named-test crash came from gfortran's
+roughly 838 KiB default-initialization temporary at inline `fpm_config_t`
+allocations. `d4ca369` isolates allocation across native build/dependency
+paths, including the three #202 sites. The worker's direct and resident gates
+passed 2/2 under 8192 KiB with `local_gate_green=true`; the exact combined
+main candidate passed #206 and #202 public checks 3/3 under that limit. #206
+is closed. Existing MCP server processes need client reconnect to load the
+installed image.
 
 Fo `1d47f93` is pushed to `main`: explicit-prefix release app installation is
 native through shared CLI/MCP behavior. Its exact committed candidate passed
