@@ -347,11 +347,8 @@ contains
         character(len=1024) :: line
         integer(c_int) :: saved, captured, rc
         integer :: unit, ios
-        integer, save :: serial = 0
 
-        serial = serial + 1
-        write (scratch, '(a,i0,a,i0,a)') '/tmp/fo_test_dep_diag-', &
-            process_getpid(), '-', serial, '.txt'
+        call make_tmp('fo_test_dep_diag', scratch)
         diagnostic = ''
         saved = c_dup(2_c_int)
         captured = c_creat(trim(scratch)//c_null_char, 384_c_int)
@@ -398,15 +395,36 @@ contains
     end subroutine mkproj
 
     subroutine make_tmp(prefix, path)
+        !! Task-private fixture path under the scratch root from tmp_root.
         character(len=*), intent(in) :: prefix
         character(len=*), intent(out) :: path
+        character(len=512) :: root
         integer :: count
         integer, save :: serial = 0
 
         serial = serial + 1
         call system_clock(count)
-        write (path, '(a,a,a,i0,a,i0,a,i0)') '/tmp/', trim(prefix), '-', &
-            process_getpid(), '-', count, '-', serial
+        call tmp_root(root)
+        write (path, '(a,a,i0,a,i0,a,i0)') trim(root)//'/'//trim(prefix), &
+            '-', process_getpid(), '-', count, '-', serial
     end subroutine make_tmp
+
+    subroutine tmp_root(root)
+        !! Scratch root chosen as fo_test_harness make_scratch does: $TMPDIR,
+        !! or /var/tmp when unset or empty, with trailing slashes removed.
+        character(len=*), intent(out) :: root
+
+        integer :: n, ios
+
+        root = ''
+        call get_environment_variable('TMPDIR', root, status=ios)
+        if (ios /= 0 .or. len_trim(root) == 0) root = '/var/tmp'
+        n = len_trim(root)
+        do while (n > 0)
+            if (root(n:n) /= '/') exit
+            n = n - 1
+        end do
+        root(n + 1:) = ''
+    end subroutine tmp_root
 
 end program test_dep_resolve
