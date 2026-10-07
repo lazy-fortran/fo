@@ -165,6 +165,13 @@ contains
                 return
             end if
         end do
+        call scan_configured_dir(trim(project_root), 'project', &
+            'build/dependencies/.fo-git-identities', 'dependency-git-identity', &
+            .false., project_index, inventory, ierr, message)
+        if (ierr /= 0) then
+            call record_failure(inventory, message)
+            return
+        end if
         do i = 1, config%n_dev_deps
             if (dep_kind(config%dev_deps(i)) /= DEP_PATH) cycle
             call discover_path_dependency(trim(project_root), &

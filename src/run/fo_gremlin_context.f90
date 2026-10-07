@@ -3,6 +3,7 @@ module fo_gremlin_context
     use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_fpm_config, only: DEP_PATH, fpm_config_t, fpm_config_parse, dep_kind
+    use fo_dep_update, only: dep_acquire_missing_git
     use fo_dep_resolve, only: normalize_path, resolve_dev_dep_srcs, &
         resolved_src_t, MAX_RESOLVED
     use fo_gremlin_generation, only: generation_context_t, generation_input_t, &
@@ -45,6 +46,13 @@ contains
         integer :: ierr
 
         registration_error = 0
+        call dep_acquire_missing_git(project_dir, ierr)
+        if (ierr /= 0) then
+            message = 'cannot resolve declared Git dependencies before capture'
+            registration_error = ierr
+            ok = .false.
+            return
+        end if
         call capture_context(project_dir, context, ierr, message)
         if (ierr /= 0) then
             ok = .false.

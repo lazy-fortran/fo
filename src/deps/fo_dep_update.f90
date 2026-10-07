@@ -17,8 +17,8 @@ module fo_dep_update
     use fo_fpm_config, only: fpm_config_t, fpm_dep_t, fpm_config_parse, &
         dep_kind, DEP_PATH, DEP_GIT
     use fo_fs, only: fs_remove_tree, fs_remove_file, fs_stat, fs_make_dir, &
-        fs_rename, &
-        fs_collect_git_checkouts
+        fs_rename, fs_write_text, &
+        fs_collect_git_checkouts, fs_mkdir_excl, fs_sleep_ms
     use fo_dep_resolve, only: normalize_path, join_path
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_util, only: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, &
@@ -67,6 +67,7 @@ contains
         integer, intent(out) :: ierr
 
         type(fpm_config_t), allocatable :: config
+        character(len=512) :: package_key
         integer :: i, parse_ierr
 
         ierr = 0
@@ -88,23 +89,24 @@ contains
             ierr = parse_ierr
             return
         end if
+        package_key = trim(config%name)//'@'//trim(config%version)
         do i = 1, config%n_deps
-            call acquire_edge(config%deps(i), package_dir, root, visited, &
+            call acquire_edge(config%deps(i), package_dir, root, package_key, visited, &
                 n_visited, depth, ierr)
             if (ierr /= 0) return
         end do
         if (.not. include_dev) return
         do i = 1, config%n_dev_deps
-            call acquire_edge(config%dev_deps(i), package_dir, root, visited, &
-                n_visited, depth, ierr)
+            call acquire_edge(config%dev_deps(i), package_dir, root, package_key, &
+                visited, n_visited, depth, ierr)
             if (ierr /= 0) return
         end do
     end subroutine acquire_package
 
-    recursive subroutine acquire_edge(dep, package_dir, root, visited, &
-            n_visited, depth, ierr)
+    recursive subroutine acquire_edge(dep, package_dir, root, package_key, &
+            visited, n_visited, depth, ierr)
         type(fpm_dep_t), intent(in) :: dep
-        character(len=*), intent(in) :: package_dir, root
+        character(len=*), intent(in) :: package_dir, root, package_key
         character(len=*), intent(inout) :: visited(:)
         integer, intent(inout) :: n_visited
         integer, intent(in) :: depth
@@ -126,41 +128,124 @@ contains
                 return
             end if
             dep_dir = trim(root)//'/build/dependencies/'//trim(dep%name)
-            call acquire_git_checkout(dep, package_dir, dep_dir, ierr)
+            call acquire_git_checkout(dep, package_dir, package_key, dep_dir, ierr)
             if (ierr /= 0) return
             call acquire_package(trim(dep_dir), root, .false., visited, &
                 n_visited, depth + 1, ierr)
         end select
     end subroutine acquire_edge
 
-    subroutine acquire_git_checkout(dep, package_dir, destination, ierr)
+    subroutine acquire_git_checkout(dep, package_dir, package_key, destination, ierr)
         type(fpm_dep_t), intent(in) :: dep
-        character(len=*), intent(in) :: package_dir, destination
+        character(len=*), intent(in) :: package_dir, package_key, destination
         integer, intent(out) :: ierr
 
-        character(len=512) :: stage, log_file, ref
-        character(len=512) :: dependencies_dir
-        character(len=512) :: source, local_source
-        character(len=4096) :: output
-        character(len=:), allocatable :: args
+        character(len=512) :: lock_path, dependencies_dir
         integer(c_long_long) :: mtime, bytes
-        integer :: n_args, exitcode, rename_rc, colon, slash, at_sign
-        logical :: present, have_manifest
+        integer :: lock_state, attempt
+        logical :: current, lock_present
 
-        ierr = 0
-        call fs_stat(trim(destination), mtime, bytes, present)
-        if (present) then
-            inquire (file=trim(destination)//'/fpm.toml', exist=have_manifest)
-            if (have_manifest) return
-            write (error_unit, '(a)') &
-                'fo: incomplete Git dependency source at '//trim(destination)// &
-                '; remove it or run fo update'
-            ierr = 1
+        call git_checkout_current(dep, package_key, destination, current)
+        if (current) then
+            ierr = 0
             return
         end if
         dependencies_dir = trim(destination(:index(trim(destination), '/', &
             back=.true.) - 1))
         call fs_make_dir(trim(dependencies_dir))
+        lock_path = trim(destination)//'.fo-acquire-lock'
+        lock_state = fs_mkdir_excl(trim(lock_path))
+        if (lock_state == 1) then
+            do attempt = 1, 3050
+                call git_checkout_current(dep, package_key, destination, current)
+                if (current) then
+                    ierr = 0
+                    return
+                end if
+                call fs_stat(trim(lock_path), mtime, bytes, lock_present)
+                if (.not. lock_present) then
+                    lock_state = fs_mkdir_excl(trim(lock_path))
+                    if (lock_state == 0) exit
+                end if
+                call fs_sleep_ms(100)
+            end do
+        end if
+        if (lock_state /= 0) then
+            write (error_unit, '(a)') 'fo: timed out waiting for Git dependency '// &
+                'acquisition lock at '//trim(lock_path)
+            ierr = 1
+            return
+        end if
+        call acquire_git_checkout_locked(dep, package_dir, package_key, destination, &
+            ierr)
+        call fs_remove_tree(trim(lock_path))
+    end subroutine acquire_git_checkout
+
+    subroutine git_checkout_current(dep, package_key, destination, current)
+        type(fpm_dep_t), intent(in) :: dep
+        character(len=*), intent(in) :: package_key, destination
+        logical, intent(out) :: current
+
+        character(len=512) :: identity_path
+        character(len=4096) :: selector, identity
+        integer(c_long_long) :: mtime, bytes
+        logical :: present, have_manifest, have_identity
+
+        current = .false.
+        call fs_stat(trim(destination), mtime, bytes, present)
+        if (.not. present) return
+        inquire (file=trim(destination)//'/fpm.toml', exist=have_manifest)
+        if (.not. have_manifest) return
+        identity_path = trim(destination(:index(trim(destination), '/', &
+            back=.true.) - 1))// '/.fo-git-identities/'//trim(dep%name)
+        inquire (file=trim(identity_path), exist=have_identity)
+        if (.not. have_identity) return
+        call read_text_file(trim(identity_path), identity)
+        call git_selector(dep, package_key, selector)
+        current = git_identity_matches(selector, identity)
+    end subroutine git_checkout_current
+
+    subroutine acquire_git_checkout_locked(dep, package_dir, package_key, &
+            destination, ierr)
+        type(fpm_dep_t), intent(in) :: dep
+        character(len=*), intent(in) :: package_dir, package_key, destination
+        integer, intent(out) :: ierr
+
+        character(len=512) :: stage, log_file, ref, backup
+        character(len=512) :: dependencies_dir, identity_dir, identity_path
+        character(len=512) :: source, local_source
+        character(len=4096) :: output
+        character(len=4096) :: selector, previous
+        character(len=:), allocatable :: args
+        integer(c_long_long) :: mtime, bytes
+        integer :: n_args, exitcode, rename_rc, colon, slash, at_sign, nl
+        logical :: present, have_manifest, have_marker
+
+        ierr = 0
+        dependencies_dir = trim(destination(:index(trim(destination), '/', &
+            back=.true.) - 1))
+        identity_dir = trim(dependencies_dir)//'/.fo-git-identities'
+        identity_path = trim(identity_dir)//'/'//trim(dep%name)
+        call fs_stat(trim(destination), mtime, bytes, present)
+        if (present) then
+            inquire (file=trim(destination)//'/fpm.toml', exist=have_manifest)
+            if (have_manifest) then
+                call git_selector(dep, package_key, selector)
+                inquire (file=trim(identity_path), exist=have_marker)
+                if (have_marker) then
+                    call read_text_file(trim(identity_path), previous)
+                    if (git_identity_matches(selector, previous)) return
+                end if
+            else
+                write (error_unit, '(a)') &
+                    'fo: incomplete Git dependency source at '//trim(destination)// &
+                    '; remove it or run fo update'
+                ierr = 1
+                return
+            end if
+        end if
+        call fs_make_dir(trim(dependencies_dir))
+        call fs_make_dir(trim(identity_dir))
         call make_sibling_tmpfile(trim(destination), stage)
         call make_tmpfile('fo-git-log', log_file)
         n_args = 0
@@ -229,15 +314,115 @@ contains
             ierr = exitcode
             return
         end if
+        args = ''
+        n_args = 0
+        call argv_push(args, n_args, 'git')
+        call argv_push(args, n_args, '-C')
+        call argv_push(args, n_args, trim(stage))
+        call argv_push(args, n_args, 'rev-parse')
+        call argv_push(args, n_args, '--verify')
+        call argv_push(args, n_args, 'HEAD^{commit}')
+        call process_run_argv_logged('', args, n_args, trim(log_file), .false., &
+            30, exitcode)
+        if (exitcode /= 0) then
+            call read_text_file(trim(log_file), output)
+            write (error_unit, '(a)') 'fo: cannot resolve Git commit for '// &
+                trim(dep%name)//': '//trim(output)
+            call fs_remove_tree(trim(stage))
+            call delete_tmpfile(trim(log_file))
+            ierr = exitcode
+            return
+        end if
+        call read_text_file(trim(log_file), output)
+        nl = index(trim(output), new_line('a'))
+        if (nl > 0) output = output(:nl - 1)
+        call git_selector(dep, package_key, selector)
+        if (present) then
+            call make_sibling_tmpfile(trim(destination), backup)
+            rename_rc = fs_rename(trim(destination), trim(backup))
+            if (rename_rc /= 0) then
+                call fs_remove_tree(trim(stage))
+                call delete_tmpfile(trim(log_file))
+                write (error_unit, '(a)') 'fo: cannot stage replacement Git '// &
+                    'dependency '//trim(dep%name)
+                ierr = 1
+                return
+            end if
+        end if
         rename_rc = fs_rename(trim(stage), trim(destination))
         call delete_tmpfile(trim(log_file))
         if (rename_rc /= 0) then
             call fs_remove_tree(trim(stage))
+            if (present) then
+                rename_rc = fs_rename(trim(backup), trim(destination))
+                if (rename_rc /= 0) then
+                    write (error_unit, '(a)') 'fo: cannot restore prior Git '// &
+                        'dependency; preserved backup at '//trim(backup)
+                end if
+            end if
             write (error_unit, '(a)') 'fo: cannot publish Git dependency '// &
                 trim(dep%name)//' at '//trim(destination)
             ierr = 1
+            return
         end if
-    end subroutine acquire_git_checkout
+        call fs_write_text(trim(identity_path), &
+            trim(selector)//new_line('a')//trim(output))
+        inquire (file=trim(identity_path), exist=have_marker)
+        if (have_marker) call read_text_file(trim(identity_path), previous)
+        if (have_marker) have_marker = git_identity_matches(selector, previous)
+        if (.not. have_marker) then
+            call fs_remove_tree(trim(destination))
+            if (present) then
+                rename_rc = fs_rename(trim(backup), trim(destination))
+                if (rename_rc /= 0) then
+                    write (error_unit, '(a)') 'fo: cannot restore prior Git '// &
+                        'dependency; preserved backup at '//trim(backup)
+                end if
+            end if
+            write (error_unit, '(a)') 'fo: cannot record Git identity for '// &
+                trim(dep%name)
+            ierr = 1
+            return
+        end if
+        if (present) call fs_remove_tree(trim(backup))
+    end subroutine acquire_git_checkout_locked
+
+    subroutine git_selector(dep, package_key, selector)
+        type(fpm_dep_t), intent(in) :: dep
+        character(len=*), intent(in) :: package_key
+        character(len=*), intent(out) :: selector
+
+        selector = 'declared-by='//trim(package_key)//new_line('a')// &
+            'git='//trim(dep%git)//new_line('a')// &
+            'branch='//trim(dep%branch)//new_line('a')// &
+            'tag='//trim(dep%tag)//new_line('a')//'rev='
+        if (allocated(dep%rev)) selector = trim(selector)//trim(dep%rev)
+    end subroutine git_selector
+
+    logical function git_identity_matches(selector, identity)
+        character(len=*), intent(in) :: selector, identity
+        character(len=64) :: commit
+        integer :: start, n, i, code
+
+        git_identity_matches = .false.
+        if (index(trim(identity), trim(selector)//new_line('a')) /= 1) return
+        start = len_trim(selector) + 2
+        if (start > len_trim(identity)) return
+        commit = identity(start:)
+        n = len_trim(commit)
+        if (n > 0) then
+            if (commit(n:n) == new_line('a')) n = n - 1
+        end if
+        if (n /= 40 .and. n /= 64) return
+        do i = 1, n
+            code = iachar(commit(i:i))
+            if (code >= iachar('0') .and. code <= iachar('9')) cycle
+            if (code >= iachar('a') .and. code <= iachar('f')) cycle
+            if (code >= iachar('A') .and. code <= iachar('F')) cycle
+            return
+        end do
+        git_identity_matches = .true.
+    end function git_identity_matches
 
     logical function safe_dependency_name(name)
         character(len=*), intent(in) :: name

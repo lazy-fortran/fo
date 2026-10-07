@@ -1,17 +1,19 @@
 program test_native_git_dependency_cli
     use fo_test_harness, only: process_result_t, string_list_t, list_add
     use fo_test_harness, only: make_scratch, join_path, make_directory
-    use fo_test_harness, only: make_symlink
+    use fo_test_harness, only: make_symlink, move_path
     use fo_test_harness, only: write_text, remove_tree, file_exists
     use fo_test_harness, only: assert_process_ok, assert_equal_string, assert_true
+    use fo_test_harness, only: assert_contains
     use fo_test_harness, only: finish_assertions
     use fo_test_cli, only: resolve_driver, run_fo, run_external
     implicit none
 
     character(:), allocatable :: driver, scratch, tools, dependency, consumer
+    character(:), allocatable :: offline_dependency
     character(:), allocatable :: path_dependency, nested_consumer
     character(:), allocatable :: git, compiler, assembler, linker, archiver
-    character(:), allocatable :: commit, checkout
+    character(:), allocatable :: commit, moved_commit, latest_commit, checkout
     type(process_result_t) :: result
     type(string_list_t) :: args, environment
 
@@ -42,7 +44,7 @@ program test_native_git_dependency_cli
         'value = 41' // new_line('a') // 'end function value' // new_line('a') // &
         'end module git_provider' // new_line('a'))
 
-    call git_command([character(len=32) :: 'init', '-q'], dependency)
+    call git_command([character(len=32) :: 'init', '-q', '-b', 'main'], dependency)
     call git_command([character(len=32) :: 'config', 'user.name', 'Fo test'], &
         dependency)
     call git_command([character(len=32) :: 'config', 'user.email', &
@@ -129,6 +131,8 @@ program test_native_git_dependency_cli
     call remove_tree(join_path(checkout, '.git'))
     call assert_true(.not. file_exists(join_path(checkout, '.git')), &
         'materialized Git dependency source has no Git metadata')
+    offline_dependency = dependency//'.offline'
+    call move_path(dependency, offline_dependency)
     args = string_list_t()
     call list_add(args, 'build')
     call run_fo(driver, args, consumer, join_path(scratch, 'cache'), result, &
@@ -144,6 +148,81 @@ program test_native_git_dependency_cli
         'Fo runs app linked to materialized dependency without Git metadata')
     call assert_equal_string(result%stdout, '41' // new_line('a'), &
         'materialized dependency source preserves the pinned runtime behavior')
+    call move_path(offline_dependency, dependency)
+
+    call write_text(join_path(consumer, 'fpm.toml'), &
+        'name = "native_git_probe"' // new_line('a') // '[dependencies]' // &
+        new_line('a') // 'git_provider = { git = "file://' // dependency // &
+        '", branch = "main" }' // new_line('a'))
+    call run_build()
+    moved_commit = current_commit()
+    call assert_checkout_commit(moved_commit)
+    call run_probe()
+    call assert_equal_string(result%stdout, '99' // new_line('a'), &
+        'moving branch initially builds its independently identified source')
+    moved_commit = current_commit()
+
+    call write_provider_value(137, 'advance remote while branch is cached')
+    latest_commit = current_commit()
+    call run_build()
+    call assert_checkout_commit(moved_commit)
+    call run_probe()
+    call assert_equal_string(result%stdout, '99' // new_line('a'), &
+        'ordinary build reuses the resolved branch commit without fetching')
+
+    args = string_list_t()
+    call list_add(args, 'update')
+    call run_fo(driver, args, consumer, join_path(scratch, 'cache'), result, &
+        environment)
+    call assert_process_ok(result, 'fo update refreshes the cached Git branch')
+    call run_build()
+    call assert_checkout_commit(latest_commit)
+    call run_probe()
+    call assert_equal_string(result%stdout, '137' // new_line('a'), &
+        'fo update captures the new branch commit and consumer behavior')
+
+    call write_text(join_path(consumer, 'fpm.toml'), &
+        'name = "native_git_probe"' // new_line('a') // '[dependencies]' // &
+        new_line('a') // 'git_provider = { git = "file://' // dependency // &
+        '", rev = "' // commit // '" }' // new_line('a'))
+    call run_build()
+    call assert_checkout_commit(commit)
+    call run_probe()
+    call assert_equal_string(result%stdout, '41' // new_line('a'), &
+        'editing branch pin to rev reacquires and invalidates the old checkout')
+
+    call write_text(join_path(consumer, 'fpm.toml'), &
+        'name = "native_git_probe"' // new_line('a') // '[dependencies]' // &
+        new_line('a') // 'git_provider = { git = "file://' // dependency // &
+        '", tag = "provider-v1" }' // new_line('a'))
+    call run_build()
+    call assert_checkout_commit(commit)
+    call run_probe()
+    call assert_equal_string(result%stdout, '41' // new_line('a'), &
+        'editing rev pin to tag resolves the tag instead of reusing stale source')
+
+    call write_text(join_path(consumer, 'fpm.toml'), &
+        'name = "native_git_probe"' // new_line('a') // '[dependencies]' // &
+        new_line('a') // 'git_provider = { git = "file://' // dependency // &
+        '", rev = "missing-revision" }' // new_line('a'))
+    args = string_list_t()
+    call list_add(args, 'build')
+    call run_fo(driver, args, consumer, join_path(scratch, 'cache'), result, &
+        environment)
+    call assert_true(result%exit_code /= 0, &
+        'missing pinned revision fails instead of reusing prior source')
+    call assert_contains(result%stderr, 'cannot select Git ref', &
+        'missing pinned revision reports an actionable acquisition error')
+
+    call write_text(join_path(consumer, 'fpm.toml'), &
+        'name = "native_git_probe"' // new_line('a') // '[dependencies]' // &
+        new_line('a') // 'git_provider = { git = "file://' // dependency // &
+        '", tag = "provider-v1" }' // new_line('a'))
+    call run_build()
+    call assert_checkout_commit(commit)
+    call run_probe()
+    call assert_equal_string(result%stdout, '41' // new_line('a'), &
+        'valid pin recovers after missing revision failure')
 
     path_dependency = join_path(scratch, 'path_dependency')
     nested_consumer = join_path(scratch, 'nested_consumer')
@@ -205,6 +284,55 @@ contains
         call assert_equal_string(without_line_ending(result%stdout), expected, &
             'acquired checkout is the exact declared revision')
     end subroutine assert_checkout_commit
+
+    subroutine run_build()
+        args = string_list_t()
+        call list_add(args, 'build')
+        call run_fo(driver, args, consumer, join_path(scratch, 'cache'), result, &
+            environment)
+        call assert_process_ok(result, 'build native Git dependency consumer')
+    end subroutine run_build
+
+    subroutine run_probe()
+        args = string_list_t()
+        call list_add(args, 'exec')
+        call list_add(args, 'probe')
+        call run_fo(driver, args, consumer, join_path(scratch, 'cache'), result, &
+            environment)
+        call assert_process_ok(result, 'run native Git dependency consumer')
+    end subroutine run_probe
+
+    function current_commit() result(value)
+        character(:), allocatable :: value
+
+        args = string_list_t()
+        call list_add(args, '-C')
+        call list_add(args, dependency)
+        call list_add(args, 'rev-parse')
+        call list_add(args, 'HEAD')
+        call run_external(git, args, scratch, result, environment)
+        call assert_process_ok(result, 'read independent Git commit identity')
+        value = without_line_ending(result%stdout)
+    end function current_commit
+
+    subroutine write_provider_value(number, subject)
+        integer, intent(in) :: number
+        character(len=*), intent(in) :: subject
+        character(len=16) :: digits
+
+        write (digits, '(i0)') number
+        call write_text(join_path(dependency, 'src/provider.f90'), &
+            'module git_provider' // new_line('a') // 'implicit none' // &
+            new_line('a') // 'contains' // new_line('a') // &
+            'integer function value()' // new_line('a') // &
+            'value = '//trim(digits) // new_line('a') // &
+            'end function value' // new_line('a') // &
+            'end module git_provider' // new_line('a'))
+        call git_command([character(len=48) :: 'add', 'src/provider.f90'], &
+            dependency)
+        call git_command([character(len=48) :: 'commit', '-q', '-m', subject], &
+            dependency)
+    end subroutine write_provider_value
 
     function without_line_ending(text) result(value)
         character(len=*), intent(in) :: text
