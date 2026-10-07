@@ -76,6 +76,9 @@ Use the exact controller-supplied fo candidate for the edit/build/test loop.
 Verify its immutable absolute path and SHA256 before validation; no PATH,
 installed-tool or newest-file fallback. Keep builds/caches warm and run the
 named affected correctness oracles, not a full pipeline after every edit.
+Copy each verified candidate to a read-only digest-named path outside mutable
+build outputs before any build, test, or Gremlin command uses it. A running
+`build/fo/app/fo` can block Fo from replacing that file with `ETXTBSY`.
 
 ```bash
 fo build                    # build applications/examples
