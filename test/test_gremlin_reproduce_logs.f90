@@ -18,7 +18,8 @@ program test_gremlin_reproduce_logs
     character(:), allocatable :: session, generation, first_log, second_log
     character(:), allocatable :: first_text, second_text, lane
     character(:), allocatable :: startup_error
-    character(:), allocatable :: first_view, second_view, active_view, pinned_driver
+    character(:), allocatable :: first_view, second_view, active_view, building_view
+    character(:), allocatable :: pinned_driver
     type(string_list_t) :: arguments
     type(string_list_t) :: status_arguments
     type(process_result_t) :: process
@@ -122,6 +123,9 @@ program test_gremlin_reproduce_logs
     active_view = trim(session_state)//'/views/execution-active'
     call make_directory(active_view//'/.fo-tmp')
     call write_text(active_view//'/fixture.txt', 'active view sentinel')
+    building_view = trim(session_state)//'/views/.building-execution-active'
+    call make_directory(building_view)
+    call write_text(building_view//'/fixture.txt', 'concurrent creation sentinel')
 
     call stop_lane(session)
     call list_add(status_arguments, 'gremlin')
@@ -145,6 +149,9 @@ program test_gremlin_reproduce_logs
     call assert_true(file_exists(active_view//'/fixture.txt'), &
         'stop preserves a view with active private scratch')
     call remove_path(active_view)
+    call assert_true(file_exists(building_view//'/fixture.txt'), &
+        'stop leaves a view that is still being materialized untouched')
+    call remove_path(building_view)
     call assert_true(file_exists(first_log) .and. file_exists(second_log), &
         'stop preserves reproduction logs')
     call assert_true(file_exists(trim(session_state)//'/campaign-journal.jsonl'), &
