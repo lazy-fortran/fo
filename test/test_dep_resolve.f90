@@ -1,6 +1,7 @@
 program test_dep_resolve
     !! Path-dependency closure resolution: transitive walk, dedup of a diamond,
     !! source-dir from the dep's own manifest, and path normalization.
+    use, intrinsic :: iso_c_binding, only: c_int, c_char, c_null_char
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, MAX_RESOLVED, &
         normalize_path, join_path, merge_dep_link_libs
@@ -8,6 +9,30 @@ program test_dep_resolve
     use fo_process, only: process_getpid
     implicit none
     integer :: n_pass, n_fail
+
+    interface
+        integer(c_int) function c_creat(path, mode) bind(C, name='creat')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: mode
+        end function c_creat
+
+        integer(c_int) function c_dup(descriptor) bind(C, name='dup')
+            import :: c_int
+            integer(c_int), value :: descriptor
+        end function c_dup
+
+        integer(c_int) function c_dup2(old_descriptor, new_descriptor) &
+                bind(C, name='dup2')
+            import :: c_int
+            integer(c_int), value :: old_descriptor, new_descriptor
+        end function c_dup2
+
+        integer(c_int) function c_close(descriptor) bind(C, name='close')
+            import :: c_int
+            integer(c_int), value :: descriptor
+        end function c_close
+    end interface
 
     n_pass = 0
     n_fail = 0
@@ -176,6 +201,7 @@ contains
 
     subroutine test_malformed_git_pointer_keeps_direct_path()
         character(len=512) :: base, worktree, expected
+        character(len=1024) :: diagnostic
         type(resolved_src_t) :: out(MAX_RESOLVED)
         integer :: n_out, n_unres, ierr, unit
 
@@ -188,14 +214,16 @@ contains
         write (unit, '(a)') 'not a gitdir pointer'
         close (unit)
 
-        call resolve_dep_srcs(worktree, out, n_out, n_unres, ierr)
-        call assert(ierr == 0, 'malformed git pointer does not fail resolution')
-        call assert(trim(out(1)%dir) == trim(expected), &
-            'malformed git pointer keeps direct missing path behavior')
+        call resolve_with_diagnostic(worktree, out, n_out, n_unres, ierr, &
+            diagnostic)
+        call assert(ierr /= 0, 'malformed git pointer fails resolution')
+        call assert(reports_missing_manifest(diagnostic, expected), &
+            'malformed git pointer names the missing direct path dependency')
     end subroutine test_malformed_git_pointer_keeps_direct_path
 
     subroutine test_missing_gitdir_keeps_direct_path()
         character(len=512) :: base, worktree, expected
+        character(len=1024) :: diagnostic
         type(resolved_src_t) :: out(MAX_RESOLVED)
         integer :: n_out, n_unres, ierr, unit
 
@@ -209,13 +237,15 @@ contains
             '/main/app/.git/worktrees/missing'
         close (unit)
 
-        call resolve_dep_srcs(worktree, out, n_out, n_unres, ierr)
-        call assert(trim(out(1)%dir) == trim(expected), &
-            'nonexistent gitdir target keeps direct missing path behavior')
+        call resolve_with_diagnostic(worktree, out, n_out, n_unres, ierr, &
+            diagnostic)
+        call assert(ierr /= 0 .and. reports_missing_manifest(diagnostic, &
+            expected), 'nonexistent gitdir target fails naming the direct path')
     end subroutine test_missing_gitdir_keeps_direct_path
 
     subroutine test_directory_git_keeps_direct_path()
         character(len=512) :: base, worktree, expected
+        character(len=1024) :: diagnostic
         type(resolved_src_t) :: out(MAX_RESOLVED)
         integer :: n_out, n_unres, ierr
 
@@ -226,9 +256,10 @@ contains
             'lib = { path = "../lib" }')
         call execute_command_line('mkdir -p '//trim(worktree)//'/.git')
 
-        call resolve_dep_srcs(worktree, out, n_out, n_unres, ierr)
-        call assert(trim(out(1)%dir) == trim(expected), &
-            'directory-style git metadata keeps direct missing path behavior')
+        call resolve_with_diagnostic(worktree, out, n_out, n_unres, ierr, &
+            diagnostic)
+        call assert(ierr /= 0 .and. reports_missing_manifest(diagnostic, &
+            expected), 'directory-style git metadata fails naming the direct path')
     end subroutine test_directory_git_keeps_direct_path
 
     subroutine write_git_pointer(worktree, primary)
@@ -301,6 +332,59 @@ contains
         call assert(n_dl == 1, 'dev-dep lib arrives')
         call assert(cfg%n_link_libs == 4, 'no duplicates and nothing extra')
     end subroutine test_dep_link_libs_propagate
+
+    subroutine resolve_with_diagnostic(project_dir, out, n_out, n_unres, &
+            ierr, diagnostic)
+        !! Run resolve_dep_srcs with fd 2 redirected to a scratch file, then
+        !! return the text it wrote. An explicit error is then checked by the
+        !! dependency it names, not only by its return code.
+        character(len=*), intent(in) :: project_dir
+        type(resolved_src_t), intent(out) :: out(MAX_RESOLVED)
+        integer, intent(out) :: n_out, n_unres, ierr
+        character(len=*), intent(out) :: diagnostic
+
+        character(len=512) :: scratch
+        character(len=1024) :: line
+        integer(c_int) :: saved, captured, rc
+        integer :: unit, ios
+        integer, save :: serial = 0
+
+        serial = serial + 1
+        write (scratch, '(a,i0,a,i0,a)') '/tmp/fo_test_dep_diag-', &
+            process_getpid(), '-', serial, '.txt'
+        diagnostic = ''
+        saved = c_dup(2_c_int)
+        captured = c_creat(trim(scratch)//c_null_char, 384_c_int)
+        if (saved < 0_c_int .or. captured < 0_c_int) then
+            diagnostic = 'stderr capture unavailable'
+            call resolve_dep_srcs(project_dir, out, n_out, n_unres, ierr)
+            return
+        end if
+        flush (error_unit)
+        rc = c_dup2(captured, 2_c_int)
+        rc = c_close(captured)
+        call resolve_dep_srcs(project_dir, out, n_out, n_unres, ierr)
+        flush (error_unit)
+        rc = c_dup2(saved, 2_c_int)
+        rc = c_close(saved)
+        open (newunit=unit, file=trim(scratch), status='old', &
+            action='read', iostat=ios)
+        if (ios /= 0) return
+        do
+            read (unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            diagnostic = trim(diagnostic)//trim(line)//new_line('a')
+        end do
+        close (unit, status='delete')
+    end subroutine resolve_with_diagnostic
+
+    logical function reports_missing_manifest(diagnostic, dep_dir)
+        !! True when the diagnostic names dep_dir/fpm.toml as missing.
+        character(len=*), intent(in) :: diagnostic, dep_dir
+
+        reports_missing_manifest = index(diagnostic, &
+            'missing dependency manifest '//trim(dep_dir)//'/fpm.toml') > 0
+    end function reports_missing_manifest
 
     subroutine mkproj(dir, deps_block)
         character(len=*), intent(in) :: dir, deps_block
