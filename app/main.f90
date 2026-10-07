@@ -41,6 +41,7 @@ program fo_main
     use fo_cover, only: fo_cover_run
     use fo_lock, only: lock_write
     use fo_scaffold, only: scaffold_project
+    use fo_install, only: install_native_executables
     use fo_bench, only: bench_result_t, fo_bench_run
     use fo_doc, only: fo_doc_run
     use fo_version_info, only: FO_VERSION
@@ -388,7 +389,7 @@ contains
         write (output_unit, '(a)') '  clean --stale  drop unreferenced artifacts (--keep N rescues newest N)'
         write (output_unit, '(a)') '  update     re-fetch git/registry dependencies on the next build'
         write (output_unit, '(a)') &
-            '  install    install release binary (fpm install --profile release)'
+            '  install    install release app executables into prefix/bin'
         write (output_unit, '(a)') '  lock       write fo.lock for current compiler, flags, and deps'
         write (output_unit, '(a)') '  info       backend, file count, module count'
         write (output_unit, '(a)') '  info --capabilities  compiler and tooling limits'
@@ -1096,24 +1097,6 @@ contains
         end if
         write (error_unit, '(a,a)') 'fo: full log: ', trim(build_log)
     end subroutine report_build_result
-
-    subroutine report_install_result(install_log)
-        character(len=*), intent(in) :: install_log
-        type(diagnostic_t) :: diag
-        character(len=32) :: lnum
-
-        call diagnostic_from_log('install', install_log, 'fo install', diag)
-        write (error_unit, '(a,a)') 'fo: install failed: ', trim(diag%message)
-        if (len_trim(diag%file) > 0) then
-            write (lnum, '(i0)') diag%line
-            write (error_unit, '(a,a,a,a)') 'fo: at: ', trim(diag%file), ':', &
-                trim(lnum)
-        end if
-        if (len_trim(diag%hint) > 0) then
-            write (error_unit, '(a,a)') 'fo: hint: ', trim(diag%hint)
-        end if
-        write (error_unit, '(a,a)') 'fo: full log: ', trim(install_log)
-    end subroutine report_install_result
 
     subroutine get_flags_arg(flags)
         character(len=*), intent(out) :: flags
@@ -1874,11 +1857,8 @@ contains
     subroutine cmd_install()
         type(backend_t) :: b
         character(len=256) :: prefix
-        character(len=512) :: home, error_message
-        character(len=512) :: install_log
-        character(len=:), allocatable :: packed
+        character(len=512) :: home, error_message, message
         integer :: exitcode, status
-        integer :: n_args
 
         call parse_install_args(prefix, error_message, status)
         if (status /= 0) then
@@ -1893,22 +1873,12 @@ contains
             call process_exit(1)
         end if
 
-        call make_tmpfile('fo-install', install_log)
-        n_args = 0
-        call argv_push(packed, n_args, 'fpm')
-        call argv_push(packed, n_args, 'install')
-        call argv_push(packed, n_args, '--profile')
-        call argv_push(packed, n_args, 'release')
-        call argv_push(packed, n_args, '--prefix')
-        call argv_push(packed, n_args, trim(prefix))
-        call process_run_argv_logged('.', packed, n_args, install_log, &
-            .false., 0, exitcode)
+        call install_native_executables(b, trim(prefix), message, exitcode)
         if (exitcode /= 0) then
-            call report_install_result(install_log)
+            write (error_unit, '(a)') trim(message)
             call process_exit(1)
         end if
-        call delete_tmpfile(install_log)
-        write (output_unit, '(a,a)') 'installed: ', trim(prefix)//'/bin/'
+        write (output_unit, '(a)') trim(message)
     end subroutine cmd_install
 
     subroutine parse_install_args(prefix, error_message, exitcode)

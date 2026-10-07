@@ -142,8 +142,10 @@ does not write fpm's private digest metadata.
 
 Git and registry dependencies are currently resolved and bootstrapped through
 an installed fpm when their compiled artifacts are absent. `fo install` also
-uses fpm's installation model. Project compilation and testing then run through
-fo's native backend and cache.
+builds release-profile app executables through fo's native backend and installs
+them under `prefix/bin`. Example, test, library and module installation remain
+unsupported. Project compilation and testing run through fo's native backend
+and cache.
 
 Tests that require different command-line arguments can declare fo-specific
 metadata without changing fpm's target model:

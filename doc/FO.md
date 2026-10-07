@@ -126,10 +126,11 @@ fo and fpm deliberately differ in private state:
 Shell output is also intentionally different. fo emits compact progress and
 bounded diagnostics for LLM edit loops.
 
-Git and registry dependency acquisition uses fpm as a bootstrap when required,
-and installation follows fpm's release-install model. fo may streamline that
-build/test integration, but it does not replace fpm's package registry or grow
-a separate system/environment package manager.
+Git and registry dependency acquisition uses fpm as a bootstrap when required.
+`fo install` builds release-profile app executables with the native backend and
+installs them under `prefix/bin`; example, test, library and module installation
+remain unsupported. fo does not replace fpm's package registry or grow a
+separate system/environment package manager.
 
 ## CMake contract
 

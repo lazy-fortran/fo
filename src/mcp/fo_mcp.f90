@@ -980,6 +980,7 @@ contains
 
     subroutine handle_install(line, id_str, dir, output_text, exitcode, response)
         use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
+        use fo_install, only: install_native_executables
         character(len=*), intent(in) :: line, id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
@@ -987,9 +988,8 @@ contains
 
         type(backend_t) :: b
         character(len=256) :: prefix, requested_prefix
-        character(len=512) :: home, install_log
-        character(len=:), allocatable :: packed
-        integer :: status, n_args, prefix_count, prefix_error
+        character(len=512) :: home
+        integer :: status, prefix_count, prefix_error
 
         call get_environment_variable('HOME', home, status=status)
         if (status /= 0 .or. len_trim(home) == 0) home = '/usr/local'
@@ -1007,22 +1007,7 @@ contains
             return
         end if
 
-        call make_tmpfile('fo-install', install_log)
-        n_args = 0
-        call argv_push(packed, n_args, 'fpm')
-        call argv_push(packed, n_args, 'install')
-        call argv_push(packed, n_args, '--profile')
-        call argv_push(packed, n_args, 'release')
-        call argv_push(packed, n_args, '--prefix')
-        call argv_push(packed, n_args, trim(prefix))
-        call process_run_argv_logged('.', packed, n_args, install_log, &
-            .false., 0, exitcode)
-        if (exitcode /= 0) then
-            call read_text_file(install_log, output_text)
-        else
-            output_text = 'installed: '//trim(prefix)//'/bin/'
-        end if
-        call delete_tmpfile(install_log)
+        call install_native_executables(b, trim(prefix), output_text, exitcode)
         call make_tool_text_response(id_str, output_text, exitcode, response)
     end subroutine handle_install
 

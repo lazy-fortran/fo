@@ -78,6 +78,9 @@ module fo_fpm_config
         logical :: auto_executables = .true.
         logical :: auto_tests = .true.
         logical :: auto_examples = .true.
+        logical :: install_library = .false.
+        logical :: install_test = .false.
+        character(len=256) :: install_module_dir = ''
         integer :: n_deps = 0
         type(fpm_dep_t) :: deps(MAX_DEPS)
         integer :: n_dev_deps = 0
@@ -298,6 +301,8 @@ contains
                 call parse_top_level(key, val, config)
             case ('build')
                 call parse_build(key, val, config)
+            case ('install')
+                call parse_install(key, val, config)
             case ('dependencies')
                 call parse_dependency_entry(key, val, config)
             case ('dev-dependencies')
@@ -418,6 +423,22 @@ contains
             call parse_flags(val, config)
         end select
     end subroutine parse_build
+
+    subroutine parse_install(key, val, config)
+        character(len=*), intent(in) :: key, val
+        type(fpm_config_t), intent(inout) :: config
+        character(len=256) :: str_val
+
+        select case (trim(key))
+        case ('library')
+            config%install_library = index(val, 'true') > 0
+        case ('test')
+            config%install_test = index(val, 'true') > 0
+        case ('module-dir')
+            call extract_string(val, str_val)
+            config%install_module_dir = trim(str_val)
+        end select
+    end subroutine parse_install
 
     subroutine parse_library(key, val, config)
         character(len=*), intent(in) :: key, val
