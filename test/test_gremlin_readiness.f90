@@ -185,6 +185,8 @@ contains
         call parse_request('wait', '{"wait_until":"unknown-condition"}', &
             request, ierr, message)
         call check(ierr /= 0, 'request parser rejects governance language')
+        call parse_request('wait', '{"fail_on_failure":true}', request, ierr, message)
+        call check(ierr /= 0, 'request parser rejects removed failure alias')
     end subroutine test_wait_request_parser
 
     subroutine test_ordinary_and_full_inventory_counts()

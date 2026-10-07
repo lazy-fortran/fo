@@ -35,7 +35,7 @@ module fo_gremlin_supervisor
         gremlin_phase_name, gremlin_health_name, gremlin_verification_name, &
         GREMLIN_PHASE_STARTING, GREMLIN_PHASE_BUILDING, GREMLIN_PHASE_TESTING, &
         GREMLIN_PHASE_QUIESCENT, GREMLIN_PHASE_STOPPED, GREMLIN_PHASE_FAILED, &
-        GREMLIN_WAIT_FAILURE, GREMLIN_HEALTH_FAILURE, GREMLIN_VERIFY_ORDINARY, &
+        GREMLIN_HEALTH_FAILURE, GREMLIN_VERIFY_ORDINARY, &
         GREMLIN_VERIFY_FULL
     use fo_gremlin_lifecycle, only: gremlin_freshness_update, &
         gremlin_freshness_check, gremlin_lifecycle_event_t, &
@@ -861,22 +861,13 @@ contains
         integer :: owner_pid
         integer(int64) :: started_ms, now_ms, next_cursor, next_lifecycle_cursor
         logical :: satisfied, failed, timed_out, terminal, has_events
-        logical :: legacy_failure_wait
         logical :: is_live
 
         poll_request = request
         poll_request%detail = 'full'
         until_kind = gremlin_wait_code(request%wait_until)
         wait_name = trim(request%wait_until)
-        legacy_failure_wait = until_kind == 0 .and. request%fail_on_failure
-        if (until_kind == 0) then
-            if (legacy_failure_wait) then
-                until_kind = GREMLIN_WAIT_FAILURE
-                wait_name = 'failure'
-            else
-                wait_name = 'events'
-            end if
-        end if
+        if (until_kind == 0) wait_name = 'events'
         satisfied = .false.
         failed = .false.
         timed_out = .false.
@@ -943,12 +934,6 @@ contains
                 timed_out = .true.
                 exit
             end if
-            if (legacy_failure_wait) then
-                if (next_cursor > poll_request%cursor) &
-                    poll_request%cursor = next_cursor
-                if (next_lifecycle_cursor > poll_request%lifecycle_cursor) &
-                    poll_request%lifecycle_cursor = next_lifecycle_cursor
-            end if
             sleep_ms = min(100, request%wait_ms - elapsed)
             if (sleep_ms > 0) call fs_sleep_ms(sleep_ms)
         end do
@@ -997,7 +982,6 @@ contains
             response = decorated
         end if
         exitcode = 0
-        if (legacy_failure_wait .and. failed) exitcode = 1
     end subroutine handle_wait
 
     subroutine read_json_cursor(json, name, value)

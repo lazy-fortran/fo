@@ -31,7 +31,6 @@ module fo_gremlin_request
         integer(int64) :: max_bytes = 262144_int64
         logical :: only_changed = .false.
         logical :: shuffle = .false.
-        logical :: fail_on_failure = .false.
         character(len=HASH_LEN) :: generation_id = ''
         character(len=32) :: wait_until = ''
         character(len=8) :: detail = 'full'
@@ -389,8 +388,6 @@ contains
                 if (action == 'wait') request_field = 19
             case ('detail')
                 if (action == 'status' .or. action == 'wait') request_field = 20
-            case ('fail_on_failure')
-                if (action == 'wait') request_field = 15
             case ('case_id')
                 if (action == 'reproduce') request_field = 16
             case ('generation_id')
@@ -481,7 +478,7 @@ contains
             case (20)
                 request%detail = value
             end select
-        case (8, 9, 15)
+        case (8, 9)
             if (is_string) then
                 ierr = 1
                 message = 'boolean request field has the wrong JSON type'
@@ -497,8 +494,6 @@ contains
                 request%only_changed = trim(value) == 'true'
             case (9)
                 request%shuffle = trim(value) == 'true'
-            case (15)
-                request%fail_on_failure = trim(value) == 'true'
             end select
         case default
             if (is_string) then

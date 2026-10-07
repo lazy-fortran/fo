@@ -290,9 +290,6 @@ contains
             key = 'detail'
             kind = 'string'
             needs_value = .true.
-        case ('--failure')
-            key = 'fail_on_failure'
-            kind = 'bool'
         case ('--until')
             key = 'wait_until'
             kind = 'string'
@@ -400,7 +397,7 @@ contains
         write (unit, '(a)') '  reads: --session ID --cursor N --lifecycle-cursor N'
         write (unit, '(a)') '         --max-records N --max-bytes N'
         write (unit, '(a)') '  reads: --detail summary|full (status/wait default: summary)'
-        write (unit, '(a)') '  wait: --wait-ms N --failure or --until CONDITION'
+        write (unit, '(a)') '  wait: --wait-ms N --until CONDITION'
         write (unit, '(a)') '  reproduce: ID or --case ID; optional --generation ID'
         write (unit, '(a)') '  output is the shared Gremlin JSON response'
     end subroutine print_gremlin_usage

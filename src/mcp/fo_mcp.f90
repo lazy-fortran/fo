@@ -1432,7 +1432,6 @@ contains
             '"wait_until":{"type":"string","enum":['// &
             '"local-gate-green","ordinary-verified","fully-verified",'// &
             '"quiescent","failure"]},'// &
-            '"fail_on_failure":{"type":"boolean"},'// &
             '"case_id":{"type":"string"},'// &
             '"generation_id":{"type":"string"}},'// &
             '"required":["action"]}}]}}'

@@ -630,8 +630,9 @@ contains
         call extract_json_field(response_json, 'next_cursor', cursor_text)
         call gremlin_handle('wait', trim(project_dir), &
             '{"lane_id":"readiness","cursor":'//trim(cursor_text)// &
-            ',"fail_on_failure":true,"wait_ms":0}', response_json, exitcode)
-        call check(exitcode == 1 .and. &
+            ',"wait_until":"failure","wait_ms":0}', response_json, exitcode)
+        call check(exitcode == 0 .and. &
+            index(response_json, '"wait_satisfied":true') > 0 .and. &
             index(response_json, '"failure_observed":true') > 0 .and. &
             index(response_json, '"durable_failure_report"') > 0 .and. &
             index(response_json, 'test_fast_two') > 0, &
@@ -727,16 +728,19 @@ contains
             'failures reads the terminal session journal')
         call gremlin_handle('wait', trim(project_dir), &
             '{"lane_id":"history","session_id":"'//trim(first%session_id)// &
-            '","fail_on_failure":true}', response_json, exitcode)
-        call check(exitcode == 1 .and. index(response_json, 'first_case') > 0, &
+            '","wait_until":"failure"}', response_json, exitcode)
+        call check(exitcode == 0 .and. &
+            index(response_json, '"wait_satisfied":true') > 0 .and. &
+            index(response_json, 'first_case') > 0, &
             'wait reports failures from a completed exact session')
         cursor_text = ''
         call extract_json_field(response_json, 'next_cursor', cursor_text)
         call gremlin_handle('wait', trim(project_dir), &
             '{"lane_id":"history","session_id":"'//trim(first%session_id)// &
-            '","cursor":'//trim(cursor_text)//',"fail_on_failure":true}', &
+            '","cursor":'//trim(cursor_text)//',"wait_until":"failure"}', &
             response_json, exitcode)
-        call check(exitcode == 1 .and. &
+        call check(exitcode == 0 .and. &
+            index(response_json, '"wait_satisfied":true') > 0 .and. &
             index(response_json, '"durable_failure_report"') > 0 .and. &
             index(response_json, 'first_case') > 0, &
             'wait includes durable failures when the receipt cursor already passed them')
