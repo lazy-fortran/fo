@@ -20,6 +20,14 @@ module fo_gremlin_session
     public :: gremlin_release_stopped_session
 
     interface
+        function c_session_retire_views(dir, session, fd) &
+                bind(C, name='fo_gremlin_session_retire_views') result(ierr)
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: dir(*), session(*)
+            integer(c_int), value :: fd
+            integer(c_int) :: ierr
+        end function c_session_retire_views
+
         function c_terminal_journal_path(project, lane, session, path, cap) &
                 bind(C, name='fo_gremlin_terminal_journal_path') result(ierr)
             import :: c_char, c_int
@@ -370,6 +378,9 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
+        integer(c_int) :: c_error
+        integer :: retire_error
+
         if (.not. session%owner) then
             ierr = 1
             message = 'only the Gremlin owner may publish a stopped terminal status'
@@ -389,10 +400,17 @@ contains
         call gremlin_publish_terminal_snapshot(project_dir, session, ierr, message, &
             status_override=trim(status_text))
         if (ierr /= 0) return
+        c_error = c_session_retire_views(session%state_dir//c_null_char, &
+            session%session_id//c_null_char, int(session%lock_fd, c_int))
+        retire_error = int(c_error)
         call gremlin_session_release(session, ierr, message)
         if (ierr /= 0) then
             message = 'cannot release Gremlin owner after durable terminal snapshot: '// &
                 trim(message)
+        else if (retire_error /= 0) then
+            ierr = retire_error
+            message = 'terminal snapshot stored; cannot retire stopped execution views: '// &
+                trim(int_text(retire_error))
         end if
     end subroutine gremlin_release_stopped_session
 

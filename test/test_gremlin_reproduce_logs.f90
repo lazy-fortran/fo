@@ -10,6 +10,7 @@ program test_gremlin_reproduce_logs
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value, json_parse
     use fo_test_gremlin_oracle, only: gremlin_stop_lane
+    use fo_gremlin_state, only: gremlin_session_state_dir
     implicit none
 
     character(:), allocatable :: driver, scratch, project, dependency, cache, state
@@ -17,9 +18,13 @@ program test_gremlin_reproduce_logs
     character(:), allocatable :: session, generation, first_log, second_log
     character(:), allocatable :: first_text, second_text, lane
     character(:), allocatable :: startup_error
+    character(:), allocatable :: first_view, second_view, active_view, pinned_driver
     type(string_list_t) :: arguments
+    type(string_list_t) :: status_arguments
     type(process_result_t) :: process
-    type(json_value_t) :: document, started, event, events, parsed
+    type(json_value_t) :: document, started, event, events, parsed, stopped
+    character(len=4096) :: session_state, state_message
+    integer :: state_error
     logical :: valid, anchor_ready
     character(:), allocatable :: parse_error
 
@@ -103,7 +108,51 @@ program test_gremlin_reproduce_logs
         'second receipt log excludes first test output')
     call assert_output_json(first_text)
 
+    first_view = execution_view_path(first_text)
+    second_view = execution_view_path(second_text)
+    call gremlin_session_state_dir(project, lane, session_state, state_error, &
+        state_message)
+    call assert_true(state_error == 0, 'resolves exact lane state directory')
+    call assert_true(len(first_view) > 0 .and. len(second_view) > 0, &
+        'failed reproduction logs identify their execution views')
+    if (len(first_view) > 0 .and. len(second_view) > 0) then
+        call assert_true(file_exists(first_view) .and. file_exists(second_view), &
+            'failed reproductions retain views while the lane is live')
+    end if
+    active_view = trim(session_state)//'/views/execution-active'
+    call make_directory(active_view//'/.fo-tmp')
+    call write_text(active_view//'/fixture.txt', 'active view sentinel')
+
     call stop_lane(session)
+    call list_add(status_arguments, 'gremlin')
+    call list_add(status_arguments, 'status')
+    call list_add(status_arguments, '--dir')
+    call list_add(status_arguments, project)
+    call list_add(status_arguments, '--lane')
+    call list_add(status_arguments, lane)
+    call list_add(status_arguments, '--session')
+    call list_add(status_arguments, session)
+    call gremlin_json(driver, project, cache, state, status_arguments, stopped, &
+        process, 10000)
+    pinned_driver = member_text(stopped, 'driver_path')
+    call assert_true(process%exit_code == 0 .and. &
+        member_text(stopped, 'state') == 'stopped', &
+        'retired lane remains readable from its terminal snapshot')
+    if (len(first_view) > 0 .and. len(second_view) > 0) then
+        call assert_true(.not. file_exists(first_view) .and. &
+            .not. file_exists(second_view), 'stop retires retained execution views')
+    end if
+    call assert_true(file_exists(active_view//'/fixture.txt'), &
+        'stop preserves a view with active private scratch')
+    call remove_path(active_view)
+    call assert_true(file_exists(first_log) .and. file_exists(second_log), &
+        'stop preserves reproduction logs')
+    call assert_true(file_exists(trim(session_state)//'/campaign-journal.jsonl'), &
+        'stop preserves campaign receipts')
+    call assert_true(len(pinned_driver) > 0 .and. file_exists(pinned_driver), &
+        'stop preserves the pinned driver')
+    call assert_true(file_exists(trim(state)//'/fo/gremlin/generations-v2/'// &
+        generation), 'stop preserves the captured generation for replay')
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
@@ -335,5 +384,24 @@ contains
         call gremlin_stop_lane(driver, project, cache, state, lane, owner, &
             allow_terminal_error=.true.)
     end subroutine stop_lane
+
+    function execution_view_path(text) result(path)
+        character(len=*), intent(in) :: text
+        character(:), allocatable :: path
+        character(len=*), parameter :: marker = 'fo: execution cwd: '
+        integer :: start, finish
+
+        path = ''
+        start = index(text, marker)
+        if (start == 0) return
+        start = start + len(marker)
+        if (start > len(text)) return
+        finish = index(text(start:), new_line('a'))
+        if (finish == 0) then
+            path = trim(text(start:))
+        else if (finish > 1) then
+            path = trim(text(start:start + finish - 2))
+        end if
+    end function execution_view_path
 
 end program test_gremlin_reproduce_logs

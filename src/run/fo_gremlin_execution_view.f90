@@ -2,7 +2,7 @@ module fo_gremlin_execution_view
     !! Private per-invocation working directories over frozen Gremlin inputs.
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_fs, only: fs_collect_files, fs_copy_exec, fs_make_dir, &
-        fs_mkdir_excl, fs_remove_tree
+        fs_mkdir_excl, fs_remove_tree, fs_rename
     use fo_input_inventory, only: input_entry_t, input_inventory_t, INPUT_FILE, &
         INPUT_DIRECTORY
     use fo_process, only: process_getpid
@@ -129,7 +129,7 @@ contains
         character(len=*), optional, intent(in) :: candidate_bundle_root
 
         character(len=PATH_LEN) :: source, destination, alias_root, bundle_path
-        character(len=PATH_LEN) :: candidate, copy_manifest
+        character(len=PATH_LEN) :: candidate, published, copy_manifest
         integer :: root_index, i, j, attempt, copy_rc, clock_count
         integer(c_int) :: writable, tree_rc
         logical :: already_materialized
@@ -157,7 +157,7 @@ contains
         attempt = 0
         do
             attempt = attempt + 1
-            write(candidate, '(a,"/execution-",i0,"-",i0,"-",i0)') &
+            write(candidate, '(a,"/.building-execution-",i0,"-",i0,"-",i0)') &
                 trim(scratch_parent), process_getpid(), clock_count, attempt
             if (len_trim(candidate) >= PATH_LEN) then
                 message = 'execution view path exceeds the supported length'
@@ -172,6 +172,8 @@ contains
         view%root = trim(candidate)
         view%cwd = trim(candidate)
         view%active = .true.
+        call create_private_scratch(view, ierr, message)
+        if (ierr /= 0) return
         if (.not. inventory_ready) then
             call reject_view(view, 'canonical input inventory unavailable', &
                 ierr, message)
@@ -226,7 +228,8 @@ contains
                     'candidate bundle does not contain a project root', ierr, message)
                 return
             end if
-            call create_private_scratch(view, ierr, message)
+            call publish_execution_view(view, scratch_parent, published, &
+                ierr, message)
             if (ierr /= 0) return
             ierr = 0
             message = trim(view%diagnostic)
@@ -366,11 +369,46 @@ contains
                 return
             end if
         end do
-        call create_private_scratch(view, ierr, message)
+        call publish_execution_view(view, scratch_parent, published, ierr, message)
         if (ierr /= 0) return
         ierr = 0
         message = trim(view%diagnostic)
     end subroutine execution_view_create
+
+    subroutine publish_execution_view(view, parent, published, ierr, message)
+        type(execution_view_t), intent(inout) :: view
+        character(len=*), intent(in) :: parent
+        character(len=*), intent(out) :: published
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        integer :: rc, marker
+
+        published = ''
+        ierr = 1
+        message = 'execution view reservation is invalid'
+        marker = index(view%root, '/.building-execution-', back=.true.)
+        if (marker == 0) return
+        published = trim(parent)//'/execution-'//view%root(marker + 21:)
+        if (len_trim(published) >= PATH_LEN) then
+            message = 'execution view path exceeds the supported length'
+            return
+        end if
+        rc = fs_rename(trim(view%root), trim(published))
+        if (rc /= 0) then
+            call reject_view(view, 'cannot publish owned execution view', &
+                ierr, message)
+            return
+        end if
+        view%root = trim(published)
+        if (index(view%cwd, '/project', back=.true.) == len_trim(view%cwd) - 7) then
+            view%cwd = trim(published)//'/project'
+        else
+            view%cwd = trim(published)
+        end if
+        view%tmpdir = trim(published)//'/.fo-tmp'
+        ierr = 0
+        message = ''
+    end subroutine publish_execution_view
 
     subroutine create_private_scratch(view, ierr, message)
         type(execution_view_t), intent(inout) :: view

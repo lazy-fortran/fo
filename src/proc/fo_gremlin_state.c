@@ -417,6 +417,82 @@ int fo_gremlin_session_release(const char *dir, const char *session, int fd) {
     return 0;
 }
 
+/* Stop retires inactive views only; .fo-tmp remains present for an active view. */
+int fo_gremlin_session_retire_views(const char *dir, const char *session, int fd) {
+    char id[128], start[64], current[64], path[PATH_MAX], views[PATH_MAX];
+    char scratch[PATH_MAX];
+    int pid = 0, e;
+    struct stat st;
+    DIR *directory;
+    struct dirent *entry;
+
+    e = verify_owner_fd(dir, fd);
+    if (e != 0) return e;
+    e = read_owner(dir, id, sizeof(id), &pid, start, sizeof(start));
+    if (e != 0) return e;
+    if (strcmp(id, session) != 0 || pid != (int)getpid()) return EPERM;
+    e = process_start(getpid(), current, sizeof(current));
+    if (e != 0 || strcmp(current, start) != 0) return EPERM;
+    if (lstat(dir, &st) != 0) return errno;
+    if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) return EPERM;
+    if (snprintf(views, sizeof(views), "%s/views", dir) >= (int)sizeof(views))
+        return ENAMETOOLONG;
+    if (lstat(views, &st) != 0) return errno == ENOENT ? 0 : errno;
+    if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) return EPERM;
+    directory = opendir(views);
+    if (directory == NULL) return errno;
+    for (;;) {
+        errno = 0;
+        entry = readdir(directory);
+        if (entry == NULL) {
+            e = errno;
+            break;
+        }
+        if (strncmp(entry->d_name, "execution-", 10) != 0) continue;
+        if (snprintf(path, sizeof(path), "%s/%s", views, entry->d_name) >=
+            (int)sizeof(path)) {
+            e = ENAMETOOLONG;
+            break;
+        }
+        if (lstat(path, &st) != 0) {
+            e = errno;
+            break;
+        }
+        if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) {
+            e = EPERM;
+            break;
+        }
+        if (snprintf(scratch, sizeof(scratch), "%s/.fo-tmp", path) >=
+            (int)sizeof(scratch)) {
+            e = ENAMETOOLONG;
+            break;
+        }
+        if (lstat(scratch, &st) == 0) {
+            if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) {
+                e = EPERM;
+                break;
+            }
+            continue;
+        }
+        if (errno != ENOENT) {
+            e = errno;
+            break;
+        }
+        if (fo_c_rm_rf(path) != 0) {
+            e = errno ? errno : EIO;
+            break;
+        }
+    }
+    if (closedir(directory) != 0 && e == 0) e = errno;
+    if (e == 0) {
+        int view_fd = open(views, O_RDONLY | O_CLOEXEC);
+        if (view_fd < 0) return errno;
+        if (fsync(view_fd) != 0) e = errno;
+        close(view_fd);
+    }
+    return e;
+}
+
 int fo_gremlin_session_read(const char *project, const char *lane,
         char *dir, int dircap, char *session, int sessioncap,
         int *pid, char *start, int startcap, char *status, int statuscap) {
