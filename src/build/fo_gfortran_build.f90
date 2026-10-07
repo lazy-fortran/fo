@@ -2673,10 +2673,13 @@ contains
         exitcode = 0
         ! Switching off auto-discovery must not leave an old app binary
         ! addressable through `fo exec`. Re-materialize the selected targets;
-        ! link-cache hits restore them without recompiling.
+        ! link-cache hits restore them without recompiling. Staging directories
+        ! belong to concurrent producers, so only stale executables are removed.
         if (.not. config%auto_executables) then
-            call fs_remove_tree(trim(bin_dir))
-            call fs_remove_tree(trim(app_bin_dir))
+            call remove_unselected_outputs(config, src_objs, n_src_objs, &
+                is_prog_arr, bin_dir)
+            call remove_unselected_outputs(config, src_objs, n_src_objs, &
+                is_prog_arr, app_bin_dir)
             call fs_make_dir(trim(bin_dir))
         end if
         n_lib = 0
@@ -2722,7 +2725,7 @@ contains
                 return
             end if
             app_bin_path = trim(app_bin_dir)//'/'//trim(prog_name)
-            copy_rc = fs_copy_exec(bin_path, app_bin_path)
+            call publish_app_copy(bin_path, app_bin_path, copy_rc)
             if (copy_rc /= 0) then
                 write (error_unit, '(a)') 'fo: failed to create '//trim(app_bin_path)
                 exitcode = 1
@@ -2734,6 +2737,67 @@ contains
         if (len_trim(base_digest) == 0 .and. len_trim(archive_path) > 0) &
             call remove_ephemeral_link_artifact(archive_path)
     end subroutine link_app_binaries
+
+    subroutine publish_app_copy(source, final_path, copy_rc)
+        !! Publish an app copy by rename from a private stage on the same
+        !! filesystem. A running app binary keeps its inode, and readers of
+        !! final_path see the old or the new complete image, never a partial copy.
+        character(len=*), intent(in) :: source, final_path
+        integer, intent(out) :: copy_rc
+
+        character(len=1024) :: stage_dir, staged_output
+        integer :: reserve_rc
+        logical :: valid_image
+
+        call reserve_link_stage(final_path, stage_dir, staged_output, reserve_rc)
+        if (reserve_rc /= 0) then
+            copy_rc = 1
+            return
+        end if
+        copy_rc = fs_copy_exec(trim(source), trim(staged_output))
+        if (copy_rc == 0) then
+            call native_image_valid(staged_output, valid_image)
+            if (.not. valid_image) copy_rc = 1
+        end if
+        if (copy_rc == 0) copy_rc = fs_rename(trim(staged_output), trim(final_path))
+        call fs_remove_tree(trim(stage_dir))
+    end subroutine publish_app_copy
+
+    subroutine remove_unselected_outputs(config, src_objs, n_src_objs, &
+            is_prog_arr, dir)
+        !! Remove published executables in dir that this build does not select.
+        !! Selected executables are republished by the link; directories, such as
+        !! another producer's staging stage, are never listed and never removed.
+        type(fpm_config_t), intent(in) :: config
+        character(len=512), intent(in) :: src_objs(MAX_SRC_OBJS)
+        integer, intent(in) :: n_src_objs
+        logical, intent(in) :: is_prog_arr(MAX_SRC_OBJS)
+        character(len=*), intent(in) :: dir
+
+        character(len=512), allocatable :: files(:)
+        character(len=128) :: selected(MAX_SRC_OBJS)
+        character(len=512) :: base
+        integer :: i, j, n_files, n_selected
+        logical :: keep
+
+        n_selected = 0
+        do i = 1, n_src_objs
+            if (.not. is_prog_arr(i)) cycle
+            n_selected = n_selected + 1
+            selected(n_selected) = app_binary_name(config, src_objs(i))
+        end do
+        allocate (files(MAX_SRC_OBJS))
+        call fs_collect_files(trim(dir), '', '', '', files, n_files, &
+            recursive=.false.)
+        do i = 1, n_files
+            call file_basename(files(i), base)
+            keep = .false.
+            do j = 1, n_selected
+                if (trim(base) == trim(selected(j))) keep = .true.
+            end do
+            if (.not. keep) call fs_remove_file(trim(files(i)))
+        end do
+    end subroutine remove_unselected_outputs
 
     subroutine link_base_digest(project_dir, lib_objs, n_lib, dep_objs, n_dep, link_libs, &
             n_link, digest)
@@ -3513,9 +3577,9 @@ contains
         logical, intent(out) :: valid
 
         integer(int64) :: file_size, arch_count, min_file_size
-        integer :: u, ios, image_class, image_data
+        integer :: u, ios, image_class, image_data, header_bytes
         character(len=4) :: magic, fat_count
-        character(len=2) :: elf_ident_tail
+        character(len=64) :: elf_header
 
         valid = .false.
         file_size = 0_int64
@@ -3592,19 +3656,64 @@ contains
                 close (u)
                 return
             end if
-            read (u, pos=5, iostat=ios) elf_ident_tail
+            header_bytes = int(min(file_size, 64_int64))
+            read (u, pos=1, iostat=ios) elf_header(1:header_bytes)
             close (u)
             if (ios /= 0) return
-            image_class = iachar(elf_ident_tail(1:1))
-            image_data = iachar(elf_ident_tail(2:2))
+            image_class = iachar(elf_header(5:5))
+            image_data = iachar(elf_header(6:6))
             if (image_data /= 1 .and. image_data /= 2) return
             if (image_class == 1) then
                 valid = file_size >= 52_int64
             else if (image_class == 2) then
                 valid = file_size >= 64_int64
             end if
+            if (valid) valid = elf_section_table_fits(elf_header(1:header_bytes), &
+                image_class, image_data == 1, file_size)
         end if
     end subroutine native_image_valid
+
+    logical function elf_section_table_fits(header, image_class, little, file_size)
+        !! A linked ELF image ends with its section header table. A file cut short
+        !! by an interrupted or damaged write loses that table, so its intact ELF
+        !! prefix does not make it a complete image.
+        character(len=*), intent(in) :: header
+        integer, intent(in) :: image_class
+        logical, intent(in) :: little
+        integer(int64), intent(in) :: file_size
+        integer(int64) :: sh_off, sh_num, sh_ent
+
+        if (image_class == 2) then
+            sh_off = elf_field(header, 40, 8, little)
+            sh_ent = elf_field(header, 58, 2, little)
+            sh_num = elf_field(header, 60, 2, little)
+        else
+            sh_off = elf_field(header, 32, 4, little)
+            sh_ent = elf_field(header, 46, 2, little)
+            sh_num = elf_field(header, 48, 2, little)
+        end if
+        elf_section_table_fits = .false.
+        if (sh_num < 1_int64 .or. sh_off < 0_int64) return
+        elf_section_table_fits = sh_off <= file_size - sh_num*sh_ent
+    end function elf_section_table_fits
+
+    integer(int64) function elf_field(bytes, offset, width, little)
+        !! Unsigned ELF header field of width bytes at a zero-based offset.
+        character(len=*), intent(in) :: bytes
+        integer, intent(in) :: offset, width
+        logical, intent(in) :: little
+        integer :: k, at
+
+        elf_field = 0_int64
+        do k = 1, width
+            if (little) then
+                at = offset + width - k
+            else
+                at = offset + k - 1
+            end if
+            elf_field = elf_field*256_int64 + int(iachar(bytes(at + 1:at + 1)), int64)
+        end do
+    end function elf_field
 
     subroutine archive_objects(project_dir, objects, n_objects, archive_path, &
             log_file, exitcode, content_key)
