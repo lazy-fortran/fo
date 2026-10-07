@@ -2,12 +2,13 @@ module fo_gfortran_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, manifest_exe_name, &
         manifest_executable_selected, &
         manifest_test_name, manifest_test_args, manifest_example_name, dep_kind, &
-        DEP_PATH, DEP_GIT
+        DEP_PATH, DEP_GIT, DEP_REGISTRY
     use fo_scan, only: scan_unit_t, scan_dir, scan_dir_regex, scan_dir_cached, &
         source_defines_module, &
         MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
-    use fo_dep_update, only: dep_update_missing_sources, MAX_UPDATE_NAMES
+    use fo_dep_update, only: dep_update_missing_sources, &
+        dep_acquire_missing_git, MAX_UPDATE_NAMES
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
         resolve_dev_dep_srcs, MAX_RESOLVED, join_path, merge_dep_link_libs
     use fo_stat_memo, only: memo_save, memo_hash_file
@@ -302,7 +303,7 @@ contains
         type(resolved_src_t), allocatable :: deps(:)
         type(fpm_config_t), allocatable :: dep_config
         integer :: n_deps, n_unresolved, n_registry, ierr, i
-        logical :: need_fetch
+        logical :: need_registry_fetch
 
         exitcode = 0
         allocate (deps(MAX_RESOLVED))
@@ -311,26 +312,17 @@ contains
             n_registry)
         if (ierr /= 0) return
 
-        ! Git sources are compiled by Fo's native DAG. Ask fpm only to acquire
-        ! missing checkouts; running `fpm build` here would compile the same
-        ! source a second time before Fo builds it. Registry sources still use
-        ! the existing fpm build path because Fo has no typed provider for the
-        ! registry cache location recorded by fpm.
-        need_fetch = n_unresolved > 0
-        do i = 1, config%n_dev_deps
-            if (dep_kind(config%dev_deps(i)) == DEP_PATH) cycle
-            if (.not. has_dependency_manifest(project_dir, &
-                    trim(config%dev_deps(i)%name))) need_fetch = .true.
-        end do
-        if (n_registry == 0 .and. need_fetch) then
-            call run_fpm_fetch_only(project_dir, log_file, exitcode)
-            if (exitcode /= 0) return
+        ! Acquire Git sources natively, then let Fo compile them through its
+        ! shared DAG. Registry dependencies still use the existing FPM path.
+        call dep_acquire_missing_git(project_dir, exitcode)
+        if (exitcode /= 0) return
+        if (n_registry == 0) then
             call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, &
                 ierr, n_registry)
             if (ierr /= 0) return
             if (n_unresolved > n_registry) then
                 write (error_unit, '(a)') &
-                    'fo: fpm fetch left Git dependency sources unresolved'
+                    'fo: native acquisition left Git dependency sources unresolved'
                 exitcode = 1
                 return
             end if
@@ -338,11 +330,23 @@ contains
                 if (dep_kind(config%dev_deps(i)) /= DEP_GIT) cycle
                 if (has_dependency_manifest(project_dir, &
                         trim(config%dev_deps(i)%name))) cycle
-                write (error_unit, '(a)') 'fo: fpm fetch left dev dependency '// &
+                write (error_unit, '(a)') &
+                    'fo: native acquisition left dev dependency '// &
                     trim(config%dev_deps(i)%name)//' unresolved'
                 exitcode = 1
                 return
             end do
+            need_registry_fetch = .false.
+            do i = 1, config%n_dev_deps
+                if (dep_kind(config%dev_deps(i)) /= DEP_REGISTRY) cycle
+                if (has_dependency_manifest(project_dir, &
+                        trim(config%dev_deps(i)%name))) cycle
+                need_registry_fetch = .true.
+            end do
+            if (need_registry_fetch) then
+                call run_fpm_fetch_only(project_dir, log_file, exitcode)
+                if (exitcode /= 0) return
+            end if
         end if
 
         if (n_registry > 0 .and. config_has_external_deps(config)) then
@@ -386,7 +390,7 @@ contains
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
             .true., build_timeout_seconds(), exitcode)
         if (exitcode /= 0) then
-            write (error_unit, '(a)') 'fo: fpm dependency fetch failed'
+            write (error_unit, '(a)') 'fo: fpm registry fetch failed'
             if (len_trim(log_file) > 0) then
                 write (error_unit, '(a)') 'fo: see '//trim(log_file)
             end if

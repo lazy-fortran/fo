@@ -1,7 +1,7 @@
 module fo_dep_update
     !! Refresh git and registry dependencies.
     !!
-    !! fo bootstraps those dependencies once, through fpm, and then reuses the
+    !! fo acquires those dependencies once and then reuses the
     !! compiled artifacts. Nothing in that path ever notices that a dependency
     !! tracking a branch has moved: the clone under `build/dependencies` and the
     !! objects under the fpm profile directories stay at whatever revision was
@@ -14,18 +14,23 @@ module fo_dep_update
     !! build re-fetches and recompiles. `dep_update_missing_sources` reports
     !! declared git dependencies whose source tree is gone while their objects
     !! remain, which is the silent case the build must never accept.
-    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, dep_kind, DEP_PATH
-    use fo_fs, only: fs_remove_tree, fs_remove_file, fs_stat, &
+    use fo_fpm_config, only: fpm_config_t, fpm_dep_t, fpm_config_parse, &
+        dep_kind, DEP_PATH, DEP_GIT
+    use fo_fs, only: fs_remove_tree, fs_remove_file, fs_stat, fs_make_dir, &
+        fs_rename, &
         fs_collect_git_checkouts
-    use fo_dep_resolve, only: normalize_path
+    use fo_dep_resolve, only: normalize_path, join_path
     use fo_process, only: process_run_argv_logged, argv_push
-    use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_util, only: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, &
+        read_text_file
     use, intrinsic :: iso_c_binding, only: c_long_long
+    use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
     private
 
     public :: dep_update_run
     public :: dep_update_missing_sources
+    public :: dep_acquire_missing_git
     public :: MAX_UPDATE_NAMES
 
     integer, parameter :: MAX_UPDATE_NAMES = 64
@@ -33,6 +38,222 @@ module fo_dep_update
     integer, parameter :: MAX_CHECKOUTS = 512
 
 contains
+
+    subroutine dep_acquire_missing_git(project_dir, ierr)
+        !! Acquire missing Git dependencies without invoking FPM.
+        !! Root test dependencies are included; dependencies' own dev edges
+        !! are intentionally excluded from the consumer closure.
+        character(len=*), intent(in) :: project_dir
+        integer, intent(out) :: ierr
+
+        character(len=512) :: root
+        character(len=512) :: visited(MAX_CHECKOUTS)
+        integer :: n_visited
+
+        call normalize_path(project_dir, root)
+        visited = ''
+        n_visited = 0
+        ierr = 0
+        call acquire_package(root, root, .true., visited, n_visited, 0, ierr)
+    end subroutine dep_acquire_missing_git
+
+    recursive subroutine acquire_package(package_dir, root, include_dev, &
+            visited, n_visited, depth, ierr)
+        character(len=*), intent(in) :: package_dir, root
+        logical, intent(in) :: include_dev
+        character(len=*), intent(inout) :: visited(:)
+        integer, intent(inout) :: n_visited
+        integer, intent(in) :: depth
+        integer, intent(out) :: ierr
+
+        type(fpm_config_t), allocatable :: config
+        integer :: i, parse_ierr
+
+        ierr = 0
+        if (depth > 64 .or. n_visited >= size(visited)) then
+            write (error_unit, '(a)') &
+                'fo: Git dependency closure exceeds supported depth or size'
+            ierr = 1
+            return
+        end if
+        do i = 1, n_visited
+            if (trim(visited(i)) == trim(package_dir)) return
+        end do
+        n_visited = n_visited + 1
+        visited(n_visited) = trim(package_dir)
+
+        allocate (config)
+        call fpm_config_parse(package_dir, config, parse_ierr)
+        if (parse_ierr /= 0) then
+            ierr = parse_ierr
+            return
+        end if
+        do i = 1, config%n_deps
+            call acquire_edge(config%deps(i), package_dir, root, visited, &
+                n_visited, depth, ierr)
+            if (ierr /= 0) return
+        end do
+        if (.not. include_dev) return
+        do i = 1, config%n_dev_deps
+            call acquire_edge(config%dev_deps(i), package_dir, root, visited, &
+                n_visited, depth, ierr)
+            if (ierr /= 0) return
+        end do
+    end subroutine acquire_package
+
+    recursive subroutine acquire_edge(dep, package_dir, root, visited, &
+            n_visited, depth, ierr)
+        type(fpm_dep_t), intent(in) :: dep
+        character(len=*), intent(in) :: package_dir, root
+        character(len=*), intent(inout) :: visited(:)
+        integer, intent(inout) :: n_visited
+        integer, intent(in) :: depth
+        integer, intent(out) :: ierr
+
+        character(len=512) :: dep_dir
+
+        ierr = 0
+        select case (dep_kind(dep))
+        case (DEP_PATH)
+            call join_path(package_dir, trim(dep%path), dep_dir)
+            call acquire_package(trim(dep_dir), root, .false., visited, &
+                n_visited, depth + 1, ierr)
+        case (DEP_GIT)
+            if (.not. safe_dependency_name(trim(dep%name))) then
+                write (error_unit, '(a)') 'fo: unsafe Git dependency name: '// &
+                    trim(dep%name)
+                ierr = 1
+                return
+            end if
+            dep_dir = trim(root)//'/build/dependencies/'//trim(dep%name)
+            call acquire_git_checkout(dep, package_dir, dep_dir, ierr)
+            if (ierr /= 0) return
+            call acquire_package(trim(dep_dir), root, .false., visited, &
+                n_visited, depth + 1, ierr)
+        end select
+    end subroutine acquire_edge
+
+    subroutine acquire_git_checkout(dep, package_dir, destination, ierr)
+        type(fpm_dep_t), intent(in) :: dep
+        character(len=*), intent(in) :: package_dir, destination
+        integer, intent(out) :: ierr
+
+        character(len=512) :: stage, log_file, ref
+        character(len=512) :: dependencies_dir
+        character(len=512) :: source, local_source
+        character(len=4096) :: output
+        character(len=:), allocatable :: args
+        integer(c_long_long) :: mtime, bytes
+        integer :: n_args, exitcode, rename_rc, colon, slash, at_sign
+        logical :: present, have_manifest
+
+        ierr = 0
+        call fs_stat(trim(destination), mtime, bytes, present)
+        if (present) then
+            inquire (file=trim(destination)//'/fpm.toml', exist=have_manifest)
+            if (have_manifest) return
+            write (error_unit, '(a)') &
+                'fo: incomplete Git dependency source at '//trim(destination)// &
+                '; remove it or run fo update'
+            ierr = 1
+            return
+        end if
+        dependencies_dir = trim(destination(:index(trim(destination), '/', &
+            back=.true.) - 1))
+        call fs_make_dir(trim(dependencies_dir))
+        call make_sibling_tmpfile(trim(destination), stage)
+        call make_tmpfile('fo-git-log', log_file)
+        n_args = 0
+        call argv_push(args, n_args, 'git')
+        call argv_push(args, n_args, 'clone')
+        call argv_push(args, n_args, '--no-checkout')
+        call argv_push(args, n_args, '--')
+        source = trim(dep%git)
+        if (index(trim(source), 'file://') == 1) then
+            local_source = source(8:)
+            if (len_trim(local_source) > 0) then
+                if (local_source(1:1) /= '/') then
+                    call join_path(package_dir, trim(local_source), source)
+                else
+                    source = trim(local_source)
+                end if
+            end if
+        else if (index(trim(source), '://') == 0) then
+            colon = index(trim(source), ':')
+            slash = index(trim(source), '/')
+            at_sign = index(trim(source), '@')
+            if (at_sign > 0 .and. colon > 0 .and. &
+                (slash == 0 .or. colon < slash)) then
+                ! Preserve SCP-style remote URLs such as git@host:repo.
+            else if (source(1:1) /= '/') then
+                call join_path(package_dir, trim(source), local_source)
+                source = trim(local_source)
+            end if
+        end if
+        call argv_push(args, n_args, trim(source))
+        call argv_push(args, n_args, trim(stage))
+        call process_run_argv_logged('', args, n_args, trim(log_file), .false., &
+            300, exitcode)
+        if (exitcode /= 0) then
+            call read_text_file(trim(log_file), output)
+            write (error_unit, '(a)') 'fo: Git clone failed for dependency '// &
+                trim(dep%name)//': '//trim(output)
+            call fs_remove_tree(trim(stage))
+            call delete_tmpfile(trim(log_file))
+            ierr = exitcode
+            return
+        end if
+
+        ref = 'HEAD'
+        if (len_trim(dep%branch) > 0) ref = 'refs/remotes/origin/'//trim(dep%branch)
+        if (len_trim(dep%tag) > 0) ref = trim(dep%tag)
+        if (allocated(dep%rev)) then
+            if (len_trim(dep%rev) > 0) ref = trim(dep%rev)
+        end if
+        args = ''
+        n_args = 0
+        call argv_push(args, n_args, 'git')
+        call argv_push(args, n_args, '-C')
+        call argv_push(args, n_args, trim(stage))
+        call argv_push(args, n_args, 'checkout')
+        call argv_push(args, n_args, '--detach')
+        call argv_push(args, n_args, trim(ref))
+        call process_run_argv_logged('', args, n_args, trim(log_file), .false., &
+            60, exitcode)
+        if (exitcode /= 0) then
+            call read_text_file(trim(log_file), output)
+            write (error_unit, '(a)') 'fo: cannot select Git ref '//trim(ref)// &
+                ' for dependency '//trim(dep%name)//': '//trim(output)
+            call fs_remove_tree(trim(stage))
+            call delete_tmpfile(trim(log_file))
+            ierr = exitcode
+            return
+        end if
+        rename_rc = fs_rename(trim(stage), trim(destination))
+        call delete_tmpfile(trim(log_file))
+        if (rename_rc /= 0) then
+            call fs_remove_tree(trim(stage))
+            write (error_unit, '(a)') 'fo: cannot publish Git dependency '// &
+                trim(dep%name)//' at '//trim(destination)
+            ierr = 1
+        end if
+    end subroutine acquire_git_checkout
+
+    logical function safe_dependency_name(name)
+        character(len=*), intent(in) :: name
+        integer :: i
+
+        safe_dependency_name = len_trim(name) > 0
+        if (trim(name) == '.' .or. trim(name) == '..') then
+            safe_dependency_name = .false.
+            return
+        end if
+        do i = 1, len_trim(name)
+            if (name(i:i) /= '/' .and. name(i:i) /= achar(92)) cycle
+            safe_dependency_name = .false.
+            return
+        end do
+    end function safe_dependency_name
 
     subroutine dep_update_missing_sources(project_dir, names, n_names)
         !! Names of declared git/registry dependencies with no source tree under
