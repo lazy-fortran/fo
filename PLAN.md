@@ -471,19 +471,19 @@ independent post-submit evidence; Gremlin reports facts and does not govern Git.
 
 | Outcome | Issues |
 | --- | --- |
-| Working resident development and exact driver behavior | #200, #151 |
-| Relevant edits and quiet completion | #148, #155 |
-| Reliable process/session lifetimes, CLI/MCP and Darwin support | #139, #142, #172 |
+| Working resident development and exact driver behavior | #200 |
+| Relevant edits and quiet completion | #155 |
+| Reliable process/session lifetimes, CLI/MCP and Darwin support | #139, #142 |
 | Lossless results, durable receipts and exact recovery | #119, #140, #183 |
 | Trustworthy inputs and affected-first finite testing | #175, #189, #138 |
-| Correct shared dispatcher routing | #131, #132 |
+| Correct shared dispatcher routing | #131 |
 | Fresh dependencies and test-only project execution | #135, #188 |
 | Complete safe artifacts and independent writable execution | #144, #166, #170 |
 | Reusable stable generations with less storage/I/O | #165, #168 |
 | Less duplicated build, source, protocol and scheduling behavior | #149, #150, #167, #185, #186 |
 | Smaller useful native tests and no Fo-owned script runtime | #161, #163, #184 |
 | Safe cleanup, useful progress and correct timeout attribution | #129, #130, #134 |
-| Native FPM manifests, dependency closures and install | #201, #202, #203, #204 |
+| Native FPM manifests and dependency closures | #201, #202, #203 |
 | Faithful native ITpPlasma profiles | #192–#198; optional reuse #199 |
 | Independent optional project/performance evidence | #145, #190 |
 | Adjacent formatting, LSP and explicit deep-lint behavior | #117, #56, #59 |
