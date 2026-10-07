@@ -8,6 +8,22 @@ preserving supported behavior and independently demonstrated correctness.
 
 ## Current goal
 
+Fo `1d47f93` is pushed to `main`: explicit-prefix release app installation is
+native through shared CLI/MCP behavior. Its exact committed candidate passed
+the focused two-app case 1/1, including output, example exclusion, preserved
+prefix files, failed builds and nonregular destination refusal. A separate
+public CLI install/run check passed with FPM absent from `PATH`; public MCP
+install/run passed too. Fo #204 remains open for direct pinned FPM parity.
+Fo `42c2531` rejects conflicting dependency sources and Git selectors. Its
+parser case passed 1/1, and three public invalid manifests failed with
+dependency-named causes. Resident session `3485903-1791379560-556554879`
+passed the required case 1/1 on generation
+`a25f97ba940e62c24b9ad59a57b563973e45a988a144a036cdb85c15b11bf48c`
+with `local_gate_green=true`; the owner then stopped. An earlier run of the
+same generation aborted in Fx lease release during parallel warm restoration.
+Fx #57 remains open: focused cache, OpenMP, ASan and TSan stress did not
+reproduce or localize that allocator fault. Revisit it promptly if it recurs.
+
 Keep one useful resident Fo Gremlin lane running and develop through it.
 Fo `190d3e8` restores a single expected `.smod` output from the shared action
 cache in fresh execution views and bypasses sources with multiple outputs. Its
