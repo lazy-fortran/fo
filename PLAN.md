@@ -53,9 +53,18 @@ Public resident session `533484-1791356967-930118364` built generation
 `386deb0f33dadf48c6d185b43523d594ff270c06216d77ac464d749435e71719`,
 passed `test_cache` with `local_gate_green=true`, and reached quiescence.
 During that run the global cache's compacted old Fo root groups fell from 178
-to 177; the owner then stopped before another heavy lane. The inactive v1
+to 175; the owner then stopped before another heavy lane. The inactive v1
 store (2.7 GB and about 102,000 files) was removed after its old resident
 owner stopped and an open-file check found no active readers.
+Fo `b802b0c` now captures declared symlink dependency roots after checking the
+opened directory against the inventory's device/inode; descendant paths remain
+no-follow. The focused symlink inventory oracle passed 1/1. Exact release
+driver SHA256
+`81c096068873c99e0211c1754ab2a122092c0df6817c8b1c4f325b669aa51105`
+passed an isolated FFC consumer gate 1/1 on generation
+`1c5e179f22bf2142262686301dea494430ee1800eebbeb04bb45d5a192eea15b`,
+including the FortFront file whose capture had failed previously. The owner
+stopped, and this driver is installed. Full FFC coverage remains open.
 Fo `22f6dd3` removed Gremlin's forced `FO_JOBS=1` from candidate builds,
 selected tests and reproduction. In a fresh public Gremlin fixture with
 `FO_JOBS=2`, independent compiler actions overlapped, the dependent source built,
