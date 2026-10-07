@@ -1,7 +1,7 @@
 program test_gremlin_reproduce_logs
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_directory, write_text, read_text, file_exists
-    use fo_test_harness, only: remove_path, assert_true
+    use fo_test_harness, only: remove_path, remove_tree, assert_true
     use fo_test_harness, only: assert_equal_integer, assert_equal_string
     use fo_test_harness, only: finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_run, gremlin_json
@@ -18,6 +18,7 @@ program test_gremlin_reproduce_logs
     character(:), allocatable :: session, generation, first_log, second_log
     character(:), allocatable :: first_text, second_text, lane
     character(:), allocatable :: startup_error
+    character(:), allocatable :: original_generation
     character(:), allocatable :: first_view, second_view, active_view, building_view
     character(:), allocatable :: pinned_driver
     type(string_list_t) :: arguments
@@ -120,6 +121,33 @@ program test_gremlin_reproduce_logs
         call assert_true(file_exists(first_view) .and. file_exists(second_view), &
             'failed reproductions retain views while the lane is live')
     end if
+    original_generation = generation
+    call stop_lane(session)
+
+    ! Reproductions intentionally change live inputs and can terminalize the
+    ! campaign with INFRA_ERROR. Start a clean owner to exercise normal stop.
+    call write_text(project//'/token.txt', 'FROZEN_REPRODUCE_TOKEN'//new_line('a'))
+    call write_dependency('FROZEN_DEPENDENCY_TOKEN')
+    call gremlin_start_args(arguments, project, lane, 'test_reproduce_anchor')
+    call list_add(arguments, '--random')
+    call list_add(arguments, '0')
+    call gremlin_json(driver, project, cache, state, arguments, started, process, &
+        30000)
+    session = member_text(started, 'session_id')
+    if (len(session) == 0 .or. process%exit_code /= 0 .or. &
+            process%runner_failed .or. process%timed_out) then
+        startup_error = start_failure(process)
+        call assert_true(.false., 'clean stop owner failed to start: '//startup_error)
+        call finish_assertions(retain_failed_scratch=.true.)
+    end if
+    call wait_for_anchor(session, generation, anchor_ready, startup_error)
+    if (.not. anchor_ready) then
+        call stop_lane(session)
+        call assert_true(.false., &
+            'clean stop owner did not become ready: '//startup_error)
+        call finish_assertions(retain_failed_scratch=.true.)
+    end if
+
     active_view = trim(session_state)//'/views/execution-active'
     call make_directory(active_view//'/.fo-tmp')
     call write_text(active_view//'/fixture.txt', 'active view sentinel')
@@ -136,6 +164,8 @@ program test_gremlin_reproduce_logs
     call list_add(status_arguments, lane)
     call list_add(status_arguments, '--session')
     call list_add(status_arguments, session)
+    call list_add(status_arguments, '--detail')
+    call list_add(status_arguments, 'full')
     call gremlin_json(driver, project, cache, state, status_arguments, stopped, &
         process, 10000)
     pinned_driver = member_text(stopped, 'driver_path')
@@ -148,10 +178,10 @@ program test_gremlin_reproduce_logs
     end if
     call assert_true(file_exists(active_view//'/fixture.txt'), &
         'stop preserves a view with active private scratch')
-    call remove_path(active_view)
+    call remove_tree(active_view)
     call assert_true(file_exists(building_view//'/fixture.txt'), &
         'stop leaves a view that is still being materialized untouched')
-    call remove_path(building_view)
+    call remove_tree(building_view)
     call assert_true(file_exists(first_log) .and. file_exists(second_log), &
         'stop preserves reproduction logs')
     call assert_true(file_exists(trim(session_state)//'/campaign-journal.jsonl'), &
@@ -160,6 +190,8 @@ program test_gremlin_reproduce_logs
         'stop preserves the pinned driver')
     call assert_true(file_exists(trim(state)//'/fo/gremlin/generations-v2/'// &
         generation), 'stop preserves the captured generation for replay')
+    call assert_true(file_exists(trim(state)//'/fo/gremlin/generations-v2/'// &
+        original_generation), 'stop preserves the original replay generation')
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
