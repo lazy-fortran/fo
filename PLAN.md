@@ -8,15 +8,19 @@ preserving supported behavior and independently demonstrated correctness.
 
 ## Current goal
 
-Fo `225f430` is pushed to `main` and installed as release CLI SHA256
+Fo `7f82d82` is pushed to `main`; the installed release CLI remains SHA256
 `2ce17e70200e627f84456341b942d604c8f88fe9695606a99bf1e964c37dd3ff`.
 The exact combined source candidate SHA256
 `ba6114b6ef430323a621d2b4bc9cf12692cf93e6054065c74307eeb59e0fc502`
 passed three focused direct checks and a resident 3/3 gate with
 `local_gate_green=true` and zero failures. `767f680` acquires missing pinned
 Git dependencies natively, including nested relative local Git sources and
-valid source materializations without `.git`; #202 stays open for moving-branch
-commit capture and pin/content edit invalidation. `73e73a7` cleans up owned
+valid source materializations without `.git`. `7f82d82` records moving-branch
+commits before Gremlin generation capture and invalidates pin/content edits.
+Its exact combined candidate passed the public dependency fixture 1/1 with
+driver SHA256 `929547e82eae407afc38a90014241d259028061a0dc2aeb139761c975958c063`;
+the worker's fresh resident gate passed 1/1 with `local_gate_green=true`.
+#202 is closed. `73e73a7` cleans up owned
 test descendants after leader completion and corrects the wall/CPU diagnostic;
 #134 is closed. `225f430` reads CTest result status after dot padding so
 status words in test names remain intact; #119 stays open for its other
