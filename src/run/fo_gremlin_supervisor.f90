@@ -2403,7 +2403,7 @@ contains
         type(coverage_epoch_t) :: coverage
         character(len=PATH_LEN) :: coverage_path
         logical, allocatable :: is_test_arr(:)
-        logical :: reproduce_only
+        logical :: reproduce_only, focused_targets
 
         allocate (changed_ids(MAX_NODES), affected_ids(MAX_NODES), &
             candidate_ids(MAX_NODES), filenames(MAX_NODES), &
@@ -2459,6 +2459,8 @@ contains
                 n_affected, .false., impacted, n_impacted)
         end if
         n_priorities = 0
+        ! Zero-random campaigns keep their explicit gate across source edits.
+        focused_targets = request%n_targets > 0 .and. request%random_count == 0
         if (request%only_changed .or. request%has_previous_generation .or. &
             request%n_targets > 0 .or. n_history > 0) then
             call append_priority_names(request%gate_cases, request%gate_required_count, &
@@ -2466,8 +2468,10 @@ contains
         end if
         call append_priority_names(request%targets, request%n_targets, priorities, &
             n_priorities)
-        call append_priority_names(impacted, n_impacted, priorities, n_priorities)
-        call append_priority_names(history, n_history, priorities, n_priorities)
+        if (.not. focused_targets) then
+            call append_priority_names(impacted, n_impacted, priorities, n_priorities)
+            call append_priority_names(history, n_history, priorities, n_priorities)
+        end if
         do i = 1, n_priorities
             if (.not. any(all_names(:n_all) == priorities(i))) then
                 ierr = 2
