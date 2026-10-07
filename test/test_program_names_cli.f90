@@ -18,13 +18,16 @@ program test_program_names_cli
     type(process_result_t) :: result
     type(string_list_t) :: arguments, environment
     type(json_value_t) :: report, tests, entry, field
-    character(len=192) :: source_lines(11)
+    character(len=192) :: source_lines(12)
     character(:), allocatable :: number
     integer :: i, pass, j, found
 
     call resolve_driver(driver)
     call make_scratch('fo-program-names', scratch)
     call write_text(join_path(scratch, 'fpm.toml'), 'name = "program_names_probe"' // new_line('a'))
+    call write_lines(join_path(scratch, 'src/external_bridge.f90'), &
+        [character(len=64) :: 'integer function external_bridge()', &
+        'implicit none', 'external_bridge = 40', 'end function external_bridge'])
     call list_add(environment, 'FO_JOBS=4')
     do i = 1, size(names)
         number = integer_text(i)
@@ -45,12 +48,13 @@ program test_program_names_cli
         source_lines(4) = 'program private_name'
         source_lines(5) = 'use support_' // number // ', only: value'
         source_lines(6) = 'implicit none'
-        source_lines(7) = 'integer :: unit'
-        source_lines(8) = "open(newunit=unit, file='" // trim(names(i)) // &
+        source_lines(7) = 'integer, external :: external_bridge'
+        source_lines(8) = 'integer :: unit'
+        source_lines(9) = "open(newunit=unit, file='" // trim(names(i)) // &
             ".receipt', status='replace')"
-        source_lines(9) = "write(unit, '(i0)') value()"
-        source_lines(10) = 'close(unit)'
-        source_lines(11) = 'end program private_name'
+        source_lines(10) = "write(unit, '(i0)') value() + external_bridge()"
+        source_lines(11) = 'close(unit)'
+        source_lines(12) = 'end program private_name'
         call write_lines(join_path(scratch, 'test/' // trim(names(i)) // '.f90'), &
             source_lines)
     end do
@@ -81,7 +85,8 @@ program test_program_names_cli
         end do
         do i = 1, size(names)
             call assert_file_equals(join_path(scratch, trim(names(i)) // '.receipt'), &
-                integer_text(i) // new_line('a'), 'distinct public tests run separately')
+                integer_text(i + 40) // new_line('a'), &
+                'distinct public tests run separately with external bridge')
         end do
     end do
 
