@@ -120,7 +120,7 @@ contains
         type(program_unit_query_t), allocatable :: program_units(:)
         type(program_unit_query_t) :: selected_unit, candidate_unit
         type(use_statement_query_t), allocatable :: use_statements(:)
-        integer :: i, j, primary
+        integer :: i, j, primary, program_unit
         character(len=MAX_NAME) :: unit_kind, name, parent_identifier
         character(len=MAX_NAME) :: ancestor_name, parent_name
 
@@ -155,6 +155,29 @@ contains
         if (primary == 0) then
             diagnostic = 'FortFront parsed no dependency-bearing program unit'
             return
+        end if
+
+        ! A source can contain a module followed by its test program. Keep the
+        ! primary module for dependency edges, but also expose the program so
+        ! test inventory and executable planning see the runnable source.
+        program_unit = 0
+        do i = 1, size(program_units)
+            if (.not. program_units(i)%found) cycle
+            unit_kind = ''
+            if (allocated(program_units(i)%unit_kind)) then
+                unit_kind = program_units(i)%unit_kind
+            end if
+            call to_lower(unit_kind)
+            if (trim(unit_kind) /= 'program') cycle
+            program_unit = i
+            exit
+        end do
+        if (program_unit > 0) then
+            unit_info%is_program = .true.
+            if (allocated(program_units(program_unit)%name)) then
+                unit_info%program_name = program_units(program_unit)%name
+                call to_lower(unit_info%program_name)
+            end if
         end if
 
         selected_unit = program_units(primary)

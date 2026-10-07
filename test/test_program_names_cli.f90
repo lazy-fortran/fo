@@ -18,7 +18,7 @@ program test_program_names_cli
     type(process_result_t) :: result
     type(string_list_t) :: arguments, environment
     type(json_value_t) :: report, tests, entry, field
-    character(len=192) :: source_lines(8)
+    character(len=192) :: source_lines(11)
     character(:), allocatable :: number
     integer :: i, pass, j, found
 
@@ -39,14 +39,18 @@ program test_program_names_cli
         call write_lines(join_path(scratch, 'test/support_' // integer_text(i) // '.f90'), &
             source_lines(1:7))
         source_lines = ''
-        source_lines(1) = 'program private_name'
-        source_lines(2) = 'use support_' // number // ', only: value'
-        source_lines(3) = 'implicit none'
-        source_lines(4) = 'integer :: unit'
-        source_lines(5) = "open(newunit=unit, file='" // trim(names(i)) // ".receipt', status='replace')"
-        source_lines(6) = "write(unit, '(i0)') value()"
-        source_lines(7) = 'close(unit)'
-        source_lines(8) = 'end program private_name'
+        source_lines(1) = 'module local_' // number
+        source_lines(2) = 'implicit none'
+        source_lines(3) = 'end module local_' // number
+        source_lines(4) = 'program private_name'
+        source_lines(5) = 'use support_' // number // ', only: value'
+        source_lines(6) = 'implicit none'
+        source_lines(7) = 'integer :: unit'
+        source_lines(8) = "open(newunit=unit, file='" // trim(names(i)) // &
+            ".receipt', status='replace')"
+        source_lines(9) = "write(unit, '(i0)') value()"
+        source_lines(10) = 'close(unit)'
+        source_lines(11) = 'end program private_name'
         call write_lines(join_path(scratch, 'test/' // trim(names(i)) // '.f90'), &
             source_lines)
     end do
