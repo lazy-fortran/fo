@@ -13,7 +13,11 @@ native through shared CLI/MCP behavior. Its exact committed candidate passed
 the focused two-app case 1/1, including output, example exclusion, preserved
 prefix files, failed builds and nonregular destination refusal. A separate
 public CLI install/run check passed with FPM absent from `PATH`; public MCP
-install/run passed too. Fo #204 remains open for direct pinned FPM parity.
+install/run passed too. Fo #204's direct parity is now verified against an FPM
+binary built from pinned source `90bb83a70e9bcf04d941fb43cca014ae1c0fc5ea`
+(binary SHA256 `1160d794d3e45f36674802449f34a38cf5970d660ab06833edab11539a638483`).
+Both release-profile fixture installs produced exactly two matching mode-0755
+executables, excluded the example, and ran with identical expected output.
 Fo `42c2531` rejects conflicting dependency sources and Git selectors. Its
 parser case passed 1/1, and three public invalid manifests failed with
 dependency-named causes. Resident session `3485903-1791379560-556554879`
