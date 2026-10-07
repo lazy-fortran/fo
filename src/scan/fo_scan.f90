@@ -160,37 +160,24 @@ contains
         ! A source can contain a module followed by its test program. Keep the
         ! primary module for dependency edges, but also expose the program so
         ! test inventory and executable planning see the runnable source.
+        selected_unit = program_units(primary)
+        unit_kind = ''
+        if (allocated(selected_unit%unit_kind)) &
+            unit_kind = selected_unit%unit_kind
+        call to_lower(unit_kind)
         program_unit = 0
-        program_candidates: do i = 1, size(program_units)
-            if (.not. program_units(i)%found) cycle
-            unit_kind = ''
-            if (allocated(program_units(i)%unit_kind)) then
-                unit_kind = program_units(i)%unit_kind
-            end if
-            call to_lower(unit_kind)
-            if (trim(unit_kind) /= 'program') cycle
-            name = ''
-            if (allocated(program_units(i)%name)) name = program_units(i)%name
-            call to_lower(name)
-            if (trim(name) == 'main') then
-                if (allocated(program_units(i)%body_indices)) then
-                    do j = 1, size(program_units(i)%body_indices)
-                        candidate_unit = query_program_unit(result%arena, &
-                            program_units(i)%body_indices(j))
-                        if (.not. candidate_unit%found) cycle
-                        unit_kind = ''
-                        if (allocated(candidate_unit%unit_kind)) &
-                            unit_kind = candidate_unit%unit_kind
-                        call to_lower(unit_kind)
-                        if (trim(unit_kind) == 'function' .or. &
-                                trim(unit_kind) == 'subroutine') &
-                            cycle program_candidates
-                    end do
-                end if
-            end if
-            program_unit = i
-            exit
-        end do program_candidates
+        if (trim(unit_kind) == 'module') then
+            do i = 1, size(program_units)
+                if (.not. program_units(i)%found) cycle
+                unit_kind = ''
+                if (allocated(program_units(i)%unit_kind)) &
+                    unit_kind = program_units(i)%unit_kind
+                call to_lower(unit_kind)
+                if (trim(unit_kind) /= 'program') cycle
+                program_unit = i
+                exit
+            end do
+        end if
         if (program_unit > 0) then
             unit_info%is_program = .true.
             if (allocated(program_units(program_unit)%name)) then
@@ -199,7 +186,6 @@ contains
             end if
         end if
 
-        selected_unit = program_units(primary)
         unit_kind = ''
         if (allocated(selected_unit%unit_kind)) then
             unit_kind = selected_unit%unit_kind
