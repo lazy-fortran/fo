@@ -10,8 +10,8 @@ program test_test_results_json
     use fo_test_harness, only: finish_assertions
     implicit none
 
-    integer, parameter :: name_count = 400
-    character(len=64) :: names(name_count)
+    integer, parameter :: name_count = 402
+    character(len=256) :: names(name_count)
     character(:), allocatable :: driver, scratch, cmake, test_name, command_name
     type(process_result_t) :: result
     type(string_list_t) :: arguments, environment
@@ -29,12 +29,14 @@ program test_test_results_json
     names(398) = 'test_quoted_"name'
     names(399) = 'test_backslash_\name'
     names(400) = 'test_late_failure'
+    names(401) = 'test_long_name_' // repeat('a', 170)
+    names(402) = 'test_long_name_' // repeat('b', 210)
 
     cmake = 'cmake_minimum_required(VERSION 3.20)' // new_line('a') // &
         'project(fo_json_report NONE)' // new_line('a') // 'enable_testing()' // new_line('a')
     do i = 1, name_count
         command_name = 'true'
-        if (i == name_count) command_name = 'false'
+        if (i == 400) command_name = 'false'
         cmake = cmake // 'add_test(NAME [=[' // trim(names(i)) // &
             ']=] COMMAND "${CMAKE_COMMAND}" -E ' // trim(command_name) // ')' // new_line('a')
     end do
@@ -73,7 +75,7 @@ program test_test_results_json
         command_name = 'pass'
         if (test_name == 'test_late_failure') command_name = 'fail'
         call assert_equal_string(json_string_value(field), command_name, &
-            'only the final CTest result fails')
+            'the expected CTest result status survives')
         field = json_member(entry, 'seconds')
         call assert_equal_integer(field%kind, json_number, 'test duration is a JSON number')
         seconds = json_number_value(field)
@@ -85,7 +87,7 @@ program test_test_results_json
 
     summary = json_member(report, 'summary')
     field = json_member(summary, 'passed')
-    call assert_equal_integer(nint(json_number_value(field)), 399, '399 results pass')
+    call assert_equal_integer(nint(json_number_value(field)), 401, '401 results pass')
     field = json_member(summary, 'failed')
     call assert_equal_integer(nint(json_number_value(field)), 1, 'one result fails')
     field = json_member(summary, 'skipped')

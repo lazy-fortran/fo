@@ -13,7 +13,7 @@ module fo_test_results
     integer, parameter :: MAX_TEST_RESULTS_ENTRIES = 256
 
     type :: test_result_entry_t
-        character(len=128) :: name
+        character(len=1024) :: name
         character(len=10)   :: status
         real                :: seconds
         integer             :: exit_code
@@ -28,7 +28,7 @@ contains
         integer, intent(out) :: ierr
 
         character(len=1024) :: line
-        character(len=128) :: name
+        character(len=1024) :: name
         character(len=10) :: status
         character(len=10) :: exit_str
         real :: secs
@@ -95,7 +95,8 @@ contains
         real, intent(out) :: secs
         integer, intent(out) :: iostat
 
-        character(len=128) :: name_local, status_local, exit_local
+        character(len=1024) :: name_local
+        character(len=128) :: status_local, exit_local
         character(len=10) :: secs_str
 
         name = ''
@@ -120,7 +121,8 @@ contains
         real, intent(out) :: secs
         integer, intent(out) :: iostat
 
-        character(len=1024) :: tail, timing
+        character(len=2048) :: tail
+        character(len=1024) :: timing
         integer :: test_pos, hash_offset, hash_pos
         integer :: colon_offset, colon_pos, status_pos, status_width
         integer :: time_iostat
@@ -196,7 +198,7 @@ contains
         character(len=*), intent(in) :: text
         character(len=*), intent(out) :: name
 
-        character(len=1024) :: local
+        character(len=2048) :: local
         integer :: padding
 
         local = adjustl(text)
@@ -211,7 +213,8 @@ contains
         character(len=*), intent(out) :: name, status, exit_str, secs_str
         integer, intent(out) :: iostat
 
-        character(len=128) :: name_local, status_local, exit_local
+        character(len=1024) :: name_local
+        character(len=128) :: status_local, exit_local
         character(len=10) :: secs_local
 
         name = ''
