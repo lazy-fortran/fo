@@ -51,6 +51,11 @@ source-dir = "test"
 main = "test_stat_memo.f90"
 
 [[test]]
+name = "test_harness_tmpdir"
+source-dir = "test"
+main = "test_harness_tmpdir.f90"
+
+[[test]]
 name = "test_cmake_named_cli"
 source-dir = "test"
 main = "test_cmake_named_cli.f90"

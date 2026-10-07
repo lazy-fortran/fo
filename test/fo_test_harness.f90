@@ -996,12 +996,23 @@ contains
         character(len=*), intent(in) :: prefix
         character(:), allocatable, intent(out) :: path
         character(kind=c_char), allocatable, target :: pattern(:)
-        character(:), allocatable :: template
+        character(:), allocatable :: template, scratch_root
         integer(c_int) :: rc
         integer :: i, end_at
 
         rc = int(test_os_link_probe(), c_int)
-        template = '/var/tmp/' // trim(prefix) // '-XXXXXX'
+        scratch_root = environment_value('TMPDIR')
+        if (len_trim(scratch_root) == 0) scratch_root = '/var/tmp'
+        scratch_root = trim(scratch_root)
+        do while (len(scratch_root) > 1)
+            if (scratch_root(len(scratch_root):len(scratch_root)) /= '/') exit
+            scratch_root = scratch_root(:len(scratch_root) - 1)
+        end do
+        if (scratch_root == '/') then
+            template = '/' // trim(prefix) // '-XXXXXX'
+        else
+            template = scratch_root // '/' // trim(prefix) // '-XXXXXX'
+        end if
         call encode_c_string(template, pattern)
         rc = c_mkdtemp(pattern)
         if (rc /= 0) then
