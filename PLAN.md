@@ -23,6 +23,13 @@ with `local_gate_green=true`; the owner then stopped. An earlier run of the
 same generation aborted in Fx lease release during parallel warm restoration.
 Fx #57 remains open: focused cache, OpenMP, ASan and TSan stress did not
 reproduce or localize that allocator fault. Revisit it promptly if it recurs.
+Fo #205's JSON-RPC cleanup candidate `b523484` removes duplicate MCP response
+wrappers. Exact driver SHA256
+`7b08451783898b510e090253d0a2cfb0e04dcb18efae37c558ae6f91c6064f7a`
+passed the public MCP request structure case 1/1 and resident session
+`3510542-1791380001-608643440` passed its required case 1/1 on generation
+`4313ebbf80feeb7bc7a545d9b88a1f219e0fa08c1c6214227d6a7d56cf662296`
+with `local_gate_green=true`. Further #205 reduction remains open.
 
 Keep one useful resident Fo Gremlin lane running and develop through it.
 Fo `190d3e8` restores a single expected `.smod` output from the shared action
