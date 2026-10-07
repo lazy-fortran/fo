@@ -65,6 +65,18 @@ generations; the corrected oracle compares the exact pre-commit completion.
 The installed Fo CLI is now the verified current-source binary SHA256
 `d7d033fc5037a3d12c3b151f4653b1b0b24854613cf22e9e32004a0dde7ad425`.
 Existing MCP server processes retain their prior image until client reconnect.
+Fo #155 now skips periodic cache retirement/compaction while a Gremlin owner is
+quiescent. Candidate SHA256
+`9b98635dd592060e586517b749edf32b8af344c1794a2b40c17648e72c05ac8b`
+passed the full public MCP fixture: a populated private cache and receipts
+stayed unchanged for 11 seconds, status/stop remained responsive, and a declared
+edit produced a new green generation. Resident session
+`3791663-1791385285-461712331` passed required `test_gremlin_supervisor`
+1/1 on generation
+`dd1aa807ea061c53198d4812af7a9ecd9dbbbff6fdd1ac3320a99893d2db8d85`
+with `local_gate_green=true`. The initial 30-second case cap was too short;
+the 300-second retry passed. Cross-lane admission and the #145 one-vs-two
+warm-lane measurement remain open.
 
 Keep one useful resident Fo Gremlin lane running and develop through it.
 Fo `190d3e8` restores a single expected `.smod` output from the shared action
