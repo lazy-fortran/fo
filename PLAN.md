@@ -100,6 +100,13 @@ SHA256 `2e0184d10d11a772be5793b4cedbf098b7ad26f4123d64e213052eb1439c5aea`
 passed the two recovery cases plus the #119 summary case 3/3 before main
 integration. #183 stays open for remaining crash-seam and stale-generation
 injection acceptance.
+Fo `5770cf7` routes test-harness scratch through the task's `TMPDIR`, with
+`/var/tmp` fallback and registered cleanup. Its direct private-TMPDIR oracle
+passed 1/1; resident session `3997205-1791389278-854770813` passed its
+required case 1/1 on generation
+`42df2f3809a4c96c96617ccf91317a371f6fe5829939fa4aba8f7dd69589daaf`
+with `local_gate_green=true`. The exact combined main candidate passed the
+same case 1/1 before promotion. Task worktrees and scratch were removed.
 
 Keep one useful resident Fo Gremlin lane running and develop through it.
 Fo `190d3e8` restores a single expected `.smod` output from the shared action
