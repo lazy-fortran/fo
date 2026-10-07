@@ -678,7 +678,6 @@ contains
             backend_test_names, BACKEND_NONE, BACKEND_NATIVE
         use fo_gfortran_build, only: gfortran_named_test_exists
         use fo_scan, only: is_slow_test
-        use fx_dag, only: MAX_NODES
         use fo_test_results, only: test_result_entry_t, parse_test_results, &
             format_test_results_human, format_test_results_json
         character(len=*), intent(in) :: line, id_str, dir, tmpfile
@@ -689,7 +688,7 @@ contains
         character(len=16384) :: human_output
         character(len=16) :: json_mode
         integer :: exitcode
-        character(len=128) :: test_names(MAX_NODES)
+        character(len=:), allocatable :: test_names(:)
         integer :: n_names
         type(test_result_entry_t), allocatable :: entries(:)
         integer :: n_entries, ierr, i, mode_count, mode_error
@@ -753,19 +752,21 @@ contains
     end subroutine handle_backend_test_named
 
     subroutine extract_test_names_from_params(line, names, n_names)
+        use fx_dag, only: MAX_NODES
         character(len=*), intent(in) :: line
-        character(len=128), intent(out) :: names(:)
+        character(len=:), allocatable, intent(out) :: names(:)
         integer, intent(out) :: n_names
 
         character(len=MAX_LINE) :: args_json
         type(json_parser_t) :: parser
         type(json_event_t) :: event, array_event
-        integer :: args_count, ierr
+        integer :: args_count, ierr, max_name_length, name_index
 
         n_names = 0
         call extract_json_member(line, 'args', args_json, args_count, ierr, array_event)
         if (ierr /= 0 .or. args_count /= 1) return
         if (array_event%event_type /= JSON_ARRAY_START) return
+        max_name_length = 0
         call json_parser_init_strict(parser, args_json)
         call json_parser_next(parser, event)
         do
@@ -775,10 +776,27 @@ contains
                 event%event_type == JSON_END_OF_INPUT) exit
             if (event%event_type /= JSON_STRING .or. &
                 .not. allocated(event%string_val)) exit
-            if (n_names < size(names)) then
+            if (n_names < MAX_NODES) then
                 n_names = n_names + 1
-                names(n_names) = event%string_val
+                max_name_length = max(max_name_length, len(event%string_val))
             end if
+        end do
+        if (n_names == 0) return
+        allocate (character(len=max(1, max_name_length)) :: names(n_names))
+
+        call json_parser_init_strict(parser, args_json)
+        call json_parser_next(parser, event)
+        name_index = 0
+        do
+            call json_parser_next(parser, event)
+            if (event%event_type == JSON_ARRAY_END .or. &
+                event%event_type == JSON_ERROR .or. &
+                event%event_type == JSON_END_OF_INPUT) exit
+            if (event%event_type /= JSON_STRING .or. &
+                .not. allocated(event%string_val)) exit
+            name_index = name_index + 1
+            if (name_index > n_names) exit
+            names(name_index) = event%string_val
         end do
     end subroutine extract_test_names_from_params
 

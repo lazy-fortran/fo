@@ -10,8 +10,8 @@ program test_mcp_test_json
     use fo_test_mcp, only: mcp_encode, mcp_request, mcp_call, mcp_quote, mcp_exchange
     implicit none
 
-    integer, parameter :: test_count = 400
-    character(len=128) :: names(test_count)
+    integer, parameter :: test_count = 402
+    character(len=256) :: names(test_count)
     character(:), allocatable :: driver, scratch, cache, input, cmake, name
     character(:), allocatable :: request_args, body, error_message
     type(process_result_t) :: process
@@ -32,11 +32,15 @@ program test_mcp_test_json
     names(398) = 'test_quoted_"name"'
     names(399) = 'test_backslash_\name'
     names(400) = 'test_late_failure'
+    names(401) = 'test_named_'//repeat('p', 140)// &
+        '_selected'
+    names(402) = 'test_named_'//repeat('p', 140)// &
+        '_neighbor'
     cmake = 'cmake_minimum_required(VERSION 3.20)' // new_line('a') // &
         'project(fo_mcp_json_report NONE)' // new_line('a') // 'enable_testing()' // new_line('a')
     do i = 1, test_count
         name = trim(names(i))
-        if (i == test_count) then
+        if (i == 400) then
             cmake = cmake // 'add_test(NAME [=[' // name // &
                 ']=] COMMAND "${CMAKE_COMMAND}" -E false)' // new_line('a')
         else
@@ -59,7 +63,10 @@ program test_mcp_test_json
             ',"json":"full"}'
         call append(mcp_call(2, request_args))
         call append(mcp_call(3, '{"action":"unknown_action"}'))
-        call append(mcp_request(4, 'shutdown'))
+        request_args = '{"action":"test","dir":'//mcp_quote(scratch)// &
+            ',"args":["'//trim(names(401))//'"],"json":"full"}'
+        call append(mcp_call(4, request_args))
+        call append(mcp_request(5, 'shutdown'))
         call mcp_exchange(driver, scratch, cache, input, framed, responses, process)
         call assert_equal_integer(process%exit_code, 0, 'large-report MCP server exits cleanly')
         result_object = json_member(responses(2), 'result')
@@ -102,7 +109,8 @@ program test_mcp_test_json
         end do
         summary = json_member(report, 'summary')
         field = json_member(summary, 'passed')
-        call assert_equal_integer(int(json_number_value(field)), 399, 'report retains 399 passes')
+        call assert_equal_integer(int(json_number_value(field)), 401, &
+            'report retains 401 passes')
         field = json_member(summary, 'failed')
         call assert_equal_integer(int(json_number_value(field)), 1, 'report retains one failure')
         field = json_member(report, 'exit_code')
@@ -111,11 +119,31 @@ program test_mcp_test_json
         field = json_member(result_object, 'code')
         call assert_equal_integer(int(json_number_value(field)), -32602, &
             'unknown action remains invalid-params error')
+
+        result_object = json_member(responses(4), 'result')
+        field = json_member(result_object, 'isError')
+        call assert_true(.not. field%boolean, 'long named CTest request passes')
+        content = json_member(result_object, 'content')
+        first = json_element(content, 1)
+        field = json_member(first, 'text')
+        body = json_string_value(field)
+        call json_parse(body, report, valid, error_message)
+        call assert_true(valid, 'long named MCP result parses as JSON')
+        tests = json_member(report, 'tests')
+        call assert_equal_integer(json_size(tests), 1, &
+            'same-prefix neighbor is excluded from named CTest result')
+        entry = json_element(tests, 1)
+        field = json_member(entry, 'name')
+        call assert_equal_string(json_string_value(field), trim(names(401)), &
+            'MCP preserves the full requested CTest ID')
+        field = json_member(entry, 'status')
+        call assert_equal_string(json_string_value(field), 'pass', &
+            'long named CTest result reports PASS')
     end do
 
     call remove_tree(scratch)
     call finish_assertions()
-    write(*, '(a)') 'mcp-test-json: framed and bare reports preserve 400 entries and escaped names'
+    write(*, '(a)') 'mcp-test-json: 402 results and long named CTest IDs survive MCP'
 
 contains
 
