@@ -24,7 +24,13 @@ two-case resident gate passed 2/2 with zero current failures on generation
 `82d90b21d391ed885856e59c46532416a7dba23ce6d426edbbfcf80dec7082af`.
 Old ambiguous shared roots remain retained until ownership can be established;
 the new namespace bounds prune victims at eight per pass but still scans all
-sidecars. Compact Fx tree roots and automatic cold cache retirement are next.
+sidecars. Old-root migration and automatic cold cache retirement are next.
+Fo `df2a456` now roots each new generation as one canonical Fx tree. Its
+focused manifest oracle passed 1/1: nine child blobs used one durable row and
+a 240-byte isolated lease snapshot; GC preserved the children until release
+and then reclaimed them. Existing global roots still occupy 8,260,961 bytes
+and 107,636 metadata rows, so exact-group migration is required to remove
+their write amplification without discarding live worktree/version ownership.
 Fo `22f6dd3` removed Gremlin's forced `FO_JOBS=1` from candidate builds,
 selected tests and reproduction. In a fresh public Gremlin fixture with
 `FO_JOBS=2`, independent compiler actions overlapped, the dependent source built,
