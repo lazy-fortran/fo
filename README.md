@@ -222,4 +222,4 @@ See [bench/README.md](bench/README.md) for current tooling and limitations.
 
 Architecture details are in [doc/FO.md](doc/FO.md); current implementation
 priorities, honest capability limits and issue ownership are in
-[PLAN.md](PLAN.md) and [ROADMAP.md](ROADMAP.md).
+[PLAN.md](PLAN.md).

@@ -38,8 +38,8 @@ one externally. Repository-internal third-party/performance audits stay under
 
 ## Read first and keep the development loop fast
 
-[PLAN.md](PLAN.md) is the authoritative current provider and execution plan;
-[ROADMAP.md](ROADMAP.md) maps adjacent issue ownership. Read workspace master
+[PLAN.md](PLAN.md) is the authoritative current provider, execution plan and
+issue ownership map. Read workspace master
 PLAN/AGENTS when available and preserve their host restrictions.
 
 Implementation and focused verification are active for Gremlin, shared storage,
