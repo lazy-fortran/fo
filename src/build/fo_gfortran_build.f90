@@ -1377,7 +1377,9 @@ contains
         exitcode = 0
         do i = 1, n_tests
             if (.not. tests(i)%ran) cycle
-            if (tests(i)%exit == 0) then
+            if (tests(i)%flaky) then
+                call append_test_stdout_block(tests(i)%log, log_file, tests(i)%name)
+            else if (tests(i)%exit == 0) then
                 call append_log_file(tests(i)%log, log_file)
             else
                 call append_test_stdout_block(tests(i)%log, log_file, tests(i)%name)
