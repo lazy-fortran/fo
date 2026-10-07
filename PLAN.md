@@ -47,6 +47,15 @@ one-group root compaction at owner start, during idle periods and on stop.
 Against Fx `e236bd0`, Fo's `test_cache`, `test_gremlin_manifest` and
 `test_gremlin_supervisor` passed 3/3. The global old-root population still
 needs a live owner pass and measured post-migration snapshot.
+The installed Fo release SHA256 is
+`8709e137513175f52aaebe87e5456d6d45261c7f2dcb2bb9d220440d139edf3e`.
+Public resident session `533484-1791356967-930118364` built generation
+`386deb0f33dadf48c6d185b43523d594ff270c06216d77ac464d749435e71719`,
+passed `test_cache` with `local_gate_green=true`, and reached quiescence.
+During that run the global cache's compacted old Fo root groups fell from 178
+to 177; the owner then stopped before another heavy lane. The inactive v1
+store (2.7 GB and about 102,000 files) was removed after its old resident
+owner stopped and an open-file check found no active readers.
 Fo `22f6dd3` removed Gremlin's forced `FO_JOBS=1` from candidate builds,
 selected tests and reproduction. In a fresh public Gremlin fixture with
 `FO_JOBS=2`, independent compiler actions overlapped, the dependent source built,
