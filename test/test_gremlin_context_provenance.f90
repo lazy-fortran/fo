@@ -8,7 +8,7 @@ program test_gremlin_context_provenance
     use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_wait_ms
     use fo_test_json, only: json_value_t, json_member
     use fo_test_json, only: json_string_value, json_parse, json_number_value
-    use fo_test_json, only: json_element, json_size
+    use fo_test_json, only: json_element, json_size, json_boolean_value
     use fo_test_gremlin_oracle, only: gremlin_stop_lane
     use fo_generation_manifest, only: generation_manifest_metadata_t, &
         generation_manifest_load
@@ -24,7 +24,7 @@ program test_gremlin_context_provenance
     type(input_inventory_t) :: initial_inventory, inventory, before_inventory
     integer :: baseline, repeat
     type(process_result_t) :: process
-    type(json_value_t) :: report, initial_pass_receipt, retained_pass_receipt
+    type(json_value_t) :: report, before_metadata_pass_receipt, retained_pass_receipt
     integer :: path_length, path_status
 
     interface
@@ -69,7 +69,6 @@ program test_gremlin_context_provenance
     session = field(report, 'session_id')
     call assert_true(len(session) > 0, 'provenance start returns an owner')
     call wait_generation(session, lane, '', generation)
-    call wait_pass_receipt(session, lane, generation, initial_pass_receipt)
     call read_generation_manifest(generation, initial_metadata, initial_inventory)
     call assert_equal_string(initial_metadata%base_commit//new_line('a'), independent_head, &
         'generation base equals independently queried Git HEAD')
@@ -122,6 +121,7 @@ program test_gremlin_context_provenance
     ! A metadata-only commit preserves the execution identity and its original
     ! provenance. A following source edit captures the new Git base and patch.
     before_metadata = metadata
+    call wait_pass_receipt(session, lane, generation, before_metadata_pass_receipt)
     call git_command(project, [character(len=32) :: &
         'git', 'commit', '--allow-empty', '-qm', 'metadata only'])
     call git_command(project, [character(len=32) :: 'git', 'rev-parse', 'HEAD'], independent_head)
@@ -130,12 +130,13 @@ program test_gremlin_context_provenance
     call wait_capture(baseline)
     call assert_equal_string(capture_generation(), generation, &
         'metadata-only commit reuses the execution generation')
-    call find_pass_receipt(session, lane, generation, retained_pass_receipt)
+    call find_pass_receipt(session, lane, generation, retained_pass_receipt, &
+        field(before_metadata_pass_receipt, 'completion_id'))
     call assert_equal_string(field(retained_pass_receipt, 'completion_id'), &
-        field(initial_pass_receipt, 'completion_id'), &
+        field(before_metadata_pass_receipt, 'completion_id'), &
         'metadata-only commit retains the same executable PASS evidence')
     call assert_equal_string(field(retained_pass_receipt, 'log_path'), &
-        field(initial_pass_receipt, 'log_path'), &
+        field(before_metadata_pass_receipt, 'log_path'), &
         'retained PASS evidence still names its original execution log')
     call read_generation_manifest(generation, metadata, inventory)
     call assert_equal_string(metadata%base_commit, before_metadata%base_commit, &
@@ -410,38 +411,63 @@ contains
         call assert_true(.false., 'initial generation produces a PASS receipt')
     end subroutine wait_pass_receipt
 
-    subroutine find_pass_receipt(owner, lane_id, generation_id, receipt)
+    subroutine find_pass_receipt(owner, lane_id, generation_id, receipt, completion_id)
         character(len=*), intent(in) :: owner, lane_id, generation_id
         type(json_value_t), intent(out) :: receipt
-        type(json_value_t) :: status, events, event
+        character(len=*), optional, intent(in) :: completion_id
+        type(json_value_t) :: status, events, event, cursor_value, more_value
         type(string_list_t) :: args
         type(process_result_t) :: result
-        integer :: i
+        integer :: i, page, cursor, next_cursor
+        character(len=32) :: cursor_text
+        logical :: has_more
 
         receipt%kind = 0
-        call list_add(args, 'gremlin')
-        call list_add(args, 'status')
-        call list_add(args, '--detail')
-        call list_add(args, 'full')
-        call list_add(args, '--dir')
-        call list_add(args, project)
-        call list_add(args, '--lane')
-        call list_add(args, lane_id)
-        call list_add(args, '--session')
-        call list_add(args, owner)
-        call list_add(args, '--cursor')
-        call list_add(args, '0')
-        call gremlin_json(driver, project, cache, state, args, status, result, 30000)
-        call assert_true(result%exit_code == 0, 'reads the public Gremlin receipt stream')
-        events = json_member(status, 'events')
-        do i = 1, json_size(events)
-            event = json_element(events, i)
-            if (field(event, 'generation') /= generation_id) cycle
-            if (field(event, 'case_id') /= 'test_provenance') cycle
-            if (field(event, 'status') /= 'PASS') cycle
-            receipt = event
-            return
+        cursor = 0
+        do page = 1, 256
+            args = string_list_t()
+            write(cursor_text, '(i0)') cursor
+            call list_add(args, 'gremlin')
+            call list_add(args, 'status')
+            call list_add(args, '--detail')
+            call list_add(args, 'full')
+            call list_add(args, '--dir')
+            call list_add(args, project)
+            call list_add(args, '--lane')
+            call list_add(args, lane_id)
+            call list_add(args, '--session')
+            call list_add(args, owner)
+            call list_add(args, '--cursor')
+            call list_add(args, trim(cursor_text))
+            call list_add(args, '--max-records')
+            call list_add(args, '32')
+            call gremlin_json(driver, project, cache, state, args, status, result, 30000)
+            call assert_true(result%exit_code == 0, &
+                'reads the public Gremlin receipt stream')
+            events = json_member(status, 'events')
+            do i = 1, json_size(events)
+                event = json_element(events, i)
+                if (field(event, 'generation') /= generation_id) cycle
+                if (field(event, 'case_id') /= 'test_provenance') cycle
+                if (field(event, 'status') /= 'PASS') cycle
+                if (present(completion_id)) then
+                    if (field(event, 'completion_id') /= completion_id) cycle
+                end if
+                receipt = event
+                return
+            end do
+            cursor_value = json_member(status, 'next_cursor')
+            more_value = json_member(status, 'has_more')
+            next_cursor = int(json_number_value(cursor_value))
+            has_more = json_boolean_value(more_value)
+            if (.not. has_more) return
+            if (next_cursor <= cursor) then
+                call assert_true(.false., 'receipt pagination cursor advances')
+                return
+            end if
+            cursor = next_cursor
         end do
+        call assert_true(.false., 'receipt search stays within bounded pagination')
     end subroutine find_pass_receipt
 
     subroutine stop_lane(lane_id, owner)
