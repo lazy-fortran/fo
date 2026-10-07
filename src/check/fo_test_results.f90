@@ -251,9 +251,8 @@ contains
         character(len=*), intent(out) :: status, exit_str, secs_str
         integer, intent(out) :: iostat
 
-        character(len=:), allocatable :: name_local
-        character(len=128) :: status_local, exit_local
-        character(len=10) :: secs_local
+        character(len=:), allocatable :: name_local, status_local, exit_local
+        character(len=:), allocatable :: secs_local
 
         name = ''
         status = ''

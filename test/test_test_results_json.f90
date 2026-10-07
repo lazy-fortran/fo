@@ -7,6 +7,7 @@ program test_test_results_json
     use fo_test_cli, only: resolve_driver, run_fo, parse_json_report
     use fo_test_json, only: json_value_t, json_number, json_member, json_element, json_size
     use fo_test_json, only: json_string_value, json_number_value
+    use fo_test_results, only: test_result_entry_t, parse_test_results
     use fo_test_harness, only: finish_assertions
     implicit none
 
@@ -16,7 +17,8 @@ program test_test_results_json
     type(process_result_t) :: result
     type(string_list_t) :: arguments, environment
     type(json_value_t) :: report, tests, summary, entry, field
-    integer :: i, j, position
+    type(test_result_entry_t), allocatable :: parsed(:)
+    integer :: i, j, position, n_parsed, parse_error
     logical :: seen(name_count)
     real(real64) :: seconds
 
@@ -98,6 +100,12 @@ program test_test_results_json
     field = json_member(report, 'exit_code')
     call assert_true(nint(json_number_value(field)) /= 0, 'JSON report retains nonzero exit code')
     call assert_true(len(result%stdout) > 16384, 'report exceeds the former output limit')
+    call write_text(join_path(scratch, 'malformed-results.log'), &
+        'TEST_RESULT test_ok PASS - 0.00' // new_line('a') // &
+        'TEST_RESULT test_broken' // new_line('a'))
+    call parse_test_results(join_path(scratch, 'malformed-results.log'), &
+        parsed, n_parsed, parse_error)
+    call assert_true(parse_error /= 0, 'malformed result is rejected explicitly')
     call remove_tree(scratch)
     call finish_assertions()
     write(*, '(a,i0,a,i0,a)') 'test-results-json: ', name_count, &
