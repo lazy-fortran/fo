@@ -72,8 +72,10 @@ passed its required case 1/1 on generation
 `6e5d7ae3e2e08cbcc78ed2fb84feac292025743de716cc1e13c318be4c05cedd`
 with `local_gate_green=true`. The first red assertion compared different source
 generations; the corrected oracle compares the exact pre-commit completion.
-The installed Fo CLI is now the verified #155 debug-profile binary SHA256
-`9b98635dd592060e586517b749edf32b8af344c1794a2b40c17648e72c05ac8b`.
+The installed Fo CLI is now the verified combined #155/#119 release binary
+SHA256 `3a6eabb7677d4fefebc5041db5da3459c139fe8dfca5104781c46f5d1ce84138`.
+The exact integrated main candidate passed `test_check` and
+`test_gremlin_summary_request` 2/2 before atomic installation.
 Existing MCP server processes retain their prior image until client reconnect.
 Fo #155 now skips periodic cache retirement/compaction while a Gremlin owner is
 quiescent. Candidate SHA256
