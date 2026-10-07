@@ -89,6 +89,17 @@ edit produced a new green generation. Resident session
 with `local_gate_green=true`. The initial 30-second case cap was too short;
 the 300-second retry passed. Cross-lane admission and the #145 one-vs-two
 warm-lane measurement remain open.
+Fo `3c183da` repairs the durable terminal-receipt recovery seam in both gate
+selection and readiness. The exact pre-merge candidate SHA256
+`db4bf5ca2839ddd9b069fe59ea6ac26391fefe12ce1e5a80cfa234afa9bea448`
+passed the public terminal-receipt and requirement-recovery cases 2/2; its
+resident session `3947508-1791388344-967411682` passed 2/2 on generation
+`360bf77d034ef07d55a0bf2c7343bef9436e97002085841ff8676f70cbde9a69`
+with `local_gate_green=true`. The controller's temporary combined candidate
+SHA256 `2e0184d10d11a772be5793b4cedbf098b7ad26f4123d64e213052eb1439c5aea`
+passed the two recovery cases plus the #119 summary case 3/3 before main
+integration. #183 stays open for remaining crash-seam and stale-generation
+injection acceptance.
 
 Keep one useful resident Fo Gremlin lane running and develop through it.
 Fo `190d3e8` restores a single expected `.smod` output from the shared action
