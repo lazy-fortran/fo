@@ -2,8 +2,7 @@ module fo_mcp
     use fo_util, only: json_bool_text => json_bool, json_int, &
         make_tmpfile, &
         delete_tmpfile, read_text_file, clean_root_build_artifacts, &
-        strip_path_prefix_in_str, jsonrpc_error_fixed => jsonrpc_error, &
-        jsonrpc_null_fixed => jsonrpc_null
+        strip_path_prefix_in_str, jsonrpc_error, jsonrpc_null
     use fx_json_build, only: json_escape_string
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
         json_parser_next, &
@@ -1449,25 +1448,6 @@ contains
         end if
         response = trim(response)//',"pending":'//trim(json_bool_text(pending))//'}}'
     end subroutine make_run_start_response
-
-    subroutine jsonrpc_error(id_str, code, message, response)
-        character(len=*), intent(in) :: id_str, message
-        integer, intent(in) :: code
-        character(len=:), allocatable, intent(out) :: response
-        character(len=len_trim(id_str) + len_trim(message) + 128) :: buffer
-
-        call jsonrpc_error_fixed(id_str, code, message, buffer)
-        response = trim(buffer)
-    end subroutine jsonrpc_error
-
-    subroutine jsonrpc_null(id_str, response)
-        character(len=*), intent(in) :: id_str
-        character(len=:), allocatable, intent(out) :: response
-        character(len=len_trim(id_str) + 64) :: buffer
-
-        call jsonrpc_null_fixed(id_str, buffer)
-        response = trim(buffer)
-    end subroutine jsonrpc_null
 
     subroutine make_tool_text_response(id_str, output_text, exitcode, response)
         character(len=*), intent(in) :: id_str, output_text

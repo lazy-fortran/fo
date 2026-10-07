@@ -216,7 +216,7 @@ contains
     subroutine jsonrpc_error(id_str, code, msg, response)
         character(len=*), intent(in) :: id_str, msg
         integer, intent(in) :: code
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
         character(len=16) :: code_str
 
@@ -234,7 +234,7 @@ contains
 
     subroutine jsonrpc_null(id_str, response)
         character(len=*), intent(in) :: id_str
-        character(len=*), intent(out) :: response
+        character(len=:), allocatable, intent(out) :: response
 
         response = '{"jsonrpc":"2.0","id":'//trim(id_str)//',"result":null}'
     end subroutine jsonrpc_null
