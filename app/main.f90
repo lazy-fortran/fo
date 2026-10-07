@@ -20,7 +20,7 @@ program fo_main
     use fo_check_output, only: check_result_compact_json, &
         check_result_full_json
     use fo_test_results, only: test_result_entry_t, &
-        parse_test_results, format_test_results_human, format_test_results_json
+        parse_test_results, format_test_results_text, format_test_results_json
     use fo_test_random, only: select_random_tests
     use fo_gfortran_build, only: gfortran_selected_test_names, &
         gfortran_named_test_exists
@@ -1492,8 +1492,7 @@ contains
 
         type(test_result_entry_t), allocatable :: entries(:)
         integer :: n_entries, parse_ierr
-        character(len=:), allocatable :: json_output
-        character(len=16384) :: human_output
+        character(len=:), allocatable :: json_output, human_output
         type(diagnostic_t) :: diag
         character(len=4096) :: failed_tests(MAX_TEST_RESULTS)
         integer :: n_failed_tests, i
@@ -1534,7 +1533,7 @@ contains
                     json_output, test_log)
                 write (output_unit, '(a)') trim(json_output)
             else
-                call format_test_results_human(entries, n_entries, test_log, &
+                call format_test_results_text(entries, n_entries, test_log, &
                     summary_mode, human_output)
                 if (len_trim(human_output) > 0) then
                     write (output_unit, '(a)') trim(human_output)

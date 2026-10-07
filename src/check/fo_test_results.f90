@@ -6,6 +6,7 @@ module fo_test_results
     private
     public :: test_result_entry_t, MAX_TEST_RESULTS_ENTRIES
     public :: parse_test_results, format_test_results_human, format_test_results_json
+    public :: format_test_results_text
 
     !! Initial capacity only. The entry buffer grows on demand, so a suite with
     !! more tests than this still reports every result: truncating the list used
@@ -359,13 +360,15 @@ contains
         end do
     end subroutine extract_word
 
-    subroutine format_test_results_human(entries, n_entries, log_file, &
+    subroutine format_test_results_text(entries, n_entries, log_file, &
             summary_mode, output)
+        !! Whole human report. A bounded buffer would drop late failures and the
+        !! summary once diagnostics pass its length, so the result is allocatable.
         type(test_result_entry_t), intent(in) :: entries(:)
         integer, intent(in) :: n_entries
         character(len=*), intent(in) :: log_file
         logical, intent(in) :: summary_mode
-        character(len=*), intent(out) :: output
+        character(len=:), allocatable, intent(out) :: output
 
         integer :: i, n_pass, n_fail, n_skip, n_shown
         real :: total_secs
@@ -416,7 +419,7 @@ contains
 
         if (n_entries == n_shown) then
             call format_summary_line(output, n_pass, n_fail, n_skip, total_secs)
-        else if (n_fail > 0) then
+        else if (n_fail > 0 .or. n_shown > 0) then
             call format_summary_line(output, n_pass, n_fail, n_skip, total_secs)
         else if (n_shown == 0) then
             output = ''
@@ -424,6 +427,23 @@ contains
                 total_secs, 's)'
             output = trim(line)
         end if
+    end subroutine format_test_results_text
+
+    subroutine format_test_results_human(entries, n_entries, log_file, &
+            summary_mode, output)
+        !! Fixed-length form for callers that pass a bounded buffer. Text past
+        !! len(output) is dropped, so new callers use format_test_results_text.
+        type(test_result_entry_t), intent(in) :: entries(:)
+        integer, intent(in) :: n_entries
+        character(len=*), intent(in) :: log_file
+        logical, intent(in) :: summary_mode
+        character(len=*), intent(out) :: output
+
+        character(len=:), allocatable :: text
+
+        call format_test_results_text(entries, n_entries, log_file, &
+            summary_mode, text)
+        output = text
     end subroutine format_test_results_human
 
     subroutine format_single_test_entry(entry, line)
@@ -457,7 +477,7 @@ contains
     end function format_status_field
 
     subroutine format_summary_line(output, n_pass, n_fail, n_skip, total_secs)
-        character(len=*), intent(inout) :: output
+        character(len=:), allocatable, intent(inout) :: output
         integer, intent(in) :: n_pass, n_fail, n_skip
         real, intent(in) :: total_secs
 
