@@ -73,7 +73,7 @@ passed `test_gremlin_reproduce_logs`, `test_gremlin_execution_view` and
 `a43957c5f6e5eed29461f35e14dd36bbd221f0553fa4ff09d3308c7cc9c51402`.
 Nested CLI checks used that candidate, including a normal stop and replay.
 The installed Fo release SHA256 is
-`faa5dd3cc2e53990bb92dff06e37bbe76264b8af1acf00c97c00aea0a8b5589c`;
+`241f780ddfac7240b0f97feb706b73f46b8c7226adb8ee811c27b16290227c37`;
 it includes Fx `fb726d6` with orphan snapshot temp recovery. An exact
 inactivity check removed 166 stopped-session execution views (1.86 GiB) and
 134 unregistered older generation bundles (2.4 GB), preserving active and
@@ -88,7 +88,15 @@ synthetic external-procedure wrappers as link objects. The exact candidate
 passed its direct public CLI regression and resident Fo Gremlin gate 2/2
 (session `983165-1791365594-530815523`, generation `3449c2dbed36564b42cd62f8273e300692d527c2b5e6a39ae388ef46f0565086`).
 The FFC consumer built under this driver after replacing a dead FortFront
-facade import; its focused test gate is running. Full coverage remains open.
+facade import. The final FortFront `8eced2d` consumer gate passed 3/3 in FFC
+generation `f6e57e6851e4441e1e665f34a3ba2866014ef53f6ac02388917fe2946e97a50f`.
+Full FFC coverage remains open.
+Fo `4ded437` removed the duplicate Gremlin `--failure`/`fail_on_failure`
+wait API; callers use `--until failure` or `wait_until=failure` and read the
+JSON result. Direct supervisor/readiness checks passed 119/119 and 49/49;
+the exact candidate passed its resident 2/2 gate in session
+`1104274-1791367525-301056715`, generation
+`46691421f86abe14a3e36084e6cd6427fa32a691cd9e704646538c4eceb97e88`.
 Fo `22f6dd3` removed Gremlin's forced `FO_JOBS=1` from candidate builds,
 selected tests and reproduction. In a fresh public Gremlin fixture with
 `FO_JOBS=2`, independent compiler actions overlapped, the dependent source built,
