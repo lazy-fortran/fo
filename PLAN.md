@@ -15,8 +15,11 @@ logs, uses `/var/tmp` by default, and removes owned read-only scratch trees.
 Its exact candidate driver SHA256 is
 `2eda4f4ac3d7a04f550d43d38123f5fe8937f9a235a0b306a0d2f822eb834254`.
 The focused execution-view, session-state, input-inventory and utility cases
-passed 4/4; the v5 provenance oracle passed separately. Fx global cache GC
-remains gated on live publication and generation-root ownership repairs.
+passed 4/4; the v5 provenance oracle passed separately. Fo `2be13db` gives
+each manifest materialization its own durable Fx root, releases it after a
+safe explicit generation prune, and retries interrupted release. Automatic
+generation retirement still needs atomic register-and-lease admission and
+per-materialization sidecar identity; legacy shared roots remain retained.
 Fo `22f6dd3` removed Gremlin's forced `FO_JOBS=1` from candidate builds,
 selected tests and reproduction. In a fresh public Gremlin fixture with
 `FO_JOBS=2`, independent compiler actions overlapped, the dependent source built,
