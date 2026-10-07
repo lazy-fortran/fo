@@ -47,7 +47,7 @@ one-group root compaction at owner start, during idle periods and on stop.
 Against Fx `e236bd0`, Fo's `test_cache`, `test_gremlin_manifest` and
 `test_gremlin_supervisor` passed 3/3. The global old-root population still
 needs a live owner pass and measured post-migration snapshot.
-The installed Fo release SHA256 is
+The Fo release SHA256 for that compaction gate was
 `8709e137513175f52aaebe87e5456d6d45261c7f2dcb2bb9d220440d139edf3e`.
 Public resident session `533484-1791356967-930118364` built generation
 `386deb0f33dadf48c6d185b43523d594ff270c06216d77ac464d749435e71719`,
@@ -64,7 +64,19 @@ driver SHA256
 passed an isolated FFC consumer gate 1/1 on generation
 `1c5e179f22bf2142262686301dea494430ee1800eebbeb04bb45d5a192eea15b`,
 including the FortFront file whose capture had failed previously. The owner
-stopped, and this driver is installed. Full FFC coverage remains open.
+stopped. Full FFC coverage remains open.
+Fo `c856ff0` now retires inactive execution views after publishing a stopped
+session's durable terminal snapshot, while preserving live views, logs,
+receipts, pinned drivers and captured generations. Its exact candidate gate
+passed `test_gremlin_reproduce_logs`, `test_gremlin_execution_view` and
+`test_gremlin_state` (3/3) on generation
+`a43957c5f6e5eed29461f35e14dd36bbd221f0553fa4ff09d3308c7cc9c51402`.
+Nested CLI checks used that candidate, including a normal stop and replay.
+The currently installed Fo release SHA256 is
+`3510671d89c610075d759861f010e70952783eb19daacc25e294924240ccdd3e`;
+it includes Fx `fb726d6` with orphan snapshot temp recovery. Existing stopped
+session views and unregistered older generation bundles still need one-time
+reclamation after exact inactivity checks.
 Fo `22f6dd3` removed Gremlin's forced `FO_JOBS=1` from candidate builds,
 selected tests and reproduction. In a fresh public Gremlin fixture with
 `FO_JOBS=2`, independent compiler actions overlapped, the dependent source built,
