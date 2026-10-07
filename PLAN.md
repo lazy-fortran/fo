@@ -96,7 +96,7 @@ edit produced a new green generation. Resident session
 1/1 on generation
 `dd1aa807ea061c53198d4812af7a9ecd9dbbbff6fdd1ac3320a99893d2db8d85`
 with `local_gate_green=true`. The initial 30-second case cap was too short;
-the 300-second retry passed. Cross-lane admission remains open.
+the 300-second retry passed. Cross-lane admission was then still open.
 The bounded warm-lane measurement now supports capacity two on this host for
 the measured eight-case fixture with aggregate `FO_JOBS=2`: one lane took
 23.49 seconds, first PASS 3.40 seconds, peak descendant RSS 100.8 MiB and
@@ -104,8 +104,18 @@ process-tree writes 307.1 MiB; two lanes took 13.00 seconds, first PASS
 3.81 seconds, summed lane peak RSS at most 179.7 MiB and process-tree writes
 237.4 MiB. A second timing pair was 23.49/12.71 seconds. Shared-cgroup
 writeback counters were not attributable to these lanes; process-tree writes
-include runner/cache output. Capacity-two admission remains implementation
-work, so the one-heavy-lane host limit still applies.
+include runner/cache output.
+Fo `70b80cb` now admits two concurrent Gremlin heavy lanes only when each
+explicitly sets `FO_JOBS=1`; a default or wider lane holds both slots. The
+process-held host lease covers build, test and manual reproduction. The same
+commit gives back-to-back private execution views distinct names, repairing a
+reproduction failure found by the public three-owner oracle. That oracle
+passed with peak concurrency two, responsive queued status/stop, edit-to-green
+and manual reproduction. Worker direct state/view tests passed 1/1 each and
+resident state was green 1/1. The exact combined-main candidate SHA256
+`a3d0f846f905deccd38a00ea26ea868b014a1a58dcecfdef85c5ce31d7435618`
+passed both direct cases 1/1 and the public three-owner oracle before push.
+Broader #155 quiescence and #166 session recovery goals remain open.
 Fo `3c183da` repairs the durable terminal-receipt recovery seam in both gate
 selection and readiness. The exact pre-merge candidate SHA256
 `db4bf5ca2839ddd9b069fe59ea6ac26391fefe12ce1e5a80cfa234afa9bea448`
