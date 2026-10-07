@@ -54,7 +54,8 @@ module fo_gremlin_supervisor
     use fo_test_budget, only: test_budget_seconds, test_wall_cap_seconds
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_process, only: argv_push, process_cancel_pid, &
-        process_poll_pid, process_start_argv_logged, process_set_async_scope
+        process_poll_pid, process_reap_adopted_scope_zombies, &
+        process_start_argv_logged, process_set_async_scope
     use fo_scan_types, only: MAX_PATH
     use fo_util, only: json_bool, json_int
     use fx_dag, only: dag_t, MAX_NODES
@@ -1317,6 +1318,7 @@ contains
         integer :: owner_pid, i
         integer :: sequence, campaign_seed, campaign_number, test_index
         integer(int64) :: capture_debounce_ms, campaign_started_ms, freshness_ticket
+        integer(int64) :: last_idle_reap_ms, now_ms
         character(len=PATH_LEN) :: freshness_path
         real :: test_timeout
         logical :: have_active, have_candidate, stop_requested, capture_ok
@@ -1339,6 +1341,7 @@ contains
         test_index = 0
         capture_debounce_ms = 0_int64
         campaign_started_ms = 0_int64
+        last_idle_reap_ms = 0_int64
         have_active = .false.
         have_candidate = .false.
         have_active_lease = .false.
@@ -1505,6 +1508,20 @@ contains
 
         do
             if (fatal_error) exit
+            if (build_child%pid <= 0 .and. test_child%pid <= 0) then
+                call clock_milliseconds(now_ms)
+                if (now_ms == 0_int64 .or. &
+                        now_ms - last_idle_reap_ms >= 1000_int64) then
+                    call process_reap_adopted_scope_zombies(ierr)
+                    if (ierr /= 0) then
+                        message = 'cannot reap adopted Gremlin children ('// &
+                            trim(int_text(ierr))//')'
+                        fatal_error = .true.
+                        exit
+                    end if
+                    last_idle_reap_ms = now_ms
+                end if
+            end if
             call gremlin_session_stop_requested(session, stop_requested, ierr, message)
             if (ierr /= 0) then
                 fatal_error = .true.

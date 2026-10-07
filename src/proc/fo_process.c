@@ -2515,12 +2515,11 @@ static int reap_registered_scope_children(const struct async_process *item) {
    reaping a short-lived child; the adopted zombie then has no live launcher or
    async handle. Reap only direct, already-dead children outside this process's
    registered async leaders, whose exit status must remain available to poll. */
-static int reap_adopted_scope_zombies(const struct async_process *item) {
+static int reap_adopted_scope_zombies(void) {
 #ifdef __linux__
     pid_t *pids = NULL;
     size_t count = 0;
     int error;
-    if (item->registry_dir[0] == '\0') return 0;
     error = owned_list_processes(&pids, &count);
     if (error != 0) return error;
     for (size_t i = 0; i < count; i++) {
@@ -2538,9 +2537,29 @@ static int reap_adopted_scope_zombies(const struct async_process *item) {
     free(pids);
     return error;
 #else
-    (void)item;
     return 0;
 #endif
+}
+
+static int reap_current_owner_scope_zombies(int reject_other_owner) {
+    char state_dir[PATH_MAX], owner_start[64];
+    pid_t owner_pid = 0;
+    int error = async_scope_owner(state_dir, sizeof(state_dir), &owner_pid,
+                                  owner_start, sizeof(owner_start));
+    if (error != 0) return error;
+    if (owner_pid != getpid()) return reject_other_owner ? ESTALE : 0;
+#ifdef __linux__
+    {
+        int subreaper = 0;
+        if (prctl(PR_GET_CHILD_SUBREAPER, &subreaper) != 0) return errno;
+        if (!subreaper) return 0;
+    }
+#endif
+    return reap_adopted_scope_zombies();
+}
+
+int fo_c_reap_adopted_scope_zombies(void) {
+    return reap_current_owner_scope_zombies(1);
 }
 
 static void forget_async_process(struct async_process *item) {
@@ -2620,8 +2639,10 @@ static int verify_or_reap_async_leader(struct async_process *item) {
 #endif
     error = reap_registered_scope_children(item);
     if (error != 0) return error;
-    error = reap_adopted_scope_zombies(item);
-    if (error != 0) return error;
+    if (item->registry_dir[0] != '\0') {
+        error = reap_current_owner_scope_zombies(0);
+        if (error != 0) return error;
+    }
     error = observe_async_leader(item);
     if (error != 0) return error;
     if (!item->leader_done && !async_identity_matches(item)) {

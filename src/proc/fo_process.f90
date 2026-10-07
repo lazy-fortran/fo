@@ -7,7 +7,7 @@ module fo_process
     public :: process_scan_sources
     public :: process_has_fortran_source_ext
     public :: process_start_fo_check, process_start_argv_logged
-    public :: process_set_async_scope
+    public :: process_set_async_scope, process_reap_adopted_scope_zombies
     public :: process_poll_pid, process_cancel_pid
     public :: process_run_logged
     public :: process_stderr_is_tty, process_write_stderr
@@ -30,6 +30,12 @@ module fo_process
             integer(c_int), value :: owner_pid
             integer(c_int) :: ierr
         end function fo_c_process_set_async_scope
+
+        function fo_c_reap_adopted_scope_zombies() &
+                bind(C, name='fo_c_reap_adopted_scope_zombies') result(ierr)
+            import :: c_int
+            integer(c_int) :: ierr
+        end function fo_c_reap_adopted_scope_zombies
 
         subroutine fo_c_detect_nproc(nproc) bind(C, name='fo_c_detect_nproc')
             import :: c_int
@@ -174,6 +180,13 @@ contains
             int(owner_pid, c_int), trim(owner_start)//c_null_char)
         exitcode = int(c_exit)
     end subroutine process_set_async_scope
+
+    subroutine process_reap_adopted_scope_zombies(exitcode)
+        !! Reap adopted dead children only in the exact registered scope owner.
+        integer, intent(out) :: exitcode
+
+        exitcode = int(fo_c_reap_adopted_scope_zombies())
+    end subroutine process_reap_adopted_scope_zombies
 
     subroutine process_setenv_default(name, value)
         !! Put `name=value` in the environment unless the user already set it.
