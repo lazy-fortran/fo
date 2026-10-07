@@ -49,6 +49,15 @@ passed its required case 1/1 on generation
 `8e8245fa155c7ad1e369f5274f20d42613008e017c812d18d6bab0885f33d431`
 with `local_gate_green=true`. Fo #119 stays open for distinct `fo check` and
 Gremlin result surfaces that still have fixed name limits.
+Fo #151's exact-driver contract now also has a metadata-only commit receipt
+oracle. It locates the same PASS completion and log after an empty commit on an
+unchanged generation. Exact current-source driver SHA256
+`d7d033fc5037a3d12c3b151f4653b1b0b24854613cf22e9e32004a0dde7ad425`
+passed the direct case 1/1 and resident session `3694000-1791383114-832543212`
+passed its required case 1/1 on generation
+`6e5d7ae3e2e08cbcc78ed2fb84feac292025743de716cc1e13c318be4c05cedd`
+with `local_gate_green=true`. The first red assertion compared different source
+generations; the corrected oracle compares the exact pre-commit completion.
 
 Keep one useful resident Fo Gremlin lane running and develop through it.
 Fo `190d3e8` restores a single expected `.smod` output from the shared action
