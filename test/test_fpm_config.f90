@@ -16,6 +16,7 @@ program test_fpm_config
     call test_reparse_resets_defaults()
     call test_parse_missing_file()
     call test_dotted_dependency_keys()
+    call test_registry_dependency_fields()
     call test_dependency_source_conflicts()
     call test_blas_metapackage()
     call test_source_metapackages()
@@ -275,6 +276,82 @@ contains
         end if
         call execute_command_line('rm -rf '//dir, wait=.true.)
     end subroutine test_dotted_dependency_keys
+
+    subroutine test_registry_dependency_fields()
+        type(fpm_config_t) :: c
+        character(len=512) :: dir
+        integer :: ierr, u, ios, status
+
+        call make_tmpfile('fo-registry-fields', dir)
+        call execute_command_line('mkdir '//trim(dir), exitstat=status)
+        call assert(status == 0, 'registry_fields: fixture directory created')
+        if (status /= 0) return
+
+        open (newunit=u, file=trim(dir)//'/fpm.toml', status='replace', &
+            iostat=ios)
+        if (ios /= 0) then
+            call assert(.false., 'registry_fields: manifest created')
+            return
+        end if
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'pinned.namespace = "demo"'
+        write (u, '(a)') 'pinned.v = "1.2.3"'
+        write (u, '(a)') 'latest.namespace = "demo"'
+        write (u, '(a)') 'inline = { namespace = "other", v = "2.1" }'
+        close (u)
+
+        call fpm_config_parse(trim(dir), c, ierr)
+        call assert(ierr == 0, 'registry_fields: valid registry entries parse')
+        if (ierr == 0) then
+            call assert(c%n_deps == 3, 'registry_fields: three deps retained')
+            call assert(trim(c%deps(1)%namespace) == 'demo' .and. &
+                c%deps(1)%namespace_seen, 'registry_fields: dotted namespace')
+            call assert(trim(c%deps(1)%registry_v) == '1.2.3' .and. &
+                c%deps(1)%registry_v_seen, 'registry_fields: dotted exact v')
+            call assert(trim(c%deps(2)%namespace) == 'demo' .and. &
+                .not. c%deps(2)%registry_v_seen, &
+                'registry_fields: absent v remains distinct from explicit v')
+            call assert(trim(c%deps(3)%namespace) == 'other' .and. &
+                trim(c%deps(3)%registry_v) == '2.1' .and. &
+                c%deps(3)%registry_v_seen, 'registry_fields: inline namespace/v')
+        end if
+
+        open (newunit=u, file=trim(dir)//'/fpm.toml', status='replace', &
+            iostat=ios)
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'wildcard.namespace = "demo"'
+        write (u, '(a)') 'wildcard.v = "*"'
+        close (u)
+        call fpm_config_parse(trim(dir), c, ierr)
+        call assert(ierr /= 0, 'registry_fields: wildcard v rejected')
+        call assert(index(c%dependency_parse_error, 'invalid registry v') > 0, &
+            'registry_fields: wildcard diagnostic identifies invalid v')
+
+        open (newunit=u, file=trim(dir)//'/fpm.toml', status='replace', &
+            iostat=ios)
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') &
+            'path_and_v = { path = "../dep", v = "1.0.0" }'
+        close (u)
+        call fpm_config_parse(trim(dir), c, ierr)
+        call assert(ierr /= 0, 'registry_fields: v with path rejected')
+        call assert(index(c%dependency_parse_error, 'v with path or git') > 0, &
+            'registry_fields: path/v diagnostic identifies conflict')
+
+        open (newunit=u, file=trim(dir)//'/fpm.toml', status='replace', &
+            iostat=ios)
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') &
+            'git_and_v = { git = "https://example.invalid/dep", v = "1.0" }'
+        close (u)
+        call fpm_config_parse(trim(dir), c, ierr)
+        call assert(ierr /= 0, 'registry_fields: v with git rejected')
+
+        open (newunit=u, file=trim(dir)//'/fpm.toml', status='old', iostat=ios)
+        if (ios == 0) close (u, status='delete')
+        call execute_command_line('rmdir '//trim(dir), exitstat=status)
+        call assert(status == 0, 'registry_fields: fixture cleaned')
+    end subroutine test_registry_dependency_fields
 
     subroutine test_dependency_source_conflicts()
         type(fpm_config_t) :: c

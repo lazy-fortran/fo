@@ -32,12 +32,16 @@ module fo_fpm_config
 
     type :: fpm_dep_t
         character(len=256) :: name = ''
+        character(len=256) :: namespace = ''
         character(len=512) :: git = ''
         character(len=128) :: branch = ''
         character(len=128) :: tag = ''
         character(len=:), allocatable :: rev
         character(len=512) :: path = ''
         character(len=32)  :: version = '*'
+        character(len=64) :: registry_v = ''
+        logical :: namespace_seen = .false.
+        logical :: registry_v_seen = .false.
         logical :: path_seen = .false.
         logical :: git_seen = .false.
         logical :: branch_seen = .false.
@@ -473,8 +477,38 @@ contains
         else if (selectors > 0 .and. .not. dep%git_seen) then
             error = '['//section//'] dependency "'//trim(dep%name)// &
                 '" has a Git selector without git'
+        else if (dep%registry_v_seen .and. &
+                (dep%path_seen .or. dep%git_seen)) then
+            error = '['//section//'] dependency "'//trim(dep%name)// &
+                '" cannot have v with path or git'
+        else if (dep%registry_v_seen .and. &
+                .not. valid_registry_version(trim(dep%registry_v))) then
+            error = '['//section//'] dependency "'//trim(dep%name)// &
+                '" has invalid registry v: "'//trim(dep%registry_v)//'"'
         end if
     end subroutine validate_dependency
+
+    pure logical function valid_registry_version(value)
+        character(len=*), intent(in) :: value
+        integer :: i, start, parts, parsed, ios
+
+        valid_registry_version = .false.
+        if (len_trim(value) == 0) return
+        parts = 0
+        start = 1
+        do i = 1, len_trim(value) + 1
+            if (i <= len_trim(value)) then
+                if (value(i:i) /= '.') cycle
+            end if
+            if (i == start .or. parts >= 3) return
+            if (verify(value(start:i - 1), '0123456789') /= 0) return
+            read (value(start:i - 1), *, iostat=ios) parsed
+            if (ios /= 0) return
+            parts = parts + 1
+            start = i + 1
+        end do
+        valid_registry_version = parts > 0
+    end function valid_registry_version
 
     subroutine parse_top_level(key, val, config)
         character(len=*), intent(in) :: key, val
@@ -784,6 +818,12 @@ contains
             deps(found)%path = trim(str_val)
         case ('version')
             deps(found)%version = trim(str_val)
+        case ('namespace')
+            deps(found)%namespace_seen = .true.
+            deps(found)%namespace = trim(str_val)
+        case ('v')
+            deps(found)%registry_v_seen = .true.
+            deps(found)%registry_v = trim(str_val)
         end select
     end subroutine parse_dep_entry
 
@@ -826,6 +866,12 @@ contains
                 case ('path')
                     dep%path_seen = .true.
                     dep%path = trim(str_val)
+                case ('namespace')
+                    dep%namespace_seen = .true.
+                    dep%namespace = trim(str_val)
+                case ('v')
+                    dep%registry_v_seen = .true.
+                    dep%registry_v = trim(str_val)
                 end select
             end do
         else
