@@ -446,14 +446,13 @@ contains
         type(gremlin_readiness_input_t) :: input
         type(journal_record_t), allocatable :: records(:)
         character(len=HASH_LEN) :: active_id, candidate_id, receipt_generation
-        character(len=HASH_LEN) :: receipt_requirement
         character(len=NAME_LEN) :: status_name, case_id, raw
-        character(len=PATH_LEN) :: journal_path
+        character(len=PATH_LEN) :: journal_path, campaign_state_dir
         character(len=NAME_LEN) :: gate_cases(MAX_NODES)
         character(len=NAME_LEN) :: gate_pass_cases(MAX_NODES)
         integer(int64) :: cursor, next_cursor
-        integer :: journal_status, i, ios, gate_count, gate_passed
-        logical :: build_passed, gate_failure, gate_required, passed
+        integer :: journal_status, i, ios, gate_count, gate_passed, journal_index
+        logical :: build_passed, gate_failure, gate_required, passed, journal_exists
 
         ierr = 0
         message = ''
@@ -546,62 +545,71 @@ contains
         call gremlin_get_session_journal_path(trim(session%project_key), &
             trim(session%lane_id), trim(session%session_id), journal_path, ierr, message)
         if (ierr /= 0) return
-        do
-            call journal_read_page(trim(journal_path), cursor, 64, &
-                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, next_cursor, &
-                journal_status, message)
-            if (journal_status /= JOURNAL_OK) then
-                ierr = journal_status
-                return
+        do journal_index = 1, 2
+            if (journal_index == 2) then
+                call gremlin_session_state_dir(trim(session%project_key), &
+                    trim(session%lane_id), campaign_state_dir, ierr, message)
+                if (ierr /= 0) return
+                journal_path = trim(campaign_state_dir)//'/campaign-journal.jsonl'
+                inquire(file=trim(journal_path), exist=journal_exists)
+                if (.not. journal_exists) cycle
             end if
-            if (size(records) == 0) exit
-            do i = 1, size(records)
-                receipt_generation = ''
-                case_id = ''
-                status_name = ''
-                raw = ''
-                call gremlin_json_field(records(i)%json, 'generation', receipt_generation)
-                call gremlin_json_field(records(i)%json, 'case_id', case_id)
-                call gremlin_json_field(records(i)%json, 'status', status_name)
-                if (trim(receipt_generation) == trim(candidate_id) .and. &
-                    trim(case_id) == '<build>' .and. &
-                    status_is_failure(trim(status_name))) input%failure_observed = .true.
-                if (trim(receipt_generation) /= trim(active_id)) cycle
-                if (trim(case_id) == '<build>' .and. trim(status_name) == 'BUILD_PASS') &
-                    build_passed = .true.
-                if (status_is_failure(trim(status_name))) then
-                    gate_failure = .true.
-                    input%failure_observed = .true.
+            cursor = 0_int64
+            do
+                call journal_read_page(trim(journal_path), cursor, 64, &
+                    int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, &
+                    next_cursor, journal_status, message)
+                if (journal_status /= JOURNAL_OK) then
+                    ierr = journal_status
+                    return
                 end if
-                call gremlin_json_field(records(i)%json, 'gate_required', raw)
-                receipt_requirement = ''
-                call gremlin_json_field(records(i)%json, 'requirement_digest', &
-                    receipt_requirement)
-                gate_required = trim(raw) == 'true' .and. &
-                    receipt_requirement == input%requirement_digest
-                passed = trim(status_name) == 'PASS'
-                if (gate_required .and. len_trim(case_id) > 0) then
-                    if (.not. any(gate_cases(:gate_count) == trim(case_id))) then
-                        if (gate_count < size(gate_cases)) then
-                            gate_count = gate_count + 1
-                            gate_cases(gate_count) = trim(case_id)
+                if (size(records) == 0) exit
+                do i = 1, size(records)
+                    receipt_generation = ''
+                    case_id = ''
+                    status_name = ''
+                    raw = ''
+                    call gremlin_json_field(records(i)%json, 'generation', &
+                        receipt_generation)
+                    call gremlin_json_field(records(i)%json, 'case_id', case_id)
+                    call gremlin_json_field(records(i)%json, 'status', status_name)
+                    if (trim(receipt_generation) == trim(candidate_id) .and. &
+                        trim(case_id) == '<build>' .and. &
+                        status_is_failure(trim(status_name))) &
+                        input%failure_observed = .true.
+                    if (trim(receipt_generation) /= trim(active_id)) cycle
+                    if (trim(case_id) == '<build>' .and. &
+                        trim(status_name) == 'BUILD_PASS') build_passed = .true.
+                    if (status_is_failure(trim(status_name))) then
+                        gate_failure = .true.
+                        input%failure_observed = .true.
+                    end if
+                    gate_required = gate_receipt_matches(records(i)%json, active_id, &
+                        input%requirement_digest, case_id, status_name)
+                    passed = trim(status_name) == 'PASS'
+                    if (gate_required .and. len_trim(case_id) > 0) then
+                        if (.not. any(gate_cases(:gate_count) == trim(case_id))) then
+                            if (gate_count < size(gate_cases)) then
+                                gate_count = gate_count + 1
+                                gate_cases(gate_count) = trim(case_id)
+                            end if
+                        end if
+                        if (passed .and. .not. any( &
+                            gate_pass_cases(:gate_passed) == trim(case_id))) then
+                            if (gate_passed < size(gate_cases)) then
+                                gate_passed = gate_passed + 1
+                                gate_pass_cases(gate_passed) = trim(case_id)
+                            end if
                         end if
                     end if
-                    if (passed .and. .not. any( &
-                        gate_pass_cases(:gate_passed) == trim(case_id))) then
-                        if (gate_passed < size(gate_cases)) then
-                            gate_passed = gate_passed + 1
-                            gate_pass_cases(gate_passed) = trim(case_id)
-                        end if
-                    end if
+                end do
+                if (next_cursor <= cursor) then
+                    ierr = JOURNAL_INVALID
+                    message = 'Gremlin receipt cursor did not advance during readiness'
+                    return
                 end if
+                cursor = next_cursor
             end do
-            if (next_cursor <= cursor) then
-                ierr = JOURNAL_INVALID
-                message = 'Gremlin receipt cursor did not advance while computing readiness'
-                return
-            end if
-            cursor = next_cursor
         end do
         input%exact_active_generation = input%exact_active_generation .and. build_passed
         input%capture_fresh = input%exact_active_generation .and. .not. input%dirty
@@ -2570,54 +2578,30 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
-        type(journal_record_t), allocatable :: records(:)
         character(len=NAME_LEN) :: pending(MAX_NODES)
-        character(len=HASH_LEN) :: receipt_generation, requirement
-        character(len=NAME_LEN) :: case_name
-        character(len=PATH_LEN) :: journal_path
-        character(len=16) :: outcome, gate_required
+        character(len=PATH_LEN) :: journal_path, campaign_state_dir
         logical :: attempted(MAX_NODES)
-        integer(int64) :: cursor, next_cursor
-        integer :: i, j, n_pending
+        integer :: i, n_pending
 
         ! Coverage may already be complete when a frozen generation is reused
-        ! with a different gate. Only actual receipts can discharge that gate.
+        ! with a different gate. Durable campaign receipts precede lane receipts,
+        ! so both ledgers can discharge a matching gate after owner loss.
         attempted = .false.
-        cursor = 0_int64
         ierr = 0
         message = ''
         call gremlin_get_session_journal_path(session%project_key, request%lane_id, &
             session%session_id, journal_path, ierr, message)
         if (ierr /= 0) return
-        do
-            call journal_read_page(trim(journal_path), cursor, 64, &
-                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, next_cursor, &
-                ierr, message)
-            if (ierr /= JOURNAL_OK) return
-            if (size(records) == 0) exit
-            do i = 1, size(records)
-                call gremlin_json_field(records(i)%json, 'generation', &
-                    receipt_generation)
-                if (trim(receipt_generation) /= trim(generation)) cycle
-                call gremlin_json_field(records(i)%json, 'requirement_digest', &
-                    requirement)
-                if (requirement /= request%requirement_digest) cycle
-                call gremlin_json_field(records(i)%json, 'gate_required', gate_required)
-                if (trim(gate_required) /= 'true') cycle
-                call gremlin_json_field(records(i)%json, 'status', outcome)
-                if (outcome /= 'PASS' .and. .not. status_is_failure(outcome)) cycle
-                call gremlin_json_field(records(i)%json, 'case_id', case_name)
-                do j = 1, request%gate_required_count
-                    if (case_name == request%gate_cases(j)) attempted(j) = .true.
-                end do
-            end do
-            if (next_cursor <= cursor) then
-                ierr = JOURNAL_INVALID
-                message = 'Gremlin receipt cursor did not advance during gate selection'
-                return
-            end if
-            cursor = next_cursor
-        end do
+        call mark_gate_receipts(journal_path, generation, request, attempted, ierr, &
+            message)
+        if (ierr /= JOURNAL_OK) return
+        call gremlin_session_state_dir(trim(session%project_key), &
+            trim(request%lane_id), campaign_state_dir, ierr, message)
+        if (ierr /= 0) return
+        journal_path = trim(campaign_state_dir)//'/campaign-journal.jsonl'
+        call mark_gate_receipts(journal_path, generation, request, attempted, ierr, &
+            message)
+        if (ierr /= JOURNAL_OK) return
         pending = ''
         n_pending = 0
         do i = 1, request%gate_required_count
@@ -2632,6 +2616,69 @@ contains
         selected = ''
         selected(:n_selected) = pending(:n_selected)
     end subroutine select_missing_gate_cases
+
+    subroutine mark_gate_receipts(path, generation, request, attempted, ierr, message)
+        character(len=*), intent(in) :: path, generation
+        type(gremlin_request_t), intent(in) :: request
+        logical, intent(inout) :: attempted(:)
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        type(journal_record_t), allocatable :: records(:)
+        character(len=NAME_LEN) :: case_name
+        character(len=16) :: outcome
+        integer(int64) :: cursor, next_cursor
+        integer :: i, j
+        logical :: accepted
+        logical :: exists
+
+        cursor = 0_int64
+        ierr = JOURNAL_OK
+        message = ''
+        inquire(file=trim(path), exist=exists)
+        if (.not. exists) return
+        do
+            call journal_read_page(trim(path), cursor, 64, &
+                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, next_cursor, &
+                ierr, message)
+            if (ierr /= JOURNAL_OK) return
+            if (size(records) == 0) exit
+            do i = 1, size(records)
+                accepted = gate_receipt_matches(records(i)%json, generation, &
+                    request%requirement_digest, case_name, outcome)
+                if (.not. accepted) cycle
+                do j = 1, request%gate_required_count
+                    if (case_name == request%gate_cases(j)) attempted(j) = .true.
+                end do
+            end do
+            if (next_cursor <= cursor) then
+                ierr = JOURNAL_INVALID
+                message = 'Gremlin receipt cursor did not advance during gate selection'
+                return
+            end if
+            cursor = next_cursor
+        end do
+    end subroutine mark_gate_receipts
+
+    logical function gate_receipt_matches(record, generation, requirement, case_name, &
+            outcome)
+        character(len=*), intent(in) :: record, generation, requirement
+        character(len=*), intent(out) :: case_name, outcome
+        character(len=HASH_LEN) :: receipt_generation, receipt_requirement
+        character(len=16) :: gate_required
+
+        case_name = ''
+        outcome = ''
+        call gremlin_json_field(record, 'generation', receipt_generation)
+        call gremlin_json_field(record, 'requirement_digest', receipt_requirement)
+        call gremlin_json_field(record, 'gate_required', gate_required)
+        call gremlin_json_field(record, 'case_id', case_name)
+        call gremlin_json_field(record, 'status', outcome)
+        gate_receipt_matches = trim(receipt_generation) == trim(generation) .and. &
+            trim(receipt_requirement) == trim(requirement) .and. &
+            trim(gate_required) == 'true' .and. len_trim(case_name) > 0 .and. &
+            (trim(outcome) == 'PASS' .or. status_is_failure(trim(outcome)))
+    end function gate_receipt_matches
 
     subroutine append_priority_names(source, n_source, destination, n_destination)
         character(len=*), intent(in) :: source(:)

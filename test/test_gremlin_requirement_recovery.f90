@@ -124,6 +124,8 @@ contains
         arguments = string_list_t()
         call list_add(arguments, 'gremlin')
         call list_add(arguments, 'wait')
+        call list_add(arguments, '--detail')
+        call list_add(arguments, 'full')
         call list_add(arguments, '--dir')
         call list_add(arguments, project)
         call list_add(arguments, '--lane')

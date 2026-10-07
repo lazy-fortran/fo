@@ -217,6 +217,11 @@ name = "test_gremlin_focused_edit"
 source-dir = "test"
 main = "test_gremlin_focused_edit.f90"
 
+[[test]]
+name = "test_gremlin_terminal_receipt_recovery"
+source-dir = "test"
+main = "test_gremlin_terminal_receipt_recovery.f90"
+
 # Containment oracles include several bounded TERM/KILL grace periods.
 # Mark them slow so focused `fo test --all NAME` uses the slow-test budget
 # on Darwin, where live child CPU accounting is unavailable.
