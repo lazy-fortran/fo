@@ -51,6 +51,10 @@ isolated luna workers; serial mode stays in the main session. After two
 substantive failed attempts on one task, freeze its evidence and transfer only
 that task to Sol, following the current workspace skill/instructions.
 `fo work` is abandoned; do not recreate an agent or CI scheduler inside fo.
+After a task is integrated or cancelled, its controller stops owned processes,
+checks that its linked worktree has no live users, and removes that worktree
+promptly. Keep primary checkouts and active workers; do not retain completed
+worktrees merely for their generated build directories.
 
 For lazy-fortran, push small exact integrated increments to main after their
 focused local correctness gate passes and no known current regression remains.
@@ -135,6 +139,10 @@ scratch. Each running process leases the exact project build outputs and declare
 assets it needs. Cancellation
 and cleanup touch only proven-owned state; no broad pkill or shared-cache purge.
 Keep documented platform containment limits honest.
+Run Fo and test fixtures with a task-private TMPDIR under /var/tmp. Bound
+temporary directory count and size, clean owned scratch after completion or a
+confirmed dead owner, and report failed recursive cleanup. An abnormal inode
+burst is a tool defect to repair at its producer, not routine cache retention.
 
 Dogfood a bounded resident lane when supported storage/execution contracts make
 it safe. Shared admission bounds total nested work; coding-worker count must not
