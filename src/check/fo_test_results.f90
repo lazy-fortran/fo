@@ -216,40 +216,64 @@ contains
         character(len=*), intent(out) :: status
         integer, intent(out) :: pos, width
 
+        character(len=:), allocatable :: status_text
+        integer :: padding_pos, local_pos, local_width
+
         status = ''
-        pos = index(text, '***Failed')
-        width = len('***Failed')
-        if (pos > 0) then
+        pos = 0
+        width = 0
+        padding_pos = index(text, '...', back=.true.)
+        if (padding_pos == 0) return
+        if (padding_pos + 3 > len(text)) return
+        status_text = text(padding_pos + 3:)
+
+        local_pos = index(status_text, '***Failed')
+        local_width = len('***Failed')
+        if (local_pos > 0) then
             status = 'FAIL'
+            pos = padding_pos + 2 + local_pos
+            width = local_width
             return
         end if
-        pos = index(text, '***Exception')
-        width = len('***Exception')
-        if (pos > 0) then
+        local_pos = index(status_text, '***Exception')
+        local_width = len('***Exception')
+        if (local_pos > 0) then
             status = 'FAIL'
+            pos = padding_pos + 2 + local_pos
+            width = local_width
             return
         end if
-        pos = index(text, '***Timeout')
-        width = len('***Timeout')
-        if (pos > 0) then
+        local_pos = index(status_text, '***Timeout')
+        local_width = len('***Timeout')
+        if (local_pos > 0) then
             status = 'TIMEOUT'
+            pos = padding_pos + 2 + local_pos
+            width = local_width
             return
         end if
-        pos = index(text, 'Passed')
-        width = len('Passed')
-        if (pos > 0) then
+        local_pos = index(status_text, 'Passed')
+        local_width = len('Passed')
+        if (local_pos > 0) then
             status = 'PASS'
+            pos = padding_pos + 2 + local_pos
+            width = local_width
             return
         end if
-        pos = index(text, 'Not Run')
-        width = len('Not Run')
-        if (pos > 0) then
+        local_pos = index(status_text, 'Not Run')
+        local_width = len('Not Run')
+        if (local_pos > 0) then
             status = 'SKIP'
+            pos = padding_pos + 2 + local_pos
+            width = local_width
             return
         end if
-        pos = index(text, 'Skipped')
-        width = len('Skipped')
-        if (pos > 0) status = 'SKIP'
+        local_pos = index(status_text, 'Skipped')
+        local_width = len('Skipped')
+        if (local_pos > 0) then
+            status = 'SKIP'
+            pos = padding_pos + 2 + local_pos
+            width = local_width
+        end if
     end subroutine find_ctest_status
 
     subroutine extract_ctest_name(text, name)

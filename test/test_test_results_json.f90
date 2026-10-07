@@ -112,6 +112,25 @@ program test_test_results_json
         parsed, n_parsed, parse_error)
     call assert_true(parse_error /= 0, &
         'malformed CTest result is rejected instead of silently omitted')
+    call write_text(join_path(scratch, 'status-words-in-names.log'), &
+        '1/3 Test #1: test_Passed_word ... Passed 0.01 sec'//new_line('a')// &
+        '2/3 Test #2: test_Skipped_word ... Skipped 0.02 sec'//new_line('a')// &
+        '3/3 Test #3: test_Not_Run_word ... Not Run 0.00 sec'//new_line('a'))
+    call parse_test_results(join_path(scratch, 'status-words-in-names.log'), &
+        parsed, n_parsed, parse_error)
+    call assert_equal_integer(parse_error, 0, 'CTest status-word names parse')
+    call assert_equal_integer(n_parsed, 3, 'all CTest status-word names remain')
+    if (n_parsed >= 3) then
+        call assert_equal_string(parsed(1)%name, 'test_Passed_word', &
+            'Passed in a test name is not treated as its status')
+        call assert_equal_string(parsed(1)%status, 'PASS', 'CTest pass status')
+        call assert_equal_string(parsed(2)%name, 'test_Skipped_word', &
+            'Skipped in a test name is not treated as its status')
+        call assert_equal_string(parsed(2)%status, 'SKIP', 'CTest skipped status')
+        call assert_equal_string(parsed(3)%name, 'test_Not_Run_word', &
+            'Not Run in a test name is not treated as its status')
+        call assert_equal_string(parsed(3)%status, 'SKIP', 'CTest not-run status')
+    end if
     call remove_tree(scratch)
     call finish_assertions()
     write(*, '(a,i0,a,i0,a)') 'test-results-json: ', name_count, &
