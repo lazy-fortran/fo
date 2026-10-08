@@ -1509,6 +1509,7 @@ contains
             else
                 write (error_unit, '(a)') 'fo: could not parse test results'
             end if
+            call process_exit(1)
             return
         end if
 

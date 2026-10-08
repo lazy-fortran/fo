@@ -27,6 +27,7 @@ program test_test_results_json
     call resolve_driver(driver)
     call make_scratch('fo-test-json', scratch)
     call list_add(environment, 'FO_TEST_TIMEOUT=120')
+    call list_add(environment, 'TMPDIR='//scratch)
     do i = 1, 397
         names(i) = 'test_report_' // integer_text(i)
     end do
@@ -174,6 +175,7 @@ program test_test_results_json
     call assert_equal_string(json_string_value(field), test_name, &
         'failure without executed tests preserves the complete raw diagnostic log')
     call test_public_compilation_failure()
+    call test_public_malformed_ctest_record()
     call write_text(join_path(scratch, 'malformed-ctest-results.log'), &
         '1/1 Test #1: test_missing_status'//new_line('a'))
     call parse_test_results(join_path(scratch, 'malformed-ctest-results.log'), &
@@ -225,6 +227,39 @@ program test_test_results_json
         ' complete entries, ', len(result%stdout), ' bytes; failure and escapes preserved'
 
 contains
+
+    subroutine test_public_malformed_ctest_record()
+        type(process_result_t) :: malformed_result
+        type(string_list_t) :: malformed_arguments
+        type(json_value_t) :: malformed_report, malformed_field
+
+        call write_text(join_path(scratch, 'malformed-result.cmake'), &
+            'message("1/1 Test #1: malformed_duration ... Passed NaN sec")'// &
+            new_line('a')//'message(FATAL_ERROR "malformed record oracle")')
+        call write_text(join_path(scratch, 'CMakeLists.txt'), cmake// &
+            'add_test(NAME malformed_ctest_record COMMAND "${CMAKE_COMMAND}"'// &
+            ' -P "${CMAKE_CURRENT_SOURCE_DIR}/malformed-result.cmake")'//new_line('a'))
+        call list_add(malformed_arguments, 'test')
+        call list_add(malformed_arguments, '--json')
+        call list_add(malformed_arguments, 'malformed_ctest_record')
+        call run_fo(driver, malformed_arguments, scratch, &
+            join_path(scratch, 'fo-cache'), malformed_result, environment)
+        call assert_equal_integer(malformed_result%term_signal, 0, &
+            'CLI malformed CTest result exits normally')
+        call assert_equal_integer(malformed_result%exit_code, 1, &
+            'CLI malformed CTest result exits nonzero')
+        call parse_json_report(malformed_result, malformed_report, &
+            'CLI malformed CTest result produces valid error JSON')
+        malformed_field = json_member(malformed_report, 'tests')
+        call assert_equal_integer(json_size(malformed_field), 0, &
+            'CLI malformed results do not claim executed verdicts')
+        malformed_field = json_member(malformed_report, 'error')
+        call assert_equal_string(json_string_value(malformed_field), &
+            'could not parse test results', 'CLI identifies malformed result input')
+        malformed_field = json_member(malformed_report, 'exit_code')
+        call assert_equal_integer(int(json_number_value(malformed_field)), 1, &
+            'CLI malformed result JSON retains its failure status')
+    end subroutine test_public_malformed_ctest_record
 
     subroutine test_public_compilation_failure()
         character(len=:), allocatable :: project
