@@ -1530,10 +1530,7 @@ contains
             call format_test_results_json(entries, n_entries, exitcode, &
                 json_output, test_log)
             write (output_unit, '(a)') trim(json_output)
-            return
-        end if
-
-        if (n_entries > 0) then
+        else if (n_entries > 0) then
             call format_test_results_text(entries, n_entries, test_log, &
                 summary_mode, human_output)
             if (len_trim(human_output) > 0) then
