@@ -2,6 +2,8 @@ module fo_gremlin_context
     use, intrinsic :: iso_fortran_env, only: int64, dp => real64
     use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_cache, only: HASH_LEN, cache_digest
+    use fo_build_backend, only: backend_t, detect_backend, BACKEND_CMAKE
+    use fo_cmake_generation, only: cmake_capture_inventory, cmake_capture_cleanup
     use fo_fpm_config, only: DEP_PATH, DEP_REGISTRY, fpm_config_t, fpm_config_parse, dep_kind
     use fo_dep_update, only: dep_acquire_sources
     use fo_dep_resolve, only: normalize_path, resolve_dev_dep_srcs, &
@@ -38,15 +40,19 @@ contains
         character(len=*), intent(out) :: message
         type(change_watch_t), intent(inout), optional :: change_watch
 
+        type(backend_t) :: backend
         type(generation_context_t) :: context
         type(input_inventory_t) :: input_inventory
         type(input_declaration_t), allocatable :: declarations(:)
         character(len=PATH_LEN) :: cas_root
         character(len=PATH_LEN) :: watch_message
-        integer :: ierr
+        integer :: ierr, cleanup_status
 
         registration_error = 0
-        call dep_acquire_sources(project_dir, ierr)
+        backend = detect_backend(project_dir)
+        ierr = 0
+        if (backend%kind /= BACKEND_CMAKE) &
+            call dep_acquire_sources(project_dir, ierr)
         if (ierr /= 0) then
             message = 'cannot resolve declared dependencies before capture'
             registration_error = ierr
@@ -58,17 +64,26 @@ contains
             ok = .false.
             return
         end if
-        call input_inventory_declarations_from_config(project_dir, declarations, &
-            ierr, message)
+        if (backend%kind == BACKEND_CMAKE) then
+            call cmake_capture_inventory(backend, input_inventory, ierr, message)
+        else
+            call input_inventory_declarations_from_config(project_dir, declarations, &
+                ierr, message)
+            if (ierr /= 0) then
+                registration_error = ierr
+                ok = .false.
+                return
+            end if
+            call input_inventory_discover(project_dir, declarations, input_inventory, &
+                ierr, message)
+            if (ierr /= 0 .or. .not. input_inventory%valid) then
+                registration_error = max(1, ierr)
+                ok = .false.
+                return
+            end if
+        end if
         if (ierr /= 0) then
             registration_error = ierr
-            ok = .false.
-            return
-        end if
-        call input_inventory_discover(project_dir, declarations, input_inventory, &
-            ierr, message)
-        if (ierr /= 0 .or. .not. input_inventory%valid) then
-            registration_error = max(1, ierr)
             ok = .false.
             return
         end if
@@ -86,7 +101,7 @@ contains
                 return
             end if
         end if
-        if (present(change_watch)) then
+        if (present(change_watch) .and. backend%kind /= BACKEND_CMAKE) then
             call watch_registry_versions(change_watch, project_dir, ierr, watch_message)
             if (ierr /= 0) then
                 ok = .false.
@@ -103,6 +118,13 @@ contains
         call generation_capture(project_dir, trim(cas_root), context, generation, &
             ierr, message)
         ok = ierr == 0
+        if (backend%kind == BACKEND_CMAKE) then
+            call cmake_capture_cleanup(context%input_inventory, cleanup_status)
+            if (cleanup_status /= 0) then
+                ok = .false.
+                message = 'cannot clean owned CMake capture metadata'
+            end if
+        end if
         if (.not. ok) return
         call generation_inventory_restore(generation, ierr, watch_message)
         ! Inventory failure does not invalidate immutable source/build evidence.
@@ -269,6 +291,7 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
+        type(backend_t) :: backend
         type(fpm_config_t), allocatable :: config
         type(generation_input_t), allocatable :: inputs(:)
         type(resolved_src_t) :: resolved_dev_deps(MAX_RESOLVED)
@@ -293,84 +316,99 @@ contains
         context%environment = ''
         context%base_commit = ''
         context%patch_digest = ''
-        allocate (config)
-        call fpm_config_parse(project_dir, config, ierr)
-        if (ierr /= 0) then
-            message = 'cannot parse fpm.toml for generation inputs'
-            return
-        end if
-        call resolve_dev_dep_srcs(project_dir, resolved_dev_deps, &
-            n_resolved_dev, resolve_status)
-        if (resolve_status /= 0) n_resolved_dev = 0
-        call resolve_dep_srcs(project_dir, resolved_deps, n_resolved, &
-            n_unresolved, ierr)
-        if (ierr /= 0) return
-        n_inputs = count(resolved_deps(:n_resolved)%kind == DEP_REGISTRY)
-        do i = 1, config%n_deps
-            if (dep_kind(config%deps(i)) == DEP_PATH) n_inputs = n_inputs + 1
-        end do
-        do i = 1, config%n_dev_deps
-            if (dep_kind(config%dev_deps(i)) == DEP_PATH) n_inputs = n_inputs + 1
-        end do
-        do i = 1, n_resolved_dev
-            if (dev_dependency_is_path(config, &
-                    trim(resolved_dev_deps(i)%name))) cycle
-            inquire(file=trim(resolved_dev_deps(i)%dir)//'/fpm.toml', exist=exists)
-            if (exists) n_inputs = n_inputs + 1
-        end do
-        allocate (inputs(n_inputs))
-        n_inputs = 0
-        do i = 1, n_resolved
-            if (resolved_deps(i)%kind /= DEP_REGISTRY) cycle
-            n_inputs = n_inputs + 1
-            inputs(n_inputs)%label = 'dependency:'//trim(resolved_deps(i)%name)
-            inputs(n_inputs)%source_root = trim(resolved_deps(i)%dir)
-            context%environment = context%environment//'registry:'// &
-                trim(resolved_deps(i)%name)//'='//trim(resolved_deps(i)%dir)//';'
-            inputs(n_inputs)%destination = 'build/dependencies/'// &
-                trim(resolved_deps(i)%name)
-        end do
-        do i = 1, config%n_deps
-            if (dep_kind(config%deps(i)) /= DEP_PATH) cycle
-            call append_path_dependency(project_dir, config%deps(i)%path, &
-                config%deps(i)%name, inputs, n_inputs, ierr, message)
-            if (ierr /= 0) return
-        end do
-        do i = 1, config%n_dev_deps
-            if (dep_kind(config%dev_deps(i)) /= DEP_PATH) cycle
-            call append_path_dependency(project_dir, config%dev_deps(i)%path, &
-                config%dev_deps(i)%name, inputs, n_inputs, ierr, message)
-            if (ierr /= 0) return
-        end do
-        do i = 1, n_resolved_dev
-            if (dev_dependency_is_path(config, &
-                    trim(resolved_dev_deps(i)%name))) cycle
-            inquire(file=trim(resolved_dev_deps(i)%dir)//'/fpm.toml', exist=exists)
-            if (.not. exists) cycle
-            if (n_inputs >= size(inputs)) then
-                ierr = 1
-                message = 'too many resolved development dependencies to freeze'
+        backend = detect_backend(project_dir)
+        if (backend%kind == BACKEND_CMAKE) then
+            allocate(inputs(0))
+            context%inputs = inputs
+            call append_environment_value(context%environment, 'FO_BACKEND')
+            call append_environment_value(context%environment, 'FO_CMAKE_BUILD_DIR')
+            call append_environment_value(context%environment, 'FO_CMAKE_CONFIG')
+            call append_environment_value(context%environment, 'FO_CMAKE_GENERATOR')
+            call append_environment_value(context%environment, 'FO_CMAKE_ARGS')
+            call append_environment_value(context%environment, 'FO_CMAKE_CONFIGURE_PRESET')
+            call append_environment_value(context%environment, 'FO_CMAKE_BUILD_PRESET')
+            call append_environment_value(context%environment, 'FO_CMAKE_BUILD_TARGETS')
+            call append_environment_value(context%environment, 'FO_CMAKE_TEST_PRESET')
+        else
+            allocate (config)
+            call fpm_config_parse(project_dir, config, ierr)
+            if (ierr /= 0) then
+                message = 'cannot parse fpm.toml for generation inputs'
                 return
             end if
-            n_inputs = n_inputs + 1
-            inputs(n_inputs)%label = 'dependency:'// &
-                trim(resolved_dev_deps(i)%name)
-            inputs(n_inputs)%source_root = trim(resolved_dev_deps(i)%dir)
-            if (resolved_dev_deps(i)%kind == DEP_REGISTRY) &
-                context%environment = context%environment//'registry-dev:'// &
-                trim(resolved_dev_deps(i)%name)//'='//trim(resolved_dev_deps(i)%dir)//';'
-            inputs(n_inputs)%destination = 'build/dependencies/'// &
-                trim(resolved_dev_deps(i)%name)
-        end do
-        if (n_inputs < size(inputs)) then
-            allocate (captured_inputs(n_inputs))
-            if (n_inputs > 0) captured_inputs = inputs(:n_inputs)
-            call move_alloc(captured_inputs, inputs)
+            call resolve_dev_dep_srcs(project_dir, resolved_dev_deps, &
+                n_resolved_dev, resolve_status)
+            if (resolve_status /= 0) n_resolved_dev = 0
+            call resolve_dep_srcs(project_dir, resolved_deps, n_resolved, &
+                n_unresolved, ierr)
+            if (ierr /= 0) return
+            n_inputs = count(resolved_deps(:n_resolved)%kind == DEP_REGISTRY)
+            do i = 1, config%n_deps
+                if (dep_kind(config%deps(i)) == DEP_PATH) n_inputs = n_inputs + 1
+            end do
+            do i = 1, config%n_dev_deps
+                if (dep_kind(config%dev_deps(i)) == DEP_PATH) n_inputs = n_inputs + 1
+            end do
+            do i = 1, n_resolved_dev
+                if (dev_dependency_is_path(config, &
+                        trim(resolved_dev_deps(i)%name))) cycle
+                inquire(file=trim(resolved_dev_deps(i)%dir)//'/fpm.toml', exist=exists)
+                if (exists) n_inputs = n_inputs + 1
+            end do
+            allocate (inputs(n_inputs))
+            n_inputs = 0
+            do i = 1, n_resolved
+                if (resolved_deps(i)%kind /= DEP_REGISTRY) cycle
+                n_inputs = n_inputs + 1
+                inputs(n_inputs)%label = 'dependency:'//trim(resolved_deps(i)%name)
+                inputs(n_inputs)%source_root = trim(resolved_deps(i)%dir)
+                context%environment = context%environment//'registry:'// &
+                    trim(resolved_deps(i)%name)//'='//trim(resolved_deps(i)%dir)//';'
+                inputs(n_inputs)%destination = 'build/dependencies/'// &
+                    trim(resolved_deps(i)%name)
+            end do
+            do i = 1, config%n_deps
+                if (dep_kind(config%deps(i)) /= DEP_PATH) cycle
+                call append_path_dependency(project_dir, config%deps(i)%path, &
+                    config%deps(i)%name, inputs, n_inputs, ierr, message)
+                if (ierr /= 0) return
+            end do
+            do i = 1, config%n_dev_deps
+                if (dep_kind(config%dev_deps(i)) /= DEP_PATH) cycle
+                call append_path_dependency(project_dir, config%dev_deps(i)%path, &
+                    config%dev_deps(i)%name, inputs, n_inputs, ierr, message)
+                if (ierr /= 0) return
+            end do
+            do i = 1, n_resolved_dev
+                if (dev_dependency_is_path(config, &
+                        trim(resolved_dev_deps(i)%name))) cycle
+                inquire(file=trim(resolved_dev_deps(i)%dir)//'/fpm.toml', exist=exists)
+                if (.not. exists) cycle
+                if (n_inputs >= size(inputs)) then
+                    ierr = 1
+                    message = 'too many resolved development dependencies to freeze'
+                    return
+                end if
+                n_inputs = n_inputs + 1
+                inputs(n_inputs)%label = 'dependency:'// &
+                    trim(resolved_dev_deps(i)%name)
+                inputs(n_inputs)%source_root = trim(resolved_dev_deps(i)%dir)
+                if (resolved_dev_deps(i)%kind == DEP_REGISTRY) &
+                    context%environment = context%environment//'registry-dev:'// &
+                    trim(resolved_dev_deps(i)%name)//'='//trim(resolved_dev_deps(i)%dir)//';'
+                inputs(n_inputs)%destination = 'build/dependencies/'// &
+                    trim(resolved_dev_deps(i)%name)
+            end do
+            if (n_inputs < size(inputs)) then
+                allocate (captured_inputs(n_inputs))
+                if (n_inputs > 0) captured_inputs = inputs(:n_inputs)
+                call move_alloc(captured_inputs, inputs)
+            end if
+            context%inputs = inputs
+            do i = 1, config%n_flags
+                context%flags = context%flags//' '//trim(config%flags(i))
+            end do
         end if
-        context%inputs = inputs
-        do i = 1, config%n_flags
-            context%flags = context%flags//' '//trim(config%flags(i))
-        end do
         call fs_find_executable('gfortran', compiler_path, found)
         if (.not. found) then
             context%toolchain = 'gfortran-unresolved'

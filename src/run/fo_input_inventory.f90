@@ -70,7 +70,8 @@ module fo_input_inventory
     end type input_inventory_t
 
     public :: input_inventory_discover, input_inventory_declarations_from_config
-    public :: input_inventory_revalidate
+    public :: input_inventory_revalidate, input_inventory_discover_cmake
+    public :: input_inventory_rediscover
 
     interface
         integer(c_int) function c_list_input_tree(root, manifest, &
@@ -82,6 +83,70 @@ module fo_input_inventory
     end interface
 
 contains
+
+    subroutine input_inventory_discover_cmake(project_dir, sources, bundles, &
+            labels, metadata_dir, inventory, ierr, message)
+        character(len=*), intent(in) :: project_dir, sources(:), bundles(:)
+        character(len=*), intent(in) :: labels(:), metadata_dir
+        type(input_inventory_t), intent(out) :: inventory
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        integer :: root_index, i, j
+        logical :: provider_dir_exists
+        type(input_entry_t) :: provider_dir
+        character(len=7), parameter :: provider_dirs(2) = &
+            [character(len=7) :: 'include', 'lib']
+
+        inventory = input_inventory_t()
+        allocate(inventory%roots(MAX_ROOTS), inventory%entries(64), &
+            inventory%declarations(0))
+        inventory%entry_capacity = 64
+        inventory%complete = .true.
+        call add_root(inventory, 'project', project_dir, root_index, ierr, &
+            message, 'project')
+        if (ierr /= 0) return
+        call scan_tree(inventory, root_index, 'project', project_dir, '', &
+            'cmake-project-input', .false., ierr, message, cmake_scan=.true.)
+        if (ierr /= 0) return
+        do i = 1, size(sources)
+            call add_root(inventory, labels(i), sources(i), root_index, ierr, &
+                message, bundles(i))
+            if (ierr /= 0) return
+            if (index(labels(i), 'cmake-provider:') == 1) then
+                do j = 1, size(provider_dirs)
+                    inquire(file=trim(sources(i))//'/'//trim(provider_dirs(j)), &
+                            exist=provider_dir_exists)
+                    if (.not. provider_dir_exists) cycle
+                    provider_dir = input_entry_t()
+                    provider_dir%root_alias = labels(i)
+                    provider_dir%relative_path = provider_dirs(j)
+                    provider_dir%role = 'cmake-provider-input'
+                    provider_dir%kind = INPUT_DIRECTORY
+                    provider_dir%mode = 0
+                    call append_entry(inventory, provider_dir, ierr, message)
+                    if (ierr /= 0) return
+                end do
+                call scan_configured_dir(sources(i), labels(i), 'include', &
+                    'cmake-provider-input', .false., root_index, inventory, ierr, message)
+                if (ierr /= 0) return
+                call scan_configured_dir(sources(i), labels(i), 'lib', &
+                    'cmake-provider-input', .false., root_index, inventory, ierr, message)
+            else
+                call scan_tree(inventory, root_index, labels(i), sources(i), '', &
+                    'cmake-dependency-input', .false., ierr, message, cmake_scan=.true.)
+            end if
+            if (ierr /= 0) return
+        end do
+        call add_root(inventory, 'cmake-context', metadata_dir, root_index, &
+            ierr, message, 'project/.fo-cmake')
+        if (ierr /= 0) return
+        call scan_tree(inventory, root_index, 'cmake-context', metadata_dir, '', &
+            'cmake-configuration', .false., ierr, message)
+        if (ierr /= 0) return
+        call canonicalize_inventory(inventory, ierr, message)
+        if (ierr /= 0) return
+        inventory%valid = .true.
+    end subroutine input_inventory_discover_cmake
 
     subroutine input_inventory_discover(project_dir, declarations, inventory, &
             ierr, message)
@@ -342,6 +407,54 @@ contains
         message = ''
     end subroutine input_inventory_declarations_from_config
 
+    subroutine input_inventory_rediscover(project_dir, declarations, expected, &
+            observed, ierr, message, materialized)
+        character(len=*), intent(in) :: project_dir
+        type(input_declaration_t), intent(in) :: declarations(:)
+        type(input_inventory_t), intent(in) :: expected
+        type(input_inventory_t), intent(out) :: observed
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        logical, intent(in), optional :: materialized
+        character(len=PATH_LEN), allocatable :: sources(:), bundles(:)
+        character(len=ALIAS_LEN), allocatable :: labels(:)
+        character(len=PATH_LEN) :: metadata_dir, base, path
+        integer :: i, n, metadata_index, slash
+        logical :: from_bundle
+
+        metadata_index = alias_root(expected, 'cmake-context')
+        if (metadata_index == 0) then
+            call input_inventory_discover(project_dir, declarations, observed, &
+                ierr, message)
+            return
+        end if
+        from_bundle = .false.
+        if (present(materialized)) from_bundle = materialized
+        base = project_dir
+        slash = index(trim(base), '/', back=.true.)
+        if (slash > 0) base = base(:slash - 1)
+        allocate(sources(expected%root_count), bundles(expected%root_count), &
+            labels(expected%root_count))
+        metadata_dir = ''
+        n = 0
+        do i = 1, expected%root_count
+            path = expected%roots(i)%physical_path
+            if (from_bundle) path = trim(base)//'/'// &
+                trim(expected%roots(i)%bundle_path)
+            if (i == metadata_index) then
+                metadata_dir = path
+                cycle
+            end if
+            if (trim(expected%roots(i)%canonical_alias) == 'project') cycle
+            n = n + 1
+            sources(n) = path
+            bundles(n) = expected%roots(i)%bundle_path
+            labels(n) = expected%roots(i)%canonical_alias
+        end do
+        call input_inventory_discover_cmake(project_dir, sources(:n), bundles(:n), &
+            labels(:n), trim(metadata_dir), observed, ierr, message)
+    end subroutine input_inventory_rediscover
+
     subroutine input_inventory_revalidate(project_dir, declarations, expected, &
             ierr, message)
         character(len=*), intent(in) :: project_dir
@@ -352,8 +465,8 @@ contains
         type(input_inventory_t) :: observed
         integer :: i, j, observed_root
 
-        call input_inventory_discover(project_dir, declarations, observed, ierr, &
-            message)
+        call input_inventory_rediscover(project_dir, declarations, expected, &
+            observed, ierr, message)
         if (ierr /= 0) return
         if (.not. expected%valid) then
             ierr = 1
@@ -1093,7 +1206,7 @@ contains
     end function root_has_alias
 
     subroutine scan_tree(inventory, root_index, alias, physical_root, prefix, &
-            role, writable, ierr, message)
+            role, writable, ierr, message, cmake_scan)
         type(input_inventory_t), intent(inout) :: inventory
         integer, intent(in) :: root_index
         character(len=*), intent(in) :: alias, physical_root, prefix, role
@@ -1108,6 +1221,7 @@ contains
         type(input_entry_t) :: entry
         character(kind=c_char, len=:), allocatable :: c_root, c_manifest
         logical :: whole_root_scan
+        logical, intent(in), optional :: cmake_scan
         integer(c_int) :: exclude_root_outputs
 
         ierr = 1
@@ -1120,6 +1234,9 @@ contains
         else
             c_root = trim(physical_root)//'/'//trim(prefix)//c_null_char
             exclude_root_outputs = 0_c_int
+        end if
+        if (present(cmake_scan)) then
+            if (cmake_scan .and. whole_root_scan) exclude_root_outputs = 2_c_int
         end if
         c_manifest = trim(manifest)//c_null_char
         rc = c_list_input_tree(c_root, c_manifest, exclude_root_outputs)
@@ -1163,6 +1280,20 @@ contains
             end select
             if (.not. whole_root_scan) then
                 relative = trim(prefix)//'/'//trim(relative)
+            end if
+            if (alias == 'cmake-context') then
+                if (relative == 'dependencies' .or. &
+                    index(relative, 'dependencies/') == 1) cycle
+                ! Provider artifacts have their own authored input roots.
+                if (index(relative, 'providers/') == 1) then
+                    if (index(relative(11:), '/') > 0 .and. &
+                        index(relative, '/CMakeCache.txt', back=.true.) == 0) cycle
+                end if
+            end if
+            if (present(cmake_scan)) then
+                if (cmake_scan) then
+                    if (inside_cmake_output(physical_root, relative)) cycle
+                end if
             end if
             if (ignored_input_path(trim(relative), kind == INPUT_DIRECTORY, &
                     whole_root_scan)) cycle
@@ -1282,6 +1413,30 @@ contains
             end if
         end if
     end function under_prefix
+
+    logical function inside_cmake_output(root, relative) result(ignored)
+        character(len=*), intent(in) :: root, relative
+        integer :: slash, start
+        logical :: exists
+        ignored = .false.
+        if (relative == '.fo-cmake' .or. index(relative, '.fo-cmake/') == 1) then
+            ignored = .true.
+            return
+        end if
+        start = 1
+        do
+            slash = index(relative(start:), '/')
+            if (slash == 0) exit
+            slash = slash + start - 1
+            inquire(file=trim(root)//'/'//relative(:slash - 1)// &
+                '/CMakeCache.txt', exist=exists)
+            if (exists) then
+                ignored = .true.
+                return
+            end if
+            start = slash + 1
+        end do
+    end function inside_cmake_output
 
     logical function ignored_input_path(path, is_directory, whole_root_scan)
         character(len=*), intent(in) :: path

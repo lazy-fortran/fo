@@ -185,6 +185,10 @@ contains
         if (watch%n_roots > 0) watch%active(1) = .true.
         if (allocated(context%input_inventory%roots)) then
             do i = 1, context%input_inventory%root_count
+                ! Derived configuration is immutable per capture; its authored
+                ! CMake inputs and declared dependency roots are watched below.
+                if (trim(context%input_inventory%roots(i)%canonical_alias) == &
+                    'cmake-context') cycle
                 root = canonical_or_entry( &
                     context%input_inventory%roots(i)%physical_path)
                 if (len_trim(root) == 0) cycle

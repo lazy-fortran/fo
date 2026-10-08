@@ -46,10 +46,10 @@ module fo_generation_manifest
     public :: generation_manifest_release
 
     interface
-        integer(c_int) function fo_c_generation_create_link(path, target) &
+        integer(c_int) function fo_c_generation_create_link(path, target, relative) &
                 bind(C, name='fo_c_generation_create_link')
             import :: c_char, c_int
-            character(kind=c_char), intent(in) :: path(*), target(*)
+            character(kind=c_char), intent(in) :: path(*), target(*), relative(*)
         end function fo_c_generation_create_link
 
         integer(c_int) function fo_c_generation_capture_file(root, relative, &
@@ -871,7 +871,8 @@ contains
                     call fs_make_dir(parent_path(trim(destination)))
                     status = int(fo_c_generation_create_link( &
                         trim(destination)//c_null_char, &
-                        trim(inventory%entries(i)%link_target)//c_null_char))
+                        trim(inventory%entries(i)%link_target)//c_null_char, &
+                        trim(inventory%entries(i)%relative_path)//c_null_char))
                     if (status /= 0) then
                         message = 'cannot materialize literal generation symlink: '// &
                             trim(inventory%entries(i)%root_alias)//':'// &
@@ -1058,9 +1059,8 @@ contains
             if (len_trim(entry%link_target) == 0 .or. &
                 len_trim(fields(9)) /= HASH_LEN .or. &
                 index(entry%link_target, achar(0)) /= 0 .or. &
-                index(entry%link_target, '/') /= 0 .or. &
-                trim(entry%link_target) == '.' .or. &
-                trim(entry%link_target) == '..') goto 900
+                .not. safe_symlink_target(trim(entry%relative_path), &
+                trim(entry%link_target))) goto 900
             if (len_trim(entry%link_target) > len(symlink_parts(1)) - &
                 len('symlink:')) goto 900
             symlink_parts(1) = 'symlink:'//trim(entry%link_target)
@@ -1384,6 +1384,42 @@ contains
         end do
         safe_relative_path = .true.
     end function safe_relative_path
+
+    logical function safe_symlink_target(relative, target)
+        character(len=*), intent(in) :: relative, target
+        integer :: depth, i, first, last, n
+
+        safe_symlink_target = .false.
+        n = len_trim(target)
+        if (n == 0) return
+        if (target(1:1) == '/' .or. index(target, achar(0)) /= 0) return
+        depth = 0
+        do i = 1, len_trim(relative)
+            if (relative(i:i) == '/') depth = depth + 1
+        end do
+        first = 1
+        do
+            last = index(target(first:n), '/')
+            if (last == 0) then
+                last = n + 1
+            else
+                last = first + last - 1
+            end if
+            if (last == first) return
+            select case (target(first:last - 1))
+            case ('..')
+                if (depth == 0) return
+                depth = depth - 1
+            case ('.')
+            case default
+                depth = depth + 1
+            end select
+            if (last > n) exit
+            first = last + 1
+            if (first > n) return
+        end do
+        safe_symlink_target = depth > 0
+    end function safe_symlink_target
 
     logical function is_hex_digest(digest)
         character(len=*), intent(in) :: digest

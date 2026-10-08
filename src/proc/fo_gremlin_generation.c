@@ -429,19 +429,18 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
             } else {
                 link_target[n] = '\0';
                 if (normalize_link_target(child, link_target, resolved,
-                                          sizeof(resolved)) != 0) {
-                    rc = -1;
-                } else if (relative_path_is_excluded(resolved,
-                                                     exclusion_policy)) {
-                    errno = EPERM;
-                    rc = -1;
-                } else if (strchr(link_target, '/') != NULL ||
-                           strcmp(link_target, ".") == 0 ||
-                           strcmp(link_target, "..") == 0) {
-                    errno = EINVAL;
-                    rc = -1;
-                } else if (open_regular_at(root_fd, resolved, &st) != 0) {
-                    rc = -1;
+                                          sizeof(resolved)) != 0 ||
+                    relative_path_is_excluded(resolved, exclusion_policy) ||
+                    open_regular_at(root_fd, resolved, &st) != 0) {
+                    /* Delegated CMake checks referenced File API paths
+                     * against the resulting inventory. Unused invalid aliases
+                     * are not inputs and must not escape or block capture. */
+                    if (exclusion_policy == 3) {
+                        errno = 0;
+                    } else {
+                        if (errno == 0) errno = EPERM;
+                        rc = -1;
+                    }
                 } else if (write_link_path(manifest, child, link_target,
                                            (size_t)n) != 0) {
                     rc = -1;
@@ -523,7 +522,8 @@ int fo_c_generation_list_input_tree(const char *root, const char *manifest,
     if (validate_tree_root(root) != 0) return errno == 0 ? 1 : errno;
     out = fopen(manifest, "w");
     if (out == NULL) return errno == 0 ? 1 : errno;
-    rc = walk_tree(root, "", out, 0, exclude_root_outputs != 0 ? 2 : 0, 1);
+    rc = walk_tree(root, "", out, 0, exclude_root_outputs == 2 ? 3 :
+                   (exclude_root_outputs != 0 ? 2 : 0), 1);
     if (fclose(out) != 0 && rc == 0) rc = -1;
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
@@ -662,12 +662,14 @@ done:
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
 
-/* The inventory provider currently admits only leaf symlinks to regular files. */
-int fo_c_generation_create_link(const char *path, const char *target) {
-    if (path == NULL || target == NULL || path[0] == '\0' ||
-        target[0] == '\0' || strchr(target, '/') != NULL ||
-        strcmp(target, ".") == 0 || strcmp(target, "..") == 0 ||
-        target[0] == '/') {
+/* Enumeration validates every target component with openat/O_NOFOLLOW.
+ * Materialization repeats root-relative confinement before preserving text. */
+int fo_c_generation_create_link(const char *path, const char *target,
+                                 const char *relative) {
+    char normalized[8192];
+    if (path == NULL || target == NULL || relative == NULL || path[0] == '\0' ||
+        target[0] == '\0' ||
+        normalize_link_target(relative, target, normalized, sizeof(normalized)) != 0) {
         errno = EINVAL;
         return errno;
     }

@@ -19,6 +19,7 @@ module fo_cmake_context
         character(:), allocatable :: request_token
         character(:), allocatable :: error
         character(:), allocatable :: extra_args(:)
+        character(:), allocatable :: build_targets(:)
         character(:), allocatable :: reported_generator
         logical :: multi_config = .false.
         logical :: has_codemodel = .false.
@@ -38,15 +39,15 @@ contains
 
     subroutine cmake_context_init(context, source_root, build_root, generator, &
             configuration, configure_preset, build_preset, extra_args, &
-            test_preset, argv)
+            test_preset, argv, build_targets)
         type(cmake_context_t), intent(out) :: context
         character(len=*), intent(in) :: source_root
         character(len=*), intent(in), optional :: build_root, generator
         character(len=*), intent(in), optional :: configuration
         character(len=*), intent(in), optional :: configure_preset, build_preset
         character(len=*), intent(in), optional :: extra_args
-        character(len=*), intent(in), optional :: test_preset, argv(:)
-        character(:), allocatable :: raw_args
+        character(len=*), intent(in), optional :: test_preset, argv(:), build_targets
+        character(:), allocatable :: raw_args, target_error
         integer :: i, env_length, env_status
         integer(int64) :: clock_tick
         character(len=40) :: token_text
@@ -96,6 +97,16 @@ contains
                 call append_arg(context%extra_args, trim(argv(i)))
             end do
         end if
+        raw_args = ''
+        if (present(build_targets)) then
+            raw_args = build_targets
+        else
+            call env_value('FO_CMAKE_BUILD_TARGETS', raw_args)
+        end if
+        call parse_argv(raw_args, context%build_targets, target_error)
+        if (allocated(target_error)) then
+            context%error = 'FO_CMAKE_BUILD_TARGETS has an unterminated escape or quote'
+        end if
         context%valid = .not. allocated(context%error)
         if (len_trim(context%source_root) == 0 .or. &
                 len_trim(context%build_root) == 0) then
@@ -119,6 +130,7 @@ contains
         call create_empty_file(query_dir//'/codemodel-v2')
         call create_empty_file(query_dir//'/cache-v2')
         call create_empty_file(query_dir//'/toolchains-v1')
+        call create_empty_file(query_dir//'/cmakeFiles-v1')
         call fs_write_text(query_dir//'/query.json', &
             '{"requests":[{"kind":"codemodel","version":2},'// &
             '{"kind":"cache","version":2},'// &

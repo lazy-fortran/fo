@@ -6,6 +6,7 @@ module fo_build_backend
         process_getcwd, process_run_argv_logged, argv_push
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names, gfortran_run_tests
+    use fo_util, only: read_text_file
     use fo_test_budget, only: test_timeout_seconds, test_wall_cap_seconds
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         selected_compiler_command
@@ -17,7 +18,7 @@ module fo_build_backend
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
     public :: backend_build, backend_test, backend_test_names
     public :: backend_test_affected, backend_clean
-    public :: profile_flags, backend_profile
+    public :: profile_flags, backend_profile, cmake_configure
     public :: BACKEND_NONE, BACKEND_NATIVE, BACKEND_CMAKE
 
     integer, parameter :: BACKEND_NONE = 0
@@ -429,16 +430,29 @@ contains
         end if
     end subroutine backend_test_affected
 
-    subroutine cmake_build(context, flags, log_file, exitcode)
+    subroutine cmake_configure(context, flags, log_file, exitcode)
         type(cmake_context_t), intent(inout) :: context
         character(len=*), intent(in) :: flags, log_file
         integer, intent(out) :: exitcode
 
         character(len=:), allocatable :: packed, cache_file, configuration
-        character(len=32) :: jobs_text
-        logical :: has_cache, hint_valid
-        integer :: n_args, i
+        logical :: has_cache, hint_valid, has_frozen_context
+        character(len=4096) :: captured_generator
+        integer :: n_args, i, line_end
 
+        if (len_trim(context%configure_preset) == 0 .and. &
+            len_trim(context%generator) == 0) then
+            inquire(file=context%source_root//'/.fo-cmake/generator.txt', &
+                exist=has_frozen_context)
+            if (has_frozen_context) then
+                call read_text_file(context%source_root// &
+                    '/.fo-cmake/generator.txt', captured_generator)
+                line_end = index(captured_generator, new_line('a'))
+                if (line_end > 0) captured_generator = &
+                    captured_generator(:line_end - 1)
+                context%generator = trim(captured_generator)
+            end if
+        end if
         if (.not. context%valid) then
             write (error_unit, '(a,a)') 'fo: invalid CMake context: ', &
                 context%error
@@ -461,7 +475,6 @@ contains
             return
         end if
 
-        write (jobs_text, '(i0)') detect_jobs()
         if (len_trim(context%configure_preset) == 0 .or. &
                 context%build_root_hint) &
             call cmake_context_query(context)
@@ -506,6 +519,13 @@ contains
                 call argv_push(packed, n_args, context%extra_args(i))
             end do
         end if
+        inquire(file=context%source_root//'/.fo-cmake/cache.cmake', &
+            exist=has_frozen_context)
+        if (has_frozen_context) then
+            call argv_push(packed, n_args, '-C')
+            call argv_push(packed, n_args, context%source_root// &
+                '/.fo-cmake/cache.cmake')
+        end if
         call process_run_argv_logged(context%source_root, packed, n_args, &
             log_file, .false., environment_timeout('FO_BUILD_TIMEOUT', 300), &
             exitcode)
@@ -526,7 +546,19 @@ contains
             call cmake_context_read_reply(context)
         end if
 
-        deallocate (packed)
+    end subroutine cmake_configure
+
+    subroutine cmake_build(context, flags, log_file, exitcode)
+        type(cmake_context_t), intent(inout) :: context
+        character(len=*), intent(in) :: flags, log_file
+        integer, intent(out) :: exitcode
+        character(len=:), allocatable :: packed
+        character(len=32) :: jobs_text
+        integer :: n_args, i
+
+        call cmake_configure(context, flags, log_file, exitcode)
+        if (exitcode /= 0) return
+        write (jobs_text, '(i0)') detect_jobs()
         n_args = 0
         call argv_push(packed, n_args, 'cmake')
         call argv_push(packed, n_args, '--build')
@@ -546,6 +578,14 @@ contains
         if (len_trim(context%configuration) > 0) then
             call argv_push(packed, n_args, '--config')
             call argv_push(packed, n_args, context%configuration)
+        end if
+        if (allocated(context%build_targets)) then
+            if (size(context%build_targets) > 0) then
+                call argv_push(packed, n_args, '--target')
+                do i = 1, size(context%build_targets)
+                    call argv_push(packed, n_args, context%build_targets(i))
+                end do
+            end if
         end if
         call argv_push(packed, n_args, '-j')
         call argv_push(packed, n_args, jobs_text)

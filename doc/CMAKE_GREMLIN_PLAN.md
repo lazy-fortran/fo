@@ -83,7 +83,27 @@ Use those as evidence, not fixed architecture instructions.
 ## CMake-only resident capture blocker
 
 The 2026-10-05 [minimal reproducer](reproducers/cmake-resident-input/README.md)
-records an observed FPM-manifest parse failure before CMake generation capture.
-Public delegated test/exec results do not establish resident support. The next
-repair must handle the CMake input inventory and frozen dependency/profile
-closure as well as backend selection, then recheck the original consumer.
+records the original FPM-manifest parse failure. The delegated resident route
+now selects CMake before capture, freezes configuration and declared sources,
+and discovers and executes actual registered CTest cases. This remains a route
+through installed CMake/CTest, not standalone compatibility.
+
+The supported closure includes project presets, explicit cache overrides and
+FetchContent source directories. `FO_CMAKE_BUILD_TARGETS` selects native build
+targets while `--target` selects registered test names; neither changes native
+project flags. Declared prebuilt `*_BUILD` providers capture their include/lib
+inputs and real Git HEAD provenance for the observed CMakeCache source probe.
+Arbitrary provider protocols, uncaptured external authored inputs, metadata
+capacity overflow and unsupported referenced symlinks fail explicitly.
+
+Valid internal relative source links retain their literal targets. Unused
+invalid aliases are omitted from CMake input enumeration; every authored File
+API path must still belong to the frozen inventory. FPM enumeration retains
+its existing strict policy. Test discovery does not invent tests for build-only
+projects, and affected CMake selections conservatively include all registered
+cases. CTest owns fixtures, cwd, environment, resource rules and verdicts.
+
+`test_gremlin_cmake` checks preset/build-target preservation, source/provider
+edit wakeup, fixture/cwd behavior, last-compilable retention, unused bad aliases
+and explicit rejection of referenced external aliases. Actual project/profile
+receipts remain necessary before claiming compatibility for another consumer.

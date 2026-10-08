@@ -1,6 +1,7 @@
 module fo_gremlin_supervisor
     use, intrinsic :: iso_fortran_env, only: int64, error_unit, dp => real64
-    use fo_build_backend, only: BACKEND_NATIVE, backend_t, detect_backend
+    use fo_build_backend, only: BACKEND_NATIVE, BACKEND_CMAKE, backend_t, detect_backend
+    use fo_cmake_generation, only: cmake_registered_names
     use fo_cache, only: HASH_LEN, cache_digest, cache_store_root
     use fx_action_result_store, only: action_result_store_t, &
         action_result_store_init, action_result_maintenance_tick, ACTION_RESULT_OK
@@ -1160,6 +1161,8 @@ contains
         end if
         generation%driver_path = reproduction_pin%path
         inquire (file=trim(active_project)//'/fpm.toml', exist=executable_ok)
+        if (.not. executable_ok) &
+            inquire(file=trim(active_project)//'/CMakeLists.txt', exist=executable_ok)
         if (.not. executable_ok) then
             call release_generation_lease(reproduction_lease, have_reproduction_lease, &
                 release_error, cleanup_message)
@@ -1174,7 +1177,7 @@ contains
         selection_request%targets(1) = request%case_id
         selection_request%n_targets = 1
         selection_request%random_count = 0
-        call discover_campaign(trim(active_project), generation%identity, session, &
+        call discover_campaign(campaign_project(generation), generation%identity, session, &
             selection_request, selected, n_selected, mandatory_count, seed, ierr, message, &
             bypass_coverage=.true.)
         if (ierr /= 0 .or. n_selected == 0) then
@@ -2447,7 +2450,7 @@ contains
         if (was_active) seed = next_campaign_seed(seed)
         selection_request = request
         selection_request%seed = seed
-        call discover_campaign(active%project_root, active%identity, session, &
+        call discover_campaign(campaign_project(active), active%identity, session, &
             selection_request, selected, selected_count, mandatory_count, seed, &
             inventory_status, message)
         request%requirement_digest = selection_request%requirement_digest
@@ -2574,6 +2577,15 @@ contains
         end do
     end subroutine compute_generation_impact
 
+    function campaign_project(generation) result(project)
+        type(generation_t), intent(in) :: generation
+        character(len=PATH_LEN) :: project
+        type(backend_t) :: backend
+        backend = detect_backend(generation%project_root)
+        project = generation%project_root
+        if (backend%kind == BACKEND_CMAKE) project = generation%build_project_root
+    end function campaign_project
+
     subroutine discover_campaign(project_dir, generation_id, session, request, &
             selected, n_selected, &
             n_mandatory_selected, seed, ierr, message, bypass_coverage)
@@ -2618,23 +2630,29 @@ contains
         backend = detect_backend(project_dir)
         ierr = 0
         message = ''
-        if (backend%kind /= BACKEND_NATIVE) then
-            ierr = 1
-            message = 'Gremlin currently requires the native fpm test backend'
-            return
+        if (backend%kind == BACKEND_CMAKE) then
+            call cmake_registered_names(backend, all_names, n_all, ierr, message)
+            if (ierr /= 0) return
+            n_affected = 0
+        else
+            if (backend%kind /= BACKEND_NATIVE) then
+                ierr = 1
+                message = 'Gremlin currently requires the native fpm test backend'
+                return
+            end if
+            call fo_changed_modules(project_dir, dag, changed_ids, n_changed, &
+                affected_ids, n_affected, n_cached, ierr, filenames=filenames, &
+                is_test_arr=is_test_arr)
+            if (ierr /= 0) then
+                message = 'cannot scan frozen project test inventory'
+                return
+            end if
+            do i = 1, dag%n_nodes
+                candidate_ids(i) = i
+            end do
+            call gfortran_selected_test_names(project_dir, filenames, candidate_ids, &
+                dag%n_nodes, .true., all_names, n_all)
         end if
-        call fo_changed_modules(project_dir, dag, changed_ids, n_changed, &
-            affected_ids, n_affected, n_cached, ierr, filenames=filenames, &
-            is_test_arr=is_test_arr)
-        if (ierr /= 0) then
-            message = 'cannot scan frozen project test inventory'
-            return
-        end if
-        do i = 1, dag%n_nodes
-            candidate_ids(i) = i
-        end do
-        call gfortran_selected_test_names(project_dir, filenames, candidate_ids, &
-            dag%n_nodes, .true., all_names, n_all)
         call read_campaign_history(session, all_names, n_all, history, n_history, &
             debt, n_debt, cursor_seed, ierr, message)
         if (ierr /= 0) return
@@ -2651,6 +2669,8 @@ contains
                     call append_priority_names(request%impact_cases, &
                         request%n_impact_cases, impacted, n_impacted)
             end if
+        else if (request%only_changed .and. backend%kind == BACKEND_CMAKE) then
+            call append_priority_names(all_names, n_all, impacted, n_impacted)
         else if (request%only_changed) then
             call gfortran_selected_test_names(project_dir, filenames, affected_ids, &
                 n_affected, .false., impacted, n_impacted)
@@ -3286,7 +3306,7 @@ contains
             seed = next_campaign_seed(seed)
             next_request = request
             next_request%seed = seed
-            call discover_campaign(generation%project_root, generation%identity, &
+            call discover_campaign(campaign_project(generation), generation%identity, &
                 session, next_request, selected, n_selected, mandatory_count, seed, &
                 ierr, message)
             request%requirement_digest = next_request%requirement_digest
