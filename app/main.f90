@@ -396,7 +396,7 @@ contains
         write (output_unit, '(a)') ''
         write (output_unit, '(a)') 'integration:'
         write (output_unit, '(a)') '  mcp-server  MCP JSON-RPC on stdin/stdout'
-        write (output_unit, '(a)') '  lsp         LSP server (diagnostics on save)'
+        write (output_unit, '(a)') '  lsp         LSP server (debounced unsaved diagnostics)'
         write (output_unit, '(a)') ''
         write (output_unit, '(a)') 'fo version    print version'
     end subroutine print_usage
