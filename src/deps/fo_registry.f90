@@ -2,7 +2,8 @@ module fo_registry
     !! Native, offline FPM registry resolution. Remote/authenticated registries
     !! are rejected explicitly; local registry trees are the source authority.
     use fo_fpm_config, only: fpm_dep_t, valid_registry_version
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use fo_fs, only: fs_identity
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
     private
@@ -70,7 +71,7 @@ contains
         end if
         call get_environment_variable('FO_GREMLIN_FROZEN_ROOT', frozen, status=status)
         if (status == 0) then
-            if (trim(frozen) == trim(root)) then
+            if (same_directory(frozen, root)) then
                 directory = trim(root)//'/build/dependencies/'//trim(dep%name)
                 inquire (file=trim(directory)//'/fpm.toml', exist=exists)
                 if (.not. exists) call registry_error( &
@@ -218,6 +219,19 @@ contains
             dep%name)//'/'//trim(latest), &
             ierr)
     end subroutine registry_resolve
+
+    logical function same_directory(left, right) result(same)
+        character(len=*), intent(in) :: left, right
+        integer(c_long_long) :: left_device, left_inode, right_device, right_inode
+        logical :: found
+
+        same = .false.
+        call fs_identity(left, left_device, left_inode, found)
+        if (.not. found) return
+        call fs_identity(right, right_device, right_inode, found)
+        if (.not. found) return
+        same = left_device == right_device .and. left_inode == right_inode
+    end function same_directory
 
     pure subroutine canonical_version(value, canonical)
         character(len=*), intent(in) :: value

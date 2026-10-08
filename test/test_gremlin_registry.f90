@@ -1,9 +1,9 @@
 program test_gremlin_registry
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_test_harness, only: string_list_t, process_result_t, list_add
-    use fo_test_harness, only: make_scratch, make_directory, write_text, read_text
+    use fo_test_harness, only: make_scratch, make_directory, make_symlink, write_text, read_text
     use fo_test_harness, only: file_exists, assert_true, finish_assertions
-    use fo_test_cli, only: resolve_driver
+    use fo_test_cli, only: resolve_driver, run_fo
     use fo_test_gremlin_oracle, only: gremlin_json, gremlin_start_args
     use fo_test_gremlin_oracle, only: gremlin_wait_ms, gremlin_stop_lane, gremlin_field
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
@@ -24,7 +24,7 @@ program test_gremlin_registry
     character(:), allocatable :: registry, alternate, session, generation, runtime_value
     character(:), allocatable :: first_root, first_source, first_bytes, previous
     character(:), allocatable :: first_generation
-    type(string_list_t) :: arguments
+    type(string_list_t) :: arguments, environment
     type(process_result_t) :: process
     type(json_value_t) :: started
     type(gremlin_lease_t) :: first_lease
@@ -46,6 +46,9 @@ program test_gremlin_registry
     runtime_value = scratch//'/runtime-value.txt'
     call make_directory(project//'/test')
     call make_directory(cache)
+    ! Exercise frozen roots through a directory alias on every supported host.
+    call make_directory(scratch//'/state-real')
+    call make_symlink(scratch//'/state-real', state)
     call make_directory(state//'/tmp')
     call set_env('FO_FPM_CONFIG_FILE', config)
     call set_env('FO_GREMLIN_STATE_DIR', state)
@@ -134,6 +137,17 @@ program test_gremlin_registry
     call assert_true(read_text(runtime_value) == '19'//new_line('a'), &
         'reproduction executes original registry source after live selection changes')
     call assert_frozen('old-generation reproduction')
+    arguments = string_list_t()
+    call list_add(arguments, 'test')
+    call list_add(arguments, '--json')
+    call list_add(arguments, case_id)
+    call list_add(environment, 'FO_GREMLIN_FROZEN_ROOT='//first_root//'/bundle/project')
+    call run_fo(driver, arguments, project, cache, process, environment, timeout_ms=30000)
+    call assert_true(process%exit_code == 0, &
+        'distinct mutable project resolves its own registry: '//process%stdout//process%stderr)
+    call assert_true(read_text(runtime_value) == '31'//new_line('a'), &
+        'unmatched frozen root preserves live registry resolution for another project')
+    call assert_frozen('distinct mutable project')
     call unpin_first()
     call finish_assertions(retain_failed_scratch=.true.)
 
