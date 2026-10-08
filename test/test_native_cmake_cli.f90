@@ -60,6 +60,7 @@ program test_native_cmake_cli
                'if(value()/=expected)error stop "independent arithmetic oracle"'//nl// &
   'if(index(compiler_options(),"-ffpe-trap=")==0)error stop "project flag lost"'//nl// &
         'if(index(compiler_options(),"-fcheck=")>0)error stop "invented checks"'//nl// &
+        'if(index(compiler_options(),"-O3")==0)error stop "Release profile lost"'//nl// &
                     'if(index(compiler_options(),"170003")==0)'//nl// &
                     'error stop "captured environment/compiler flags lost"'//nl// &
                     'print *,"numerical-oracle",value()'//nl//'end program'//nl)
