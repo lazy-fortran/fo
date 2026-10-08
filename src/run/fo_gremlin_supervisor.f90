@@ -1053,13 +1053,12 @@ contains
         character(len=PATH_LEN) :: message, active_project, log_file, executable
         character(len=PATH_LEN) :: cleanup_message
         character(len=PATH_LEN) :: work_release_message
-        character(len=PATH_LEN) :: generation_root
+        character(len=PATH_LEN) :: generation_root, driver_state_dir
         character(len=32) :: reproduction_id
         character(len=NAME_LEN) :: selected(MAX_NODES)
         character(len=HASH_LEN) :: active_identity
         character(len=16) :: outcome
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
-        character(len=128) :: session_id, owner_start
         character(len=128) :: build_view_owner
         character(len=:), allocatable :: packed, execution_env
         integer :: owner_pid, ierr, n_selected, mandatory_count, seed
@@ -1067,31 +1066,38 @@ contains
         integer :: reproduction_timeout, work_release_error
         character(len=128) :: view_owner
         logical :: retain_view, have_reproduction_work_lease, stop_requested
-        logical :: have_reproduction_lease, executable_ok
+        logical :: have_reproduction_lease, executable_ok, is_live
 
         exitcode = 0
         have_reproduction_lease = .false.
         have_reproduction_work_lease = .false.
-        call gremlin_session_read(project_dir, trim(request%lane_id), session_id, &
-            owner_pid, owner_start, status_text, ierr, message)
+        call gremlin_resolve_read_session(project_dir, request, session, status_text, &
+            owner_pid, is_live, ierr, message)
         if (ierr /= 0) then
             call error_response('reproduce', trim(message), response)
             exitcode = 2
             return
         end if
-        if (len_trim(request%session_id) > 0 .and. &
-            trim(request%session_id) /= trim(session_id)) then
-            call error_response('reproduce', 'session_id does not match the lane owner', response)
-            exitcode = 2
-            return
+        if (is_live) then
+            call gremlin_session_acquire(project_dir, trim(request%lane_id), session, &
+                ierr, message)
         end if
-        call gremlin_session_acquire(project_dir, trim(request%lane_id), session, &
-            ierr, message)
         if (ierr /= 0) then
             call error_response('reproduce', trim(message), response)
             exitcode = 2
             return
         end if
+        ! Retired sessions keep their exact journal namespace. Driver pins are
+        ! shared by that lane and remain validated against the generation key.
+        call gremlin_session_state_dir(project_dir, request%lane_id, &
+            driver_state_dir, ierr, message)
+        if (ierr /= 0) then
+            call release_if_owner(session, release_error, cleanup_message)
+            call error_response('reproduce', trim(message), response)
+            exitcode = 2
+            return
+        end if
+        call fs_make_dir(trim(session%state_dir)//'/logs')
         call gremlin_json_field(status_text, 'active_generation', active_identity)
         if (len_trim(request%generation_id) > 0) then
             active_identity = request%generation_id
@@ -1138,7 +1144,7 @@ contains
             exitcode = 2
             return
         end if
-        call driver_pin_existing(session%state_dir, generation%driver_digest, &
+        call driver_pin_existing(driver_state_dir, generation%driver_digest, &
             generation%driver_size, reproduction_pin, ierr, message)
         if (ierr /= 0) then
             call release_generation_lease(reproduction_lease, have_reproduction_lease, &

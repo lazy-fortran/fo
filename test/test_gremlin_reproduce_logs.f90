@@ -17,6 +17,7 @@ program test_gremlin_reproduce_logs
     character(:), allocatable :: relocated_cache
     character(:), allocatable :: session, generation, first_log, second_log
     character(:), allocatable :: first_text, second_text, lane
+    character(:), allocatable :: terminal_log, terminal_text
     character(:), allocatable :: startup_error
     character(:), allocatable :: original_generation
     character(:), allocatable :: first_view, second_view, active_view, building_view
@@ -192,6 +193,16 @@ program test_gremlin_reproduce_logs
         generation), 'stop preserves the captured generation for replay')
     call assert_true(file_exists(trim(state)//'/fo/gremlin/generations-v2/'// &
         original_generation), 'stop preserves the original replay generation')
+    call write_text(project//'/token.txt', 'AFTER_STOP_FIXTURE_TOKEN'//new_line('a'))
+    call write_dependency('AFTER_STOP_DEPENDENCY_TOKEN')
+    call reproduce('test_reproduce_first', terminal_log)
+    terminal_text = read_text(terminal_log)
+    call assert_true(index(terminal_text, 'FROZEN_REPRODUCE_TOKEN') > 0 .and. &
+        index(terminal_text, 'FROZEN_DEPENDENCY_TOKEN') > 0, &
+        'terminal reproduction restores captured project and dependency inputs')
+    call assert_true(index(terminal_text, 'AFTER_STOP_FIXTURE_TOKEN') == 0 .and. &
+        index(terminal_text, 'AFTER_STOP_DEPENDENCY_TOKEN') == 0, &
+        'terminal reproduction excludes later editable input bytes')
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
