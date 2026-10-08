@@ -148,20 +148,22 @@ jobs:
           verifier_dir="$(mktemp -d)"
           trap 'rm -rf "$verifier_dir"' EXIT
           fixture_dir=test-fixtures/c
+          process_dependencies=(src/proc/fo_gremlin_state.c src/util/fo_fs.c)
           cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
-            "$fixture_dir/async_filter.c" -o "$verifier_dir/filter-native"
+            "$fixture_dir/async_filter.c" "${process_dependencies[@]}" -o "$verifier_dir/filter-native"
           "$verifier_dir/filter-native"
           for target in AARCH64 ARM X86_64 UNSUPPORTED; do
             cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
               "-DFO_ASYNC_TEST_$target" "$fixture_dir/async_filter.c" \
+              "${process_dependencies[@]}" \
               -o "$verifier_dir/filter-$target"
             "$verifier_dir/filter-$target"
           done
           cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
-            "$fixture_dir/async_process_nested.c" \
+            "$fixture_dir/async_process_nested.c" "${process_dependencies[@]}" \
             -o "$verifier_dir/nested"
           "$verifier_dir/nested"
           cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
-            "$fixture_dir/async_process_nested_cancel.c" \
+            "$fixture_dir/async_process_nested_cancel.c" "${process_dependencies[@]}" \
             -o "$verifier_dir/nested-cancel"
           "$verifier_dir/nested-cancel"
