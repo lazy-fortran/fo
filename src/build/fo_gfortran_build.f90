@@ -2,7 +2,7 @@ module fo_gfortran_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, &
         fpm_config_allocate, manifest_exe_name, &
         manifest_executable_selected, &
-        manifest_test_name, manifest_test_args, manifest_example_name, dep_kind, &
+        manifest_test_args, manifest_example_name, dep_kind, &
         DEP_PATH, DEP_REGISTRY
     use fo_scan, only: scan_unit_t, scan_dir, scan_dir_regex, scan_dir_cached, &
         source_defines_module, &
@@ -731,14 +731,14 @@ contains
         character(len=MAX_PATH) :: execution_cwd
 
         exitcode = 0
-        call scan_dir_cached(trim(project_dir)//'/'//trim(test_dir), units, &
-            n_units, ierr)
+        call fpm_config_allocate(config)
+        call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) then
             exitcode = 1
             return
         end if
-        call fpm_config_allocate(config)
-        call fpm_config_parse(project_dir, config, ierr)
+        call scan_project_test_units(project_dir, config, units, n_units, ierr, &
+            use_cached=.true.)
         if (ierr /= 0) then
             exitcode = 1
             return
@@ -832,11 +832,11 @@ contains
         logical :: exists
 
         ready = .false.
-        call scan_dir_cached(trim(project_dir)//'/'//trim(test_dir), units, &
-            n_units, ierr)
-        if (ierr /= 0) return
         call fpm_config_allocate(config)
         call fpm_config_parse(project_dir, config, ierr)
+        if (ierr /= 0) return
+        call scan_project_test_units(project_dir, config, units, n_units, ierr, &
+            use_cached=.true.)
         if (ierr /= 0) return
         call select_current_tests(project_dir, config, units, n_units, test_dir, &
             bin_dir, selected_names, n_selected, include_slow, tests, n_tests)
@@ -897,6 +897,7 @@ contains
         do i = 1, n_units
             if (.not. units(i)%is_program) cycle
             name = gfortran_test_source_name(config, test_dir, units(i)%filename)
+            if (len_trim(name) == 0) cycle
             if (trim(name) /= trim(config%dispatcher)) cycle
             available = .true.
             return
@@ -917,8 +918,7 @@ contains
         call fpm_config_allocate(config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) return
-        call scan_dir(trim(project_dir)//'/'//trim(config%test_dir), &
-            units, n_units, ierr)
+        call scan_project_test_units(project_dir, config, units, n_units, ierr)
         if (ierr /= 0) return
         has_dispatcher = scanned_dispatcher_available(config, config%test_dir, &
             units, n_units)
@@ -1001,8 +1001,7 @@ contains
         call fpm_config_allocate(config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) return
-        call scan_dir(trim(project_dir)//'/'//trim(config%test_dir), &
-            units, n_units, ierr)
+        call scan_project_test_units(project_dir, config, units, n_units, ierr)
         if (ierr /= 0) return
         has_dispatcher = scanned_dispatcher_available(config, config%test_dir, &
             units, n_units)
@@ -1016,6 +1015,7 @@ contains
             if (j > n_ids) cycle
             name = gfortran_test_source_name(config, config%test_dir, &
                 units(i)%filename)
+            if (len_trim(name) == 0) cycle
             if (trim(name) == trim(config%dispatcher)) cycle
             if (.not. include_slow .and. is_slow_name(name)) cycle
             if (selected_test(name, names, n_names)) cycle
@@ -1057,6 +1057,7 @@ contains
                 units(i)%is_program, has_dispatcher, &
                 units(i)%is_program .or. len_trim(units(i)%module_name) > 0)) cycle
             name = gfortran_test_source_name(config, test_dir, units(i)%filename)
+            if (len_trim(name) == 0) cycle
             ! The dispatcher is infrastructure, not a test: scanned as one it
             ! gets run bare and fails its own usage check, which would read as
             ! a suite regression. It still builds, because routed tests link it
@@ -2446,14 +2447,79 @@ contains
         call delete_tmpfile(tmpfile)
     end subroutine link_base_digest
 
+    subroutine scan_project_test_units(project_dir, config, units, n_units, ierr, &
+            use_cached)
+        !! Explicit test roots may be nested under test/ or anywhere in the
+        !! project. Keep each source once when declared roots overlap.
+        character(len=*), intent(in) :: project_dir
+        type(fpm_config_t), intent(in) :: config
+        type(scan_unit_t), allocatable, intent(out) :: units(:)
+        integer, intent(out) :: n_units, ierr
+        logical, intent(in), optional :: use_cached
+        logical :: cached
+        type(scan_unit_t), allocatable :: found(:), merged(:)
+        character(len=MAX_PATH) :: root
+        integer :: d, i, j, n_found, n_new
+
+        cached = .false.
+        if (present(use_cached)) cached = use_cached
+        allocate (units(0))
+        n_units = 0
+        ierr = 0
+        do d = 0, config%n_tests
+            if (d == 0) then
+                if (.not. config%auto_tests) cycle
+                root = config%test_dir
+            else
+                root = config%tests(d)%source_dir
+                do j = 1, d - 1
+                    if (trim(config%tests(j)%source_dir) == trim(root)) exit
+                end do
+                if (j < d) cycle
+                if (config%auto_tests) then
+                    if (trim(root) == trim(config%test_dir)) cycle
+                end if
+            end if
+            if (cached) then
+                call scan_dir_cached(trim(project_dir)//'/'//trim(root), &
+                    found, n_found, ierr)
+            else
+                call scan_dir(trim(project_dir)//'/'//trim(root), found, n_found, ierr)
+            end if
+            if (ierr /= 0) return
+            allocate (merged(n_units + n_found))
+            merged(:n_units) = units(:n_units)
+            n_new = n_units
+            do i = 1, n_found
+                do j = 1, n_new
+                    if (trim(found(i)%filename) == trim(merged(j)%filename)) exit
+                end do
+                if (j <= n_new) cycle
+                n_new = n_new + 1
+                merged(n_new) = found(i)
+            end do
+            n_units = n_new
+            call move_alloc(merged, units)
+        end do
+    end subroutine scan_project_test_units
+
     function gfortran_test_source_name(config, test_dir, source) result(name)
         type(fpm_config_t), intent(in) :: config
         character(len=*), intent(in) :: test_dir, source
-        character(len=MAX_PATH) :: name, public_name
+        character(len=MAX_PATH) :: name, declared_source
+        integer :: i
 
+        name = ''
+        do i = 1, config%n_tests
+            declared_source = trim(config%project_dir)//'/'// &
+                trim(config%tests(i)%source_dir)//'/'//trim(config%tests(i)%main)
+            if (trim(source) /= trim(declared_source)) cycle
+            name = config%tests(i)%name
+            return
+        end do
+        if (.not. config%auto_tests) return
+        if (.not. source_is_in_dir(source, config%project_dir, test_dir)) return
         call file_basename(source, name)
-        public_name = manifest_test_name(config, test_dir, name)
-        if (len_trim(public_name) > 0) name = public_name
     end function gfortran_test_source_name
 
     function gfortran_app_source_name(config, source) result(name)
@@ -2635,11 +2701,16 @@ contains
         flaky = .false.
         run_secs = 0.0
         run_cpu = -1.0
-        call scan_dir(trim(project_dir)//'/'//trim(test_dir), tunits, n_tests, ierr)
-        if (n_tests == 0) return
         call fpm_config_allocate(manifest_config)
         call fpm_config_parse(project_dir, manifest_config, ierr)
         if (ierr /= 0) return
+        call scan_project_test_units(project_dir, manifest_config, &
+            tunits, n_tests, ierr)
+        if (ierr /= 0) then
+            exitcode = 1
+            return
+        end if
+        if (n_tests == 0) return
         test_timeout = test_timeout_seconds(manifest_config)
         test_warn = test_warn_seconds(test_timeout)
 
@@ -2685,6 +2756,7 @@ contains
                 is_prog(node_id), dnode > 0, .true.)) cycle
             tname = gfortran_test_source_name(manifest_config, test_dir, &
                 filenames(node_id))
+            if (len_trim(tname) == 0) cycle
             if (.not. include_slow .and. is_slow_name(tname)) cycle
             if (trim(tname) == trim(manifest_config%dispatcher)) then
                 if (.not. selected_test(tname, selected_names, n_selected)) cycle
