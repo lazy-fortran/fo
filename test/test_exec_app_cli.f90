@@ -3,7 +3,8 @@ program test_exec_app_cli
     use fo_test_harness, only: make_scratch, join_path, write_text, remove_tree
     use fo_test_harness, only: assert_true, assert_equal_string, assert_equal_integer
     use fo_test_harness, only: assert_contains, assert_not_contains, assert_process_ok
-    use fo_test_cli, only: resolve_driver, run_fo
+    use fo_test_harness, only: file_exists
+    use fo_test_cli, only: resolve_driver, run_fo, run_external
     use fo_test_harness, only: finish_assertions
     implicit none
 
@@ -48,6 +49,7 @@ program test_exec_app_cli
     call write_program(join_path(broken, 'app/shared.f90'), 'application')
     call exercise_source(broken, 'test/shared.f90', 'shared')
 
+    call exercise_custom_targets()
     call exercise_flavours(flavours)
     call exercise_format_check(unformatted)
     call setup_project('broken_test', 'name = "broken_test"' // new_line('a'), &
@@ -133,6 +135,108 @@ contains
 
         call run_fo(driver, command, project, join_path(scratch, '.fo-cache'), child)
     end subroutine invoke
+
+    subroutine exercise_custom_targets()
+        character(:), allocatable :: project, prefix
+        character(len=1024) :: reference
+        character(len=1), parameter :: nl = new_line('a')
+        character(len=2), parameter :: expected(3) = ['61', '61', '63']
+        type(string_list_t) :: command
+        type(process_result_t) :: child
+        integer :: phase, status
+
+        project = join_path(scratch, 'custom-targets')
+        prefix = join_path(scratch, 'custom-prefix')
+        reference = ''
+        call get_environment_variable('FO_FPM_REFERENCE', reference, status=status)
+        if (status /= 0) reference = ''
+        call write_text(project//'/fpm.toml', &
+            'name = "custom_targets"'//nl//'[build]'//nl// &
+            'auto-executables = false'//nl//'auto-examples = false'//nl// &
+            '[[executable]]'//nl//'name = "test_report"'//nl// &
+            'source-dir = "commands/report"'//nl//'main = "main.f90"'//nl// &
+            '[[executable]]'//nl//'name = "other_report"'//nl// &
+            'source-dir = "commands/other"'//nl//'main = "main.f90"'//nl)
+        call write_text(project//'/src/base.f90', &
+            'module base'//nl//'implicit none'//nl//'contains'//nl// &
+            'integer function base_value()'//nl//'base_value = 43'//nl// &
+            'end function'//nl//'end module'//nl)
+        call write_text(project//'/commands/report/main.f90', &
+            'program report'//nl//'use report_math, only: report_value'//nl// &
+            'implicit none'//nl//"print '(a,i0)', 'CUSTOM_OUTPUT=', report_value()"// &
+            nl//'end program'//nl)
+        call write_text(project//'/commands/other/main.f90', &
+            'program other'//nl//'use base, only: base_value'//nl// &
+            'implicit none'//nl//"print '(a,i0)', 'OTHER_OUTPUT=', base_value()+24"// &
+            nl//'end program'//nl)
+        call write_program(project//'/commands/report/unregistered.f90', 'unused')
+        call write_text(project//'/test/broken.f90', &
+            'program broken'//nl//'implicit none'//nl// &
+            'print *, missing_symbol'//nl//'end program'//nl)
+        call write_report_math(project, '18')
+        do phase = 1, size(expected)
+            if (phase == 3) call write_report_math(project, '20')
+            if (len_trim(reference) > 0) then
+                command = words([character(len=32) :: 'run', 'test_report'])
+                call run_external(trim(reference), command, project, child)
+                call assert_process_ok(child, 'pinned FPM custom executable runs')
+                call assert_contains(child%stdout, 'CUSTOM_OUTPUT='//expected(phase), &
+                    'pinned FPM helper body controls cold/warm/edited runtime')
+            end if
+            command = words([character(len=32) :: 'exec', 'test_report'])
+            call invoke(project, command, child)
+            call assert_process_ok(child, 'custom executable avoids unrelated tests')
+            call assert_equal_string(child%stdout, &
+                'CUSTOM_OUTPUT='//expected(phase)//nl, &
+                'declared custom executable follows cold/warm/helper-body edits')
+        end do
+        command = words([character(len=32) :: 'run', 'other_report'])
+        call invoke(project, command, child)
+        call assert_process_ok(child, 'second custom directory runs its public name')
+        call assert_equal_string(child%stdout, 'OTHER_OUTPUT=67'//nl, &
+            'same main filename in another directory selects the correct program')
+        command = words([character(len=32) :: 'exec', '--no-build', 'unregistered'])
+        call invoke(project, command, child)
+        call assert_true(child%exit_code /= 0, &
+            'disabled automatic discovery excludes another custom-directory main')
+        command = words([character(len=32) :: 'install', '--prefix'])
+        call list_add(command, prefix)
+        call invoke(project, command, child)
+        call assert_process_ok(child, 'custom executables install through native build')
+        call check_installed(project, prefix, 'test_report', 'CUSTOM_OUTPUT=63')
+        call check_installed(project, prefix, 'other_report', 'OTHER_OUTPUT=67')
+        if (len_trim(reference) > 0) then
+            prefix = join_path(scratch, 'custom-reference-prefix')
+            command = words([character(len=32) :: 'install', '--prefix'])
+            call list_add(command, prefix)
+            call run_external(trim(reference), command, project, child)
+            call assert_process_ok(child, 'pinned FPM installs the unchanged project')
+            call check_installed(project, prefix, 'test_report', 'CUSTOM_OUTPUT=63')
+            call check_installed(project, prefix, 'other_report', 'OTHER_OUTPUT=67')
+        end if
+    end subroutine exercise_custom_targets
+
+    subroutine write_report_math(project, offset)
+        character(len=*), intent(in) :: project, offset
+        character(len=1), parameter :: nl = new_line('a')
+        call write_text(project//'/commands/report/helper.f90', &
+            'module report_math'//nl//'use base, only: base_value'//nl// &
+            'implicit none'//nl//'contains'//nl//'integer function report_value()'//nl// &
+            'report_value = base_value()+'//offset//nl//'end function'//nl// &
+            'end module'//nl)
+    end subroutine write_report_math
+
+    subroutine check_installed(project, prefix, name, expected)
+        character(len=*), intent(in) :: project, prefix, name, expected
+        character(:), allocatable :: installed
+        type(process_result_t) :: child
+        installed = prefix//'/bin/'//name
+        if (.not. file_exists(installed)) installed = installed//'.exe'
+        call run_external(installed, string_list_t(), project, child)
+        call assert_process_ok(child, 'installed custom executable runs')
+        call assert_equal_string(child%stdout, expected//new_line('a'), &
+            'installed executable preserves edited runtime and public name')
+    end subroutine check_installed
 
     subroutine exercise_flavours(project)
         character(:), allocatable, intent(out) :: project

@@ -2,10 +2,9 @@ module fo_install
     use fo_build_backend, only: backend_t, BACKEND_NATIVE, backend_build, &
         profile_flags
     use fo_build_tree, only: native_output_dir
-    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, &
-        manifest_executable_selected, manifest_exe_name
-    use fo_scan, only: scan_unit_t, scan_dir
-    use fo_gfortran_build, only: gfortran_app_source_name
+    use fo_fpm_config, only: fpm_config_t, fpm_config_parse
+    use fo_scan, only: scan_unit_t
+    use fo_gfortran_build, only: gfortran_app_source_name, scan_project_app_units
     use fo_fs, only: fs_copy_exec, fs_make_dir, fs_mkdir_excl, fs_remove_file, &
         fs_collect_files, fs_remove_tree, fs_rename
     use fo_process, only: process_getpid
@@ -26,7 +25,7 @@ contains
         type(fpm_config_t) :: config
         type(scan_unit_t), allocatable :: units(:)
         character(len=128) :: names(256)
-        character(len=512) :: source_dir, stage, source, target
+        character(len=512) :: stage, source, target
         character(len=512) :: log_path
         character(len=32) :: line_text
         type(diagnostic_t) :: diag
@@ -34,7 +33,7 @@ contains
         character(len=128) :: name
         character(len=512) :: prefix_files(256)
         character(len=:), allocatable :: release_flags, bin_dir
-        integer :: ierr, n_units, n_names, i, j, build_status, pid, attempt, stage_rc
+        integer :: ierr, n_units, n_names, i, build_status, pid, attempt, stage_rc
         integer :: cleanup_rc
         logical :: exists, had_previous(256), published(256), rollback_ok
 
@@ -56,38 +55,28 @@ contains
             return
         end if
 
+        call scan_project_app_units(backend%project_dir, config, units, n_units, ierr)
+        if (ierr /= 0) then
+            message = 'fo install: could not scan declared executable sources'
+            return
+        end if
         n_names = 0
-        source_dir = trim(config%app_dir)
-        inquire (file=trim(backend%project_dir)//'/'//trim(source_dir), exist=exists)
-        if (exists) then
-            call scan_dir(trim(backend%project_dir)//'/'//trim(source_dir), &
-                units, n_units, ierr)
-            if (ierr /= 0) then
-                message = 'fo install: could not scan executable sources'
+        do i = 1, n_units
+            if (.not. units(i)%is_program .or. units(i)%is_test) cycle
+            name = gfortran_app_source_name(config, units(i)%filename)
+            if (len_trim(name) == 0) cycle
+            if (.not. safe_executable_name(trim(name))) then
+                message = 'fo install: invalid executable name: '//trim(name)
                 return
             end if
-            do j = 1, n_units
-                if (.not. units(j)%is_program .or. units(j)%is_test) cycle
-                if (.not. manifest_executable_selected(config, trim(source_dir), &
-                        source_stem(units(j)%filename))) cycle
-                name = manifest_exe_name(config, trim(source_dir), &
-                    source_stem(units(j)%filename))
-                if (len_trim(name) == 0 .and. config%auto_executables) &
-                    name = gfortran_app_source_name(config, units(j)%filename)
-                if (len_trim(name) == 0) cycle
-                if (.not. safe_executable_name(trim(name))) then
-                    message = 'fo install: invalid executable name: '//trim(name)
-                    return
-                end if
-                if (name_in_list(names, n_names, trim(name))) cycle
-                if (n_names == size(names)) then
-                    message = 'fo install: too many executable targets'
-                    return
-                end if
-                n_names = n_names + 1
-                names(n_names) = name
-            end do
-        end if
+            if (name_in_list(names, n_names, trim(name))) cycle
+            if (n_names == size(names)) then
+                message = 'fo install: too many executable targets'
+                return
+            end if
+            n_names = n_names + 1
+            names(n_names) = name
+        end do
         if (n_names == 0) then
             message = 'fo install: no supported executable targets found'
             return
@@ -230,17 +219,6 @@ contains
             end if
         end do
     end subroutine rollback_install
-
-    function source_stem(path) result(stem)
-        character(len=*), intent(in) :: path
-        character(len=256) :: stem
-        integer :: slash, dot
-        stem = trim(path)
-        slash = index(trim(stem), '/', back=.true.)
-        if (slash > 0) stem = stem(slash + 1:)
-        dot = index(trim(stem), '.', back=.true.)
-        if (dot > 1) stem = stem(:dot - 1)
-    end function source_stem
 
     logical function name_in_list(names, count, name)
         character(len=*), intent(in) :: names(:), name

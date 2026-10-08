@@ -1,7 +1,6 @@
 module fo_gfortran_build
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, &
         fpm_config_allocate, manifest_exe_name, &
-        manifest_executable_selected, &
         manifest_test_args, manifest_example_name, dep_kind, &
         DEP_PATH, DEP_REGISTRY, valid_manifest_module_name
     use fo_scan, only: scan_provides_name, scan_unit_t, scan_dir, scan_dir_regex, &
@@ -11,7 +10,8 @@ module fo_gfortran_build
     use fo_dag_bridge, only: build_dag_from_units, dag_find_source_provider
     use fo_dep_update, only: dep_acquire_sources
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
-        resolve_dev_dep_srcs, MAX_RESOLVED, join_path, merge_dep_link_libs
+        resolve_dev_dep_srcs, MAX_RESOLVED, join_path, normalize_path, &
+        merge_dep_link_libs
     use fo_registry, only: registry_config_path
     use fo_stat_memo, only: memo_save, memo_hash_file
     use fo_build_tree, only: native_output_dir, native_profiles_dir, &
@@ -86,6 +86,7 @@ module fo_gfortran_build
     public :: gfortran_run_tests
     public :: config_flags_str
     public :: gfortran_app_source_name, gfortran_test_source_name
+    public :: scan_project_app_units
     public :: source_has_marker, dispatch_target
     public :: gfortran_selected_test_names, gfortran_named_test_exists
     public :: native_compile_units, native_link_target, native_archive_target
@@ -1556,24 +1557,24 @@ contains
             n_deps_resolved = 0
         else
         call scan_dir(trim(project_dir)//'/'//trim(src_dir), units_a, na, ierr)
-        call scan_dir(trim(project_dir)//'/'//trim(app_dir), units_b, nb, ierr)
+        if (include_apps) then
+            call scan_project_app_units(project_dir, config, units_b, nb, ierr)
+            if (ierr /= 0) then
+                exitcode = ierr
+                return
+            end if
+        else
+            allocate (units_b(0))
+            nb = 0
+        end if
         nc = 0
         if (include_examples) &
             call scan_dir(trim(project_dir)//'/'//trim(example_dir), units_c, nc, ierr)
 
         n_all = na
-        allocate (all_units(na + nb + nc))
-        do i = 1, nb
-            n_all = n_all + 1
-            all_units(n_all) = units_b(i)
-        end do
-        do i = 1, na
-            all_units(i) = units_a(i)
-        end do
-        do i = 1, nc
-            n_all = n_all + 1
-            all_units(n_all) = units_c(i)
-        end do
+        call move_alloc(units_a, all_units)
+        call append_unique_source_units(all_units, n_all, units_b, nb)
+        if (nc > 0) call append_unique_source_units(all_units, n_all, units_c, nc)
 
         ! Fold path dependencies and any missing external-dependency module
         ! providers into the same source-ordered native DAG.
@@ -1885,12 +1886,28 @@ contains
             result(selected)
         character(len=*), intent(in) :: source, project_dir, app_dir
         type(fpm_config_t), intent(in) :: config
-        character(len=128) :: stem
+        character(len=MAX_PATH) :: declared, normalized
+        integer :: i
 
+        call normalize_path(source, normalized)
+        do i = 1, config%n_exes
+            call join_path(project_dir, trim(config%exes(i)%source_dir)//'/'// &
+                trim(config%exes(i)%main), declared)
+            if (normalized == declared) then
+                selected = .true.
+                return
+            end if
+        end do
+        if (source_is_in_dir(source, project_dir, app_dir)) then
+            selected = config%auto_executables
+            return
+        end if
+        selected = .false.
+        do i = 1, config%n_exes
+            if (source_is_in_dir(source, project_dir, &
+                config%exes(i)%source_dir)) return
+        end do
         selected = .true.
-        if (.not. source_is_in_dir(source, project_dir, app_dir)) return
-        call file_basename(source, stem)
-        selected = manifest_executable_selected(config, app_dir, stem)
     end function app_program_selected
 
     subroutine source_smod_names(path, names, cacheable)
@@ -2759,6 +2776,73 @@ contains
         call delete_tmpfile(tmpfile)
     end subroutine link_base_digest
 
+    subroutine scan_project_app_units(project_dir, config, units, n_units, ierr)
+        !! Use the executable roots already declared and captured by the manifest.
+        !! One collector serves native compilation, exec lookup and installation.
+        character(len=*), intent(in) :: project_dir
+        type(fpm_config_t), intent(in) :: config
+        type(scan_unit_t), allocatable, intent(out) :: units(:)
+        integer, intent(out) :: n_units, ierr
+        type(scan_unit_t), allocatable :: found(:)
+        character(len=MAX_PATH) :: root, main_path
+        integer :: d, j, n_found
+        logical :: exists
+
+        allocate (units(0))
+        n_units = 0
+        ierr = 0
+        do d = 0, config%n_exes
+            if (d == 0) then
+                if (.not. config%auto_executables) cycle
+                root = config%app_dir
+            else
+                root = config%exes(d)%source_dir
+                call join_path(project_dir, trim(root)//'/'// &
+                    trim(config%exes(d)%main), main_path)
+                inquire (file=trim(main_path), exist=exists)
+                if (.not. exists) then
+                    write (error_unit, '(a)') &
+                        'fo: declared executable main does not exist: '//trim(main_path)
+                    ierr = 1
+                    return
+                end if
+                do j = 1, d - 1
+                    if (trim(config%exes(j)%source_dir) == trim(root)) exit
+                end do
+                if (j < d) cycle
+                if (config%auto_executables) then
+                    if (trim(root) == trim(config%app_dir)) cycle
+                end if
+            end if
+            call scan_dir(trim(project_dir)//'/'//trim(root), found, n_found, ierr)
+            if (ierr /= 0) return
+            call append_unique_source_units(units, n_units, found, n_found)
+        end do
+    end subroutine scan_project_app_units
+
+    subroutine append_unique_source_units(units, n_units, found, n_found)
+        type(scan_unit_t), allocatable, intent(inout) :: units(:)
+        integer, intent(inout) :: n_units
+        type(scan_unit_t), intent(in) :: found(:)
+        integer, intent(in) :: n_found
+        type(scan_unit_t), allocatable :: merged(:)
+        integer :: i, j, n_new
+
+        allocate (merged(n_units + n_found))
+        merged(:n_units) = units(:n_units)
+        n_new = n_units
+        do i = 1, n_found
+            do j = 1, n_new
+                if (trim(found(i)%filename) == trim(merged(j)%filename)) exit
+            end do
+            if (j <= n_new) cycle
+            n_new = n_new + 1
+            merged(n_new) = found(i)
+        end do
+        n_units = n_new
+        call move_alloc(merged, units)
+    end subroutine append_unique_source_units
+
     subroutine scan_project_test_units(project_dir, config, units, n_units, ierr, &
             use_cached)
         !! Explicit test roots may be nested under test/ or anywhere in the
@@ -2859,9 +2943,20 @@ contains
         type(fpm_config_t), intent(in) :: config
         character(len=*), intent(in) :: obj_path
         character(len=MAX_PATH) :: name, manifest_name, object_name
+        character(len=MAX_PATH) :: declared, declared_object, object_stem
         logical :: is_example
+        integer :: i
 
         call file_basename(obj_path, object_name)
+        do i = 1, config%n_exes
+            call join_path(config%project_dir, trim(config%exes(i)%source_dir)// &
+                '/'//trim(config%exes(i)%main), declared)
+            call make_obj_path(trim(declared), config%project_dir, '', declared_object)
+            call file_basename(trim(declared_object), object_stem)
+            if (object_stem /= object_name) cycle
+            name = config%exes(i)%name
+            return
+        end do
         is_example = index(trim(object_name), trim(config%example_dir)//'_') == 1
         if (is_example) then
             call app_prog_stem(obj_path, config%example_dir, name)

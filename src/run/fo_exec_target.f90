@@ -7,7 +7,8 @@ module fo_exec_target
     use fo_cmake_native_config, only: native_cmake_selected
     use fo_fs, only: fs_collect_files
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
-    use fo_gfortran_build, only: gfortran_app_source_name, gfortran_test_source_name
+    use fo_gfortran_build, only: gfortran_app_source_name, gfortran_test_source_name, &
+        scan_project_app_units
     use fo_scan, only: scan_unit_t, scan_dir
     implicit none
     private
@@ -144,14 +145,22 @@ contains
         type(backend_t), intent(in) :: b
         character(len=*), intent(in) :: target
         type(fpm_config_t), allocatable :: config
-        integer :: ierr
+        integer :: ierr, i, n_units
+        type(scan_unit_t), allocatable :: units(:)
 
         is_app = .false.
         if (b%kind /= BACKEND_NATIVE) return
         allocate (config)
         call fpm_config_parse(b%project_dir, config, ierr)
         if (ierr /= 0) return
-        is_app = source_dir_has_target(config, config%app_dir, target, .false.)
+        call scan_project_app_units(config%project_dir, config, units, n_units, ierr)
+        if (ierr /= 0) return
+        do i = 1, n_units
+            if (.not. units(i)%is_program .or. units(i)%is_test) cycle
+            if (gfortran_app_source_name(config, units(i)%filename) /= target) cycle
+            is_app = .true.
+            exit
+        end do
         if (.not. is_app) then
             if (config%auto_examples .or. config%n_examples > 0) then
                 is_app = source_dir_has_target(config, config%example_dir, &
