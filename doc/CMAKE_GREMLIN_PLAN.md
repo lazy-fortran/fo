@@ -6,11 +6,28 @@ and install without installed CMake/CTest. Unsupported constructs are explicit.
 Current delegated support remains useful interim behavior and is labelled as
 such; it does not count as completed native compatibility.
 
-This is milestone 6 in [PLAN.md](../PLAN.md). It follows useful Fo/FFC Gremlin
-development and standalone FPM, with only actual consumer dependencies blocking
-each increment. [Architectural freedom](GOAL_DRIVEN_DEVELOPMENT.md) applies:
+This is the fifth delivery priority in [PLAN.md](../PLAN.md). It follows useful
+Fo/FFC Gremlin development and standalone FPM, with only actual consumer
+dependencies blocking each increment.
+[Architectural freedom](GOAL_DRIVEN_DEVELOPMENT.md) applies:
 agents choose the implementation as requirements become concrete. No File API,
 slot-pool, launcher, parser representation or module list is mandatory.
+
+## Current implementation
+
+At the 2026-10-08 source handoff (`de85cf9`), the delegated route coexists with
+an opt-in native Fortran slice selected by `FO_CMAKE_NATIVE=1`. The native slice
+includes selected executable/static-library builds, registered target tests,
+captured configuration and frozen Gremlin replay. Presets, multi-configuration
+generators, explicit toolchains and broader CTest semantics remain unsupported
+or outside this slice. The default route still delegates to CMake/CTest.
+
+`test_native_cmake_cli` contains a numerical reference oracle, cold/warm/edit
+and restore checks, frozen Release flags and traps for delegated tool use.
+Their presence does not establish current combined-source green. Recheck the
+slice against actual GORILLA, then the maintained profile families below;
+#192–#198 remain open. The current runtime/platform gates are in
+[Fo's handoff](../PLAN.md#current-delivery).
 
 ## Observable compatibility
 
