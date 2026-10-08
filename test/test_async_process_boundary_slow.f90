@@ -1,6 +1,6 @@
 program test_async_process_boundary_slow
     use, intrinsic :: iso_c_binding, only: c_int, c_char, c_null_char, c_int64_t, &
-        c_funptr, c_funloc, c_associated
+        c_funptr, c_funloc, c_associated, c_null_funptr
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit, int64, real64
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_sleep_ms
     use fo_process, only: argv_push, process_cancel_pid, process_getcwd, &
@@ -123,16 +123,19 @@ program test_async_process_boundary_slow
     call get_command_argument(1, mode)
     if (trim(mode) == '--owner' .or. trim(mode) == '--sentinel' .or. &
         trim(mode) == '--orphan' .or. trim(mode) == '--scope-child' .or. &
-        trim(mode) == '--quick-exit') then
+        trim(mode) == '--quick-exit' .or. &
+        trim(mode) == '--scope-child-unpolled') then
         call get_command_argument(2, prefix)
         call run_helper(trim(mode), trim(prefix))
         call process_exit(2)
     end if
-    if (trim(mode) == '--scope-owner') then
+    if (trim(mode) == '--scope-owner' .or. &
+        trim(mode) == '--scope-owner-unpolled') then
         call get_command_argument(2, project)
         call get_command_argument(3, lane_id)
         call get_command_argument(4, prefix)
-        call run_scope_owner(trim(project), trim(lane_id), trim(prefix))
+        call run_scope_owner(trim(project), trim(lane_id), trim(prefix), &
+            trim(mode) == '--scope-owner-unpolled')
         call process_exit(2)
     end if
     if (trim(mode) == '--reuse-session') then
@@ -380,6 +383,7 @@ program test_async_process_boundary_slow
     call check(scope_sentinel_quiet, 'recovery sentinel stops after exact cancellation')
 
     call exercise_stale_session(trim(scratch)//'/reuse', darwin)
+    call exercise_unpolled_recovery(trim(scratch)//'/unpolled')
 
     call cleanup_crash_owner(scope_owner_pid, owner_start, scope_owner_reaped)
     if (len_trim(owner_start) > 0) then
@@ -407,6 +411,90 @@ program test_async_process_boundary_slow
     if (failed > 0) stop 1
 
 contains
+
+    subroutine exercise_unpolled_recovery(target)
+        character(len=*), intent(in) :: target
+        type(string_list_t) :: command
+        integer :: helper, wrapper, escaped, sentinel, rc, attempt
+        integer :: sentinel_before, escaped_before, escaped_after, wrapper_after
+        integer(c_int64_t) :: owner_birth, wrapper_birth, escaped_birth
+        character(len=4096) :: state_dir
+        character(len=128) :: lane, start_text
+
+        helper = 0
+        wrapper = 0
+        escaped = 0
+        write (lane, '("boundary-unpolled-",i0)') process_getpid()
+        call start_helper('--sentinel', target//'-sentinel', sentinel)
+        call check(wait_for_data(target//'-sentinel.sentinel.heartbeat'), &
+            'unpolled recovery starts an unrelated sentinel')
+        call list_add(command, trim(executable))
+        call list_add(command, '--scope-owner-unpolled')
+        call list_add(command, trim(workdir))
+        call list_add(command, trim(lane))
+        call list_add(command, target)
+        ! The independent harness never invokes Fo's async descendant polling.
+        call spawn_process(command, trim(workdir), helper)
+        call check(helper > 0, 'launches exact unpolled scope owner')
+        owner_birth = c_test_start(int(helper, c_int))
+        call check(wait_for_pid(target//'.unpolled-wrapper.pid', wrapper), &
+            'registered wrapper exists before its scope owner exits')
+        call check(wait_for_pid(target//'.unpolled-escaped.pid', escaped), &
+            'raw-forked descendant exists before its scope owner exits')
+        call check(wait_for_data(target//'.unpolled-escaped.heartbeat'), &
+            'unpolled escaped descendant starts its heartbeat')
+        call read_birth_file(target//'.unpolled-wrapper.birth', wrapper_birth)
+        call read_birth_file(target//'.unpolled-escaped.birth', escaped_birth)
+        call check(wrapper_birth > 0_c_int64_t .and. escaped_birth > 0_c_int64_t, &
+            'records independent wrapper and escaped descendant birth identities')
+        call check(c_getsid(int(escaped, c_int)) == int(escaped, c_int), &
+            'unpolled raw descendant owns a separate session')
+        call check(wait_for_data(target//'.scope-state-dir'), &
+            'unpolled owner records its exact scope directory')
+        call check(wait_for_data(target//'.scope-owner-start'), &
+            'unpolled owner records its exact birth identity')
+        call read_text_file(target//'.scope-state-dir', state_dir)
+        call read_text_file(target//'.scope-owner-start', start_text)
+        call write_text_file(target//'.unpolled-owner.release', 'exit')
+        rc = 999
+        do attempt = 1, 500
+            call poll_process(helper, rc)
+            if (rc /= 999) exit
+            call fs_sleep_ms(10)
+        end do
+        call check(rc == 0, 'scope owner exits without async descendant polling')
+        call check(c_process_matches(int(helper, c_int), &
+            trim(start_text)//c_null_char) == 0, &
+            'exact unpolled scope owner is absent before recovery')
+        escaped_before = line_count(target//'.unpolled-escaped.heartbeat')
+        call fs_sleep_ms(120)
+        call check(line_count(target//'.unpolled-escaped.heartbeat') > escaped_before, &
+            'unrecorded escaped descendant outlives its scope owner')
+        sentinel_before = line_count(target//'-sentinel.sentinel.heartbeat')
+        rc = c_recover_scope(trim(state_dir)//c_null_char, int(helper, c_int), &
+            trim(start_text)//c_null_char)
+        call check(rc == 0, 'recovers a scope before normal descendant capture')
+        escaped_after = line_count(target//'.unpolled-escaped.heartbeat')
+        wrapper_after = line_count(target//'.unpolled-wrapper.heartbeat')
+        call fs_sleep_ms(150)
+        call check(line_count(target//'.unpolled-escaped.heartbeat') == escaped_after, &
+            'recovery returns only after the TERM-ignoring escaped heartbeat stops')
+        call check(line_count(target//'.unpolled-wrapper.heartbeat') == wrapper_after, &
+            'recovery stops the registered TERM-sensitive wrapper heartbeat')
+        call check(line_count(target//'-sentinel.sentinel.heartbeat') > &
+            sentinel_before, 'unrelated sentinel survives unpolled scope recovery')
+
+        ! Baseline failure must leave no payload running after its oracle is read.
+        call cleanup_exact_fixture(escaped, escaped_birth)
+        call cleanup_exact_fixture(wrapper, wrapper_birth)
+        call cleanup_exact_fixture(helper, owner_birth)
+        call process_cancel_pid(sentinel, rc)
+        call check(rc == 0, 'cancels only the unpolled recovery sentinel')
+        call check(wait_for_quiet(target//'.unpolled-escaped.heartbeat'), &
+            'exact cleanup stops the unpolled fixture descendant')
+        call check(wait_for_quiet(target//'-sentinel.sentinel.heartbeat'), &
+            'exact cleanup stops the unrelated fixture sentinel')
+    end subroutine exercise_unpolled_recovery
 
     function birth_text(identity, macos) result(text)
         integer(c_int64_t), intent(in) :: identity
@@ -694,8 +782,35 @@ contains
             'launches crashable Gremlin state owner')
     end subroutine start_scope_owner
 
-    subroutine run_scope_owner(project_dir, owner_lane, target)
+    subroutine run_unpolled_wrapper(target)
+        character(len=*), intent(in) :: target
+        integer(c_int) :: child, sid
+        character(len=64) :: text
+
+        previous_handler = c_signal(15_c_int, c_null_funptr)
+        call write_pid(target, 'unpolled-wrapper')
+        write (text, '(i0)') c_test_start(int(process_getpid(), c_int))
+        call write_text_file(target//'.unpolled-wrapper.birth', text)
+        if (.not. wait_for_data(target//'.unpolled-fork.release')) &
+            call process_exit(26)
+        child = c_fork()
+        if (child < 0_c_int) call process_exit(27)
+        if (child == 0_c_int) then
+            sid = c_setsid()
+            if (sid <= 0_c_int) call process_exit(28)
+            previous_handler = c_signal(15_c_int, c_funloc(ignore_term))
+            if (c_associated(previous_handler)) call process_exit(29)
+            call write_pid(target, 'unpolled-escaped')
+            write (text, '(i0)') c_test_start(int(process_getpid(), c_int))
+            call write_text_file(target//'.unpolled-escaped.birth', text)
+            call heartbeat_loop(target, 'unpolled-escaped')
+        end if
+        call heartbeat_loop(target, 'unpolled-wrapper')
+    end subroutine run_unpolled_wrapper
+
+    subroutine run_scope_owner(project_dir, owner_lane, target, unpolled)
         character(len=*), intent(in) :: project_dir, owner_lane, target
+        logical, intent(in) :: unpolled
 
         type(gremlin_session_t) :: session
         integer :: ierr, child_pid, child_exit
@@ -711,6 +826,17 @@ contains
         call process_set_async_scope(session%state_dir, session%owner_pid, &
             session%owner_start, ierr)
         if (ierr /= 0) call process_exit(12)
+        if (unpolled) then
+            call start_helper('--scope-child-unpolled', target, child_pid)
+            if (child_pid <= 0) call process_exit(13)
+            ! Release raw fork only after async startup has registered the wrapper.
+            call write_text_file(target//'.unpolled-fork.release', 'fork')
+            if (.not. wait_for_data(target//'.unpolled-escaped.heartbeat')) &
+                call process_exit(15)
+            if (.not. wait_for_data(target//'.unpolled-owner.release')) &
+                call process_exit(16)
+            call process_exit(0)
+        end if
         call start_helper('--scope-child', target, child_pid)
         if (child_pid <= 0) call process_exit(13)
         do
@@ -726,6 +852,10 @@ contains
         integer(c_int) :: child, grandchild, setpgid_error, escaped_sid
         character(len=32) :: result_text
 
+        if (helper_mode == '--scope-child-unpolled') then
+            call run_unpolled_wrapper(target)
+            call process_exit(2)
+        end if
         previous_handler = c_signal(15_c_int, c_funloc(ignore_term))
         if (c_associated(previous_handler)) call process_exit(8)
         if (helper_mode == '--quick-exit') call process_exit(0)
