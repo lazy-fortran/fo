@@ -4,7 +4,8 @@ program test_harness_process_group
     use fo_test_harness, only: assert_process_ok, assert_true, assert_equal_string
     use fo_test_harness, only: finish_assertions, write_text, append_text, sleep_ms
     use fo_test_harness, only: spawn_unowned_process, start_sentinel, stop_sentinel, process_alive
-    use fo_fs, only: fs_is_windows, fs_realpath
+    use fo_fs, only: fs_is_windows
+    use fo_test_harness, only: resolve_test_executable
     use fo_process, only: process_getpid, process_exit
     use fo_test_process_identity, only: mcp_process_start_time, mcp_process_identity_running, mcp_kill_owned_tree
     use fo_test_os_link, only: test_os_initialize
@@ -18,7 +19,7 @@ program test_harness_process_group
     character(:), allocatable :: scratch, heartbeat, before, host
     integer :: i, pid, sentinel, status, unit
     integer(c_int64_t) :: birth
-    character(len=4096) :: mode, value, own_buffer
+    character(len=4096) :: mode, value
     character(len=96) :: identity
     character(:), allocatable :: executable
     logical :: resolved
@@ -32,8 +33,7 @@ program test_harness_process_group
     end interface
 
     call get_command_argument(1, mode)
-    call get_command_argument(0, own_buffer)
-    call fs_realpath(trim(own_buffer), executable, resolved)
+    call resolve_test_executable(executable, resolved)
     if (.not. resolved) error stop 'cannot resolve native boundary oracle'
     select case (trim(mode))
     case ('--native-job-leaf')

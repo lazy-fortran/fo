@@ -22,6 +22,7 @@ module fo_test_harness
     public :: terminate_process_group, spawn_heartbeat_process
     public :: reset_assertions_for_probe
     public :: exercise_failure_cleanup_probe, open_descriptor_count, harness_probe_entry
+    public :: resolve_test_executable
     public :: sleep_ms, spawn_unowned_process
 
     type :: string_t
@@ -1378,10 +1379,27 @@ contains
         if (allocated(scratch_paths)) deallocate(scratch_paths)
     end subroutine reset_assertions_for_probe
 
+    subroutine resolve_test_executable(executable, ok)
+        character(:), allocatable, intent(out) :: executable
+        logical, intent(out) :: ok
+        character(:), allocatable :: argument
+        character(len=4096) :: resolved
+        integer :: length, status
+
+        executable = ''
+        ok = .false.
+        call get_command_argument(0, length=length, status=status)
+        if (status /= 0 .or. length <= 0) return
+        allocate(character(len=length) :: argument)
+        call get_command_argument(0, argument, status=status)
+        if (status /= 0) return
+        call fs_realpath(argument, resolved, ok)
+        if (ok) executable = trim(resolved)
+    end subroutine resolve_test_executable
+
     subroutine harness_probe_entry()
         character(len=4096) :: mode, marker, retain
         character(:), allocatable :: scratch, value, resolved
-        character(len=4096) :: executable
         character(len=96) :: identity
         type(string_list_t) :: args
         integer :: status, pid, unit, i
@@ -1416,8 +1434,7 @@ contains
                     flush(output_unit)
                 end do
             case ('silent-parent')
-                call get_command_argument(0, executable)
-                call fs_realpath(trim(executable), resolved, ok)
+                call resolve_test_executable(resolved, ok)
                 if (.not. ok) call process_exit(125)
                 call list_add(args, resolved)
                 call list_add(args, '--fo-test-helper')
@@ -1466,7 +1483,7 @@ contains
     subroutine exercise_failure_cleanup_probe(marker, retain_failed_scratch)
         character(len=*), intent(in) :: marker
         logical, optional, intent(in) :: retain_failed_scratch
-        character(:), allocatable :: scratch, executable, resolved
+        character(:), allocatable :: scratch, resolved
         type(string_list_t) :: command
         type(process_result_t) :: result
         integer :: status
@@ -1475,10 +1492,7 @@ contains
         retain = .false.
         if (present(retain_failed_scratch)) retain = retain_failed_scratch
 
-        call get_command_argument(0, length=status)
-        allocate(character(len=status) :: executable)
-        call get_command_argument(0, executable)
-        call fs_realpath(executable, resolved, resolved_ok)
+        call resolve_test_executable(resolved, resolved_ok)
         call assert_true(resolved_ok, 'resolve assertion probe executable')
         if (.not. resolved_ok) return
         call list_add(command, resolved)

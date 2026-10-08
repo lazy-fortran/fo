@@ -5,11 +5,11 @@ module fo_test_cli
     use fo_test_harness, only: make_scratch, join_path, make_symlink, remove_tree
     use fo_test_harness, only: file_exists, remove_path, read_text, sleep_ms
     use fo_test_process_identity, only: mcp_kill_owned_tree, mcp_process_identity_running
-    use fo_fs, only: fs_realpath, fs_is_windows
+    use fo_fs, only: fs_is_windows
     use fo_test_harness, only: assert_equal_string, assert_equal_integer
     use fo_test_harness, only: process_alive, start_sentinel, stop_sentinel
     use fo_test_harness, only: exercise_failure_cleanup_probe, open_descriptor_count
-    use fo_test_harness, only: assert_contains, assert_process_ok
+    use fo_test_harness, only: assert_contains, assert_process_ok, resolve_test_executable
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_string_value, json_number_value, json_boolean_value
     use fo_test_json, only: json_null
@@ -113,15 +113,13 @@ contains
         type(json_value_t) :: document, field, item
         character(:), allocatable :: scratch, large_text, error_message
         character(:), allocatable :: cleanup_marker, executable, heartbeat, before
-        character(len=4096) :: executable_buffer
         logical :: valid
         logical :: sentinel_survived
         integer :: sentinel_id, descriptor_count, repeat_index, pid, unit, status
         integer(c_int64_t) :: birth
 
         call make_scratch('fo harness ; $(no-shell)', scratch)
-        call get_command_argument(0, executable_buffer)
-        call fs_realpath(trim(executable_buffer), executable, valid)
+        call resolve_test_executable(executable, valid)
         call assert_true(valid, 'resolve independent native helper executable')
         if (.not. valid) return
         arguments = helper_command(executable, 'print')

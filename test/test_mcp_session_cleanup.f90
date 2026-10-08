@@ -5,7 +5,7 @@ program test_mcp_session_cleanup
     use fo_test_harness, only: run_process, file_exists, assert_true
     use fo_test_harness, only: assert_contains, assert_equal_integer
     use fo_test_harness, only: finish_assertions, spawn_process, sleep_ms
-    use fo_fs, only: fs_realpath
+    use fo_test_harness, only: resolve_test_executable
     use fo_test_os_link, only: test_os_initialize
     use fo_test_mcp_session, only: mcp_session_t, mcp_session_start
     use fo_test_mcp_session, only: mcp_session_shutdown
@@ -13,7 +13,7 @@ program test_mcp_session_cleanup
     use fo_test_process_identity, only: mcp_kill_owned_tree, mcp_process_start_time
     implicit none
 
-    character(len=4096) :: argument, executable_buffer, directory_buffer
+    character(len=4096) :: argument, directory_buffer
     character(:), allocatable :: executable, scratch, cwd
     character(len=128) :: identity
     type(string_list_t) :: args
@@ -26,8 +26,7 @@ program test_mcp_session_cleanup
     status = test_os_initialize()
     if (status /= 162) error stop 'cannot initialize native binary test IO'
     call get_command_argument(1, argument)
-    call get_command_argument(0, executable_buffer)
-    call fs_realpath(trim(executable_buffer), executable, resolved_ok)
+    call resolve_test_executable(executable, resolved_ok)
     if (.not. resolved_ok) error stop 'cannot resolve native test executable'
     if (trim(argument) == '--peer-descendant') then
         do
