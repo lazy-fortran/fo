@@ -2,20 +2,22 @@ program test_gremlin_timeout_order
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, c_null_ptr
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_directory, write_text, file_exists, process_alive
-    use fo_test_harness, only: remove_path
+    use fo_test_harness, only: remove_path, current_directory
     use fo_test_harness, only: run_process, list_with_first, assert_true
     use fo_test_harness, only: assert_equal_string, assert_equal_integer, finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_run, gremlin_json
     use fo_test_gremlin_oracle, only: gremlin_wait_file, gremlin_wait_ms
-    use fo_test_gremlin_oracle, only: gremlin_fifo, gremlin_release_fifo
+    use fo_test_gremlin_oracle, only: gremlin_gate_create, gremlin_gate_release, gremlin_gate_destroy
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value, json_number_value, json_parse
     use fo_test_gremlin_oracle, only: gremlin_stop_lane
+    use fo_test_gremlin_oracle, only: gremlin_gate_read_source, gremlin_pid_binding
+    use fo_fs, only: fs_is_windows, fs_find_executable
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state, lane
     character(:), allocatable :: started, pid_path, done, gate, hold, release, entered
-    character(:), allocatable :: compiler, compiler_dir, compiler_source, path_value
+    character(:), allocatable :: compiler, compiler_dir, compiler_source, path_value, cwd, c_compiler, compiler_wrapper, path_separator
     character(:), allocatable :: session, generation
     type(string_list_t) :: args, extra, command
     type(process_result_t) :: process
@@ -25,10 +27,9 @@ program test_gremlin_timeout_order
     character(:), allocatable :: message
 
     interface
-        integer(c_int) function c_utime(path, times) bind(C, name='utime')
+        integer(c_int) function c_utime(path) bind(C, name='fo_test_touch_directory')
             use, intrinsic :: iso_c_binding, only: c_char, c_int, c_ptr
             character(kind=c_char), intent(in) :: path(*)
-            type(c_ptr), value :: times
         end function c_utime
     end interface
 
@@ -48,16 +49,27 @@ program test_gremlin_timeout_order
     call make_directory(project//'/test')
     call write_text(project//'/fpm.toml', &
         'name = "gremlin_timeout_order_probe"'//new_line('a'))
-    call gremlin_fifo(gate)
+    call gremlin_gate_create(gate)
     call write_case()
     call locate_compiler(compiler)
     compiler_dir = scratch//'/compiler-bin'
     call make_directory(compiler_dir)
-    compiler_source = scratch//'/compiler-wrapper.c'
-    call write_wrapper(compiler_source, compiler, hold, release, entered)
-    call list_add(args, 'cc')
+    call current_directory(cwd)
+    compiler_source = cwd//'/test-fixtures/c/compiler_probe.c'
+    compiler_wrapper = compiler_dir//'/gfortran'
+    path_separator = ':'
+    call fs_find_executable('cc', c_compiler, found)
+    if (fs_is_windows()) then
+        compiler_wrapper = compiler_wrapper//'.exe'
+        path_separator = ';'
+        call fs_find_executable('gcc', c_compiler, found)
+        call list_add(args, '-municode')
+    end if
+    call assert_true(found, 'locates the native C compiler')
+    call list_with_first(c_compiler, args, command)
+    args = command
     call list_add(args, '-o')
-    call list_add(args, compiler_dir//'/gfortran')
+    call list_add(args, compiler_wrapper)
     call list_add(args, compiler_source)
     call run_process(args, scratch, process, timeout_ms=30000)
     call assert_true(process%exit_code == 0, 'compiles the real compiler barrier wrapper')
@@ -79,7 +91,7 @@ program test_gremlin_timeout_order
 
     ! The test exits before its budget while generation capture is still blocked.
     ! Gremlin must retain its timer observation until capture returns, then publish PASS.
-    call gremlin_release_fifo(gate)
+    call gremlin_gate_release(gate)
     call wait_for_file(done, 5000, found)
     call assert_true(found, 'short child completes while compiler probe is stalled')
     call gremlin_wait_ms(5400)
@@ -100,8 +112,8 @@ program test_gremlin_timeout_order
     call remove_file(started)
     call remove_file(pid_path)
     call remove_file(done)
-    call remove_path(gate)
-    call gremlin_fifo(gate)
+    call gremlin_gate_destroy(gate)
+    call gremlin_gate_create(gate)
     lane = 'timeout-order-control'
     call start_lane(lane, .false., report)
     session = field(report, 'session_id')
@@ -136,7 +148,7 @@ contains
         source = 'program test_timeout_order'//new_line('a')// &
             'use, intrinsic :: iso_c_binding, only: c_int'//new_line('a')//'implicit none'//new_line('a')// &
             'interface'//new_line('a')// &
-            '    function c_getpid() bind(C, name="getpid") result(pid)'//new_line('a')// &
+            '    function c_getpid() bind(C, name="'//gremlin_pid_binding()//'") result(pid)'//new_line('a')// &
             '        import :: c_int'//new_line('a')//'        integer(c_int) :: pid'//new_line('a')// &
             '    end function c_getpid'//new_line('a')//'end interface'//new_line('a')// &
             'integer :: unit, gate_unit'//new_line('a')//'character :: token'//new_line('a')// &
@@ -144,43 +156,18 @@ contains
             "write(unit,'(a)') 'started'"//new_line('a')//'close(unit)'//new_line('a')// &
             "open(newunit=unit,file='"//pid_path//"',status='replace')"//new_line('a')// &
             "write(unit,'(i0)') c_getpid()"//new_line('a')//'close(unit)'//new_line('a')// &
-            "open(newunit=gate_unit,file='"//gate//"',status='old',access='stream', &"//new_line('a')// &
-            "    form='unformatted',action='read')"//new_line('a')// &
-            'read(gate_unit) token'//new_line('a')//'close(gate_unit)'//new_line('a')// &
+            gremlin_gate_read_source(gate)//new_line('a')// &
             "open(newunit=unit,file='"//done//"',status='replace')"//new_line('a')// &
             "write(unit,'(a)') 'done'"//new_line('a')//'close(unit)'//new_line('a')// &
             'end program test_timeout_order'//new_line('a')
         call write_text(project//'/test/test_timeout_order.f90', source)
     end subroutine write_case
 
-    subroutine write_wrapper(path, real_compiler, hold_file, release_file, entered_file)
-        character(len=*), intent(in) :: path, real_compiler, hold_file, release_file, entered_file
-        character(:), allocatable :: source
-        source = '#include <stdio.h>'//new_line('a')// &
-            '#include <stdlib.h>'//new_line('a')//'#include <string.h>'//new_line('a')// &
-            '#include <unistd.h>'//new_line('a')//'#include <time.h>'//new_line('a')// &
-            'int main(int argc,char **argv){'//new_line('a')// &
-            'const char *hold=getenv("FO_TIMEOUT_VERSION_HOLD");'//new_line('a')// &
-            'if(argc==2 && strcmp(argv[1],"--version")==0 && hold && access(hold,F_OK)==0){'//new_line('a')// &
-            'const char *p=getenv("FO_TIMEOUT_VERSION_ENTERED"); FILE *f=fopen(p,"w");'//new_line('a')// &
-            'if(!f)return 120; fprintf(f,"%ld'//achar(92)// &
-            'n",(long)getpid()); fclose(f);'//new_line('a')// &
-            'const char *r=getenv("FO_TIMEOUT_VERSION_RELEASE"); struct timespec t={0,20000000};'//new_line('a')// &
-            'while(access(r,F_OK)!=0)nanosleep(&t,0); }'//new_line('a')// &
-            'argv[0]="'//real_compiler//'";'//new_line('a')// &
-            'execv(argv[0],argv); return 127; }'//new_line('a')
-        call write_text(path, source)
-    end subroutine write_wrapper
-
     subroutine locate_compiler(path)
         character(:), allocatable, intent(out) :: path
-        type(string_list_t) :: args
-        type(process_result_t) :: result
-        call list_add(args, 'gfortran')
-        call list_with_first('which', args, command)
-        call run_process(command, project, result, timeout_ms=10000)
-        call assert_equal_integer(result%exit_code, 0, 'locates the real compiler')
-        path = result%stdout(:index(result%stdout, new_line('a')) - 1)
+        logical :: found
+        call fs_find_executable('gfortran', path, found)
+        call assert_true(found, 'locates the real native compiler')
     end subroutine locate_compiler
 
     subroutine start_lane(lane_id, block_probe, value)
@@ -204,7 +191,9 @@ contains
         call list_add(values, '1729')
         call list_add(values, '--timeout-seconds')
         call list_add(values, '5')
-        call list_add(environment, 'PATH='//compiler_dir//':'//path_value)
+        call list_add(environment, 'PATH='//compiler_dir//path_separator//path_value)
+        call list_add(environment, 'FO_FC='//compiler_wrapper)
+        call list_add(environment, 'FO_TEST_REAL_COMPILER='//compiler)
         if (block_probe) then
             call list_add(environment, 'FO_TIMEOUT_VERSION_HOLD='//hold)
             call list_add(environment, 'FO_TIMEOUT_VERSION_RELEASE='//release)
@@ -300,7 +289,7 @@ contains
     subroutine touch_directory(path)
         character(len=*), intent(in) :: path
         integer(c_int) :: rc
-        rc = c_utime(trim(path)//c_null_char, c_null_ptr)
+        rc = c_utime(trim(path)//c_null_char)
         call assert_true(rc == 0, 'touches project directory to produce a real capture event')
     end subroutine touch_directory
 

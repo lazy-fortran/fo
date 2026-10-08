@@ -13,7 +13,8 @@ module fo_test_gremlin_oracle
     public :: gremlin_setup, gremlin_run, gremlin_json, gremlin_write_case
     public :: gremlin_wait_file, gremlin_wait_ms, gremlin_field, gremlin_start_args
     public :: gremlin_spawn, gremlin_wait_child, gremlin_poll_child
-    public :: gremlin_fifo, gremlin_release_fifo
+    public :: gremlin_gate_create, gremlin_gate_release, gremlin_gate_destroy
+    public :: gremlin_gate_read_source, gremlin_pid_binding
     public :: gremlin_stop_child
     public :: gremlin_stop_lane
     public :: gremlin_process_running
@@ -40,22 +41,26 @@ module fo_test_gremlin_oracle
             type(c_ptr), intent(in) :: arguments(*)
             character(kind=c_char), intent(in) :: cwd(*), stdout_path(*), stderr_path(*)
         end function c_spawn
-        integer(c_int) function c_mkfifo(path, mode) bind(C, name='fo_test_mkfifo')
+        integer(c_int) function c_gate_create(path, capacity) bind(C, name='fo_test_gate_create')
+            import :: c_char, c_int
+            character(kind=c_char), intent(inout) :: path(*)
+            integer(c_int), value :: capacity
+        end function c_gate_create
+        integer(c_int) function c_gate_destroy(path) bind(C, name='fo_test_gate_destroy')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
-            integer(c_int), value :: mode
-        end function c_mkfifo
+        end function c_gate_destroy
         integer(c_int) function c_signal_group(process, signal_number) &
                 bind(C, name='fo_test_signal_group')
             import :: c_int
             integer(c_int), value :: process, signal_number
         end function c_signal_group
-        integer(c_int) function c_release_fifo(path, timeout) &
-                bind(C, name='fo_test_release_fifo')
+        integer(c_int) function c_gate_release(path, timeout) &
+                bind(C, name='fo_test_gate_release')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
             integer(c_int), value :: timeout
-        end function c_release_fifo
+        end function c_gate_release
         integer(c_int) function c_process_running(pid) &
                 bind(C, name='fo_test_process_running')
             import :: c_int
@@ -380,20 +385,104 @@ contains
         end if
     end subroutine gremlin_poll_child
 
-    subroutine gremlin_fifo(path)
-        character(len=*), intent(in) :: path
-        integer(c_int) :: result
+    subroutine gremlin_gate_create(path)
+        character(:), allocatable, intent(inout) :: path
+        character(kind=c_char) :: bytes(4096)
+        integer :: i, n
+        integer(c_int) :: status
+        bytes = c_null_char
+        call assert_true(len(path) < size(bytes), 'gate label fits its native namespace buffer')
+        if (len(path) >= size(bytes)) return
+        do i = 1, len(path)
+            bytes(i) = path(i:i)
+        end do
+        status = c_gate_create(bytes, int(size(bytes), c_int))
+        call assert_true(status == 0, 'creates an owned process gate')
+        if (status /= 0) return
+        n = 0
+        do i = 1, size(bytes)
+            if (bytes(i) == c_null_char) exit
+            n = n + 1
+        end do
+        path = repeat(' ', n)
+        do i = 1, n
+            path(i:i) = bytes(i)
+        end do
+    end subroutine gremlin_gate_create
 
-        result = c_mkfifo(trim(path)//c_null_char, int(o'600', c_int))
-        call assert_true(result == 0, 'creates FIFO process barrier')
-    end subroutine gremlin_fifo
-
-    subroutine gremlin_release_fifo(path)
+    subroutine gremlin_gate_destroy(path)
         character(len=*), intent(in) :: path
         integer(c_int) :: status
-        status = c_release_fifo(trim(path)//c_null_char, 5000_c_int)
-        call assert_true(status == 0, 'releases FIFO with a live reader within its bound')
-    end subroutine gremlin_release_fifo
+        status = c_gate_destroy(trim(path)//c_null_char)
+        call assert_true(status == 0, 'destroys only the owned process gate')
+    end subroutine gremlin_gate_destroy
+
+    subroutine gremlin_gate_release(path)
+        character(len=*), intent(in) :: path
+        integer(c_int) :: status
+        status = c_gate_release(trim(path)//c_null_char, 5000_c_int)
+        call assert_true(status == 0, 'releases a live gate reader within its bound')
+    end subroutine gremlin_gate_release
+
+    function gremlin_pid_binding() result(name)
+        character(:), allocatable :: name
+        name = 'getpid'
+        if (fs_is_windows()) name = '_getpid'
+    end function gremlin_pid_binding
+
+    function gremlin_gate_read_source(path) result(source)
+        character(len=*), intent(in) :: path
+        character(:), allocatable :: source, escaped
+        character(len=1), parameter :: nl = new_line('a')
+        integer :: i
+        escaped = ''
+        do i = 1, len_trim(path)
+            escaped = escaped//path(i:i)
+            if (path(i:i) == "'") escaped = escaped//"'"
+        end do
+        if (.not. fs_is_windows()) then
+            source = 'block'//nl//'integer :: gate_unit'//nl//'character :: gate_token'//nl// &
+                "open(newunit=gate_unit,file='"//escaped// &
+                "',status='old',access='stream',form='unformatted',action='read')"//nl// &
+                'read(gate_unit) gate_token'//nl//'close(gate_unit)'//nl//'end block'
+            return
+        end if
+        source = 'block'//nl//'use, intrinsic :: iso_c_binding'//nl// &
+            'integer(c_intptr_t) :: gate_handle'//nl//'integer(c_int) :: rc, count'//nl// &
+            'integer(c_short) :: wide(512)'//nl//'character(c_char) :: token'//nl// &
+            'interface'//nl// &
+            'integer(c_int) function utf16(cp,flags,text,n,out,m) bind(C,name="MultiByteToWideChar")'//nl// &
+            'import c_int,c_char,c_short'//nl//'integer(c_int),value :: cp,flags,n,m'//nl// &
+            'character(c_char) :: text(*)'//nl//'integer(c_short) :: out(*)'//nl//'end function'//nl// &
+            'integer(c_intptr_t) function pipe_open(name,access,share,sa,creation,flags,tmp) &'//nl// &
+            'bind(C,name="CreateFileW")'//nl//'import c_short,c_int,c_intptr_t,c_ptr'//nl// &
+            'integer(c_short) :: name(*)'//nl//'integer(c_int),value :: access,share,creation,flags'//nl// &
+            'type(c_ptr),value :: sa'//nl//'integer(c_intptr_t),value :: tmp'//nl//'end function'//nl// &
+            'integer(c_int) function pipe_wait(name,ms) bind(C,name="WaitNamedPipeW")'//nl// &
+            'import c_short,c_int'//nl//'integer(c_short) :: name(*)'//nl// &
+            'integer(c_int),value :: ms'//nl//'end function'//nl// &
+            'integer(c_int) function pipe_read(h,byte,n,count,ov) bind(C,name="ReadFile")'//nl// &
+            'import c_intptr_t,c_char,c_int,c_ptr'//nl//'integer(c_intptr_t),value :: h'//nl// &
+            'character(c_char) :: byte'//nl//'integer(c_int),value :: n'//nl// &
+            'integer(c_int) :: count'//nl//'type(c_ptr),value :: ov'//nl//'end function'//nl// &
+            'integer(c_int) function pipe_write(h,byte,n,count,ov) bind(C,name="WriteFile")'//nl// &
+            'import c_intptr_t,c_char,c_int,c_ptr'//nl//'integer(c_intptr_t),value :: h'//nl// &
+            'character(c_char) :: byte'//nl//'integer(c_int),value :: n'//nl// &
+            'integer(c_int) :: count'//nl//'type(c_ptr),value :: ov'//nl//'end function'//nl// &
+            'integer(c_int) function pipe_close(h) bind(C,name="CloseHandle")'//nl// &
+            'import c_intptr_t,c_int'//nl//'integer(c_intptr_t),value :: h'//nl//'end function'//nl// &
+            'end interface'//nl// &
+            "rc=utf16(65001_c_int,8_c_int,'"//escaped//"'//c_null_char,-1_c_int,wide,512_c_int)"//nl// &
+            'if(rc==0) error stop 110'//nl//'do'//nl// &
+            "gate_handle=pipe_open(wide,int(z'C0000000',c_int),0_c_int,c_null_ptr,3_c_int,0_c_int,0_c_intptr_t)"//nl// &
+            'if(gate_handle/=-1_c_intptr_t) exit'//nl// &
+            'rc=pipe_wait(wide,1000_c_int)'//nl//'if(rc==0) error stop 111'//nl//'end do'//nl// &
+            'rc=pipe_read(gate_handle,token,1_c_int,count,c_null_ptr)'//nl// &
+            'if(rc==0.or.count/=1) error stop 112'//nl// &
+            'rc=pipe_write(gate_handle,token,1_c_int,count,c_null_ptr)'//nl// &
+            'if(rc==0.or.count/=1) error stop 113'//nl// &
+            'rc=pipe_close(gate_handle)'//nl//'if(rc==0) error stop 114'//nl//'end block'
+    end function gremlin_gate_read_source
 
     subroutine gremlin_stop_lane(driver, project, cache, state, lane, owner, &
             allow_terminal_error)

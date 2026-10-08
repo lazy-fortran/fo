@@ -1,16 +1,18 @@
 program test_continuous_preemption
     use fo_test_harness, only: string_list_t, process_result_t, list_add
-    use fo_test_harness, only: make_directory, write_text, read_text, file_exists
+    use fo_test_harness, only: make_directory, write_text, read_text, file_exists, current_directory
     use fo_test_harness, only: assert_true, assert_equal_string
     use fo_test_harness, only: spawn_heartbeat_process, terminate_process_group
     use fo_test_harness, only: assert_equal_integer, finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_run, gremlin_json
     use fo_test_gremlin_oracle, only: gremlin_wait_file, gremlin_wait_ms
-    use fo_test_gremlin_oracle, only: gremlin_fifo, gremlin_release_fifo
+    use fo_test_gremlin_oracle, only: gremlin_gate_create, gremlin_gate_release
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value, json_number_value, json_parse
     use fo_test_gremlin_oracle, only: gremlin_stop_lane
     use fo_test_gremlin_oracle, only: process_alive => gremlin_process_running
+    use fo_test_gremlin_oracle, only: gremlin_gate_read_source, gremlin_pid_binding
+    use fo_fs, only: fs_is_windows
     implicit none
 
     character(:), allocatable :: driver, scratch, project, other, cache, state
@@ -25,9 +27,10 @@ program test_continuous_preemption
     integer :: sentinel_bytes
     logical :: sentinel_reaped
     character(:), allocatable :: progress_pid, progress_child, progress_gate, progress_started
-    character(:), allocatable :: progress_view, progress_cwd
+    character(:), allocatable :: progress_view, progress_cwd, fixture_root
     logical :: found
 
+    call current_directory(fixture_root)
     call gremlin_setup(driver, scratch, project, cache, state)
     other = scratch//'/other'
     lane_a = 'preemption-a'
@@ -50,13 +53,13 @@ program test_continuous_preemption
     progress_started = scratch//'/progress.started'
     progress_view = scratch//'/progress-view-path'
     progress_cwd = ''
-    call gremlin_fifo(progress_gate)
+    call gremlin_gate_create(progress_gate)
     call spawn_heartbeat_process(scratch//'/sentinel.log', scratch, sentinel_pid)
     call make_project(project, 'A')
     call make_project(other, 'O')
-    call gremlin_fifo(gate_a)
-    call gremlin_fifo(gate_b)
-    call gremlin_fifo(other_gate)
+    call gremlin_gate_create(gate_a)
+    call gremlin_gate_create(gate_b)
+    call gremlin_gate_create(other_gate)
     call write_text(project//'/test/test_fail.f90', &
         'program test_fail'//new_line('a')//'implicit none'//new_line('a')// &
         "print '(a)', 'CURRENT_GENERATION_FAILURE'"//new_line('a')//'error stop 7'//new_line('a')// &
@@ -91,7 +94,7 @@ program test_continuous_preemption
     call assert_equal_string(read_text(field(status, 'active_project')//'/token.txt'), &
         'A'//new_line('a'), 'active runtime closure retains the captured A input')
     call assert_true(process_alive(pid_blocked), 'old test child remains alive during failed build')
-    call gremlin_release_fifo(gate_a)
+    call gremlin_gate_release(gate_a)
     call wait_file(result_a//'A', 10000, found)
     call assert_true(found, 'old test completes from its frozen runtime view')
     call assert_equal_string(read_text(result_a//'A'), 'A:A'//new_line('a'), &
@@ -147,7 +150,7 @@ program test_continuous_preemption
     call assert_true(.not. has_receipt(status, 'test_progress', generation_a, 'TIMEOUT'), &
         'preempted A case stays unclassified instead of timing out')
 
-    call gremlin_release_fifo(gate_b)
+    call gremlin_gate_release(gate_b)
     call wait_file(result_b//'B', 10000, found)
     call assert_true(found, 'new B test completes after its gate release')
     call assert_equal_string(read_text(result_b//'B'), 'B:B'//new_line('a'), &
@@ -190,6 +193,8 @@ contains
             '[[extra.fo.inputs]]'//new_line('a')// &
             'path = "token.txt"'//new_line('a')// &
             'role = "test-fixture"'//new_line('a'))
+        if (fs_is_windows()) call write_text(root//'/src/fixture_leaf_windows.c', &
+            read_text(fixture_root//'/test-fixtures/c/fixture_leaf_windows.c'))
         call write_text(root//'/src/probe.f90', &
             'module probe'//new_line('a')// &
             'character(len=*), parameter :: probe_value = "'//value//'"'//new_line('a')// &
@@ -206,7 +211,7 @@ contains
         if (len(pid_path) > 0) then
             pid_use = 'use, intrinsic :: iso_c_binding, only: c_int'//new_line('a')
             pid_declarations = 'interface'//new_line('a')// &
-                'integer(c_int) function c_getpid() bind(C,name="getpid")'//new_line('a')// &
+                'integer(c_int) function c_getpid() bind(C,name="'//gremlin_pid_binding()//'")'//new_line('a')// &
                 'import :: c_int'//new_line('a')//'end function c_getpid'//new_line('a')//'end interface'//new_line('a')
             pid_body = "open(newunit=unit,file='"//pid_path//"',status='replace')"//new_line('a')// &
                 "write(unit,'(i0)') c_getpid()"//new_line('a')//'close(unit)'//new_line('a')
@@ -218,9 +223,7 @@ contains
             "open(newunit=unit,file='"//started_path//"',status='replace')"//new_line('a')// &
             "write(unit,'(a)') 'started'"//new_line('a')//'close(unit)'//new_line('a')//pid_body// &
             'if (probe_value == "A" .or. "'//tag//'" /= "A") then'//new_line('a')// &
-            "open(newunit=gate_unit,file='"//fifo//"',status='old',access='stream', &"//new_line('a')// &
-            "    form='unformatted',action='read')"//new_line('a')// &
-            'read(gate_unit) gate_token'//new_line('a')//'close(gate_unit)'//new_line('a')// &
+            gremlin_gate_read_source(fifo)//new_line('a')// &
             'end if'//new_line('a')// &
             "open(newunit=unit,file='token.txt',status='old')"//new_line('a')// &
             "read(unit,'(a)') runtime_token"//new_line('a')//'close(unit)'//new_line('a')// &
@@ -240,18 +243,18 @@ contains
             '    c_ptr, c_associated, c_null_char'//new_line('a')// &
             'implicit none'//new_line('a')// &
             'interface'//new_line('a')// &
-            'function c_getcwd(buffer, size) bind(C, name="getcwd") result(pointer)'//new_line('a')// &
+            'function c_getcwd(buffer, size) bind(C, name="'//cwd_binding()//'") result(pointer)'//new_line('a')// &
             'import :: c_char, c_size_t, c_ptr'//new_line('a')// &
             'character(kind=c_char), intent(out) :: buffer(*)'//new_line('a')// &
             'integer(c_size_t), value :: size'//new_line('a')// &
             'type(c_ptr) :: pointer'//new_line('a')// &
             'end function c_getcwd'//new_line('a')// &
-            'end interface'//new_line('a')//fork_interface()// &
+            'end interface'//new_line('a')//child_interface()// &
             'integer :: unit, gate_unit, child, rc, i'//new_line('a')// &
             'character :: token'//new_line('a')// &
             'character(kind=c_char) :: cwd_bytes(4096)'//new_line('a')// &
             'character(len=4096) :: execution_cwd'//new_line('a')// &
-            'type(c_ptr) :: cwd_pointer'//new_line('a')// &
+            'type(c_ptr) :: cwd_pointer'//new_line('a')//child_entry_source()// &
             'if (probe_value == "A") then'//new_line('a')// &
             'cwd_bytes = c_null_char'//new_line('a')// &
             'cwd_pointer = c_getcwd(cwd_bytes, int(size(cwd_bytes), c_size_t))'//new_line('a')// &
@@ -270,16 +273,10 @@ contains
             "',status='replace')"//new_line('a')// &
             "write(unit,'(a)') trim(execution_cwd)"//new_line('a')// &
             'close(unit)'//new_line('a')// &
-            'child = c_fork()'//new_line('a')// &
-            'if (child < 0) error stop 8'//new_line('a')// &
-            'if (child == 0) then'//new_line('a')// &
-            'rc = c_pause()'//new_line('a')//'error stop 9'//new_line('a')// &
-            'end if'//new_line('a')// &
+            child_start_source()// &
             "open(newunit=unit,file='"//progress_child//"',status='replace')"//new_line('a')// &
             "write(unit,'(i0)') child"//new_line('a')//'close(unit)'//new_line('a')// &
-            "open(newunit=gate_unit,file='"//progress_gate// &
-            "',status='old',access='stream',form='unformatted')"//new_line('a')// &
-            'read(gate_unit) token'//new_line('a')//'close(gate_unit)'//new_line('a')// &
+            gremlin_gate_read_source(progress_gate)//new_line('a')// &
             'else'//new_line('a')// &
             "open(newunit=unit,file='"//scratch//"/b-progress',status='replace')"//new_line('a')// &
             "write(unit,'(a)') probe_value"//new_line('a')//'close(unit)'//new_line('a')// &
@@ -287,15 +284,53 @@ contains
         call write_text(project//'/test/test_progress.f90', source)
     end subroutine write_progress_test
 
-    function fork_interface() result(source)
+    function child_interface() result(source)
         character(:), allocatable :: source
-        source = 'interface'//new_line('a')// &
-            'integer(c_int) function c_fork() bind(C,name="fork")'//new_line('a')// &
-            'import :: c_int'//new_line('a')//'end function c_fork'//new_line('a')// &
-            'integer(c_int) function c_pause() bind(C,name="pause")'//new_line('a')// &
-            'import :: c_int'//new_line('a')//'end function c_pause'//new_line('a')// &
-            'end interface'//new_line('a')
-    end function fork_interface
+        if (fs_is_windows()) then
+            source = 'interface'//new_line('a')// &
+                'integer(c_int) function c_spawn_descendant() bind(C,name="fo_fixture_spawn_descendant")'// &
+                new_line('a')//'import :: c_int'//new_line('a')//'end function'//new_line('a')// &
+                'integer(c_int) function c_pause() bind(C,name="fo_fixture_wait_forever")'// &
+                new_line('a')//'import :: c_int'//new_line('a')//'end function'//new_line('a')// &
+                'end interface'//new_line('a')
+        else
+            source = 'interface'//new_line('a')// &
+                'integer(c_int) function c_fork() bind(C,name="fork")'//new_line('a')// &
+                'import :: c_int'//new_line('a')//'end function c_fork'//new_line('a')// &
+                'integer(c_int) function c_pause() bind(C,name="pause")'//new_line('a')// &
+                'import :: c_int'//new_line('a')//'end function c_pause'//new_line('a')// &
+                'end interface'//new_line('a')
+        end if
+    end function child_interface
+
+    function child_entry_source() result(source)
+        character(:), allocatable :: source
+        source = ''
+        if (.not. fs_is_windows()) return
+        source = 'block'//new_line('a')//'character(64) :: leaf'//new_line('a')// &
+            'call get_command_argument(1,leaf)'//new_line('a')// &
+            'if(trim(leaf)=="--fo-fixture-sleep") then'//new_line('a')// &
+            'rc=c_pause()'//new_line('a')//'error stop 9'//new_line('a')// &
+            'end if'//new_line('a')//'end block'//new_line('a')
+    end function child_entry_source
+
+    function child_start_source() result(source)
+        character(:), allocatable :: source
+        if (fs_is_windows()) then
+            source = 'child=c_spawn_descendant()'//new_line('a')// &
+                'if(child<=0) error stop 8'//new_line('a')
+        else
+            source = 'child=c_fork()'//new_line('a')//'if(child<0) error stop 8'//new_line('a')// &
+                'if(child==0) then'//new_line('a')//'rc=c_pause()'//new_line('a')// &
+                'error stop 9'//new_line('a')//'end if'//new_line('a')
+        end if
+    end function child_start_source
+
+    function cwd_binding() result(name)
+        character(:), allocatable :: name
+        name = 'getcwd'
+        if (fs_is_windows()) name = 'fo_fixture_getcwd'
+    end function cwd_binding
 
     subroutine start_main_lane(owner)
         character(:), allocatable, intent(out) :: owner
@@ -360,23 +395,17 @@ contains
         character(:), allocatable :: source
         source = 'program test_other'//new_line('a')//'use, intrinsic :: iso_c_binding, only: c_int'// &
             new_line('a')//'implicit none'//new_line('a')// &
-            'interface'//new_line('a')//' integer(c_int) function getpid() bind(C, name="getpid")'// &
+            'interface'//new_line('a')//' integer(c_int) function getpid() bind(C, name="'//gremlin_pid_binding()//'")'// &
             new_line('a')//'  import :: c_int'//new_line('a')//' end function getpid'//new_line('a')// &
-            'end interface'//new_line('a')//fork_interface()// &
+            'end interface'//new_line('a')//child_interface()// &
             'integer :: child, rc'//new_line('a')// &
             'integer :: unit, gate_unit'//new_line('a')//'character :: gate_token'//new_line('a')// &
-            'child = c_fork()'//new_line('a')// &
-            'if (child < 0) error stop 8'//new_line('a')// &
-            'if (child == 0) then'//new_line('a')// &
-            'rc = c_pause()'//new_line('a')//'error stop 9'//new_line('a')// &
-            'end if'//new_line('a')// &
+            child_entry_source()//child_start_source()// &
             "open(newunit=unit,file='"//other_start//"',status='replace')"//new_line('a')// &
             "write(unit,'(a)') 'started'"//new_line('a')//'close(unit)'//new_line('a')// &
             "open(newunit=unit,file='"//other_pid//"',status='replace')"//new_line('a')// &
             "write(unit,'(i0)') child"//new_line('a')//'close(unit)'//new_line('a')// &
-            "open(newunit=gate_unit,file='"//other_gate//"',status='old',access='stream', &"//new_line('a')// &
-            "    form='unformatted',action='read')"//new_line('a')// &
-            'read(gate_unit) gate_token'//new_line('a')//'close(gate_unit)'//new_line('a')// &
+            gremlin_gate_read_source(other_gate)//new_line('a')// &
             "open(newunit=unit,file='"//scratch//"/other.done',status='replace')"//new_line('a')// &
             "write(unit,'(a)') 'done'"//new_line('a')//'close(unit)'//new_line('a')// &
             'end program test_other'//new_line('a')

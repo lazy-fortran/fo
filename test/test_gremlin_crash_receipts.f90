@@ -5,7 +5,7 @@ program test_gremlin_crash_receipts
     use fo_test_harness, only: assert_true, assert_equal_integer, write_text
     use fo_test_harness, only: read_text, remove_path, finish_assertions, file_exists
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, gremlin_field
-    use fo_test_gremlin_oracle, only: gremlin_fifo, gremlin_release_fifo
+    use fo_test_gremlin_oracle, only: gremlin_gate_create, gremlin_gate_release
     use fo_test_gremlin_oracle, only: gremlin_wait_file, gremlin_wait_ms
     use fo_test_gremlin_oracle, only: gremlin_stop_lane
     use fo_test_process_identity, only: mcp_process_start_time, mcp_kill_owned_tree
@@ -18,6 +18,7 @@ program test_gremlin_crash_receipts
     use fo_gremlin_journal, only: JOURNAL_OK, JOURNAL_MAX_RECORD_BYTES
     use fo_gremlin_coverage, only: coverage_read_view_path, COVERAGE_OK
     use fo_gremlin_coverage_view, only: gremlin_coverage_view_t
+    use fo_test_gremlin_oracle, only: gremlin_gate_read_source, gremlin_pid_binding
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state, owner
@@ -32,30 +33,23 @@ program test_gremlin_crash_receipts
     type(gremlin_coverage_view_t) :: coverage_view
     integer :: status, child_pid
     integer(c_int64_t) :: child_start
-    logical :: has_proc
     character(len=*), parameter :: lane = 'crash-receipts'
     character(len=*), parameter :: case_name = 'test_crash_case'
 
     interface
-        integer(c_int) function signal_identity(pid, start, signal) &
-                bind(C, name='fo_test_signal_identity')
+        integer(c_int) function freeze_identity(pid, start) bind(C, name='fo_test_freeze_identity')
             import :: c_int, c_int64_t
-            integer(c_int), value :: pid, signal
+            integer(c_int), value :: pid
             integer(c_int64_t), value :: start
-        end function signal_identity
+        end function freeze_identity
     end interface
 
-    inquire(file='/proc/self/stat', exist=has_proc)
-    if (.not. has_proc) then
-        write (*, '(a)') 'crash receipts: skipped (requires Linux /proc)'
-        stop
-    end if
     call gremlin_setup(driver, scratch, project, cache, state)
     marker = scratch//'/executions.log'
     ready = scratch//'/blocked.pid'
     gate = scratch//'/completion.fifo'
     released = scratch//'/failure-released'
-    call gremlin_fifo(gate)
+    call gremlin_gate_create(gate)
     call write_text(project//'/fpm.toml', 'name = "crash_receipts"'//new_line('a'))
     call write_case(.false.)
 
@@ -70,7 +64,7 @@ program test_gremlin_crash_receipts
     call assert_true(gremlin_field(document, 'active_generation') == old_generation, &
         'crash recovery retries the exact unchanged generation')
     call assert_uncredited('retry remains unknown before terminal completion')
-    call gremlin_release_fifo(gate)
+    call gremlin_gate_release(gate)
     call wait_until('quiescent')
     call assert_true(boolean_field(document, 'local_gate_green'), &
         'only the real retry terminal PASS discharges the gate')
@@ -106,7 +100,7 @@ program test_gremlin_crash_receipts
     ! Native Fo diagnoses a failing test with another execution. Once this
     ! controlled retry is released, those diagnostic executions may finish too.
     call write_text(released, 'released'//new_line('a'))
-    call gremlin_release_fifo(gate)
+    call gremlin_gate_release(gate)
     call wait_until('failure')
     call wait_for_failure_coverage()
     call assert_true(gremlin_field(document, 'health') == 'failure' .and. &
@@ -131,7 +125,7 @@ contains
             new_line('a')//'logical :: released'// &
             new_line('a')//'character :: token'//new_line('a')// &
             'interface'//new_line('a')// &
-            'integer function getpid() bind(C, name="getpid")'//new_line('a')// &
+            'integer function getpid() bind(C, name="'//gremlin_pid_binding()//'")'//new_line('a')// &
             'end function getpid'//new_line('a')//'end interface'//new_line('a')// &
             'open(newunit=unit, file="'//marker// &
             '", status="unknown", position="append")'//new_line('a')// &
@@ -142,10 +136,7 @@ contains
             new_line('a')//'inquire(file="'//released// &
             '", exist=released)'//new_line('a')// &
             'if (.not. released) then'//new_line('a')// &
-            'open(newunit=gate_unit, file="'//gate// &
-            '", status="old", access="stream", form="unformatted", action="read")'// &
-            new_line('a')//'read(gate_unit) token'//new_line('a')// &
-            'close(gate_unit)'//new_line('a')//'end if'//new_line('a')
+            gremlin_gate_read_source(gate)//new_line('a')//'end if'//new_line('a')
         if (failing) source = source//'error stop 19'//new_line('a')
         source = source//'end program '//case_name//new_line('a')
         call write_text(project//'/test/'//case_name//'.f90', source)
@@ -251,11 +242,8 @@ contains
     end subroutine wait_at_marker
 
     subroutine crash_owner()
-        integer :: owner_pid, split, signal_status, attempt, unit, ios
+        integer :: owner_pid, split, signal_status, attempt
         integer(c_int64_t) :: owner_start
-        character(len=32) :: pid_text
-        character(len=4096) :: proc_status
-        logical :: stopped
 
         split = index(owner, '-')
         owner_pid = -1
@@ -267,31 +255,10 @@ contains
         call assert_true(owner_start > 0_c_int64_t, 'captures owner start identity')
         ! Freeze receipt publication before killing descendants. Their death
         ! cannot race a synthetic failure receipt into the interrupted journal.
-        signal_status = signal_identity(int(owner_pid, c_int), owner_start, 19_c_int)
-        call assert_true(signal_status == 0, 'freezes only the exact owner identity')
-        write(pid_text, '(i0)') owner_pid
-        stopped = .false.
-        do attempt = 1, 250
-            open(newunit=unit, file='/proc/'//trim(pid_text)//'/stat', &
-                status='old', action='read', iostat=ios)
-            if (ios == 0) then
-                read(unit, '(a)', iostat=ios) proc_status
-                close(unit)
-                if (ios == 0) then
-                    split = index(proc_status, ')', back=.true.)
-                    if (split > 0) then
-                        if (split + 2 <= len_trim(proc_status)) then
-                            stopped = proc_status(split + 2:split + 2) == 'T' .or. &
-                                proc_status(split + 2:split + 2) == 't'
-                        end if
-                    end if
-                end if
-            end if
-            if (stopped) exit
-            call gremlin_wait_ms(20)
-        end do
-        call assert_true(stopped, &
-            'kernel confirms owner stopped before descendant death')
+        signal_status = freeze_identity(int(owner_pid, c_int), owner_start)
+        call assert_true(signal_status == 0, &
+            'kernel confirms exact owner frozen before descendant death')
+        if (signal_status /= 0) return
         call mcp_kill_owned_tree(owner_pid, owner_start, signal_status)
         call assert_true(signal_status == 0, 'crashes the frozen owned process tree')
         do attempt = 1, 250

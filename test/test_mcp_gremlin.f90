@@ -7,7 +7,7 @@ program test_mcp_gremlin
     use fo_test_harness, only: assert_contains, finish_assertions, run_process, current_directory
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, gremlin_field, gremlin_run
     use fo_test_gremlin_oracle, only: gremlin_write_case, gremlin_wait_ms
-    use fo_test_gremlin_oracle, only: gremlin_fifo, gremlin_wait_file, gremlin_stop_lane
+    use fo_test_gremlin_oracle, only: gremlin_gate_create, gremlin_wait_file, gremlin_stop_lane
     use fo_test_mcp_session, only: mcp_session_t, mcp_session_start
     use fo_test_mcp_session, only: mcp_session_call, mcp_session_request
     use fo_test_mcp_session, only: mcp_session_notify, mcp_session_shutdown
@@ -17,6 +17,7 @@ program test_mcp_gremlin
     use fo_test_json, only: json_boolean_value, json_object, json_array
     use fo_gremlin_session, only: gremlin_get_session_journal_path
     use fx_hash, only: sha256_file
+    use fo_test_gremlin_oracle, only: gremlin_gate_read_source, gremlin_pid_binding
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state, owner
@@ -33,22 +34,17 @@ program test_mcp_gremlin
     type(process_result_t) :: process
     integer :: status, i, j, attempt, before, unit
     integer(int64) :: started, finished, rate
-    logical :: found, linux
+    logical :: found
     character(len=24), parameter :: public_actions(7) = [character(len=24) :: &
         'gremlin_start', 'gremlin_status', 'gremlin_wait', 'gremlin_events', &
         'gremlin_failures', 'gremlin_reproduce', 'gremlin_stop']
 
-    inquire(file='/proc/self/stat', exist=linux)
-    if (.not. linux) then
-        print '(a)', 'MCP Gremlin containment parity: skipped (requires Linux /proc and FIFO barriers)'
-        stop
-    end if
     call current_directory(cwd)
     call gremlin_setup(driver, scratch, project, cache, state)
     gate = scratch//'/blocked.fifo'
     blocked = scratch//'/blocked.started'
     failure_marker = scratch//'/failure.executions'
-    call gremlin_fifo(gate)
+    call gremlin_gate_create(gate)
     call write_text(project//'/fpm.toml', 'name="mcp_gremlin_probe"'//new_line('a'))
     call gremlin_write_case(project, 'test_mcp_pass', marker_body(scratch//'/pass.done'))
     call gremlin_write_case(project, 'test_mcp_fail', marker_body(failure_marker)// &
@@ -56,9 +52,7 @@ program test_mcp_gremlin
     call gremlin_write_case(project, 'test_mcp_blocked', &
         'integer :: gate_unit'//new_line('a')//'character :: token'//new_line('a')// &
         marker_body(blocked)//new_line('a')// &
-        'open(newunit=gate_unit,file="'//gate// &
-        '",access="stream",form="unformatted",action="read")'//new_line('a')// &
-        'read(gate_unit) token'//new_line('a')//'close(gate_unit)'//new_line('a')// &
+        gremlin_gate_read_source(gate)//new_line('a')// &
         marker_body(scratch//'/blocked.done', .true.))
     call mcp_session_start(server, driver, project, cache, state, scratch//'/mcp.stderr')
     call mcp_session_request(server, 'initialize', &

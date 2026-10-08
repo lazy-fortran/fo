@@ -3,20 +3,22 @@ program test_gremlin_watch
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_directory, write_text, read_text, run_process
     use fo_test_harness, only: file_exists
-    use fo_test_harness, only: move_path
+    use fo_test_harness, only: move_path, remove_path, current_directory
     use fo_test_harness, only: assert_true, assert_equal_integer, assert_equal_string
     use fo_test_harness, only: finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, gremlin_run
     use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_wait_ms, gremlin_wait_file
-    use fo_test_gremlin_oracle, only: gremlin_fifo
+    use fo_test_gremlin_oracle, only: gremlin_gate_create
     use fo_test_gremlin_oracle, only: gremlin_spawn, gremlin_stop_child
     use fo_test_json, only: json_value_t, json_member
     use fo_test_json, only: json_string_value, json_number_value, json_parse
     use fo_test_gremlin_oracle, only: gremlin_stop_lane
+    use fo_test_gremlin_oracle, only: gremlin_gate_read_source, gremlin_pid_binding
+    use fo_fs, only: fs_is_windows, fs_find_executable
     implicit none
 
     interface
-        integer(c_int) function c_setenv(name, value, overwrite) bind(C, name='setenv')
+        integer(c_int) function c_setenv(name, value, overwrite) bind(C, name='fo_test_setenv')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: name(*), value(*)
             integer(c_int), value :: overwrite
@@ -27,7 +29,7 @@ program test_gremlin_watch
     character(:), allocatable :: dependency, nested, lane, session, generation
     character(:), allocatable :: gate, entered, manifest, retired_path, failed_counter
     character(:), allocatable :: cli_project, bin_dir, path_value, check_marker
-    character(:), allocatable :: temp_one, temp_two, temp_populated
+    character(:), allocatable :: temp_one, temp_two, temp_populated, cwd, c_compiler, recorder, separator
     type(string_list_t) :: args, bad_observer
     type(process_result_t) :: process
     type(json_value_t) :: response, status
@@ -57,7 +59,7 @@ program test_gremlin_watch
     call write_text(nested//'/src/nested.f90', &
         'module nested_dep'//new_line('a')//'end module nested_dep'//new_line('a'))
     call write_text(project//'/src/oracle.data', 'captured input'//new_line('a'))
-    call gremlin_fifo(gate)
+    call gremlin_gate_create(gate)
     call write_blocked_test()
     call gremlin_start_args(args, project, lane, 'test_watch')
     call gremlin_json(driver, project, cache, state, args, response, process, 120000)
@@ -153,23 +155,32 @@ program test_gremlin_watch
     call write_text(cli_project//'/src/second.f90', &
         'module second'//new_line('a')//'end module second'//new_line('a'))
     check_marker = scratch//'/watch-checks'
-    call write_text(scratch//'/check-command.c', &
-        '#include <stdio.h>'//new_line('a')// &
-        'int main(void){FILE *f=fopen("'//check_marker//'","a");'//new_line('a')// &
-        'if(!f)return 1;fputs("check",f);fputc(10,f);return fclose(f)!=0;}'//new_line('a'))
+    call current_directory(cwd)
+    recorder = bin_dir//'/fo'
+    separator = ':'
+    call fs_find_executable('cc', c_compiler, found)
+    if (fs_is_windows()) then
+        recorder = recorder//'.exe'
+        separator = ';'
+        call fs_find_executable('gcc', c_compiler, found)
+    end if
+    call assert_true(found, 'locates native C compiler for independent check recorder')
     args = string_list_t()
-    call list_add(args, 'cc')
+    call list_add(args, c_compiler)
+    if (fs_is_windows()) call list_add(args, '-municode')
     call list_add(args, '-o')
-    call list_add(args, bin_dir//'/fo')
-    call list_add(args, scratch//'/check-command.c')
+    call list_add(args, recorder)
+    call list_add(args, cwd//'/test-fixtures/c/watch_check.c')
     call run_process(args, scratch, process, timeout_ms=30000)
     call assert_equal_integer(process%exit_code, 0, 'builds the independent check recorder')
     call get_environment_variable('PATH', length=path_length)
     allocate(character(len=path_length) :: path_value)
     call get_environment_variable('PATH', path_value)
     env_result = c_setenv('PATH'//c_null_char, &
-        (bin_dir//':'//trim(path_value))//c_null_char, 1_c_int)
+        (bin_dir//separator//trim(path_value))//c_null_char, 1_c_int)
     call assert_true(env_result == 0, 'watch fixture prepends isolated check command')
+    env_result = c_setenv('FO_WATCH_CHECK_MARKER'//c_null_char, check_marker//c_null_char, 1_c_int)
+    call assert_true(env_result == 0, 'independent check recorder receives its marker namespace')
     args = string_list_t()
     call list_add(args, 'watch')
     call list_add(args, '--fmt')
@@ -267,23 +278,12 @@ contains
 
     subroutine move_file(source, destination)
         character(len=*), intent(in) :: source, destination
-        type(string_list_t) :: command
-        type(process_result_t) :: result
-        call list_add(command, 'mv')
-        call list_add(command, source)
-        call list_add(command, destination)
-        call run_process(command, scratch, result, timeout_ms=10000)
-        call assert_equal_integer(result%exit_code, 0, 'rename fixture file succeeds')
+        call move_path(source, destination)
     end subroutine move_file
 
     subroutine remove_file(path)
         character(len=*), intent(in) :: path
-        type(string_list_t) :: command
-        type(process_result_t) :: result
-        call list_add(command, 'rm')
-        call list_add(command, path)
-        call run_process(command, scratch, result, timeout_ms=10000)
-        call assert_equal_integer(result%exit_code, 0, 'unlink fixture file succeeds')
+        call remove_path(path)
     end subroutine remove_file
 
     subroutine write_blocked_test()
@@ -292,9 +292,7 @@ contains
             'integer :: unit'//new_line('a')//'character :: token'//new_line('a')// &
             "open(newunit=unit,file='"//entered//"',status='replace')"//new_line('a')// &
             "write(unit,'(a)') 'started'"//new_line('a')//'close(unit)'//new_line('a')// &
-            "open(newunit=unit,file='"//gate//"',status='old',access='stream', &"//new_line('a')// &
-            " form='unformatted',action='read')"//new_line('a')//'read(unit) token'//new_line('a')// &
-            'close(unit)'//new_line('a')//'end program test_watch'//new_line('a')
+            gremlin_gate_read_source(gate)//new_line('a')//'end program test_watch'//new_line('a')
         call write_text(project//'/test/test_watch.f90', source)
     end subroutine write_blocked_test
 

@@ -62,6 +62,10 @@ module fo_test_harness
     end type byte_buffer_t
 
     interface
+        integer(c_int) function c_gate_close_all() bind(C, name="fo_test_gate_close_all")
+            import :: c_int
+        end function c_gate_close_all
+
         integer(c_int) function open_descriptor_count() bind(C, name='fo_test_open_fds')
             import :: c_int
         end function open_descriptor_count
@@ -1332,6 +1336,8 @@ contains
         integer :: i, failure_count
         logical :: retain
 
+        rc = c_gate_close_all()
+        if (rc /= 0) call record_failure("close test-owned process gates")
         failure_count = 0
         if (allocated(failures)) then
             failure_count = size(failures)

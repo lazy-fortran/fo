@@ -198,6 +198,7 @@ int fo_test_process_running(int pid) {
 }
 int fo_test_signal_identity(int pid, uint64_t birth, int signal_number) {
     if (pid <= 0 || !birth) return -1;
+    if (signal_number != 0 && signal_number != 9 && signal_number != 15) { errno = ENOTSUP; return -1; }
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE |
         (signal_number ? PROCESS_TERMINATE : 0), FALSE, (DWORD)pid);
     if (!process) return -1;
@@ -452,11 +453,9 @@ int fo_test_private_mode(const char *path, int directory) {
     free(wide); FreeLibrary(security); return changed ? 0 : -1;
 }
 int fo_test_mode_bits(const char *path) { (void)path; errno = ENOTSUP; return -1; }
-int fo_test_release_fifo(const char *path, int timeout_ms) {
-    (void)path; (void)timeout_ms; errno = ENOTSUP; return -1;
-}
 
-int fo_test_mkfifo(const char *path, int mode) { (void)path; (void)mode; errno = ENOTSUP; return -1; }
+
+
 
 int fo_test_is_regular_file(const char *path) {
     wchar_t *wide = fx_win32_utf16(path);
@@ -473,3 +472,19 @@ int fo_test_is_regular_file(const char *path) {
 }
 
 int fo_test_in_job(void) { BOOL present; return IsProcessInJob(GetCurrentProcess(), NULL, &present) ? (present ? 1 : 0) : -1; }
+
+#include "fo_test_os_gates_windows.inc"
+
+#include "fo_test_os_freeze_windows.inc"
+
+int fo_test_touch_directory(const char *path) {
+    wchar_t *wide = fx_win32_utf16(path);
+    HANDLE handle = wide ? CreateFileW(wide, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE |
+        FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL) : INVALID_HANDLE_VALUE;
+    free(wide);
+    if (handle == INVALID_HANDLE_VALUE) return -1;
+    FILETIME now; GetSystemTimeAsFileTime(&now);
+    BOOL changed = SetFileTime(handle, NULL, NULL, &now);
+    BOOL closed = CloseHandle(handle);
+    return changed && closed ? 0 : -1;
+}

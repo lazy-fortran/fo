@@ -5,7 +5,7 @@ program test_gremlin_journal_recovery
     use fo_test_harness, only: assert_true, assert_equal_integer, assert_equal_string
     use fo_test_harness, only: assert_contains, finish_assertions, current_directory
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, gremlin_field
-    use fo_test_gremlin_oracle, only: gremlin_fifo, gremlin_wait_file, gremlin_wait_ms
+    use fo_test_gremlin_oracle, only: gremlin_gate_create, gremlin_wait_file, gremlin_wait_ms
     use fo_test_gremlin_oracle, only: gremlin_spawn, gremlin_wait_child, gremlin_stop_lane
     use fo_test_process_identity, only: mcp_process_start_time
     use fo_test_process_identity, only: mcp_process_identity_running, mcp_kill_owned_tree
@@ -13,6 +13,7 @@ program test_gremlin_journal_recovery
     use fo_test_json, only: json_number_value, json_parse
     use fo_gremlin_state, only: gremlin_session_state_dir, gremlin_session_read
     use fo_gremlin_session, only: gremlin_get_session_journal_path
+    use fo_test_gremlin_oracle, only: gremlin_gate_read_source, gremlin_pid_binding
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state, cwd
@@ -79,8 +80,8 @@ program test_gremlin_journal_recovery
     second_pid_file = scratch//'/after-recovery.pid'
     first_done = scratch//'/before-crash.done'
     second_done = scratch//'/after-recovery.done'
-    call gremlin_fifo(first_gate)
-    call gremlin_fifo(second_gate)
+    call gremlin_gate_create(first_gate)
+    call gremlin_gate_create(second_gate)
     call write_text(project//'/fpm.toml', 'name="journal_recovery"'//new_line('a'))
     call write_text(project//'/test/test_pass.f90', &
         'program test_pass'//new_line('a')//'end program'//new_line('a'))
@@ -135,13 +136,11 @@ contains
             'program test_blocked'//new_line('a')// &
             'integer :: unit'//new_line('a')//'character :: token'//new_line('a')// &
             'interface'//new_line('a')// &
-            'integer function getpid() bind(C,name="getpid")'//new_line('a')// &
+            'integer function getpid() bind(C,name="'//gremlin_pid_binding()//'")'//new_line('a')// &
             'end function'//new_line('a')//'end interface'//new_line('a')// &
             'open(newunit=unit,file="'//pid_file//'",status="replace")'//new_line('a')// &
             'write(unit,"(i0)") getpid()'//new_line('a')//'close(unit)'//new_line('a')// &
-            'open(newunit=unit,file="'//gate// &
-            '",access="stream",form="unformatted",action="read")'//new_line('a')// &
-            'read(unit) token'//new_line('a')//'close(unit)'//new_line('a')// &
+            gremlin_gate_read_source(gate)//new_line('a')// &
             'open(newunit=unit,file="'//done_file//'",status="replace")'//new_line('a')// &
             'write(unit,"(a)") "done"'//new_line('a')//'close(unit)'//new_line('a')// &
             'end program'//new_line('a'))
@@ -291,7 +290,7 @@ contains
 
         ready = scratch//'/restart-'//mode//'.ready'
         gate = scratch//'/restart-'//mode//'.fifo'
-        call gremlin_fifo(gate)
+        call gremlin_gate_create(gate)
         call environment('RECOVERY_BARRIER_OWNER', trim(lane_state)//'/owner')
         call environment('RECOVERY_BARRIER_MODE', mode)
         call environment('RECOVERY_BARRIER_READY', ready)

@@ -9,10 +9,11 @@ program test_gremlin_bootstrap
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_run, gremlin_json
     use fo_test_gremlin_oracle, only: gremlin_wait_file, gremlin_wait_ms
     use fo_test_gremlin_oracle, only: gremlin_spawn, gremlin_wait_child
-    use fo_test_gremlin_oracle, only: gremlin_fifo, gremlin_release_fifo
+    use fo_test_gremlin_oracle, only: gremlin_gate_create, gremlin_gate_release
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value, json_parse
     use fo_test_gremlin_oracle, only: gremlin_stop_lane
+    use fo_test_gremlin_oracle, only: gremlin_gate_read_source, gremlin_pid_binding
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state, lane
@@ -44,8 +45,8 @@ program test_gremlin_bootstrap
         '[[extra.fo.inputs]]'//new_line('a')// &
         'path = "test/obsolete.version"'//new_line('a')// &
         'role = "test-fixture"'//new_line('a'))
-    call gremlin_fifo(old_gate)
-    call gremlin_fifo(new_gate)
+    call gremlin_gate_create(old_gate)
+    call gremlin_gate_create(new_gate)
     call write_generation('old')
     out_one = scratch//'/start-one.out'
     err_one = scratch//'/start-one.err'
@@ -87,7 +88,7 @@ program test_gremlin_bootstrap
         'failed build retains the last-compilable generation')
     call assert_equal_integer(marker_count(marker, 'started'), 1, &
         'concurrent start executes the first case exactly once')
-    call gremlin_release_fifo(old_gate)
+    call gremlin_gate_release(old_gate)
     call wait_marker(generation_done, 'done', 30000, found)
     call assert_true(found, 'last-compilable test completes after gate release')
     call wait_receipt(lane, session, 'test_generation', generation, 'PASS', event)
@@ -119,7 +120,7 @@ program test_gremlin_bootstrap
         'obsolete child receives no fabricated completion')
     call assert_true(.not. has_receipt(status, 'test_obsolete', generation, 'PASS'), &
         'preempted old case remains unclassified')
-    call gremlin_release_fifo(new_gate)
+    call gremlin_gate_release(new_gate)
     call wait_receipt(lane, session, 'test_generation', new_generation, 'PASS', event)
     call status_now(lane, session, status)
     call assert_true(has_receipt(status, 'test_generation', generation, 'PASS'), &
@@ -129,7 +130,7 @@ program test_gremlin_bootstrap
     call make_directory(scratch//'/other/test')
     call write_text(scratch//'/other/fpm.toml', &
         'name = "gremlin_bootstrap_lane_b"'//new_line('a'))
-    call gremlin_fifo(lane_gate)
+    call gremlin_gate_create(lane_gate)
     call write_gate_case(scratch//'/other', 'test_lane_b', lane_gate, &
         scratch//'/lane-b.started', scratch//'/lane-b.done')
     call start_other_lane(scratch//'/other', lane_session)
@@ -139,7 +140,7 @@ program test_gremlin_bootstrap
     call stop_lane(lane, session)
     call assert_true(.not. marker_has(scratch//'/lane-b.done', 'done'), &
         'stopping lane A does not complete or kill lane B')
-    call gremlin_release_fifo(lane_gate)
+    call gremlin_gate_release(lane_gate)
     call wait_marker(scratch//'/lane-b.done', 'done', 30000, found)
     call assert_true(found, 'lane B completes after its own gate is released')
     call wait_receipt_for_project(scratch//'/other', 'lane-b', lane_session, &
@@ -206,9 +207,7 @@ contains
                 'integer :: unit, gate_unit'//new_line('a')//'character :: token'//new_line('a')// &
                 "open(newunit=unit,file='"//marker//"',status='unknown',position='append')"//new_line('a')// &
                 "write(unit,'(a)') 'new-started'"//new_line('a')//'close(unit)'//new_line('a')// &
-                "open(newunit=gate_unit,file='"//new_gate//"',status='old',access='stream', &"//new_line('a')// &
-                "    form='unformatted',action='read')"//new_line('a')// &
-                'read(gate_unit) token'//new_line('a')//'close(gate_unit)'//new_line('a')// &
+                gremlin_gate_read_source(new_gate)//new_line('a')// &
                 "open(newunit=unit,file='"//scratch//"/generation.done',status='replace')"//new_line('a')// &
                 "write(unit,'(a)') 'done'"//new_line('a')//'close(unit)'//new_line('a')// &
                 'end program test_generation'//new_line('a'))
@@ -224,9 +223,7 @@ contains
             "open(newunit=unit,file='"//started_path// &
             "',status='unknown',position='append')"//new_line('a')// &
             "write(unit,'(a)') 'started'"//new_line('a')//'close(unit)'//new_line('a')// &
-            "open(newunit=gate_unit,file='"//gate_path//"',status='old',access='stream', &"//new_line('a')// &
-            "    form='unformatted',action='read')"//new_line('a')// &
-            'read(gate_unit) token'//new_line('a')//'close(gate_unit)'//new_line('a')// &
+            gremlin_gate_read_source(gate_path)//new_line('a')// &
             "open(newunit=unit,file='"//done_path//"',status='replace')"//new_line('a')// &
             "write(unit,'(a)') 'done'"//new_line('a')//'close(unit)'//new_line('a')// &
             'end program '//name//new_line('a')
@@ -238,7 +235,7 @@ contains
         character(:), allocatable :: source
         source = 'program test_obsolete'//new_line('a')// &
             'use, intrinsic :: iso_c_binding, only: c_int'//new_line('a')//'implicit none'//new_line('a')// &
-            'interface'//new_line('a')//'integer(c_int) function c_getpid() bind(C,name="getpid")'//new_line('a')// &
+            'interface'//new_line('a')//'integer(c_int) function c_getpid() bind(C,name="'//gremlin_pid_binding()//'")'//new_line('a')// &
             'import :: c_int'//new_line('a')//'end function c_getpid'//new_line('a')//'end interface'//new_line('a')// &
             'integer :: unit, gate_unit'//new_line('a')//'character :: token'//new_line('a')// &
             'character(len=32) :: value'//new_line('a')// &
@@ -248,9 +245,7 @@ contains
             "write(unit,'(a)') trim(value)"//new_line('a')//'close(unit)'//new_line('a')// &
             "open(newunit=unit,file='"//old_pid_file//"',status='replace')"//new_line('a')// &
             "write(unit,'(i0)') c_getpid()"//new_line('a')//'close(unit)'//new_line('a')// &
-            "open(newunit=gate_unit,file='"//old_gate//"',status='old',access='stream', &"//new_line('a')// &
-            "    form='unformatted',action='read')"//new_line('a')// &
-            'read(gate_unit) token'//new_line('a')//'close(gate_unit)'//new_line('a')// &
+            gremlin_gate_read_source(old_gate)//new_line('a')// &
             "open(newunit=unit,file='"//obsolete_marker//"',status='replace')"//new_line('a')// &
             "write(unit,'(a)') 'done'"//new_line('a')//'close(unit)'//new_line('a')// &
             'end program test_obsolete'//new_line('a')
@@ -488,12 +483,8 @@ contains
 
     subroutine remove_file(path)
         character(len=*), intent(in) :: path
-        type(string_list_t) :: values
-        type(process_result_t) :: result
-        call list_add(values, 'rm')
-        call list_add(values, '-f')
-        call list_add(values, path)
-        call run_process(values, scratch, result, timeout_ms=10000)
+        if (.not. file_exists(path)) return
+        call remove_path(path)
     end subroutine remove_file
 
 end program test_gremlin_bootstrap

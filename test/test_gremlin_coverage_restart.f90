@@ -6,7 +6,7 @@ program test_gremlin_coverage_restart
     use fo_test_harness, only: assert_true, assert_equal_integer, assert_equal_string
     use fo_test_harness, only: finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, gremlin_wait_ms
-    use fo_test_gremlin_oracle, only: gremlin_fifo, gremlin_release_fifo
+    use fo_test_gremlin_oracle, only: gremlin_gate_create, gremlin_gate_release
     use fo_test_gremlin_oracle, only: gremlin_stop_lane
     use fo_test_gremlin_oracle, only: gremlin_field
     use fo_test_gremlin_oracle, only: gremlin_write_case
@@ -14,6 +14,7 @@ program test_gremlin_coverage_restart
     use fo_test_process_identity, only: mcp_process_identity_running
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_number_value, json_boolean_value, json_string_value
+    use fo_test_gremlin_oracle, only: gremlin_gate_read_source, gremlin_pid_binding
     implicit none
 
     integer, parameter :: n_cases = 40, interrupted_slot = 18
@@ -29,13 +30,7 @@ program test_gremlin_coverage_restart
     integer :: owner_pid, child_pid, signal_status, attempt, i
     integer(c_int64_t) :: owner_start, child_start
     logical :: ready_seen, interrupted_pass
-    logical :: has_proc
 
-    inquire(file='/proc/self/stat', exist=has_proc)
-    if (.not. has_proc) then
-        write (*, '(a)') 'coverage restart: skipped (requires Linux /proc)'
-        stop
-    end if
     call gremlin_setup(driver, scratch, project, cache, state)
     write (*, '(a)') 'coverage restart fixture: '//scratch
     lane = 'coverage-restart-native'
@@ -45,8 +40,8 @@ program test_gremlin_coverage_restart
     ready_after_marker = scratch//'/final.pid'
     marker = scratch//'/cases.log'
     call write_text(project//'/fpm.toml', 'name = "coverage_restart_probe"'//new_line('a'))
-    call gremlin_fifo(gate)
-    call gremlin_fifo(gate_after_marker)
+    call gremlin_gate_create(gate)
+    call gremlin_gate_create(gate_after_marker)
     do i = 1, n_cases
         write(names(i), '(a,i2.2)') 'test_case_', i
     end do
@@ -140,7 +135,7 @@ program test_gremlin_coverage_restart
     call wait_for_progress(17, ready, 60000, ready_seen, replacement)
     call assert_true(ready_seen, 'restarted epoch reaches the interrupted permutation slot')
     if (.not. ready_seen) call finish_assertions()
-    call gremlin_release_fifo(gate)
+    call gremlin_gate_release(gate)
     call remove_path(ready)
     call wait_for_progress(n_cases, ready_after_marker, 180000, ready_seen, replacement)
     call assert_true(ready_seen, 'all markers are present while the final child is blocked')
@@ -161,7 +156,7 @@ program test_gremlin_coverage_restart
     call assert_true(signal_status == 0 .and. child_pid > 0, &
         'final marker fixture publishes its blocked child')
     child_start = mcp_process_start_time(child_pid)
-    call gremlin_release_fifo(gate_after_marker)
+    call gremlin_gate_release(gate_after_marker)
     call wait_gone(child_pid, child_start, 5000)
     call remove_path(ready_after_marker)
     call wait_for_progress(n_cases, '', 180000, ready_seen, replacement)
@@ -321,7 +316,7 @@ contains
 
     subroutine write_cases()
         integer :: index_case
-        character(len=2048) :: body
+        character(:), allocatable :: body
 
         do index_case = 1, n_cases
             if (names(index_case) == expected(interrupted_slot)) then
@@ -337,7 +332,7 @@ contains
 
     function marker_body(name) result(body)
         character(len=*), intent(in) :: name
-        character(len=2048) :: body
+        character(:), allocatable :: body
 
         body = 'integer :: unit'//new_line('a')//'open(newunit=unit, file="'//marker// &
             '", status="unknown", position="append")'//new_line('a')// &
@@ -346,19 +341,16 @@ contains
 
     function blocked_body(name) result(body)
         character(len=*), intent(in) :: name
-        character(len=2048) :: body
+        character(:), allocatable :: body
 
         body = 'integer :: unit, gate_unit, mark_unit'//new_line('a')//'character :: token'// &
             new_line('a')//'interface'//new_line('a')// &
-            'integer function getpid() bind(C, name="getpid")'//new_line('a')// &
+            'integer function getpid() bind(C, name="'//gremlin_pid_binding()//'")'//new_line('a')// &
             'end function getpid'//new_line('a')// &
             'end interface'//new_line('a')// &
             'open(newunit=unit, file="'//ready//'", status="replace")'//new_line('a')// &
             'write(unit, "(i0)") getpid()'//new_line('a')//'close(unit)'//new_line('a')// &
-            'open(newunit=gate_unit, file="'//gate// &
-            '", status="old", access="stream", form="unformatted", action="read")'// &
-            new_line('a')//'read(gate_unit) token'//new_line('a')//'close(gate_unit)'// &
-            new_line('a')// &
+            gremlin_gate_read_source(gate)//new_line('a')// &
             'open(newunit=mark_unit, file="'//marker// &
             '", status="unknown", position="append")'//new_line('a')// &
             'write(mark_unit, "(a)") "'//name//'"'//new_line('a')//'close(mark_unit)'
@@ -366,11 +358,11 @@ contains
 
     function marker_then_blocked_body(name) result(body)
         character(len=*), intent(in) :: name
-        character(len=2048) :: body
+        character(:), allocatable :: body
 
         body = 'integer :: unit, gate_unit'//new_line('a')//'character :: token'// &
             new_line('a')//'interface'//new_line('a')// &
-            'integer function getpid() bind(C, name="getpid")'//new_line('a')// &
+            'integer function getpid() bind(C, name="'//gremlin_pid_binding()//'")'//new_line('a')// &
             'end function getpid'//new_line('a')//'end interface'//new_line('a')// &
             new_line('a')//'open(newunit=unit, file="'//marker// &
             '", status="unknown", position="append")'//new_line('a')// &
@@ -378,9 +370,7 @@ contains
             new_line('a')//'open(newunit=unit, file="'//ready_after_marker// &
             '", status="replace")'//new_line('a')//'write(unit, "(i0)") getpid()'// &
             new_line('a')//'close(unit)'//new_line('a')// &
-            'open(newunit=gate_unit, file="'//gate_after_marker// &
-            '", status="old", access="stream", form="unformatted", action="read")'// &
-            new_line('a')//'read(gate_unit) token'//new_line('a')//'close(gate_unit)'
+            gremlin_gate_read_source(gate_after_marker)
     end function marker_then_blocked_body
 
     subroutine shuffle(values, initial_seed)

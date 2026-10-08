@@ -4,8 +4,8 @@ program test_mcp_cancel_error
     use fo_test_harness, only: process_alive, stop_sentinel
     use fo_test_harness, only: remove_path
     use fo_test_harness, only: assert_true, assert_equal_integer, finish_assertions
-    use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_fifo
-    use fo_test_gremlin_oracle, only: gremlin_wait_file, gremlin_release_fifo
+    use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_gate_create, gremlin_gate_destroy
+    use fo_test_gremlin_oracle, only: gremlin_wait_file, gremlin_gate_release
     use fo_test_gremlin_oracle, only: gremlin_wait_ms
     use fo_test_mcp_session, only: mcp_session_t, mcp_session_start
     use fo_test_mcp_session, only: mcp_session_request, mcp_session_notify
@@ -17,6 +17,7 @@ program test_mcp_cancel_error
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_string_value, json_number_value, json_boolean_value
     use fo_test_json, only: json_boolean, json_object
+    use fo_test_gremlin_oracle, only: gremlin_gate_read_source, gremlin_pid_binding
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state
@@ -187,7 +188,7 @@ program test_mcp_cancel_error
         'server B retains its distinct active run identity')
     call assert_true(mcp_process_identity_running(child_b, child_b_start), &
         'server B blocked child remains alive after server A cancellation')
-    call gremlin_release_fifo(gate_b)
+    call gremlin_gate_release(gate_b)
     call gremlin_wait_file(done_b, 10000, found)
     call assert_true(found, 'server B test progresses after server A cancellation')
     call wait_finished(server_b, run_id_b, status_payload)
@@ -360,25 +361,26 @@ contains
                 'unrelated sentinel survives both server cleanup paths')
             call stop_sentinel(sentinel)
         end if
-        call remove_path(gate_a)
-        call remove_path(gate_b)
+        call gremlin_gate_destroy(gate_a)
+        call gremlin_gate_destroy(gate_b)
     end subroutine cleanup_fixture
 
     subroutine prepare_check_fixture(project_dir, ready_path, gate_path, package, &
             completed_path)
-        character(len=*), intent(in) :: project_dir, ready_path, gate_path, package
+        character(len=*), intent(in) :: project_dir, ready_path, package
+        character(:), allocatable, intent(inout) :: gate_path
         character(len=*), intent(in), optional :: completed_path
 
         call make_directory(project_dir)
         call write_text(project_dir//'/fpm.toml', &
             'name = "'//trim(package)//'"'//new_line('a'))
-        call gremlin_fifo(gate_path)
+        call gremlin_gate_create(gate_path)
         call make_directory(project_dir//'/test')
         body = 'program test_mcp_barrier'//new_line('a')// &
             'use, intrinsic :: iso_c_binding, only: c_int'//new_line('a')// &
             'implicit none'//new_line('a')// &
             'interface'//new_line('a')// &
-            'integer(c_int) function getpid() bind(C, name="getpid")'// &
+            'integer(c_int) function getpid() bind(C, name="'//gremlin_pid_binding()//'")'// &
             new_line('a')//'import :: c_int'//new_line('a')// &
             'end function getpid'//new_line('a')//'end interface'//new_line('a')// &
             'integer :: unit, gate_unit'//new_line('a')// &
@@ -386,10 +388,7 @@ contains
             'open(newunit=unit, file="'//ready_path// &
                 '", status="replace", action="write")'//new_line('a')// &
             'write(unit, "(i0)") getpid()'//new_line('a')//'close(unit)'// &
-            new_line('a')//'open(newunit=gate_unit, file="'//gate_path// &
-                '", status="old", access="stream", form="unformatted", '// &
-                'action="read")'//new_line('a')//'read(gate_unit) token'// &
-            new_line('a')//'close(gate_unit)'
+            new_line('a')//gremlin_gate_read_source(gate_path)
         if (present(completed_path)) body = body//new_line('a')// &
             'open(newunit=unit, file="'//completed_path// &
                 '", status="replace", action="write")'//new_line('a')// &

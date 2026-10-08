@@ -243,6 +243,34 @@ int fo_test_signal_identity(int pid, uint64_t start_time, int signal_number) {
     return kill((pid_t)pid, signal_number);
 }
 
+int fo_test_freeze_identity(int pid, uint64_t birth) {
+    if (fo_test_signal_identity(pid, birth, SIGSTOP)) return -1;
+    for (int attempt = 0; attempt < 250; ++attempt) {
+        int stopped = 0;
+#ifdef __linux__
+        char path[64], record[4096];
+        snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+        FILE *stream = fopen(path, "r");
+        if (stream) {
+            if (fgets(record, sizeof(record), stream)) {
+                char *end = strrchr(record, ')');
+                if (end && end[1] == ' ') stopped = end[2] == 'T' || end[2] == 't';
+            }
+            fclose(stream);
+        }
+#elif defined(__APPLE__)
+        struct proc_bsdinfo info;
+        int length = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+        stopped = length == sizeof(info) && info.pbi_status == SSTOP;
+#endif
+        if (stopped && process_start_time(pid) == birth) return 0;
+        struct timespec delay = {0, 20000000};
+        nanosleep(&delay, NULL);
+    }
+    if (process_start_time(pid) == birth) (void)kill(pid, SIGCONT);
+    return -1;
+}
+
 int fo_test_os_initialize(void) { return 162; }
 
 int fo_test_mkdtemp(char *pattern) {
@@ -295,6 +323,9 @@ int fo_test_unlink(const char *path) { return unlink(path) == 0 || errno == ENOE
 int fo_test_rename(const char *source, const char *target) { return rename(source, target); }
 int fo_test_symlink(const char *target, const char *link_path) { return symlink(target, link_path); }
 int fo_test_getcwd(char *buffer, size_t size) { return getcwd(buffer, size) == NULL ? -1 : 0; }
+int fo_test_touch_directory(const char *path) {
+    return utimensat(AT_FDCWD, path, NULL, 0);
+}
 int fo_test_mode_bits(const char *path) {
     struct stat info;
     return stat(path, &info) == 0 ? (int)(info.st_mode & 07777) : -1;
@@ -306,7 +337,7 @@ int64_t fo_test_monotonic_ms(void) {
     return (int64_t)now.tv_sec * 1000 + (int64_t)now.tv_nsec / 1000000;
 }
 
-int fo_test_release_fifo(const char *path, int timeout_ms) {
+int fo_test_gate_release(const char *path, int timeout_ms) {
     int64_t deadline = fo_test_monotonic_ms() + timeout_ms;
     int descriptor;
     struct timespec pause = {0, 20000000};
@@ -416,7 +447,12 @@ int fo_test_is_regular_file(const char *path) {
 }
 int fo_test_chdir(const char *path) { return chdir(path); }
 int fo_test_setenv(const char *name, const char *value, int overwrite) { return setenv(name, value, overwrite); }
-int fo_test_mkfifo(const char *path, int mode) { return mkfifo(path, (mode_t)mode); }
+int fo_test_gate_create(char *path, int capacity) {
+    if (capacity < 1 || strlen(path) >= (size_t)capacity) return -1;
+    return mkfifo(path, 0600);
+}
+int fo_test_gate_destroy(const char *path) { return unlink(path); }
+int fo_test_gate_close_all(void) { return 0; } /* FIFO nodes are registered scratch. */
 int fo_test_open_write(const char *path) { return open(path, O_CREAT | O_TRUNC | O_WRONLY, 0600); }
 int fo_test_sleep_ms(int ms) { return ms < 0 ? -1 : poll(NULL, 0, ms) < 0 && errno != EINTR ? -1 : 0; }
 int fo_test_cancel(int pid) { return kill(-pid, SIGKILL); }
