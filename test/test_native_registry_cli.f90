@@ -81,7 +81,7 @@ program test_native_registry_cli
     call run_fo(driver, args, consumer, join_path(scratch, 'cache'), result, &
         environment)
     call assert_process_ok(result, &
-        'root dev closure runs; provider dev edge is excluded')
+        'root dev closure runs; regular selection wins; irrelevant dev is excluded')
 
     call write_package('leaf', '2.0.0', 50)
     call write_text(join_path(consumer, 'fpm.toml'), &
@@ -157,6 +157,7 @@ contains
             new_line('a')//'openmp = "*"'//new_line('a')// &
             'provider.namespace = "demo"'//new_line('a')//trim(selector)// &
             new_line('a')//'[dev-dependencies]'//new_line('a')// &
+            'provider = { namespace = "demo", v = "1.9.0" }'//new_line('a')// &
             'helper = { namespace = "demo", v = "1.0.0" }'//new_line('a'))
     end subroutine write_consumer
 

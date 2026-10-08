@@ -99,6 +99,8 @@ contains
         end do
         if (.not. include_dev) return
         do i = 1, config%n_dev_deps
+            if (any(config%deps(:config%n_deps)%name == &
+                    config%dev_deps(i)%name)) cycle
             call acquire_edge(config%dev_deps(i), package_dir, root, package_key, &
                 visited, n_visited, depth, ierr)
             if (ierr /= 0) return

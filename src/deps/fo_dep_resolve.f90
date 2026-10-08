@@ -73,6 +73,7 @@ contains
 
         n_unresolved = 0
         do i = 1, cfg%n_dev_deps
+            if (any(cfg%deps(:cfg%n_deps)%name == cfg%dev_deps(i)%name)) cycle
             kind = dep_kind(cfg%dev_deps(i))
             if (kind == DEP_PATH) then
                 call resolve_path_dep(root, trim(cfg%dev_deps(i)%path), dep_dir)
