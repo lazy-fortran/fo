@@ -2348,6 +2348,44 @@ static int signal_recovery_session(const struct recovery_session *item,
 #endif
 }
 
+#if defined(__APPLE__) || defined(__linux__)
+static int capture_recovery_descendants(const char *registry,
+                                        const char *owner_start,
+                                        const struct recovery_session *items,
+                                        size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        if (items[i].is_member) continue;
+        struct async_process scope = {0};
+        scope.pid = items[i].pid;
+        scope.session = items[i].session;
+        scope.owns_session = items[i].owns_session;
+        scope.start_identity = items[i].identity;
+        strcpy(scope.registry_dir, registry);
+        strcpy(scope.scope_owner_start, owner_start);
+        strcpy(scope.start_identity_text, items[i].start);
+        int e = 0;
+        for (size_t j = 0; j < count; ++j) {
+            if (!items[j].is_member || items[j].root_pid != scope.pid ||
+                items[j].root_identity != scope.start_identity) continue;
+            struct owned_process_identity *member = calloc(1, sizeof(*member));
+            if (!member) { e = ENOMEM; break; }
+            member->pid = items[j].pid;
+            member->start = items[j].identity;
+            member->next = scope.members;
+            scope.members = member;
+        }
+        if (!e) e = register_async_descendants(&scope, 1);
+        while (scope.members) {
+            struct owned_process_identity *next = scope.members->next;
+            free(scope.members);
+            scope.members = next;
+        }
+        if (e) return e;
+    }
+    return 0;
+}
+#endif
+
 int fo_c_recover_async_scope(const char *state_dir, int owner_pid,
                              const char *owner_start) {
     char registry[PATH_MAX], current_owner[64];
@@ -2355,7 +2393,7 @@ int fo_c_recover_async_scope(const char *state_dir, int owner_pid,
     struct dirent *entry;
     DIR *directory = NULL;
     size_t count = 0, capacity = 0;
-    int e, dirfd;
+    int e, dirfd, captured = 0;
     struct timespec now, deadline;
 
     uint64_t parsed_owner;
@@ -2371,6 +2409,9 @@ int fo_c_recover_async_scope(const char *state_dir, int owner_pid,
                              registry, sizeof(registry), 0);
     if (e == ENOENT) return 0;
     if (e != 0) return e;
+read_registry:
+    count = 0;
+    e = 0;
     directory = opendir(registry);
     if (directory == NULL) return errno;
     while ((entry = readdir(directory)) != NULL) {
@@ -2418,6 +2459,17 @@ int fo_c_recover_async_scope(const char *state_dir, int owner_pid,
     directory = NULL;
     if (e != 0) { free(items); return e; }
 
+#if defined(__APPLE__) || defined(__linux__)
+    if (!captured) {
+        /* TERM can remove a wrapper and reparent its isolated payload. Publish
+           exact member births before signaling so drainage and retries retain
+           ownership after the live ancestry edge disappears. */
+        e = capture_recovery_descendants(registry, owner_start, items, count);
+        if (e) { free(items); return e; }
+        captured = 1;
+        goto read_registry;
+    }
+#endif
     for (size_t i = 0; i < count; i++) {
         e = signal_recovery_session(&items[i], SIGTERM);
         if (e != 0) { free(items); return e; }
