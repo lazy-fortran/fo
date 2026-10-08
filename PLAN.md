@@ -14,6 +14,30 @@ path capture, declared executable directories, an opt-in native CMake slice,
 and opt-in deep lint. This is a source handoff, not a stable release: the final
 combined source has not completed its runtime gates or full platform suites.
 
+For Linux and Windows testing, SSH to **mailuefterl** (`ssh mailuefterl`).
+The source checkouts on that host are:
+
+- Fo: `/home/ert/code/lazy-fortran/fo` (published `main`).
+- Fx: `/home/ert/code/lazy-fortran/fx` (published `main`).
+- FortFront: `/home/ert/code/lazy-fortran/fortfront`.
+- FFC: `/home/ert/code/lazy-fortran/ffc`; preserve its unrelated local edit.
+- Fluff: `/var/tmp/fo-fluff-reference-20261008` (published `main`).
+
+Run Linux checks on mailuefterl. Its running Windows VM is `tpx-win2025`;
+use the existing authenticated WinRM helper
+`/var/tmp/fo-windows-20261008/run_winrm.py` through `127.0.0.1:15985` on that
+host. Windows scripts, source archives and receipts are under
+`/var/tmp/fo-windows-20261008`; native guest task files are under
+`C:\fo-windows-20261008`, with the isolated UCRT64 toolchain at
+`C:\fo\msys64\ucrt64`. Rebuild from the current source checkouts: earlier
+Windows archives and pinned executables precede the final combined main.
+
+The excluded allocator proposal is in
+`/var/tmp/fo-linux-compile-flags-20261008`; the excluded barrier experiment is in
+`/var/tmp/fx-action-publication-oracle-20261009`. These are unfinished task
+worktrees, not the published source. The local evidence paths below refer to
+mailuefterl; the Darwin worker's handoff was copied there too.
+
 Resume in this order:
 
 1. Repair the reproducible Linux parallel allocator/parser failure (Fx #57).
