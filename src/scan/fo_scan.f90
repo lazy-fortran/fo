@@ -208,6 +208,9 @@ contains
                 call to_lower(unit_kind)
                 if (trim(unit_kind) /= 'function' .and. &
                     trim(unit_kind) /= 'subroutine') cycle
+                ! An explicit or implicit host program contains its procedures.
+                ! Only unwrap FortFront's synthetic external-procedure container.
+                if (has_program_host(result, candidate_unit)) cycle
                 selected_unit = candidate_unit
                 exit
             end do
@@ -415,6 +418,27 @@ contains
             call scan_cache_save(dirname, paths, units)
         end if
     end subroutine scan_dir_impl
+
+    logical function has_program_host(result, procedure_unit) result(has_host)
+        type(compiler_frontend_result_t), intent(in) :: result
+        type(program_unit_query_t), intent(in) :: procedure_unit
+        character(len=MAX_NAME) :: text
+        integer :: i
+
+        has_host = .false.
+        if (.not. allocated(result%tokens)) return
+        do i = 1, size(result%tokens)
+            if (result%tokens(i)%line > procedure_unit%line) exit
+            if (result%tokens(i)%line == procedure_unit%line) then
+                if (result%tokens(i)%column >= procedure_unit%column) exit
+            end if
+            text = result%tokens(i)%text
+            call to_lower(text)
+            if (trim(text) /= 'program' .and. trim(text) /= 'contains') cycle
+            has_host = .true.
+            return
+        end do
+    end function has_program_host
 
     subroutine reset_scan_unit(filename, unit_info)
         character(len=*), intent(in) :: filename
