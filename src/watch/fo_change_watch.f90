@@ -226,20 +226,31 @@ contains
         logical, allocatable :: updated_active(:)
         character(len=PATH_LEN) :: root
         integer :: j
-        logical :: exists
+        logical :: exists, reactivated
 
         if (present(message)) message = ''
         root = canonical_root(path)
         if (len_trim(root) == 0) root = canonical_or_entry(path)
         exists = .false.
+        reactivated = .false.
         do j = 1, watch%n_roots
             if (trim(watch%roots(j)) == trim(root)) then
                 exists = .true.
+                if (.not. watch%active(j)) reactivated = .true.
                 watch%active(j) = .true.
             end if
         end do
         if (exists) then
             ierr = 0
+            if (reactivated) then
+                if (c_associated(watch%native)) then
+                    call sync_native_roots(watch, ierr, message)
+                else
+                    call watcher_add(watch%watcher, parent_path(trim(root)), .false., ierr)
+                    if (ierr /= 0) return
+                    call watcher_add(watch%watcher, trim(root), .true., ierr)
+                end if
+            end if
             return
         end if
         if (.not. c_associated(watch%native)) then
