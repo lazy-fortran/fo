@@ -23,6 +23,7 @@ program test_gremlin_registry
     character(:), allocatable :: driver, scratch, project, cache, state, config
     character(:), allocatable :: registry, alternate, session, generation, runtime_value
     character(:), allocatable :: first_root, first_source, first_bytes, previous
+    character(:), allocatable :: first_generation
     type(string_list_t) :: arguments
     type(process_result_t) :: process
     type(json_value_t) :: started
@@ -84,6 +85,7 @@ program test_gremlin_registry
     if (len(session) == 0) call finish_assertions(retain_failed_scratch=.true.)
     call await_value('', '19', generation, ready)
     if (.not. ready) call stop_failed()
+    first_generation = generation
     first_root = state//'/fo/gremlin/generations-v2/'//generation
     call gremlin_generation_lease_acquire_at(first_root, first_lease, &
         pin_error, pin_message)
@@ -114,6 +116,23 @@ program test_gremlin_registry
     if (.not. ready) call stop_failed()
     call assert_frozen('registry configuration path edit')
     call gremlin_stop_lane(driver, project, cache, state, lane, session)
+    arguments = string_list_t()
+    call list_add(arguments, 'gremlin')
+    call list_add(arguments, 'reproduce')
+    call list_add(arguments, case_id)
+    call list_add(arguments, '--dir')
+    call list_add(arguments, project)
+    call list_add(arguments, '--lane')
+    call list_add(arguments, lane)
+    call list_add(arguments, '--session')
+    call list_add(arguments, session)
+    call list_add(arguments, '--generation')
+    call list_add(arguments, first_generation)
+    call gremlin_json(driver, project, cache, state, arguments, started, process, 30000)
+    call assert_true(process%exit_code == 0, 'captured registry consumer reproduces')
+    call assert_true(read_text(runtime_value) == '19'//new_line('a'), &
+        'reproduction executes original registry source after live selection changes')
+    call assert_frozen('old-generation reproduction')
     call unpin_first()
     call finish_assertions(retain_failed_scratch=.true.)
 
