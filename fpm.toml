@@ -83,6 +83,11 @@ source-dir = "test"
 main = "test_native_registry_cli.f90"
 
 [[test]]
+name = "test_gremlin_registry"
+source-dir = "test"
+main = "test_gremlin_registry.f90"
+
+[[test]]
 name = "test_native_git_dependency_cli"
 source-dir = "test"
 main = "test_native_git_dependency_cli.f90"
