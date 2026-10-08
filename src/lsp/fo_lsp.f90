@@ -49,7 +49,9 @@ contains
                                                 frontend(i)%span%end%column)
                 diags(i)%severity = max(0, min(3, frontend(i)%severity - 1))
                 diags(i)%code = frontend(i)%code
-                if (allocated(frontend(i)%message)) diags(i)%message = frontend(i)%message
+                if (allocated(frontend(i)%message)) then
+                    diags(i)%message = frontend(i)%message
+                end if
             end do
         end associate
     end subroutine diagnose_document
