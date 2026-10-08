@@ -1316,7 +1316,8 @@ contains
             call make_tmpfile('fo-test', test_log)
             call backend_test_names(b, test_names, n_arg_names, exitcode, &
                 include_all, test_log, flags=all_flags)
-            call report_test_result(exitcode, test_log, .false., use_json)
+            call report_test_result(exitcode, test_log, .false., use_json, &
+                require_results=.true.)
             call delete_tmpfile(test_log)
         else if (n_arg_names > 0) then
             ! Validate names against the inventory owned by this backend.
@@ -1348,7 +1349,8 @@ contains
             call make_tmpfile('fo-test', test_log)
             call backend_test_names(b, test_names, n_arg_names, exitcode, &
                 include_all, test_log, flags=all_flags)
-            call report_test_result(exitcode, test_log, .false., use_json)
+            call report_test_result(exitcode, test_log, .false., use_json, &
+                require_results=.true.)
             call delete_tmpfile(test_log)
         else if (only_changed) then
             call fo_changed_modules('.', dag, changed_ids, n_changed, &
@@ -1387,7 +1389,8 @@ contains
             call make_tmpfile('fo-test', test_log)
             call backend_test_names(b, test_names, n_test_names, exitcode, &
                 include_all, test_log, flags=all_flags)
-            call report_test_result(exitcode, test_log, .false., use_json)
+            call report_test_result(exitcode, test_log, .false., use_json, &
+                require_results=.true.)
             call delete_tmpfile(test_log)
         else
             call make_tmpfile('fo-test', test_log)
@@ -1483,11 +1486,12 @@ contains
         on = length > 0 .and. trim(value) == '1'
     end function env_flag
 
-    subroutine report_test_result(exitcode, test_log, summary_mode, use_json)
+    subroutine report_test_result(exitcode, test_log, summary_mode, use_json, require_results)
         integer, intent(inout) :: exitcode
         character(len=*), intent(in) :: test_log
         logical, intent(in) :: summary_mode
         logical, intent(in) :: use_json
+        logical, intent(in), optional :: require_results
 
         type(test_result_entry_t), allocatable :: entries(:)
         integer :: n_entries, parse_ierr
@@ -1511,6 +1515,18 @@ contains
             end if
             call process_exit(1)
             return
+        end if
+
+        if (present(require_results)) then
+            if (require_results .and. n_entries == 0 .and. exitcode == 0) then
+                if (use_json) then
+                    write (output_unit, '(a)') '{"tests":[],"exit_code":1,'// &
+                        '"error":"selected tests produced no results"}'
+                else
+                    write (error_unit, '(a)') 'fo: selected tests produced no results'
+                end if
+                call process_exit(1)
+            end if
         end if
 
         ! `fo test` normally prints an aggregate count and the failures, and the
