@@ -37,6 +37,7 @@ program test_dependency_freshness
     call change_flags_and_tool()
     call change_c_tool()
     call switch_manifest_source_dir()
+    call long_external_dependencies()
 
     call remove_tree(scratch)
     call finish_assertions()
@@ -385,6 +386,66 @@ contains
         call assert_equal_string(result%stdout, '22' // nl, &
             'manifest source-dir change reaches the executable')
     end subroutine switch_manifest_source_dir
+
+    subroutine long_external_dependencies()
+        !! Equal source basenames in long external paths retain both providers.
+        character(:), allocatable :: consumer, root, left, right
+        character(:), allocatable :: compiler, count, before
+        integer :: remaining
+
+        consumer = join_path(scratch, 'long-paths/consumer')
+        root = join_path(scratch, 'long-paths/external')
+        do while (len(root) < 270)
+            remaining = min(80, 270 - len(root))
+            root = join_path(root, repeat('d', remaining))
+        end do
+        left = join_path(root, 'left')
+        right = join_path(root, 'right')
+        compiler = join_path(scratch, 'gfortran-long-path-wrapper')
+        count = compiler//'.count'
+        call write_tool(compiler, count, '61')
+        call write_text(join_path(consumer, 'fpm.toml'), &
+            'name = "consumer"'//nl//'[dependencies]'//nl// &
+            'left_dep = { path = "'//left//'" }'//nl// &
+            'right_dep = { path = "'//right//'" }'//nl)
+        call write_text(join_path(left, 'fpm.toml'), 'name = "left_dep"'//nl)
+        call write_text(join_path(right, 'fpm.toml'), 'name = "right_dep"'//nl)
+        call write_external_value(left, 'left_value', '11')
+        call write_external_value(right, 'right_value', '22')
+        call write_text(join_path(consumer, 'app/main.f90'), &
+            'program main'//nl//'use left_value, only: left => value'//nl// &
+            'use right_value, only: right => value'//nl// &
+            "print '(i0,1x,i0)', left(), right()"//nl//'end program main'//nl)
+        call exec_target(consumer, 'consumer', compiler=compiler)
+        call assert_public_ok('two long external providers compile and link')
+        call assert_equal_string(result%stdout, '11 22'//nl, &
+            'equal source basenames retain distinct external providers')
+        before = read_text(count)
+        call exec_target(consumer, 'consumer', compiler=compiler)
+        call assert_public_ok('long external providers reuse a warm build')
+        call assert_equal_string(result%stdout, '11 22'//nl, &
+            'warm execution retains both external providers')
+        call assert_file_equals(count, before, &
+            'warm long-path build compiles no declared sources')
+        call preserve_metadata(join_path(right, 'src/value.f90'), &
+            join_path(scratch, 'long-path.reference'), .false.)
+        call write_external_value(right, 'right_value', '32')
+        call preserve_metadata(join_path(right, 'src/value.f90'), &
+            join_path(scratch, 'long-path.reference'), .true.)
+        call exec_target(consumer, 'consumer', compiler=compiler)
+        call assert_public_ok('edited long external provider builds')
+        call assert_equal_string(result%stdout, '11 32'//nl, &
+            'long-path edit replaces only the selected provider behavior')
+    end subroutine long_external_dependencies
+
+    subroutine write_external_value(dep, module_name, value)
+        character(len=*), intent(in) :: dep, module_name, value
+
+        call write_text(join_path(dep, 'src/value.f90'), &
+            'module '//module_name//nl//'contains'//nl// &
+            'integer function value()'//nl//'value = '//value//nl// &
+            'end function value'//nl//'end module '//module_name//nl)
+    end subroutine write_external_value
 
     subroutine setup_build_named(name, consumer, dep, compiler)
         !! Builds the consumer once with dependency value 11 in src/build_info.f90.

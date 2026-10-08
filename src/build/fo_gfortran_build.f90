@@ -3964,13 +3964,24 @@ contains
 
         character(len=512) :: rel
         integer :: i, plen
+        logical :: in_project
 
         plen = len_trim(project_dir)
-        if (len_trim(source_path) > plen .and. &
-            source_path(1:plen) == project_dir) then
+        in_project = .false.
+        if (len_trim(source_path) > plen + 1) then
+            if (source_path(1:plen) == project_dir) &
+                in_project = source_path(plen + 1:plen + 1) == '/'
+        end if
+        if (in_project) then
             rel = source_path(plen + 2:)
         else
-            rel = trim(source_path)
+            ! External absolute paths can exceed a filesystem component's limit.
+            ! Keep project-relative names decodable for app/example targets.
+            rel = source_path
+            if (len_trim(source_path) > 0) then
+                if (source_path(1:1) == '/') &
+                    rel = 'external_'//cache_digest([source_path], 1)
+            end if
         end if
         do i = 1, len_trim(rel)
             if (rel(i:i) == '/') rel(i:i) = '_'
