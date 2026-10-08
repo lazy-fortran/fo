@@ -649,7 +649,12 @@ contains
         if (pid > 0) then
             alive = process_is_alive(pid)
             call assert(.not. alive, trim(mode)//' child is cleaned after its parent')
-            if (alive) rc = c_kill(int(pid, c_int), 9_c_int)
+            if (alive) then
+                write (error_unit, '(a,a,a,l1,a,i0)') &
+                    'Native process oracle reports running child: mode=', trim(mode), &
+                    ' named=', named, ' pid=', pid
+                rc = c_kill(int(pid, c_int), 9_c_int)
+            end if
         end if
         alive = process_is_alive(sentinel_pid)
         call assert(alive, 'process-group cleanup preserves unrelated sentinel')
@@ -669,31 +674,16 @@ contains
     end function read_process_id
 
     logical function process_is_alive(pid) result(alive)
-        use, intrinsic :: iso_c_binding, only: c_int
         interface
-            integer(c_int) function c_kill(process, signal) bind(C, name='kill')
+            integer(c_int) function c_process_running(process) &
+                    bind(C, name='fo_test_process_running')
                 import :: c_int
-                integer(c_int), value :: process, signal
-            end function c_kill
+                integer(c_int), value :: process
+            end function c_process_running
         end interface
         integer, intent(in) :: pid
-        character(len=1024) :: stat_path, stat_line
-        integer :: unit, io_status, close_index
 
-        alive = .false.
-        if (pid <= 0) return
-        alive = c_kill(int(pid, c_int), 0_c_int) == 0
-        if (.not. alive) return
-        write (stat_path, '(a,i0,a)') '/proc/', pid, '/stat'
-        open (newunit=unit, file=trim(stat_path), status='old', &
-            action='read', iostat=io_status)
-        if (io_status /= 0) return
-        read (unit, '(a)', iostat=io_status) stat_line
-        close (unit)
-        if (io_status /= 0) return
-        close_index = index(stat_line, ')')
-        if (close_index > 0 .and. close_index + 2 <= len_trim(stat_line)) &
-            alive = stat_line(close_index + 2:close_index + 2) /= 'Z'
+        alive = c_process_running(int(pid, c_int)) == 1_c_int
     end function process_is_alive
 
     logical function host_can_measure_child_cpu(project_dir) result(supported)

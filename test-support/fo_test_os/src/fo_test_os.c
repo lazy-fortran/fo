@@ -24,6 +24,7 @@
 #include <unistd.h>
 #ifdef __APPLE__
 #include <libproc.h>
+#include <sys/proc.h>
 #endif
 
 int fo_test_host_is_linux(void) {
@@ -298,6 +299,11 @@ int fo_test_process_running(int pid) {
     char *end = strrchr(line, ')');
     if (end == NULL || end[1] != ' ') return 0;
     return end[2] != 'Z' && end[2] != 'X';
+#elif defined(__APPLE__)
+    struct proc_bsdinfo info;
+    int bytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+    if (bytes != sizeof(info)) return 0;
+    return info.pbi_status != SZOMB;
 #else
     return 1;
 #endif
