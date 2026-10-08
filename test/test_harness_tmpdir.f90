@@ -1,10 +1,14 @@
 program test_harness_tmpdir
     use fo_test_harness, only: make_scratch, environment_value, assert_true, &
-        file_exists, finish_assertions
+        file_exists, finish_assertions, process_result_t, string_list_t, &
+        assert_contains, assert_process_ok
+    use fo_test_cli, only: run_fo
     implicit none
 
     character(:), allocatable :: scratch, tmpdir
     integer :: tmpdir_length
+    type(process_result_t) :: child
+    type(string_list_t) :: arguments
 
     tmpdir = trim(environment_value('TMPDIR'))
     call assert_true(len(tmpdir) > 0, 'test requires an assigned private TMPDIR')
@@ -16,6 +20,11 @@ program test_harness_tmpdir
     call make_scratch('fo-harness-tmpdir-oracle', scratch)
     call assert_true(index(scratch, tmpdir // '/') == 1 .or. tmpdir == '/', &
         'fixture scratch is created inside TMPDIR')
+    call run_fo('/usr/bin/env', arguments, scratch, scratch // '/cache', child)
+    call assert_process_ok(child, 'CLI fixture launches its child environment')
+    call assert_contains(child%stdout, &
+        'TMPDIR=' // trim(environment_value('TMPDIR')) // new_line('a'), &
+        'CLI fixture children retain the assigned private TMPDIR')
 
     call finish_assertions()
     call assert_true(.not. file_exists(scratch), &

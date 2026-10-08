@@ -88,7 +88,6 @@ contains
         call list_add(environment, 'FO_DISABLE_SELF_REFRESH=1')
         call list_add(environment, 'FO_SELF_REFRESH=0')
         call list_add(environment, 'FO_CACHE_DIR=' // trim(cache_directory))
-        call list_add(environment, 'TMPDIR=/var/tmp')
         if (present(extra_environment)) call list_extend(environment, extra_environment)
         call run_arguments(driver, arguments, cwd, result, environment, timeout_ms)
     end subroutine run_fo

@@ -2517,8 +2517,11 @@
         first_file = trim(tmpdir)//'/first-path'
         second_file = trim(tmpdir)//'/second-path'
         command = '"'//trim(executable)//'" tmpdir-child > "'// &
-            trim(first_file)//'" & "'//trim(executable)// &
-            '" tmpdir-child > "'//trim(second_file)//'" & wait'
+            trim(first_file)//'" & first_pid=$!; "'//trim(executable)// &
+            '" tmpdir-child > "'//trim(second_file)// &
+            '" & second_pid=$!; child_status=0; '// &
+            'wait "$first_pid" || child_status=1; '// &
+            'wait "$second_pid" || child_status=1; exit "$child_status"'
         call execute_command_line(trim(command), exitstat=exitcode)
         call assert(exitcode == 0, 'parallel backend fixture processes complete')
         call read_first_line(first_file, first_path, ios)
