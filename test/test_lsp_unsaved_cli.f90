@@ -68,7 +68,7 @@ program test_lsp_unsaved_cli
                    scratch//'/cache'//c_null_char, scratch//'/state'//c_null_char, &
                    scratch//'/stderr'//c_null_char)
     call assert_true(handle > 0, 'starts public LSP process')
-    if (handle <= 0) call finish_assertions('lsp_unsaved_cli')
+    if (handle <= 0) call finish_assertions()
 
     call notify('{"jsonrpc":"2.0","id":"17","method":"initialize","params":{}}')
     call receive(response)
@@ -170,7 +170,7 @@ call assert_equal_integer(int(json_number_value(json_member(diagnostic, 'severit
     call assert_file_absent(scratch//'/cache', 'typing never captures/builds a project')
     call assert_file_absent(scratch//'/state', &
                             'typing never starts resident test campaigns')
-    call finish_assertions('lsp_unsaved_cli', retain_failed_scratch=.true.)
+    call finish_assertions(retain_failed_scratch=.true.)
 
 contains
 
@@ -207,6 +207,7 @@ contains
         type(json_value_t), intent(out) :: value
         integer :: length, ios
         logical :: valid
+        character(:), allocatable :: error_message
 
         status = read_line(handle, bytes, int(len(bytes), c_size_t), 10000_c_int)
         call assert_true(status > 16, 'receives Content-Length response header')
@@ -221,7 +222,7 @@ contains
         status = read_bytes(handle, bytes, int(length, c_size_t), 10000_c_int)
       call assert_equal_integer(int(status), length, 'response body matches byte count')
         if (status /= length) return
-        call json_parse(bytes(:length), value, valid)
+        call json_parse(bytes(:length), value, valid, error_message)
         call assert_true(valid, 'independent parser accepts LSP response JSON')
     end subroutine receive
 
