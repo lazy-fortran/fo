@@ -38,7 +38,7 @@ int fo_test_permissions_snapshot(const char *path, char *out, int capacity) {
 }
 int fo_test_executable_access(const char *path) {
     wchar_t *wide = fx_win32_utf16(path);
-    HANDLE file = wide ? CreateFileW(wide, FILE_READ_DATA | FILE_EXECUTE | READ_CONTROL,
+    HANDLE file = wide ? CreateFileW(wide, FILE_READ_DATA | FILE_WRITE_DATA | FILE_EXECUTE | READ_CONTROL,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL) : INVALID_HANDLE_VALUE;
     free(wide);
     return file != INVALID_HANDLE_VALUE && CloseHandle(file) ? 1 : 0;
@@ -80,12 +80,14 @@ int fo_test_executable_permissions(const char *path) {
             entry->Header.AceType != ACCESS_DENIED_ACE_TYPE) { valid = 0; break; }
         int is_owner = equal.typed(owner_sid, &entry->SidStart);
         int is_world = equal.typed(world_sid, &entry->SidStart);
-        if (!is_owner && !is_world) continue;
         DWORD rights = entry->Mask;
         if (rights & GENERIC_ALL) rights |= FILE_ALL_ACCESS;
         if (rights & GENERIC_READ) rights |= FILE_GENERIC_READ;
         if (rights & GENERIC_WRITE) rights |= FILE_GENERIC_WRITE;
         if (rights & GENERIC_EXECUTE) rights |= FILE_GENERIC_EXECUTE;
+        const DWORD writes = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA |
+            FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC | WRITE_OWNER;
+        if (!is_owner && entry->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && (rights & writes)) valid = 0;
         if (entry->Header.AceType == ACCESS_DENIED_ACE_TYPE) {
             if ((is_owner && (rights & owner_required)) || (is_world && (rights & world_required))) valid = 0;
         } else if (entry->Header.AceType == ACCESS_ALLOWED_ACE_TYPE) {
