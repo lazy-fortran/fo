@@ -1372,11 +1372,12 @@ contains
         logical :: has_cycle
         logical :: allow_cache
         character(len=512) :: obj_path
-        character(len=4096) :: includes_flag, effective_flags, action_flags
+        character(len=4096) :: includes_flag, action_flags
         character(len=512) :: c_line
         character(len=512), allocatable :: cfiles(:)
         character(len=MAX_PATH), allocatable :: compdb_sources(:)
         character(len=512), allocatable :: compdb_objects(:)
+        character(len=4096), allocatable :: source_flags(:), compdb_flags(:)
         integer :: n_cfiles, ic
         integer :: n_compdb
         type(resolved_src_t) :: deps(MAX_RESOLVED)
@@ -1420,6 +1421,7 @@ contains
         allocate (smod_names(MAX_NODES))
         allocate (compile_exits(MAX_NODES), per_logs(MAX_NODES))
         allocate (compdb_sources(MAX_NODES), compdb_objects(MAX_NODES))
+        allocate (source_flags(MAX_NODES), compdb_flags(MAX_NODES))
 
         call scan_dir(trim(project_dir)//'/'//trim(src_dir), units_a, na, ierr)
         call scan_dir(trim(project_dir)//'/'//trim(app_dir), units_b, nb, ierr)
@@ -1450,8 +1452,8 @@ contains
         call dag_levels(dag, topo_order, n_order, node_levels, n_levels)
         call remove_shadow_mods(project_dir, dag)
         call make_includes_flag(mod_dir, dep_includes, n_dep_includes, includes_flag)
-        effective_flags = with_user_flags(includes_flag, flags)
-        action_flags = compile_key_flags(flags)
+        call package_source_flags(filenames, flags, config, deps, n_deps_resolved, &
+            source_flags)
 
         old_mod_keys = ''
         new_mod_keys = ''
@@ -1480,6 +1482,7 @@ contains
             total_source = total_source + 1
             n_compdb = n_compdb + 1
             compdb_sources(n_compdb) = filenames(node_id)
+            compdb_flags(n_compdb) = source_flags(node_id)
             call make_obj_path(filenames(node_id), project_dir, obj_dir, &
                 compdb_objects(n_compdb))
         end do
@@ -1526,6 +1529,7 @@ contains
                         level_restored(i) = .false.
                         cycle
                     end if
+                    action_flags = compile_key_flags(source_flags(node_id))
                     level_source_key = cache_key_for(filenames(node_id), compiler, &
                         action_flags, level_dep_keys, level_dep_count, &
                         include_dirs=dep_includes(:n_dep_includes))
@@ -1576,7 +1580,7 @@ contains
                     if (len_trim(smod_names(node_id)) > 0) call fs_remove_file( &
                         trim(mod_dir)//'/'//trim(smod_names(node_id))//'.smod')
                     call compile_f90(project_dir, fname_local, obj_path, &
-                        effective_flags, &
+                        with_user_flags(includes_flag, source_flags(node_id)), &
                         per_log_local, compile_exits(ii))
                     call progress_step()
                 end do
@@ -1594,7 +1598,8 @@ contains
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, &
                         obj_path)
                     call compile_f90(project_dir, filenames(node_id), obj_path, &
-                        effective_flags, per_logs(ii), compile_exits(ii))
+                        with_user_flags(includes_flag, source_flags(node_id)), &
+                        per_logs(ii), compile_exits(ii))
                 end do
 
                 do ii = 1, n_compile
@@ -1644,7 +1649,7 @@ contains
                     filenames(node_id), project_dir, app_dir, config)) cycle
                 call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
                 call compile_f90(project_dir, filenames(node_id), obj_path, &
-                    effective_flags, log_file, &
+                    with_user_flags(includes_flag, source_flags(node_id)), log_file, &
                     exitcode)
                 if (exitcode /= 0) then
                     call progress_end()
@@ -1658,7 +1663,7 @@ contains
 
         call compdb_write(trim(project_dir)//'/build/compile_commands.json', &
             project_dir, compdb_sources, compdb_objects, n_compdb, &
-            fc_command(), fc_base_flags(), includes_flag, flags)
+            fc_command(), fc_base_flags(), includes_flag, flags, compdb_flags)
 
         do i = 1, n_order
             node_id = topo_order(i)
@@ -2643,7 +2648,7 @@ contains
         logical :: has_cycle, restored, bonly
         logical :: allow_cache
         character(len=512) :: obj_path, bin_path
-        character(len=4096) :: incl_flag
+        character(len=4096) :: incl_flag, helper_includes
         character(len=MAX_PATH) :: tname
         character(len=MAX_PATH) :: fname_local
         character(len=512) :: log_local, rerun_log
@@ -2667,6 +2672,7 @@ contains
         character(len=MAX_PATH) :: execution_cwd
         logical :: in_lib
         type(resolved_src_t) :: devsrcs(MAX_RESOLVED)
+        character(len=4096), allocatable :: helper_flags(:)
         integer :: n_dev, d, nud
         type(scan_unit_t), allocatable :: udev(:)
         type(fpm_config_t), allocatable :: manifest_config
@@ -2731,6 +2737,7 @@ contains
         call build_dag_from_units(tunits, n_tests, dag, filenames, is_test_arr, is_prog)
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
         call make_includes_flag(mod_dir, dep_includes, n_dep_includes, incl_flag)
+        helper_includes = incl_flag
         if (len_trim(test_flags) > 0) then
             incl_flag = with_user_flags(incl_flag, test_flags)
         end if
@@ -2795,10 +2802,16 @@ contains
         ! Compile only those reachable from a selected test, in dependency order,
         ! so their .mod files exist before the test programs compile, then fold
         ! their objects into the link line.
-        allocate (helper_objs(MAX_SRC_OBJS))
+        allocate (helper_objs(MAX_SRC_OBJS), helper_flags(MAX_NODES))
+        call package_source_flags(filenames, test_flags, manifest_config, &
+            devsrcs, n_dev, helper_flags)
+        do i = 1, size(helper_flags)
+            helper_flags(i) = with_user_flags(helper_includes, &
+                helper_flags(i))
+        end do
         call compile_test_helpers(project_dir, obj_dir, dag, filenames, is_prog, &
             topo_order, n_order, run_nodes, n_run, incl_flag, log_file, &
-            helper_objs, n_helper_objs, exitcode)
+            helper_objs, n_helper_objs, exitcode, helper_flags)
         if (exitcode /= 0) return
 
         test_dep_objs = dep_objs
@@ -3654,7 +3667,7 @@ contains
 
     subroutine compile_test_helpers(project_dir, obj_dir, dag, filenames, is_prog, &
             topo_order, n_order, run_nodes, n_run, incl_flag, log_file, &
-            helper_objs, n_helper_objs, exitcode)
+            helper_objs, n_helper_objs, exitcode, source_flags)
         !! Compile the module-only helper files a selected test program depends
         !! on, in dependency order, so their .mod files exist before the test
         !! programs compile and their objects can be linked in. Scoped to the
@@ -3666,6 +3679,7 @@ contains
         logical, intent(in) :: is_prog(:)
         integer, intent(in) :: topo_order(:), n_order, run_nodes(:), n_run
         character(len=*), intent(in) :: incl_flag
+        character(len=*), intent(in) :: source_flags(:)
         character(len=512), intent(out) :: helper_objs(:)
         integer, intent(out) :: n_helper_objs
         integer, intent(out) :: exitcode
@@ -3688,8 +3702,8 @@ contains
             if (is_prog(node_id)) cycle
             if (.not. needed(node_id)) cycle
             call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
-            call compile_f90(project_dir, filenames(node_id), obj_path, incl_flag, &
-                log_file, exitcode)
+            call compile_f90(project_dir, filenames(node_id), obj_path, &
+                source_flags(node_id), log_file, exitcode)
             if (exitcode /= 0) return
             if (n_helper_objs >= size(helper_objs)) cycle
             n_helper_objs = n_helper_objs + 1
@@ -4168,7 +4182,8 @@ contains
         character(len=*), intent(in) :: flags
         character(len=:), allocatable :: key_flags
 
-        key_flags = 'compiler-policy:'//trim(fc_policy_flags())//new_line('a')// &
+        key_flags = 'preprocess-policy:package-v1'//new_line('a')// &
+            'compiler-policy:'//trim(fc_policy_flags())//new_line('a')// &
             'request-flags:'//trim(flags)
     end function request_key_flags
 
@@ -4176,7 +4191,8 @@ contains
         character(len=*), intent(in) :: flags
         character(len=:), allocatable :: key_flags
 
-        key_flags = 'compiler-baseline:'//trim(fc_base_flags())//new_line('a')// &
+        key_flags = 'preprocess-policy:package-v1'//new_line('a')// &
+            'compiler-baseline:'//trim(fc_base_flags())//new_line('a')// &
             'project-flags:'//trim(flags)
     end function compile_key_flags
 
@@ -5104,6 +5120,74 @@ contains
         open (newunit=u, file=trim(path), status='replace', iostat=ios)
         if (ios == 0) close (u)
     end subroutine truncate_file
+
+    subroutine package_source_flags(sources, flags, root_config, deps, n_deps, out)
+        !! Manifest preprocessing belongs to the package defining a source.
+        !! Profile/user flags stay shared; root manifest macros must not leak.
+        character(len=*), intent(in) :: sources(:), flags
+        type(fpm_config_t), intent(in) :: root_config
+        type(resolved_src_t), intent(in) :: deps(:)
+        integer, intent(in) :: n_deps
+        character(len=*), intent(out) :: out(:)
+        type(fpm_config_t), allocatable :: dep_config
+        type(compiler_dialect_t) :: dialect
+        character(len=:), allocatable :: mapped, shared, package_flags, prefix
+        integer :: i, d, k, ierr, n
+        integer, allocatable :: owner_lengths(:)
+
+        allocate (owner_lengths(size(sources)))
+        owner_lengths = 0
+        out = flags
+        shared = flags
+        dialect = compiler_dialect(fc_command())
+        do k = 1, root_config%n_flags
+            if (.not. is_preprocess_flag(root_config%flags(k))) cycle
+            mapped = dialect%translate_flag(root_config%flags(k))
+            call remove_manifest_flag(shared, mapped)
+        end do
+        call fpm_config_allocate(dep_config)
+        do d = 1, n_deps
+            call fpm_config_parse(trim(deps(d)%dir), dep_config, ierr)
+            if (ierr /= 0) cycle
+            package_flags = ''
+            do k = 1, dep_config%n_flags
+                if (.not. is_preprocess_flag(dep_config%flags(k))) cycle
+                mapped = dialect%translate_flag(dep_config%flags(k))
+                if (len_trim(mapped) == 0) cycle
+                package_flags = trim(package_flags)//' '//trim(mapped)
+            end do
+            prefix = trim(deps(d)%src_dir)//'/'
+            n = len(prefix)
+            do i = 1, size(sources)
+                if (len_trim(sources(i)) < n) cycle
+                if (sources(i)(:n) /= prefix) cycle
+                if (n <= owner_lengths(i)) cycle
+                owner_lengths(i) = n
+                out(i) = trim(adjustl(package_flags))//' '//trim(shared)
+            end do
+        end do
+    end subroutine package_source_flags
+
+    logical function is_preprocess_flag(flag) result(yes)
+        character(len=*), intent(in) :: flag
+        yes = trim(flag) == '-cpp'
+        if (len_trim(flag) < 2) return
+        if (flag(:2) == '-D' .or. flag(:2) == '-U') yes = .true.
+    end function is_preprocess_flag
+
+    subroutine remove_manifest_flag(flags, flag)
+        !! Remove one manifest occurrence, retaining a repeated user override.
+        character(len=:), allocatable, intent(inout) :: flags
+        character(len=*), intent(in) :: flag
+        character(len=:), allocatable :: padded, needle
+        integer :: pos
+        if (len_trim(flag) == 0) return
+        padded = ' '//trim(flags)//' '
+        needle = ' '//trim(flag)//' '
+        pos = index(padded, needle)
+        if (pos == 0) return
+        flags = trim(adjustl(padded(:pos)//padded(pos + len(needle):)))
+    end subroutine remove_manifest_flag
 
     subroutine merge_flags(config, flag_text)
         type(fpm_config_t), intent(in) :: config

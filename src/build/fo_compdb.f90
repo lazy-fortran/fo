@@ -8,12 +8,13 @@ module fo_compdb
 contains
 
     subroutine compdb_write(output_path, project_dir, sources, objects, n_sources, &
-            compiler, base_flags, includes_flag, user_flags)
+            compiler, base_flags, includes_flag, user_flags, source_flags)
         character(len=*), intent(in) :: output_path, project_dir
         character(len=*), intent(in) :: sources(:), objects(:)
         integer, intent(in) :: n_sources
         character(len=*), intent(in) :: compiler, base_flags
         character(len=*), intent(in) :: includes_flag, user_flags
+        character(len=*), intent(in), optional :: source_flags(:)
 
         integer :: u, ios, i, n_args
         character(len=:), allocatable :: packed
@@ -30,7 +31,11 @@ contains
             call argv_push(packed, n_args, '-c')
             call argv_push_split_nl(packed, n_args, includes_flag)
             call argv_push_split(packed, n_args, base_flags)
-            call argv_push_split(packed, n_args, user_flags)
+            if (present(source_flags)) then
+                call argv_push_split(packed, n_args, source_flags(i))
+            else
+                call argv_push_split(packed, n_args, user_flags)
+            end if
             call argv_push(packed, n_args, '-o')
             call argv_push(packed, n_args, trim(objects(i)))
             call argv_push(packed, n_args, trim(sources(i)))
