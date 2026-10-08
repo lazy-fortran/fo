@@ -173,9 +173,16 @@ program test_gremlin_input_inventory
         'fixture-dep = { path = "../dependency" }'//new_line('a')// &
         'external-dep = "*"')
     call discover(runtime, ierr, diagnostic)
+    call require(ierr /= 0, 'unsupported bare registry declaration is rejected')
+    call write(trim(project)//'/fpm.toml', &
+        'name = "inventory-fixture"'//new_line('a')// &
+        '[dependencies]'//new_line('a')// &
+        'fixture-dep = { path = "../dependency" }'//new_line('a')// &
+        'external-dep = { git = "https://example.invalid/external-dep.git" }')
+    call discover(runtime, ierr, diagnostic)
     call require(ierr == 0, 'partial inventory is available: '//trim(diagnostic))
     call require(.not. runtime%complete .and. len_trim(runtime%diagnostic) > 0, &
-        'unresolved registry dependency cannot certify complete closure')
+        'unresolved Git dependency cannot certify complete closure')
     call fs_make_dir(trim(project)//'/build/dependencies/external-dep/src')
     call write(trim(project)//'/build/dependencies/external-dep/fpm.toml', &
         'name = "external-dep"')
@@ -184,10 +191,10 @@ program test_gremlin_input_inventory
     call discover(changed, ierr, diagnostic)
     call require(ierr == 0, 'inventory with acquired dependency: '//trim(diagnostic))
     call require(changed%complete, &
-        'existing acquired registry source closes its declared dependency root')
+        'existing acquired Git source closes its declared dependency root')
     call require(has_entry(changed, 'dependency:external-dep', &
         'src/external.f90', 'dependency-source'), &
-        'acquired registry source is included in canonical inventory')
+        'acquired Git source is included in canonical inventory')
     previous = changed
     call write(trim(project)//'/build/dependencies/external-dep/src/external.f90', &
         'module external_dep_changed')
@@ -224,7 +231,7 @@ contains
         call fs_make_dir(trim(root)//'/app')
         call fs_make_dir(trim(provider)//'/src')
         call fs_make_dir(trim(child)//'/src')
-        ! No Git metadata or reachable remotes: acquisition must not run.
+        ! Acquired source identities are present; remotes are unreachable.
         call write(trim(provider)//'/fpm.toml', &
             'name = "provider"'//new_line('a')//'[dependencies]'//new_line('a')// &
             'child = { git = "https://invalid.invalid/child", rev = "'// &
@@ -258,6 +265,22 @@ contains
                 'child = { git = "https://invalid.invalid/child", rev = "'// &
                 repeat('1', 40)//'" }'
             call write(trim(root)//'/fpm.toml', manifest)
+            call fs_make_dir(trim(root)//'/build/dependencies/.fo-git-identities')
+            call write(trim(root)//'/build/dependencies/.fo-git-identities/provider', &
+                'declared-by=flat-git-project@'//new_line('a')// &
+                'git=https://invalid.invalid/provider'//new_line('a')// &
+                'branch='//new_line('a')//'tag='//new_line('a')// &
+                'rev='//repeat('2', 40)//new_line('a')//repeat('2', 40))
+            if (scenario == 3) then
+                manifest = 'declared-by=flat-git-project@'
+            else
+                manifest = 'declared-by=provider@'
+            end if
+            call write(trim(root)//'/build/dependencies/.fo-git-identities/child', &
+                manifest//new_line('a')// &
+                'git=https://invalid.invalid/child'//new_line('a')// &
+                'branch='//new_line('a')//'tag='//new_line('a')// &
+                'rev='//repeat('1', 40)//new_line('a')//repeat('1', 40))
             call write(trim(child)//'/src/child.f90', &
                 'module child_mod'//new_line('a')// &
                 'integer, parameter :: child_value = 37'//new_line('a')//'end module')
