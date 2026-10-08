@@ -3,7 +3,7 @@ program test_native_cmake_cli
                           make_scratch, make_directory, write_text, environment_value, &
                     run_process, assert_process_ok, assert_true, assert_equal_integer, &
           assert_equal_string, assert_file_exists, assert_file_absent, finish_assertions
-    use fo_test_harness, only: remove_tree, remove_path
+    use fo_test_harness, only: remove_tree, remove_path, read_text
     use fo_test_cli, only: resolve_driver, run_fo, parse_json_report
     use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_run, &
                                       gremlin_field, gremlin_wait_ms, gremlin_stop_lane
@@ -21,7 +21,9 @@ program test_native_cmake_cli
 
     call get_command_argument(0, executable)
     self = trim(executable)
-    if (index(self, '/cmake') > 0 .or. index(self, '/ctest') > 0 .or. &
+    if (self == 'cmake' .or. self == 'ctest' .or. &
+        self == 'cmake.exe' .or. self == 'ctest.exe' .or. &
+        index(self, '/cmake') > 0 .or. index(self, '/ctest') > 0 .or. &
         index(self, achar(92)//'cmake') > 0 .or. &
         index(self, achar(92)//'ctest') > 0) then
         call write_text(environment_value('FO_FORBIDDEN_TOOL_MARKER'), self)
@@ -292,7 +294,7 @@ contains
 
     subroutine shadow_tool(name)
         character(len=*), intent(in) :: name
-        type(string_list_t) :: command
+        type(string_list_t) :: command, guard_env
         type(process_result_t) :: observed
         character(:), allocatable :: destination
         destination = scratch//'/shadow/'//name
@@ -302,5 +304,22 @@ contains
         call list_add(command, destination)
         call run_process(command, project, observed)
       call assert_process_ok(observed, 'prepare fail-on-execution delegated tool guard')
+        command = string_list_t()
+        call list_add(command, name)
+        if (environment_value('OS') == 'Windows_NT') then
+            call list_add(guard_env, 'PATH='//scratch//'/shadow;'// &
+                          environment_value('PATH'))
+        else
+            call list_add(guard_env, 'PATH='//scratch//'/shadow:'// &
+                          environment_value('PATH'))
+        end if
+        call list_add(guard_env, 'FO_FORBIDDEN_TOOL_MARKER='//scratch//'/guard-probe.ran')
+        call run_process(command, project, observed, guard_env, timeout_ms=1000)
+        call assert_true(observed%exit_code /= 0, 'bare delegated tool guard rejects')
+        call assert_file_exists(scratch//'/guard-probe.ran', &
+                                'bare delegated tool reaches the guard')
+        call assert_equal_string(trim(read_text(scratch//'/guard-probe.ran')), name, &
+                                 'bare delegated tool argv0 is guarded')
+        call remove_path(scratch//'/guard-probe.ran')
     end subroutine
 end program test_native_cmake_cli
