@@ -938,7 +938,7 @@
         integer :: exitcode, u, ios
         character(len=512) :: base, libdir, appdir, log_file, outfile, depobj
         character(len=64) :: line
-        integer :: mtime_a, mtime_b, bin_a, bin_b
+        integer(c_long_long) :: mtime_a, mtime_b, bin_a, bin_b
 
         call make_tmp_path('fo_test_pathdep', base)
         libdir = trim(base)//'/lib'
@@ -952,8 +952,13 @@
         close (u)
         open (newunit=u, file=trim(libdir)//'/src/depmod.f90', status='replace')
         write (u, '(a)') 'module depmod'
+        write (u, '(a)') '  use iso_c_binding, only: c_int'
         write (u, '(a)') '  implicit none'
-        write (u, '(a)') '  integer, parameter :: dep_value = 7'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') '  integer(c_int) function dep_value() &'
+        write (u, '(a)') '      bind(C, name="fo_backend_dep_value")'
+        write (u, '(a)') '    dep_value = 7'
+        write (u, '(a)') '  end function dep_value'
         write (u, '(a)') 'end module depmod'
         close (u)
         open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
@@ -964,7 +969,7 @@
         open (newunit=u, file=trim(appdir)//'/app/main.f90', status='replace')
         write (u, '(a)') 'program main'
         write (u, '(a)') '  use depmod, only: dep_value'
-        write (u, '(a)') '  print "(i0)", dep_value'
+        write (u, '(a)') '  print "(i0)", dep_value()'
         write (u, '(a)') 'end program main'
         close (u)
 
@@ -987,7 +992,8 @@
         ! warm rebuild must not recompile the cached dep object, nor relink the
         ! unchanged binary (the link cache leaves a matching output untouched)
         depobj = ''
-        call first_match(trim(appdir)//'/build/fo/obj', 'depmod', depobj)
+        call object_defining_symbol(trim(appdir)//'/build/fo/obj', &
+            'fo_backend_dep_value', depobj)
         mtime_a = file_mtime(depobj)
         bin_a = file_mtime(trim(appdir)//'/build/fo/bin/depapp')
         call backend_build(b, exitcode, log_file=log_file)
@@ -1074,9 +1080,11 @@
         ! linked copies of this object collide; a parameter would inline away.
         open (newunit=u, file=trim(libdir)//'/src/foo.f90', status='replace')
         write (u, '(a)') 'module foo'
+        write (u, '(a)') '  use iso_c_binding, only: c_int'
         write (u, '(a)') '  implicit none'
         write (u, '(a)') 'contains'
-        write (u, '(a)') '  integer function foo_value()'
+        write (u, '(a)') '  integer(c_int) function foo_value() &'
+        write (u, '(a)') '      bind(C, name="fo_backend_foo_value")'
         write (u, '(a)') '    foo_value = 11'
         write (u, '(a)') '  end function foo_value'
         write (u, '(a)') 'end module foo'
@@ -1101,7 +1109,8 @@
         ! object under a build/gfortran_* dir, exactly what find_dep_artifacts
         ! harvests. Copying fo's own object guarantees identical symbols.
         depobj = ''
-        call first_match(trim(appdir)//'/build/fo/obj', 'mylib', depobj)
+        call object_defining_symbol(trim(appdir)//'/build/fo/obj', &
+            'fo_backend_foo_value', depobj)
         call assert(len_trim(depobj) > 0, 'native dep object present in build/fo/obj')
         fakedir = trim(appdir)//'/build/gfortran_FADE/coexapp'
         call make_dir(fakedir)
@@ -1159,9 +1168,11 @@
         close (u)
         open (newunit=u, file=trim(libdir)//'/src/foo.f90', status='replace')
         write (u, '(a)') 'module foo'
+        write (u, '(a)') '  use iso_c_binding, only: c_int'
         write (u, '(a)') '  implicit none'
         write (u, '(a)') 'contains'
-        write (u, '(a)') '  integer function foo_value()'
+        write (u, '(a)') '  integer(c_int) function foo_value() &'
+        write (u, '(a)') '      bind(C, name="fo_backend_foo_value")'
         write (u, '(a)') '    foo_value = 11'
         write (u, '(a)') '  end function foo_value'
         write (u, '(a)') 'end module foo'
@@ -1190,7 +1201,8 @@
         ! The test build compiled the dep natively; fabricate an fpm-tree
         ! duplicate of that object next to it.
         depobj = ''
-        call first_match(trim(appdir)//'/build/fo/obj', 'mylib', depobj)
+        call object_defining_symbol(trim(appdir)//'/build/fo/obj', &
+            'fo_backend_foo_value', depobj)
         call assert(len_trim(depobj) > 0, 'native dep object present after test build')
         fakedir = trim(appdir)//'/build/gfortran_FADE/coexapp'
         call make_dir(fakedir)
@@ -2085,43 +2097,73 @@
         end if
     end function checkout_marker_identity
 
-    subroutine first_match(dir, infix, path)
-        !! Return the first file under dir whose name contains infix. Shell-based
-        !! to match the other build-test helpers and avoid extra module imports.
-        character(len=*), intent(in) :: dir, infix
+    subroutine object_defining_symbol(dir, symbol, path)
+        !! Identify the compiled provider by its exported fixture symbol, without
+        !! depending on backend object filenames. Mach-O adds a leading underscore.
+        character(len=*), intent(in) :: dir, symbol
         character(len=*), intent(out) :: path
-        character(len=512) :: tmp
-        integer :: u, ios
+        character(len=512) :: listing, symbols, candidate, line, name
+        character(len=1) :: kind
+        integer :: u, v, ios, stat, matches
+        logical :: defines_symbol
 
         path = ''
-        call make_tmp_path('fo_match', tmp)
-        call execute_command_line('find "'//trim(dir)//'" -name "*'// &
-            trim(infix)//'*" 2>/dev/null | head -1 > '//trim(tmp))
-        open (newunit=u, file=trim(tmp), status='old', iostat=ios)
-        if (ios == 0) then
-            read (u, '(a)', iostat=ios) path
-            close (u)
+        matches = 0
+        call make_tmp_path('fo_object_list', listing)
+        call make_tmp_path('fo_object_symbols', symbols)
+        call execute_command_line('find "'//trim(dir)// &
+            '" -type f -name "*.o" > "'//trim(listing)//'"', exitstat=stat)
+        if (stat == 0) then
+            open (newunit=u, file=trim(listing), status='old', iostat=ios)
+            if (ios == 0) then
+                do
+                    read (u, '(a)', iostat=ios) candidate
+                    if (ios /= 0) exit
+                    call run_backend_argv('nm', &
+                        [character(len=512) :: '-P', '-g', trim(candidate)], &
+                        symbols, stat)
+                    if (stat /= 0) exit
+                    defines_symbol = .false.
+                    open (newunit=v, file=trim(symbols), status='old', iostat=ios)
+                    if (ios /= 0) then
+                        stat = ios
+                        exit
+                    end if
+                    do
+                        read (v, '(a)', iostat=ios) line
+                        if (ios /= 0) exit
+                        read (line, *, iostat=ios) name, kind
+                        if (ios /= 0) cycle
+                        if (kind /= 'T') cycle
+                        if (name == symbol .or. name == '_'//symbol) &
+                            defines_symbol = .true.
+                    end do
+                    close (v)
+                    if (defines_symbol) then
+                        matches = matches + 1
+                        path = candidate
+                    end if
+                end do
+                close (u)
+            end if
         end if
-        call execute_command_line('rm -f '//trim(tmp))
-    end subroutine first_match
+        call assert(matches == 1 .and. stat == 0, &
+            'one compiled object defines '//symbol)
+        if (matches /= 1 .or. stat /= 0) path = ''
+        call execute_command_line('rm -f "'//trim(listing)//'" "'// &
+            trim(symbols)//'"')
+    end subroutine object_defining_symbol
 
-    integer function file_mtime(path) result(t)
-        !! Seconds-resolution mtime via stat(1); 0 if missing. Test-only helper.
+    integer(c_long_long) function file_mtime(path) result(t)
+        !! Nanosecond-resolution artifact mtime; zero if missing.
         character(len=*), intent(in) :: path
-        character(len=512) :: tmp
-        integer :: u, ios
+        integer(c_long_long) :: bytes
+        logical :: ok
 
         t = 0
         if (len_trim(path) == 0) return
-        call make_tmp_path('fo_mtime', tmp)
-        call execute_command_line('(stat -c %Y "'//trim(path)//'" 2>/dev/null || '// &
-            'stat -f %m "'//trim(path)//'" 2>/dev/null) > '//trim(tmp))
-        open (newunit=u, file=trim(tmp), status='old', iostat=ios)
-        if (ios == 0) then
-            read (u, *, iostat=ios) t
-            close (u)
-        end if
-        call execute_command_line('rm -f '//trim(tmp))
+        call fs_stat(trim(path), t, bytes, ok)
+        if (.not. ok) t = 0
     end function file_mtime
 
     subroutine make_helper_module_project(project_dir)
