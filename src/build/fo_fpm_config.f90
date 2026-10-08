@@ -447,6 +447,14 @@ contains
             case ('dev-dependencies')
                 call parse_dep_entry(key, val, config%dev_deps, config%n_dev_deps, &
                     config%manifest_parse_error)
+            case ('test.dependencies')
+                if (config%n_tests == 0) then
+                    config%manifest_parse_error = &
+                        '[test.dependencies] requires a preceding [[test]]'
+                else
+                    call parse_dep_entry(key, val, config%dev_deps, config%n_dev_deps, &
+                        config%manifest_parse_error)
+                end if
             case ('executable')
                 if (config%n_exes > 0) &
                     call parse_exe(key, val, config%exes(config%n_exes))
