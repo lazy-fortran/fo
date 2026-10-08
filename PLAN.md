@@ -42,6 +42,18 @@ LSP diagnostics, deep lint, safe cleanup, native fixture migration and the
 first native CMake consumer slice. Exact sources, drivers and receipts remain
 under `/var/tmp/fo-platform-controller-20261008` and task-specific evidence roots.
 
+The paired Fo/Fx editor increment diagnoses unsaved buffers directly through
+FortFront, with per-document debounce, current versions, multiple parser and
+semantic diagnostics, UTF-16 spans and correction/close clearing. Typing never
+starts a project build or tests. The controller passed four owning Fx Linux
+checks and the actual framed Fo consumer; the paired Darwin worker passed six
+checks. Candidate driver `2385601e…13f330f` also passes manifest and frontend
+checks. The custom-library-header resident oracle fails on the old driver,
+then passes capture, runtime edit and stopped-owner frozen replay with the
+repaired inventory. Its child independently accepts only the original sum255
+and reports259 after the live header edit. Full current platform suites remain
+open; these focused checks do not count as a full fixed-version receipt.
+
 Earlier handoff evidence follows; it does not replace current platform gates.
 The reviewed Claude handoff is published on main, based on
 `95490c97f73e53b2b9c70a61b287bd3aa36b8d38`. On exact source `7056854` and pinned
