@@ -192,14 +192,29 @@ contains
             object = join_path(scratch, trim(architectures(i)) // '.o')
             image = join_path(scratch, trim(architectures(i)) // '.dylib')
             target = trim(architectures(i)) // '-apple-macos11'
-            args = words([character(len=512) :: '-target', target, '-c', source, &
-                '-o', object])
+            args = string_list_t()
+            call list_add(args, '-target')
+            call list_add(args, target)
+            call list_add(args, '-c')
+            call list_add(args, source)
+            call list_add(args, '-o')
+            call list_add(args, object)
             call run_external(trim(clang), args, scratch, result)
             call assert_process_ok(result, 'LLVM cross compiler produces Mach-O object')
             if (result%exit_code /= 0) return
-            args = words([character(len=512) :: '-dylib', '-arch', &
-                trim(architectures(i)), '-platform_version', 'macos', '11.0', &
-                '11.0', '-install_name', '@rpath/libanswer.dylib', object, '-o', image])
+            args = string_list_t()
+            call list_add(args, '-dylib')
+            call list_add(args, '-arch')
+            call list_add(args, trim(architectures(i)))
+            call list_add(args, '-platform_version')
+            call list_add(args, 'macos')
+            call list_add(args, '11.0')
+            call list_add(args, '11.0')
+            call list_add(args, '-install_name')
+            call list_add(args, '@rpath/libanswer.dylib')
+            call list_add(args, object)
+            call list_add(args, '-o')
+            call list_add(args, image)
             call run_external(trim(linker), args, scratch, result)
             call assert_process_ok(result, 'LLVM cross linker produces real dylib')
             if (result%exit_code /= 0) return
@@ -218,9 +233,12 @@ contains
         if (.not. found) return
         image = join_path(scratch, 'universal.dylib')
         do i = 1, 2
-            args = words([character(len=512) :: '-create', &
-                join_path(scratch, 'x86_64.dylib'), join_path(scratch, 'arm64.dylib'), &
-                '-output', image])
+            args = string_list_t()
+            call list_add(args, '-create')
+            call list_add(args, join_path(scratch, 'x86_64.dylib'))
+            call list_add(args, join_path(scratch, 'arm64.dylib'))
+            call list_add(args, '-output')
+            call list_add(args, image)
             if (i == 2) call list_add(args, '-fat64')
             call run_external(trim(lipo), args, scratch, result)
             call assert_process_ok(result, &
@@ -245,15 +263,5 @@ contains
         read (unit) bytes
         close (unit)
     end function read_image
-
-    function words(items) result(list)
-        character(len=*), intent(in) :: items(:)
-        type(string_list_t) :: list
-        integer :: i
-
-        do i = 1, size(items)
-            call list_add(list, trim(items(i)))
-        end do
-    end function words
 
 end program test_macho_image

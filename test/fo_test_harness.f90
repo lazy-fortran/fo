@@ -1317,6 +1317,14 @@ contains
         type(process_result_t), intent(in) :: result
         character(len=*), intent(in) :: message
 
+        if (result%exit_code /= 0 .or. result%term_signal /= 0 .or. &
+            result%runner_failed .or. result%timed_out) then
+            if (allocated(result%stderr)) then
+                if (len(result%stderr) > 0) &
+                    write (error_unit, '(a)') message // ': captured stderr: ' // &
+                        result%stderr
+            end if
+        end if
         if (result%runner_failed) then
             if (allocated(result%runner_error)) then
                 call assert_true(.false., message // ': process runner failed: ' // &
