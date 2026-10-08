@@ -3,6 +3,8 @@ module fo_exec_target
     use fo_build_tree, only: native_output_dir
     use fo_cmake_context, only: cmake_context_t, cmake_context_init, &
         cmake_context_build_path
+    use fo_cmake_native, only: native_cmake_resolve
+    use fo_cmake_native_config, only: native_cmake_selected
     use fo_fs, only: fs_collect_files
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
     use fo_gfortran_build, only: gfortran_app_source_name, gfortran_test_source_name
@@ -220,9 +222,13 @@ contains
             return
         end if
 
-        call cmake_context_init(context, b%project_dir)
         found = .false.
         bin_path = ''
+        if (native_cmake_selected()) then
+            call native_cmake_resolve(b%cmake, target, bin_path, found)
+            return
+        end if
+        call cmake_context_init(context, b%project_dir)
         if (.not. context%valid) return
         build_root = cmake_context_build_path(context)
         bin_path = build_root//'/'//trim(target)

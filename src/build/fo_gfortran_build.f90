@@ -88,6 +88,9 @@ module fo_gfortran_build
     public :: gfortran_app_source_name, gfortran_test_source_name
     public :: source_has_marker, dispatch_target
     public :: gfortran_selected_test_names, gfortran_named_test_exists
+    public :: native_compile_units, native_link_target, native_archive_target
+    public :: native_run_test, write_test_result_line
+    public :: make_obj_path
 
     interface
         integer(c_int) function c_unsetenv(name) bind(C, name='fo_c_unsetenv')
@@ -104,6 +107,101 @@ module fo_gfortran_build
     end type source_interfaces_t
 
 contains
+
+    subroutine native_run_test(cwd, binary, args, log_file, exitcode)
+        character(len=*), intent(in) :: cwd, binary, args, log_file
+        integer, intent(out) :: exitcode
+        type(fpm_config_t), allocatable :: config
+        call fpm_config_allocate(config)
+        call run_test_binary(cwd, binary, args, log_file, config, .false., exitcode)
+    end subroutine native_run_test
+
+    subroutine native_compile_units(project_dir, units, flags, includes, &
+            mod_dir, obj_dir, log_file, exitcode, n_compiled, compile_database)
+        character(len=*), intent(in) :: project_dir, flags(:), includes(:)
+        character(len=*), intent(in) :: mod_dir, obj_dir, log_file
+        type(scan_unit_t), intent(in) :: units(:)
+        integer, intent(out) :: exitcode, n_compiled
+        character(len=*), intent(in) :: compile_database
+        type(fpm_config_t), allocatable :: config
+        character(len=512), allocatable :: objects(:), dep_objects(:), dirs(:)
+        logical, allocatable :: programs(:)
+        character(len=512) :: compiler
+        integer :: n_objects
+
+        exitcode = 1
+        n_compiled = 0
+        if (size(units) /= size(flags) .or. size(includes) > MAX_DEP_DIRS) return
+        call fpm_config_allocate(config)
+        allocate(objects(MAX_SRC_OBJS), dep_objects(MAX_DEP_OBJS), &
+            dirs(MAX_DEP_DIRS), programs(MAX_SRC_OBJS))
+        dirs = ''
+        dirs(:size(includes)) = includes
+        dep_objects = ''
+        call cache_set_file_hash_hook(memo_hash_file)
+        call detect_compiler(compiler)
+        call resolve_fc_executable(fc_command())
+        call fs_make_dir(mod_dir)
+        call fs_make_dir(obj_dir)
+        call compile_sources(project_dir, '.fo-no-scan', '.fo-no-scan', &
+            '.fo-no-scan', .false., mod_dir, obj_dir, dirs, size(includes), &
+            dep_objects, 0, log_file, objects, n_objects, programs, &
+            exitcode, n_compiled, '', compiler, .true., config, &
+            declared_units=units, declared_flags=flags, &
+            compile_database=compile_database)
+        call memo_save()
+    end subroutine native_compile_units
+
+    subroutine native_link_target(project_dir, objects, libraries, flags, &
+            output, log_file, exitcode)
+        character(len=*), intent(in) :: project_dir, flags, output, log_file
+        character(len=512), intent(in) :: objects(:)
+        character(len=128), intent(in) :: libraries(:)
+        integer, intent(out) :: exitcode
+        character(len=512), allocatable :: empty(:)
+        character(len=HASH_LEN) :: base_digest
+        type(cache_t) :: cache
+        integer :: ierr
+
+        exitcode = 1
+        if (size(objects) == 0) return
+        allocate(empty(MAX_DEP_OBJS))
+        empty = ''
+        if (size(libraries) > 0) then
+            ! Named external libraries use the declared GNU search policy. Until
+            ! their exact selected files are frozen, do not reuse a link action
+            ! keyed by FPM's different static-library preference.
+            call link_binary(project_dir, objects(1), objects(2:), &
+                size(objects) - 1, empty, 0, libraries, size(libraries), &
+                output, log_file, exitcode, flags, exact_flags=.true.)
+            return
+        end if
+        call cache_init(cache, ierr)
+        call link_base_digest(project_dir, objects(2:), size(objects) - 1, &
+            empty, 0, libraries, size(libraries), base_digest)
+        call link_binary(project_dir, objects(1), objects(2:), &
+            size(objects) - 1, empty, 0, libraries, size(libraries), &
+            output, log_file, exitcode, flags, cache, base_digest, &
+            exact_flags=.true.)
+    end subroutine native_link_target
+
+    subroutine native_archive_target(project_dir, objects, output, log_file, exitcode)
+        character(len=*), intent(in) :: project_dir, output, log_file
+        character(len=512), intent(in) :: objects(:)
+        integer, intent(out) :: exitcode
+        character(len=512) :: archive
+        logical :: valid
+
+        call archive_has_expected_members(project_dir, output, objects, &
+            size(objects), valid)
+        exitcode = 0
+        if (valid) return
+        call archive_objects(project_dir, objects, size(objects), archive, &
+            log_file, exitcode)
+        if (exitcode /= 0) return
+        exitcode = fs_rename(trim(archive), output)
+        call remove_ephemeral_link_artifact(archive)
+    end subroutine native_archive_target
 
     logical function gremlin_execution_view_requested() result(requested)
         character(len=MAX_PATH) :: execution_cwd
@@ -1366,7 +1464,8 @@ contains
             include_examples, mod_dir, obj_dir, &
             dep_includes, n_dep_includes, dep_objs, n_dep_objs, log_file, &
             src_objs, n_src_objs, is_prog_arr, exitcode, &
-            n_compiled, flags, compiler, include_apps, config, use_cache)
+            n_compiled, flags, compiler, include_apps, config, use_cache, &
+            declared_units, declared_flags, compile_database)
         character(len=*), intent(in) :: project_dir, src_dir, app_dir, example_dir
         logical, intent(in) :: include_examples
         character(len=*), intent(in) :: mod_dir, obj_dir, log_file
@@ -1383,9 +1482,13 @@ contains
         logical, intent(in) :: include_apps
         logical, intent(in), optional :: use_cache
 
+        type(scan_unit_t), intent(in), optional :: declared_units(:)
+        character(len=*), intent(in), optional :: declared_flags(:)
+        character(len=*), intent(in), optional :: compile_database
+
         type(scan_unit_t), allocatable :: units_a(:), units_b(:), units_c(:)
         type(scan_unit_t), allocatable :: all_units(:)
-        integer :: na, nb, nc, n_all, i, ii, ierr, node_id
+        integer :: na, nb, nc, n_all, i, ii, ierr, node_id, declared_index
         type(dag_t) :: dag
         character(len=MAX_PATH), allocatable :: filenames(:)
         logical, allocatable :: is_prog(:), is_test_arr(:)
@@ -1447,6 +1550,11 @@ contains
         allocate (source_flags(MAX_NODES), compdb_flags(MAX_NODES))
         allocate (source_key_flags(MAX_NODES))
 
+        if (present(declared_units)) then
+            n_all = size(declared_units)
+            all_units = declared_units
+            n_deps_resolved = 0
+        else
         call scan_dir(trim(project_dir)//'/'//trim(src_dir), units_a, na, ierr)
         call scan_dir(trim(project_dir)//'/'//trim(app_dir), units_b, nb, ierr)
         nc = 0
@@ -1470,6 +1578,7 @@ contains
         ! Fold path dependencies and any missing external-dependency module
         ! providers into the same source-ordered native DAG.
         call add_dep_sources(project_dir, all_units, n_all, deps, n_deps_resolved)
+        end if
 
         call validate_module_naming(config, all_units(:n_all), deps, &
             n_deps_resolved, exitcode)
@@ -1477,11 +1586,27 @@ contains
 
         call build_dag_from_units(all_units, n_all, dag, filenames, is_test_arr, is_prog)
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
+        if (present(declared_units) .and. has_cycle) then
+            write(error_unit, '(a)') 'native CMake: cyclic Fortran module dependency'
+            exitcode = 1
+            return
+        end if
         call dag_levels(dag, topo_order, n_order, node_levels, n_levels)
         call remove_shadow_mods(project_dir, dag)
         call make_includes_flag(mod_dir, dep_includes, n_dep_includes, includes_flag)
         call package_source_flags(filenames, flags, config, deps, n_deps_resolved, &
             source_flags)
+        if (present(declared_flags)) then
+            do i = 1, n_order
+                node_id = topo_order(i)
+                do declared_index = 1, n_all
+                    if (trim(all_units(declared_index)%filename) /= &
+                        trim(filenames(node_id))) cycle
+                    source_flags(node_id) = declared_flags(declared_index)
+                    exit
+                end do
+            end do
+        end if
 
         old_mod_keys = ''
         new_mod_keys = ''
@@ -1515,7 +1640,12 @@ contains
             ! Construct deferred-length compiler policy strings before workers
             ! start. Some gfortran versions use process-global result-length
             ! temporaries even for recursive deferred-length functions.
-            source_key_flags(node_id) = compile_key_flags(source_flags(node_id))
+            if (present(declared_flags)) then
+                source_key_flags(node_id) = 'native-declared-v1'//new_line('a')// &
+                    trim(source_flags(node_id))
+            else
+                source_key_flags(node_id) = compile_key_flags(source_flags(node_id))
+            end if
             if (size(interfaces(node_id)%modules) > 1) &
                 source_key_flags(node_id) = trim(source_key_flags(node_id))// &
                     '|fo-interface-vector-v1'
@@ -1612,7 +1742,8 @@ contains
                     end do
                     call compile_f90(project_dir, fname_local, obj_path, &
                         with_user_flags(includes_flag, source_flags(node_id)), &
-                        per_log_local, compile_exits(ii))
+                        per_log_local, compile_exits(ii), &
+                        exact_flags=present(declared_flags))
                     call progress_step()
                 end do
                 !$omp end parallel do
@@ -1630,7 +1761,8 @@ contains
                         obj_path)
                     call compile_f90(project_dir, filenames(node_id), obj_path, &
                         with_user_flags(includes_flag, source_flags(node_id)), &
-                        per_logs(ii), compile_exits(ii))
+                        per_logs(ii), compile_exits(ii), &
+                        exact_flags=present(declared_flags))
                 end do
 
                 do ii = 1, n_compile
@@ -1682,7 +1814,7 @@ contains
                 call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
                 call compile_f90(project_dir, filenames(node_id), obj_path, &
                     with_user_flags(includes_flag, source_flags(node_id)), log_file, &
-                    exitcode)
+                    exitcode, exact_flags=present(declared_flags))
                 if (exitcode /= 0) then
                     call progress_end()
                     return
@@ -1693,9 +1825,17 @@ contains
         end if
         call progress_end()
 
+        if (present(declared_flags)) then
+            if (present(compile_database)) then
+                call compdb_write(compile_database, project_dir, compdb_sources, &
+                    compdb_objects, n_compdb, fc_command(), '', includes_flag, &
+                    flags, compdb_flags)
+            end if
+        else
         call compdb_write(trim(project_dir)//'/build/compile_commands.json', &
             project_dir, compdb_sources, compdb_objects, n_compdb, &
             fc_command(), fc_base_flags(), includes_flag, flags, compdb_flags)
+        end if
 
         do i = 1, n_order
             node_id = topo_order(i)
@@ -1715,6 +1855,7 @@ contains
             end if
         end do
 
+        if (present(declared_units)) return
         allocate (cfiles(MAX_SRC_OBJS))
         call collect_c_family(trim(project_dir)//'/'//trim(src_dir), &
             cfiles, n_cfiles)
@@ -4527,10 +4668,11 @@ contains
     end function compiler_tool_key
 
     recursive subroutine compile_f90(project_dir, source, objfile, includes_flag, log_file, &
-            exitcode)
+            exitcode, exact_flags)
         character(len=*), intent(in) :: project_dir, source, objfile, includes_flag
         character(len=*), intent(in) :: log_file
         integer, intent(out) :: exitcode
+        logical, intent(in), optional :: exact_flags
         character(len=:), allocatable :: packed
         integer :: n_args, n_removed
 
@@ -4542,7 +4684,11 @@ contains
         n_args = 0
         call append_fc_command(packed, n_args)
         call argv_push(packed, n_args, '-c')
-        call argv_push_split(packed, n_args, fc_base_flags())
+        if (present(exact_flags)) then
+            if (.not. exact_flags) call argv_push_split(packed, n_args, fc_base_flags())
+        else
+            call argv_push_split(packed, n_args, fc_base_flags())
+        end if
         call argv_push_split_nl(packed, n_args, includes_flag)
         call argv_push(packed, n_args, '-o')
         call argv_push(packed, n_args, objfile)
@@ -4719,7 +4865,7 @@ contains
 
     subroutine link_binary(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, n_dep_objs, &
             link_libs, n_link_libs, output, log_file, exitcode, flags, &
-            cache, base_digest)
+            cache, base_digest, exact_flags)
         character(len=*), intent(in) :: project_dir
         character(len=*), intent(in) :: prog_obj, output, log_file
         character(len=512), intent(in) :: lib_objs(:)
@@ -4739,6 +4885,7 @@ contains
         ! relinking. Linking is the dominant warm-build cost otherwise.
         type(cache_t), intent(in), optional :: cache
         character(len=*), intent(in), optional :: base_digest
+        logical, intent(in), optional :: exact_flags
 
         character(len=:), allocatable :: packed
         character(len=8) :: debug_links
@@ -4756,12 +4903,18 @@ contains
         if (present(flags)) flags_str = trim(flags)
         exitcode = 1
         call select_linker(fc_command(), use_lld)
+        if (present(exact_flags)) then
+            if (exact_flags) use_lld = .false.
+        end if
 
         do_cache = present(cache) .and. present(base_digest)
         if (do_cache) do_cache = len_trim(base_digest) > 0
         if (do_cache) then
             call cache_file_digest(prog_obj, prog_key)
             key_parts(1) = 'fo-link-3'
+            if (present(exact_flags)) then
+                if (exact_flags) key_parts(1) = 'fo-declared-link-1'
+            end if
             key_parts(2) = trim(fc_command())
             key_parts(3) = 'default'
             if (use_lld) key_parts(3) = 'lld-with-default-fallback'
@@ -4829,7 +4982,7 @@ contains
             status=debug_status)
         call make_link_argv(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, &
             n_dep_objs, link_libs, n_link_libs, staged_output, flags_str, use_lld, &
-            packed, n_args)
+            packed, n_args, exact_flags=exact_flags)
         if (debug_status == 0 .and. len_trim(debug_links) > 0) then
             write (error_unit, '(a)') 'fo link: '//argv_display(packed)
         end if
@@ -4843,7 +4996,7 @@ contains
             call fs_remove_file(trim(staged_output))
             call make_link_argv(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, &
                 n_dep_objs, link_libs, n_link_libs, staged_output, flags_str, .false., &
-                packed, n_args)
+                packed, n_args, exact_flags=exact_flags)
             if (use_lld .and. debug_status == 0 .and. len_trim(debug_links) > 0) &
                 write (error_unit, '(a)') 'fo link fallback: '//argv_display(packed)
             call process_run_argv_logged('', packed, n_args, log_file, .true., &
@@ -4914,7 +5067,7 @@ contains
 
     subroutine make_link_argv(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, &
             n_dep_objs, link_libs, n_link_libs, output, flags, use_lld, packed, n_args, &
-            install_name)
+            install_name, exact_flags)
         character(len=*), intent(in) :: project_dir, prog_obj, output, flags
         character(len=512), intent(in) :: lib_objs(:)
         integer, intent(in) :: n_lib_objs
@@ -4926,9 +5079,11 @@ contains
         character(len=:), allocatable, intent(out) :: packed
         integer, intent(out) :: n_args
         character(len=*), intent(in), optional :: install_name
+        logical, intent(in), optional :: exact_flags
 
         integer :: i
         character(len=512) :: policy_flag
+        logical :: declared_link
 
         n_args = 0
         call append_fc_command(packed, n_args)
@@ -4940,8 +5095,22 @@ contains
         do i = 1, n_dep_objs
             call argv_push(packed, n_args, dep_objs(i))
         end do
-        call argv_push_split_nl(packed, n_args, &
-            link_lib_flags(project_dir, link_libs, n_link_libs))
+        declared_link = .false.
+        if (present(exact_flags)) declared_link = exact_flags
+        if (declared_link) then
+            do i = 1, n_link_libs
+                if (index(trim(link_libs(i)), '/') > 0 .or. &
+                    index(trim(link_libs(i)), achar(92)) > 0 .or. &
+                    index(trim(link_libs(i)), '-') == 1) then
+                    call argv_push(packed, n_args, trim(link_libs(i)))
+                else
+                    call argv_push(packed, n_args, '-l'//trim(link_libs(i)))
+                end if
+            end do
+        else
+            call argv_push_split_nl(packed, n_args, &
+                link_lib_flags(project_dir, link_libs, n_link_libs))
+        end if
         ! flang's driver does not add Homebrew's libomp to the link search, so
         ! -fopenmp links fail with "library 'omp' not found". Add it (harmless
         ! when the build does not use OpenMP) plus an rpath for runtime.
@@ -4950,7 +5119,12 @@ contains
             call argv_push(packed, n_args, '-Wl,-rpath,/opt/homebrew/opt/libomp/lib')
         end if
         if (len_trim(flags) > 0) call argv_push_split(packed, n_args, flags)
-        policy_flag = fc_link_policy_flags()
+        policy_flag = ''
+        if (present(exact_flags)) then
+            if (.not. exact_flags) policy_flag = fc_link_policy_flags()
+        else
+            policy_flag = fc_link_policy_flags()
+        end if
         if (len_trim(policy_flag) > 0) call argv_push_split(packed, n_args, policy_flag)
         if (present(install_name)) then
             if (len_trim(install_name) > 0) &

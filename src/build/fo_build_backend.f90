@@ -14,6 +14,8 @@ module fo_build_backend
     use fo_cmake_context, only: cmake_context_t, cmake_context_init, &
         cmake_context_query, cmake_context_read_reply, &
         cmake_context_build_path, cmake_context_validate_hint
+    use fo_cmake_native_config, only: native_cmake_selected
+    use fo_cmake_native, only: native_cmake_build, native_cmake_test
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
@@ -320,7 +322,12 @@ contains
                 call gfortran_run_tests(self%project_dir, log_path, exitcode, &
                     slow, no_names, 0, flags=flag_text)
             case (BACKEND_CMAKE)
-                call cmake_test(self%cmake, '', slow, log_path, exitcode)
+                if (native_cmake_selected()) then
+                    call native_cmake_test(self%cmake, [character(len=1) ::], &
+                        log_path, exitcode)
+                else
+                    call cmake_test(self%cmake, '', slow, log_path, exitcode)
+                end if
             end select
         end if
         if (exitcode == 124) then
@@ -394,8 +401,13 @@ contains
             call gfortran_run_tests(self%project_dir, log_path, exitcode, slow, &
                 fast_names, n_fast, flags=flag_text)
         case (BACKEND_CMAKE)
-            call names_to_ctest_regex(fast_names, n_fast, regex)
-            call cmake_test(self%cmake, regex, slow, log_path, exitcode)
+            if (native_cmake_selected()) then
+                call native_cmake_test(self%cmake, fast_names(:n_fast), &
+                    log_path, exitcode)
+            else
+                call names_to_ctest_regex(fast_names, n_fast, regex)
+                call cmake_test(self%cmake, regex, slow, log_path, exitcode)
+            end if
         end select
     end subroutine backend_test_names
 
@@ -430,6 +442,12 @@ contains
         logical :: has_cache, hint_valid, has_frozen_context
         character(len=4096) :: captured_generator
         integer :: n_args, i, line_end
+
+        if (native_cmake_selected()) then
+            write(error_unit, '(a)') 'native CMake: resident capture is not yet supported'
+            exitcode = 1
+            return
+        end if
 
         effective_flags = flags
         if (allocated(context%profile)) then
@@ -643,6 +661,25 @@ contains
         character(len=:), allocatable :: packed
         character(len=32) :: jobs_text
         integer :: n_args, i
+
+        if (native_cmake_selected()) then
+            if (len_trim(flags) > 0) then
+                if (len(context%profile) == 0) then
+                    write(error_unit, '(a)') &
+                        'native CMake: declare compiler flags through CMake inputs'
+                    exitcode = 1
+                    return
+                end if
+                if (trim(flags) /= trim(profile_flags(context%profile))) then
+                    write(error_unit, '(a)') &
+                        'native CMake: custom CLI compiler flags unsupported'
+                    exitcode = 1
+                    return
+                end if
+            end if
+            call native_cmake_build(context, log_file, exitcode)
+            return
+        end if
 
         call cmake_configure(context, flags, log_file, exitcode)
         if (exitcode /= 0) return
