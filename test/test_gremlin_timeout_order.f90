@@ -19,6 +19,7 @@ program test_gremlin_timeout_order
     character(:), allocatable :: started, pid_path, done, gate, hold, release, entered
     character(:), allocatable :: compiler, compiler_dir, compiler_source, path_value, cwd, c_compiler, compiler_wrapper, path_separator
     character(:), allocatable :: session, generation
+    character(len=4096) :: c_compiler_buffer
     type(string_list_t) :: args, extra, command
     type(process_result_t) :: process
     type(json_value_t) :: report, event
@@ -58,13 +59,14 @@ program test_gremlin_timeout_order
     compiler_source = cwd//'/test-fixtures/c/compiler_probe.c'
     compiler_wrapper = compiler_dir//'/gfortran'
     path_separator = ':'
-    call fs_find_executable('cc', c_compiler, found)
+    call fs_find_executable('cc', c_compiler_buffer, found)
     if (fs_is_windows()) then
         compiler_wrapper = compiler_wrapper//'.exe'
         path_separator = ';'
-        call fs_find_executable('gcc', c_compiler, found)
+        call fs_find_executable('gcc', c_compiler_buffer, found)
         call list_add(args, '-municode')
     end if
+    c_compiler = trim(c_compiler_buffer)
     call assert_true(found, 'locates the native C compiler')
     call list_with_first(c_compiler, args, command)
     args = command
@@ -166,7 +168,9 @@ contains
     subroutine locate_compiler(path)
         character(:), allocatable, intent(out) :: path
         logical :: found
-        call fs_find_executable('gfortran', path, found)
+        character(len=4096) :: buffer
+        call fs_find_executable('gfortran', buffer, found)
+        path = trim(buffer)
         call assert_true(found, 'locates the real native compiler')
     end subroutine locate_compiler
 

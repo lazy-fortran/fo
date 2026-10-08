@@ -30,6 +30,7 @@ program test_gremlin_watch
     character(:), allocatable :: gate, entered, manifest, retired_path, failed_counter
     character(:), allocatable :: cli_project, bin_dir, path_value, check_marker
     character(:), allocatable :: temp_one, temp_two, temp_populated, cwd, c_compiler, recorder, separator
+    character(len=4096) :: compiler_buffer
     type(string_list_t) :: args, bad_observer
     type(process_result_t) :: process
     type(json_value_t) :: response, status
@@ -158,12 +159,13 @@ program test_gremlin_watch
     call current_directory(cwd)
     recorder = bin_dir//'/fo'
     separator = ':'
-    call fs_find_executable('cc', c_compiler, found)
+    call fs_find_executable('cc', compiler_buffer, found)
     if (fs_is_windows()) then
         recorder = recorder//'.exe'
         separator = ';'
-        call fs_find_executable('gcc', c_compiler, found)
+        call fs_find_executable('gcc', compiler_buffer, found)
     end if
+    c_compiler = trim(compiler_buffer)
     call assert_true(found, 'locates native C compiler for independent check recorder')
     args = string_list_t()
     call list_add(args, c_compiler)

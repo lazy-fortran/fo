@@ -452,7 +452,6 @@ int fo_test_private_mode(const char *path, int directory) {
     if (descriptor) LocalFree(descriptor);
     free(wide); FreeLibrary(security); return changed ? 0 : -1;
 }
-int fo_test_mode_bits(const char *path) { (void)path; errno = ENOTSUP; return -1; }
 
 
 

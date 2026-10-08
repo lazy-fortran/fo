@@ -34,6 +34,7 @@ program test_install_help
     character(:), allocatable :: cache, prefix
     character(:), allocatable :: sentinel, installed, original_permissions, value, cwd, compiler, c_compiler
     character(:), allocatable :: shim, shim_dir, compiler_source, marker, separator
+    character(len=4096) :: compiler_buffer, c_compiler_buffer
     character(len=64) :: original_hash, installed_hash
     type(string_list_t) :: args, env
     type(process_result_t) :: result
@@ -103,14 +104,16 @@ program test_install_help
     marker = join_path(scratch, 'compiler-invocations')
     separator = ':'
     call make_directory(shim_dir)
-    call fs_find_executable('gfortran', compiler, ok)
+    call fs_find_executable('gfortran', compiler_buffer, ok)
+    compiler = trim(compiler_buffer)
     call assert_true(ok, 'locates real native Fortran compiler')
-    call fs_find_executable('cc', c_compiler, ok)
+    call fs_find_executable('cc', c_compiler_buffer, ok)
     if (fs_is_windows()) then
         shim = shim//'.exe'
         separator = ';'
-        call fs_find_executable('gcc', c_compiler, ok)
+        call fs_find_executable('gcc', c_compiler_buffer, ok)
     end if
+    c_compiler = trim(c_compiler_buffer)
     call assert_true(ok, 'locates native C compiler for independent compiler observer')
     call list_add(args, c_compiler)
     if (fs_is_windows()) call list_add(args, '-municode')

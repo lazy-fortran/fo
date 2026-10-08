@@ -326,7 +326,7 @@ int fo_test_getcwd(char *buffer, size_t size) { return getcwd(buffer, size) == N
 int fo_test_touch_directory(const char *path) {
     return utimensat(AT_FDCWD, path, NULL, 0);
 }
-int fo_test_mode_bits(const char *path) {
+static int mode_bits(const char *path) {
     struct stat info;
     return stat(path, &info) == 0 ? (int)(info.st_mode & 07777) : -1;
 }
@@ -334,7 +334,7 @@ int fo_test_mode_bits(const char *path) {
 int fo_test_prepare_executable(const char *path) { return chmod(path, 0755); }
 int fo_test_executable_access(const char *path) { return access(path, R_OK | X_OK) == 0; }
 int fo_test_executable_permissions(const char *path) {
-    return fo_test_mode_bits(path) == 0755 && fo_test_executable_access(path);
+    return mode_bits(path) == 0755 && fo_test_executable_access(path);
 }
 int fo_test_permissions_snapshot(const char *path, char *out, int capacity) {
     struct stat info;
