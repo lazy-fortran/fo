@@ -64,11 +64,13 @@ int fo_gremlin_process_matches(int pid, const char *start);
 int fo_c_recover_async_scope(const char *state_dir, int owner_pid,
                              const char *owner_start);
 int fo_c_rm_rf(const char *path);
+int fo_c_execution_scratch_release(const char *view);
+int fo_c_execution_scratch_active(const char *view);
 
 /* A replacement owner has already recovered the previous owner's children.
    Preserve retained execution views but discard their disposable scratch. */
 static int cleanup_view_scratch(const char *state_dir) {
-    char views[PATH_MAX], view[PATH_MAX], scratch[PATH_MAX];
+    char views[PATH_MAX], view[PATH_MAX];
     struct stat st;
     struct dirent *entry;
     DIR *directory;
@@ -84,20 +86,14 @@ static int cleanup_view_scratch(const char *state_dir) {
         errno = 0;
         entry = readdir(directory);
         if (entry == NULL) { e = errno; break; }
-        if (strncmp(entry->d_name, "execution-", 10) != 0) continue;
+        if (strncmp(entry->d_name, "execution-", 10) != 0 &&
+            strncmp(entry->d_name, ".building-execution-", 20) != 0) continue;
         if (snprintf(view, sizeof(view), "%s/%s", views, entry->d_name) >=
-            (int)sizeof(view) ||
-            snprintf(scratch, sizeof(scratch), "%s/.fo-tmp", view) >=
-            (int)sizeof(scratch)) { e = ENAMETOOLONG; break; }
+            (int)sizeof(view)) { e = ENAMETOOLONG; break; }
         if (lstat(view, &st) != 0) { e = errno; break; }
         if (!S_ISDIR(st.st_mode) || !fo_private_path(view)) { e = EPERM; break; }
-        if (lstat(scratch, &st) != 0) {
-            if (errno == ENOENT) continue;
-            e = errno;
-            break;
-        }
-        if (!S_ISDIR(st.st_mode) || !fo_private_path(scratch)) { e = EPERM; break; }
-        if (fo_c_rm_rf(scratch) != 0) { e = errno ? errno : EIO; break; }
+        e = fo_c_execution_scratch_release(view);
+        if (e != 0) break;
     }
     if (closedir(directory) != 0 && e == 0) e = errno;
     return e;
@@ -456,10 +452,9 @@ int fo_gremlin_session_release(const char *dir, const char *session, int fd) {
     return 0;
 }
 
-/* Stop retires inactive views only; .fo-tmp remains present for an active view. */
+/* Stop retires inactive views only; validated scratch marks an active view. */
 int fo_gremlin_session_retire_views(const char *dir, const char *session, int fd) {
     char id[128], start[64], current[64], path[PATH_MAX], views[PATH_MAX];
-    char scratch[PATH_MAX];
     int pid = 0, e;
     struct stat st;
     DIR *directory;
@@ -501,22 +496,11 @@ int fo_gremlin_session_retire_views(const char *dir, const char *session, int fd
             e = EPERM;
             break;
         }
-        if (snprintf(scratch, sizeof(scratch), "%s/.fo-tmp", path) >=
-            (int)sizeof(scratch)) {
-            e = ENAMETOOLONG;
-            break;
-        }
-        if (lstat(scratch, &st) == 0) {
-            if (!S_ISDIR(st.st_mode) || !fo_private_path(scratch)) {
-                e = EPERM;
-                break;
-            }
-            continue;
-        }
-        if (errno != ENOENT) {
-            e = errno;
-            break;
-        }
+        e = fo_c_execution_scratch_active(path);
+        if (e < 0) { e = -e; break; }
+        if (e > 0) continue;
+        e = fo_c_execution_scratch_release(path);
+        if (e != 0) break;
         if (fo_c_rm_rf(path) != 0) {
             e = errno ? errno : EIO;
             break;

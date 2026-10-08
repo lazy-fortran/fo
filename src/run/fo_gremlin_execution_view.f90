@@ -6,7 +6,7 @@ module fo_gremlin_execution_view
     use fo_input_inventory, only: input_entry_t, input_inventory_t, INPUT_FILE, &
         INPUT_DIRECTORY
     use fo_process, only: process_getpid
-    use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_util, only: make_tmpfile, delete_tmpfile, temporary_root
     implicit none
     private
 
@@ -31,6 +31,20 @@ module fo_gremlin_execution_view
     public :: execution_view_copy_app_outputs
 
     interface
+        integer(c_int) function scratch_create(view, parent, output, capacity) &
+                bind(C, name='fo_c_execution_scratch_create')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: view(*), parent(*)
+            character(kind=c_char), intent(out) :: output(*)
+            integer(c_int), value :: capacity
+        end function scratch_create
+
+        integer(c_int) function scratch_release(view) &
+                bind(C, name='fo_c_execution_scratch_release')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: view(*)
+        end function scratch_release
+
         integer(c_int) function generation_copy_tree_ephemeral( &
                 source, destination, manifest) &
                 bind(C, name='fo_c_generation_copy_tree_ephemeral')
@@ -423,7 +437,6 @@ contains
         else
             view%cwd = trim(published)
         end if
-        view%tmpdir = trim(published)//'/.fo-tmp'
         ierr = 0
         message = ''
     end subroutine publish_execution_view
@@ -440,17 +453,24 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
+        character(kind=c_char) :: output(PATH_LEN)
+        integer :: i, rc
+
         ierr = 0
         message = ''
-        if (len_trim(view%root) + len('/.fo-tmp') >= PATH_LEN) then
-            call reject_view(view, 'execution view scratch path is too long', &
+        output = c_null_char
+        rc = scratch_create(trim(view%root)//c_null_char, &
+            temporary_root()//c_null_char, output, int(PATH_LEN, c_int))
+        if (rc /= 0) then
+            call reject_view(view, 'cannot create private execution scratch', &
                 ierr, message)
             return
         end if
-        view%tmpdir = trim(view%root)//'/.fo-tmp'
-        if (fs_mkdir_excl(trim(view%tmpdir)) /= 0) &
-            call reject_view(view, 'cannot create private execution scratch', &
-                ierr, message)
+        view%tmpdir = ''
+        do i = 1, PATH_LEN
+            if (output(i) == c_null_char) exit
+            view%tmpdir(i:i) = output(i)
+        end do
     end subroutine create_private_scratch
 
     subroutine reject_view(view, diagnostic, ierr, message)
@@ -478,15 +498,12 @@ contains
         ierr = 0
         message = ''
         if (.not. view%active .or. len_trim(view%root) == 0) return
+        ierr = scratch_release(trim(view%root)//c_null_char)
+        if (ierr /= 0) then
+            message = 'cannot remove owned execution scratch: '//trim(view%tmpdir)
+            return
+        end if
         if (retain) then
-            if (len_trim(view%tmpdir) > 0) then
-                call fs_remove_tree(trim(view%tmpdir), ierr)
-                if (ierr /= 0) then
-                    message = 'cannot remove retained view scratch: '// &
-                        trim(view%tmpdir)
-                    return
-                end if
-            end if
             view%retain_on_failure = .true.
             view%active = .false.
             return

@@ -8,10 +8,23 @@ program test_gremlin_state
         generation_capture
     use fo_process, only: process_getpid, process_set_async_scope, argv_push, &
         process_start_argv_logged, process_poll_pid
-    use fo_fs, only: fs_sleep_ms, fs_remove_tree
+    use fo_fs, only: fs_sleep_ms, fs_remove_tree, fs_make_dir
     implicit none
 
     interface
+        integer(c_int) function c_scratch_create(view, parent, output, capacity) &
+                bind(C, name='fo_c_execution_scratch_create')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: view(*), parent(*)
+            character(kind=c_char), intent(out) :: output(*)
+            integer(c_int), value :: capacity
+        end function c_scratch_create
+        integer(c_int) function c_retire_views(state_dir, session, fd) &
+                bind(C, name='fo_gremlin_session_retire_views')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: state_dir(*), session(*)
+            integer(c_int), value :: fd
+        end function c_retire_views
         integer(c_int) function fo_c_generation_list_tree(root, manifest) &
                 bind(C, name='fo_c_generation_list_tree')
             import :: c_char, c_int
@@ -235,7 +248,7 @@ contains
         character(len=128) :: lane_id, stale_id, new_id
         character(len=256) :: message
         character(len=4096) :: cmd
-        character(len=1024) :: state_dir, scratch_file, evidence_file
+        character(len=1024) :: state_dir, scratch_file, evidence_file, building_scratch
         integer :: ierr, u
         logical :: exists
         type(gremlin_session_t) :: session
@@ -249,23 +262,33 @@ contains
         call read_single_line(trim(root)//'/stale.result', stale_id)
         call gremlin_session_state_dir('.', trim(lane_id), state_dir, ierr, message)
         call assert(ierr == 0, 'stale lane state is addressable')
-        scratch_file = trim(state_dir)//'/views/execution-orphan/.fo-tmp/owned.tmp'
+        open(newunit=u, file=trim(root)//'/stale.result', status='old')
+        read(u, '(a)') stale_id
+        read(u, '(a)') scratch_file
+        read(u, '(a)') building_scratch
+        close(u)
         evidence_file = trim(state_dir)//'/views/execution-orphan/fixture.txt'
-        call execute_command_line('mkdir -p '// &
-            trim(state_dir)//'/views/execution-orphan/.fo-tmp', exitstat=ierr)
-        call assert(ierr == 0, 'create an abandoned private execution view')
-        call touch(trim(scratch_file))
-        call touch(trim(evidence_file))
+        inquire(file=trim(scratch_file), exist=exists)
+        call assert(exists, 'dead child leaves actual owned external scratch')
         call gremlin_session_acquire('.', trim(lane_id), session, ierr, message)
         new_id = session%session_id
         call assert(ierr == 0 .and. session%owner, &
             'dead owner record is recovered after its process exits')
         inquire (file=trim(scratch_file), exist=exists)
         call assert(.not. exists, 'recovered owner removes abandoned private scratch')
+        inquire(file=trim(building_scratch), exist=exists)
+        call assert(.not. exists, 'recovery removes interrupted materialization scratch')
+        inquire(file=trim(state_dir)//'/views/.building-execution-orphan/fixture.txt', exist=exists)
+        call assert(exists, 'recovery keeps interrupted materialization evidence')
         inquire (file=trim(evidence_file), exist=exists)
         call assert(exists, 'recovered owner preserves retained fixture evidence')
         call assert(trim(new_id) /= trim(stale_id), &
             'recovery creates a new session instead of attaching stale identity')
+        ierr = c_retire_views(trim(session%state_dir)//c_null_char, &
+            trim(session%session_id)//c_null_char, int(session%lock_fd, c_int))
+        call assert(ierr == 0, 'stopped owner retires recovered evidence through normal cleanup')
+        inquire(file=trim(evidence_file), exist=exists)
+        call assert(.not. exists, 'terminal retirement removes recovered inactive view')
         call gremlin_session_release(session, ierr, message)
         call assert(ierr == 0, 'recovered owner releases cleanly')
     end subroutine test_stale_owner_recovery
@@ -853,13 +876,36 @@ contains
         character(len=*), intent(in) :: lane_id, result_file
         type(gremlin_session_t) :: session
         character(len=256) :: message
-        integer :: ierr, u
+        integer :: ierr, u, i, j
+        character(kind=c_char) :: output(4096)
+        character(len=4096) :: view, scratch
 
         call gremlin_session_acquire('.', lane_id, session, ierr, message)
         if (ierr /= 0) stop 2
         open (newunit=u, file=result_file, status='replace')
         write (u, '(a)') trim(session%session_id)
+        do j = 1, 2
+            if (j == 1) then
+                view = trim(session%state_dir)//'/views/execution-orphan'
+            else
+                view = trim(session%state_dir)//'/views/.building-execution-orphan'
+            end if
+            call fs_make_dir(trim(view))
+            output = c_null_char
+            ierr = c_scratch_create(trim(view)//c_null_char, &
+                temporary_root()//c_null_char, output, 4096_c_int)
+            if (ierr /= 0) stop 3
+            scratch = ''
+            do i = 1, size(output)
+                if (output(i) == c_null_char) exit
+                scratch(i:i) = output(i)
+            end do
+            call touch(trim(view)//'/fixture.txt')
+            call touch(trim(scratch)//'/owned.tmp')
+            write (u, '(a)') trim(scratch)//'/owned.tmp'
+        end do
         close (u)
+        ! Deliberately exit without releasing the owner or its view.
     end subroutine crash_session_child
 
     subroutine acquire_once_child(lane_id, result_file)

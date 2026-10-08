@@ -2408,6 +2408,15 @@ contains
             end if
             return
         end if
+        ! The completed build keeps its CWD for campaign artifacts, but no
+        ! process still owns its disposable scratch after successful completion.
+        call execution_view_release(build_child%execution_view, .true., &
+            release_status, release_message)
+        if (release_status /= 0) then
+            ierr = release_status
+            message = 'cannot release completed build scratch: '//trim(release_message)
+            return
+        end if
         if (allocated(request%impact_cases)) deallocate(request%impact_cases)
         request%n_impact_cases = 0
         request%impact_all = .false.
@@ -2483,7 +2492,6 @@ contains
         request%requirement_digest = ''
         request%gate_cases = ''
         active = candidate
-        build_child%execution_view%active = .false.
         have_active = .true.
         request%input_changed = .false.
         request%gate_required_count = 0

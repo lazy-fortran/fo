@@ -1,12 +1,12 @@
 program test_gremlin_execution_view
     use fo_cache, only: HASH_LEN, cache_file_digest
-    use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_write_text
+    use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_write_text, fs_realpath, fs_rename
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release, execution_view_copy_app_outputs
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, INPUT_FILE
     use fo_process, only: argv_push, process_getcwd, process_run_argv_logged
-    use fo_util, only: delete_tmpfile, make_tmpfile, read_text_file
+    use fo_util, only: delete_tmpfile, make_tmpfile, read_text_file, temporary_root
     use fo_test_cli, only: resolve_driver, run_fo
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     implicit none
@@ -14,7 +14,7 @@ program test_gremlin_execution_view
     type(input_declaration_t) :: declarations(1)
     type(input_inventory_t) :: inventory, escaping, incomplete, invalid
     type(input_inventory_t) :: multirole, conflicting, aliased
-    type(execution_view_t) :: first, second, partial, paired, rejected, alias_view
+    type(execution_view_t) :: first, second, partial, paired, rejected, alias_view, tampered
     type(execution_view_t) :: build_view, runtime_view
     type(execution_view_t) :: reproduction_build_view, reproduction_runtime_view
     type(string_list_t) :: arguments, environment
@@ -31,7 +31,8 @@ program test_gremlin_execution_view
     character(len=:), allocatable :: packed, driver
     integer :: n_args, probe_exit, cwd_status
     integer :: ierr, release_status, i
-    logical :: exists
+    character(len=4096) :: canonical_tmp, moved_scratch
+    logical :: exists, path_ok
 
     call get_command_argument(1, argument)
     if (trim(argument) == '--execution-view-probe') then
@@ -71,6 +72,12 @@ program test_gremlin_execution_view
         'create a complete private fixture view')
     inquire(file=trim(first%tmpdir), exist=exists)
     call check(exists, 'execution view owns a private temporary directory')
+    call fs_realpath(temporary_root(), canonical_tmp, path_ok)
+    call check(path_ok, 'caller temporary root has a physical path')
+    call check(index(first%tmpdir, trim(canonical_tmp)//'/fo-execution-tmp-') == 1, &
+        'scratch belongs to the caller physical temporary root')
+    call check(index(first%tmpdir, trim(first%root)//'/') /= 1, &
+        'scratch is separate from retained execution evidence')
     call fs_write_text(trim(first%tmpdir)//'/owned.tmp', 'disposable scratch')
     first_fixture = trim(first%cwd)//'/fixtures/input.txt'
     call read_text_file(trim(first_fixture), text)
@@ -108,6 +115,8 @@ program test_gremlin_execution_view
     call check(.not. exists, 'editable fixture can be removed after capture')
     call execution_view_create(trim(root)//'/views', repeat('a', HASH_LEN), &
         'session-case-2', 'test_case', inventory, .true., .true., second, ierr, message)
+    call check(second%tmpdir /= first%tmpdir, &
+        'concurrent cases own distinct disposable scratch')
     call check(ierr == 0 .and. second%cwd /= first%cwd, &
         'concurrent cases receive distinct working directories')
     call read_text_file(trim(second%cwd)//'/fixtures/input.txt', text)
@@ -119,12 +128,36 @@ program test_gremlin_execution_view
     call check(index(text, 'written relative') > 0, &
         'relative outputs stay isolated between cases')
 
+    call execution_view_create(trim(root)//'/views', repeat('a', HASH_LEN), &
+        'session-tampered', 'test_case', inventory, .true., .true., tampered, ierr, message)
+    call check(ierr == 0, 'create identity-validation fixture')
+    moved_scratch = trim(tampered%tmpdir)//'-original'
+    ierr = fs_rename(trim(tampered%tmpdir), trim(moved_scratch))
+    call check(ierr == 0, 'move original scratch aside without changing its identity')
+    call fs_make_dir(trim(tampered%tmpdir))
+    call fs_write_text(trim(tampered%tmpdir)//'/unrelated.txt', 'must survive')
+    call execution_view_release(tampered, .false., release_status, message)
+    call check(release_status /= 0 .and. tampered%active, &
+        'replacement scratch is rejected instead of removing an unrelated directory')
+    inquire(file=trim(tampered%tmpdir)//'/unrelated.txt', exist=exists)
+    call check(exists, 'failed cleanup preserves unrelated replacement bytes')
+    call fs_remove_tree(trim(tampered%tmpdir), ierr)
+    call check(ierr == 0, 'fixture removes its own unrelated replacement')
+    ierr = fs_rename(trim(moved_scratch), trim(tampered%tmpdir))
+    call check(ierr == 0, 'restore original owned scratch')
+    call execution_view_release(tampered, .false., release_status, message)
+    call check(release_status == 0, 'restored identity permits checked cleanup')
+
     call execution_view_release(first, .true., release_status, message)
+    call check(release_status == 0, 'retained view releases checked scratch')
     inquire(file=trim(first_fixture), exist=exists)
     call check(exists, 'retained failure view keeps its fixture evidence')
     inquire(file=trim(first%tmpdir)//'/owned.tmp', exist=exists)
     call check(.not. exists, 'retained failure view drops temporary scratch')
     call execution_view_release(second, .false., release_status, message)
+    call check(release_status == 0, 'ordinary view release succeeds')
+    inquire(file=trim(second%tmpdir), exist=exists)
+    call check(.not. exists, 'ordinary release removes external scratch directory')
     inquire(file=trim(second_output), exist=exists)
     call check(.not. exists, 'owned inactive view cleanup removes its scratch')
 

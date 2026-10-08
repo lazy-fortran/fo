@@ -10,8 +10,27 @@ program test_gremlin_reproduce_logs
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_string_value, json_parse
     use fo_test_gremlin_oracle, only: gremlin_stop_lane
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use fo_util, only: temporary_root
     use fo_gremlin_state, only: gremlin_session_state_dir
     implicit none
+
+    interface
+        integer(c_int) function c_scratch_create(view, parent, output, capacity) &
+                bind(C, name='fo_c_execution_scratch_create')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: view(*), parent(*)
+            character(kind=c_char), intent(out) :: output(*)
+            integer(c_int), value :: capacity
+        end function c_scratch_create
+        integer(c_int) function c_scratch_release(view) &
+                bind(C, name='fo_c_execution_scratch_release')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: view(*)
+        end function c_scratch_release
+    end interface
+    character(kind=c_char) :: active_tmp(4096)
+    integer(c_int) :: scratch_status
 
     character(:), allocatable :: driver, scratch, project, dependency, cache, state
     character(:), allocatable :: relocated_cache
@@ -153,7 +172,10 @@ program test_gremlin_reproduce_logs
     end if
 
     active_view = trim(session_state)//'/views/execution-active'
-    call make_directory(active_view//'/.fo-tmp')
+    call make_directory(active_view)
+    scratch_status = c_scratch_create(active_view//c_null_char, &
+        temporary_root()//c_null_char, active_tmp, 4096_c_int)
+    call assert_equal_integer(0, int(scratch_status), 'create actual active view scratch')
     call write_text(active_view//'/fixture.txt', 'active view sentinel')
     building_view = trim(session_state)//'/views/.building-execution-active'
     call make_directory(building_view)
@@ -182,6 +204,8 @@ program test_gremlin_reproduce_logs
     end if
     call assert_true(file_exists(active_view//'/fixture.txt'), &
         'stop preserves a view with active private scratch')
+    scratch_status = c_scratch_release(active_view//c_null_char)
+    call assert_equal_integer(0, int(scratch_status), 'active fixture releases its owned scratch')
     call remove_tree(active_view)
     call assert_true(file_exists(building_view//'/fixture.txt'), &
         'stop leaves a view that is still being materialized untouched')
