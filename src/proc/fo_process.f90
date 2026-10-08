@@ -1,5 +1,6 @@
 module fo_process
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char, &
+        c_ptr, c_null_ptr
     implicit none
     private
     public :: process_detect_nproc, process_configure_openmp
@@ -8,6 +9,7 @@ module fo_process
     public :: process_has_fortran_source_ext
     public :: process_start_fo_check, process_start_argv_logged
     public :: process_set_async_scope, process_reap_adopted_scope_zombies
+    public :: process_scope_t, process_scope_begin, process_scope_end
     public :: process_poll_pid, process_cancel_pid
     public :: process_run_logged
     public :: process_stderr_is_tty, process_write_stderr
@@ -22,7 +24,27 @@ module fo_process
     integer, parameter :: TIMEOUT_NONE = 0, TIMEOUT_CPU = 1, TIMEOUT_WALL = 2
     integer, parameter :: TIMEOUT_UNMEASURED = 3
 
+    type :: process_scope_t
+        private
+        type(c_ptr) :: previous = c_null_ptr
+    end type process_scope_t
+
     interface
+        function fo_c_process_push_async_scope(state_dir, previous) &
+                bind(C, name='fo_c_process_push_async_scope') result(ierr)
+            import :: c_char, c_int, c_ptr
+            character(kind=c_char), intent(in) :: state_dir(*)
+            type(c_ptr), intent(inout) :: previous
+            integer(c_int) :: ierr
+        end function fo_c_process_push_async_scope
+
+        function fo_c_process_pop_async_scope(previous) &
+                bind(C, name='fo_c_process_pop_async_scope') result(ierr)
+            import :: c_int, c_ptr
+            type(c_ptr), intent(inout) :: previous
+            integer(c_int) :: ierr
+        end function fo_c_process_pop_async_scope
+
         function fo_c_process_set_async_scope(state_dir, owner_pid, owner_start) &
                 bind(C, name='fo_c_process_set_async_scope') result(ierr)
             import :: c_char, c_int
@@ -168,6 +190,21 @@ module fo_process
     end interface
 
 contains
+
+    subroutine process_scope_begin(state_dir, scope, exitcode)
+        !! Claim exact current-process ownership while retaining the caller scope.
+        character(len=*), intent(in) :: state_dir
+        type(process_scope_t), intent(inout) :: scope
+        integer, intent(out) :: exitcode
+        exitcode = int(fo_c_process_push_async_scope( &
+            trim(state_dir)//c_null_char, scope%previous))
+    end subroutine process_scope_begin
+
+    subroutine process_scope_end(scope, exitcode)
+        type(process_scope_t), intent(inout) :: scope
+        integer, intent(out) :: exitcode
+        exitcode = int(fo_c_process_pop_async_scope(scope%previous))
+    end subroutine process_scope_end
 
     subroutine process_set_async_scope(state_dir, owner_pid, owner_start, exitcode)
         !! Tie future async process launches in this owner to its durable state.

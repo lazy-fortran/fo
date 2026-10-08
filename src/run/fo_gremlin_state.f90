@@ -36,6 +36,9 @@ module fo_gremlin_state
     type, public :: gremlin_lease_group_t
         type(gremlin_lease_t) :: members(LEASE_GROUP_MAX)
         integer :: count = 0
+        integer :: scope_fd = -1, guardian_pid = 0
+        character(len=PATH_LEN) :: scope = '', previous_scope = ''
+        logical :: closing = .false.
     end type gremlin_lease_group_t
 
     public :: gremlin_session_acquire, gremlin_session_publish
@@ -139,14 +142,33 @@ module fo_gremlin_state
             integer(c_int) :: ierr
         end function c_lease_acquire
 
-        function c_host_lease_acquire_weighted(kind, capacity, weight, fds, slots) &
+        function c_host_lease_acquire_weighted(kind, capacity, weight, fds, slots, &
+                authority, guardian, scope, previous, text_capacity) &
                 bind(C, name='fo_gremlin_host_lease_acquire_weighted') result(ierr)
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: kind(*)
             integer(c_int), value :: capacity, weight
             integer(c_int), intent(out) :: fds(*), slots(*)
+            integer(c_int), intent(out) :: authority, guardian
+            character(kind=c_char), intent(out) :: scope(*), previous(*)
+            integer(c_int), value :: text_capacity
             integer(c_int) :: ierr
         end function c_host_lease_acquire_weighted
+
+        function c_host_lease_close(fd) bind(C, name='fo_gremlin_host_lease_close') &
+                result(ierr)
+            import :: c_int
+            integer(c_int), value :: fd
+            integer(c_int) :: ierr
+        end function c_host_lease_close
+
+        function c_host_scope_retire(authority, guardian, scope, previous) &
+                bind(C, name='fo_gremlin_host_scope_retire') result(ierr)
+            import :: c_char, c_int
+            integer(c_int), intent(inout) :: authority, guardian
+            character(kind=c_char), intent(in) :: scope(*), previous(*)
+            integer(c_int) :: ierr
+        end function c_host_scope_retire
 
         function c_lease_is_busy(ierr) bind(C, name='fo_gremlin_lease_is_busy') &
                 result(is_busy)
@@ -464,6 +486,8 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         integer(c_int) :: fds(LEASE_GROUP_MAX), slots(LEASE_GROUP_MAX), c_error
+        integer(c_int) :: authority, guardian
+        character(kind=c_char) :: scope(PATH_LEN), previous(PATH_LEN)
         integer :: i
 
         group = gremlin_lease_group_t()
@@ -476,12 +500,17 @@ contains
         fds = -1_c_int
         slots = -1_c_int
         c_error = c_host_lease_acquire_weighted(trim(resource)//c_null_char, &
-            int(capacity, c_int), int(weight, c_int), fds, slots)
+            int(capacity, c_int), int(weight, c_int), fds, slots, authority, guardian, &
+            scope, previous, int(PATH_LEN, c_int))
         ierr = int(c_error)
         busy = c_lease_is_busy(c_error) /= 0_c_int
         message = error_text(ierr)
         if (ierr /= 0) return
         group%count = weight
+        group%scope_fd = int(authority)
+        group%guardian_pid = int(guardian)
+        group%scope = c_string(scope)
+        group%previous_scope = c_string(previous)
         do i = 1, weight
             group%members(i)%resource = trim(resource)
             group%members(i)%slot = int(slots(i))
@@ -494,19 +523,37 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         integer :: i, release_error
-        integer(c_int) :: c_error
+        integer(c_int) :: c_error, authority, guardian
 
         ierr = 0
         message = ''
+        authority = int(group%scope_fd, c_int)
+        guardian = int(group%guardian_pid, c_int)
+        c_error = c_host_scope_retire(authority, guardian, &
+            trim(group%scope)//c_null_char, trim(group%previous_scope)//c_null_char)
+        group%scope_fd = int(authority)
+        group%guardian_pid = int(guardian)
+        ! A closing ancestor retains its reservation until already admitted
+        ! children finish. New descendants must reacquire ordinary capacity.
+        if (c_lease_is_busy(c_error) /= 0_c_int) then
+            group%closing = .true.
+            return
+        end if
+        if (c_error /= 0_c_int) then
+            ierr = int(c_error)
+            message = error_text(ierr)
+            return
+        end if
         do i = 1, group%count
             if (group%members(i)%lock_fd < 0) cycle
-            c_error = c_lease_release(int(group%members(i)%lock_fd, c_int))
+            c_error = c_host_lease_close(int(group%members(i)%lock_fd, c_int))
             release_error = int(c_error)
             group%members(i)%lock_fd = -1
             group%members(i)%slot = -1
             if (ierr == 0 .and. release_error /= 0) ierr = release_error
         end do
         group%count = 0
+        group%closing = .false.
         message = error_text(ierr)
     end subroutine gremlin_host_lease_release
 

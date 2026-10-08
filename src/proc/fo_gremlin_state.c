@@ -18,6 +18,7 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -668,18 +669,345 @@ static int host_lease_base(char *base, size_t cap) {
     return 0;
 }
 
-int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
-                                           int weight, int *fds, int *slots) {
-    char base[PATH_MAX], dir[PATH_MAX];
+/* Ephemeral admission lives outside source/action identity. Each held group
+   reserves an upstream budget and offers weighted child slots under a fresh
+   incarnation. Descendants cannot spend sibling or retired scope capacity. */
+struct admission_owner {
+    int pid, weight;
+    unsigned long long kind;
+    char start[64], state[PATH_MAX];
+};
+int fo_c_process_owned_by_scope(const char *, int, const char *);
+
+static int admission_gate(const char *scope, int create) {
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/gate", scope) >= (int)sizeof(path)) {
+        errno = ENAMETOOLONG; return -1;
+    }
+    int fd = open(path, O_RDWR | O_CLOEXEC | (create ? O_CREAT : 0), 0600);
+    if (fd < 0) return -1;
+    if (flock(fd, LOCK_EX) != 0) { int e = errno; close(fd); errno = e; return -1; }
+    return fd;
+}
+
+static int admission_read(int fd, struct admission_owner *owner) {
+    char record[PATH_MAX + 160], *state;
+    ssize_t n = pread(fd, record, sizeof(record)-1, 0);
+    if (n <= 0 || n >= (ssize_t)sizeof(record)-1) return EINVAL;
+    record[n] = '\0';
+    if (sscanf(record, "%d %63s %d %llx", &owner->pid, owner->start,
+               &owner->weight, &owner->kind) != 4 || owner->pid <= 0 ||
+        owner->weight < 1 || owner->weight > 1024) return EINVAL;
+    state = strchr(record, '\n');
+    if (!state) return EINVAL;
+    ++state;
+    n = strcspn(state, "\n");
+    if (n <= 0 || n >= PATH_MAX || state[n] != '\n' || state[n+1] != '\0')
+        return EINVAL;
+    memcpy(owner->state, state, (size_t)n); owner->state[n] = '\0';
+    return 0;
+}
+
+static int admission_children_busy(const char *scope, int capacity) {
+    char path[PATH_MAX];
+    for (int i = 0; i < capacity; ++i) {
+        if (snprintf(path, sizeof(path), "%s/children/slot-%04d.lock", scope, i)
+            >= (int)sizeof(path)) return ENAMETOOLONG;
+        int fd = open(path, O_RDWR | O_CLOEXEC);
+        if (fd < 0) { if (errno == ENOENT) continue; return errno; }
+        int e = flock(fd, LOCK_EX | LOCK_NB) == 0 ? 0 : errno;
+        if (e == 0) flock(fd, LOCK_UN);
+        close(fd);
+        if (e) return e;
+    }
+    return 0;
+}
+
+/* A guardian retains the original flock descriptions, not newly acquired
+   pathname locks. Wrappers may close inherited FDs; owner death cannot release
+   capacity while admitted descendants still hold their family reservations. */
+static int admission_guard_path(int pid, const char *start, char *path,
+                                size_t cap) {
+    char base[PATH_MAX], directory[PATH_MAX];
     int e = host_lease_base(base, sizeof(base));
     if (e) return e;
+    if (snprintf(directory, sizeof(directory), "%s/guardians", base)
+        >= (int)sizeof(directory)) return ENAMETOOLONG;
+    e = make_dirs(directory);
+    if (e) return e;
+    if (snprintf(path, cap, "%s/%d-%s", directory, pid, start) >= (int)cap)
+        return ENAMETOOLONG;
+    return 0;
+}
+
+int fo_gremlin_admission_is_guardian(int pid, const char *start) {
+    char path[PATH_MAX];
+    struct stat st;
+    if (admission_guard_path(pid, start, path, sizeof(path)) != 0) return 0;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return 0;
+    int active = flock(fd, LOCK_EX | LOCK_NB) != 0 &&
+                 (errno == EAGAIN || errno == EWOULDBLOCK);
+    active = active && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+             st.st_uid == geteuid() && (st.st_mode & 0077) == 0 &&
+             fo_gremlin_process_matches(pid, start);
+    close(fd);
+    return active;
+}
+
+static int admission_guard_close_fds(const int *fds, int weight, int ack, int marker) {
+#ifdef __linux__
+    DIR *directory = opendir("/proc/self/fd");
+#else
+    DIR *directory = opendir("/dev/fd");
+#endif
+    if (!directory) return errno;
+    struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL) {
+        char *end;
+        long value = strtol(entry->d_name, &end, 10);
+        if (*end || value < 0 || value > INT_MAX) continue;
+        int keep = value == dirfd(directory) || value == ack || value == marker;
+        for (int i = 0; i < weight; ++i) if (value == fds[i]) keep = 1;
+        if (!keep) close((int)value);
+    }
+    closedir(directory);
+    return 0;
+}
+
+static int admission_guard_start(const char *scope, const int *fds, int weight,
+                                  int *guardian) {
+    int handshake[2];
+    char owner_start[64], authority[PATH_MAX], state[PATH_MAX];
+    pid_t owner = getpid();
+    int e = process_start(owner, owner_start, sizeof(owner_start));
+    if (e) return e;
+    const char *state_hint = getenv("FO_GREMLIN_PROCESS_SCOPE_DIR");
+    const char *pid_hint = getenv("FO_GREMLIN_PROCESS_SCOPE_PID");
+    const char *start_hint = getenv("FO_GREMLIN_PROCESS_SCOPE_START");
+    state[0] = '\0';
+    if (state_hint && pid_hint && start_hint && atoi(pid_hint) == (int)owner &&
+        strcmp(start_hint, owner_start) == 0 && strlen(state_hint) < sizeof(state))
+        strcpy(state, state_hint);
+    if (snprintf(authority, sizeof(authority), "%s/authority", scope)
+        >= (int)sizeof(authority)) return ENAMETOOLONG;
+    if (pipe(handshake) != 0) return errno;
+    pid_t pid = fork();
+    if (pid < 0) { e = errno; close(handshake[0]); close(handshake[1]); return e; }
+    if (pid == 0) {
+        /* Ordinary owner cancellation must drain payloads before dropping their
+           reservation. The guardian is capacity bookkeeping, not payload. */
+        signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN); signal(SIGHUP, SIG_IGN);
+        signal(SIGPIPE, SIG_IGN);
+        int detached = setsid() >= 0;
+        int detach_error = detached ? 0 : errno;
+        char stamp[64], marker_path[PATH_MAX];
+        int marker = -1;
+        e = detach_error ? detach_error : process_start(getpid(), stamp, sizeof(stamp));
+        if (e == 0) e = admission_guard_path((int)getpid(), stamp, marker_path,
+                                           sizeof(marker_path));
+        if (e == 0) {
+            marker = open(marker_path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
+            if (marker < 0) e = errno;
+            else if (flock(marker, LOCK_EX | LOCK_NB) != 0) e = errno;
+        }
+        if (e == 0) e = admission_guard_close_fds(fds, weight, handshake[1], marker);
+        (void)write(handshake[1], &e, sizeof(e)); close(handshake[1]);
+        if (e) {
+            if (marker >= 0) { close(marker); unlink(marker_path); }
+            _exit(1);
+        }
+        struct timespec pause = {0, 20000000};
+        for (;;) {
+            int alive = fo_gremlin_process_matches((int)owner, owner_start);
+            struct stat st;
+            int observed = lstat(authority, &st);
+            int observation_error = observed < 0 ? errno : 0;
+            if (observation_error && observation_error != ENOENT) {
+                nanosleep(&pause, NULL);
+                continue;
+            }
+            int active = alive && observed == 0;
+            int payload_drained = alive || !*state ||
+                fo_c_recover_async_scope(state, (int)owner, owner_start) == 0;
+            if (!active && payload_drained) {
+                int gate = -1;
+                e = 0;
+                /* A child may have validated the owner before its death but
+                   not yet locked its slot. Revoke under the same gate before
+                   checking drainage, keeping upstream capacity throughout. */
+                if (!alive) {
+                    gate = admission_gate(scope, 0);
+                    if (gate < 0) e = errno;
+                    else if (unlink(authority) != 0 && errno != ENOENT) e = errno;
+                }
+                if (!e) e = admission_children_busy(scope, weight);
+                if (gate >= 0) { flock(gate, LOCK_UN); close(gate); }
+                if (!e) break;
+            }
+            nanosleep(&pause, NULL);
+        }
+        /* Closing copies preserves any other live holder's flock. */
+        for (int i = 0; i < weight; ++i) close(fds[i]);
+        unlink(marker_path); close(marker);
+        if (!fo_gremlin_process_matches((int)owner, owner_start))
+            (void)fo_c_rm_rf(scope);
+        _exit(0);
+    }
+    close(handshake[1]);
+    ssize_t n;
+    do { n = read(handshake[0], &e, sizeof(e)); } while (n < 0 && errno == EINTR);
+    close(handshake[0]);
+    if (n != sizeof(e)) e = EIO;
+    if (e) { (void)waitpid(pid, NULL, 0); return e; }
+    *guardian = (int)pid;
+    return 0;
+}
+
+int fo_gremlin_host_lease_close(int fd) {
+    if (fd < 0) return EINVAL;
+    return close(fd) == 0 ? 0 : errno;
+}
+
+static int admission_parent(const char *scope, uint64_t kind,
+                             struct admission_owner *owner) {
+    char path[PATH_MAX];
+    struct stat st;
+    if (snprintf(path, sizeof(path), "%s/authority", scope) >= (int)sizeof(path))
+        return 0;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return 0;
+    int active = flock(fd, LOCK_EX | LOCK_NB) != 0 &&
+                 (errno == EAGAIN || errno == EWOULDBLOCK);
+    int valid = active && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+                st.st_uid == geteuid() && (st.st_mode & 0077) == 0 &&
+                admission_read(fd, owner) == 0 && owner->kind == kind &&
+                fo_c_process_owned_by_scope(owner->state, owner->pid, owner->start);
+    close(fd);
+    return valid;
+}
+
+static int admission_publish(const char *base, uint64_t kind, int weight,
+                              char *scope, int cap, int *authority) {
+    char directory[PATH_MAX], path[PATH_MAX], start[64], record[PATH_MAX+160];
+    const char *state = getenv("FO_GREMLIN_PROCESS_SCOPE_DIR");
+    int n = snprintf(directory, sizeof(directory), "%s/scopes", base);
+    if (n < 0 || n >= (int)sizeof(directory)) return ENAMETOOLONG;
+    int e = make_dirs(directory);
+    if (e) return e;
+    n = snprintf(scope, (size_t)cap, "%s/%ld-XXXXXX", directory, (long)getpid());
+    if (n < 0 || n >= cap) return ENAMETOOLONG;
+    if (!mkdtemp(scope)) return errno;
+    int gate = admission_gate(scope, 1);
+    if (gate < 0) { e = errno; goto failed; }
+    close(gate);
+    e = process_start(getpid(), start, sizeof(start));
+    if (e) goto failed;
+    n = snprintf(path, sizeof(path), "%s/authority", scope);
+    if (n < 0 || n >= (int)sizeof(path)) { e = ENAMETOOLONG; goto failed; }
+    *authority = open(path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
+    if (*authority < 0) { e = errno; goto failed; }
+    if (flock(*authority, LOCK_EX | LOCK_NB) != 0) { e = errno; goto failed; }
+    n = snprintf(record, sizeof(record), "%ld %s %d %llx\n%s\n",
+                 (long)getpid(), start, weight, (unsigned long long)kind,
+                 state && *state ? state : "-");
+    if (n < 0 || n >= (int)sizeof(record)) { e = ENAMETOOLONG; goto failed; }
+    e = write_all(*authority, record, (size_t)n);
+    if (e == 0 && setenv("FO_GREMLIN_ADMISSION_SCOPE", scope, 1) != 0) e = errno;
+    if (e == 0) return 0;
+failed:
+    if (*authority >= 0) { close(*authority); *authority = -1; }
+    fo_c_rm_rf(scope); scope[0] = '\0'; return e;
+}
+
+int fo_gremlin_host_scope_retire(int *authority, int *guardian, const char *scope,
+                                 const char *previous) {
+    if (*authority < 0) return 0;
+    int gate = admission_gate(scope, 0);
+    if (gate < 0) return errno;
+    struct admission_owner owner;
+    int e = admission_read(*authority, &owner);
+    char path[PATH_MAX];
+    if (e == 0 && snprintf(path, sizeof(path), "%s/authority", scope)
+        >= (int)sizeof(path)) e = ENAMETOOLONG;
+    /* Revocation and child admission share this gate. Existing children retain
+       their upstream reservation; no new sibling can enter a closing scope. */
+    if (e == 0 && unlink(path) != 0 && errno != ENOENT) e = errno;
+    if (e == 0) e = admission_children_busy(scope, owner.weight);
+    if (e == 0 && *guardian > 0) {
+        pid_t done;
+        do { done = waitpid((pid_t)*guardian, NULL, 0); }
+        while (done < 0 && errno == EINTR);
+        if (done < 0 && errno != ECHILD) e = errno;
+        else *guardian = 0;
+    }
+    if (e == 0) {
+        const char *current = getenv("FO_GREMLIN_ADMISSION_SCOPE");
+        if (current && strcmp(current, scope) == 0) {
+            if (previous && *previous) {
+                if (setenv("FO_GREMLIN_ADMISSION_SCOPE", previous, 1) != 0) e = errno;
+            } else if (unsetenv("FO_GREMLIN_ADMISSION_SCOPE") != 0) e = errno;
+        }
+    }
+    if (e == 0) {
+        close(*authority); *authority = -1;
+        if (fo_c_rm_rf(scope) != 0) e = errno ? errno : EIO;
+    }
+    flock(gate, LOCK_UN); close(gate);
+    return e;
+}
+
+int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
+                                           int weight, int *fds, int *slots,
+                                           int *authority, int *guardian, char *scope,
+                                           char *previous, int text_capacity) {
+    char base[PATH_MAX], dir[PATH_MAX];
+    const char *hint = getenv("FO_GREMLIN_ADMISSION_SCOPE");
+    struct admission_owner parent;
+    int e = host_lease_base(base, sizeof(base)), gate = -1, delegated = 0;
+    *authority = -1; *guardian = 0; scope[0] = '\0'; previous[0] = '\0';
+    if (e) return e;
+    if (hint && *hint) {
+        if (strlen(hint) >= (size_t)text_capacity) return ENAMETOOLONG;
+        strcpy(previous, hint);
+    }
     uint64_t h = hash_bytes(UINT64_C(1469598103934665603),
                             (const unsigned char *)kind);
-    if (snprintf(dir, sizeof(dir), "%s/fo/gremlin/leases/%016llx", base,
-                 (unsigned long long)h) >= (int)sizeof(dir)) return ENAMETOOLONG;
+    if (hint && *hint) {
+        gate = admission_gate(hint, 0);
+        if (gate >= 0 && admission_parent(hint, h, &parent)) {
+            if (weight > parent.weight) { e = E2BIG; goto done; }
+            if (snprintf(dir, sizeof(dir), "%s/children", hint) >= (int)sizeof(dir)) {
+                e = ENAMETOOLONG; goto done;
+            }
+            capacity = parent.weight;
+            delegated = 1;
+        }
+    }
+    if (!delegated && snprintf(dir, sizeof(dir), "%s/fo/gremlin/leases/%016llx",
+                 base, (unsigned long long)h) >= (int)sizeof(dir)) {
+        e = ENAMETOOLONG; goto done;
+    }
     e = make_dirs(dir);
-    if (e) return e;
-    return lease_acquire_in_dir_weighted(dir, capacity, weight, fds, slots);
+    if (e == 0) e = lease_acquire_in_dir_weighted(dir, capacity, weight, fds, slots);
+    if (e == 0) {
+        e = admission_publish(base, h, weight, scope, text_capacity, authority);
+        if (e == 0) e = admission_guard_start(scope, fds, weight, guardian);
+        if (e != 0) {
+            if (*authority >= 0) {
+                close(*authority); *authority = -1;
+                (void)fo_c_rm_rf(scope); scope[0] = '\0';
+                if (*previous) (void)setenv("FO_GREMLIN_ADMISSION_SCOPE", previous, 1);
+                else (void)unsetenv("FO_GREMLIN_ADMISSION_SCOPE");
+            }
+            for (int i = 0; i < weight; ++i) {
+                flock(fds[i], LOCK_UN); close(fds[i]); fds[i] = -1; slots[i] = -1;
+            }
+        }
+    }
+done:
+    if (gate >= 0) { flock(gate, LOCK_UN); close(gate); }
+    return e;
 }
 
 int fo_gremlin_lease_is_busy(int error) {

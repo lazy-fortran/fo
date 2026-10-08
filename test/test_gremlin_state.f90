@@ -5,7 +5,9 @@ program test_gremlin_state
     use fo_gremlin_state
     use fo_gremlin_generation, only: generation_context_t, generation_t, &
         generation_capture
-    use fo_process, only: process_getpid
+    use fo_process, only: process_getpid, process_set_async_scope, argv_push, &
+        process_start_argv_logged, process_poll_pid
+    use fo_fs, only: fs_sleep_ms, fs_remove_tree
     implicit none
 
     interface
@@ -24,16 +26,46 @@ program test_gremlin_state
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: name(*)
         end function c_unsetenv
+        integer(c_int) function c_kill(pid, signal_number) bind(C, name='kill')
+            import :: c_int
+            integer(c_int), value :: pid, signal_number
+        end function c_kill
+        integer(c_int) function c_open(path, flags) bind(C, name='open')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            integer(c_int), value :: flags
+        end function c_open
+        integer(c_int) function c_flock(fd, operation) bind(C, name='flock')
+            import :: c_int
+            integer(c_int), value :: fd, operation
+        end function c_flock
+        integer(c_int) function c_close(fd) bind(C, name='close')
+            import :: c_int
+            integer(c_int), value :: fd
+        end function c_close
+        subroutine c_exit(code) bind(C, name="_exit")
+            import :: c_int
+            integer(c_int), value :: code
+        end subroutine c_exit
     end interface
 
     integer :: n_pass = 0, n_fail = 0
     character(len=4096) :: arg, executable
     character(len=1024) :: lane, ready, gate, result, done, seen
     integer :: cmdstat
-    character(len=128) :: root
+    character(len=1024) :: root
 
     call get_command_argument(1, arg)
     select case (trim(arg))
+    case ('--admission-child')
+        call get_command_argument(2, lane)
+        call get_command_argument(3, arg)
+        call get_command_argument(4, ready)
+        call get_command_argument(5, gate)
+        call get_command_argument(6, result)
+        call admission_child(trim(lane), trim(arg), trim(ready), trim(gate), &
+            trim(result))
+        stop
     case ('--session-child')
         call get_command_argument(2, lane)
         call get_command_argument(3, ready)
@@ -88,6 +120,7 @@ program test_gremlin_state
     call test_stale_owner_recovery(trim(executable))
     call test_capacity_leases(trim(executable))
     call test_host_weighted_leases(trim(executable))
+    call test_nested_host_admission(trim(executable))
     call test_generation_pins(trim(executable))
     call test_bounded_generation_prune()
     call test_root(root)
@@ -113,10 +146,11 @@ contains
 
     subroutine test_concurrent_sessions(exe)
         character(len=*), intent(in) :: exe
-        character(len=128) :: root, lane_id, sid(2)
+        character(len=1024) :: root
+        character(len=128) :: lane_id, sid(2)
         character(len=256) :: message, status_text
         character(len=128) :: owner_start
-        character(len=512) :: path, wrong_id, command
+        character(len=4096) :: path, wrong_id, command
         integer :: pid, ierr, owners(2), owner_pid(2), contender_error
         integer :: contender_owner, u, cmd_status
         logical :: stopped
@@ -196,9 +230,10 @@ contains
 
     subroutine test_stale_owner_recovery(exe)
         character(len=*), intent(in) :: exe
-        character(len=128) :: root, lane_id, stale_id, new_id
+        character(len=1024) :: root
+        character(len=128) :: lane_id, stale_id, new_id
         character(len=256) :: message
-        character(len=512) :: cmd
+        character(len=4096) :: cmd
         character(len=1024) :: state_dir, scratch_file, evidence_file
         integer :: ierr, u
         logical :: exists
@@ -236,8 +271,9 @@ contains
 
     subroutine test_capacity_leases(exe)
         character(len=*), intent(in) :: exe
-        character(len=128) :: root, resource, slot_text
-        character(len=512) :: cmd, ready_path, result_path
+        character(len=1024) :: root
+        character(len=128) :: resource, slot_text
+        character(len=4096) :: cmd, ready_path, result_path
         integer :: i, successes, slots(4), ierr, cmdstat
 
         call test_root(root)
@@ -278,8 +314,9 @@ contains
 
     subroutine test_host_weighted_leases(exe)
         character(len=*), intent(in) :: exe
-        character(len=128) :: root, resource
-        character(len=512) :: command, base, ready, result
+        character(len=1024) :: root
+        character(len=128) :: resource
+        character(len=4096) :: command, base, ready, result
         character(len=4096) :: previous_state, isolated_state
         character(len=12) :: number
         integer :: i, cmd_status, ierr, count, slot1, slot2, busy
@@ -376,11 +413,212 @@ contains
         call assert(env_rc == 0, 'legacy lease state root is restored')
     end subroutine test_host_weighted_leases
 
+    subroutine test_nested_host_admission(exe)
+        character(len=*), intent(in) :: exe
+        type(gremlin_lease_group_t) :: group
+        type(gremlin_session_t) :: owner
+        character(len=1024) :: root, resource, base, old_scope, dead_scope
+        character(len=4096) :: message, prior_dir, prior_pid, prior_start
+        integer :: ierr, i, successes, blocked, count, busy_number, pid
+        integer :: children(4), child, status_dir, status_pid, status_start
+        integer :: payload_pid, unit, rc, attempt, gate_fd
+        logical :: busy
+
+        call test_root(root)
+        write (resource, '(a,i0)') 'nested-host-', process_getpid()
+        call get_environment_variable('FO_GREMLIN_PROCESS_SCOPE_DIR', prior_dir, &
+            status=status_dir)
+        call get_environment_variable('FO_GREMLIN_PROCESS_SCOPE_PID', prior_pid, &
+            status=status_pid)
+        call get_environment_variable('FO_GREMLIN_PROCESS_SCOPE_START', prior_start, &
+            status=status_start)
+        call gremlin_session_acquire('.', trim(resource), owner, ierr, message)
+        call assert(ierr == 0 .and. owner%owner, 'admission test owns an async scope')
+        if (ierr /= 0) return
+        call process_set_async_scope(owner%state_dir, owner%owner_pid, &
+            owner%owner_start, ierr)
+        call assert(ierr == 0, 'admission test binds its owned descendant scope')
+        call gremlin_host_lease_acquire_weighted(trim(resource), 2, 2, group, &
+            busy, ierr, message)
+        call assert(ierr == 0, 'outer admission owns both global slots')
+        if (ierr /= 0) return
+        successes = 0
+        blocked = 0
+        do i = 1, 4
+            write (base, '(a,"/nested-",i0)') trim(root), i
+            call start_admission_child(exe, resource, '1', base, 'plain', '', &
+                children(i))
+        end do
+        do i = 1, 4
+            write (base, '(a,"/nested-",i0)') trim(root), i
+            call wait_file(trim(base)//'.ready', 500)
+            call read_admission_result(base, ierr, count, busy_number, pid, old_scope)
+            if (ierr == 0) successes = successes + 1
+            if (busy_number == 1) blocked = blocked + 1
+        end do
+        call assert(successes == 2 .and. blocked == 2, &
+            'four nested siblings consume exactly two inherited budget slots')
+        do i = 1, 2
+            write (base, '(a,"/unrelated-",i0)') trim(root), i
+            call start_admission_child(exe, resource, '1', base, 'global', '', child)
+            call wait_file(trim(base)//'.ready', 500)
+            call read_admission_result(base, ierr, count, busy_number, pid, old_scope)
+            call assert(ierr /= 0 .and. busy_number == 1, &
+                'unrelated contender remains excluded by the real outer global lease')
+            call finish_admission_child(base, child)
+        end do
+        call gremlin_host_lease_release(group, ierr, message)
+        call assert(ierr == 0 .and. group%count == 2 .and. group%closing, &
+            'outer release revokes fresh delegation but retains active child capacity')
+        base = trim(root)//'/closing-contender'
+        call start_admission_child(exe, resource, '1', base, 'global', '', child)
+        call wait_file(trim(base)//'.ready', 500)
+        call read_admission_result(base, ierr, count, busy_number, pid, old_scope)
+        call assert(ierr /= 0 .and. busy_number == 1, &
+            'closing reservation still excludes actual global work until family drains')
+        call finish_admission_child(base, child)
+        do i = 1, 4
+            write (base, '(a,"/nested-",i0)') trim(root), i
+            call finish_admission_child(base, children(i))
+        end do
+        call gremlin_host_lease_release(group, ierr, message)
+        call assert(ierr == 0 .and. group%count == 0, &
+            'outer capacity retires after its admitted children finish')
+
+        call gremlin_host_lease_acquire_weighted(trim(resource), 2, 2, group, &
+            busy, ierr, message)
+        base = trim(root)//'/grandparent'
+        call start_admission_child(exe, resource, '2', base, 'grandchild', '', child)
+        call wait_file(trim(base)//'.grand.ready', 500)
+        call read_admission_result(trim(base)//'.grand', ierr, count, busy_number, &
+            pid, old_scope)
+        call assert(ierr == 0 .and. count == 2, &
+            'grandchild runs under its parent budget without ancestor self-deadlock')
+        call finish_admission_child(base, child)
+        old_scope = group%scope
+        call gremlin_host_lease_release(group, ierr, message)
+        call gremlin_host_lease_acquire_weighted(trim(resource), 2, 2, group, &
+            busy, ierr, message)
+        base = trim(root)//'/stale-live'
+        call start_admission_child(exe, resource, '1', base, 'hint', old_scope, child)
+        call wait_file(trim(base)//'.ready', 500)
+        call read_admission_result(base, ierr, count, busy_number, pid, old_scope)
+        call assert(ierr /= 0 .and. busy_number == 1, &
+            'same live owner reacquisition rejects a retired admission incarnation')
+        call finish_admission_child(base, child)
+        call gremlin_host_lease_release(group, ierr, message)
+
+        base = trim(root)//'/dead-owner'
+        call start_admission_child(exe, resource, '2', base, 'crash', '', child)
+        call wait_file(trim(base)//'.ready', 500)
+        call read_admission_result(base, ierr, count, busy_number, pid, dead_scope)
+        call assert(ierr == 0, 'crash fixture acquires real global capacity')
+        call finish_admission_child(base, child)
+        call gremlin_host_lease_acquire_weighted(trim(resource), 2, 2, group, &
+            busy, ierr, message)
+        do attempt = 1, 500
+            if (ierr == 0) exit
+            call fs_sleep_ms(20)
+            call gremlin_host_lease_acquire_weighted(trim(resource), 2, 2, group, &
+                busy, ierr, message)
+        end do
+        call assert(ierr == 0, &
+            'owner death releases global capacity after exact owned work drains')
+        base = trim(root)//'/stale-dead'
+        call start_admission_child(exe, resource, '1', base, 'hint', dead_scope, child)
+        call wait_file(trim(base)//'.ready', 500)
+        call read_admission_result(base, ierr, count, busy_number, pid, old_scope)
+        call assert(ierr /= 0 .and. busy_number == 1, &
+            'dead owner hint cannot spend a replacement owner budget')
+        call finish_admission_child(base, child)
+        call gremlin_host_lease_release(group, ierr, message)
+        call fs_remove_tree(trim(dead_scope))
+
+        ! Kill an already admitted original owner while its borrower has actual
+        ! registered payload work. Capacity is probed independently of scopes.
+        resource = 'death-host-'//trim(resource)
+        base = trim(root)//'/owner-death-live-payload'
+        call start_admission_child(exe, resource, '2', base, 'death-root', '', child)
+        call wait_file(trim(base)//'.child.payload.pid', 1000)
+        open (newunit=unit, file=trim(base)//'.child.payload.pid', status='old')
+        read (unit, *) payload_pid
+        close (unit)
+        call read_admission_result(base, ierr, count, busy_number, pid, old_scope)
+        rc = c_kill(int(pid, c_int), 9_c_int)
+        call assert(rc == 0, 'SIGKILL removes the actual original admission owner')
+        rc = c_kill(int(payload_pid, c_int), 0_c_int)
+        call assert(rc == 0, 'borrowed registered payload is live at capacity probe')
+        call gremlin_host_lease_acquire_weighted(trim(resource), 2, 2, group, &
+            busy, ierr, message)
+        call assert(ierr /= 0 .and. busy, &
+            'owner death retains global capacity until live borrowed payload drains')
+        if (ierr == 0) call gremlin_host_lease_release(group, ierr, message)
+        do attempt = 1, 500
+            call gremlin_host_lease_acquire_weighted(trim(resource), 2, 2, group, &
+                busy, ierr, message)
+            if (ierr == 0) exit
+            call fs_sleep_ms(20)
+        end do
+        call assert(ierr == 0, 'death recovery drains payload and releases capacity')
+        if (ierr == 0) call gremlin_host_lease_release(group, ierr, message)
+        call process_poll_pid(child, busy, rc)
+
+        ! A pending admission can hold the gate before it acquires child slots.
+        ! Owner death must serialize revocation with that critical section.
+        resource = 'gate-host-'//trim(resource)
+        base = trim(root)//'/owner-death-held-gate'
+        call start_admission_child(exe, resource, '2', base, 'global', '', child)
+        call wait_file(trim(base)//'.ready', 1000)
+        call read_admission_result(base, ierr, count, busy_number, pid, old_scope)
+        gate_fd = int(c_open(trim(old_scope)//'/gate'//c_null_char, 2_c_int))
+        call assert(gate_fd >= 0, 'independent admission gate handle opens')
+        if (gate_fd >= 0) then
+            rc = int(c_flock(int(gate_fd, c_int), 2_c_int))
+            call assert(rc == 0, 'independent admission critical section is held')
+            rc = int(c_kill(int(pid, c_int), 9_c_int))
+            call assert(rc == 0, 'actual owner dies while admission gate is held')
+            call fs_sleep_ms(100)
+            call gremlin_host_lease_acquire_weighted(trim(resource), 2, 2, group, &
+                busy, ierr, message)
+            call assert(ierr /= 0 .and. busy, &
+                'owner-death revocation waits for an in-flight admission gate')
+            if (ierr == 0) call gremlin_host_lease_release(group, ierr, message)
+            rc = int(c_flock(int(gate_fd, c_int), 8_c_int))
+            rc = int(c_close(int(gate_fd, c_int)))
+            do attempt = 1, 500
+                call gremlin_host_lease_acquire_weighted(trim(resource), 2, 2, group, &
+                    busy, ierr, message)
+                if (ierr == 0) exit
+                call fs_sleep_ms(20)
+            end do
+            call assert(ierr == 0, 'revoked owner releases capacity after gate drainage')
+            if (ierr == 0) call gremlin_host_lease_release(group, ierr, message)
+        end if
+        call process_poll_pid(child, busy, rc)
+        call gremlin_session_release(owner, ierr, message)
+        call restore_scope_env('FO_GREMLIN_PROCESS_SCOPE_DIR', prior_dir, status_dir)
+        call restore_scope_env('FO_GREMLIN_PROCESS_SCOPE_PID', prior_pid, status_pid)
+        call restore_scope_env('FO_GREMLIN_PROCESS_SCOPE_START', prior_start, &
+            status_start)
+    end subroutine test_nested_host_admission
+
+    subroutine restore_scope_env(name, value, status)
+        character(len=*), intent(in) :: name, value
+        integer, intent(in) :: status
+        integer :: rc
+        if (status == 0) then
+            rc = c_setenv(trim(name)//c_null_char, trim(value)//c_null_char, 1_c_int)
+        else
+            rc = c_unsetenv(trim(name)//c_null_char)
+        end if
+        call assert(rc == 0, 'restores inherited process scope')
+    end subroutine restore_scope_env
+
     subroutine test_generation_pins(exe)
         character(len=*), intent(in) :: exe
-        character(len=256) :: root, project, cache, source, manifest_before
-        character(len=256) :: manifest_after, lease_ready
-        character(len=256) :: lease_gate, lease_result
+        character(len=1024) :: root, project, cache, source, manifest_before
+        character(len=1024) :: manifest_after, lease_ready
+        character(len=1024) :: lease_gate, lease_result
         character(len=256) :: message
         integer :: ierr, u, child_error, ios
         integer(c_int) :: list_rc
@@ -469,7 +707,8 @@ contains
     end subroutine test_generation_pins
 
     subroutine test_bounded_generation_prune()
-        character(len=256) :: root, base, snapshot, message
+        character(len=1024) :: root, base, snapshot
+        character(len=256) :: message
         character(len=12) :: number
         type(gremlin_lease_t) :: lease
         integer :: i, ierr, remaining
@@ -688,6 +927,126 @@ contains
         end if
         call touch(trim(result_file)//'.released')
     end subroutine host_lease_child
+
+    subroutine start_admission_child(exe, resource, weight, base, mode, hint, pid)
+        character(len=*), intent(in) :: exe, resource, weight, base, mode, hint
+        integer, intent(out) :: pid
+        character(:), allocatable :: packed
+        integer :: n_args, ierr
+        packed = ''
+        n_args = 0
+        call argv_push(packed, n_args, trim(exe))
+        call argv_push(packed, n_args, '--admission-child')
+        call argv_push(packed, n_args, trim(resource))
+        call argv_push(packed, n_args, trim(weight))
+        call argv_push(packed, n_args, trim(base))
+        call argv_push(packed, n_args, trim(mode))
+        call argv_push(packed, n_args, trim(hint))
+        call process_start_argv_logged('.', packed, n_args, trim(base)//'.log', &
+            pid, ierr)
+        call assert(ierr == 0, 'native owned admission child starts')
+    end subroutine start_admission_child
+
+    subroutine read_admission_result(base, ierr, count, busy, pid, scope)
+        character(len=*), intent(in) :: base
+        integer, intent(out) :: ierr, count, busy, pid
+        character(len=*), intent(out) :: scope
+        integer :: unit, ios, slot1, slot2
+        ierr = 1
+        count = 0
+        busy = 0
+        pid = 0
+        scope = ''
+        open (newunit=unit, file=trim(base)//'.result', status='old', iostat=ios)
+        if (ios /= 0) return
+        read (unit, *, iostat=ios) ierr, count, slot1, slot2, busy, pid
+        if (ios == 0) read (unit, '(a)', iostat=ios) scope
+        close (unit)
+        call assert(ios == 0, 'admission child emits a complete behavioral result')
+    end subroutine read_admission_result
+
+    subroutine finish_admission_child(base, pid)
+        character(len=*), intent(in) :: base
+        integer, intent(in) :: pid
+        integer :: attempt, exitcode
+        logical :: finished
+        call touch(trim(base)//'.go')
+        call wait_file(trim(base)//'.done', 1000)
+        finished = .false.
+        do attempt = 1, 1000
+            call process_poll_pid(pid, finished, exitcode)
+            if (finished) exit
+            call fs_sleep_ms(10)
+        end do
+        call assert(finished, 'owned admission child is drained before cleanup')
+    end subroutine finish_admission_child
+
+    subroutine admission_child(resource, weight_text, base, mode, hint)
+        character(len=*), intent(in) :: resource, weight_text, base, mode, hint
+        type(gremlin_lease_group_t) :: group
+        type(gremlin_session_t) :: owner
+        character(len=4096) :: exe, message, lane, command
+        character(:), allocatable :: packed
+        integer :: ierr, unit, weight, child, n_args
+        logical :: busy
+        call get_command_argument(0, exe)
+        write (lane, '(a,i0)') 'admission-child-', process_getpid()
+        call gremlin_session_acquire('.', trim(lane), owner, ierr, message)
+        if (ierr /= 0) stop 1
+        call process_set_async_scope(owner%state_dir, owner%owner_pid, &
+            owner%owner_start, ierr)
+        if (ierr /= 0) stop 1
+        if (mode == 'global') then
+            ierr = c_unsetenv('FO_GREMLIN_ADMISSION_SCOPE'//c_null_char)
+        else if (mode == 'hint') then
+            ierr = c_setenv('FO_GREMLIN_ADMISSION_SCOPE'//c_null_char, &
+                trim(hint)//c_null_char, 1_c_int)
+        end if
+        read (weight_text, *) weight
+        call gremlin_host_lease_acquire_weighted(resource, 2, weight, group, &
+            busy, ierr, message)
+        open (newunit=unit, file=trim(base)//'.result', status='replace')
+        write (unit, *) ierr, group%count, group%members(1)%slot, &
+            group%members(2)%slot, merge(1, 0, busy), process_getpid()
+        write (unit, '(a)') trim(group%scope)
+        close (unit)
+        call touch(trim(base)//'.ready')
+        if (ierr == 0) then
+            if (mode == 'death-root') then
+                call start_admission_child(trim(exe), resource, weight_text, &
+                    trim(base)//'.child', 'payload', '', child)
+            end if
+            if (mode == 'payload') then
+                packed = ''
+                n_args = 0
+                command = 'trap "" TERM; echo $$ > "'//trim(base)// &
+                    '.payload.pid"; while :; do sleep 0.1; done'
+                call argv_push(packed, n_args, '/bin/sh')
+                call argv_push(packed, n_args, '-c')
+                call argv_push(packed, n_args, trim(command))
+                call process_start_argv_logged('.', packed, n_args, &
+                    trim(base)//'.payload.log', child, ierr)
+                if (ierr /= 0) stop 1
+            end if
+            if (mode == 'grandchild') then
+                call start_admission_child(trim(exe), resource, weight_text, &
+                    trim(base)//'.grand', 'plain', '', child)
+            end if
+            call wait_file(trim(base)//'.go', 1000)
+            if (mode == 'grandchild') then
+                call finish_admission_child(trim(base)//'.grand', child)
+            end if
+            if (mode == 'crash') then
+                call touch(trim(base)//'.done')
+                call c_exit(99_c_int)
+            end if
+            call gremlin_host_lease_release(group, ierr, message)
+            call assert(ierr == 0 .and. group%count == 0, &
+                'child relinquishes its own budget after descendants finish')
+        end if
+        call touch(trim(base)//'.done')
+        call gremlin_session_release(owner, ierr, message)
+    end subroutine admission_child
 
     subroutine start_session_child(exe, lane_id, ready_file, gate_file, result_file, &
             done_file, seen_file)

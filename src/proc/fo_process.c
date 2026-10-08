@@ -1042,6 +1042,10 @@ static int collect_owned_tree(pid_t root, uint64_t root_start,
 /* Only a matching birth identity seeds ownership. Session membership is an
    additional edge while its exact leader is present; after leader exit use
    captured member identities and current, birth-validated PPID lineage. */
+int fo_gremlin_admission_is_guardian(int pid, const char *start);
+static int process_identity_text(pid_t pid, char *out, size_t cap);
+static int parse_identity_text(const char *text, uint64_t *identity);
+
 static int signal_owned_tree(pid_t root, uint64_t root_start,
                                  pid_t session, int owns_session,
                                  const struct owned_process_identity *seeds,
@@ -1056,6 +1060,12 @@ static int signal_owned_tree(pid_t root, uint64_t root_start,
     for (i = 0; i < count; i++) {
         uint64_t current_start;
         if (!records[i].owned || !records[i].alive) continue;
+        char stamp[64];
+        uint64_t guardian_identity;
+        if (process_identity_text(records[i].pid, stamp, sizeof(stamp)) == 0 &&
+            parse_identity_text(stamp, &guardian_identity) == 0 &&
+            guardian_identity == records[i].start &&
+            fo_gremlin_admission_is_guardian((int)records[i].pid, stamp)) continue;
         matched++;
         if (signal_number == 0) continue;
         if (owned_process_details(records[i].pid, NULL, NULL, NULL,
@@ -2262,6 +2272,55 @@ static int read_recovery_member(const char *registry, const char *name,
 }
 #endif
 
+/* Admission delegates only to a current descendant of the exact owned scope.
+   Kernel ancestry is sufficient before reparenting; durable owned-member
+   records retain the same relationship for reparented Darwin children. */
+int fo_c_process_owned_by_scope(const char *state_dir, int owner_pid,
+                                const char *owner_start) {
+#if defined(__APPLE__) || defined(__linux__)
+    uint64_t owner_identity, identity;
+    pid_t current = getpid(), parent;
+    char registry[PATH_MAX], start[64];
+    int alive;
+    if (owner_pid <= 0 || owner_pid == (int)getpid() ||
+        parse_identity_text(owner_start, &owner_identity) != 0 ||
+        !fo_gremlin_process_matches(owner_pid, owner_start)) return 0;
+    for (int depth = 0; depth < 256 && current > 1; ++depth) {
+        if (owned_process_details(current, &parent, NULL, NULL, &identity,
+                                  &alive) != 0 || !alive) break;
+        if (current == (pid_t)owner_pid) return identity == owner_identity;
+        if (parent == current) break;
+        current = parent;
+    }
+    if (!has_text(state_dir) || strcmp(state_dir, "-") == 0 ||
+        process_identity_text(getpid(), start, sizeof(start)) != 0 ||
+        async_owner_registry(state_dir, (pid_t)owner_pid, owner_start,
+                             registry, sizeof(registry), 0) != 0) return 0;
+    DIR *directory = opendir(registry);
+    if (!directory) return 0;
+    struct dirent *entry;
+    int owned = 0;
+    while ((entry = readdir(directory)) != NULL) {
+        struct recovery_session item = {0};
+        size_t n = strlen(entry->d_name);
+        int error = EINVAL;
+        if (n > 7 && strcmp(entry->d_name + n - 7, ".member") == 0)
+            error = read_recovery_member(registry, entry->d_name, owner_start, &item);
+        else if (n > 8 && strcmp(entry->d_name + n - 8, ".session") == 0)
+            error = read_recovery_session(registry, entry->d_name, owner_start, &item);
+        if (error == 0 && item.pid == getpid() && strcmp(item.start, start) == 0) {
+            owned = 1;
+            break;
+        }
+    }
+    closedir(directory);
+    return owned && fo_gremlin_process_matches(owner_pid, owner_start);
+#else
+    (void)state_dir; (void)owner_pid; (void)owner_start;
+    return 0;
+#endif
+}
+
 static int recovery_session_count(const struct recovery_session *item) {
 #if defined(__APPLE__) || defined(__linux__)
     int count = signal_owned_tree(item->pid, item->identity, item->session,
@@ -2449,6 +2508,45 @@ int fo_c_process_set_async_scope(const char *state_dir, int owner_pid,
         return e;
     }
     return 0;
+}
+
+struct saved_async_scope { char *values[3]; };
+static const char *scope_environment[3] = {
+    "FO_GREMLIN_PROCESS_SCOPE_DIR", "FO_GREMLIN_PROCESS_SCOPE_PID",
+    "FO_GREMLIN_PROCESS_SCOPE_START"
+};
+
+int fo_c_process_pop_async_scope(void **token) {
+    struct saved_async_scope *saved = *token;
+    if (!saved) return 0;
+    int error = 0;
+    for (int i = 0; i < 3; ++i) {
+        int e = saved->values[i] ? setenv(scope_environment[i], saved->values[i], 1)
+                                : unsetenv(scope_environment[i]);
+        if (e && !error) error = errno;
+        free(saved->values[i]);
+    }
+    free(saved); *token = NULL;
+    return error;
+}
+
+int fo_c_process_push_async_scope(const char *state_dir, void **token) {
+    if (*token) return EBUSY;
+    struct saved_async_scope *saved = calloc(1, sizeof(*saved));
+    if (!saved) return ENOMEM;
+    for (int i = 0; i < 3; ++i) {
+        const char *value = getenv(scope_environment[i]);
+        if (value && !(saved->values[i] = strdup(value))) {
+            for (int j = 0; j < i; ++j) free(saved->values[j]);
+            free(saved); return ENOMEM;
+        }
+    }
+    char start[64];
+    int e = process_identity_text(getpid(), start, sizeof(start));
+    if (!e) e = fo_c_process_set_async_scope(state_dir, (int)getpid(), start);
+    *token = saved;
+    if (e) (void)fo_c_process_pop_async_scope(token);
+    return e;
 }
 
 static int async_owner_exists(const struct async_process *item) {
