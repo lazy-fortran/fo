@@ -7,7 +7,7 @@ failure detection. The workspace master plan, when present, owns delivery order.
 
 ## Current delivery
 
-The stopped Claude session is recovered. Main `8a267e9` includes its published
+The stopped Claude session is recovered. Main includes its published
 readiness/recovery/test-runner fixes, install diagnostics and Darwin fixtures.
 The controller independently passed five resident baseline cases on `31c795b`;
 the full inventory remains 129 cases, with current full coverage still open.
@@ -18,15 +18,29 @@ leases/GC (2/2). Fo's source-cleanliness increment passed bootstrap/manifest
 SHA256 `42e03e2cbc4728212606bc5097a1f3aa1a89967e741fa06eac1b883245223268`.
 #211 remains open because the historical sporadic caller is unidentified.
 
-Darwin workers have passing focused candidates for watcher/process recovery
-(3/3) and CMake/compiler context (3/3). The controller is combining them and
-will verify the exact integrated source before promotion. Windows Server 2025
-is reachable through authenticated WinRM without using the active TPX console;
-an isolated Cygwin dependency installation is running. No Windows green or
-native Win32 backend is claimed. Separate workers are implementing remaining
-FPM contracts, unsaved LSP diagnostics, deep lint, safe cleanup and native
-fixture migration. Exact source, host assignments and evidence are retained
-under `/var/tmp/fo-platform-controller-20261008`.
+Combined source `116a209` passes eight Linux focused cases and five required
+resident cases (`local_gate_green`, generation `9fd5b9e7…254c9b2`) through
+read-only driver `f29c8249…a07e28`. It preserves Darwin watcher changes, exact
+generation coverage, CMake compiler profiles and physical input paths. Native
+FPM builds now honor package naming, implicit/source-form policies, declared
+include directories and test-only Git/dev closures. Serial construction of
+per-source cache flags fixes a reproduced parallel warm-restore race; three
+independent repeats restore thirteen objects without recompilation.
+
+The combined FPM increment passes four Darwin focused cases. The preceding
+platform candidate passed ten focused cases and 128/129 full cases; the sole
+failure expected lexical `/var/tmp` instead of the compiler's physical
+`/private/var/tmp` source path. Its corrected fixture passes independently.
+This does not claim a full green run of the new 130-case source.
+
+Windows Server 2025 is reachable through authenticated WinRM without using the
+active TPX console. Native Win32 delivery uses isolated MSYS2 UCRT64 GCC,
+gfortran, CMake, Ninja and fpm; Cygwin evidence is provisional. Native store
+and process probes are advancing, but a native Fo build/full Windows green
+remains open. Separate workers own custom-include resident capture, unsaved
+LSP diagnostics, deep lint, safe cleanup, native fixture migration and the
+first native CMake consumer slice. Exact sources, drivers and receipts remain
+under `/var/tmp/fo-platform-controller-20261008` and task-specific evidence roots.
 
 Earlier handoff evidence follows; it does not replace current platform gates.
 The reviewed Claude handoff is published on main, based on
