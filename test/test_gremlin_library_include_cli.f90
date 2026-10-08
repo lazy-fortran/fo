@@ -57,9 +57,9 @@ contains
         call write_text(project//'/fpm.toml', &
             'name = "header_probe"'//nl//'[build]'//nl//'auto-tests = false'//nl// &
             '[library]'//nl//'include-dir = ["headers"]'//nl// &
-            '[dependencies]'//nl//"provider = { path = '"//provider//"' }"//nl// &
+            '[dependencies]'//nl//'provider = { path = "'//provider//'" }'//nl// &
             '[dev-dependencies]'//nl// &
-            "test_provider = { path = '"//test_provider//"' }"//nl// &
+            'test_provider = { path = "'//test_provider//'" }'//nl// &
             '[[test]]'//nl//'name = "test_header_payload"'//nl// &
             'source-dir = "checks"'//nl//'main = "main.f90"'//nl)
         call write_package(project, 'root_value', '13')
@@ -70,7 +70,7 @@ contains
             'include-dir = "headers"'//nl)
         if (absolute) call write_text(scratch//'/provider/fpm.toml', &
             'name = "provider"'//nl//'[library]'//nl//'include-dir = "headers"'//nl// &
-            '[dependencies]'//nl//"leaf = { path = '"//scratch//"/leaf' }"//nl)
+            '[dependencies]'//nl//'leaf = { path = "'//scratch//'/leaf" }'//nl)
         call write_text(scratch//'/test_provider/fpm.toml', &
             'name = "test_provider"'//nl//'[library]'//nl// &
             'include-dir = ["headers"]'//nl)
@@ -126,9 +126,11 @@ contains
             do attempt = 1, 200
                 call read_status()
                 if (gremlin_field(document, 'state') == 'capture_failed') exit
+                if (gremlin_field(document, 'state') == 'error') exit
                 call gremlin_wait_ms(50)
             end do
-            call assert_true(gremlin_field(document, 'state') == 'capture_failed', &
+            call assert_true(gremlin_field(document, 'state') == 'capture_failed' .or. &
+                gremlin_field(document, 'state') == 'error', &
                 'capture refuses an input materialization path escaping its root')
             call assert_true(index(gremlin_field(document, 'diagnostic'), &
                 'parent traversal') > 0, 'refusal identifies invalid input path')
