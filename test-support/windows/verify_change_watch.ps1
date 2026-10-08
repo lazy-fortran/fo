@@ -1,11 +1,12 @@
 param(
+    [string]$ToolchainBin = 'C:\fo\msys64\ucrt64\bin',
     [string]$FxInclude = (Join-Path $PSScriptRoot 'include'),
     [string]$OutputDirectory = (Join-Path $env:TEMP 'fo-watch-native-probe')
 )
 $ErrorActionPreference = 'Stop'
-$env:PATH = 'C:\fo\msys64\ucrt64\bin;C:\Windows\System32;C:\Windows'
-$cc = 'C:\fo\msys64\ucrt64\bin\gcc.exe'
-$fc = 'C:\fo\msys64\ucrt64\bin\gfortran.exe'
+$env:PATH = "$ToolchainBin;$env:SystemRoot\System32;$env:SystemRoot"
+$cc = Join-Path $ToolchainBin 'gcc.exe'
+$fc = Join-Path $ToolchainBin 'gfortran.exe'
 # A frozen flat closure or the repository's production source; never installed Fo.
 $source = Join-Path $PSScriptRoot 'fo_change_watch.c'
 if (!(Test-Path $source)) {
@@ -28,3 +29,8 @@ if ($LASTEXITCODE) { throw 'ABI helper compile failed' }
 if ($LASTEXITCODE) { throw 'Fortran oracle compile failed' }
 & $fprobe
 if ($LASTEXITCODE) { throw 'Fortran oracle failed' }
+$hprobe = Join-Path $OutputDirectory 'watch-handles.exe'
+& $cc -std=c11 -Wall -Wextra -Werror -I $FxInclude "$PSScriptRoot\test_change_watch_handles.c" $watch $helpers -o $hprobe
+if ($LASTEXITCODE) { throw 'handle oracle compile failed' }
+& $hprobe
+if ($LASTEXITCODE) { throw 'handle oracle failed' }
