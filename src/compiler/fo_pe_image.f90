@@ -19,7 +19,8 @@ contains
 
         valid = .false.
         inquire (file=trim(path), size=file_size, iostat=ios)
-        if (ios /= 0 .or. file_size < 64_int64) return
+        if (ios /= 0) return
+        if (file_size < 64_int64) return
         open (newunit=u, file=trim(path), access='stream', form='unformatted', &
             status='old', action='read', iostat=ios)
         if (ios /= 0) return
