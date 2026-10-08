@@ -1313,8 +1313,8 @@ contains
         character(len=*), intent(in) :: val
         type(fpm_config_t), intent(inout) :: config
 
-        integer :: pos, start, n
-        character(len=128) :: macro
+        integer :: pos, start, n, equals
+        character(len=:), allocatable :: macro
         logical :: in_str
 
         pos = 1
@@ -1332,6 +1332,22 @@ contains
                 else
                     in_str = .false.
                     macro = val(start:pos - 1)
+                    equals = index(macro, '=')
+                    if (equals > 0) then
+                        if (trim(adjustl(macro(equals + 1:))) == '{version}') then
+                            if (len_trim(config%version) > 0) then
+                                macro = macro(:equals)//trim(config%version)
+                            else
+                                ! Native fpm defaults a missing package version to 0.
+                                macro = macro(:equals)//'0'
+                            end if
+                        end if
+                    end if
+                    if (len_trim(macro) + 2 > len(config%flags)) then
+                        config%manifest_parse_error = &
+                            'preprocessor macro exceeds supported flag length'
+                        return
+                    end if
                     if (len_trim(macro) > 0 .and. config%n_flags < MAX_FLAGS) then
                         config%n_flags = config%n_flags + 1
                         config%flags(config%n_flags) = '-D'//trim(macro)
