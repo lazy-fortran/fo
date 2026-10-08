@@ -599,6 +599,7 @@ contains
             n_roots = n_roots + 1
             roots(n_roots) = deps(i)%src_dir
             if (deps(i)%kind /= DEP_REGISTRY) cycle
+            roots(n_roots) = deps(i)%dir
             if (index(trim(deps(i)%dir), trim(project_dir)// &
                     '/build/dependencies/') == 1) cycle
             if (n_roots + 2 > size(roots)) then
@@ -646,6 +647,7 @@ contains
             n_roots = n_roots + 1
             roots(n_roots) = devs(i)%src_dir
             if (devs(i)%kind /= DEP_REGISTRY) cycle
+            roots(n_roots) = devs(i)%dir
             if (index(trim(devs(i)%dir), trim(project_dir)// &
                     '/build/dependencies/') == 1) cycle
             if (n_roots + 2 > size(roots)) then

@@ -40,7 +40,6 @@ module fo_fpm_config
         character(len=128) :: tag = ''
         character(len=:), allocatable :: rev
         character(len=512) :: path = ''
-        character(len=32)  :: version = '*'
         character(len=64) :: registry_v = ''
         logical :: namespace_seen = .false.
         logical :: registry_v_seen = .false.
@@ -223,7 +222,6 @@ contains
             c%deps(i)%tag = ''
             if (allocated(c%deps(i)%rev)) deallocate (c%deps(i)%rev)
             c%deps(i)%path = ''
-            c%deps(i)%version = '*'
             c%deps(i)%namespace = ''
             c%deps(i)%unsupported_field = ''
             c%deps(i)%registry_v = ''
@@ -242,7 +240,6 @@ contains
             c%dev_deps(i)%tag = ''
             if (allocated(c%dev_deps(i)%rev)) deallocate (c%dev_deps(i)%rev)
             c%dev_deps(i)%path = ''
-            c%dev_deps(i)%version = '*'
             c%dev_deps(i)%namespace = ''
             c%dev_deps(i)%unsupported_field = ''
             c%dev_deps(i)%registry_v = ''
@@ -855,8 +852,6 @@ contains
         case ('path')
             deps(found)%path_seen = .true.
             deps(found)%path = trim(str_val)
-        case ('version')
-            deps(found)%version = trim(str_val)
         case ('namespace')
             deps(found)%namespace_seen = .true.
             deps(found)%namespace = trim(str_val)
@@ -891,7 +886,6 @@ contains
         dep%tag = ''
         dep%rev = ''
         dep%path = ''
-        dep%version = '*'
 
         if (len_trim(val) == 0) return
 
@@ -935,7 +929,7 @@ contains
             end do
         else
             call extract_string(val, str_val)
-            dep%version = trim(str_val)
+            dep%unsupported_field = 'bare registry version; use namespace and v'
         end if
     end subroutine parse_dep
 

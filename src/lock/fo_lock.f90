@@ -1,6 +1,7 @@
 module fo_lock
     use fo_fpm_config, only: fpm_config_t, fpm_dep_t, fpm_config_parse, dep_kind, &
         DEP_PATH, DEP_GIT, DEP_REGISTRY
+    use fo_registry, only: registry_resolve
     use fo_fs, only: fs_write_text
     use fo_process, only: process_run_argv_logged, argv_push, argv_push_split
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file
@@ -77,18 +78,20 @@ contains
         call append_line(text, '')
         call append_line(text, '[dependencies]')
         do i = 1, cfg%n_deps
-            call append_dep(text, cfg%deps(i), ierr)
+            call append_dep(text, cfg%deps(i), project_dir, ierr)
             if (ierr /= 0) return
         end do
         ierr = 0
     end subroutine lock_content
 
-    subroutine append_dep(text, dep, ierr)
+    subroutine append_dep(text, dep, project_dir, ierr)
         character(len=*), intent(inout) :: text
         type(fpm_dep_t), intent(in) :: dep
+        character(len=*), intent(in) :: project_dir
         integer, intent(out) :: ierr
 
-        character(len=512) :: rev
+        character(len=512) :: rev, source
+        integer :: slash
 
         ierr = 0
 
@@ -109,7 +112,11 @@ contains
         case (DEP_REGISTRY)
             call append_line(text, '[[dependencies.registry]]')
             call append_kv(text, 'name', dep%name)
-            call append_kv(text, 'version', dep%version)
+            call registry_resolve(dep, project_dir, source, ierr)
+            if (ierr /= 0) return
+            slash = index(trim(source), '/', back=.true.)
+            call append_kv(text, 'namespace', dep%namespace)
+            call append_kv(text, 'version', source(slash + 1:))
         end select
     end subroutine append_dep
 
