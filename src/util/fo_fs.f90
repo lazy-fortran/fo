@@ -13,10 +13,18 @@ module fo_fs
     public :: fs_mkdir_excl, fs_sleep_ms, fs_pid_alive
     public :: fs_copy_exec, fs_rename, fs_stat, fs_identity
     public :: fs_tree_fingerprint
-    public :: fs_find_executable
+    public :: fs_realpath, fs_find_executable
     public :: fs_collect_git_checkouts
 
     interface
+        integer(c_int) function fo_c_realpath(path, resolved, capacity) &
+                bind(C, name='fo_c_realpath')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+            character(kind=c_char), intent(out) :: resolved(*)
+            integer(c_int), value :: capacity
+        end function fo_c_realpath
+
         integer(c_int) function fo_c_rm_rf(path) bind(C, name='fo_c_rm_rf')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
@@ -317,6 +325,24 @@ contains
         rc = fo_c_tree_fingerprint(trim(path)//c_null_char, mode, sum, mixed, count)
         ok = (rc == 0)
     end subroutine fs_tree_fingerprint
+
+    subroutine fs_realpath(path, resolved, ok)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(out) :: resolved
+        logical, intent(out) :: ok
+        integer(c_int) :: rc
+        integer :: nul
+
+        resolved = ''
+        rc = fo_c_realpath(trim(path)//c_null_char, resolved, int(len(resolved), c_int))
+        ok = rc == 0
+        if (.not. ok) then
+            resolved = ''
+            return
+        end if
+        nul = index(resolved, achar(0))
+        if (nul > 0) resolved(nul:) = ' '
+    end subroutine fs_realpath
 
     subroutine fs_find_executable(command, path, ok)
         character(len=*), intent(in) :: command

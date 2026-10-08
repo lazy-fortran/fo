@@ -1,6 +1,7 @@
 module fo_cmake_context
     use, intrinsic :: iso_fortran_env, only: int64
-    use fo_fs, only: fs_make_dir, fs_collect_files, fs_write_text
+    use, intrinsic :: iso_c_binding, only: c_long_long
+    use fo_fs, only: fs_make_dir, fs_collect_files, fs_write_text, fs_identity
     use fx_json_parse, only: json_parser_t, json_event_t, &
         json_parser_init_strict, json_parser_next, JSON_OBJECT_START, &
         JSON_OBJECT_END, JSON_ARRAY_START, JSON_ARRAY_END, JSON_KEY, &
@@ -13,6 +14,7 @@ module fo_cmake_context
         character(:), allocatable :: build_root
         character(:), allocatable :: generator
         character(:), allocatable :: configuration
+        character(:), allocatable :: profile
         character(:), allocatable :: configure_preset
         character(:), allocatable :: build_preset
         character(:), allocatable :: test_preset
@@ -52,6 +54,7 @@ contains
         integer(int64) :: clock_tick
         character(len=40) :: token_text
 
+        context%profile = ''
         context%source_root = trim(source_root)
         context%build_root = 'build'
         context%build_root_hint = present(build_root)
@@ -284,6 +287,8 @@ contains
         character(len=4096) :: line, cache_home, cache_generator
         character(:), allocatable :: cache_file
         integer :: unit, ios
+        integer(c_long_long) :: home_device, home_inode, source_device, source_inode
+        logical :: home_exists, source_exists
 
         valid = .false.
         if (allocated(context%error)) deallocate (context%error)
@@ -306,7 +311,11 @@ contains
         end do
         close (unit)
 
-        if (trim(cache_home) /= trim(context%source_root)) then
+        call fs_identity(trim(cache_home), home_device, home_inode, home_exists)
+        call fs_identity(context%source_root, source_device, source_inode, &
+            source_exists)
+        if (.not. home_exists .or. .not. source_exists .or. &
+                home_device /= source_device .or. home_inode /= source_inode) then
             context%error = 'preset build-root hint points at a different source'
             return
         end if

@@ -88,6 +88,7 @@ contains
             '{"version":3,"configurePresets":[{"name":"cpu","generator":"Ninja",', &
             '"binaryDir":"${sourceDir}/build","cacheVariables":{', &
             '"CMAKE_BUILD_TYPE":"Release",', &
+            '"CMAKE_Fortran_COMPILER":"gfortran",', &
             '"CMAKE_Fortran_FLAGS":"-cpp -DKEEP_PROJECT",', &
             '"CMAKE_Fortran_FLAGS_RELEASE":"-O2"}}],', &
             '"buildPresets":[{"name":"cpu","configurePreset":"cpu"}]}'])
@@ -132,6 +133,8 @@ contains
             'end if', &
             'end program'])
         call list_add(env, 'FO_BACKEND=cmake')
+        ! Fo's native compiler preference must not override the CMake preset.
+        call list_add(env, 'FO_FC=flang')
         call list_add(env, 'FO_CMAKE_CONFIGURE_PRESET=cpu')
         call list_add(env, 'FO_CMAKE_BUILD_PRESET=cpu')
         call list_add(env, 'FO_CMAKE_BUILD_DIR=build')

@@ -247,6 +247,8 @@ contains
         call list_add(query, project)
         call list_add(query, '--lane')
         call list_add(query, 'cmake')
+        call list_add(query, '--session')
+        call list_add(query, owner)
         do i = 1, 2400
         call gremlin_json(driver, project, cache, state, query, status, observed, 10000)
             current = gremlin_field(status, 'active_generation')

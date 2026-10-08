@@ -4,7 +4,8 @@ module fo_cmake_generation
     use fo_build_backend, only: backend_t, cmake_configure
     use fo_cmake_context, only: cmake_context_build_path
     use fo_input_inventory, only: input_inventory_t, input_inventory_discover_cmake
-    use fo_fs, only: fs_make_dir, fs_write_text, fs_collect_files, fs_remove_tree
+    use fo_fs, only: fs_make_dir, fs_write_text, fs_collect_files, fs_remove_tree, &
+        fs_realpath
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file
     use fo_dep_resolve, only: normalize_path
     use fo_cache, only: cache_digest, HASH_LEN
@@ -31,7 +32,8 @@ contains
         character(:), allocatable :: digest_parts(:)
         character(:), allocatable :: generator
         integer :: n_roots, cursor, i, cleanup_status
-        logical :: exists, source_key, provider
+        logical :: exists, source_key, provider, physical
+        character(len=PATH_LEN) :: project_path, build_path
 
         ierr = 1
         message = ''
@@ -64,6 +66,13 @@ contains
             message = 'configured CMake cache is unavailable'
             return
         end if
+        call fs_realpath(backend%project_dir, project_path, physical)
+        if (.not. physical) then
+            ierr = 1
+            message = 'CMake project root is unavailable'
+            return
+        end if
+        call canonical_directory(cmake_context_build_path(backend%cmake), build_path)
         n_roots = 0
         roots = ''
         bundles = ''
@@ -86,8 +95,8 @@ contains
                 if (key(len(key) - 10:) == '_SOURCE_DIR') source_key = .true.
             end if
             if (.not. source_key) cycle
-            call normalize_path(value, normalized)
-            if (trim(normalized) == trim(backend%project_dir)) cycle
+            call canonical_directory(value, normalized)
+            if (trim(normalized) == trim(project_path)) cycle
             inquire (file=trim(normalized)//'/CMakeLists.txt', exist=exists)
             ! Populated FetchContent sources may be consumed without a subproject.
             if (.not. exists) inquire (file=trim(normalized), exist=exists)
@@ -116,15 +125,15 @@ contains
             if (key == 'CMAKE_INSTALL_PREFIX') cycle
             if (index(key, 'CMAKE_FIND_PACKAGE_REDIRECTS_DIR') == 1) cycle
             if (kind == 'PATH' .and. len(value) > 0) then
-                call normalize_path(value, normalized)
+                call canonical_directory(value, normalized)
                 do i = 1, n_roots
                     if (trim(normalized) /= trim(roots(i))) cycle
                     value = trim(normalized)
                     exit
                 end do
             end if
-            call relocate_value(value, trim(backend%project_dir), &
-                cmake_context_build_path(backend%cmake), roots(:n_roots), &
+            call relocate_value(value, trim(project_path), &
+                trim(build_path), roots(:n_roots), &
                 bundles(:n_roots), rewritten)
             script = script//'set('//key//' "'//cmake_quote(rewritten)// &
                      '" CACHE '//kind//' "captured by Fo" FORCE)'//new_line('a')
@@ -387,8 +396,8 @@ contains
         allocate(character(len=1048576) :: text)
         ierr = 0
         message = ''
-        call normalize_path(backend%project_dir, project)
-        call normalize_path(cmake_context_build_path(backend%cmake), build)
+        call canonical_directory(backend%project_dir, project)
+        call canonical_directory(cmake_context_build_path(backend%cmake), build)
         call fs_collect_files(trim(build)//'/.cmake/api/v1/reply', '', '.json', &
                               '', files, n_files, recursive=.false.)
         if (n_files == 0 .or. n_files == size(files)) then
@@ -442,6 +451,7 @@ contains
                 else
                     call normalize_path(path, normalized)
                 end if
+                call canonical_authored_path(normalized)
                 captured = inside(normalized, project) .or. &
                            inside(normalized, build)
                 do j = 1, size(roots)
@@ -479,14 +489,16 @@ contains
         character(len=*), intent(in) :: path
         integer :: i, j
         character(len=:), allocatable :: relative
+        character(len=PATH_LEN) :: root
         found = .false.
         do i = 1, inventory%root_count
-            if (.not. inside(path, inventory%roots(i)%physical_path)) cycle
-            if (trim(path) == trim(inventory%roots(i)%physical_path)) then
+            call canonical_directory(inventory%roots(i)%physical_path, root)
+            if (.not. inside(path, root)) cycle
+            if (trim(path) == trim(root)) then
                 found = .true.
                 return
             end if
-            relative = path(len_trim(inventory%roots(i)%physical_path) + 2:)
+            relative = path(len_trim(root) + 2:)
             do j = 1, inventory%entry_count
                 if (inventory%entries(j)%root_alias /= &
                     inventory%roots(i)%canonical_alias) cycle
@@ -496,6 +508,31 @@ contains
             end do
         end do
     end function inventory_has_path
+
+    subroutine canonical_authored_path(path)
+        character(len=*), intent(inout) :: path
+        character(len=PATH_LEN) :: parent
+        character(len=:), allocatable :: leaf
+        integer :: separator
+        logical :: ok
+
+        ! Resolve directory aliases while retaining the authored leaf: the
+        ! inventory must still reject a referenced unsafe file symlink.
+        separator = index(trim(path), '/', back=.true.)
+        if (separator <= 1) return
+        leaf = trim(path(separator + 1:))
+        call fs_realpath(path(:separator - 1), parent, ok)
+        if (ok) path = trim(parent)//'/'//leaf
+    end subroutine canonical_authored_path
+
+    subroutine canonical_directory(path, normalized)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(out) :: normalized
+        logical :: ok
+
+        call fs_realpath(path, normalized, ok)
+        if (.not. ok) call normalize_path(path, normalized)
+    end subroutine canonical_directory
 
     logical function inside(path, root) result(matches)
         character(len=*), intent(in) :: path, root

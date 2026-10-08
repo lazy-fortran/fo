@@ -7,6 +7,7 @@ module fo_change_watch
         watcher_close, watcher_mark_self_written, watcher_remove
     use fo_gremlin_generation, only: generation_context_t
     use fo_util, only: read_text_file
+    use fo_fs, only: fs_realpath
     implicit none
     private
 
@@ -81,13 +82,6 @@ module fo_change_watch
             type(c_ptr), value :: handle
             character(c_char), intent(in) :: path(*)
         end subroutine native_self
-        integer(c_int) function fo_change_watch_realpath(path, resolved, capacity) &
-                bind(C, name='fo_change_watch_realpath')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: path(*)
-            character(kind=c_char), intent(out) :: resolved(*)
-            integer(c_int), value :: capacity
-        end function fo_change_watch_realpath
         integer(c_int) function fo_change_watch_is_dir(path) &
                 bind(C, name='fo_change_watch_is_dir')
             import :: c_char, c_int
@@ -574,14 +568,11 @@ contains
     function canonical_root(path) result(root)
         character(len=*), intent(in) :: path
         character(len=PATH_LEN) :: root
-        integer(c_int) :: ierr
-        integer :: n, nul
+        logical :: ok
+        integer :: n
 
-        root = ''
-        ierr = fo_change_watch_realpath(trim(path)//c_null_char, root, len(root))
-        if (ierr /= 0) return
-        nul = index(root, achar(0))
-        if (nul > 0) root(nul:) = ' '
+        call fs_realpath(path, root, ok)
+        if (.not. ok) return
         n = len_trim(root)
         do while (n > 1 .and. root(n:n) == '/')
             root(n:n) = ' '

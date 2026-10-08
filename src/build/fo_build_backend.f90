@@ -9,7 +9,7 @@ module fo_build_backend
     use fo_util, only: read_text_file
     use fo_test_budget, only: test_timeout_seconds, test_wall_cap_seconds
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
-        selected_compiler_command
+        selected_compiler_command, COMPILER_UNKNOWN
     use fo_cmake_context, only: cmake_context_t, cmake_context_init, &
         cmake_context_query, cmake_context_read_reply, &
         cmake_context_build_path, cmake_context_validate_hint
@@ -265,6 +265,7 @@ contains
         integer :: i, code
 
         if (backend%kind /= BACKEND_CMAKE) return
+        backend%cmake%profile = trim(name)
         if (len_trim(backend%cmake%configuration) > 0) return
         lowered = name
         do i = 1, len(name)
@@ -436,10 +437,39 @@ contains
         integer, intent(out) :: exitcode
 
         character(len=:), allocatable :: packed, cache_file, configuration
+        character(:), allocatable :: effective_flags, selected_flags, compiler
+        type(compiler_dialect_t) :: dialect
         logical :: has_cache, hint_valid, has_frozen_context
         character(len=4096) :: captured_generator
         integer :: n_args, i, line_end
 
+        effective_flags = flags
+        if (allocated(context%profile)) then
+            if (len_trim(context%profile) > 0 .and. len_trim(flags) > 0) then
+                selected_flags = profile_flags(context%profile)
+                if (len(selected_flags) > 0) then
+                    if (index(flags, selected_flags) == 1) then
+                        ! CMake owns compiler selection, including inherited presets.
+                        ! Configure first so Fo's defaults follow the real compiler;
+                        ! retain separately supplied project/user flags unchanged.
+                        call cmake_configure(context, '', log_file, exitcode)
+                        if (exitcode /= 0) return
+                        call cmake_cache_compiler(context, compiler)
+                        if (len(compiler) > 0) then
+                            dialect = compiler_dialect(compiler)
+                            if (dialect%kind == COMPILER_UNKNOWN) then
+                                write (error_unit, '(a,a)') &
+                                    'fo: unsupported CMake profile compiler: ', compiler
+                                exitcode = 1
+                                return
+                            end if
+                            effective_flags = dialect%profile_flags(context%profile)// &
+                                flags(len(selected_flags) + 1:)
+                        end if
+                    end if
+                end if
+            end if
+        end if
         if (len_trim(context%configure_preset) == 0 .and. &
             len_trim(context%generator) == 0) then
             inquire(file=context%source_root//'/.fo-cmake/generator.txt', &
@@ -512,7 +542,7 @@ contains
                     configuration(i:i) = achar(iachar(configuration(i:i)) - 32)
             end do
             call argv_push(packed, n_args, &
-                '-DCMAKE_Fortran_FLAGS_'//configuration//'='//trim(flags))
+                '-DCMAKE_Fortran_FLAGS_'//configuration//'='//trim(effective_flags))
         end if
         if (allocated(context%extra_args)) then
             do i = 1, size(context%extra_args)
@@ -561,6 +591,29 @@ contains
         end if
 
     end subroutine cmake_configure
+
+    subroutine cmake_cache_compiler(context, compiler)
+        type(cmake_context_t), intent(in) :: context
+        character(:), allocatable, intent(out) :: compiler
+        character(len=4096) :: line
+        integer :: unit, ios, colon, equals
+
+        compiler = ''
+        open (newunit=unit, file=cmake_context_build_path(context)// &
+            '/CMakeCache.txt', status='old', action='read', iostat=ios)
+        if (ios /= 0) return
+        do
+            read (unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            colon = index(line, ':')
+            if (colon < 1) cycle
+            if (line(:colon - 1) /= 'CMAKE_Fortran_COMPILER') cycle
+            equals = index(line, '=')
+            if (equals > colon) compiler = trim(line(equals + 1:))
+            exit
+        end do
+        close (unit)
+    end subroutine cmake_cache_compiler
 
     subroutine locate_preset_build(context, log_file, found)
         type(cmake_context_t), intent(inout) :: context

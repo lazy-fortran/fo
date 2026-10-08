@@ -18,6 +18,22 @@
 
 static int fo_has(const char *s) { return s != NULL && s[0] != '\0'; }
 
+int fo_c_realpath(const char *path, char *resolved, int capacity) {
+    char *canonical;
+    size_t length;
+    if (path == NULL || resolved == NULL || capacity <= 0) return EINVAL;
+    canonical = realpath(path, NULL);
+    if (canonical == NULL) return errno == 0 ? EIO : errno;
+    length = strlen(canonical);
+    if (length >= (size_t)capacity) {
+        free(canonical);
+        return ENAMETOOLONG;
+    }
+    memcpy(resolved, canonical, length + 1);
+    free(canonical);
+    return 0;
+}
+
 /* Recursively delete a file or directory tree. Missing path is success
    (mirrors rm -rf). Returns 0 on success, -1 on error. */
 int fo_c_rm_rf(const char *path) {

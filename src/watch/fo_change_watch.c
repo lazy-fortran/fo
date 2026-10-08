@@ -18,21 +18,6 @@ void fo_change_native_diagnostic(void *handle, char *buffer, int capacity) {
 }
 #endif
 
-int fo_change_watch_realpath(const char *path, char *resolved, int capacity) {
-    char *canonical;
-    size_t length;
-    if (path == NULL || resolved == NULL || capacity <= 0) return EINVAL;
-    canonical = realpath(path, NULL);
-    if (canonical == NULL) return errno == 0 ? EIO : errno;
-    length = strlen(canonical);
-    if (length >= (size_t)capacity) {
-        free(canonical);
-        return ENAMETOOLONG;
-    }
-    memcpy(resolved, canonical, length + 1);
-    free(canonical);
-    return 0;
-}
 
 int fo_change_watch_is_dir(const char *path) {
     struct stat info;
