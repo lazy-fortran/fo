@@ -3,15 +3,15 @@ module fo_gfortran_build
         fpm_config_allocate, manifest_exe_name, &
         manifest_executable_selected, &
         manifest_test_name, manifest_test_args, manifest_example_name, dep_kind, &
-        DEP_PATH, DEP_GIT, DEP_REGISTRY
+        DEP_PATH, DEP_REGISTRY
     use fo_scan, only: scan_unit_t, scan_dir, scan_dir_regex, scan_dir_cached, &
         source_defines_module, &
         MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units
-    use fo_dep_update, only: dep_update_missing_sources, &
-        dep_acquire_missing_git, MAX_UPDATE_NAMES
+    use fo_dep_update, only: dep_acquire_sources
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
         resolve_dev_dep_srcs, MAX_RESOLVED, join_path, merge_dep_link_libs
+    use fo_registry, only: registry_config_path
     use fo_stat_memo, only: memo_save, memo_hash_file
     use fo_build_tree, only: native_output_dir, native_profiles_dir, &
         native_record_profile
@@ -242,15 +242,14 @@ contains
         ! build can turn warnings already present in vendored code into
         ! build noise (or, with -Werror flags, failures) that has nothing to
         ! do with the optimization-level bug this is fixing.
-        call bootstrap_external_deps(project_dir, config, lf, request_flags, &
-            exitcode)
+        call validate_native_deps(project_dir, exitcode)
         if (exitcode /= 0) return
         call merge_dep_link_libs(project_dir, config)
 
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs)
         stamp_flags = compile_key_flags(flag_text)
-        allocate (stamp_roots(3 * MAX_RESOLVED))
+        allocate (stamp_roots(8 * MAX_RESOLVED))
         call collect_stamp_roots(project_dir, stamp_roots, n_stamp_roots, stamp_ok)
         stamp_hit = .false.
         if (allow_cache .and. stamp_ok) then
@@ -296,239 +295,24 @@ contains
         call memo_save()
     end subroutine gfortran_build
 
-    subroutine bootstrap_external_deps(project_dir, config, log_file, &
-            project_flags, exitcode)
-        character(len=*), intent(in) :: project_dir, log_file
-        type(fpm_config_t), intent(in) :: config
-        character(len=*), intent(in) :: project_flags
+    subroutine validate_native_deps(project_dir, exitcode)
+        character(len=*), intent(in) :: project_dir
         integer, intent(out) :: exitcode
-
         type(resolved_src_t), allocatable :: deps(:)
-        type(fpm_config_t), allocatable :: dep_config
-        integer :: n_deps, n_unresolved, n_registry, ierr, i
-        logical :: need_registry_fetch
+        integer :: n_deps, n_unresolved
 
-        exitcode = 0
-        allocate (deps(MAX_RESOLVED))
-        call fpm_config_allocate(dep_config)
-        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr, &
-            n_registry)
-        if (ierr /= 0) return
-
-        ! Acquire Git sources natively, then let Fo compile them through its
-        ! shared DAG. Registry dependencies still use the existing FPM path.
-        call dep_acquire_missing_git(project_dir, exitcode)
+        call dep_acquire_sources(project_dir, exitcode)
         if (exitcode /= 0) return
-        if (n_registry == 0) then
-            call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, &
-                ierr, n_registry)
-            if (ierr /= 0) return
-            if (n_unresolved > n_registry) then
-                write (error_unit, '(a)') &
-                    'fo: native acquisition left Git dependency sources unresolved'
-                exitcode = 1
-                return
-            end if
-            do i = 1, config%n_dev_deps
-                if (dep_kind(config%dev_deps(i)) /= DEP_GIT) cycle
-                if (has_dependency_manifest(project_dir, &
-                        trim(config%dev_deps(i)%name))) cycle
-                write (error_unit, '(a)') &
-                    'fo: native acquisition left dev dependency '// &
-                    trim(config%dev_deps(i)%name)//' unresolved'
-                exitcode = 1
-                return
-            end do
-            need_registry_fetch = .false.
-            do i = 1, config%n_dev_deps
-                if (dep_kind(config%dev_deps(i)) /= DEP_REGISTRY) cycle
-                if (has_dependency_manifest(project_dir, &
-                        trim(config%dev_deps(i)%name))) cycle
-                need_registry_fetch = .true.
-            end do
-            if (need_registry_fetch) then
-                call run_fpm_fetch_only(project_dir, log_file, exitcode)
-                if (exitcode /= 0) return
-            end if
-        end if
-
-        if (n_registry > 0 .and. config_has_external_deps(config)) then
-            call bootstrap_config_deps(project_dir, config, log_file, &
-                project_flags, exitcode)
-            if (exitcode /= 0) return
-        end if
-
-        if (n_registry == 0) return
-
-        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
-        if (ierr /= 0) return
-        do i = 1, n_deps
-            call fpm_config_parse(deps(i)%dir, dep_config, ierr)
-            if (ierr /= 0) cycle
-            if (.not. config_has_external_deps(dep_config)) cycle
-            call bootstrap_config_deps(deps(i)%dir, dep_config, log_file, &
-                project_flags, exitcode)
-            if (exitcode /= 0) return
-        end do
-    end subroutine bootstrap_external_deps
-
-    logical function has_dependency_manifest(project_dir, dep_name) result(found)
-        character(len=*), intent(in) :: project_dir, dep_name
-
-        inquire (file=trim(project_dir)//'/build/dependencies/'// &
-            trim(dep_name)//'/fpm.toml', exist=found)
-    end function has_dependency_manifest
-
-    subroutine run_fpm_fetch_only(project_dir, log_file, exitcode)
-        character(len=*), intent(in) :: project_dir, log_file
-        integer, intent(out) :: exitcode
-
-        character(len=:), allocatable :: packed
-        integer :: n_args
-
-        n_args = 0
-        call argv_push(packed, n_args, 'fpm')
-        call argv_push(packed, n_args, 'update')
-        call argv_push(packed, n_args, '--fetch-only')
-        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
-            .true., build_timeout_seconds(), exitcode)
-        if (exitcode /= 0) then
-            write (error_unit, '(a)') 'fo: fpm registry fetch failed'
-            if (len_trim(log_file) > 0) then
-                write (error_unit, '(a)') 'fo: see '//trim(log_file)
-            end if
-        end if
-    end subroutine run_fpm_fetch_only
-
-    logical function config_has_external_deps(config) result(found)
-        type(fpm_config_t), intent(in) :: config
-        integer :: i
-
-        found = .false.
-        do i = 1, config%n_deps
-            if (dep_kind(config%deps(i)) /= DEP_PATH) then
-                found = .true.
-                return
-            end if
-        end do
-    end function config_has_external_deps
-
-    subroutine bootstrap_config_deps(project_dir, config, log_file, &
-            project_flags, exitcode)
-        character(len=*), intent(in) :: project_dir, log_file
-        type(fpm_config_t), intent(in) :: config
-        character(len=*), intent(in) :: project_flags
-        integer, intent(out) :: exitcode
-        character(len=512), allocatable :: includes(:), objects(:), object_keys(:)
-        character(len=256) :: missing(MAX_UPDATE_NAMES)
-        integer :: n_includes, n_objects, n_object_keys, n_missing, i
-
-        n_includes = 0
-        n_objects = 0
-        n_object_keys = 0
-        allocate (includes(MAX_DEP_DIRS), objects(MAX_DEP_OBJS), &
-            object_keys(MAX_DEP_OBJS))
-        call collect_dep_artifacts(project_dir, config, includes, n_includes, &
-            objects, n_objects, object_keys, n_object_keys)
-        ! Reusing the compiled objects is only safe while the sources they came
-        ! from are still there. Once the clone under build/dependencies is gone,
-        ! the objects are the last trace of a revision nothing can reproduce, so
-        ! re-fetch instead of linking them blind.
-        call dep_update_missing_sources(project_dir, missing, n_missing)
-        if (n_objects > 0 .and. n_missing == 0) then
-            exitcode = 0
+        allocate (deps(MAX_RESOLVED))
+        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, exitcode)
+        if (exitcode /= 0) return
+        if (n_unresolved > 0) then
+            write (error_unit, '(a)') 'fo: native dependency sources remain unresolved'
+            exitcode = 1
             return
         end if
-        do i = 1, n_missing
-            write (error_unit, '(a)') 'fo: re-fetching dependency '// &
-                trim(missing(i))//': its source tree is missing'
-        end do
-        call run_fpm_bootstrap(project_dir, config, project_flags, log_file, &
-            exitcode)
-    end subroutine bootstrap_config_deps
-
-    subroutine run_fpm_bootstrap(project_dir, config, project_flags, &
-            log_file, exitcode)
-        character(len=*), intent(in) :: project_dir, log_file
-        type(fpm_config_t), intent(in) :: config
-        character(len=*), intent(in) :: project_flags
-        integer, intent(out) :: exitcode
-
-        character(len=:), allocatable :: packed
-        character(len=4096) :: bootstrap_env, lib_dir, lib_path, prior_paths
-        character(len=512) :: selected_fc
-        character(len=512) :: ext_dirs(MAX_DEP_DIRS)
-        character(len=4096) :: ext_flag
-        integer :: n_args, n_ext, i
-        integer :: stat, cut
-        logical :: has_local_liric
-
-        bootstrap_env = ''
-        call local_library_candidate(project_dir, 'liric', lib_path, has_local_liric)
-        if (has_local_liric) then
-            cut = index(trim(lib_path), '/', back=.true.)
-            if (cut > 0) lib_dir = trim(lib_path(1:cut - 1))
-
-            if (len_trim(lib_dir) > 0) then
-                call get_environment_variable('LIBRARY_PATH', prior_paths, status=stat)
-                if (stat == 0 .and. len_trim(prior_paths) > 0) then
-                    bootstrap_env = 'LIBRARY_PATH='//trim(lib_dir)//':'//trim(prior_paths)
-                else
-                    bootstrap_env = 'LIBRARY_PATH='//trim(lib_dir)
-                end if
-            end if
-        end if
-
-        selected_fc = trim(fc_executable_command())
-        if (len_trim(selected_fc) > 0) then
-            if (len_trim(bootstrap_env) > 0) then
-                bootstrap_env = trim(bootstrap_env)//';FPM_FC='//trim(selected_fc)
-            else
-                bootstrap_env = 'FPM_FC='//trim(selected_fc)
-            end if
-        end if
-
-        ! The fpm bootstrap must compile with the same baseline policy as the
-        ! native path. This includes preprocessing lowercase sources and the
-        ! compiler's source-form dialect. fpm also has no notion of
-        ! external-modules, so append the system module include directories.
-        n_ext = 0
-        call collect_external_module_dirs(config%external_modules, &
-            config%n_external_modules, ext_dirs, n_ext, MAX_DEP_DIRS)
-        ! fpm's own --profile default is "debug" (-O0) whenever --flag is
-        ! given (its docs: "If --flag is not specified the debug flags
-        ! default"), so without the caller's optimization flags here a git
-        ! dependency is always compiled unoptimized, regardless of the
-        ! native path building at -O3 -funroll-loops for --profile release.
-        ! Appending project_flags after the base policy flags lets its -O
-        ! level win (gfortran honors the last -O flag on the line), so a
-        ! dependency ends up at the same optimization as the rest of the
-        ! project instead of silently staying at fpm's debug default.
-        ext_flag = fc_base_flags()
-        if (len_trim(project_flags) > 0) &
-            ext_flag = trim(ext_flag)//' '//trim(project_flags)
-        do i = 1, n_ext
-            if (len_trim(ext_flag) > 0) ext_flag = trim(ext_flag)//' '
-            ext_flag = trim(ext_flag)//'-I'//trim(ext_dirs(i))
-        end do
-
-        n_args = 0
-        call argv_push(packed, n_args, 'fpm')
-        call argv_push(packed, n_args, 'build')
-        if (len_trim(ext_flag) > 0) then
-            call argv_push(packed, n_args, '--flag')
-            call argv_push(packed, n_args, trim(ext_flag))
-        end if
-        call process_run_argv_logged(project_dir, packed, n_args, log_file, &
-            .true., build_timeout_seconds(), exitcode, &
-            env_extra=trim(bootstrap_env))
-        if (exitcode == 0) return
-
-        write (error_unit, '(a)') 'fo: fpm bootstrap failed for git/registry dependencies'
-        if (len_trim(log_file) > 0) then
-            write (error_unit, '(a)') 'fo: see '//trim(log_file)
-        end if
-    end subroutine run_fpm_bootstrap
+        call resolve_dev_dep_srcs(project_dir, deps, n_deps, exitcode)
+    end subroutine validate_native_deps
 
     subroutine guard_compiler_switch(project_dir, mod_dir, obj_dir, bin_dir)
         !! Record which compiler owns the native build tree and wipe it when
@@ -799,7 +583,8 @@ contains
         logical, intent(out) :: ok
 
         type(resolved_src_t) :: deps(MAX_RESOLVED), devs(MAX_RESOLVED)
-        integer :: n_deps, n_dev, n_unresolved, ierr, i, j
+        integer :: n_deps, n_dev, n_unresolved, ierr, i, j, slash
+        character(len=512) :: registry_config
 
         roots = ''
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
@@ -813,6 +598,25 @@ contains
             end if
             n_roots = n_roots + 1
             roots(n_roots) = deps(i)%src_dir
+            if (deps(i)%kind /= DEP_REGISTRY) cycle
+            if (index(trim(deps(i)%dir), trim(project_dir)// &
+                    '/build/dependencies/') == 1) cycle
+            if (n_roots + 2 > size(roots)) then
+                ok = .false.
+                return
+            end if
+            if (deps(i)%registry_latest) then
+                slash = index(trim(deps(i)%dir), '/', back=.true.)
+                n_roots = n_roots + 1
+                roots(n_roots) = deps(i)%dir(:slash - 1)
+            end if
+            call registry_config_path(registry_config, ierr)
+            if (ierr /= 0) then
+                ok = .false.
+                return
+            end if
+            n_roots = n_roots + 1
+            roots(n_roots) = trim(registry_config)
         end do
         call resolve_dev_dep_srcs(project_dir, devs, n_dev, ierr)
         if (ierr /= 0) then
@@ -841,6 +645,25 @@ contains
             end if
             n_roots = n_roots + 1
             roots(n_roots) = devs(i)%src_dir
+            if (devs(i)%kind /= DEP_REGISTRY) cycle
+            if (index(trim(devs(i)%dir), trim(project_dir)// &
+                    '/build/dependencies/') == 1) cycle
+            if (n_roots + 2 > size(roots)) then
+                ok = .false.
+                return
+            end if
+            if (devs(i)%registry_latest) then
+                slash = index(trim(devs(i)%dir), '/', back=.true.)
+                n_roots = n_roots + 1
+                roots(n_roots) = devs(i)%dir(:slash - 1)
+            end if
+            call registry_config_path(registry_config, ierr)
+            if (ierr /= 0) then
+                ok = .false.
+                return
+            end if
+            n_roots = n_roots + 1
+            roots(n_roots) = trim(registry_config)
         end do
     end subroutine collect_stamp_roots
 
@@ -859,7 +682,7 @@ contains
         allow_cache = .true.
         if (present(use_cache)) allow_cache = use_cache
         if (.not. allow_cache) return
-        allocate (roots(3 * MAX_RESOLVED))
+        allocate (roots(8 * MAX_RESOLVED))
         call collect_stamp_roots(project_dir, roots, n_roots, ok)
         if (.not. ok) return
         stamp_flags = flags
@@ -1455,214 +1278,36 @@ contains
         type(resolved_src_t), allocatable :: deps(:)
         type(resolved_src_t) :: devs(MAX_RESOLVED)
         type(fpm_config_t), allocatable :: dep_config
-        integer :: i, n_deps, n_devs, n_unresolved, n_registry, ierr
-        integer :: n_obj_seen
-        character(len=512), allocatable :: obj_basenames(:)
-        logical :: native_sources
+        integer :: i, n_deps, n_devs, n_unresolved, ierr
 
         n_dep_includes = 0
         n_dep_objs = 0
-        n_obj_seen = 0
-        allocate (deps(MAX_RESOLVED), obj_basenames(MAX_DEP_OBJS))
+        allocate (deps(MAX_RESOLVED))
         call fpm_config_allocate(dep_config)
-        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr, &
-            n_registry)
+        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
         if (ierr /= 0) return
-        ! Native source resolution covers path and acquired external deps.
-        ! Registry dependencies still require artifacts produced by FPM.
-        native_sources = n_registry == 0
         call resolve_dev_dep_srcs(project_dir, devs, n_devs, ierr)
         if (ierr /= 0) n_devs = 0
 
-        if (native_sources) then
-            call collect_external_module_dirs(config%external_modules, &
-                config%n_external_modules, dep_includes, n_dep_includes, &
-                MAX_DEP_DIRS)
-            do i = 1, n_deps
-                call fpm_config_parse(deps(i)%dir, dep_config, ierr)
-                if (ierr /= 0) cycle
-                call collect_external_module_dirs(dep_config%external_modules, &
-                    dep_config%n_external_modules, dep_includes, &
-                    n_dep_includes, MAX_DEP_DIRS)
-            end do
-            do i = 1, n_devs
-                call fpm_config_parse(devs(i)%dir, dep_config, ierr)
-                if (ierr /= 0) cycle
-                call collect_external_module_dirs(dep_config%external_modules, &
-                    dep_config%n_external_modules, dep_includes, &
-                    n_dep_includes, MAX_DEP_DIRS)
-            end do
-            return
-        end if
-
-        call collect_dep_artifacts(project_dir, config, dep_includes, &
-            n_dep_includes, dep_objs, n_dep_objs, obj_basenames, n_obj_seen)
+        call collect_external_module_dirs(config%external_modules, &
+            config%n_external_modules, dep_includes, n_dep_includes, &
+            MAX_DEP_DIRS)
         do i = 1, n_deps
             call fpm_config_parse(deps(i)%dir, dep_config, ierr)
             if (ierr /= 0) cycle
-            call collect_dep_artifacts(deps(i)%dir, dep_config, dep_includes, &
-                n_dep_includes, dep_objs, n_dep_objs, obj_basenames, n_obj_seen)
+            call collect_external_module_dirs(dep_config%external_modules, &
+                dep_config%n_external_modules, dep_includes, &
+                n_dep_includes, MAX_DEP_DIRS)
+        end do
+        do i = 1, n_devs
+            call fpm_config_parse(devs(i)%dir, dep_config, ierr)
+            if (ierr /= 0) cycle
+            call collect_external_module_dirs(dep_config%external_modules, &
+                dep_config%n_external_modules, dep_includes, &
+                n_dep_includes, MAX_DEP_DIRS)
         end do
     end subroutine find_dep_artifacts
 
-    subroutine collect_dep_artifacts(project_dir, config, dep_includes, &
-            n_dep_includes, dep_objs, n_dep_objs, obj_basenames, n_obj_seen)
-        character(len=*), intent(in) :: project_dir
-        type(fpm_config_t), intent(in) :: config
-        character(len=512), intent(inout) :: dep_includes(MAX_DEP_DIRS)
-        integer, intent(inout) :: n_dep_includes
-        character(len=512), intent(inout) :: dep_objs(MAX_DEP_OBJS)
-        integer, intent(inout) :: n_dep_objs
-        character(len=512), intent(inout) :: obj_basenames(MAX_DEP_OBJS)
-        integer, intent(inout) :: n_obj_seen
-        character(len=512), allocatable :: found(:)
-        character(len=512) :: found_mod_dirs(MAX_DEP_DIRS)
-        character(len=8) :: suffixes(4)
-        integer :: i, j, n_found, n_found_mod_dirs
-
-        allocate (found(MAX_DEP_OBJS))
-
-        ! Every directory holding a .mod under build/ is an include candidate:
-        ! the project's own gfortran_* profile dir and each dependency's mod
-        ! dir. Replaces grep over compile_commands.json plus find -printf %h.
-        ! fs_collect_mod_dirs replaces its output, so gather privately and append;
-        ! each path dependency must not erase root/external provider directories.
-        call fs_collect_mod_dirs(trim(project_dir)//'/build', found_mod_dirs, &
-            n_found_mod_dirs)
-        call filter_module_dirs_for_compiler(found_mod_dirs, n_found_mod_dirs)
-        call append_module_dirs(found_mod_dirs, n_found_mod_dirs, dep_includes, &
-            n_dep_includes)
-
-        ! Modules the manifest declares as external live outside build/, in a
-        ! system package.  gfortran will not look in /usr/include for them on
-        ! its own, so their directories have to join the include list or the
-        ! compile fails as if the package were not installed at all.
-        call collect_external_module_dirs(config%external_modules, &
-            config%n_external_modules, dep_includes, n_dep_includes, MAX_DEP_DIRS)
-        allow_implicit_typing = config%implicit_typing
-
-        suffixes(1) = '.f90.o'
-        suffixes(2) = '.F90.o'
-        suffixes(3) = '.c.o'
-        suffixes(4) = '.cpp.o'
-        do i = 1, config%n_deps
-            ! A path dependency is compiled natively (Fortran and C) into
-            ! build/fo/obj, so its objects are already linked from src_objs.
-            ! Harvesting the same modules from a coexisting fpm build/gfortran_*
-            ! tree would link every dependency symbol twice. Only git/registry
-            ! deps, bootstrapped through fpm, are collected from that tree.
-            if (dep_kind(config%deps(i)) == DEP_PATH) cycle
-            ! fpm names a dependency's compiled objects from the relative path to
-            ! its source: git deps under build/dependencies become
-            ! build_dependencies_<dep>_src_*, path deps (path = "../dep") become
-            ! .._<dep>_src_*. Both share the _<dep>_src_ infix. Scan every
-            ! compiler-specific profile dir directly and dedup by module identity.
-            do j = 1, size(suffixes)
-                call fs_collect_files(trim(project_dir)//'/build', &
-                    '_'//trim(config%deps(i)%name)//'_src_', &
-                    trim(suffixes(j)), trim(compiler_profile_prefix()), found, &
-                    n_found)
-                call add_dep_objs(found, n_found, dep_objs, n_dep_objs, &
-                    obj_basenames, n_obj_seen)
-            end do
-        end do
-    end subroutine collect_dep_artifacts
-
-    subroutine filter_module_dirs_for_compiler(directories, n_directories)
-        character(len=512), intent(inout) :: directories(:)
-        integer, intent(inout) :: n_directories
-
-        character(len=64) :: compiler_marker
-        integer :: i, kept
-
-        compiler_marker = trim(compiler_profile_prefix())
-        kept = 0
-        do i = 1, n_directories
-            if (index(trim(directories(i)), trim(compiler_marker)) == 0 .and. &
-                index(trim(directories(i)), '/fo/mod') == 0) cycle
-            kept = kept + 1
-            directories(kept) = directories(i)
-        end do
-        n_directories = kept
-    end subroutine filter_module_dirs_for_compiler
-
-    subroutine append_module_dirs(found, n_found, directories, n_directories)
-        character(len=512), intent(in) :: found(:)
-        integer, intent(in) :: n_found
-        character(len=512), intent(inout) :: directories(MAX_DEP_DIRS)
-        integer, intent(inout) :: n_directories
-
-        integer :: i, j
-        logical :: duplicate
-
-        do i = 1, n_found
-            if (len_trim(found(i)) == 0) cycle
-            duplicate = .false.
-            do j = 1, n_directories
-                if (trim(directories(j)) /= trim(found(i))) cycle
-                duplicate = .true.
-                exit
-            end do
-            if (duplicate) cycle
-            if (n_directories >= MAX_DEP_DIRS) exit
-            n_directories = n_directories + 1
-            directories(n_directories) = found(i)
-        end do
-    end subroutine append_module_dirs
-
-    function compiler_profile_prefix() result(prefix)
-        !! Compiler-family token in an fpm profile directory.  fpm may wrap
-        !! the family in a target triple and append a version, for example
-        !! x86_64-linux-gnu-gfortran-14_<hash>, so neither a leading slash nor
-        !! a trailing underscore is part of the stable match.
-        character(len=32) :: prefix
-        type(compiler_dialect_t) :: dialect
-
-        dialect = compiler_dialect(fc_command())
-        select case (dialect%kind)
-        case (COMPILER_NVFORTRAN)
-            prefix = 'nvfortran'
-        case (COMPILER_IFX)
-            prefix = 'ifx'
-        case (COMPILER_FLANG)
-            prefix = 'flang'
-        case default
-            prefix = 'gfortran'
-        end select
-    end function compiler_profile_prefix
-
-    subroutine add_dep_objs(found, n_found, dep_objs, n_dep_objs, &
-            obj_basenames, n_obj_seen)
-        !! Append collected dependency library objects to dep_objs,
-        !! deduplicating by module identity so the same module built under
-        !! different prefixes or profiles links once. find_dep_artifacts only
-        !! collects objects carrying the dependency's '_<dep>_src_' library
-        !! marker, so fpm's app/test objects (named '_<dep>_app_' / '_<dep>_test_')
-        !! never reach here and need no filtering.
-        character(len=512), intent(in) :: found(:)
-        integer, intent(in) :: n_found
-        character(len=512), intent(inout) :: dep_objs(MAX_DEP_OBJS)
-        integer, intent(inout) :: n_dep_objs
-        character(len=512), intent(inout) :: obj_basenames(MAX_DEP_OBJS)
-        integer, intent(inout) :: n_obj_seen
-        character(len=512) :: line, obj_key, base
-        integer :: k, slash
-
-        do k = 1, n_found
-            line = found(k)
-            if (len_trim(line) == 0) cycle
-            slash = index(trim(line), '/', back=.true.)
-            base = line(slash + 1:)
-            obj_key = dep_object_module_key(base)
-            if (any(obj_basenames(1:n_obj_seen) == obj_key)) cycle
-            if (n_dep_objs < MAX_DEP_OBJS) then
-                n_dep_objs = n_dep_objs + 1
-                dep_objs(n_dep_objs) = trim(line)
-                n_obj_seen = n_obj_seen + 1
-                obj_basenames(n_obj_seen) = obj_key
-            end if
-        end do
-    end subroutine add_dep_objs
 
     function dep_object_module_key(basename) result(key)
         !! Reduce an fpm dependency object basename to its module identity by
@@ -1782,8 +1427,7 @@ contains
 
         ! Fold path dependencies and any missing external-dependency module
         ! providers into the same source-ordered native DAG.
-        call add_dep_sources(project_dir, all_units, n_all, deps, n_deps_resolved, &
-            dep_includes, n_dep_includes, dep_objs, n_dep_objs)
+        call add_dep_sources(project_dir, all_units, n_all, deps, n_deps_resolved)
 
         call build_dag_from_units(all_units, n_all, dag, filenames, is_test_arr, is_prog)
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
@@ -2149,8 +1793,7 @@ contains
     end subroutine append_compile_failure_source
 
 
-    subroutine add_dep_sources(project_dir, all_units, n_all, deps, n_deps, &
-            dep_includes, n_dep_includes, dep_objs, n_dep_objs)
+    subroutine add_dep_sources(project_dir, all_units, n_all, deps, n_deps)
         !! Scan every transitive path-dependency's library source dir and append
         !! its module units to all_units. Program units in a dep are skipped: a
         !! dependency contributes a library, never an executable of ours. The
@@ -2163,11 +1806,6 @@ contains
         integer, intent(inout) :: n_all
         type(resolved_src_t), intent(out) :: deps(MAX_RESOLVED)
         integer, intent(out) :: n_deps
-        character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
-        integer, intent(in) :: n_dep_includes
-        character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
-        integer, intent(in) :: n_dep_objs
-
         type(scan_unit_t), allocatable :: ud(:), grown(:)
         integer :: n_unres, ierr, d, j, nu, old_n
 
@@ -2188,71 +1826,9 @@ contains
             end do
             call move_alloc(grown, all_units)
         end do
-        call add_missing_external_dep_sources(project_dir, all_units, n_all, &
-            dep_includes, n_dep_includes, dep_objs, n_dep_objs)
     end subroutine add_dep_sources
 
-    subroutine add_missing_external_dep_sources(project_dir, units, n_units, &
-            dep_includes, n_dep_includes, dep_objs, n_dep_objs)
-        !! Repair a partial fpm dependency profile without compiling the entire
-        !! external dependency closure. Scan direct acquired dependency sources,
-        !! then append only providers required by an existing unit for which the
-        !! module interface or provider object is absent. Repeat to include the
-        !! missing providers' dependencies as well.
-        character(len=*), intent(in) :: project_dir
-        type(scan_unit_t), allocatable, intent(inout) :: units(:)
-        integer, intent(inout) :: n_units
-        character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
-        integer, intent(in) :: n_dep_includes
-        character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
-        integer, intent(in) :: n_dep_objs
 
-        type(fpm_config_t), allocatable :: config, dep_config
-        type(scan_unit_t), allocatable :: candidates(:), scanned(:)
-        character(len=512) :: dep_dir, src_dir, modpath
-        integer :: ierr, i, j, k, n_candidates, n_scanned, old_n
-        logical :: found, added
-
-        call fpm_config_allocate(config)
-        call fpm_config_allocate(dep_config)
-        allocate (candidates(0))
-        n_candidates = 0
-        call fpm_config_parse(project_dir, config, ierr)
-        if (ierr /= 0) return
-        do i = 1, config%n_deps
-            if (dep_kind(config%deps(i)) == DEP_PATH) cycle
-            dep_dir = trim(project_dir)//'/build/dependencies/'// &
-                trim(config%deps(i)%name)
-            call fpm_config_parse(dep_dir, dep_config, ierr)
-            if (ierr /= 0) cycle
-            src_dir = trim(dep_dir)//'/'//trim(dep_config%source_dir)
-            call scan_dir_regex(src_dir, scanned, n_scanned, ierr)
-            if (ierr /= 0) cycle
-            call append_module_units(candidates, n_candidates, scanned, n_scanned)
-        end do
-
-        do
-            added = .false.
-            old_n = n_units
-            do i = 1, old_n
-                do j = 1, units(i)%n_deps
-                    if (unit_set_defines_module(units, n_units, units(i)%deps(j))) cycle
-                    call find_dep_mod_file(units(i)%deps(j), dep_includes, &
-                        n_dep_includes, modpath, found)
-                    do k = 1, n_candidates
-                        if (trim(candidates(k)%module_name) /= &
-                            trim(units(i)%deps(j))) cycle
-                        if (found .and. dep_provider_object_exists( &
-                            candidates(k)%filename, dep_objs, n_dep_objs)) exit
-                        call append_module_unit(units, n_units, candidates(k))
-                        added = .true.
-                        exit
-                    end do
-                end do
-            end do
-            if (.not. added) exit
-        end do
-    end subroutine add_missing_external_dep_sources
 
     logical function dep_provider_object_exists(source, dep_objs, n_dep_objs) &
             result(found)
@@ -4271,8 +3847,7 @@ contains
                 all_units(n_all) = units(i)
             end do
         end if
-        call add_dep_sources(project_dir, all_units, n_all, deps, n_deps, &
-            dep_includes, n_dep_includes, dep_objs, n_dep_objs)
+        call add_dep_sources(project_dir, all_units, n_all, deps, n_deps)
 
         if (n_all > 0) then
             allocate (filenames(MAX_NODES), is_prog(MAX_NODES), &

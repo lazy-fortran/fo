@@ -16,7 +16,8 @@ module fo_dep_update
     !! remain, which is the silent case the build must never accept.
     use fo_fpm_config, only: fpm_config_t, fpm_dep_t, fpm_config_parse, &
         fpm_config_allocate, &
-        dep_kind, DEP_PATH, DEP_GIT
+        dep_kind, DEP_PATH, DEP_GIT, DEP_REGISTRY
+    use fo_registry, only: registry_resolve
     use fo_fs, only: fs_remove_tree, fs_remove_file, fs_stat, fs_make_dir, &
         fs_rename, fs_write_text, &
         fs_collect_git_checkouts, fs_mkdir_excl, fs_sleep_ms
@@ -31,7 +32,7 @@ module fo_dep_update
 
     public :: dep_update_run
     public :: dep_update_missing_sources
-    public :: dep_acquire_missing_git
+    public :: dep_acquire_sources
     public :: MAX_UPDATE_NAMES
 
     integer, parameter :: MAX_UPDATE_NAMES = 64
@@ -40,8 +41,8 @@ module fo_dep_update
 
 contains
 
-    subroutine dep_acquire_missing_git(project_dir, ierr)
-        !! Acquire missing Git dependencies without invoking FPM.
+    subroutine dep_acquire_sources(project_dir, ierr)
+        !! Acquire missing Git sources and validate local registry closure natively.
         !! Root test dependencies are included; dependencies' own dev edges
         !! are intentionally excluded from the consumer closure.
         character(len=*), intent(in) :: project_dir
@@ -56,7 +57,7 @@ contains
         n_visited = 0
         ierr = 0
         call acquire_package(root, root, .true., visited, n_visited, 0, ierr)
-    end subroutine dep_acquire_missing_git
+    end subroutine dep_acquire_sources
 
     recursive subroutine acquire_package(package_dir, root, include_dev, &
             visited, n_visited, depth, ierr)
@@ -74,7 +75,7 @@ contains
         ierr = 0
         if (depth > 64 .or. n_visited >= size(visited)) then
             write (error_unit, '(a)') &
-                'fo: Git dependency closure exceeds supported depth or size'
+                'fo: dependency closure exceeds supported depth or size'
             ierr = 1
             return
         end if
@@ -113,9 +114,23 @@ contains
         integer, intent(in) :: depth
         integer, intent(out) :: ierr
 
-        character(len=512) :: dep_dir
+        character(len=512) :: dep_dir, root_key
+        type(fpm_config_t), allocatable :: root_config
+        integer :: i
 
         ierr = 0
+        if (trim(package_dir) /= trim(root)) then
+            call fpm_config_allocate(root_config)
+            call fpm_config_parse(root, root_config, ierr)
+            if (ierr /= 0) return
+            do i = 1, root_config%n_deps
+                if (trim(root_config%deps(i)%name) /= trim(dep%name)) cycle
+                root_key = trim(root_config%name)//'@'//trim(root_config%version)
+                call acquire_edge(root_config%deps(i), root, root, root_key, &
+                    visited, n_visited, depth, ierr)
+                return
+            end do
+        end if
         select case (dep_kind(dep))
         case (DEP_PATH)
             call join_path(package_dir, trim(dep%path), dep_dir)
@@ -130,6 +145,11 @@ contains
             end if
             dep_dir = trim(root)//'/build/dependencies/'//trim(dep%name)
             call acquire_git_checkout(dep, package_dir, package_key, dep_dir, ierr)
+            if (ierr /= 0) return
+            call acquire_package(trim(dep_dir), root, .false., visited, &
+                n_visited, depth + 1, ierr)
+        case (DEP_REGISTRY)
+            call registry_resolve(dep, root, dep_dir, ierr)
             if (ierr /= 0) return
             call acquire_package(trim(dep_dir), root, .false., visited, &
                 n_visited, depth + 1, ierr)

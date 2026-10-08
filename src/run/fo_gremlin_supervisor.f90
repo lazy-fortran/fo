@@ -1252,6 +1252,7 @@ contains
         execution_env = 'FO_BIN='//trim(executable)//';FO='//trim(executable)//';'// &
             'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
             'FO_GREMLIN_EXECUTION_CWD='//trim(execution_view%cwd)//';'// &
+            'FO_GREMLIN_FROZEN_ROOT='//trim(execution_view%cwd)//';'// &
             'TMPDIR='//trim(execution_view%tmpdir)
         call process_start_argv_logged(trim(build_view%cwd), packed, n_args, &
             trim(log_file), owner_pid, spawn_exit, &
@@ -2226,7 +2227,8 @@ contains
         call argv_push(packed, n_args, 'build')
         call process_start_argv_logged(trim(child%execution_view%cwd), packed, &
             n_args, trim(child%log_file), child%pid, spawn_exit, &
-            'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;TMPDIR='// &
+            'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
+            'FO_GREMLIN_FROZEN_ROOT='//trim(child%execution_view%cwd)//';TMPDIR='// &
             trim(child%execution_view%tmpdir))
         ierr = spawn_exit
         if (ierr /= 0) then
@@ -3121,6 +3123,7 @@ contains
         execution_env = 'FO_BIN='//trim(executable)//';FO='//trim(executable)//';'// &
             'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
             'FO_GREMLIN_EXECUTION_CWD='//trim(child%execution_view%cwd)//';'// &
+            'FO_GREMLIN_FROZEN_ROOT='//trim(child%execution_view%cwd)//';'// &
             'TMPDIR='//trim(child%execution_view%tmpdir)
         n_args = 0
         call argv_push(packed, n_args, trim(executable))

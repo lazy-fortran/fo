@@ -7,6 +7,7 @@ module fo_fpm_config
     public :: fpm_dep_t, fpm_exe_t, fpm_config_t
     public :: fpm_config_init, fpm_config_parse, fpm_config_allocate
     public :: dep_kind, DEP_PATH, DEP_GIT, DEP_REGISTRY
+    public :: valid_registry_version
     public :: manifest_exe_name, manifest_test_name, manifest_example_name
     public :: manifest_executable_selected
     public :: manifest_test_args
@@ -33,6 +34,7 @@ module fo_fpm_config
     type :: fpm_dep_t
         character(len=256) :: name = ''
         character(len=256) :: namespace = ''
+        character(len=128) :: unsupported_field = ''
         character(len=512) :: git = ''
         character(len=128) :: branch = ''
         character(len=128) :: tag = ''
@@ -222,6 +224,11 @@ contains
             if (allocated(c%deps(i)%rev)) deallocate (c%deps(i)%rev)
             c%deps(i)%path = ''
             c%deps(i)%version = '*'
+            c%deps(i)%namespace = ''
+            c%deps(i)%unsupported_field = ''
+            c%deps(i)%registry_v = ''
+            c%deps(i)%namespace_seen = .false.
+            c%deps(i)%registry_v_seen = .false.
             c%deps(i)%path_seen = .false.
             c%deps(i)%git_seen = .false.
             c%deps(i)%branch_seen = .false.
@@ -236,6 +243,11 @@ contains
             if (allocated(c%dev_deps(i)%rev)) deallocate (c%dev_deps(i)%rev)
             c%dev_deps(i)%path = ''
             c%dev_deps(i)%version = '*'
+            c%dev_deps(i)%namespace = ''
+            c%dev_deps(i)%unsupported_field = ''
+            c%dev_deps(i)%registry_v = ''
+            c%dev_deps(i)%namespace_seen = .false.
+            c%dev_deps(i)%registry_v_seen = .false.
             c%dev_deps(i)%path_seen = .false.
             c%dev_deps(i)%git_seen = .false.
             c%dev_deps(i)%branch_seen = .false.
@@ -468,7 +480,13 @@ contains
         if (dep%branch_seen) selectors = selectors + 1
         if (dep%tag_seen) selectors = selectors + 1
         if (dep%rev_seen) selectors = selectors + 1
-        if (dep%path_seen .and. dep%git_seen) then
+        if (len_trim(dep%unsupported_field) > 0) then
+            error = '['//section//'] dependency "'//trim(dep%name)// &
+                '" has unsupported dependency field '//trim(dep%unsupported_field)
+        else if (dep%namespace_seen .and. (dep%path_seen .or. dep%git_seen)) then
+            error = '['//section//'] dependency "'//trim(dep%name)// &
+                '" cannot have namespace with path or git'
+        else if (dep%path_seen .and. dep%git_seen) then
             error = '['//section//'] dependency "'//trim(dep%name)// &
                 '" cannot have both path and git'
         else if (selectors > 1) then
@@ -481,12 +499,28 @@ contains
                 (dep%path_seen .or. dep%git_seen)) then
             error = '['//section//'] dependency "'//trim(dep%name)// &
                 '" cannot have v with path or git'
+        else if (.not. dep%path_seen .and. .not. dep%git_seen .and. &
+                len_trim(dep%namespace) == 0) then
+            error = '['//section//'] dependency "'//trim(dep%name)// &
+                '" requires namespace for registry resolution'
         else if (dep%registry_v_seen .and. &
                 .not. valid_registry_version(trim(dep%registry_v))) then
             error = '['//section//'] dependency "'//trim(dep%name)// &
                 '" has invalid registry v: "'//trim(dep%registry_v)//'"'
         end if
     end subroutine validate_dependency
+
+    pure logical function quoted_dependency_value(value)
+        character(len=*), intent(in) :: value
+        character(len=len(value)) :: stripped
+        integer :: n
+        stripped = adjustl(value)
+        n = len_trim(stripped)
+        quoted_dependency_value = .false.
+        if (n < 2) return
+        if (stripped(1:1) /= '"' .and. stripped(1:1) /= "'") return
+        quoted_dependency_value = stripped(n:n) == stripped(1:1)
+    end function quoted_dependency_value
 
     pure logical function valid_registry_version(value)
         character(len=*), intent(in) :: value
@@ -540,6 +574,11 @@ contains
     subroutine parse_dependency_entry(key, val, config)
         character(len=*), intent(in) :: key, val
         type(fpm_config_t), intent(inout) :: config
+
+        if (trim(val) /= '"*"' .and. trim(val) /= "'*'") then
+            call parse_dep_entry(key, val, config%deps, config%n_deps)
+            return
+        end if
 
         select case (trim(key))
         case ('openmp')
@@ -821,9 +860,19 @@ contains
         case ('namespace')
             deps(found)%namespace_seen = .true.
             deps(found)%namespace = trim(str_val)
+            if (.not. quoted_dependency_value(val)) &
+                deps(found)%unsupported_field = 'unquoted registry identity'
+            if (len_trim(str_val) > len(deps(found)%namespace)) &
+                deps(found)%unsupported_field = 'oversized registry identity'
         case ('v')
             deps(found)%registry_v_seen = .true.
             deps(found)%registry_v = trim(str_val)
+            if (.not. quoted_dependency_value(val)) &
+                deps(found)%unsupported_field = 'unquoted registry identity'
+            if (len_trim(str_val) > len(deps(found)%registry_v)) &
+                deps(found)%unsupported_field = 'oversized registry identity'
+        case default
+            deps(found)%unsupported_field = trim(field)
         end select
     end subroutine parse_dep_entry
 
@@ -869,9 +918,19 @@ contains
                 case ('namespace')
                     dep%namespace_seen = .true.
                     dep%namespace = trim(str_val)
+                    if (.not. quoted_dependency_value(ivals(i))) &
+                        dep%unsupported_field = 'unquoted registry identity'
+                    if (len_trim(str_val) > len(dep%namespace)) &
+                        dep%unsupported_field = 'oversized registry identity'
                 case ('v')
                     dep%registry_v_seen = .true.
                     dep%registry_v = trim(str_val)
+                    if (.not. quoted_dependency_value(ivals(i))) &
+                        dep%unsupported_field = 'unquoted registry identity'
+                    if (len_trim(str_val) > len(dep%registry_v)) &
+                        dep%unsupported_field = 'oversized registry identity'
+                case default
+                    dep%unsupported_field = trim(ikeys(i))
                 end select
             end do
         else

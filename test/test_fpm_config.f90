@@ -316,6 +316,18 @@ contains
                 c%deps(3)%registry_v_seen, 'registry_fields: inline namespace/v')
         end if
 
+        open (newunit=u, file=trim(dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "reset_registry"'
+        write (u, '(a)') '[dependencies]'
+        write (u, '(a)') 'local = { path = "dependency" }'
+        close (u)
+        call fpm_config_parse(trim(dir), c, ierr)
+        call assert(ierr == 0, 'registry_fields: reparse a path dependency')
+        call assert(.not. c%deps(1)%namespace_seen .and. &
+            .not. c%deps(1)%registry_v_seen, 'registry_fields: selection flags reset')
+        call assert(trim(c%deps(1)%namespace) == '' .and. &
+            trim(c%deps(1)%registry_v) == '', 'registry_fields: selection strings reset')
+
         open (newunit=u, file=trim(dir)//'/fpm.toml', status='replace', &
             iostat=ios)
         write (u, '(a)') '[dependencies]'

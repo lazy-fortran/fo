@@ -4,10 +4,12 @@ module fo_input_inventory
         c_long_long
     use fo_cache, only: HASH_LEN, cache_digest
     use fx_immutable_store, only: immutable_store_hash_file, IMMUTABLE_OK
-    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_exe_t, &
-        fpm_input_t, dep_kind, DEP_PATH
-    use fo_dep_resolve, only: normalize_path, resolved_src_t, &
+    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_config_allocate, &
+        fpm_exe_t, &
+        fpm_input_t, dep_kind, DEP_PATH, DEP_GIT, DEP_REGISTRY
+    use fo_dep_resolve, only: normalize_path, join_path, resolved_src_t, &
         resolve_dev_dep_srcs, MAX_RESOLVED
+    use fo_registry, only: registry_resolve, registry_config_path
     use fo_fs, only: fs_identity
     use fo_util, only: make_tmpfile, delete_tmpfile
     use fx_action_result_store, only: action_result_file_mode, ACTION_RESULT_OK
@@ -154,6 +156,11 @@ contains
             if (dep_kind(config%deps(i)) == DEP_PATH) cycle
             dependency_root = trim(project_root)//'/build/dependencies/'// &
                 trim(config%deps(i)%name)
+            if (dep_kind(config%deps(i)) == DEP_REGISTRY) then
+                call registry_source(config%deps(i), project_root, dependency_root, &
+                    inventory, ierr, message)
+                if (ierr /= 0) return
+            end if
             if (alias_root(inventory, 'dependency:'// &
                     trim(config%deps(i)%name)) /= 0) cycle
             call discover_acquired_dependency(trim(dependency_root), &
@@ -469,6 +476,11 @@ contains
             ! FPM acquires transitive Git packages in the root's flat tree.
             child_root = trim(acquisition_root)//'/build/dependencies/'// &
                 trim(config%deps(i)%name)
+            if (dep_kind(config%deps(i)) == DEP_REGISTRY) then
+                call registry_source(config%deps(i), acquisition_root, child_root, &
+                    inventory, ierr, message)
+                if (ierr /= 0) return
+            end if
             child_alias = trim(alias)//'/dependency:'//trim(config%deps(i)%name)
             child_bundle = trim(acquisition_bundle)//'/build/dependencies/'// &
                 trim(config%deps(i)%name)
@@ -684,6 +696,11 @@ contains
             if (dep_kind(config%deps(i)) == DEP_PATH) cycle
             child_root = trim(acquisition_root)//'/build/dependencies/'// &
                 trim(config%deps(i)%name)
+            if (dep_kind(config%deps(i)) == DEP_REGISTRY) then
+                call registry_source(config%deps(i), acquisition_root, child_root, &
+                    inventory, ierr, message)
+                if (ierr /= 0) return
+            end if
             child_alias = trim(alias)//'/dependency:'//trim(config%deps(i)%name)
             child_bundle = trim(acquisition_bundle)//'/build/dependencies/'// &
                 trim(config%deps(i)%name)
@@ -695,6 +712,56 @@ contains
         ierr = 0
     end subroutine discover_path_dependency
 
+    subroutine registry_source(dep, project_root, directory, inventory, ierr, message)
+        use fo_fpm_config, only: fpm_dep_t
+        type(fpm_dep_t), intent(in) :: dep
+        character(len=*), intent(in) :: project_root
+        character(len=:), allocatable, intent(inout) :: directory
+        type(input_inventory_t), intent(inout) :: inventory
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=PATH_LEN) :: source, config_path
+        integer :: slash, root_index, i
+        type(fpm_config_t), allocatable :: root_config
+        logical :: exists, selected
+
+        call fpm_config_allocate(root_config)
+        call fpm_config_parse(project_root, root_config, ierr)
+        if (ierr /= 0) return
+        selected = .false.
+        do i = 1, root_config%n_deps
+            if (trim(root_config%deps(i)%name) /= trim(dep%name)) cycle
+            selected = .true.
+            select case (dep_kind(root_config%deps(i)))
+            case (DEP_PATH)
+                call join_path(project_root, root_config%deps(i)%path, source)
+            case (DEP_GIT)
+                source = trim(project_root)//'/build/dependencies/'//trim(dep%name)
+            case (DEP_REGISTRY)
+                call registry_resolve(root_config%deps(i), project_root, source, ierr)
+            end select
+            exit
+        end do
+        if (.not. selected) call registry_resolve(dep, project_root, source, ierr)
+        if (ierr /= 0) then
+            message = 'cannot resolve registry dependency '//trim(dep%name)
+            return
+        end if
+        directory = trim(source)
+        call registry_config_path(config_path, ierr)
+        if (ierr /= 0) return
+        inquire(file=trim(config_path), exist=exists)
+        if (.not. exists) return
+        if (alias_root(inventory, 'registry-config') /= 0) return
+        slash = index(trim(config_path), '/', back=.true.)
+        call add_root(inventory, 'registry-config', config_path(:slash - 1), &
+            root_index, ierr, message, 'registry-config')
+        if (ierr /= 0) return
+        call add_file_entry(inventory, root_index, 'registry-config', &
+            trim(config_path(slash + 1:)), &
+            'registry-configuration', .false., ierr, message)
+    end subroutine registry_source
+
     subroutine mark_unmodeled_config(config, alias, inventory, resolved_root)
         type(fpm_config_t), intent(in) :: config
         character(len=*), intent(in) :: alias
@@ -705,6 +772,7 @@ contains
 
         do i = 1, config%n_deps
             if (dep_kind(config%deps(i)) == DEP_PATH) cycle
+            if (dep_kind(config%deps(i)) == DEP_REGISTRY) cycle
             acquired = .false.
             if (present(resolved_root)) then
                 inquire(file=trim(resolved_root)//'/build/dependencies/'// &
@@ -714,15 +782,6 @@ contains
             call mark_incomplete(inventory, trim(alias)//' dependency '// &
                 trim(config%deps(i)%name)// &
                 ' is not available in the existing acquired-dependency tree')
-        end do
-        do i = 1, config%n_dev_deps
-            if (dep_kind(config%dev_deps(i)) == DEP_PATH) cycle
-            if (trim(alias) == 'project') then
-                cycle
-            end if
-            call mark_incomplete(inventory, trim(alias)//' dev-dependency '// &
-                trim(config%dev_deps(i)%name)// &
-                ' is not included in this package execution closure')
         end do
         if (config%n_external_modules > 0) then
             call mark_incomplete(inventory, trim(alias)// &

@@ -2,17 +2,17 @@ module fo_gremlin_context
     use, intrinsic :: iso_fortran_env, only: int64
     use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_cache, only: HASH_LEN, cache_digest
-    use fo_fpm_config, only: DEP_PATH, fpm_config_t, fpm_config_parse, dep_kind
-    use fo_dep_update, only: dep_acquire_missing_git
+    use fo_fpm_config, only: DEP_PATH, DEP_REGISTRY, fpm_config_t, fpm_config_parse, dep_kind
+    use fo_dep_update, only: dep_acquire_sources
     use fo_dep_resolve, only: normalize_path, resolve_dev_dep_srcs, &
-        resolved_src_t, MAX_RESOLVED
+        resolved_src_t, resolve_dep_srcs, MAX_RESOLVED
     use fo_gremlin_generation, only: generation_context_t, generation_input_t, &
         generation_t, generation_capture, generation_load_inventory
     use fo_driver, only: driver_pin_t
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, input_inventory_declarations_from_config
     use fo_gremlin_state, only: gremlin_generation_register_lease_at, gremlin_lease_t
-    use fo_change_watch, only: change_watch_t, change_watch_add_context
+    use fo_change_watch, only: change_watch_t, change_watch_add_context, change_watch_add_root
     use fo_process, only: argv_push, process_cancel_pid, process_poll_pid, &
         process_start_argv_logged
     use fo_util, only: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, read_text_file
@@ -46,9 +46,9 @@ contains
         integer :: ierr
 
         registration_error = 0
-        call dep_acquire_missing_git(project_dir, ierr)
+        call dep_acquire_sources(project_dir, ierr)
         if (ierr /= 0) then
-            message = 'cannot resolve declared Git dependencies before capture'
+            message = 'cannot resolve declared dependencies before capture'
             registration_error = ierr
             ok = .false.
             return
@@ -86,6 +86,15 @@ contains
                 return
             end if
         end if
+        if (present(change_watch)) then
+            call watch_registry_versions(change_watch, project_dir, ierr, watch_message)
+            if (ierr /= 0) then
+                ok = .false.
+                registration_error = ierr
+                message = trim(watch_message)
+                return
+            end if
+        end if
         call common_generation_cas_root(cas_root, ierr, message)
         if (ierr /= 0) then
             ok = .false.
@@ -106,6 +115,37 @@ contains
         change_watch%capture_count = change_watch%capture_count + 1
         call observe_test_capture(change_watch%capture_count, generation%identity)
     end subroutine capture_candidate
+
+    subroutine watch_registry_versions(watch, project_dir, ierr, message)
+        type(change_watch_t), intent(inout) :: watch
+        character(len=*), intent(in) :: project_dir
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(resolved_src_t), allocatable :: deps(:), devs(:)
+        integer :: i, slash, n_deps, n_devs, n_unresolved
+        character(len=PATH_LEN) :: root
+
+        ierr = 0
+        message = ''
+        allocate (deps(MAX_RESOLVED), devs(MAX_RESOLVED))
+        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
+        if (ierr /= 0) return
+        call resolve_dev_dep_srcs(project_dir, devs, n_devs, ierr)
+        if (ierr /= 0) return
+        do i = 1, n_deps + n_devs
+            if (i <= n_deps) then
+                if (.not. deps(i)%registry_latest) cycle
+                root = deps(i)%dir
+            else
+                if (.not. devs(i - n_deps)%registry_latest) cycle
+                root = devs(i - n_deps)%dir
+            end if
+            slash = index(trim(root), '/', back=.true.)
+            if (slash <= 1) cycle
+            call change_watch_add_root(watch, root(:slash - 1), ierr, message)
+            if (ierr /= 0) return
+        end do
+    end subroutine watch_registry_versions
 
     subroutine generation_inventory_restore(generation, ierr, message)
         !! Recovery restores only the canonical inventory captured in the
@@ -232,6 +272,7 @@ contains
         type(fpm_config_t), allocatable :: config
         type(generation_input_t), allocatable :: inputs(:)
         type(resolved_src_t) :: resolved_dev_deps(MAX_RESOLVED)
+        type(resolved_src_t) :: resolved_deps(MAX_RESOLVED)
         character(len=PATH_LEN) :: compiler_path, command_path
         character(len=:), allocatable :: packed
         character(len=PATH_LEN) :: log_file, output_line
@@ -241,6 +282,7 @@ contains
         integer(c_long_long) :: tree_sum, tree_mixed, tree_count
         type(generation_input_t), allocatable :: captured_inputs(:)
         integer :: i, n_inputs, n_args, n_resolved_dev, resolve_status
+        integer :: n_resolved, n_unresolved
         integer :: exitcode, git_exit
         logical :: found, git_found, fingerprint_ok, exists
 
@@ -260,7 +302,10 @@ contains
         call resolve_dev_dep_srcs(project_dir, resolved_dev_deps, &
             n_resolved_dev, resolve_status)
         if (resolve_status /= 0) n_resolved_dev = 0
-        n_inputs = 0
+        call resolve_dep_srcs(project_dir, resolved_deps, n_resolved, &
+            n_unresolved, ierr)
+        if (ierr /= 0) return
+        n_inputs = count(resolved_deps(:n_resolved)%kind == DEP_REGISTRY)
         do i = 1, config%n_deps
             if (dep_kind(config%deps(i)) == DEP_PATH) n_inputs = n_inputs + 1
         end do
@@ -275,6 +320,16 @@ contains
         end do
         allocate (inputs(n_inputs))
         n_inputs = 0
+        do i = 1, n_resolved
+            if (resolved_deps(i)%kind /= DEP_REGISTRY) cycle
+            n_inputs = n_inputs + 1
+            inputs(n_inputs)%label = 'dependency:'//trim(resolved_deps(i)%name)
+            inputs(n_inputs)%source_root = trim(resolved_deps(i)%dir)
+            context%environment = context%environment//'registry:'// &
+                trim(resolved_deps(i)%name)//'='//trim(resolved_deps(i)%dir)//';'
+            inputs(n_inputs)%destination = 'build/dependencies/'// &
+                trim(resolved_deps(i)%name)
+        end do
         do i = 1, config%n_deps
             if (dep_kind(config%deps(i)) /= DEP_PATH) cycle
             call append_path_dependency(project_dir, config%deps(i)%path, &
@@ -301,6 +356,9 @@ contains
             inputs(n_inputs)%label = 'dependency:'// &
                 trim(resolved_dev_deps(i)%name)
             inputs(n_inputs)%source_root = trim(resolved_dev_deps(i)%dir)
+            if (resolved_dev_deps(i)%kind == DEP_REGISTRY) &
+                context%environment = context%environment//'registry-dev:'// &
+                trim(resolved_dev_deps(i)%name)//'='//trim(resolved_dev_deps(i)%dir)//';'
             inputs(n_inputs)%destination = 'build/dependencies/'// &
                 trim(resolved_dev_deps(i)%name)
         end do
@@ -341,6 +399,7 @@ contains
         call append_environment_value(context%environment, 'FFLAGS')
         call append_environment_value(context%environment, 'FPM_FC')
         call append_environment_value(context%environment, 'FPM_FFLAGS')
+        call append_environment_value(context%environment, 'FO_FPM_CONFIG_FILE')
         call append_environment_value(context%environment, 'LIBRARY_PATH')
         call append_environment_value(context%environment, 'OMP_NUM_THREADS')
         call make_tmpfile('fo-gremlin-git-head', log_file)

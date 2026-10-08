@@ -2,13 +2,13 @@ module fo_dep_resolve
     !! Resolve a project's dependency closure to the set of library source
     !! directories fo must compile alongside the project's own sources.
     !!
-    !! Path dependencies and acquired Git dependencies are resolved
-    !! transitively here. FPM stores the flattened Git closure in the root
-    !! build/dependencies directory. Registry sources remain unresolved until
-    !! a provider for FPM's registry cache is available.
-    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, &
+    !! Path, acquired Git, and configured local-registry sources share the
+    !! native closure and compilation route. The root's regular selections
+    !! shadow downstream declarations; downstream dev edges are excluded.
+    use fo_fpm_config, only: fpm_config_t, fpm_dep_t, fpm_config_parse, &
         fpm_config_allocate, dep_kind, &
         DEP_PATH, DEP_GIT, DEP_REGISTRY, add_link_lib
+    use fo_registry, only: registry_resolve
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
     private
@@ -23,36 +23,31 @@ module fo_dep_resolve
         character(len=512) :: dir = '' ! absolute dep root (dedup key)
         character(len=512) :: src_dir = '' ! absolute dir holding library sources
         integer :: kind = DEP_PATH
+        logical :: registry_latest = .false.
     end type resolved_src_t
 
 contains
 
-    subroutine resolve_dep_srcs(project_dir, out, n_out, n_unresolved, ierr, &
-            n_registry_out)
-        !! Collect path deps and acquired Git source dirs for this project.
-        !! Registry deps and missing Git checkouts are counted as unresolved.
+    subroutine resolve_dep_srcs(project_dir, out, n_out, n_unresolved, ierr)
+        !! Collect regular native dependency sources for this project.
+        !! Missing Git checkouts are counted; registry/config errors are explicit.
         !! out excludes the root project's own sources.
         character(len=*), intent(in) :: project_dir
         type(resolved_src_t), intent(out) :: out(MAX_RESOLVED)
         integer, intent(out) :: n_out, n_unresolved, ierr
-        integer, intent(out), optional :: n_registry_out
-        integer :: n_registry
 
         type(fpm_config_t), allocatable :: root_config
         character(len=512) :: root
 
         n_out = 0
         n_unresolved = 0
-        n_registry = 0
         ierr = 0
         call normalize_path(project_dir, root)
         call fpm_config_allocate(root_config)
         call fpm_config_parse(root, root_config, ierr)
         if (ierr /= 0) return
-        call walk(root, out, n_out, n_unresolved, n_registry, ierr, 0, &
+        call walk(root, out, n_out, n_unresolved, ierr, 0, &
             root_config, .true.)
-        if (n_registry > 0) call drop_git_sources(out, n_out)
-        if (present(n_registry_out)) n_registry_out = n_registry
     end subroutine resolve_dep_srcs
 
     subroutine resolve_dev_dep_srcs(project_dir, out, n_out, ierr)
@@ -66,7 +61,7 @@ contains
 
         type(fpm_config_t), allocatable :: cfg
         character(len=512) :: root, dep_dir
-        integer :: i, k, kind, n_unresolved, n_registry
+        integer :: i, k, kind, n_unresolved
         logical :: seen
 
         n_out = 0
@@ -77,11 +72,13 @@ contains
         if (ierr /= 0) return
 
         n_unresolved = 0
-        n_registry = 0
         do i = 1, cfg%n_dev_deps
             kind = dep_kind(cfg%dev_deps(i))
             if (kind == DEP_PATH) then
                 call resolve_path_dep(root, trim(cfg%dev_deps(i)%path), dep_dir)
+            else if (kind == DEP_REGISTRY) then
+                call registry_resolve(cfg%dev_deps(i), root, dep_dir, ierr)
+                if (ierr /= 0) return
             else
                 dep_dir = trim(root)//'/build/dependencies/'// &
                     trim(cfg%dev_deps(i)%name)
@@ -97,7 +94,9 @@ contains
                 call record_dep_src(cfg%dev_deps(i)%name, dep_dir, out, n_out, &
                     kind, ierr)
                 if (ierr /= 0) return
-                call walk(dep_dir, out, n_out, n_unresolved, n_registry, ierr, &
+                if (kind == DEP_REGISTRY) out(n_out)%registry_latest = &
+                    .not. cfg%dev_deps(i)%registry_v_seen
+                call walk(dep_dir, out, n_out, n_unresolved, ierr, &
                     1, cfg, .false.)
                 if (ierr /= 0) return
             end if
@@ -153,7 +152,7 @@ contains
         end do
     end subroutine merge_dep_link_libs
 
-    recursive subroutine walk(dir, out, n_out, n_unresolved, n_registry, &
+    recursive subroutine walk(dir, out, n_out, n_unresolved, &
             ierr, depth, root_config, root_walked)
         !! root_walked is true when the root's own entries are walked as well,
         !! and then they count a missing Git or registry provider. A nested edge
@@ -161,7 +160,7 @@ contains
         !! walk the root's entries, so there the shadowed edge is the one count.
         character(len=*), intent(in) :: dir
         type(resolved_src_t), intent(inout) :: out(MAX_RESOLVED)
-        integer, intent(inout) :: n_out, n_unresolved, n_registry
+        integer, intent(inout) :: n_out, n_unresolved
         integer, intent(out) :: ierr
         integer, intent(in) :: depth
         type(fpm_config_t), intent(in) :: root_config
@@ -170,6 +169,8 @@ contains
         type(fpm_config_t), allocatable :: cfg
         integer :: i, k, kind, root_kind
         character(len=512) :: dep_dir, dep_src
+        character(len=512) :: edge_base
+        type(fpm_dep_t) :: selected
         logical :: seen, shadowed
 
         ierr = 0
@@ -188,37 +189,28 @@ contains
         end if
 
         do i = 1, cfg%n_deps
-            kind = dep_kind(cfg%deps(i))
-            root_kind = kind
+            selected = cfg%deps(i)
+            edge_base = dir
             shadowed = .false.
-            if (kind == DEP_PATH) then
-                ! If the root pins this package through Git, use that
-                ! flattened checkout instead of a second path copy.
+            if (depth > 0) then
                 do k = 1, root_config%n_deps
-                    if (trim(root_config%deps(k)%name) /= &
-                            trim(cfg%deps(i)%name)) cycle
-                    root_kind = dep_kind(root_config%deps(k))
-                    if (root_kind == DEP_PATH) cycle
+                    if (trim(root_config%deps(k)%name) /= trim(selected%name)) cycle
+                    selected = root_config%deps(k)
+                    edge_base = root_config%project_dir
                     shadowed = .true.
                     exit
                 end do
-                if (shadowed) then
-                    if (root_kind /= DEP_GIT) then
-                        if (.not. root_walked) n_unresolved = n_unresolved + 1
-                        cycle
-                    end if
-                    dep_dir = trim(root_config%project_dir)// &
-                        '/build/dependencies/'//trim(cfg%deps(i)%name)
-                else
-                    call resolve_path_dep(dir, trim(cfg%deps(i)%path), dep_dir)
-                end if
+            end if
+            kind = dep_kind(selected)
+            root_kind = kind
+            if (kind == DEP_PATH) then
+                call resolve_path_dep(edge_base, trim(selected%path), dep_dir)
             else if (kind == DEP_GIT) then
                 dep_dir = trim(root_config%project_dir)// &
-                    '/build/dependencies/'//trim(cfg%deps(i)%name)
+                    '/build/dependencies/'//trim(selected%name)
             else
-                n_unresolved = n_unresolved + 1
-                n_registry = n_registry + 1
-                cycle
+                call registry_resolve(selected, root_config%project_dir, dep_dir, ierr)
+                if (ierr /= 0) return
             end if
             if (.not. has_manifest(dep_dir)) then
                 if (root_kind == DEP_GIT) then
@@ -247,29 +239,14 @@ contains
                 call record_dep_src(cfg%deps(i)%name, dep_dir, out, n_out, &
                     root_kind, ierr)
                 if (ierr /= 0) return
-                call walk(dep_dir, out, n_out, n_unresolved, n_registry, &
+                if (kind == DEP_REGISTRY) out(n_out)%registry_latest = &
+                    .not. selected%registry_v_seen
+                call walk(dep_dir, out, n_out, n_unresolved, &
                     ierr, depth + 1, root_config, root_walked)
                 if (ierr /= 0) return
             end if
         end do
     end subroutine walk
-
-    subroutine drop_git_sources(out, n_out)
-        type(resolved_src_t), intent(inout) :: out(MAX_RESOLVED)
-        integer, intent(inout) :: n_out
-
-        type(resolved_src_t) :: kept(MAX_RESOLVED)
-        integer :: i, n_kept
-
-        n_kept = 0
-        do i = 1, n_out
-            if (out(i)%kind == DEP_GIT) cycle
-            n_kept = n_kept + 1
-            kept(n_kept) = out(i)
-        end do
-        out = kept
-        n_out = n_kept
-    end subroutine drop_git_sources
 
     subroutine record_dep_src(name, dep_dir, out, n_out, kind, ierr)
         character(len=*), intent(in) :: name, dep_dir
