@@ -1681,16 +1681,26 @@ contains
         character(len=*), intent(inout) :: line
 
         integer :: i
-        logical :: in_str
+        character :: quote
 
-        in_str = .false.
-        do i = 1, len_trim(line)
-            if (line(i:i) == '"') then
-                in_str = .not. in_str
-            else if (line(i:i) == '#' .and. .not. in_str) then
-                line(i:) = ' '
-                return
+        quote = achar(0)
+        i = 1
+        do while (i <= len_trim(line))
+            if (quote == achar(0)) then
+                select case (line(i:i))
+                case ('"', "'")
+                    quote = line(i:i)
+                case ('#')
+                    line(i:) = ' '
+                    return
+                end select
+            else if (quote == '"' .and. line(i:i) == achar(92)) then
+                ! Basic-string escapes do not end the surrounding string.
+                i = i + 1
+            else if (line(i:i) == quote) then
+                quote = achar(0)
             end if
+            i = i + 1
         end do
     end subroutine strip_comment
 
@@ -1737,9 +1747,12 @@ contains
         character(len=*), intent(in) :: raw_val
         character(len=*), intent(out) :: str_val
 
-        integer :: q1, q2, n
+        integer :: q2, n
+        character(len=len(raw_val)) :: value
+        character :: quote
 
         str_val = ''
+        value = adjustl(raw_val)
         n = len_trim(raw_val)
         if (n < 2) then
             ! bare value (e.g. "*")
@@ -1747,15 +1760,15 @@ contains
             return
         end if
 
-        q1 = index(raw_val, '"')
-        if (q1 == 0) then
-            str_val = trim(raw_val)
+        quote = value(1:1)
+        if (quote /= '"' .and. quote /= "'") then
+            str_val = trim(value)
             return
         end if
-        q2 = index(raw_val(q1 + 1:), '"')
+        q2 = index(value(2:), quote)
         if (q2 == 0) return
-        q2 = q1 + q2
-        str_val = raw_val(q1 + 1:q2 - 1)
+        q2 = 1 + q2
+        if (q2 > 2) str_val = value(2:q2 - 1)
     end subroutine extract_string
 
     subroutine parse_inline_table(val, keys, vals, n_fields)

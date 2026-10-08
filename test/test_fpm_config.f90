@@ -4,6 +4,7 @@ program test_fpm_config
         fpm_config_allocate, &
         manifest_test_args, manifest_test_name
     use fo_util, only: make_tmpfile, temporary_root
+    use fo_test_harness, only: make_scratch, write_text, remove_tree
     implicit none
 
     integer :: n_pass, n_fail
@@ -12,6 +13,7 @@ program test_fpm_config
     n_fail = 0
 
     call test_parse_fo_own_toml()
+    call test_toml_literal_strings()
     call test_many_fo_inputs()
     call test_init_defaults()
     call test_reparse_resets_defaults()
@@ -35,6 +37,53 @@ program test_fpm_config
     if (n_fail > 0) stop 1
 
 contains
+
+    subroutine test_toml_literal_strings()
+        type(fpm_config_t) :: c
+        character(:), allocatable :: directory
+        character(len=*), parameter :: nl = new_line('a')
+        character(len=*), parameter :: windows_path = &
+            'C:'//achar(92)//'Fortran "SDK"'//achar(92)//'part#1'//achar(92)
+        integer :: ierr
+
+        call make_scratch('fo-toml-literal', directory)
+        call write_text(directory//'/fpm.toml', &
+            "name = 'native_link_consumer' # outside comment"//nl// &
+            "version = '0.1.0'"//nl// &
+            '[dependencies]'//nl// &
+            "windows_path = { path = '"//windows_path//"' } # outside comment"//nl// &
+            "literal_path = { path = '/tmp/Fortran # data' }"//nl// &
+            '[[executable]]'//nl// &
+            "name = 'numerical#oracle' # outside comment"//nl// &
+            "source-dir = 'app'"//nl//"main = 'main.f90'"//nl// &
+            '[extra.fo]'//nl//"dispatcher = '' # an empty literal"//nl)
+        call fpm_config_parse(directory, c, ierr)
+        call assert(ierr == 0, 'literal strings: manifest parses')
+        call assert(trim(c%name) == 'native_link_consumer', &
+            'literal strings: public consumer name excludes delimiters')
+        call assert(trim(c%version) == '0.1.0', 'literal strings: version text')
+        call assert(c%n_deps == 2, 'literal strings: both declared paths survive')
+        if (c%n_deps == 2) then
+            call assert(trim(c%deps(1)%path) == windows_path, &
+                'literal strings: backslashes, double quotes and hash stay literal')
+            call assert(trim(c%deps(2)%path) == '/tmp/Fortran # data', &
+                'literal strings: POSIX path preserves its quoted hash')
+        end if
+        call assert(c%n_exes == 1, 'literal strings: executable recorded')
+        if (c%n_exes == 1) call assert(trim(c%exes(1)%name) == 'numerical#oracle', &
+            'literal strings: executable name preserves its quoted hash')
+        call assert(len_trim(c%dispatcher) == 0, &
+            'literal strings: empty value has no delimiter characters')
+
+        call write_text(directory//'/fpm.toml', &
+            'name = "basic''#oracle" # outside comment'//nl// &
+            'version = "0.1.0"'//nl)
+        call fpm_config_parse(directory, c, ierr)
+        call assert(ierr == 0, 'basic strings: existing quote form still parses')
+        call assert(trim(c%name) == "basic'#oracle", &
+            'basic strings: apostrophe does not expose a quoted hash as comment')
+        call remove_tree(directory)
+    end subroutine test_toml_literal_strings
 
     subroutine assert(cond, msg)
         logical, intent(in) :: cond
