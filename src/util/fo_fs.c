@@ -360,6 +360,24 @@ static unsigned long long fo_fnv1a_bytes(unsigned long long hash,
     return hash;
 }
 
+static void fo_fingerprint_file(const char *path, const struct stat *st,
+                                unsigned long long *sum,
+                                unsigned long long *mixed, long long *count) {
+    unsigned long long item = 1469598103934665603ULL;
+    item = fo_fnv1a_bytes(item, path, strlen(path));
+#if defined(__APPLE__)
+    item = fo_fnv1a_bytes(item, &st->st_mtimespec, sizeof(st->st_mtimespec));
+    item = fo_fnv1a_bytes(item, &st->st_ctimespec, sizeof(st->st_ctimespec));
+#else
+    item = fo_fnv1a_bytes(item, &st->st_mtim, sizeof(st->st_mtim));
+    item = fo_fnv1a_bytes(item, &st->st_ctim, sizeof(st->st_ctim));
+#endif
+    item = fo_fnv1a_bytes(item, &st->st_size, sizeof(st->st_size));
+    *sum += item;
+    *mixed ^= (item << (item & 31)) | (item >> ((64 - (item & 31)) & 63));
+    (*count)++;
+}
+
 static int fo_tree_fingerprint_rec(const char *root, int input_mode, int depth,
                                    unsigned long long *sum,
                                    unsigned long long *mixed,
@@ -372,7 +390,6 @@ static int fo_tree_fingerprint_rec(const char *root, int input_mode, int depth,
     dir = opendir(root);
     if (dir == NULL) return -1;
     while ((ent = readdir(dir)) != NULL) {
-        unsigned long long item = 1469598103934665603ULL;
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
             continue;
         if (ent->d_name[0] == '.') continue;
@@ -382,16 +399,14 @@ static int fo_tree_fingerprint_rec(const char *root, int input_mode, int depth,
                 strcmp(ent->d_name, "__pycache__") == 0 ||
                 strcmp(ent->d_name, "site-packages") == 0)
                 continue;
-            if (depth == 0 &&
-                (strcmp(ent->d_name, "build") == 0 ||
-                 strncmp(ent->d_name, "build", 5) == 0))
-                continue;
         }
         if (snprintf(child, sizeof(child), "%s/%s", root, ent->d_name) >=
             (int)sizeof(child))
             continue;
         if (lstat(child, &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) {
+            if (input_mode && depth == 0 && strcmp(ent->d_name, "build") == 0)
+                continue;
             if (fo_tree_fingerprint_rec(child, input_mode, depth + 1, sum,
                                         mixed, count) != 0) {
                 closedir(dir);
@@ -400,21 +415,7 @@ static int fo_tree_fingerprint_rec(const char *root, int input_mode, int depth,
             continue;
         }
         if (!S_ISREG(st.st_mode)) continue;
-        item = fo_fnv1a_bytes(item, child, strlen(child));
-#if defined(__APPLE__)
-        item = fo_fnv1a_bytes(item, &st.st_mtimespec,
-                              sizeof(st.st_mtimespec));
-        item = fo_fnv1a_bytes(item, &st.st_ctimespec,
-                              sizeof(st.st_ctimespec));
-#else
-        item = fo_fnv1a_bytes(item, &st.st_mtim, sizeof(st.st_mtim));
-        item = fo_fnv1a_bytes(item, &st.st_ctim, sizeof(st.st_ctim));
-#endif
-        item = fo_fnv1a_bytes(item, &st.st_size, sizeof(st.st_size));
-        *sum += item;
-        *mixed ^= (item << (item & 31)) |
-                  (item >> ((64 - (item & 31)) & 63));
-        (*count)++;
+        fo_fingerprint_file(child, &st, sum, mixed, count);
     }
     closedir(dir);
     return 0;
@@ -428,8 +429,15 @@ int fo_c_tree_fingerprint(const char *root, int input_mode,
     unsigned long long usum = 0, umixed = 0;
     long long n = 0;
     int rc;
+    struct stat st;
     if (!fo_has(root)) return -1;
-    rc = fo_tree_fingerprint_rec(root, input_mode, 0, &usum, &umixed, &n);
+    if (stat(root, &st) != 0) return -1;
+    if (S_ISREG(st.st_mode)) {
+        fo_fingerprint_file(root, &st, &usum, &umixed, &n);
+        rc = 0;
+    } else {
+        rc = fo_tree_fingerprint_rec(root, input_mode, 0, &usum, &umixed, &n);
+    }
     *sum = (long long)usum;
     *mixed = (long long)umixed;
     *count = n;

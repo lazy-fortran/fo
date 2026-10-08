@@ -63,6 +63,11 @@ main = "test_cmake_named_cli.f90"
 # The standalone CLI fixtures share their process and JSON support modules.
 # Explicit mains keep those support modules from becoming test programs.
 [[test]]
+name = "test_dependency_freshness"
+source-dir = "test"
+main = "test_dependency_freshness.f90"
+
+[[test]]
 name = "test_dependency_membership_cli"
 source-dir = "test"
 main = "test_dependency_membership_cli.f90"

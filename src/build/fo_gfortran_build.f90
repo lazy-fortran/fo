@@ -57,6 +57,7 @@ module fo_gfortran_build
     character(len=512), save :: detected_fc = ''
     character(len=512), save :: detected_fc_path = ''
     character(len=512), save :: detected_compiler = ''
+    character(len=HASH_LEN), save :: detected_tool_key = ''
     !> Set from [fortran] implicit-typing before compiling.  The baseline flags
     !> carry -fimplicit-none because that is fpm's default, but a manifest that
     !> allows implicit typing has to be able to turn it back off, and the
@@ -597,9 +598,8 @@ contains
                 return
             end if
             n_roots = n_roots + 1
-            roots(n_roots) = deps(i)%src_dir
-            if (deps(i)%kind /= DEP_REGISTRY) cycle
             roots(n_roots) = deps(i)%dir
+            if (deps(i)%kind /= DEP_REGISTRY) cycle
             if (index(trim(deps(i)%dir), trim(project_dir)// &
                     '/build/dependencies/') == 1) cycle
             if (n_roots + 2 > size(roots)) then
@@ -626,18 +626,7 @@ contains
         end if
         do i = 1, n_dev
             do j = 1, n_roots
-                if (trim(roots(j)) == trim(devs(i)%dir)//'/fpm.toml') exit
-            end do
-            if (j > n_roots) then
-                if (n_roots >= size(roots)) then
-                    ok = .false.
-                    return
-                end if
-                n_roots = n_roots + 1
-                roots(n_roots) = trim(devs(i)%dir)//'/fpm.toml'
-            end if
-            do j = 1, n_roots
-                if (trim(roots(j)) == trim(devs(i)%src_dir)) exit
+                if (trim(roots(j)) == trim(devs(i)%dir)) exit
             end do
             if (j <= n_roots) cycle
             if (n_roots >= size(roots)) then
@@ -645,9 +634,8 @@ contains
                 return
             end if
             n_roots = n_roots + 1
-            roots(n_roots) = devs(i)%src_dir
-            if (devs(i)%kind /= DEP_REGISTRY) cycle
             roots(n_roots) = devs(i)%dir
+            if (devs(i)%kind /= DEP_REGISTRY) cycle
             if (index(trim(devs(i)%dir), trim(project_dir)// &
                     '/build/dependencies/') == 1) cycle
             if (n_roots + 2 > size(roots)) then
@@ -1291,12 +1279,15 @@ contains
         call resolve_dev_dep_srcs(project_dir, devs, n_devs, ierr)
         if (ierr /= 0) n_devs = 0
 
+        call append_library_include_dir(project_dir, dep_includes, n_dep_includes)
         call collect_external_module_dirs(config%external_modules, &
             config%n_external_modules, dep_includes, n_dep_includes, &
             MAX_DEP_DIRS)
         do i = 1, n_deps
             call fpm_config_parse(deps(i)%dir, dep_config, ierr)
             if (ierr /= 0) cycle
+            call append_library_include_dir(deps(i)%dir, &
+                dep_includes, n_dep_includes)
             call collect_external_module_dirs(dep_config%external_modules, &
                 dep_config%n_external_modules, dep_includes, &
                 n_dep_includes, MAX_DEP_DIRS)
@@ -1304,11 +1295,25 @@ contains
         do i = 1, n_devs
             call fpm_config_parse(devs(i)%dir, dep_config, ierr)
             if (ierr /= 0) cycle
+            call append_library_include_dir(devs(i)%dir, &
+                dep_includes, n_dep_includes)
             call collect_external_module_dirs(dep_config%external_modules, &
                 dep_config%n_external_modules, dep_includes, &
                 n_dep_includes, MAX_DEP_DIRS)
         end do
     end subroutine find_dep_artifacts
+
+    subroutine append_library_include_dir(project_dir, directories, n_directories)
+        character(len=*), intent(in) :: project_dir
+        character(len=512), intent(inout) :: directories(MAX_DEP_DIRS)
+        integer, intent(inout) :: n_directories
+        character(len=512) :: include_dir(1)
+        logical :: exists
+
+        include_dir(1) = trim(project_dir)//'/include'
+        inquire (file=trim(include_dir(1)), exist=exists)
+        if (exists) call append_module_dirs(include_dir, 1, directories, n_directories)
+    end subroutine append_library_include_dir
 
 
     function dep_object_module_key(basename) result(key)
@@ -1513,7 +1518,8 @@ contains
                         cycle
                     end if
                     level_source_key = cache_key_for(filenames(node_id), compiler, &
-                        action_flags, level_dep_keys, level_dep_count)
+                        action_flags, level_dep_keys, level_dep_count, &
+                        include_dirs=dep_includes(:n_dep_includes))
                     level_keys(i) = level_source_key
 
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, &
@@ -2805,7 +2811,8 @@ contains
                     'test-args:'//trim(run_args(i))
             end if
             run_keys(i) = cache_key_for(filenames(node_id), compiler, &
-                test_key_flags, dep_keys, n_dep)
+                test_key_flags, dep_keys, n_dep, &
+                include_dirs=dep_includes(:n_dep_includes))
         end do
 
         run_exits = 0
@@ -4129,19 +4136,26 @@ contains
         character(len=:), allocatable :: packed
         integer :: u, iostat, n_args, exitcode
         logical :: memo_hit
+        character(len=HASH_LEN) :: tool_keys(3), tool_key
 
         command = fc_command()
         call resolve_fc_executable(command)
+        tool_keys(1) = compiler_tool_key(command)
+        tool_keys(2) = compiler_tool_key('gcc')
+        tool_keys(3) = compiler_tool_key('g++')
+        tool_key = cache_digest(tool_keys, size(tool_keys))
         if (trim(command) == trim(detected_fc) .and. &
-            len_trim(detected_compiler) > 0) then
+            len_trim(detected_compiler) > 0 .and. tool_key == detected_tool_key) then
             compiler = detected_compiler
             return
         end if
         compiler = command
         call compiler_memo_load(command, compiler, memo_hit)
         if (memo_hit) then
+            compiler = 'tool-sha256:'//tool_key//' '//trim(compiler)
             detected_fc = command
             detected_compiler = compiler
+            detected_tool_key = tool_key
             return
         end if
         call make_tmpfile('fo_compiler_version', tmpfile)
@@ -4158,10 +4172,32 @@ contains
             close (u)
         end if
         call delete_tmpfile(tmpfile)
+        call compiler_memo_save(command, compiler)
+        compiler = 'tool-sha256:'//tool_key//' '//trim(compiler)
         detected_fc = command
         detected_compiler = compiler
-        call compiler_memo_save(command, compiler)
+        detected_tool_key = tool_key
     end subroutine detect_compiler
+
+    function compiler_tool_key(command) result(key)
+        !! Capture Fo's explicit compiler drivers, without recursing into host tools.
+        character(len=*), intent(in) :: command
+        character(len=HASH_LEN) :: key, executable_key
+        character(len=512) :: executable, program, parts(3)
+        integer :: space
+        logical :: found
+
+        program = adjustl(command)
+        space = index(trim(program), ' ')
+        if (space > 0) program = program(:space - 1)
+        call fs_find_executable(trim(program), executable, found)
+        executable_key = ''
+        if (found) call cache_file_digest(trim(executable), executable_key)
+        parts(1) = command
+        parts(2) = executable
+        parts(3) = executable_key
+        key = cache_digest(parts, size(parts))
+    end function compiler_tool_key
 
     recursive subroutine compile_f90(project_dir, source, objfile, includes_flag, log_file, &
             exitcode)
