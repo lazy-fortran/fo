@@ -115,6 +115,14 @@ contains
                 kind /= 'FILEPATH') cycle
             if (key == 'CMAKE_INSTALL_PREFIX') cycle
             if (index(key, 'CMAKE_FIND_PACKAGE_REDIRECTS_DIR') == 1) cycle
+            if (kind == 'PATH' .and. len(value) > 0) then
+                call normalize_path(value, normalized)
+                do i = 1, n_roots
+                    if (trim(normalized) /= trim(roots(i))) cycle
+                    value = trim(normalized)
+                    exit
+                end do
+            end if
             call relocate_value(value, trim(backend%project_dir), &
                 cmake_context_build_path(backend%cmake), roots(:n_roots), &
                 bundles(:n_roots), rewritten)
