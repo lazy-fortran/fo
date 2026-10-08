@@ -284,6 +284,14 @@ path = "test-fixtures/c/link_publication_peer.c"
 role = "test-fixture"
 
 [[extra.fo.inputs]]
+path = "src/proc/fo_gremlin_state.c"
+role = "test-fixture"
+
+[[extra.fo.inputs]]
+path = "test/fixtures/gremlin_state_feature_macros.c.inc"
+role = "test-fixture"
+
+[[extra.fo.inputs]]
 path = "test-fixtures/gremlin_process_boundary/fpm.toml"
 role = "test-fixture"
 
