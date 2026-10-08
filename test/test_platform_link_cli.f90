@@ -1,6 +1,6 @@
 program test_platform_link_cli
     use fo_test_harness, only: string_list_t, process_result_t, list_add
-    use fo_test_harness, only: make_scratch, join_path, write_text, write_lines, remove_tree
+    use fo_test_harness, only: make_scratch, join_path, write_text, write_lines
     use fo_test_harness, only: assert_true, assert_equal_string, assert_equal_integer
     use fo_test_harness, only: assert_process_ok, environment_value
     use fo_test_cli, only: resolve_driver, run_fo, run_external, parse_json_report
@@ -81,8 +81,7 @@ program test_platform_link_cli
     platform = trim(tool_result%stdout)
     if (platform == 'Darwin' // new_line('a')) call exercise_macos_profiles()
 
-    call remove_tree(scratch)
-    call finish_assertions()
+    call finish_assertions(retain_failed_scratch=.true.)
     write(*, '(a)') 'platform-link-cli: static/shared cold/warm dependency and archive links pass'
 
 contains
@@ -171,8 +170,9 @@ contains
             call assert_process_ok(child, 'macOS shared image test for ' // profile)
             call parse_json_report(child, document, 'macOS profile report')
             call check_single_test(document, 'macOS profile report')
-            call run_external('/bin/ls', words([character(len=128) :: '-1', library_dir]), &
-                consumer, listing, listing_environment)
+            command = words([character(len=8) :: '-1'])
+            call list_add(command, library_dir)
+            call run_external('/bin/ls', command, consumer, listing, listing_environment)
             call assert_process_ok(listing, 'list shared library images')
             file_index = 1
             do
@@ -182,8 +182,9 @@ contains
                 if (len(file_name) < 6) cycle
                 if (file_name(len(file_name) - 5:) /= '.dylib') cycle
                 full_path = join_path(library_dir, file_name)
-                call run_external('otool', words([character(len=256) :: '-l', full_path]), &
-                    consumer, otool)
+                command = words([character(len=8) :: '-l'])
+                call list_add(command, full_path)
+                call run_external('otool', command, consumer, otool)
                 call assert_process_ok(otool, 'inspect shared image rpath')
                 if (index(otool%stdout, 'path ' // marker // ' (') == 0) cycle
                 if (profile_index == 1) then

@@ -23,7 +23,7 @@ fixture now uses native process data to distinguish live and exited children;
 the independent control and affected backend test pass. The long-root frozen registry oracle returns the incorrect live value 31 on
 the old 256-character project-root field and the captured value 19 after expanding
 it to the supported 512-character limit. Longer parse roots are rejected explicitly.
-Final combined/platform gates remain pending; neither a retry nor receipts from
+Final combined/platform gates must pass before publication; neither a retry nor receipts from
 an earlier source version satisfies the final gate.
 
 | Handoff goal | Independently checked behavior |
@@ -44,7 +44,9 @@ without exceeding the filesystem component limit. Backend fixtures identify
 providers by independent exported symbols and verify warm artifact reuse with
 nanosecond timestamps. Gremlin keeps elapsed-clock values in real64 throughout
 supervision and bounded reproduction, avoiding false timeout jumps on Darwin
-epoch-based clocks.
+epoch-based clocks. The Darwin platform-link fixture passes complete paths to
+OS listing/image tools with dynamic arguments and retains failed scratch before
+cleanup; resident paths had exposed truncated test-only argument arrays.
 
 The #205 JSON increment removes the duplicate scanner and verifies strict
 receipt recovery with nested metadata. It removes 40 physical lines across its
@@ -66,7 +68,7 @@ local-result matching through a deferred-character function result during
 parallel cache restoration. Fx `63f010f` replaces that private result with a caller-owned
 output; the same varied-path oracle fails under ASAN on old code and passes 640
 cold/warm pairs after repair, including the controller recheck. Evidence is retained under
-`/var/tmp/fx-heap-audit-20261008`; The original instrumented Fo parallel consumer recheck remains required.
+`/var/tmp/fx-heap-audit-20261008`; The original instrumented Fo parallel consumer recheck passes with eight jobs.
 The older allocator aborts remain unattributed until evidence links them.
 
 ## Delivery order
