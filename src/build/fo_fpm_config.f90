@@ -13,6 +13,7 @@ module fo_fpm_config
     public :: manifest_test_args
     public :: MAX_LINK_LIBS, add_link_lib
     public :: MAX_EXTERNAL_MODULES
+    public :: valid_manifest_module_name
 
     ! How a dependency is acquired, derived from which fields the manifest set.
     ! path = local dir (mutable, may be edited); git = cloned at a ref (pinned,
@@ -81,6 +82,8 @@ module fo_fpm_config
         character(len=1024) :: name = ''
         character(len=32)  :: version = ''
         character(len=256) :: source_dir = 'src'
+        integer :: n_include_dirs = 1
+        character(len=256) :: include_dirs(64) = 'include'
         character(len=256) :: app_dir = 'app'
         character(len=256) :: test_dir = 'test'
         character(len=256) :: example_dir = 'example'
@@ -89,6 +92,8 @@ module fo_fpm_config
         logical :: auto_executables = .true.
         logical :: auto_tests = .true.
         logical :: auto_examples = .true.
+        logical :: module_naming = .false.
+        character(len=63) :: module_prefix = ''
         logical :: install_library = .false.
         logical :: install_test = .false.
         character(len=256) :: install_module_dir = ''
@@ -161,6 +166,7 @@ module fo_fpm_config
         ! what legacy fixed-form sources such as libneo's polylag_3.f90 need.
         logical :: implicit_typing = .false.
         logical :: implicit_external = .false.
+        character(len=7) :: source_form = 'free'
     end type fpm_config_t
 
 contains
@@ -196,6 +202,9 @@ contains
         c%name = ''
         c%version = ''
         c%source_dir = 'src'
+        c%n_include_dirs = 1
+        c%include_dirs = ''
+        c%include_dirs(1) = 'include'
         c%app_dir = 'app'
         c%test_dir = 'test'
         c%example_dir = 'example'
@@ -203,6 +212,8 @@ contains
         c%auto_executables = .true.
         c%auto_tests = .true.
         c%auto_examples = .true.
+        c%module_naming = .false.
+        c%module_prefix = ''
         c%install_library = .false.
         c%install_test = .false.
         c%install_module_dir = ''
@@ -215,6 +226,7 @@ contains
         c%minpack = .false.
         c%implicit_typing = .false.
         c%implicit_external = .false.
+        c%source_form = 'free'
         c%n_deps = 0
         c%n_dev_deps = 0
         do i = 1, MAX_DEPS
@@ -333,6 +345,8 @@ contains
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', &
             status='old', iostat=ios)
         if (ios /= 0) then
+            write (error_unit, '(a)') 'fo: cannot open dependency/project manifest: '// &
+                trim(project_dir)//'/fpm.toml'
             ierr = 1
             return
         end if
@@ -369,6 +383,18 @@ contains
                         call parse_build(pending_key, val, config)
                     case ('preprocess', 'preprocess.cpp')
                         call parse_preprocess(pending_key, val, config)
+                    case ('library')
+                        call parse_library(pending_key, val, config)
+                    case ('executable')
+                        if (config%n_exes > 0) call parse_exe(pending_key, val, &
+                            config%exes(config%n_exes), config%manifest_parse_error)
+                    case ('test')
+                        if (config%n_tests > 0) call parse_exe(pending_key, val, &
+                            config%tests(config%n_tests), config%manifest_parse_error)
+                    case ('example')
+                        if (config%n_examples > 0) call parse_exe(pending_key, val, &
+                            config%examples(config%n_examples), &
+                            config%manifest_parse_error)
                     case ('extra.fo.test-args')
                         call parse_test_args(pending_key, val, config)
                     case ('extra.fo.inputs')
@@ -455,15 +481,21 @@ contains
                     call parse_dep_entry(key, val, config%dev_deps, config%n_dev_deps, &
                         config%manifest_parse_error)
                 end if
+            case ('executable.dependencies', 'example.dependencies')
+                config%manifest_parse_error = 'unsupported ['//trim(section)// &
+                    '] dependency declaration; move dependencies to [dependencies]'
             case ('executable')
                 if (config%n_exes > 0) &
-                    call parse_exe(key, val, config%exes(config%n_exes))
+                    call parse_exe(key, val, config%exes(config%n_exes), &
+                        config%manifest_parse_error)
             case ('test')
                 if (config%n_tests > 0) &
-                    call parse_exe(key, val, config%tests(config%n_tests))
+                    call parse_exe(key, val, config%tests(config%n_tests), &
+                        config%manifest_parse_error)
             case ('example')
                 if (config%n_examples > 0) &
-                    call parse_exe(key, val, config%examples(config%n_examples))
+                    call parse_exe(key, val, config%examples(config%n_examples), &
+                        config%manifest_parse_error)
             case ('preprocess', 'preprocess.cpp')
                 call parse_preprocess(key, val, config)
             case ('extra.fo.test-args')
@@ -663,19 +695,120 @@ contains
             call extract_string(val, str_val)
             if (len_trim(str_val) > 0) config%test_dir = trim(str_val)
         case ('auto-executables')
-            config%auto_executables = (index(val, 'true') > 0)
+            call parse_boolean(val, config%auto_executables, key, &
+                config%manifest_parse_error)
         case ('auto-tests')
-            config%auto_tests = (index(val, 'true') > 0)
+            call parse_boolean(val, config%auto_tests, key, config%manifest_parse_error)
         case ('auto-examples')
-            config%auto_examples = (index(val, 'true') > 0)
+            call parse_boolean(val, config%auto_examples, key, &
+                config%manifest_parse_error)
+        case ('module-naming')
+            config%module_prefix = ''
+            select case (trim(val))
+            case ('true')
+                config%module_naming = .true.
+            case ('false')
+                config%module_naming = .false.
+            case default
+                str_val = ''
+                if (len_trim(val) >= 2) then
+                    if (val(1:1) == '"' .or. val(1:1) == "'") then
+                        if (val(len_trim(val):len_trim(val)) == val(1:1)) &
+                            str_val = val(2:len_trim(val) - 1)
+                    end if
+                end if
+                if (.not. valid_module_prefix(trim(str_val))) then
+                    config%manifest_parse_error = &
+                        '[build] module-naming requires a boolean or '// &
+                        'an alphanumeric '// &
+                        'prefix beginning with a letter (1-63 characters)'
+                    return
+                end if
+                config%module_naming = .true.
+                config%module_prefix = trim(str_val)
+            end select
         case ('link')
             call parse_link_libs(val, config)
         case ('external-modules')
             call parse_external_modules(val, config)
         case ('flags')
             call parse_flags(val, config)
+        case default
+            config%manifest_parse_error = 'unsupported [build] field: '//trim(key)
         end select
     end subroutine parse_build
+
+    subroutine parse_boolean(value, boolean, field, error)
+        character(len=*), intent(in) :: value, field
+        logical, intent(out) :: boolean
+        character(len=*), intent(out) :: error
+        error = ''
+        boolean = .false.
+        select case (trim(value))
+        case ('true')
+            boolean = .true.
+        case ('false')
+        case default
+            error = trim(field)//' requires a boolean true or false'
+        end select
+    end subroutine parse_boolean
+
+    pure logical function valid_module_prefix(prefix) result(valid)
+        character(len=*), intent(in) :: prefix
+        character(len=*), parameter :: alpha = &
+            'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        valid = .false.
+        if (len(prefix) < 1 .or. len(prefix) > 63) return
+        if (verify(prefix(:1), alpha) /= 0) return
+        valid = verify(prefix, alpha//'0123456789') == 0
+    end function valid_module_prefix
+
+    pure logical function valid_manifest_module_name(config, name) result(valid)
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: name
+        character(len=:), allocatable :: package, module_name, prefix
+        integer :: i, code
+
+        valid = .true.
+        if (.not. config%module_naming) return
+        package = trim(config%name)
+        module_name = trim(name)
+        prefix = trim(config%module_prefix)
+        do i = 1, len(package)
+            if (package(i:i) == '-') package(i:i) = '_'
+        end do
+        do i = 1, len(package)
+            code = iachar(package(i:i))
+            if (code >= 65 .and. code <= 90) package(i:i) = achar(code + 32)
+        end do
+        do i = 1, len(module_name)
+            code = iachar(module_name(i:i))
+            if (code >= 65 .and. code <= 90) module_name(i:i) = achar(code + 32)
+        end do
+        do i = 1, len(prefix)
+            code = iachar(prefix(i:i))
+            if (code >= 65 .and. code <= 90) prefix(i:i) = achar(code + 32)
+        end do
+        valid = naming_prefix_matches(module_name, package, '__')
+        if (.not. valid .and. len(prefix) > 0) &
+            valid = naming_prefix_matches(module_name, prefix, '_')
+    end function valid_manifest_module_name
+
+    pure logical function naming_prefix_matches(name, prefix, separator) result(valid)
+        character(len=*), intent(in) :: name, prefix, separator
+        integer :: n, last
+        valid = .false.
+        n = len(prefix)
+        if (n == 0) return
+        if (prefix(n:n) == '_') return
+        if (name == prefix) then
+            valid = .true.
+            return
+        end if
+        last = n + len(separator)
+        if (len(name) <= last) return
+        valid = name(:last) == prefix//separator
+    end function naming_prefix_matches
 
     subroutine parse_install(key, val, config)
         character(len=*), intent(in) :: key, val
@@ -684,9 +817,11 @@ contains
 
         select case (trim(key))
         case ('library')
-            config%install_library = index(val, 'true') > 0
+            call parse_boolean(val, config%install_library, key, &
+                config%manifest_parse_error)
         case ('test')
-            config%install_test = index(val, 'true') > 0
+            call parse_boolean(val, config%install_test, key, &
+                config%manifest_parse_error)
         case ('module-dir')
             call extract_string(val, str_val)
             config%install_module_dir = trim(str_val)
@@ -698,10 +833,74 @@ contains
         type(fpm_config_t), intent(inout) :: config
         character(len=1024) :: str_val
 
-        if (trim(key) /= 'source-dir') return
-        call extract_string(val, str_val)
-        if (len_trim(str_val) > 0) config%source_dir = trim(str_val)
+        select case (trim(key))
+        case ('source-dir')
+            call extract_string(val, str_val)
+            if (len_trim(str_val) > 0) config%source_dir = trim(str_val)
+        case ('type')
+            call extract_string(val, str_val)
+            if (trim(str_val) /= 'static') config%manifest_parse_error = &
+                'unsupported [library] type: '//trim(str_val)// &
+                '; native library type currently supports "static"'
+        case ('include-dir')
+            call parse_include_directories(val, config)
+        case default
+            config%manifest_parse_error = 'unsupported [library] field: '//trim(key)
+        end select
     end subroutine parse_library
+
+    subroutine parse_include_directories(val, config)
+        character(len=*), intent(in) :: val
+        type(fpm_config_t), intent(inout) :: config
+        character(:), allocatable :: input
+        character(len=1) :: quote
+        integer :: position, start, last
+        logical :: array
+
+        input = trim(adjustl(val))
+        config%n_include_dirs = 0
+        config%include_dirs = ''
+        last = len(input)
+        if (last == 0) goto 900
+        array = input(1:1) == '['
+        position = 1
+        if (array) then
+            if (input(last:last) /= ']') goto 900
+            position = 2
+            last = last - 1
+        end if
+        do while (position <= last)
+            if (input(position:position) == ' ') then
+                position = position + 1
+                cycle
+            end if
+            quote = input(position:position)
+            if (quote /= '"' .and. quote /= "'") goto 900
+            start = position + 1
+            position = start
+            do while (position <= last)
+                if (input(position:position) == quote) exit
+                position = position + 1
+            end do
+            if (position > last .or. position == start) goto 900
+            if (position - start > len(config%include_dirs(1))) goto 900
+            if (config%n_include_dirs == size(config%include_dirs)) goto 900
+            config%n_include_dirs = config%n_include_dirs + 1
+            config%include_dirs(config%n_include_dirs) = input(start:position - 1)
+            position = position + 1
+            do while (position <= last)
+                if (input(position:position) /= ' ') exit
+                position = position + 1
+            end do
+            if (position > last) exit
+            if (.not. array) goto 900
+            if (input(position:position) /= ',') goto 900
+            position = position + 1
+        end do
+        return
+900     config%manifest_parse_error = &
+            '[library] include-dir requires a quoted path or list of quoted paths'
+    end subroutine parse_include_directories
 
     subroutine parse_fortran(key, val, config)
         character(len=*), intent(in) :: key, val
@@ -710,19 +909,20 @@ contains
 
         select case (trim(key))
         case ('implicit-typing')
-            config%implicit_typing = (index(val, 'true') > 0)
-            if (index(val, 'false') > 0) call append_config_flag( &
-                '-fimplicit-none', config)
+            call parse_boolean(val, config%implicit_typing, key, &
+                config%manifest_parse_error)
         case ('implicit-external')
-            config%implicit_external = (index(val, 'true') > 0)
-            if (index(val, 'false') > 0) call append_config_flag( &
-                '-Werror=implicit-interface', config)
+            call parse_boolean(val, config%implicit_external, key, &
+                config%manifest_parse_error)
         case ('source-form')
             call extract_string(val, str_val)
-            if (trim(str_val) == 'free') call append_config_flag( &
-                '-ffree-form', config)
-            if (trim(str_val) == 'fixed') call append_config_flag( &
-                '-ffixed-form', config)
+            if (trim(str_val) /= 'free' .and. trim(str_val) /= 'fixed' .and. &
+                trim(str_val) /= 'default') then
+                config%manifest_parse_error = &
+                    '[fortran] source-form must be "free", "fixed" or "default"'
+                return
+            end if
+            config%source_form = trim(str_val)
         end select
     end subroutine parse_fortran
 
@@ -739,12 +939,14 @@ contains
         config%flags(config%n_flags) = trim(flag)
     end subroutine append_config_flag
 
-    subroutine parse_exe(key, val, exe)
+    subroutine parse_exe(key, val, exe, error)
         character(len=*), intent(in) :: key, val
         type(fpm_exe_t), intent(inout) :: exe
+        character(len=*), intent(out) :: error
 
         character(len=1024) :: str_val
 
+        error = ''
         call extract_string(val, str_val)
         if (len_trim(str_val) == 0) return
         select case (trim(key))
@@ -754,6 +956,11 @@ contains
             exe%main = trim(str_val)
         case ('source-dir')
             exe%source_dir = trim(str_val)
+        case ('link')
+            error = 'target-local link is unsupported; '// &
+                'declare libraries in [build] link'
+        case default
+            error = 'unsupported executable/test/example field: '//trim(key)
         end select
     end subroutine parse_exe
 

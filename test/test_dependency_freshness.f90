@@ -220,6 +220,9 @@ contains
         character(:), allocatable :: consumer, dep, extra
 
         call setup_build_named('add-source', consumer, dep)
+        call write_text(join_path(dep, 'fpm.toml'), &
+            'name = "buildlib"' // nl // '[fortran]' // nl // &
+            'implicit-external = true' // nl)
         extra = join_path(dep, 'src/extra.f90')
         call write_text(extra, 'integer function extra_value()' // nl // &
             'extra_value = 47' // nl // 'end function extra_value' // nl)

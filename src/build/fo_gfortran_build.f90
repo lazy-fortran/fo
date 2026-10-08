@@ -3,7 +3,7 @@ module fo_gfortran_build
         fpm_config_allocate, manifest_exe_name, &
         manifest_executable_selected, &
         manifest_test_args, manifest_example_name, dep_kind, &
-        DEP_PATH, DEP_REGISTRY
+        DEP_PATH, DEP_REGISTRY, valid_manifest_module_name
     use fo_scan, only: scan_unit_t, scan_dir, scan_dir_regex, scan_dir_cached, &
         source_defines_module, &
         MAX_UNITS, MAX_NAME, MAX_PATH
@@ -58,13 +58,6 @@ module fo_gfortran_build
     character(len=512), save :: detected_fc_path = ''
     character(len=512), save :: detected_compiler = ''
     character(len=HASH_LEN), save :: detected_tool_key = ''
-    !> Set from [fortran] implicit-typing before compiling.  The baseline flags
-    !> carry -fimplicit-none because that is fpm's default, but a manifest that
-    !> allows implicit typing has to be able to turn it back off, and the
-    !> baseline is appended after the per-project flags so a flag alone cannot
-    !> win.  Module state keeps fc_base_flags callable from the compile path,
-    !> which has no view of the config.
-    logical, save :: allow_implicit_typing = .false.
     !> The flags the current build was asked for, kept so the baseline can add
     !> its debug-info diet (`-g0`) without overwriting a caller's `-g`.
     !> `--debug` and `--asan` arrive here as request flags, the same reason
@@ -1292,14 +1285,15 @@ contains
         call resolve_dev_dep_srcs(project_dir, devs, n_devs, ierr)
         if (ierr /= 0) n_devs = 0
 
-        call append_library_include_dir(project_dir, dep_includes, n_dep_includes)
+        call append_library_include_dir(project_dir, config, &
+            dep_includes, n_dep_includes)
         call collect_external_module_dirs(config%external_modules, &
             config%n_external_modules, dep_includes, n_dep_includes, &
             MAX_DEP_DIRS)
         do i = 1, n_deps
             call fpm_config_parse(deps(i)%dir, dep_config, ierr)
             if (ierr /= 0) cycle
-            call append_library_include_dir(deps(i)%dir, &
+            call append_library_include_dir(deps(i)%dir, dep_config, &
                 dep_includes, n_dep_includes)
             call collect_external_module_dirs(dep_config%external_modules, &
                 dep_config%n_external_modules, dep_includes, &
@@ -1308,7 +1302,7 @@ contains
         do i = 1, n_devs
             call fpm_config_parse(devs(i)%dir, dep_config, ierr)
             if (ierr /= 0) cycle
-            call append_library_include_dir(devs(i)%dir, &
+            call append_library_include_dir(devs(i)%dir, dep_config, &
                 dep_includes, n_dep_includes)
             call collect_external_module_dirs(dep_config%external_modules, &
                 dep_config%n_external_modules, dep_includes, &
@@ -1316,23 +1310,28 @@ contains
         end do
     end subroutine find_dep_artifacts
 
-    subroutine append_library_include_dir(project_dir, directories, n_directories)
+    subroutine append_library_include_dir(project_dir, config, &
+            directories, n_directories)
         character(len=*), intent(in) :: project_dir
+        type(fpm_config_t), intent(in) :: config
         character(len=512), intent(inout) :: directories(MAX_DEP_DIRS)
         integer, intent(inout) :: n_directories
         character(len=512) :: include_dir
-        integer :: i
+        integer :: i, j
         logical :: exists
 
-        include_dir = trim(project_dir)//'/include'
-        inquire (file=trim(include_dir), exist=exists)
-        if (.not. exists) return
-        do i = 1, n_directories
-            if (trim(directories(i)) == trim(include_dir)) return
+        do j = 1, config%n_include_dirs
+            call join_path(project_dir, trim(config%include_dirs(j)), include_dir)
+            inquire (file=trim(include_dir), exist=exists)
+            if (.not. exists) cycle
+            do i = 1, n_directories
+                if (trim(directories(i)) == trim(include_dir)) exit
+            end do
+            if (i <= n_directories) cycle
+            if (n_directories >= size(directories)) return
+            n_directories = n_directories + 1
+            directories(n_directories) = include_dir
         end do
-        if (n_directories >= size(directories)) return
-        n_directories = n_directories + 1
-        directories(n_directories) = include_dir
     end subroutine append_library_include_dir
 
 
@@ -1384,12 +1383,13 @@ contains
         logical :: has_cycle
         logical :: allow_cache
         character(len=512) :: obj_path
-        character(len=4096) :: includes_flag, action_flags
+        character(len=4096) :: includes_flag
         character(len=512) :: c_line
         character(len=512), allocatable :: cfiles(:)
         character(len=MAX_PATH), allocatable :: compdb_sources(:)
         character(len=512), allocatable :: compdb_objects(:)
         character(len=4096), allocatable :: source_flags(:), compdb_flags(:)
+        character(len=4096), allocatable :: source_key_flags(:)
         integer :: n_cfiles, ic
         integer :: n_compdb
         type(resolved_src_t) :: deps(MAX_RESOLVED)
@@ -1434,6 +1434,7 @@ contains
         allocate (compile_exits(MAX_NODES), per_logs(MAX_NODES))
         allocate (compdb_sources(MAX_NODES), compdb_objects(MAX_NODES))
         allocate (source_flags(MAX_NODES), compdb_flags(MAX_NODES))
+        allocate (source_key_flags(MAX_NODES))
 
         call scan_dir(trim(project_dir)//'/'//trim(src_dir), units_a, na, ierr)
         call scan_dir(trim(project_dir)//'/'//trim(app_dir), units_b, nb, ierr)
@@ -1458,6 +1459,10 @@ contains
         ! Fold path dependencies and any missing external-dependency module
         ! providers into the same source-ordered native DAG.
         call add_dep_sources(project_dir, all_units, n_all, deps, n_deps_resolved)
+
+        call validate_module_naming(config, all_units(:n_all), deps, &
+            n_deps_resolved, exitcode)
+        if (exitcode /= 0) return
 
         call build_dag_from_units(all_units, n_all, dag, filenames, is_test_arr, is_prog)
         call dag_topo_sort(dag, topo_order, n_order, has_cycle)
@@ -1495,6 +1500,10 @@ contains
             n_compdb = n_compdb + 1
             compdb_sources(n_compdb) = filenames(node_id)
             compdb_flags(n_compdb) = source_flags(node_id)
+            ! Construct deferred-length compiler policy strings before workers
+            ! start. Some gfortran versions use process-global result-length
+            ! temporaries even for recursive deferred-length functions.
+            source_key_flags(node_id) = compile_key_flags(source_flags(node_id))
             call make_obj_path(filenames(node_id), project_dir, obj_dir, &
                 compdb_objects(n_compdb))
         end do
@@ -1541,9 +1550,8 @@ contains
                         level_restored(i) = .false.
                         cycle
                     end if
-                    action_flags = compile_key_flags(source_flags(node_id))
                     level_source_key = cache_key_for(filenames(node_id), compiler, &
-                        action_flags, level_dep_keys, level_dep_count, &
+                        source_key_flags(node_id), level_dep_keys, level_dep_count, &
                         include_dirs=dep_includes(:n_dep_includes))
                     level_keys(i) = level_source_key
 
@@ -1703,7 +1711,7 @@ contains
             if (len_trim(c_line) == 0) cycle
             call make_obj_path(trim(c_line), project_dir, obj_dir, obj_path)
             call compile_c_family(trim(c_line), obj_path, &
-                trim(project_dir)//'/include', log_file, exitcode)
+                project_dir, log_file, exitcode)
             if (exitcode /= 0) then
                 deallocate (cfiles)
                 return
@@ -1862,6 +1870,53 @@ contains
         end do
     end subroutine add_dep_sources
 
+    subroutine validate_module_naming(root_config, units, deps, n_deps, exitcode)
+        type(fpm_config_t), intent(in) :: root_config
+        type(scan_unit_t), intent(in) :: units(:)
+        type(resolved_src_t), intent(in) :: deps(:)
+        integer, intent(in) :: n_deps
+        integer, intent(out) :: exitcode
+        type(fpm_config_t), allocatable :: package
+        character(len=:), allocatable :: prefix
+        integer :: i, d, owner, longest, n, ierr
+
+        exitcode = 0
+        if (.not. root_config%module_naming) return
+        call fpm_config_allocate(package)
+        do i = 1, size(units)
+            if (len_trim(units(i)%module_name) == 0) cycle
+            owner = 0
+            longest = 0
+            do d = 1, n_deps
+                prefix = trim(deps(d)%src_dir)//'/'
+                n = len(prefix)
+                if (len_trim(units(i)%filename) < n) cycle
+                if (units(i)%filename(:n) /= prefix) cycle
+                if (n <= longest) cycle
+                owner = d
+                longest = n
+            end do
+            if (owner == 0) then
+                package = root_config
+            else
+                call fpm_config_parse(trim(deps(owner)%dir), package, ierr)
+                if (ierr /= 0) then
+                    exitcode = 1
+                    return
+                end if
+                ! FPM's root policy enforces package names even for dependencies
+                ! whose own manifest disables naming. Their custom prefix is
+                ! available only when enabled by that dependency's manifest.
+                package%module_naming = .true.
+            end if
+            if (valid_manifest_module_name(package, trim(units(i)%module_name))) cycle
+            write (error_unit, '(a)') 'fo: module '//trim(units(i)%module_name)// &
+                ' in '//trim(units(i)%filename)//' does not match package '// &
+                trim(package%name)//' or its [build] module-naming prefix'
+            exitcode = 1
+        end do
+    end subroutine validate_module_naming
+
 
 
     logical function dep_provider_object_exists(source, dep_objs, n_dep_objs) &
@@ -1976,7 +2031,7 @@ contains
                 if (len_trim(c_line) == 0) cycle
                 call make_obj_path(trim(c_line), project_dir, obj_dir, obj_path)
                 call compile_c_family(trim(c_line), obj_path, &
-                    trim(deps(d)%dir)//'/include', log_file, exitcode)
+                    trim(deps(d)%dir), log_file, exitcode)
                 if (exitcode /= 0) then
                     deallocate (cfiles)
                     return
@@ -2017,7 +2072,7 @@ contains
                 source = cfiles(i)
                 call make_obj_path(trim(source), project_dir, obj_dir, object_path)
                 call compile_c_family(trim(source), object_path, &
-                    trim(deps(d)%dir)//'/include', log_file, exitcode)
+                    trim(deps(d)%dir), log_file, exitcode)
                 if (exitcode /= 0) then
                     deallocate (cfiles)
                     return
@@ -2750,6 +2805,9 @@ contains
                 exitcode = 1
                 return
             end if
+            call validate_module_naming(manifest_config, udev(:nud), devsrcs, &
+                n_dev, exitcode)
+            if (exitcode /= 0) return
             call append_module_units(tunits, n_tests, udev, nud)
         end do
 
@@ -4217,18 +4275,18 @@ contains
     recursive function fc_base_flags() result(flags)
         character(len=:), allocatable :: flags
         type(compiler_dialect_t) :: dialect
-
         dialect = compiler_dialect(fc_command())
         flags = fc_policy_flags()
-        if (allow_implicit_typing) flags = flags//' '//dialect%translate_flag( &
-            '-fno-implicit-none')
+        ! Source form is a package choice. In particular, "default" must let
+        ! the compiler choose by extension instead of retaining -Mfree/-free.
+        call remove_manifest_flag(flags, dialect%translate_flag('-ffree-form'))
     end function fc_base_flags
 
     recursive function request_key_flags(flags) result(key_flags)
         character(len=*), intent(in) :: flags
         character(len=:), allocatable :: key_flags
 
-        key_flags = 'preprocess-policy:package-v1'//new_line('a')// &
+        key_flags = 'manifest-policy:package-v3'//new_line('a')// &
             'compiler-policy:'//trim(fc_policy_flags())//new_line('a')// &
             'request-flags:'//trim(flags)
     end function request_key_flags
@@ -4237,7 +4295,7 @@ contains
         character(len=*), intent(in) :: flags
         character(len=:), allocatable :: key_flags
 
-        key_flags = 'preprocess-policy:package-v1'//new_line('a')// &
+        key_flags = 'manifest-policy:package-v3'//new_line('a')// &
             'compiler-baseline:'//trim(fc_base_flags())//new_line('a')// &
             'project-flags:'//trim(flags)
     end function compile_key_flags
@@ -4374,8 +4432,8 @@ contains
         n_args = 0
         call argv_push_split(packed, n_args, fc_executable_command())
         call argv_push(packed, n_args, '-c')
-        call argv_push_split_nl(packed, n_args, includes_flag)
         call argv_push_split(packed, n_args, fc_base_flags())
+        call argv_push_split_nl(packed, n_args, includes_flag)
         call argv_push(packed, n_args, '-o')
         call argv_push(packed, n_args, objfile)
         call argv_push(packed, n_args, source)
@@ -4516,57 +4574,38 @@ contains
         if (n >= 4) is_cxx = path(n - 3:n) == '.cpp'
     end function is_cxx_source
 
-    subroutine compile_c_family(source, objfile, include_dir, log_file, exitcode)
-        !! Compile a C or C++ source, choosing the driver by extension.
-        character(len=*), intent(in) :: source, objfile, include_dir, log_file
+    subroutine compile_c_family(source, objfile, package_dir, log_file, exitcode)
+        character(len=*), intent(in) :: source, objfile, package_dir, log_file
         integer, intent(out) :: exitcode
+        type(fpm_config_t), allocatable :: config
+        character(len=512) :: directories(MAX_DEP_DIRS), objects(MAX_DEP_OBJS)
+        character(:), allocatable :: packed
+        integer :: n_args, n_directories, n_objects, i
 
+        call fpm_config_allocate(config)
+        call fpm_config_parse(package_dir, config, exitcode)
+        if (exitcode /= 0) return
+        call find_dep_artifacts(package_dir, config, directories, n_directories, &
+            objects, n_objects)
+        n_args = 0
         if (is_cxx_source(source)) then
-            call compile_cxx(source, objfile, include_dir, log_file, exitcode)
+            call argv_push(packed, n_args, 'g++')
+            call argv_push(packed, n_args, '-std=c++17')
+            call argv_push(packed, n_args, '-fPIC')
         else
-            call compile_c(source, objfile, include_dir, log_file, exitcode)
+            call argv_push(packed, n_args, 'gcc')
         end if
+        call argv_push(packed, n_args, '-c')
+        do i = 1, n_directories
+            call argv_push(packed, n_args, '-I')
+            call argv_push(packed, n_args, trim(directories(i)))
+        end do
+        call argv_push(packed, n_args, '-o')
+        call argv_push(packed, n_args, objfile)
+        call argv_push(packed, n_args, source)
+        call process_run_argv_logged('', packed, n_args, log_file, .true., &
+            build_timeout_seconds(), exitcode)
     end subroutine compile_c_family
-
-    subroutine compile_cxx(source, objfile, include_dir, log_file, exitcode)
-        character(len=*), intent(in) :: source, objfile, include_dir, log_file
-        integer, intent(out) :: exitcode
-        character(len=:), allocatable :: packed
-        integer :: n_args
-
-        n_args = 0
-        call argv_push(packed, n_args, 'g++')
-        call argv_push(packed, n_args, '-c')
-        ! C++17 is what current library headers expect; older standards fail to
-        ! compile common dependency headers rather than merely warning.
-        call argv_push(packed, n_args, '-std=c++17')
-        call argv_push(packed, n_args, '-fPIC')
-        call argv_push(packed, n_args, '-I')
-        call argv_push(packed, n_args, include_dir)
-        call argv_push(packed, n_args, '-o')
-        call argv_push(packed, n_args, objfile)
-        call argv_push(packed, n_args, source)
-        call process_run_argv_logged('', packed, n_args, log_file, .true., &
-            build_timeout_seconds(), exitcode)
-    end subroutine compile_cxx
-
-    subroutine compile_c(source, objfile, include_dir, log_file, exitcode)
-        character(len=*), intent(in) :: source, objfile, include_dir, log_file
-        integer, intent(out) :: exitcode
-        character(len=:), allocatable :: packed
-        integer :: n_args
-
-        n_args = 0
-        call argv_push(packed, n_args, 'gcc')
-        call argv_push(packed, n_args, '-c')
-        call argv_push(packed, n_args, '-I')
-        call argv_push(packed, n_args, include_dir)
-        call argv_push(packed, n_args, '-o')
-        call argv_push(packed, n_args, objfile)
-        call argv_push(packed, n_args, source)
-        call process_run_argv_logged('', packed, n_args, log_file, .true., &
-            build_timeout_seconds(), exitcode)
-    end subroutine compile_c
 
     subroutine link_binary(project_dir, prog_obj, lib_objs, n_lib_objs, dep_objs, n_dep_objs, &
             link_libs, n_link_libs, output, log_file, exitcode, flags, &
@@ -5168,8 +5207,8 @@ contains
     end subroutine truncate_file
 
     subroutine package_source_flags(sources, flags, root_config, deps, n_deps, out)
-        !! Manifest preprocessing belongs to the package defining a source.
-        !! Profile/user flags stay shared; root manifest macros must not leak.
+        !! Manifest compile choices belong to the package defining a source.
+        !! Profile/user flags stay shared; root manifest choices must not leak.
         character(len=*), intent(in) :: sources(:), flags
         type(fpm_config_t), intent(in) :: root_config
         type(resolved_src_t), intent(in) :: deps(:)
@@ -5177,7 +5216,7 @@ contains
         character(len=*), intent(out) :: out(:)
         type(fpm_config_t), allocatable :: dep_config
         type(compiler_dialect_t) :: dialect
-        character(len=:), allocatable :: mapped, shared, package_flags, prefix
+        character(len=:), allocatable :: shared, package_flags, prefix
         integer :: i, d, k, ierr, n
         integer, allocatable :: owner_lengths(:)
 
@@ -5186,22 +5225,18 @@ contains
         out = flags
         shared = flags
         dialect = compiler_dialect(fc_command())
-        do k = 1, root_config%n_flags
-            if (.not. is_preprocess_flag(root_config%flags(k))) cycle
-            mapped = dialect%translate_flag(root_config%flags(k))
-            call remove_manifest_flag(shared, mapped)
+        package_flags = manifest_compile_flags(root_config, dialect)
+        do while (len_trim(package_flags) > 0)
+            k = index(package_flags, ' ')
+            if (k == 0) k = len_trim(package_flags) + 1
+            call remove_manifest_flag(shared, package_flags(:k - 1))
+            package_flags = adjustl(package_flags(k:))
         end do
         call fpm_config_allocate(dep_config)
         do d = 1, n_deps
             call fpm_config_parse(trim(deps(d)%dir), dep_config, ierr)
             if (ierr /= 0) cycle
-            package_flags = ''
-            do k = 1, dep_config%n_flags
-                if (.not. is_preprocess_flag(dep_config%flags(k))) cycle
-                mapped = dialect%translate_flag(dep_config%flags(k))
-                if (len_trim(mapped) == 0) cycle
-                package_flags = trim(package_flags)//' '//trim(mapped)
-            end do
+            package_flags = manifest_compile_flags(dep_config, dialect)
             prefix = trim(deps(d)%src_dir)//'/'
             n = len(prefix)
             do i = 1, size(sources)
@@ -5214,12 +5249,33 @@ contains
         end do
     end subroutine package_source_flags
 
-    logical function is_preprocess_flag(flag) result(yes)
-        character(len=*), intent(in) :: flag
-        yes = trim(flag) == '-cpp'
-        if (len_trim(flag) < 2) return
-        if (flag(:2) == '-D' .or. flag(:2) == '-U') yes = .true.
-    end function is_preprocess_flag
+    function manifest_compile_flags(config, dialect) result(flags)
+        type(fpm_config_t), intent(in) :: config
+        type(compiler_dialect_t), intent(in) :: dialect
+        character(len=:), allocatable :: flags, mapped
+        integer :: i
+
+        flags = ''
+        if (config%implicit_typing) then
+            mapped = dialect%translate_flag('-fno-implicit-none')
+        else
+            mapped = dialect%translate_flag('-fimplicit-none')
+        end if
+        if (len_trim(mapped) > 0) flags = mapped
+        if (.not. config%implicit_external) then
+            mapped = dialect%translate_flag('-Werror=implicit-interface')
+            if (len_trim(mapped) > 0) flags = trim(flags)//' '//mapped
+        end if
+        if (config%source_form /= 'default') then
+            mapped = dialect%translate_flag('-f'//trim(config%source_form)//'-form')
+            if (len_trim(mapped) > 0) flags = trim(flags)//' '//mapped
+        end if
+        do i = 1, config%n_flags
+            mapped = dialect%translate_flag(config%flags(i))
+            if (len_trim(mapped) > 0) flags = trim(flags)//' '//mapped
+        end do
+        flags = trim(adjustl(flags))
+    end function manifest_compile_flags
 
     subroutine remove_manifest_flag(flags, flag)
         !! Remove one manifest occurrence, retaining a repeated user override.
@@ -5238,7 +5294,6 @@ contains
     subroutine merge_flags(config, flag_text)
         type(fpm_config_t), intent(in) :: config
         character(len=*), intent(inout) :: flag_text
-        integer :: i
         character(len=1024) :: combined
         character(len=:), allocatable :: mapped
         type(compiler_dialect_t) :: dialect
@@ -5247,15 +5302,7 @@ contains
         dialect = compiler_dialect(fc_command())
         ! fpm openmp metapackage -> the selected compiler's OpenMP flag.
         if (config%openmp) combined = trim(dialect%openmp_flag())
-        do i = 1, config%n_flags
-            mapped = dialect%translate_flag(config%flags(i))
-            if (len_trim(mapped) == 0) cycle
-            if (len_trim(combined) > 0) then
-                combined = trim(combined)//' '//trim(mapped)
-            else
-                combined = trim(mapped)
-            end if
-        end do
+        combined = trim(combined)//' '//manifest_compile_flags(config, dialect)
         if (len_trim(flag_text) > 0) then
             if (len_trim(combined) > 0) then
                 combined = trim(combined)//' '//trim(flag_text)

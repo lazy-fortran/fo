@@ -108,7 +108,7 @@ contains
         character(len=512) :: project_dir, log_file, source, binary, output
         character(len=32) :: name, value
         character(len=32) :: old_jobs
-        integer :: i, u, exitcode, n_first, n_restore, env_status
+        integer :: i, u, exitcode, n_first, n_restore, env_status, restore_exit
 
         call make_tmp_path('fo_parallel_warm_restore', project_dir)
         log_file = trim(project_dir)//'.log'
@@ -157,6 +157,14 @@ contains
         call execute_command_line('rm -rf "'//trim(project_dir)// &
             '/build/fo/obj" "'//trim(project_dir)//'/build/fo/mod"')
         call gfortran_build(project_dir, log_file, exitcode, n_restore)
+        restore_exit = exitcode
+        if (restore_exit /= 0 .or. n_restore /= 0) then
+            write(error_unit, '(a,i0,a,i0,a,i0)') &
+                'warm restore diagnostic: cold actions=', n_first, &
+                ', restored build exit=', restore_exit, ', compiler launches=', n_restore
+            write(error_unit, '(a)') 'Retained warm restore project: '//trim(project_dir)
+            write(error_unit, '(a)') 'Retained warm restore log: '//trim(log_file)
+        end if
         call assert(exitcode == 0 .and. n_restore == 0, &
             'parallel warm restore reuses all cached actions')
         binary = trim(project_dir)//'/build/fo/bin/parallel_warm_restore'
@@ -171,9 +179,11 @@ contains
         else
             call set_env('FO_JOBS', '')
         end if
-        call remove_tree(project_dir)
-        call execute_command_line('rm -f "'//trim(log_file)//'" "'// &
-            trim(output)//'"')
+        if (restore_exit == 0 .and. n_restore == 0) then
+            call remove_tree(project_dir)
+            call execute_command_line('rm -f "'//trim(log_file)//'" "'// &
+                trim(output)//'"')
+        end if
     end subroutine test_gfortran_parallel_warm_restore
 
     subroutine test_compiler_baseline_flags_change_action_id()
@@ -926,6 +936,8 @@ contains
         call make_dir(trim(project_dir)//'/app')
         open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "reachable_app"'
+        write (u, '(a)') '[fortran]'
+        write (u, '(a)') 'implicit-external = true'
         close (u)
         open (newunit=u, file=trim(project_dir)//'/src/used.f90', status='replace')
         write (u, '(a)') 'module used'

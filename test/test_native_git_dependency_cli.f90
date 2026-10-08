@@ -1,12 +1,15 @@
 program test_native_git_dependency_cli
     use fo_test_harness, only: process_result_t, string_list_t, list_add
     use fo_test_harness, only: make_scratch, join_path, make_directory
-    use fo_test_harness, only: make_symlink, move_path
+    use fo_test_harness, only: make_symlink, move_path, remove_path
     use fo_test_harness, only: write_text, remove_tree, file_exists
     use fo_test_harness, only: assert_process_ok, assert_equal_string, assert_true
     use fo_test_harness, only: assert_contains
+    use fo_test_harness, only: assert_file_equals
     use fo_test_harness, only: finish_assertions
     use fo_test_cli, only: resolve_driver, run_fo, run_external
+    use fo_fs, only: fs_stat, fs_identity
+    use, intrinsic :: iso_c_binding, only: c_long_long
     implicit none
 
     character(:), allocatable :: driver, scratch, tools, dependency, consumer
@@ -269,12 +272,121 @@ program test_native_git_dependency_cli
     call assert_equal_string(result%stdout, '41' // new_line('a'), &
         'nested relative Git dependency preserves its pinned behavior')
 
+    call test_only_closure()
+
     call remove_tree(scratch)
     call finish_assertions()
     write(*, '(a)') &
         'native-git-dependency-cli: exact rev and tag build and run without FPM'
 
 contains
+
+    subroutine test_only_closure()
+        character(:), allocatable :: root, dev, nested, original_path_manifest
+        character(:), allocatable :: binary
+        character(len=1), parameter :: nl = new_line('a')
+        integer(c_long_long) :: first_time, second_time, first_size, second_size
+        integer(c_long_long) :: first_device, second_device, first_inode, second_inode
+        logical :: valid
+
+        root = join_path(scratch, 'test_only')
+        dev = join_path(scratch, 'root_dev')
+        nested = join_path(scratch, 'test_edge')
+        original_path_manifest = 'name = "path_dependency"' // nl // &
+            '[dependencies]' // nl // 'git_provider = { git = "../provider", '// &
+            'rev = "' // commit // '" }' // nl
+        call write_text(join_path(dev, 'fpm.toml'), 'name = "root_dev"' // nl)
+        call write_text(join_path(dev, 'src/dev.f90'), &
+            'module root_dev' // nl // 'implicit none' // nl // &
+            'integer, parameter :: dev_value = 7' // nl // &
+            'end module root_dev' // nl)
+        call write_text(join_path(nested, 'fpm.toml'), &
+            'name = "test_edge"' // nl // '[dependencies]' // nl // &
+            'root_dev = { path = "../root_dev" }' // nl)
+        call write_text(join_path(nested, 'src/edge.f90'), &
+            'module test_edge' // nl // 'use root_dev, only: dev_value' // nl // &
+            'implicit none' // nl // &
+            'integer, parameter :: edge_value = dev_value + 1' // nl // &
+            'end module test_edge' // nl)
+        call write_text(join_path(root, 'fpm.toml'), &
+            'name = "test_only"' // nl // '[build]' // nl // &
+            'auto-tests = false' // nl // '[dependencies]' // nl // &
+            'path_dependency = { path = "../path_dependency" }' // nl // &
+            '[dev-dependencies]' // nl // &
+            'root_dev = { path = "../root_dev" }' // nl // &
+            '[[test]]' // nl // 'name = "closure_case"' // nl // &
+            'source-dir = "checks"' // nl // 'main = "main.f90"' // nl // &
+            '[test.dependencies]' // nl // &
+            'test_edge = { path = "../test_edge" }' // nl)
+        call write_text(join_path(root, 'checks/main.f90'), &
+            'program closure_probe' // nl // &
+            'use path_provider, only: nested_value' // nl // &
+            'use root_dev, only: dev_value' // nl // &
+            'use test_edge, only: edge_value' // nl // &
+            'implicit none' // nl // 'integer :: unit' // nl // &
+            "open(newunit=unit,file='closure.receipt',status='replace')" // nl // &
+            "write(unit,'(i0)') nested_value() + dev_value + edge_value" // nl // &
+            'close(unit)' // nl // 'end program closure_probe' // nl)
+        call expect_test_value(root, '56', 'cold named test-only closure')
+        call assert_true(.not. file_exists(join_path(root, 'src')), &
+            'test-only consumer has no dummy library source')
+        call assert_true(.not. file_exists(join_path(root, 'app')), &
+            'test-only consumer has no dummy executable source')
+        binary = join_path(root, 'build/fo/bin/closure_case')
+        if (file_exists(binary // '.exe')) binary = binary // '.exe'
+        call fs_stat(binary, first_time, first_size, valid)
+        call assert_true(valid, 'cold test-only command publishes its named executable')
+        call fs_identity(binary, first_device, first_inode, valid)
+        call expect_test_value(root, '56', 'warm named test-only closure')
+        call fs_stat(binary, second_time, second_size, valid)
+        call assert_true(valid, 'warm test-only executable remains available')
+        call fs_identity(binary, second_device, second_inode, valid)
+        call assert_true(first_time == second_time .and. first_size == second_size .and. &
+            first_device == second_device .and. first_inode == second_inode, &
+            'unchanged valid named test executable is reused without rewriting')
+
+        call write_text(join_path(dev, 'src/dev.f90'), &
+            'module root_dev' // nl // 'implicit none' // nl // &
+            'integer, parameter :: dev_value = 11' // nl // &
+            'end module root_dev' // nl)
+        call expect_test_value(root, '64', 'warm root dev dependency edit')
+        call write_text(join_path(path_dependency, 'fpm.toml'), &
+            'name = "path_dependency"' // nl // '[dependencies]' // nl // &
+            'git_provider = { git = "../provider", rev = "' // &
+            latest_commit // '" }' // nl)
+        call expect_test_value(root, '160', 'warm nested Git pin change')
+
+        call move_path(dev, dev // '.offline')
+        args = string_list_t()
+        call list_add(args, 'test')
+        call list_add(args, 'closure_case')
+        call run_fo(driver, args, root, join_path(scratch, 'cache'), result, &
+            environment)
+        call assert_true(result%exit_code /= 0, &
+            'missing root dev dependency rejects an otherwise warm test')
+        call assert_contains(result%stderr, 'root_dev', &
+            'missing test dependency names the unavailable package')
+        call move_path(dev // '.offline', dev)
+        call expect_test_value(root, '160', &
+            'restored dependency recovers test-only closure')
+        call write_text(join_path(path_dependency, 'fpm.toml'), original_path_manifest)
+        call expect_test_value(root, '64', 'restored Git pin recovers earlier behavior')
+
+    end subroutine test_only_closure
+
+    subroutine expect_test_value(root, expected, context)
+        character(len=*), intent(in) :: root, expected, context
+        character(len=1), parameter :: nl = new_line('a')
+        call remove_path(join_path(root, 'closure.receipt'))
+        args = string_list_t()
+        call list_add(args, 'test')
+        call list_add(args, 'closure_case')
+        call run_fo(driver, args, root, join_path(scratch, 'cache'), result, &
+            environment)
+        call assert_process_ok(result, context)
+        call assert_file_equals(join_path(root, 'closure.receipt'), expected // nl, &
+            context // ' executes the current source closure')
+    end subroutine expect_test_value
 
     subroutine assert_checkout_commit(expected)
         character(len=*), intent(in) :: expected
