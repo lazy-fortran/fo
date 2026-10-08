@@ -7,6 +7,42 @@ failure detection. The workspace master plan, when present, owns delivery order.
 
 ## Current delivery
 
+Handoff requested by the user on 2026-10-08: publish the assembled work and stop
+for another computer to continue. Main contains the native Win32 provider,
+complete multi-module cache artifacts, private resident scratch, absolute FPM
+path capture, declared executable directories, an opt-in native CMake slice,
+and opt-in deep lint. This is a source handoff, not a stable release: the final
+combined source has not completed its runtime gates or full platform suites.
+
+Resume in this order:
+
+1. Repair the reproducible Linux parallel allocator/parser failure (Fx #57).
+   The flags-preparation proposal still fails and was excluded from main.
+2. Build the exact combined Fo/Fx source and recheck resident scratch recovery,
+   absolute dependencies, naming, compiler paths and declared executable/install
+   behavior. The readiness stamp was advanced to invalidate old discovery.
+3. Finish native Windows coherent build/replay/cleanup tests: a simple Fortran
+   pipe variant still increases the handle count; permission and full-suite
+   gates remain open. The VM and TPX were left running, with no task processes.
+4. Run deep lint against repaired Fluff and fix its remaining Windows fixture
+   assumptions; verify native CMake against the actual GORILLA oracle and then
+   the maintained ITpPlasma profiles. The current CMake slice is deliberately
+   partial; neither broader goal is complete.
+5. Correct the recovery-test barrier only after its deterministic reproducer
+   passes; its experimental patch was excluded. Recheck the parallel-restore
+   oracle's OpenMP flags and timeout. Then run exact full platform coverage and
+   delete obsolete scripts only after their replacements pass.
+
+Local evidence remains in `/var/tmp/fo-platform-controller-20261008/resumed`,
+`/var/tmp/fo-linux-compile-flags-evidence-20261008`,
+`/var/tmp/fo-deep-lint-20261008-transfer/final-worker-handoff.json`, and
+`/var/tmp/fo-windows-20261008/windows-stopped-handoff.json`. Existing source
+branches retain earlier task commits. FPM's verified include-path repair is
+[upstream PR #1339](https://github.com/fortran-lang/fpm/pull/1339).
+
+Historical receipts below describe earlier exact sources, not this combined
+handoff.
+
 The stopped Claude session is recovered. Main includes its published
 readiness/recovery/test-runner fixes, install diagnostics and Darwin fixtures.
 The controller independently passed five resident baseline cases on `31c795b`;
