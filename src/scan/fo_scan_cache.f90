@@ -7,7 +7,7 @@ module fo_scan_cache
     implicit none
     private
 
-    character(len=16), parameter :: CACHE_MAGIC = 'fo-scan-v3'
+    character(len=16), parameter :: CACHE_MAGIC = 'fo-scan-v4'
 
     public :: scan_cache_load, scan_cache_load_trusted, scan_cache_save
 
@@ -38,7 +38,8 @@ contains
             return
         end if
         do i = 1, size(paths)
-            read (u, iostat=ios) stored_path, stored_mtime, stored_size, units(i)
+            read (u, iostat=ios) stored_path, stored_mtime, stored_size
+            if (ios == 0) call read_scan_unit(u, units(i), ios)
             if (ios /= 0 .or. trim(stored_path) /= trim(paths(i))) then
                 close (u)
                 return
@@ -87,7 +88,8 @@ contains
         deallocate (units)
         allocate (units(n_stored))
         do i = 1, n_stored
-            read (u, iostat=ios) stored_path, stored_mtime, stored_size, units(i)
+            read (u, iostat=ios) stored_path, stored_mtime, stored_size
+            if (ios == 0) call read_scan_unit(u, units(i), ios)
             if (ios /= 0) then
                 close (u)
                 deallocate (units)
@@ -131,7 +133,8 @@ contains
                 return
             end if
             stored_path = paths(i)
-            write (u, iostat=ios) stored_path, mtime, bytes, units(i)
+            write (u, iostat=ios) stored_path, mtime, bytes
+            if (ios == 0) call write_scan_unit(u, units(i), ios)
             if (ios /= 0) then
                 close (u)
                 call delete_tmpfile(tmpfile)
@@ -142,6 +145,41 @@ contains
         rc = fs_rename(tmpfile, file)
         if (rc /= 0) call delete_tmpfile(tmpfile)
     end subroutine scan_cache_save
+
+    subroutine write_scan_unit(unit, record, ios)
+        integer, intent(in) :: unit
+        type(scan_unit_t), intent(in) :: record
+        integer, intent(out) :: ios
+        write(unit, iostat=ios) record%filename, record%module_name, &
+            record%program_name, record%is_program, record%is_test, &
+            record%source_line, record%source_column, record%n_deps
+        if (ios /= 0 .or. record%n_deps == 0) return
+        write(unit, iostat=ios) record%deps(:record%n_deps), &
+            record%dependency_lines(:record%n_deps), &
+            record%dependency_columns(:record%n_deps)
+    end subroutine write_scan_unit
+
+    subroutine read_scan_unit(unit, record, ios)
+        integer, intent(in) :: unit
+        type(scan_unit_t), intent(out) :: record
+        integer, intent(out) :: ios
+        read(unit, iostat=ios) record%filename, record%module_name, &
+            record%program_name, record%is_program, record%is_test, &
+            record%source_line, record%source_column, record%n_deps
+        if (ios /= 0) return
+        ! Corrupt cache counts cannot allocate an unbounded record. A rejected
+        ! cache is rescanned; this bound does not limit source scanning.
+        if (record%n_deps < 0 .or. record%n_deps > MAX_UNITS) then
+            ios = 1
+            return
+        end if
+        allocate(record%deps(record%n_deps), &
+            record%dependency_lines(record%n_deps), &
+            record%dependency_columns(record%n_deps))
+        if (record%n_deps == 0) return
+        read(unit, iostat=ios) record%deps, record%dependency_lines, &
+            record%dependency_columns
+    end subroutine read_scan_unit
 
     subroutine cache_file(root, path)
         character(len=*), intent(in) :: root

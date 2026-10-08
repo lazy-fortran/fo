@@ -1399,7 +1399,8 @@ contains
         character(len=MAX_PATH) :: fname_local
         character(len=512) :: per_log_local
         character(len=512) :: level_obj_path
-        character(len=HASH_LEN) :: level_dep_keys(64), level_source_key
+        character(len=HASH_LEN), allocatable :: level_dep_keys(:)
+        character(len=HASH_LEN) :: level_source_key
         integer :: level_dep_count
         logical :: level_complete, level_hit
 
@@ -2017,19 +2018,21 @@ contains
         character(len=*), intent(in) :: source_path
         type(dag_t), intent(in) :: dag
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
-        character(len=HASH_LEN), intent(inout) :: dep_keys(64)
+        character(len=HASH_LEN), allocatable, intent(out) :: dep_keys(:)
         integer, intent(inout) :: n_dep
 
         integer :: i, j
         character(len=512) :: modpath
         logical :: found
 
+        n_dep = 0
         do i = 1, n_units
             if (trim(units(i)%filename) /= trim(source_path)) cycle
-
+            ! Reserve one further key for the linked project library.
+            allocate (dep_keys(units(i)%n_deps + 1))
+            dep_keys = ''
             do j = 1, units(i)%n_deps
                 if (dag_find_node(dag, units(i)%deps(j)) > 0) cycle
-                if (n_dep >= 64) return
                 call find_dep_mod_file(units(i)%deps(j), dep_includes, &
                     n_dep_includes, modpath, found)
                 if (.not. found) cycle
@@ -2038,6 +2041,8 @@ contains
             end do
             return
         end do
+        allocate (dep_keys(1))
+        dep_keys = ''
     end subroutine add_external_dep_keys
 
     subroutine collect_dep_keys_source_order(units, n_units, dag, source_path, &
@@ -2049,7 +2054,7 @@ contains
         type(dag_t), intent(in) :: dag
         character(len=HASH_LEN), intent(in) :: mod_keys(MAX_NODES)
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
-        character(len=HASH_LEN), intent(out) :: dep_keys(64)
+        character(len=HASH_LEN), allocatable, intent(out) :: dep_keys(:)
         integer, intent(out) :: n_dep
         logical, intent(out) :: complete
 
@@ -2058,13 +2063,13 @@ contains
         logical :: found
 
         n_dep = 0
-        dep_keys = ''
         complete = .true.
         do i = 1, n_units
             if (trim(units(i)%filename) /= trim(source_path)) cycle
 
+            allocate (dep_keys(units(i)%n_deps))
+            dep_keys = ''
             do j = 1, units(i)%n_deps
-                if (n_dep >= 64) return
                 dep_id = dag_find_node(dag, units(i)%deps(j))
                 if (dep_id > 0) then
                     if (len_trim(mod_keys(dep_id)) == 0) then
@@ -2083,6 +2088,7 @@ contains
             end do
             return
         end do
+        allocate (dep_keys(0))
     end subroutine collect_dep_keys_source_order
 
     subroutine find_dep_mod_file(modname, dep_includes, n_dep_includes, modpath, &
@@ -2578,7 +2584,8 @@ contains
         type(cache_t) :: c
         integer :: cache_ierr
         character(len=256) :: compiler
-        character(len=HASH_LEN) :: dep_keys(64), output_key, lib_hash
+        character(len=HASH_LEN), allocatable :: dep_keys(:)
+        character(len=HASH_LEN) :: output_key, lib_hash
         character(len=HASH_LEN) :: link_base
         integer :: n_dep, n_test_includes
         character(len=512) :: test_includes(MAX_DEP_DIRS)
@@ -2806,7 +2813,7 @@ contains
             call add_external_dep_keys(tunits, n_tests, dag, filenames(node_id), &
                 test_includes, n_test_includes, &
                 dep_keys, n_dep)
-            if (len_trim(lib_hash) > 0 .and. n_dep < size(dep_keys)) then
+            if (len_trim(lib_hash) > 0) then
                 n_dep = n_dep + 1
                 dep_keys(n_dep) = lib_hash
             end if

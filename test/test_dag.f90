@@ -44,16 +44,19 @@ contains
         units(1)%filename = 'a.f90'
         units(1)%module_name = 'a'
         units(1)%n_deps = 1
+        allocate(units(1)%deps(1))
         units(1)%deps(1) = 'b'
 
         units(2)%filename = 'b.f90'
         units(2)%module_name = 'b'
         units(2)%n_deps = 1
+        allocate(units(2)%deps(1))
         units(2)%deps(1) = 'c'
 
         units(3)%filename = 'c.f90'
         units(3)%module_name = 'c'
         units(3)%n_deps = 0
+        allocate(units(3)%deps(0))
 
         call build_dag_from_units(units, 3, dag)
         call assert(dag%n_nodes == 3, 'linear: 3 nodes')
@@ -81,17 +84,20 @@ contains
         units(1)%filename = '00_child.f90'
         units(1)%module_name = 'child_sm'
         units(1)%n_deps = 2
+        allocate(units(1)%deps(2))
         units(1)%deps(1) = 'ancestor_m'
         units(1)%deps(2) = 'parent_sm'
 
         units(2)%filename = '10_parent.f90'
         units(2)%module_name = 'parent_sm'
         units(2)%n_deps = 1
+        allocate(units(2)%deps(1))
         units(2)%deps(1) = 'ancestor_m'
 
         units(3)%filename = '20_ancestor.f90'
         units(3)%module_name = 'ancestor_m'
         units(3)%n_deps = 0
+        allocate(units(3)%deps(0))
 
         call build_dag_from_units(units, 3, dag)
         call dag_topo_sort(dag, order, n_order, has_cycle)
@@ -115,20 +121,24 @@ contains
         units(1)%filename = 'a.f90'
         units(1)%module_name = 'a'
         units(1)%n_deps = 0
+        allocate(units(1)%deps(0))
 
         units(2)%filename = 'b.f90'
         units(2)%module_name = 'b'
         units(2)%n_deps = 1
+        allocate(units(2)%deps(1))
         units(2)%deps(1) = 'a'
 
         units(3)%filename = 'c.f90'
         units(3)%module_name = 'c'
         units(3)%n_deps = 1
+        allocate(units(3)%deps(1))
         units(3)%deps(1) = 'a'
 
         units(4)%filename = 'd.f90'
         units(4)%module_name = 'd'
         units(4)%n_deps = 2
+        allocate(units(4)%deps(2))
         units(4)%deps(1) = 'b'
         units(4)%deps(2) = 'c'
 
@@ -151,16 +161,19 @@ contains
         units(1)%filename = 'a.f90'
         units(1)%module_name = 'a'
         units(1)%n_deps = 1
+        allocate(units(1)%deps(1))
         units(1)%deps(1) = 'b'
 
         units(2)%filename = 'b.f90'
         units(2)%module_name = 'b'
         units(2)%n_deps = 1
+        allocate(units(2)%deps(1))
         units(2)%deps(1) = 'c'
 
         units(3)%filename = 'c.f90'
         units(3)%module_name = 'c'
         units(3)%n_deps = 0
+        allocate(units(3)%deps(0))
 
         call build_dag_from_units(units, 3, dag)
 
@@ -182,6 +195,7 @@ contains
         units(1)%filename = 'src/lib_a.f90'
         units(1)%module_name = 'lib_a'
         units(1)%n_deps = 0
+        allocate(units(1)%deps(0))
         units(1)%is_test = .false.
 
         units(2)%filename = 'test/test_a.f90'
@@ -189,6 +203,7 @@ contains
         units(2)%is_program = .true.
         units(2)%is_test = .true.
         units(2)%n_deps = 1
+        allocate(units(2)%deps(1))
         units(2)%deps(1) = 'lib_a'
 
         units(3)%filename = 'test/test_b.f90'
@@ -196,10 +211,12 @@ contains
         units(3)%is_program = .true.
         units(3)%is_test = .true.
         units(3)%n_deps = 0
+        allocate(units(3)%deps(0))
 
         units(4)%filename = 'src/lib_b.f90'
         units(4)%module_name = 'lib_b'
         units(4)%n_deps = 0
+        allocate(units(4)%deps(0))
         units(4)%is_test = .false.
 
         call build_dag_from_units(units, 4, dag, is_test_arr=is_test_arr)

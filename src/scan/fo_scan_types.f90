@@ -5,6 +5,7 @@ module fo_scan_types
     integer, parameter, public :: MAX_NAME = 128
     integer, parameter, public :: MAX_PATH = 512
     integer, parameter, public :: MAX_UNITS = 8192
+    ! Initial allocation only: source dependencies grow without truncation.
     integer, parameter, public :: MAX_DEPS = 64
 
     type, public :: scan_unit_t
@@ -16,9 +17,9 @@ module fo_scan_types
         integer :: source_line = 0
         integer :: source_column = 0
         integer :: n_deps = 0
-        character(len=MAX_NAME) :: deps(MAX_DEPS)
-        integer :: dependency_lines(MAX_DEPS) = 0
-        integer :: dependency_columns(MAX_DEPS) = 0
+        character(len=MAX_NAME), allocatable :: deps(:)
+        integer, allocatable :: dependency_lines(:)
+        integer, allocatable :: dependency_columns(:)
     end type scan_unit_t
 
 end module fo_scan_types

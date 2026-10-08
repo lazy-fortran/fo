@@ -428,6 +428,8 @@ contains
         unit_info%source_line = 0
         unit_info%source_column = 0
         unit_info%n_deps = 0
+        allocate(unit_info%deps(MAX_DEPS), unit_info%dependency_lines(MAX_DEPS), &
+            unit_info%dependency_columns(MAX_DEPS))
         unit_info%deps = ''
         unit_info%dependency_lines = 0
         unit_info%dependency_columns = 0
@@ -777,21 +779,32 @@ contains
         character(len=*), intent(in) :: name
         integer, intent(in), optional :: line, column
 
-        integer :: i
+        integer :: i, capacity
+        character(len=MAX_NAME), allocatable :: expanded(:)
+        integer, allocatable :: lines(:), columns(:)
 
         ! skip duplicates
         do i = 1, unit_info%n_deps
             if (trim(unit_info%deps(i)) == trim(name)) return
         end do
 
-        if (unit_info%n_deps < MAX_DEPS) then
-            unit_info%n_deps = unit_info%n_deps + 1
-            unit_info%deps(unit_info%n_deps) = name
-            if (present(line)) unit_info%dependency_lines(unit_info%n_deps) = line
-            if (present(column)) then
-                unit_info%dependency_columns(unit_info%n_deps) = column
-            end if
+        if (unit_info%n_deps == size(unit_info%deps)) then
+            capacity = max(MAX_DEPS, 2*size(unit_info%deps))
+            allocate(expanded(capacity), lines(capacity), columns(capacity))
+            expanded = ''
+            lines = 0
+            columns = 0
+            expanded(:unit_info%n_deps) = unit_info%deps
+            lines(:unit_info%n_deps) = unit_info%dependency_lines
+            columns(:unit_info%n_deps) = unit_info%dependency_columns
+            call move_alloc(expanded, unit_info%deps)
+            call move_alloc(lines, unit_info%dependency_lines)
+            call move_alloc(columns, unit_info%dependency_columns)
         end if
+        unit_info%n_deps = unit_info%n_deps + 1
+        unit_info%deps(unit_info%n_deps) = name
+        if (present(line)) unit_info%dependency_lines(unit_info%n_deps) = line
+        if (present(column)) unit_info%dependency_columns(unit_info%n_deps) = column
     end subroutine add_dep
 
     integer function leading_column(line) result(column)
