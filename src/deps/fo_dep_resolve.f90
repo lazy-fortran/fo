@@ -9,6 +9,8 @@ module fo_dep_resolve
         fpm_config_allocate, dep_kind, &
         DEP_PATH, DEP_GIT, DEP_REGISTRY, add_link_lib
     use fo_registry, only: registry_resolve
+    use fo_fs, only: fs_native_path, fs_path_root_len, fs_is_windows, &
+        fs_path_has_drive, fs_identity
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
     private
@@ -86,7 +88,7 @@ contains
             end if
             seen = .false.
             do k = 1, n_out
-                if (trim(out(k)%dir) == trim(dep_dir)) then
+                if (same_directory(out(k)%dir, dep_dir)) then
                     seen = .true.
                     exit
                 end if
@@ -228,7 +230,7 @@ contains
             end if
             seen = .false.
             do k = 1, n_out
-                if (trim(out(k)%dir) == trim(dep_dir)) then
+                if (same_directory(out(k)%dir, dep_dir)) then
                     seen = .true.
                     exit
                 end if
@@ -358,64 +360,95 @@ contains
         found = .true.
     end subroutine linked_worktree_primary_root
 
+    logical function same_directory(first, second) result(same)
+        character(len=*), intent(in) :: first, second
+        integer(8) :: first_device, first_inode, second_device, second_inode
+        logical :: first_ok, second_ok
+
+        same = trim(first) == trim(second)
+        if (same .or. .not. fs_is_windows()) return
+        call fs_identity(first, first_device, first_inode, first_ok)
+        if (.not. first_ok) return
+        call fs_identity(second, second_device, second_inode, second_ok)
+        if (second_ok) same = first_device == second_device .and. &
+            first_inode == second_inode
+    end function same_directory
+
     subroutine join_path(base, rel, out)
-        !! Resolve rel against base (absolute base assumed) and normalize.
+        !! Resolve relative paths while preserving Windows drive and share roots.
         character(len=*), intent(in) :: base, rel
         character(len=*), intent(out) :: out
+        character(len=:), allocatable :: native_base, native_rel
+        integer :: root
 
-        if (len_trim(rel) == 0) then
-            call normalize_path(base, out)
-        else if (rel(1:1) == '/') then
-            call normalize_path(rel, out)
+        native_base = fs_native_path(base)
+        native_rel = fs_native_path(rel)
+        if (len(native_rel) == 0) then
+            call normalize_path(native_base, out)
+            return
+        end if
+        root = fs_path_root_len(native_rel)
+        if (root > 0) then
+            if (fs_is_windows() .and. root == 1) then
+                root = fs_path_root_len(native_base)
+                if (root >= 3) then
+                    call normalize_path(native_base(:root)//native_rel(2:), out)
+                    return
+                end if
+            end if
+            call normalize_path(native_rel, out)
         else
-            call normalize_path(trim(base)//'/'//trim(rel), out)
+            call normalize_path(native_base//'/'//native_rel, out)
         end if
     end subroutine join_path
 
     subroutine normalize_path(path, out)
-        !! Collapse '.' and 'a/b/..' segments so equivalent spellings of one
-        !! directory compare equal for dedup. Leading '/' is preserved; a
-        !! leading '..' that cannot be collapsed is kept verbatim.
+        !! Collapse lexical segments without escaping a native drive/share root.
+        !! Relative leading '..' survives; Unicode and case bytes stay intact.
         character(len=*), intent(in) :: path
         character(len=*), intent(out) :: out
-
         character(len=256) :: segs(128)
-        integer :: nseg, i, start, n
-        logical :: absolute, at_sep
+        integer :: nseg, i, start, n, root
+        logical :: rooted, at_sep
         character(len=:), allocatable :: p
 
-        p = trim(adjustl(path))
-        n = len_trim(p)
-        absolute = (n >= 1 .and. p(1:1) == '/')
+        p = fs_native_path(trim(adjustl(path)))
+        n = len(p)
+        root = fs_path_root_len(p)
+        rooted = root > 0
+        if (fs_path_has_drive(p)) rooted = root == 3
         nseg = 0
-        start = 1
-        do i = 1, n + 1
+        start = root + 1
+        do i = start, n + 1
             at_sep = i > n
             if (.not. at_sep) at_sep = p(i:i) == '/'
             if (at_sep) then
-                if (i > start) then
-                    call push_seg(p(start:i - 1), segs, nseg)
-                end if
+                if (i > start) call push_seg(p(start:i - 1), segs, nseg, rooted)
                 start = i + 1
             end if
         end do
-
-        out = ''
-        if (absolute) out = '/'
+        out = p(:root)
+        if (fs_is_windows() .and. root > 3) then
+            if (out(root:root) /= '/') out = trim(out)//'/'
+        end if
         do i = 1, nseg
-            if (i == 1) then
-                out = trim(out)//trim(segs(i))
-            else
-                out = trim(out)//'/'//trim(segs(i))
+            if (len_trim(out) > 0) then
+                n = len_trim(out)
+                if (out(n:n) /= '/') then
+                    if (.not. (i == 1 .and. root == 2 .and. &
+                               fs_path_has_drive(p))) out = trim(out)//'/'
+                end if
             end if
+            out = trim(out)//trim(segs(i))
         end do
         if (len_trim(out) == 0) out = '.'
     end subroutine normalize_path
 
-    subroutine push_seg(seg, segs, nseg)
+    subroutine push_seg(seg, segs, nseg, rooted)
         character(len=*), intent(in) :: seg
         character(len=256), intent(inout) :: segs(128)
         integer, intent(inout) :: nseg
+        logical, intent(in) :: rooted
 
         if (trim(seg) == '.') return
         if (trim(seg) == '..') then
@@ -425,7 +458,8 @@ contains
                     return
                 end if
             end if
-            ! cannot collapse: keep it (relative path escaping the base)
+            if (rooted) return
+            ! Relative leading parents cannot collapse.
             if (nseg < 128) then
                 nseg = nseg + 1
                 segs(nseg) = '..'

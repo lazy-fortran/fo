@@ -2,7 +2,8 @@ module fo_registry
     !! Native, offline FPM registry resolution. Remote/authenticated registries
     !! are rejected explicitly; local registry trees are the source authority.
     use fo_fpm_config, only: fpm_dep_t, valid_registry_version
-    use fo_fs, only: fs_identity
+    use fo_fs, only: fs_identity, fs_path_is_absolute, fs_native_path, &
+        fs_is_windows, fs_parent_path
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
@@ -24,6 +25,7 @@ contains
         integer, intent(out) :: ierr
         character(len=4096) :: home_dir
         integer :: status, length
+        character(len=:), allocatable :: suffix
 
         ierr = 0
         call get_environment_variable('FO_FPM_CONFIG_FILE', path, length, status)
@@ -33,17 +35,24 @@ contains
             return
         end if
         if (status == 0 .and. length > 0) then
-            if (path(1:1) /= '/') then
+            path = fs_native_path(path)
+            if (.not. fs_path_is_absolute(path)) then
                 call registry_error('FO_FPM_CONFIG_FILE must be an absolute path', ierr)
             end if
             return
         end if
-        call get_environment_variable('HOME', home_dir, length, status)
-        if (status /= 0 .or. length == 0 .or. length + 29 > len(path)) then
-            call registry_error('cannot locate FPM registry config under HOME', ierr)
+        suffix = '/.local/share/fpm/config.toml'
+        if (fs_is_windows()) then
+            call get_environment_variable('APPDATA', home_dir, length, status)
+            suffix = '/local/fpm/config.toml'
+        else
+            call get_environment_variable('HOME', home_dir, length, status)
+        end if
+        if (status /= 0 .or. length == 0 .or. length + len(suffix) > len(path)) then
+            call registry_error('cannot locate platform FPM registry config', ierr)
             return
         end if
-        path = trim(home_dir)//'/.local/share/fpm/config.toml'
+        path = fs_native_path(home_dir)//suffix
     end subroutine registry_config_path
 
     subroutine registry_resolve(dep, root, directory, ierr)
@@ -142,8 +151,12 @@ contains
             end if
             registry = value(2:i - 1)
             if (index(trim(registry), achar(92)) /= 0) then
-                call registry_error('escaped registry paths are unsupported', ierr)
-                exit
+                if (fs_is_windows() .and. value(1:1) == "'") then
+                    registry = fs_native_path(registry)
+                else
+                    call registry_error('escaped registry paths are unsupported', ierr)
+                    exit
+                end if
             end if
             have_path = .true.
         end do
@@ -153,9 +166,9 @@ contains
             call registry_error('registry config requires a local path', ierr)
             return
         end if
-        if (registry(1:1) /= '/') then
-            i = index(trim(config), '/', back=.true.)
-            registry = config(:i)//trim(registry)
+        if (.not. fs_path_is_absolute(registry)) then
+            call fs_parent_path(config, line)
+            registry = trim(line)//'/'//trim(registry)
         end if
         package = trim(registry)//'/'//trim(dep%namespace)//'/'//trim(dep%name)
         if (dep%registry_v_seen) then

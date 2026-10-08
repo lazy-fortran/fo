@@ -1,7 +1,8 @@
 module fo_util
     use, intrinsic :: iso_fortran_env, only: int64, real64, iostat_eor
-    use, intrinsic :: iso_c_binding, only: c_int
-    use fo_fs, only: fs_collect_files, fs_remove_file
+    use, intrinsic :: iso_c_binding, only: c_int, c_char, c_null_char
+    use fo_fs, only: fs_collect_files, fs_remove_file, fs_native_path, &
+        fs_path_root_len
     use fx_mcp, only: mcp_send_response, MCP_FRAME_UNKNOWN
     implicit none
     private
@@ -14,6 +15,13 @@ module fo_util
     public :: wall_time_seconds
 
     interface
+        integer(c_int) function fo_c_temp_directory(path, capacity) &
+                bind(C, name='fo_c_temp_directory')
+            import :: c_int, c_char
+            character(kind=c_char), intent(out) :: path(*)
+            integer(c_int), value :: capacity
+        end function fo_c_temp_directory
+
         subroutine fo_c_getpid(pid_out) bind(C, name='fo_c_getpid')
             import :: c_int
             integer(c_int), intent(out) :: pid_out
@@ -35,19 +43,31 @@ contains
     end function wall_time_seconds
 
     function temporary_root() result(root)
-        !! TMPDIR without trailing slashes, or /var/tmp when unset or unusable.
+        !! Explicit TMPDIR, otherwise the native platform temporary directory.
         character(len=:), allocatable :: root
         character(len=512) :: tmpdir
-        integer :: tmpdir_len, tmpdir_status
+        integer :: tmpdir_len, tmpdir_status, i, root_len
+        character(kind=c_char) :: native_tmp(513)
+        integer(c_int) :: rc
 
         tmpdir = ''
         call get_environment_variable('TMPDIR', tmpdir, length=tmpdir_len, &
             status=tmpdir_status)
-        if (tmpdir_status /= 0 .or. tmpdir_len <= 0 .or. tmpdir_len > len(tmpdir)) &
-            tmpdir = '/var/tmp'
-        if (len_trim(tmpdir) == 0) tmpdir = '/var/tmp'
-        root = trim(tmpdir)
-        do while (len(root) > 1)
+        if (tmpdir_status /= 0 .or. tmpdir_len <= 0 .or. &
+            tmpdir_len > len(tmpdir)) then
+            rc = fo_c_temp_directory(native_tmp, int(size(native_tmp), c_int))
+            tmpdir = '.'
+            if (rc == 0) then
+                tmpdir = ''
+                do i = 1, len(tmpdir)
+                    if (native_tmp(i) == c_null_char) exit
+                    tmpdir(i:i) = native_tmp(i)
+                end do
+            end if
+        end if
+        root = fs_native_path(tmpdir)
+        root_len = fs_path_root_len(root)
+        do while (len(root) > max(1, root_len))
             if (root(len(root):len(root)) /= '/') exit
             root = root(:len(root) - 1)
         end do
@@ -62,6 +82,7 @@ contains
         integer(c_int) :: pid
         integer, save :: serial = 0
         integer :: serial_local
+        character(len=:), allocatable :: prefix_root
 
         !$omp critical (fo_tmpfile_serial)
         serial = serial + 1
@@ -69,7 +90,12 @@ contains
         !$omp end critical (fo_tmpfile_serial)
         call fo_c_getpid(pid)
         call system_clock(count)
-        write (path, '(a,a,a,a,i0,a,i0,a,i0,a)') temporary_root(), '/', &
+        prefix_root = temporary_root()
+        if (len(prefix_root) > 0) then
+            if (prefix_root(len(prefix_root):) == '/') &
+                prefix_root = prefix_root(:len(prefix_root) - 1)
+        end if
+        write (path, '(a,a,a,a,i0,a,i0,a,i0,a)') prefix_root, '/', &
             trim(prefix), '-', int(pid), '-', count, '-', serial_local, '.tmp'
     end subroutine make_tmpfile
 
