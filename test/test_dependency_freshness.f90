@@ -16,11 +16,15 @@ program test_dependency_freshness
     implicit none
 
     character(:), allocatable :: driver, scratch, cache
+    character(len=512) :: chmod_tool, copy_tool, touch_tool
     character(len=1), parameter :: nl = new_line('a')
     type(process_result_t) :: result
     type(string_list_t) :: arguments, environment
 
     call resolve_driver(driver)
+    call require_utility('chmod', chmod_tool)
+    call require_utility('cp', copy_tool)
+    call require_utility('touch', touch_tool)
     call make_scratch('fo-dependency-freshness-cli', scratch)
     cache = join_path(scratch, 'cache')
 
@@ -40,6 +44,16 @@ program test_dependency_freshness
         'dependency-freshness-cli: source, include, header, module, flags, tool'
 
 contains
+
+    subroutine require_utility(name, path)
+        character(len=*), intent(in) :: name
+        character(len=*), intent(out) :: path
+        logical :: found
+
+        call fs_find_executable(name, path, found)
+        call assert_true(found, 'freshness oracle requires executable '//name)
+        if (.not. found) call finish_assertions()
+    end subroutine require_utility
 
     subroutine assert_public_ok(message)
         character(len=*), intent(in) :: message
@@ -325,8 +339,8 @@ contains
             value // ' "$@"' // nl)
         call list_add(command, '+x')
         call list_add(command, path)
-        call run_external('/usr/bin/chmod', command, scratch, child)
-        call assert_process_ok(child, 'compiler wrapper is executable')
+        call run_external(trim(chmod_tool), command, scratch, child)
+        call assert_process_ok(child, 'make compiler wrapper executable: '//path)
     end subroutine write_tool
 
     subroutine preserve_metadata(path, reference, restore)
@@ -339,14 +353,15 @@ contains
             call list_add(command, '-r')
             call list_add(command, reference)
             call list_add(command, path)
-            call run_external('/usr/bin/touch', command, scratch, child)
+            call run_external(trim(touch_tool), command, scratch, child)
+            call assert_process_ok(child, 'restore input timestamps: '//path)
         else
             call list_add(command, '-p')
             call list_add(command, path)
             call list_add(command, reference)
-            call run_external('/usr/bin/cp', command, scratch, child)
+            call run_external(trim(copy_tool), command, scratch, child)
+            call assert_process_ok(child, 'save metadata reference: '//reference)
         end if
-        call assert_process_ok(child, 'preserve input metadata for content oracle')
     end subroutine preserve_metadata
 
     subroutine switch_manifest_source_dir()
