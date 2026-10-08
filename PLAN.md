@@ -7,13 +7,15 @@ failure detection. The workspace master plan, when present, owns delivery order.
 
 ## Current delivery
 
-The reviewed Claude handoff is implemented through `d7e8c9b`,
+The reviewed Claude handoff is implemented through `7fa581b`,
 based on `95490c97f73e53b2b9c70a61b287bd3aa36b8d38`. Publication requires the
 controller's exact combined gate; individual worker receipts do not substitute
 for it. The final gate selects 42 Linux resident cases, 20 Darwin public cases and
 15 Darwin resident cases. Nested host admission now delegates bounded capacity to descendants and retains
 upstream reservations through owner death, payload drainage and gated
-authority revocation. Its independent crash/stop oracles and these combined
+authority revocation. Recovery publishes exact descendant identities before
+TERM can remove their ancestry; a direct unpolled-scope heartbeat fixture and
+the real public reproduction crash oracle verify drainage. Its independent crash/stop oracles and these combined
 gates must pass before publication. These selections do not claim the full
 Fo inventory.
 The user explicitly authorized faepmac1 for Darwin verification.
@@ -32,7 +34,11 @@ setup. The harness now has one group writer and cleans up a child whose group
 has not yet been established. Independent native controls and timeout/grandchild
 oracles distinguish this defect from artifact failures. External dependency
 object basenames use full path digests so deep private execution views compile
-without exceeding the filesystem component limit.
+without exceeding the filesystem component limit. Backend fixtures identify
+providers by independent exported symbols and verify warm artifact reuse with
+nanosecond timestamps. Gremlin keeps elapsed-clock values in real64 throughout
+supervision and bounded reproduction, avoiding false timeout jumps on Darwin
+epoch-based clocks.
 
 The #205 JSON increment removes the duplicate scanner and verifies strict
 receipt recovery with nested metadata. It removes 40 physical lines across its
