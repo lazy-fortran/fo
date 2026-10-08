@@ -122,20 +122,29 @@ call assert_equal_integer(int(json_number_value(json_member(diagnostic, 'severit
     call assert_equal_integer(int(json_number_value(json_member(position, 'line'))), &
                               3, 'unsaved parser diagnostic points to exact line')
 
-    call notify(edit('didChange', 7, good))
+    call notify(edit('didChange', 7, &
+        'program broken'//achar(10)//'implicit none'//achar(10)// &
+        'integer :: value'//achar(10)//'print *, "'//achar(206)//achar(177)// &
+        achar(240)//achar(159)//achar(152)//achar(128)// &
+        '"; value = identity{integer'))
     call receive(response)
-    call check_publication(response, 7, .false.)
-    call notify(edit('didChange', 5, &
-        'elemental subroutine invalid_intent(a, b)'//achar(10)// &
-        '  integer :: a'//achar(10)//'  integer :: b'//achar(10)// &
-        'end subroutine invalid_intent'))
-    call receive(response)
-    call check_publication(response, 5, .true.)
+    call check_publication(response, 7, .true.)
     params = json_member(response, 'params')
-    call assert_equal_integer(json_size(json_member(params, 'diagnostics')), &
-        2, 'publishes every independent semantic error in one document')
+    diagnostic = json_element(json_member(params, 'diagnostics'), 1)
+    span = json_member(diagnostic, 'range')
+    position = json_member(span, 'start')
+    call assert_equal_integer( &
+        int(json_number_value(json_member(position, 'character'))), 32, &
+        'Greek and astral literal before error uses UTF16 start column')
+    position = json_member(span, 'end')
+    call assert_equal_integer( &
+        int(json_number_value(json_member(position, 'character'))), 33, &
+        'Greek and astral literal before error uses UTF16 end column')
 
-    call notify(edit('didChange', 6, parser_error))
+    call notify(edit('didChange', 8, good))
+    call receive(response)
+    call check_publication(response, 8, .false.)
+    call notify(edit('didChange', 5, parser_error))
     status = read_line(handle, bytes, int(len(bytes), c_size_t), 400_c_int)
     call assert_equal_integer(int(status), -2, &
                               'older versions cannot replace newer results')
@@ -156,7 +165,8 @@ call assert_equal_integer(int(json_number_value(json_member(diagnostic, 'severit
     call assert_file_equals(scratch//'/src/space #.f90', &
                             'disk source must stay untouched', &
                             'diagnostics analyze editor text without writing source')
-  call assert_file_absent(scratch//'/build', 'typing never starts compiler/test builds')
+    call assert_file_absent(scratch//'/build', &
+        'typing never starts compiler/test builds')
     call assert_file_absent(scratch//'/cache', 'typing never captures/builds a project')
     call assert_file_absent(scratch//'/state', &
                             'typing never starts resident test campaigns')
