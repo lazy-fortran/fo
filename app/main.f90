@@ -1669,23 +1669,78 @@ contains
 
     subroutine cmd_lint()
         use fo_lint, only: lint_finding_t, lint_warning_t, &
-            lint_dir, lint_compiler, lint_dedup_warnings, &
+            lint_files, lint_compiler, lint_dedup_warnings, collect_fortran_sources, &
             lint_all_json, lint_fix_dir, MAX_FINDINGS, MAX_WARNINGS
+        use fo_lint_deep, only: lint_deep_run, lint_deep_print
+        use fx_path, only: path_normalize, path_is_absolute
         type(backend_t) :: b
         type(lint_finding_t), allocatable :: findings(:)
         type(lint_warning_t), allocatable :: warnings(:)
-        integer :: n_findings, n_warnings, i, output_mode, mode_ierr
-        integer :: n_removed, n_remaining
-        character(len=512) :: scan_root
+        character(len=512), allocatable :: files(:), selected(:)
+        logical, allocatable :: wanted(:)
+        integer :: n_findings, n_warnings, i, j, n_files, n_selected, arg_length
+        integer :: n_removed, n_remaining, status, deep_count, deep_status
+        character(len=512) :: scan_root, argument, candidate
+        character(len=4096) :: cwd
+        character(len=:), allocatable :: deep_json, deep_error, normalized
+        logical :: deep, json_mode, matched
 
         allocate (findings(MAX_FINDINGS), warnings(MAX_WARNINGS))
         b = detect_backend('.')
         scan_root = '.'
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
 
-        call check_output_mode(output_mode, mode_ierr)
+        deep = has_arg('--deep')
+        json_mode = has_arg('--json') .or. has_arg('--json=compact') .or. &
+            has_arg('--json=full')
+        allocate (selected(max(0, nargs - 1)))
+        call process_getcwd(cwd, status)
+        if (status /= 0) then
+            write (error_unit, '(a)') 'fo lint: cannot identify working directory'
+            call process_exit(2)
+        end if
+        n_selected = 0
+        do i = 2, nargs
+            call get_command_argument(i, length=arg_length)
+            if (arg_length > len(argument)) then
+                write (error_unit, '(a)') &
+                    'fo lint: source argument exceeds 512 characters'
+                call process_exit(2)
+            end if
+            call get_command_argument(i, argument)
+            select case (trim(argument))
+            case ('--deep', '--fix', '--json', '--json=compact', '--json=full')
+                cycle
+            case default
+                if (len_trim(argument) == 0) then
+                    write (error_unit, '(a)') 'fo lint: empty source argument'
+                    call process_exit(2)
+                end if
+                if (argument(1:1) == '-') then
+                    write (error_unit, '(a)') 'fo lint: unknown option '//trim(argument)
+                    call process_exit(2)
+                end if
+                n_selected = n_selected + 1
+                if (path_is_absolute(trim(argument))) then
+                    normalized = path_normalize(trim(argument))
+                else
+                    normalized = path_normalize(trim(cwd)//'/'//trim(argument))
+                end if
+                if (len(normalized) > len(argument)) then
+                    write (error_unit, '(a)') &
+                        'fo lint: normalized source path exceeds 512 characters'
+                    call process_exit(2)
+                end if
+                selected(n_selected) = normalized
+            end select
+        end do
 
         if (has_arg('--fix')) then
+            if (deep .or. n_selected > 0) then
+                write (error_unit, '(a)') &
+                    'fo lint: --fix cannot combine with --deep or selected sources'
+                call process_exit(2)
+            end if
             call lint_fix_dir(trim(scan_root), n_removed, n_remaining)
             write (output_unit, '(i0,a)') n_removed, ' unused import(s) removed'
             if (n_remaining > 0) write (output_unit, '(i0,a)') &
@@ -1694,15 +1749,53 @@ contains
             return
         end if
 
-        call lint_dir(trim(scan_root), findings, n_findings)
-        call lint_compiler(trim(scan_root), warnings, n_warnings)
+        call collect_fortran_sources(trim(scan_root), files, n_files)
+        allocate (wanted(n_files))
+        wanted = n_selected == 0
+        do i = 1, n_selected
+            matched = .false.
+            do j = 1, n_files
+                candidate = files(j)
+                if (.not. path_is_absolute(trim(candidate))) &
+                    candidate = path_normalize(trim(cwd)//'/'//trim(candidate))
+                candidate = path_normalize(trim(candidate))
+                if (candidate == selected(i)) then
+                    wanted(j) = .true.
+                    matched = .true.
+                else if (len_trim(candidate) > len_trim(selected(i))) then
+                    if (index(candidate, trim(selected(i))//'/') == 1) then
+                        wanted(j) = .true.
+                        matched = .true.
+                    end if
+                end if
+            end do
+            if (.not. matched) then
+                write (error_unit, '(a)') &
+                    'fo lint: no supported source matches '//trim(selected(i))
+                call process_exit(2)
+            end if
+        end do
+        selected = pack(files(:n_files), wanted)
+        n_selected = size(selected)
+        call lint_files(trim(scan_root), selected, n_selected, findings, n_findings)
+        call lint_compiler(trim(scan_root), warnings, n_warnings, selected)
         call lint_dedup_warnings(warnings, n_warnings)
+        deep_count = 0
+        deep_status = 0
+        deep_json = '[]'
+        deep_error = ''
+        if (deep) call lint_deep_run(trim(scan_root), selected, n_selected, &
+            deep_json, deep_count, deep_status, deep_error)
 
-        if (output_mode > 0) then
-            write (output_unit, '(a)') &
-                trim(lint_all_json(findings, n_findings, &
-                warnings, n_warnings))
-        else if (n_findings == 0 .and. n_warnings == 0) then
+        if (json_mode) then
+            if (deep) then
+                write (output_unit, '(a)') lint_all_json(findings, n_findings, &
+                    warnings, n_warnings, deep_json, deep_count, deep_error)
+            else
+                write (output_unit, '(a)') &
+                    lint_all_json(findings, n_findings, warnings, n_warnings)
+            end if
+        else if (n_findings + n_warnings + deep_count == 0 .and. deep_status == 0) then
             write (output_unit, '(a)') 'no issues found'
         else
             do i = 1, n_findings
@@ -1717,6 +1810,8 @@ contains
                     ':', warnings(i)%column, ': ', &
                     trim(warnings(i)%message)
             end do
+            if (deep_count > 0) call lint_deep_print(deep_json)
+            if (len(deep_error) > 0) write (error_unit, '(a)') deep_error
             if (any_unused_dummy(warnings, n_warnings)) &
                 write (output_unit, '(a)') &
                 'hint: an intentionally unused dummy argument (e.g. an interface'// &
@@ -1725,8 +1820,10 @@ contains
             write (output_unit, '(i0,a,i0,a)') &
                 n_findings, ' unused import(s), ', &
                 n_warnings, ' compiler warning(s)'
-            call process_exit(1)
+            if (deep) write (output_unit, '(i0,a)') deep_count, ' deep diagnostic(s)'
         end if
+        if (deep_status > 1) call process_exit(2)
+        if (n_findings + n_warnings > 0 .or. deep_status == 1) call process_exit(1)
     end subroutine cmd_lint
 
     logical function any_unused_dummy(warnings, n)

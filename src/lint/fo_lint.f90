@@ -16,6 +16,7 @@ module fo_lint
     public :: lint_testfail_files
     public :: lint_dedup_warnings
     public :: lint_fix_dir
+    public :: collect_fortran_sources
     public :: MAX_FINDINGS, MAX_WARNINGS
 
     integer, parameter :: MAX_FINDINGS = 512
@@ -481,7 +482,7 @@ contains
     end subroutine is_symbol_used
 
     subroutine collect_fortran_sources(dir, files, n_files)
-        !! Collect supported lowercase and uppercase Fortran sources, excluding generated
+        !! Collect lowercase and uppercase Fortran sources, excluding generated
         !! and dependency trees. Replaces the find | sort pipeline.
         character(len=*), intent(in) :: dir
         character(len=512), allocatable, intent(out) :: files(:)
@@ -684,7 +685,7 @@ contains
     function lint_findings_json(findings, n_findings) result(json)
         type(lint_finding_t), intent(in) :: findings(*)
         integer, intent(in) :: n_findings
-        character(len=8192) :: json
+        character(len=:), allocatable :: json
 
         integer :: i
 
@@ -707,10 +708,11 @@ contains
         json = trim(json)//'],"count":'//trim(json_int(n_findings))//'}'
     end function lint_findings_json
 
-    subroutine lint_compiler(dir, warnings, n_warnings)
+    subroutine lint_compiler(dir, warnings, n_warnings, selected)
         character(len=*), intent(in) :: dir
         type(lint_warning_t), intent(out) :: warnings(MAX_WARNINGS)
         integer, intent(out) :: n_warnings
+        character(len=*), intent(in), optional :: selected(:)
 
         character(len=512) :: moddir
         character(len=512), allocatable :: files(:)
@@ -735,7 +737,13 @@ contains
         if (len_trim(mod_flags) + len_trim(moddir) + 4 <= len(mod_flags)) &
             mod_flags = trim(mod_flags)//' -J'//trim(moddir)
 
-        call collect_fortran_sources(dir, files, n_files)
+        if (present(selected)) then
+            n_files = size(selected)
+            allocate (files(n_files))
+            files = selected
+        else
+            call collect_fortran_sources(dir, files, n_files)
+        end if
 
         ! Each file's -fsyntax-only pass is independent (dependency interfaces come
         ! from the build's -I dirs, not the throwaway -J output), so compile them in
@@ -1095,7 +1103,7 @@ contains
     function lint_warnings_json(warnings, n_warnings) result(json)
         type(lint_warning_t), intent(in) :: warnings(*)
         integer, intent(in) :: n_warnings
-        character(len=8192) :: json
+        character(len=:), allocatable :: json
 
         integer :: i
 
@@ -1117,22 +1125,24 @@ contains
         json = trim(json)//'],"count":'//trim(json_int(n_warnings))//'}'
     end function lint_warnings_json
 
-    function lint_all_json(findings, n_findings, warnings, n_warnings) &
+    function lint_all_json(findings, n_findings, warnings, n_warnings, &
+            deep_json, deep_count, deep_error) &
             result(json)
         type(lint_finding_t), intent(in) :: findings(*)
         integer, intent(in) :: n_findings
         type(lint_warning_t), intent(in) :: warnings(*)
         integer, intent(in) :: n_warnings
-        character(len=16384) :: json
+        character(len=*), intent(in), optional :: deep_json, deep_error
+        integer, intent(in), optional :: deep_count
+        character(len=:), allocatable :: json
 
-        integer, parameter :: LIMIT = 15000
         integer :: i, total, n_emitted
 
         total = n_findings + n_warnings
+        if (present(deep_count)) total = total + deep_count
         json = '{"unused_imports":['
 
         do i = 1, n_findings
-            if (len_trim(json) > LIMIT) exit
             if (i > 1) json = trim(json)//','
             json = trim(json)//'{"file":"'// &
                 trim(json_escape_string(findings(i)%file))//'"'// &
@@ -1147,7 +1157,6 @@ contains
 
         n_emitted = 0
         do i = 1, n_warnings
-            if (len_trim(json) > LIMIT) exit
             if (n_emitted > 0) json = trim(json)//','
             n_emitted = n_emitted + 1
             json = trim(json)//'{"file":"'// &
@@ -1158,7 +1167,13 @@ contains
                 trim(json_escape_string(warnings(i)%message))//'"}'
         end do
 
-        json = trim(json)//'],"count":'//trim(json_int(total))//'}'
+        json = trim(json)//'],"count":'//trim(json_int(total))
+        if (present(deep_json)) json = json//',"deep_diagnostics":'//deep_json
+        if (present(deep_error)) then
+            if (len(deep_error) > 0) json = json//',"deep_error":"'// &
+                json_escape_string(deep_error)//'"'
+        end if
+        json = json//'}'
     end function lint_all_json
 
     pure function to_lower(str) result(low)

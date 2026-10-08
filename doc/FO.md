@@ -152,6 +152,22 @@ MCP `test` accepts `json="full"` or `json="compact"` for the complete structured
 test report, including every failing and passing entry. The report and its MCP
 response grow with the results rather than truncating at a fixed byte limit.
 
+`fo lint --deep [paths...]` adds Fluff diagnostics to the native source checks
+and compiler warnings. Install `fluff` on PATH, then use `--json` to receive the
+usual native fields plus a lossless `deep_diagnostics` array, including locations
+and fix suggestions. Source selections use Fo's inventory and exclude generated
+and dependency trees. Ordinary lint, build, test, and Gremlin commands keep their
+existing native checks.
+
+Deep lint runs `fluff check --output-format json` once for the selected input set,
+using `.fluff.nml` or `fluff.nml` in the project directory. Valid findings return
+exit code 1; missing tools, execution failures, malformed diagnostics, and damaged
+cache records return exit code 2 with an explicit error. Unchanged analysis can
+reuse a typed diagnostics artifact in the shared action-result store. The key
+includes selected filenames and source bytes, the manifest, both configuration
+files, the Fluff executable bytes, and the command policy. Changing an input
+invalidates reuse.
+
 The test-failure-path lint rule follows failure exits through project module
 helpers. It scans module procedures in `src/`, `app/`, and `test/`, repeats the
 collection until transitive helper calls converge, and distinguishes calls from
