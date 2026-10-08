@@ -359,6 +359,25 @@ contains
                 end if
             end do
         end do
+        do count = 256, 257
+            open (newunit=unit, file=trim(dir)//'/fpm.toml', status='replace')
+            write (unit, '(a)') 'name = "capacity"'
+            do i = 1, count
+                write (number, '(i0)') i
+                write (unit, '(a)') '[[extra.fo.inputs]]'
+                write (unit, '(a)') 'path = "fixture_'//trim(number)//'"'
+                write (unit, '(a)') 'role = "test-fixture"'
+            end do
+            close (unit)
+            call fpm_config_parse(trim(dir), config, ierr)
+            if (count == 256) then
+                call assert(ierr == 0, '256 declared fixture inputs are supported')
+            else
+                call assert(ierr /= 0, '257th fixture input fails explicitly')
+                call assert(index(config%manifest_parse_error, 'extra.fo.inputs') > 0, &
+                    'fixture input error identifies the unsupported declaration')
+            end if
+        end do
         call execute_command_line('rm -rf "'//trim(dir)//'"', exitstat=status)
         call assert(status == 0, 'manifest capacity fixture removed')
     end subroutine test_manifest_capacity_errors
