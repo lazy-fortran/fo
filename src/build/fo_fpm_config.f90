@@ -16,8 +16,8 @@ module fo_fpm_config
 
     ! How a dependency is acquired, derived from which fields the manifest set.
     ! path = local dir (mutable, may be edited); git = cloned at a ref (pinned,
-    ! immutable); registry = a bare version spec like `stdlib = "*"` resolved
-    ! through the package registry (pinned, immutable).
+    ! immutable); registry = namespace/name with an optional exact numeric v,
+    ! resolved from configured local registry sources through the native DAG.
     integer, parameter :: DEP_PATH = 1
     integer, parameter :: DEP_GIT = 2
     integer, parameter :: DEP_REGISTRY = 3

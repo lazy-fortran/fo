@@ -46,13 +46,11 @@ program test_native_registry_cli
         'module helper'//new_line('a')// &
         'use helper_leaf, only: helper_leaf_value'//new_line('a')// &
         'contains'//new_line('a')//'integer function helper_value()'// &
-        new_line( &
-        'a')//'helper_value = 7 + helper_leaf_value( &
+        new_line('a')//'helper_value = 7 + helper_leaf_value( &
         )'//new_line('a')// &
         'end function'//new_line('a')//'end module'//new_line('a'))
     call write_text(join_path(consumer, 'app/probe.f90'), &
-        'program probe'//new_line( &
-        'a')//'use provider, only: provider_value'// &
+        'program probe'//new_line('a')//'use provider, only: provider_value'// &
         new_line('a')//"print '(i0)', provider_value()"//new_line('a')// &
         'end program'//new_line('a'))
     call assert_true(.not. file_exists(join_path(tools, 'fpm')), &
@@ -98,13 +96,11 @@ program test_native_registry_cli
     call write_consumer('provider.v = "7.0.0"')
     call expect_failure('missing registry', 'missing exact registry version')
     call write_text(join_path(consumer, 'fpm.toml'), &
-        'name = "registry_probe"'//new_line( &
-        'a')//'[dependencies]'//new_line('a')// &
+        'name = "registry_probe"'//new_line('a')//'[dependencies]'//new_line('a')// &
         'provider = { v = "1.9.0" }'//new_line('a'))
     call expect_failure('requires namespace', 'missing namespace is explicit')
     call write_text(join_path(consumer, 'fpm.toml'), &
-        'name = "registry_probe"'//new_line( &
-        'a')//'[dependencies]'//new_line('a')// &
+        'name = "registry_probe"'//new_line('a')//'[dependencies]'//new_line('a')// &
         'provider = { namespace = "missing", v = "1.9.0" }'//new_line('a'))
     call expect_failure('missing registry', 'absent namespace is explicit')
     call write_consumer('provider.v = ""')
@@ -126,8 +122,7 @@ program test_native_registry_cli
         'dependency authentication fails explicitly')
     call write_consumer('')
     call write_text(config, '[registry]'//new_line('a')// &
-        'path = "'//registry//'"'//new_line( &
-        'a')//'token = "secret"'//new_line('a'))
+        'path = "'//registry//'"'//new_line('a')//'token = "secret"'//new_line('a'))
     call expect_failure('unsupported registry config/auth key token', &
         'authentication config fails explicitly')
     call write_text(config, '[registry]'//new_line('a')// &
@@ -168,8 +163,7 @@ contains
         call write_text(join_path(root, 'src/'//name//'.f90'), &
             'module '//name//new_line('a')//'contains'//new_line('a')// &
             'integer function '//name//'_value()'//new_line('a')// &
-            name//'_value = '//trim( &
-            number)//new_line('a')//'end function'// &
+            name//'_value = '//trim(number)//new_line('a')//'end function'// &
             new_line('a')//'end module'//new_line('a'))
     end subroutine write_package
 
@@ -182,20 +176,16 @@ contains
         root = join_path(registry, 'demo/provider/'//version)
         write (number, '(i0)') value
         call write_text(join_path(root, 'fpm.toml'), &
-            'name = "provider"'//new_line( &
-            'a')//'version = "'//version//'"'// &
+            'name = "provider"'//new_line('a')//'version = "'//version//'"'// &
             new_line('a')//'[dependencies]'//new_line('a')// &
             'leaf = { namespace = "demo", v = "1.0.0" }'//new_line('a')// &
             '[dev-dependencies]'//new_line('a')// &
-            'irrelevant = { namespace = "missing", v = "99.0.0" }'//new_line( &
-            'a'))
+            'irrelevant = { namespace = "missing", v = "99.0.0" }'//new_line('a'))
         call write_text(join_path(root, 'src/provider.f90'), &
-            'module provider'//new_line( &
-            'a')//'use leaf, only: leaf_value'// &
+            'module provider'//new_line('a')//'use leaf, only: leaf_value'// &
             new_line('a')//'contains'//new_line('a')// &
             'integer function provider_value()'//new_line('a')// &
-            'provider_value = '//trim( &
-            number)//' + leaf_value()'//new_line('a')// &
+            'provider_value = '//trim(number)//' + leaf_value()'//new_line('a')// &
             'end function'//new_line('a')//'end module'//new_line('a'))
     end subroutine write_provider
 
