@@ -129,6 +129,9 @@ program test_gremlin_reproduce_logs
     ! campaign with INFRA_ERROR. Start a clean owner to exercise normal stop.
     call write_text(project//'/token.txt', 'FROZEN_REPRODUCE_TOKEN'//new_line('a'))
     call write_dependency('FROZEN_DEPENDENCY_TOKEN')
+    ! A distinct anchor needs a new receipt instead of transferring the prior PASS.
+    call gremlin_write_case(project, 'test_reproduce_anchor', &
+        "print '(a)', 'FO_REPRODUCE_CLEAN_STOP_ANCHOR_OUTPUT'")
     call gremlin_start_args(arguments, project, lane, 'test_reproduce_anchor')
     call list_add(arguments, '--random')
     call list_add(arguments, '0')
