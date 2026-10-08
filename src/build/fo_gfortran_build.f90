@@ -1785,7 +1785,10 @@ contains
                 index(lower, ' function ') == 0 .and. &
                 index(lower, ' subroutine ') == 0 .and. &
                 index(lower, ' procedure ') == 0) n_modules = n_modules + 1
-            if (index(lower, 'module ') == 1 .and. &
+            ! MODULE is a procedure prefix and can follow PURE/ELEMENTAL or
+            ! a return type. The parent interface still produces its .smod.
+            if (index(' '//trim(lower), ' module ') > 0 .and. &
+                index(lower, 'end ') /= 1 .and. &
                 (index(lower, ' subroutine ') > 0 .or. &
                 index(lower, ' function ') > 0 .or. &
                 index(lower, ' procedure ') > 0)) then

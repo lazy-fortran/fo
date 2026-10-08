@@ -157,7 +157,7 @@ contains
         write (unit, '(a)') 'submodule (lineage_m:parent_sm) child_sm'
         write (unit, '(a)') 'contains'
         write (unit, '(a)') 'module procedure child_value'
-        write (unit, '(a)') 'child_value = 2'
+        write (unit, '(a)') 'value = 2 + n'
         write (unit, '(a)') 'end procedure child_value'
         write (unit, '(a)') 'end submodule child_sm'
         close (unit)
@@ -178,9 +178,12 @@ contains
         write (unit, '(a)') 'module lineage_m'
         write (unit, '(a)') 'implicit none'
         write (unit, '(a)') 'interface'
-        write (unit, '(a)') 'module integer function parent_value()'
+        write (unit, '(a)') 'pure module integer function parent_value()'
         write (unit, '(a)') 'end function parent_value'
-        write (unit, '(a)') 'module integer function child_value()'
+        write (unit, '(a)') &
+            'pure elemental module function child_value(n) result(value)'
+        write (unit, '(a)') 'integer, intent(in) :: n'
+        write (unit, '(a)') 'integer :: value'
         write (unit, '(a)') 'end function child_value'
         write (unit, '(a)') 'end interface'
         write (unit, '(a)') 'end module lineage_m'
@@ -222,7 +225,9 @@ contains
         write (unit, '(a)') 'use lineage_m, only: child_value, parent_value'
         write (unit, '(a)') 'implicit none'
         write (unit, '(a,i0,a)') &
-            'if (parent_value() + child_value() /= ', value, ') error stop 1'
+            'if (parent_value() + child_value(0) /= ', value, ') error stop 1'
+        write (unit, '(a)') &
+            'if (any(child_value([0, 1]) /= [2, 3])) error stop 2'
         write (unit, '(a)') 'end program test_lineage'
         close (unit)
     end subroutine write_test_expectation
