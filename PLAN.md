@@ -7,7 +7,7 @@ failure detection. The workspace master plan, when present, owns delivery order.
 
 ## Current delivery
 
-The reviewed Claude handoff is implemented through `7fa581b`,
+The reviewed Claude handoff is implemented through `a17df88`,
 based on `95490c97f73e53b2b9c70a61b287bd3aa36b8d38`. Publication requires the
 controller's exact combined gate; individual worker receipts do not substitute
 for it. The final gate selects 42 Linux resident cases, 20 Darwin public cases and
@@ -18,7 +18,12 @@ TERM can remove their ancestry; a direct unpolled-scope heartbeat fixture and
 the real public reproduction crash oracle verify drainage. Its independent crash/stop oracles and these combined
 gates must pass before publication. These selections do not claim the full
 Fo inventory.
-The user explicitly authorized faepmac1 for Darwin verification.
+The user explicitly authorized faepmac1 for Darwin verification. Its child-state
+fixture now uses native process data to distinguish live and exited children;
+the independent control and affected backend test pass. Publication remains
+held on a frozen registry replay mismatch in the deeper Linux resident fixture
+and an instrumented Fx parallel cache-restore memory error. Neither a retry
+nor receipts from an earlier source version satisfies the final gate.
 
 | Handoff goal | Independently checked behavior |
 | --- | --- |
@@ -54,10 +59,13 @@ under `/var/tmp/fo-codex-144-darwin-20261008` on faepmac1. FPM bootstrap defects
 warm runtime checks pass without clearing caches; upstream scope review
 precedes a PR. Fo's native build path remains the delivery authority.
 
-Fx #57 remains open. Its two historical allocator aborts do not establish the
-first invalid write or a recurrent reproducer. The audit is retained at
-`/var/tmp/fx-heap-audit-20261008/AUDIT.txt`; a bounded warm Valgrind build is the
-next discriminating check if the failure recurs. Do not infer repair from a retry.
+Fx #57 remains open. The current resident diagnostic build repeated an allocator
+abort. An ASAN Fo build independently identifies an out-of-bounds access in Fx
+local-result matching through a deferred-character function result during
+parallel cache restoration. The owning Fx repair and independent varied-path
+restore oracle are in progress. Evidence is retained under
+`/var/tmp/fx-heap-audit-20261008`; original Fo consumer rechecks are required.
+The older allocator aborts remain unattributed until evidence links them.
 
 ## Delivery order
 

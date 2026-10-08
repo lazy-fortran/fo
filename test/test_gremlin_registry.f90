@@ -71,6 +71,7 @@ program test_gremlin_registry
         'use provider, only: provider_value'//new_line('a')// &
         'implicit none'//new_line('a')// &
         'integer :: unit'//new_line('a')// &
+        'print "(a,i0)", "REGISTRY_RUNTIME_VALUE=", provider_value()'//new_line('a')// &
         'select case(provider_value())'//new_line('a')// &
         'case(19,23,29,31)'//new_line('a')// &
         'open(newunit=unit, file="'//runtime_value// &
@@ -135,7 +136,8 @@ program test_gremlin_registry
     call assert_true(process%exit_code == 0, &
         'captured registry consumer reproduces: '//process%stdout//process%stderr)
     call assert_true(read_text(runtime_value) == '19'//new_line('a'), &
-        'reproduction executes original registry source after live selection changes')
+        'reproduction executes original registry source after live selection changes; '// &
+        'actual='//read_text(runtime_value)//'; response='//process%stdout//process%stderr)
     call assert_frozen('old-generation reproduction')
     arguments = string_list_t()
     call list_add(arguments, 'test')
