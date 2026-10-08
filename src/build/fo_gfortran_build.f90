@@ -33,7 +33,8 @@ module fo_gfortran_build
     use fo_lock, only: lock_check
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_remove_file, fs_append_file, &
         fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec, &
-        fs_find_executable, fs_rename, fs_mkdir_excl, fs_identity, fs_path_is_absolute
+        fs_find_executable, fs_rename, fs_mkdir_excl, fs_identity, fs_path_is_absolute, &
+        fs_is_windows
     use fo_progress, only: progress_begin, progress_step, progress_end
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         selected_compiler_command, COMPILER_NVFORTRAN, COMPILER_IFX, &
@@ -41,6 +42,7 @@ module fo_gfortran_build
     use fo_compiler_flags, only: append_array_temporary_warning_flag, append_pipe_flag
     use fo_linker_policy, only: select_linker
     use fo_macho_image, only: macho_image_valid
+    use fo_pe_image, only: pe_image_valid
     use fo_capabilities, only: compiler_supports_section_splitting
     use fo_external_modules, only: collect_external_module_dirs
     use fo_build_stamp, only: build_stamp_matches, build_stamp_quick_matches, &
@@ -3380,6 +3382,10 @@ contains
         character(len=64) :: elf_header
 
         valid = .false.
+        if (fs_is_windows()) then
+            call pe_image_valid(path, valid)
+            return
+        end if
         file_size = 0_int64
         inquire (file=trim(path), size=file_size, iostat=ios)
         if (ios /= 0) return
@@ -4809,6 +4815,7 @@ contains
                 cycle
             end if
             staged_output = trim(stage_dir)//'/binary'
+            if (fs_is_windows()) staged_output = trim(staged_output)//'.exe'
             inquire (file=trim(staged_output), exist=exists)
             if (.not. exists) return
             call fs_remove_tree(trim(stage_dir))
