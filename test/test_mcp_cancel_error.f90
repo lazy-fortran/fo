@@ -26,7 +26,7 @@ program test_mcp_cancel_error
     character(len=32) :: number
     type(mcp_session_t) :: server, server_b
     type(json_value_t) :: response, payload, status_payload, field, full_check
-    integer :: exit_code, sentinel = 0, run_id, run_id_b, bad_run_id, error_code
+    integer :: exit_code, sentinel = 0, run_id, run_id_b, bad_run_id, error_code, replacement_run_id
     integer :: child_a = 0, child_b = 0
     integer(c_int64_t) :: child_a_start = 0_c_int64_t
     integer(c_int64_t) :: child_b_start = 0_c_int64_t
@@ -91,7 +91,7 @@ program test_mcp_cancel_error
         response)
     call mcp_session_notify(server_b, 'notifications/initialized')
     arguments = '{"action":"check","mode":"start","root":'// &
-        mcp_quote(project_b)//'}'
+        mcp_quote(project_b)//',"json":"full"}'
     call mcp_session_call(server_b, arguments, response)
     payload = json_member(response, 'result')
     run_id_b = int(json_number_value(json_member(payload, 'run_id')))
@@ -126,8 +126,8 @@ program test_mcp_cancel_error
         int(json_number_value(json_member(payload, 'run_id'))) == run_id, &
         'valid cancellation reports completion for the exact owned process')
     if (clock_rate > 0) then
-        call assert_true(real(finished_at - started_at) / real(clock_rate) < 5.0, &
-            'owned process cancellation completes within five seconds')
+        call assert_true(real(finished_at - started_at) / real(clock_rate) < 3.0, &
+            'owned process cancellation completes within three seconds')
     end if
     call mcp_session_call(server, '{"action":"status"}', response)
     call extract_payload(response, status_payload)
@@ -138,6 +138,45 @@ program test_mcp_cancel_error
         'terminal status records the public cancellation exit code')
     call wait_child_gone(child_a, child_a_start, &
         'public cancellation stops the exact blocked child before cleanup')
+
+    call remove_path(ready_a)
+    call mcp_session_call(server, start_arguments, response)
+    payload = json_member(response, 'result')
+    replacement_run_id = int(json_number_value(json_member(payload, 'run_id')))
+    call assert_true(replacement_run_id > 0 .and. replacement_run_id /= run_id, &
+        'same MCP server allocates a new owner after completed cancellation')
+    if (replacement_run_id <= 0) goto 900
+    call gremlin_wait_file(ready_a, 30000, found)
+    call assert_true(found, 'replacement check reaches its real child barrier')
+    if (.not. found) goto 900
+    call read_child_identity(ready_a, child_a, child_a_start, found)
+    if (.not. found) goto 900
+    write(number, '(i0)') run_id
+    call mcp_session_call(server, &
+        '{"action":"cancel","run_id":'//trim(number)//'}', response)
+    call assert_equal_integer(rpc_error_code(response), -32602, &
+        'completed old owner cannot cancel a newer active owner on the same server')
+    call mcp_session_call(server, '{"action":"status"}', response)
+    call extract_payload(response, status_payload)
+    call assert_true(json_string_value(json_member(status_payload, 'state')) == &
+        'running', 'rejected completed owner leaves the replacement active')
+    call assert_equal_integer(int(json_number_value( &
+        json_member(status_payload, 'run_id'))), replacement_run_id, &
+        'replacement retains its exact identity after completed-owner rejection')
+    call assert_true(mcp_process_identity_running(child_a, child_a_start), &
+        'completed-owner rejection preserves the actual replacement child')
+    write(number, '(i0)') replacement_run_id
+    call mcp_session_call(server, &
+        '{"action":"cancel","run_id":'//trim(number)//'}', response)
+    call extract_payload(response, payload)
+    call assert_true(json_boolean_value(json_member(payload, 'cancelled')), &
+        'replacement owner cancels with its own public ID')
+    call wait_child_gone(child_a, child_a_start, &
+        'replacement cancellation reaps its actual child')
+    call mcp_session_call(server, &
+        '{"action":"cancel","run_id":'//trim(number)//'}', response)
+    call assert_equal_integer(rpc_error_code(response), -32602, &
+        'duplicate replacement cancellation rejects its now-completed public ID')
 
     call mcp_session_call(server_b, '{"action":"status"}', response)
     call extract_payload(response, status_payload)
@@ -157,6 +196,16 @@ program test_mcp_cancel_error
         'independent server B check completes successfully')
     call wait_child_gone(child_b, child_b_start, &
         'server B child exits after its own completion token')
+
+    write(number, '(i0)') run_id_b
+    call mcp_session_call(server_b, &
+        '{"action":"diagnostics","run_id":'//trim(number)//'}', response)
+    diagnostics = response_text(response)
+    call read_full_check(diagnostics, full_check)
+    call assert_true(json_boolean_value(json_member(full_check, 'ok')), &
+        'successful completed child retains its full check receipt after reaping')
+    call assert_true(index(diagnostics, 'completed-result') > 0, &
+        'successful completed child output remains available after reaping')
 
     call prepare_failure_fixture(project_bad)
     bad_arguments = '{"action":"check","mode":"start","json":"full","root":'// &
@@ -344,7 +393,8 @@ contains
         if (present(completed_path)) body = body//new_line('a')// &
             'open(newunit=unit, file="'//completed_path// &
                 '", status="replace", action="write")'//new_line('a')// &
-            'write(unit, "(a)") "completed"'//new_line('a')//'close(unit)'
+            'write(unit, "(a)") "completed"'//new_line('a')//'close(unit)'// &
+            new_line('a')//'print *, "completed-result"'
         body = body//new_line('a')//'end program test_mcp_barrier'//new_line('a')
         call write_text(project_dir//'/test/test_mcp_barrier.f90', body)
     end subroutine prepare_check_fixture

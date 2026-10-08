@@ -206,7 +206,7 @@ program test_async_process_boundary_slow
     write (output_unit, '(a,f0.2,a)') 'Owner cancellation took ', &
         cancel_seconds, ' seconds'
     call check(exitcode == 0, 'cancels the exact owned session')
-    call check(cancel_seconds >= 1.5_real64 .and. cancel_seconds < 4.0_real64, &
+    call check(cancel_seconds >= 1.5_real64 .and. cancel_seconds < 3.5_real64, &
         'gives TERM-ignoring descendants bounded grace before KILL')
     call check(wait_for_quiet(trim(scratch)//'/owned.owner.heartbeat'), &
         'stops the owned session leader heartbeat')
