@@ -185,7 +185,7 @@ contains
                '","params":{"textDocument":{"uri":'//mcp_quote(uri)// &
                ',"version":'//trim(number)
         if (method == 'didOpen') then
-            body = body//',"languageId":"fortran","text":'//mcp_quote(text)//'}}'
+            body = body//',"languageId":"fortran","text":'//mcp_quote(text)//'}}}'
         else
             body = body//'},"contentChanges":[{"text":'//mcp_quote(text)//'}]}}'
         end if
@@ -193,9 +193,13 @@ contains
 
     subroutine notify(body)
         character(len=*), intent(in) :: body
-        character(:), allocatable :: frame
+        character(:), allocatable :: frame, error_message
         character(len=32) :: length
+        type(json_value_t) :: parsed
+        logical :: valid
 
+        call json_parse(body, parsed, valid, error_message)
+        call assert_true(valid, 'fixture sends syntactically valid JSON')
         write (length, '(i0)') len(body)
         frame = 'Content-Length: '//trim(length)//achar(13)//achar(10)// &
                 achar(13)//achar(10)//body
