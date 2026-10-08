@@ -12,6 +12,11 @@
 #include <unistd.h>
 #include <stdatomic.h>
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#include "fx_win_store.h"
+#endif
+#include "../util/fo_path.h"
+
 /* Exposed only as a focused native oracle for copy durability behavior. */
 static atomic_ulong generation_copy_sync_count;
 
@@ -61,6 +66,9 @@ static int validate_tree_root(const char *root) {
 }
 
 static int make_dirs(const char *path) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    return fx_win_mkdirs(path, 0);
+#else
     char *copy = strdup(path);
     char *p;
     struct stat st;
@@ -85,6 +93,7 @@ static int make_dirs(const char *path) {
     }
     free(copy);
     return 0;
+#endif
 }
 
 static int inventory_path_is_valid(const char *rel) {
@@ -108,10 +117,6 @@ static int write_path(FILE *manifest, char kind, unsigned int executable,
     if (!inventory_path_is_valid(rel)) return -1;
     return fprintf(manifest, "%c %03u %s\n", kind, executable, rel) < 0 ?
                -1 : 0;
-}
-
-static int compare_names(const struct dirent **lhs, const struct dirent **rhs) {
-    return strcmp((*lhs)->d_name, (*rhs)->d_name);
 }
 
 static int make_parent(const char *path) {
@@ -138,10 +143,16 @@ static int normalize_link_target(const char *link_rel, const char *raw,
     size_t used = 0;
     int n;
 
-    if (raw[0] == '/') {
+    if (fo_path_is_absolute(raw) || raw[0] == '/') {
         errno = EXDEV;
         return -1;
     }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (strchr(raw, '\\') || strchr(raw, ':')) {
+        errno = EXDEV;
+        return -1;
+    }
+#endif
     n = snprintf(combined, sizeof(combined), "%.*s/%s", (int)parent_len,
                  link_rel, raw);
     if (n < 0 || (size_t)n >= sizeof(combined)) {
@@ -629,6 +640,9 @@ int fo_c_generation_capture_file(const char *root, const char *relative,
         return errno;
     }
     strcpy(copy, relative);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (strchr(relative, '\\') || strchr(relative, ':')) return EINVAL;
+#endif
     for (part = copy; *part != '\0';) {
         next = strchr(part, '/');
         if (next != NULL) *next = '\0';
@@ -646,8 +660,9 @@ int fo_c_generation_capture_file(const char *root, const char *relative,
      * still match the inventory, and all descendants remain no-follow. */
     root_fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (root_fd < 0) goto done;
-    if (fstat(root_fd, &root_st) != 0 || root_st.st_dev != device ||
-        root_st.st_ino != inode) {
+    if (fstat(root_fd, &root_st) != 0 ||
+        (unsigned long long)root_st.st_dev != (unsigned long long)device ||
+        (unsigned long long)root_st.st_ino != (unsigned long long)inode) {
         errno = EAGAIN;
         goto done;
     }
@@ -713,35 +728,30 @@ static int freeze_tree_at(const char *root, const char *rel) {
     }
     if (lstat(path, &st) != 0) return -1;
     if (S_ISDIR(st.st_mode)) {
-        struct dirent **entries = NULL;
-        int count = scandir(path, &entries, NULL, compare_names);
-        int i;
-        if (count < 0) return -1;
-        for (i = 0; i < count; ++i) {
+        DIR *directory = opendir(path);
+        struct dirent *entry;
+        int result = 0;
+        if (directory == NULL) return -1;
+        for (;;) {
             char child[8192];
-            const char *name = entries[i]->d_name;
-            int rc = 0;
+            errno = 0;
+            entry = readdir(directory);
+            if (entry == NULL) { result = errno ? -1 : 0; break; }
+            const char *name = entry->d_name;
             if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0 ||
-                excluded_entry(rel, name, 1)) {
-                free(entries[i]);
-                continue;
-            }
+                excluded_entry(rel, name, 1)) continue;
             if (snprintf(child, sizeof(child), "%s%s%s", rel,
-                         rel[0] == '\0' ? "" : "/", name) >=
-                (int)sizeof(child)) {
+                         rel[0] == '\0' ? "" : "/", name) >= (int)sizeof(child)) {
                 errno = ENAMETOOLONG;
-                rc = -1;
-            } else {
-                rc = freeze_tree_at(root, child);
+                result = -1;
+                break;
             }
-            free(entries[i]);
-            if (rc != 0) {
-                while (++i < count) free(entries[i]);
-                free(entries);
-                return rc;
-            }
+            if (freeze_tree_at(root, child) != 0) { result = -1; break; }
         }
-        free(entries);
+        int saved = errno;
+        if (closedir(directory) != 0 && result == 0) return -1;
+        errno = saved;
+        if (result != 0) return result;
         return chmod(path, 0555);
     }
     if (S_ISLNK(st.st_mode)) return 0;

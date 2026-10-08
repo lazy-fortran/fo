@@ -10,6 +10,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#include "fx_win_store.h"
+#endif
+
 static int write_all(int fd, const char *data, size_t length) {
     size_t offset = 0;
     while (offset < length) {

@@ -15,6 +15,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#include "fx_win_store.h"
+#endif
+
 #define LIFECYCLE_MAX (256 * 1024)
 
 static int sync_parent(const char *path) {

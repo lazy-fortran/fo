@@ -72,14 +72,14 @@ module fo_fs
         end function fo_c_rename_path
 
         integer(c_int) function fo_c_collect_files(root, infix, suffix, &
-                path_needle, recursive, out, cap) &
+                path_needle, recursive, out, cap, reject_aliases) &
                 bind(C, name='fo_c_collect_files')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: root(*), infix(*), suffix(*)
             character(kind=c_char), intent(in) :: path_needle(*)
             integer(c_int), value :: recursive
             character(kind=c_char), intent(out) :: out(*)
-            integer(c_int), value :: cap
+            integer(c_int), value :: cap, reject_aliases
         end function fo_c_collect_files
 
         integer(c_int) function fo_c_collect_git_checkouts(root, out, cap, &
@@ -299,7 +299,7 @@ contains
     end subroutine fs_write_text
 
     subroutine fs_collect_files(root, infix, suffix, path_needle, items, &
-            n_items, recursive)
+            n_items, recursive, ierr, reject_aliases)
         !! Collect regular files under root whose basename contains infix and
         !! ends with suffix and whose path contains path_needle, into items
         !! (each a full path). Recurses unless recursive is .false. Replaces a
@@ -307,19 +307,29 @@ contains
         character(len=*), intent(in) :: root, infix, suffix, path_needle
         character(len=*), intent(out) :: items(:)
         integer, intent(out) :: n_items
-        logical, intent(in), optional :: recursive
+        logical, intent(in), optional :: recursive, reject_aliases
+        integer, intent(out), optional :: ierr
         character(kind=c_char), allocatable :: buf(:)
-        integer(c_int) :: rc, rec
+        integer(c_int) :: rc, rec, strict_aliases
 
         rec = 1
         if (present(recursive)) then
             if (.not. recursive) rec = 0
         end if
+        strict_aliases = 0
+        if (present(reject_aliases)) then
+            if (reject_aliases) strict_aliases = 1
+        end if
         allocate (buf(FS_COLLECT_CAP))
         rc = fo_c_collect_files(trim(root)//c_null_char, trim(infix)//c_null_char, &
             trim(suffix)//c_null_char, &
             trim(path_needle)//c_null_char, rec, buf, &
-            int(FS_COLLECT_CAP, c_int))
+            int(FS_COLLECT_CAP, c_int), strict_aliases)
+        if (present(ierr)) then
+            ierr = 0
+            if (rc < 0 .or. rc > size(items)) ierr = 1
+            if (rc == -2) ierr = 2
+        end if
         call unpack_buffer(buf, int(rc), items, n_items)
         call sort_items(items, n_items)
         deallocate (buf)

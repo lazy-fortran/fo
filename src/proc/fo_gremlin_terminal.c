@@ -12,11 +12,18 @@
 #include <time.h>
 #include <unistd.h>
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#include "fx_win_store.h"
+#endif
+
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
 
 static int make_dirs(const char *path) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    return fx_win_mkdirs_mode(path, 0700, 0) == 0 ? 0 : errno;
+#else
     char tmp[PATH_MAX];
     size_t n = strlen(path);
     if (n == 0 || n >= sizeof(tmp)) return ENAMETOOLONG;
@@ -29,6 +36,7 @@ static int make_dirs(const char *path) {
     }
     if (mkdir(tmp, 0700) != 0 && errno != EEXIST) return errno;
     return 0;
+#endif
 }
 
 static uint64_t hash_text(uint64_t h, const char *text) {
@@ -60,6 +68,9 @@ static int base_path(char *out, size_t cap, int create_dirs) {
     const char *base = getenv("FO_GREMLIN_STATE_DIR");
     char fallback[PATH_MAX];
     if (!base || !*base) base = getenv("XDG_CACHE_HOME");
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (!base || !*base) base = getenv("LOCALAPPDATA");
+#endif
     if (!base || !*base) {
         const char *home = getenv("HOME");
         if (!home || !*home) return ENOENT;
