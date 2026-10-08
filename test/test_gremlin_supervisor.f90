@@ -13,7 +13,8 @@ program test_gremlin_supervisor
     use fo_gremlin_supervisor, only: gremlin_handle
     use fo_gremlin_session, only: gremlin_release_stopped_session
     use fo_gremlin_request, only: gremlin_request_t, parse_request
-    use fo_util, only: extract_json_field, make_tmpfile
+    use fo_util, only: make_tmpfile
+    use fo_test_json, only: json_value_t, json_parse, json_member, json_number
     implicit none
 
     interface
@@ -94,6 +95,25 @@ program test_gremlin_supervisor
     if (failed > 0) stop 1
 
 contains
+
+    subroutine test_json_cursor(source, value)
+        character(len=*), intent(in) :: source
+        character(len=*), intent(out) :: value
+        type(json_value_t) :: document, member
+        character(len=:), allocatable :: parse_message
+        logical :: valid
+
+        value = ''
+        call json_parse(source, document, valid, parse_message)
+        call check(valid, 'test oracle parses response JSON: '//parse_message)
+        if (.not. valid) return
+        member = json_member(document, 'next_cursor')
+        if (member%kind /= json_number) then
+            call check(.false., 'test oracle finds numeric next_cursor')
+            return
+        end if
+        value = member%text
+    end subroutine test_json_cursor
 
     subroutine check(condition, description)
         logical, intent(in) :: condition
@@ -387,7 +407,7 @@ contains
             index(response_json, '"has_more":true') > 0, &
             'status returns the first event and a continuation cursor')
         cursor_text = ''
-        call extract_json_field(response_json, 'next_cursor', cursor_text)
+        call test_json_cursor(response_json, cursor_text)
         read (cursor_text, *, iostat=ios) cursor
         call check(ios == 0 .and. cursor > 0_int64, &
             'returns a byte cursor at the record boundary')
@@ -627,7 +647,7 @@ contains
             index(response_json, '"local_gate_green":false') > 0, &
             'durable active-generation failure prevents gate green')
         cursor_text = ''
-        call extract_json_field(response_json, 'next_cursor', cursor_text)
+        call test_json_cursor(response_json, cursor_text)
         call gremlin_handle('wait', trim(project_dir), &
             '{"lane_id":"readiness","cursor":'//trim(cursor_text)// &
             ',"wait_until":"failure","wait_ms":0}', response_json, exitcode)
@@ -734,7 +754,7 @@ contains
             index(response_json, 'first_case') > 0, &
             'wait reports failures from a completed exact session')
         cursor_text = ''
-        call extract_json_field(response_json, 'next_cursor', cursor_text)
+        call test_json_cursor(response_json, cursor_text)
         call gremlin_handle('wait', trim(project_dir), &
             '{"lane_id":"history","session_id":"'//trim(first%session_id)// &
             '","cursor":'//trim(cursor_text)//',"wait_until":"failure"}', &

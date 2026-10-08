@@ -6,8 +6,7 @@ module fo_gremlin_session
     use fo_gremlin_state, only: gremlin_session_t, gremlin_session_read, &
         gremlin_session_recovery_complete, gremlin_session_release, &
         GREMLIN_STATE_TEXT_MAX
-    use fo_gremlin_request, only: gremlin_request_t
-    use fo_util, only: extract_json_field
+    use fo_gremlin_request, only: gremlin_request_t, gremlin_json_field
     use fo_fs, only: fs_remove_file
     implicit none
     private
@@ -273,7 +272,7 @@ contains
             if (size(records) == 0) exit
             do i = 1, size(records)
                 completion_id = ''
-                call extract_json_field(records(i)%json, 'completion_id', completion_id)
+                call gremlin_json_field(records(i)%json, 'completion_id', completion_id)
                 if (len_trim(completion_id) == 0) then
                     ierr = JOURNAL_INVALID
                     message = 'recovery journal record has no completion_id'

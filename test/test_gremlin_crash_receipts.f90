@@ -102,6 +102,7 @@ program test_gremlin_crash_receipts
     call assert_true(gremlin_field(document, 'active_generation') == generation, &
         'restart preserves the current generation despite stale PASS injection')
     call assert_uncredited('recovery ignores stale PASS in both durable ledgers')
+    call assert_stale_visible()
     ! Native Fo diagnoses a failing test with another execution. Once this
     ! controlled retry is released, those diagnostic executions may finish too.
     call write_text(released, 'released'//new_line('a'))
@@ -398,6 +399,8 @@ contains
         call replace_receipt_value('inventory_digest', '"'//inventory//'"')
         call replace_receipt_value('coverage_epoch', trim(epoch_text))
         call replace_receipt_value('seed', trim(seed_text))
+        injected_receipt = '{"metadata":{"completion_id":"nested-shadow"},'// &
+            injected_receipt(2:)
         call gremlin_get_session_journal_path(project, lane, owner, journal_path, &
             status, message)
         call assert_true(status == 0, 'locates current session injection ledger')

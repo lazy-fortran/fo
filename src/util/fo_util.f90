@@ -10,7 +10,6 @@ module fo_util
     public :: strip_path_prefix_in_str
     public :: send_jsonrpc, jsonrpc_error, jsonrpc_null
     public :: json_bool, json_int
-    public :: extract_json_field
     public :: wall_time_seconds
 
     interface
@@ -256,69 +255,5 @@ contains
 
         write (text, '(i0)') value
     end function json_int
-
-    ! Extract a value from flat JSON by key. key may include surrounding
-    ! double-quotes (e.g. '"method"') or omit them ('method').
-    ! Handles both quoted string values and bare values (numbers, booleans).
-    subroutine extract_json_field(line, key, val)
-        character(len=*), intent(in) :: line, key
-        character(len=*), intent(out) :: val
-
-        integer :: pos, start, fin, k1, k2
-        character(len=len_trim(key)) :: clean_key
-        character(len=1) :: ch
-
-        val = ''
-
-        ! Strip surrounding quotes from key
-        k1 = 1
-        k2 = len_trim(key)
-        if (k2 >= k1) then
-            if (key(k1:k1) == '"') k1 = k1 + 1
-        end if
-        if (k2 >= k1) then
-            if (key(k2:k2) == '"') k2 = k2 - 1
-        end if
-        if (k2 < k1) return
-        clean_key = key(k1:k2)
-
-        pos = index(line, '"'//trim(clean_key)//'"')
-        if (pos == 0) return
-
-        pos = pos + len_trim(clean_key) + 2
-        do while (pos <= len_trim(line))
-            if (line(pos:pos) == ':') exit
-            pos = pos + 1
-        end do
-        pos = pos + 1
-
-        do while (pos <= len_trim(line))
-            if (.not. (line(pos:pos) == ' ')) exit
-            pos = pos + 1
-        end do
-
-        if (pos > len_trim(line)) return
-
-        ch = line(pos:pos)
-        if (ch == '"') then
-            start = pos + 1
-            fin = start
-            do while (fin <= len_trim(line))
-                if (line(fin:fin) == '"' .and. &
-                    (fin == start .or. line(fin - 1:fin - 1) /= '\')) exit
-                fin = fin + 1
-            end do
-            val = line(start:fin - 1)
-        else
-            start = pos
-            fin = pos
-            do while (fin <= len_trim(line))
-                ch = line(fin:fin)
-                if (ch == ',' .or. ch == '}' .or. ch == ' ') exit
-                fin = fin + 1
-            end do
-            val = line(start:fin - 1)
-        end if
-    end subroutine extract_json_field
 
 end module fo_util

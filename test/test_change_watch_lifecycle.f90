@@ -2,7 +2,8 @@ program test_change_watch_lifecycle
     !! Verify the real provider, then exercise the public CLI lifecycle boundary.
     use fo_change_watch, only: change_watch_t, change_watch_init, change_watch_close
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_write_text, fs_sleep_ms
-    use fo_util, only: make_tmpfile, extract_json_field
+    use fo_util, only: make_tmpfile
+    use fo_test_json, only: json_value_t, json_parse, json_member, json_string_value
     implicit none
 
     type(change_watch_t) :: watch
@@ -11,8 +12,10 @@ program test_change_watch_lifecycle
     character(len=32) :: platform
     character(len=128) :: session_id
     character(len=:), allocatable :: prefix
+    character(len=:), allocatable :: parse_message
+    type(json_value_t) :: response_document
     integer :: status, unit, ios, attempt
-    logical :: darwin
+    logical :: darwin, valid_json
 
     call get_environment_variable('FO', executable, status=ios)
     if (ios /= 0 .or. len_trim(executable) == 0) &
@@ -71,9 +74,9 @@ program test_change_watch_lifecycle
         print '(a)', 'Darwin lifecycle reached separate #172 process containment boundary'
     else
         call require(status == 0, 'Linux public start failed')
-        call require(index(output, '"session_id":"') > 0, &
-            'Linux public start did not publish an owner session')
-        call extract_json_field(output, 'session_id', session_id)
+        call json_parse(output, response_document, valid_json, parse_message)
+        call require(valid_json, 'Linux start returned valid JSON: '//parse_message)
+        session_id = json_string_value(json_member(response_document, 'session_id'))
         call require(len_trim(session_id) > 0, 'Linux start published an empty session')
         call cli('status', status, output)
         print '(a,i0,2a)', 'public status exit=', status, ' ', trim(output)
