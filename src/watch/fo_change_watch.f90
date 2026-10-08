@@ -6,6 +6,7 @@ module fo_change_watch
     use fx_watch, only: watcher_t, watcher_init, watcher_add, watcher_poll, &
         watcher_close, watcher_mark_self_written, watcher_remove
     use fo_gremlin_generation, only: generation_context_t
+    use fo_util, only: read_text_file
     implicit none
     private
 
@@ -16,6 +17,12 @@ module fo_change_watch
     integer, parameter, public :: CHANGE_RECONCILE = 4
 
     interface
+        integer(c_int) function native_exclude(handle, path) &
+                bind(C, name='fo_change_native_exclude_root')
+            import :: c_ptr, c_int, c_char
+            type(c_ptr), value :: handle
+            character(c_char), intent(in) :: path(*)
+        end function native_exclude
         function native_open(ierr, diagnostic, capacity) &
                 bind(C, name='fo_change_native_open_diagnostic') result(handle)
             import :: c_ptr, c_int, c_char
@@ -95,6 +102,7 @@ module fo_change_watch
         character(len=PATH_LEN), allocatable :: roots(:)
         logical, allocatable :: active(:)
         integer :: n_roots = 0
+        character(len=PATH_LEN) :: excluded_root = ''
     end type change_watch_t
 
     public :: change_watch_init, change_watch_add_root, change_watch_add_context
@@ -177,10 +185,12 @@ contains
         character(len=*), intent(out), optional :: message
 
         character(len=PATH_LEN) :: root
-        integer :: i, j
+        integer :: i, j, newline_at
+        character(len=PATH_LEN) :: build_directory
 
         if (present(message)) message = ''
         ierr = 0
+        watch%excluded_root = ''
         watch%active(:) = .false.
         if (watch%n_roots > 0) watch%active(1) = .true.
         if (allocated(context%input_inventory%roots)) then
@@ -188,7 +198,18 @@ contains
                 ! Derived configuration is immutable per capture; its authored
                 ! CMake inputs and declared dependency roots are watched below.
                 if (trim(context%input_inventory%roots(i)%canonical_alias) == &
-                    'cmake-context') cycle
+                    'cmake-context') then
+                    build_directory = ''
+                    call read_text_file(trim(context%input_inventory%roots(i)% &
+                        physical_path)//'/build-directory.txt', build_directory)
+                    newline_at = index(build_directory, new_line('a'))
+                    if (newline_at > 0) &
+                        build_directory = build_directory(:newline_at - 1)
+                    if (len_trim(build_directory) > 0) &
+                        watch%excluded_root = canonical_or_entry( &
+                        trim(watch%roots(1))//'/'//trim(build_directory))
+                    cycle
+                end if
                 root = canonical_or_entry( &
                     context%input_inventory%roots(i)%physical_path)
                 if (len_trim(root) == 0) cycle
@@ -337,10 +358,29 @@ contains
         character(len=*), intent(in) :: path
         integer :: i, n
         character(len=PATH_LEN) :: rel
+        logical :: output_path
 
         relevant = .false.
+        output_path = .false.
+        n = len_trim(watch%excluded_root)
+        if (n > 0) then
+            if (trim(path) == trim(watch%excluded_root)) output_path = .true.
+            if (len_trim(path) > n) then
+                if (path(:n) == watch%excluded_root(:n)) then
+                    if (path(n + 1:n + 1) == '/') output_path = .true.
+                end if
+            end if
+        end if
         do i = 1, watch%n_roots
             if (.not. watch%active(i)) cycle
+            if (output_path) then
+                n = len_trim(watch%excluded_root)
+                if (len_trim(watch%roots(i)) < n) cycle
+                if (watch%roots(i)(:n) /= watch%excluded_root(:n)) cycle
+                if (len_trim(watch%roots(i)) > n) then
+                    if (watch%roots(i)(n + 1:n + 1) /= '/') cycle
+                end if
+            end if
             n = len_trim(watch%roots(i))
             if (trim(path) == trim(watch%roots(i))) then
                 relevant = .true.
@@ -387,6 +427,8 @@ contains
 
         if (present(message)) message = ''
         call native_clear(watch%native)
+        ierr = native_exclude(watch%native, trim(watch%excluded_root)//c_null_char)
+        if (ierr /= 0) return
         first_active = 0
         do i = 1, watch%n_roots
             if (.not. watch%active(i)) cycle
@@ -482,6 +524,7 @@ contains
         if (allocated(watch%roots)) deallocate(watch%roots)
         if (allocated(watch%active)) deallocate(watch%active)
         watch%n_roots = 0
+        watch%excluded_root = ''
     end subroutine change_watch_close
 
     function provider_error(operation, root, error) result(message)

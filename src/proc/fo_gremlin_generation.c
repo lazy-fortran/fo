@@ -381,7 +381,7 @@ fail:
 static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
                               const char *dest, FILE *manifest,
                               int copy_files, int exclusion_policy,
-                              int sync_output) {
+                              int sync_output, const char *excluded_directory) {
     struct name_list names;
     size_t i;
     if (rel[0] != '\0' && write_path(manifest, 'D', 0, rel) != 0) return -1;
@@ -406,6 +406,9 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
             (int)sizeof(child)) {
             errno = ENAMETOOLONG;
             rc = -1;
+        } else if (excluded_directory != NULL &&
+                   strcmp(child, excluded_directory) == 0) {
+            continue;
         } else if (fstatat(dir_fd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
             rc = -1;
         } else if (S_ISDIR(st.st_mode)) {
@@ -416,7 +419,7 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
             } else {
                 rc = walk_directory_at(root_fd, child_fd, child, dest,
                                        manifest, copy_files,
-                                       exclusion_policy, sync_output);
+                                       exclusion_policy, sync_output, excluded_directory);
                 close(child_fd);
             }
         } else if (S_ISLNK(st.st_mode)) {
@@ -493,15 +496,22 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
     return 0;
 }
 
-static int walk_tree(const char *root, const char *dest, FILE *manifest,
-                     int copy_files, int exclusion_policy, int sync_output) {
+static int walk_tree_excluding(const char *root, const char *dest, FILE *manifest,
+                               int copy_files, int exclusion_policy, int sync_output,
+                               const char *excluded_directory) {
     int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     int rc;
     if (root_fd < 0) return -1;
     rc = walk_directory_at(root_fd, root_fd, "", dest, manifest, copy_files,
-                           exclusion_policy, sync_output);
+                           exclusion_policy, sync_output, excluded_directory);
     close(root_fd);
     return rc;
+}
+
+static int walk_tree(const char *root, const char *dest, FILE *manifest,
+                     int copy_files, int exclusion_policy, int sync_output) {
+    return walk_tree_excluding(root, dest, manifest, copy_files, exclusion_policy,
+                               sync_output, NULL);
 }
 
 int fo_c_generation_list_tree(const char *root, const char *manifest) {
@@ -515,17 +525,27 @@ int fo_c_generation_list_tree(const char *root, const char *manifest) {
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
 
-int fo_c_generation_list_input_tree(const char *root, const char *manifest,
-                                    int exclude_root_outputs) {
+static int list_input_tree(const char *root, const char *manifest,
+                           int exclude_root_outputs, const char *excluded_directory) {
     FILE *out;
     int rc;
     if (validate_tree_root(root) != 0) return errno == 0 ? 1 : errno;
     out = fopen(manifest, "w");
     if (out == NULL) return errno == 0 ? 1 : errno;
-    rc = walk_tree(root, "", out, 0, exclude_root_outputs == 2 ? 3 :
-                   (exclude_root_outputs != 0 ? 2 : 0), 1);
+    rc = walk_tree_excluding(root, "", out, 0, exclude_root_outputs == 2 ? 3 :
+                   (exclude_root_outputs != 0 ? 2 : 0), 1, excluded_directory);
     if (fclose(out) != 0 && rc == 0) rc = -1;
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
+}
+
+int fo_c_generation_list_input_tree(const char *root, const char *manifest,
+                                    int exclude_root_outputs) {
+    return list_input_tree(root, manifest, exclude_root_outputs, NULL);
+}
+
+int fo_c_generation_list_cmake_input_tree(const char *root, const char *manifest,
+                                          const char *build_directory) {
+    return list_input_tree(root, manifest, 2, build_directory);
 }
 
 int fo_c_generation_copy_tree(const char *root, const char *dest,

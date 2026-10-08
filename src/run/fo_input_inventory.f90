@@ -11,7 +11,7 @@ module fo_input_inventory
         resolve_dev_dep_srcs, MAX_RESOLVED
     use fo_registry, only: registry_resolve, registry_config_path
     use fo_fs, only: fs_identity
-    use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file
     use fx_action_result_store, only: action_result_file_mode, ACTION_RESULT_OK
     implicit none
     private
@@ -80,6 +80,11 @@ module fo_input_inventory
             character(kind=c_char), intent(in) :: root(*), manifest(*)
             integer(c_int), value :: exclude_root_outputs
         end function c_list_input_tree
+        integer(c_int) function c_list_cmake_input_tree(root, manifest, excluded) &
+                bind(C, name='fo_c_generation_list_cmake_input_tree')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: root(*), manifest(*), excluded(*)
+        end function c_list_cmake_input_tree
     end interface
 
 contains
@@ -91,7 +96,8 @@ contains
         type(input_inventory_t), intent(out) :: inventory
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-        integer :: root_index, i, j
+        integer :: root_index, i, j, newline_at
+        character(len=PATH_LEN) :: build_directory
         logical :: provider_dir_exists
         type(input_entry_t) :: provider_dir
         character(len=7), parameter :: provider_dirs(2) = &
@@ -105,8 +111,13 @@ contains
         call add_root(inventory, 'project', project_dir, root_index, ierr, &
             message, 'project')
         if (ierr /= 0) return
+        build_directory = ''
+        call read_text_file(trim(metadata_dir)//'/build-directory.txt', build_directory)
+        newline_at = index(build_directory, new_line('a'))
+        if (newline_at > 0) build_directory = build_directory(:newline_at - 1)
         call scan_tree(inventory, root_index, 'project', project_dir, '', &
-            'cmake-project-input', .false., ierr, message, cmake_scan=.true.)
+            'cmake-project-input', .false., ierr, message, cmake_scan=.true., &
+            excluded_directory=trim(build_directory))
         if (ierr /= 0) return
         do i = 1, size(sources)
             call add_root(inventory, labels(i), sources(i), root_index, ierr, &
@@ -1206,7 +1217,7 @@ contains
     end function root_has_alias
 
     subroutine scan_tree(inventory, root_index, alias, physical_root, prefix, &
-            role, writable, ierr, message, cmake_scan)
+            role, writable, ierr, message, cmake_scan, excluded_directory)
         type(input_inventory_t), intent(inout) :: inventory
         integer, intent(in) :: root_index
         character(len=*), intent(in) :: alias, physical_root, prefix, role
@@ -1222,6 +1233,8 @@ contains
         character(kind=c_char, len=:), allocatable :: c_root, c_manifest
         logical :: whole_root_scan
         logical, intent(in), optional :: cmake_scan
+        character(len=*), intent(in), optional :: excluded_directory
+        character(kind=c_char, len=:), allocatable :: c_excluded
         integer(c_int) :: exclude_root_outputs
 
         ierr = 1
@@ -1239,7 +1252,12 @@ contains
             if (cmake_scan .and. whole_root_scan) exclude_root_outputs = 2_c_int
         end if
         c_manifest = trim(manifest)//c_null_char
-        rc = c_list_input_tree(c_root, c_manifest, exclude_root_outputs)
+        if (present(excluded_directory)) then
+            c_excluded = trim(excluded_directory)//c_null_char
+            rc = c_list_cmake_input_tree(c_root, c_manifest, c_excluded)
+        else
+            rc = c_list_input_tree(c_root, c_manifest, exclude_root_outputs)
+        end if
         if (rc /= 0) then
             call delete_tmpfile(trim(manifest))
             message = 'cannot enumerate declared input root: '//trim(alias)

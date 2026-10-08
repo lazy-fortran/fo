@@ -146,6 +146,8 @@ contains
         end if
         call fs_write_text(trim(metadata_dir)//'/cache.cmake', script)
         call fs_write_text(trim(metadata_dir)//'/generator.txt', generator)
+        call fs_write_text(trim(metadata_dir)//'/build-directory.txt', &
+                           backend%cmake%build_root)
         call input_inventory_discover_cmake(backend%project_dir, roots(:n_roots), &
                    bundles(:n_roots), labels(:n_roots), trim(metadata_dir), inventory, &
                                             ierr, message)

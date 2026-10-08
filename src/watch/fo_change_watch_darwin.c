@@ -30,6 +30,7 @@ typedef void (*fs_action_fn)(FSEventStreamRef);
 #define APPLE_EVENT_LIMIT 2048
 struct apple_event { char *path; int kind; };
 struct change_watch {
+    char *excluded_root;
     void *core, *services;
     cf_string_create_fn string_create;
     cf_array_create_fn array_create;
@@ -97,8 +98,20 @@ static int apple_symbol(void *library, const char *name, void *target,
 static int apple_excluded(const char *path);
 
 static int apple_relevant(const struct change_watch *w, const char *path) {
+    int output = 0;
+    size_t excluded_length = 0;
+    if (w->excluded_root != NULL) {
+        excluded_length = strlen(w->excluded_root);
+        output = excluded_length > 0 &&
+            !strncmp(path, w->excluded_root, excluded_length) &&
+            (path[excluded_length] == '/' || path[excluded_length] == '\0');
+    }
     size_t i;
     for (i = 0; i < w->nroots; ++i) {
+        /* Explicit providers inside the output tree remain declared inputs. */
+        if (output && (strncmp(w->roots[i], w->excluded_root, excluded_length) ||
+            (w->roots[i][excluded_length] != '/' &&
+             w->roots[i][excluded_length] != '\0'))) continue;
         size_t n = strlen(w->roots[i]);
         if (!strcmp(path, w->roots[i])) return 1;
         if (!strncmp(path, w->roots[i], n) && path[n] == '/' &&
@@ -259,8 +272,17 @@ void *fo_change_native_open_diagnostic(int *error, char *diagnostic,
     return apple_open(error, diagnostic, capacity);
 }
 
+int fo_change_native_exclude_root(void *handle, const char *path) {
+    struct change_watch *w = handle;
+    char *next = strdup(path);
+    if (!next) return ENOMEM;
+    free(w->excluded_root);
+    w->excluded_root = next;
+    return 0;
+}
 void fo_change_native_clear_roots(void *handle) {
     struct change_watch *w = handle;
+    free(w->excluded_root); w->excluded_root = NULL;
     size_t i;
     if (!w) return;
     apple_drop_stream(w);

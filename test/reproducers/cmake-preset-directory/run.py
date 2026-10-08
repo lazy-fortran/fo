@@ -26,12 +26,19 @@ if (value /= 17) error stop 'independent payload expected 17'
 print *, 'payload17'
 end program
 """)
-leaf = project / 'value.inc'
+if '--custom-output' in sys.argv:
+    p = project / 'main.f90'
+    p.write_text(p.read_text().replace("'value.inc'", "'out/authored/value.inc'"))
+    c = project / 'CMakeLists.txt'
+    c.write_text(c.read_text()+'target_include_directories(marker PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")\n')
+leaf = project / ('out/authored/value.inc' if '--custom-output' in sys.argv else 'value.inc')
+leaf.parent.mkdir(parents=True, exist_ok=True)
 leaf.write_text('integer, parameter :: value=17\n')
 (project / 'CMakePresets.json').write_text(json.dumps({
     'version': 3, 'configurePresets': [
         {'name': 'base', 'hidden': True, 'generator': 'Ninja',
          'binaryDir': '${sourceDir}/build' if '--flat' in sys.argv else
+                      '${sourceDir}/out/native' if '--custom-output' in sys.argv else
                       '${sourceDir}/build/native',
          'cacheVariables': {'CMAKE_BUILD_TYPE': 'Release'}},
         {'name': 'cpu', 'inherits': 'base'}],
@@ -42,6 +49,8 @@ env = dict(os.environ, FO_CMAKE_CONFIGURE_PRESET='cpu',
            FO_DISABLE_SELF_REFRESH='1', FO_JOBS='2',
            XDG_CACHE_HOME=str(root / 'cache'), TMPDIR=str(root))
 env.pop('FO_CMAKE_BUILD_DIR', None)
+if '--build-hint' in sys.argv:
+    env['FO_CMAKE_BUILD_DIR'] = 'out/native'
 rows = []
 
 def run(args, phase):
@@ -64,14 +73,19 @@ original = leaf.read_bytes()
 st = leaf.stat()
 generation = ''
 try:
-    for phase in ['cold', 'warm', 'edit', 'restore']:
+    for phase in ['cold', 'warm', 'output', 'edit', 'restore']:
+        if phase == 'output':
+            output = project / 'out/native/output-only.f90'
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text('generated output is not an authored input\n')
+            time.sleep(2)
         if phase == 'edit':
             leaf.write_bytes(original.replace(b'17', b'23'))
         if phase == 'restore':
             leaf.write_bytes(original)
         if phase in ['edit', 'restore']:
             os.utime(leaf, ns=(st.st_atime_ns, st.st_mtime_ns))
-        deadline = time.monotonic()+60
+        deadline = time.monotonic()+(20 if '--expect-parent-pending' in sys.argv else 60)
         x = {}
         while time.monotonic() < deadline:
             p = run(base, phase+'-status')
@@ -86,7 +100,7 @@ try:
                          failure.get('generation') == x.get('active_generation'))
             else:
                 ready = x.get('local_gate_green', False)
-            if ready:
+            if ready and '--expect-parent-pending' not in sys.argv:
                 break
             time.sleep(0.2)
         rows.append({'phase': phase, 'exit': p.returncode,
@@ -94,7 +108,13 @@ try:
         if parent:
             assert p.returncode != 0
             break
+        if '--expect-parent-pending' in sys.argv:
+            assert x.get('state') == 'capture_pending', x
+            assert not x.get('local_gate_green') and x.get('completed', 0) >= 1, x
+            break
         assert ready, (phase, x)
+        if phase in ['warm', 'output']:
+            assert generation == x['active_generation'], (phase, x)
         generation = x['active_generation']
 finally:
     run([driver, 'gremlin', 'stop', '--dir', str(project), '--lane', 'preset',

@@ -53,6 +53,7 @@ int fo_change_watch_is_dir(const char *path) {
 struct change_entry { int wd, seen; char *path; };
 struct change_self { char *path; long long until; };
 struct change_watch {
+    char *excluded_root;
     int fd, epoch, reconcile_pending;
     long long reconcile_deadline, reconcile_maximum;
     union { char bytes[65536]; struct inotify_event alignment; } pending;
@@ -84,8 +85,20 @@ static int change_excluded(const char *rel) {
     return 0;
 }
 static int change_relevant(struct change_watch *w, const char *path) {
+    int output = 0;
+    size_t excluded_length = 0;
+    if (w->excluded_root != NULL) {
+        excluded_length = strlen(w->excluded_root);
+        output = excluded_length > 0 &&
+            !strncmp(path, w->excluded_root, excluded_length) &&
+            (path[excluded_length] == '/' || path[excluded_length] == '\0');
+    }
     size_t i;
     for (i = 0; i < w->nroots; ++i) {
+        /* Explicit providers inside the output tree remain declared inputs. */
+        if (output && (strncmp(w->roots[i], w->excluded_root, excluded_length) ||
+            (w->roots[i][excluded_length] != '/' &&
+             w->roots[i][excluded_length] != '\0'))) continue;
         size_t n = strlen(w->roots[i]);
         if (!strcmp(path, w->roots[i])) return 1;
         if (!strncmp(path, w->roots[i], n) && path[n] == '/' &&
@@ -194,8 +207,17 @@ void *fo_change_native_open_diagnostic(int *error, char *diagnostic, int capacit
     }
     return handle;
 }
+int fo_change_native_exclude_root(void *handle, const char *path) {
+    struct change_watch *w = handle;
+    char *next = strdup(path);
+    if (!next) return ENOMEM;
+    free(w->excluded_root);
+    w->excluded_root = next;
+    return 0;
+}
 void fo_change_native_clear_roots(void *handle) {
     struct change_watch *w = handle;
+    free(w->excluded_root); w->excluded_root = NULL;
     size_t i;
     for (i = 0; i < w->nroots; ++i) free(w->roots[i]);
     free(w->roots); w->roots = NULL; w->nroots = 0;
@@ -390,6 +412,9 @@ void *fo_change_native_open_diagnostic(int *error, char *diagnostic, int capacit
 }
 void fo_change_native_close(void *handle) { (void)handle; }
 void fo_change_native_clear_roots(void *handle) { (void)handle; }
+int fo_change_native_exclude_root(void *h, const char *p) {
+    (void)h; (void)p; return ENOSYS;
+}
 int fo_change_native_root(void *h, const char *p) { (void)h; (void)p; return ENOSYS; }
 int fo_change_native_reconcile(void *h) { (void)h; return ENOSYS; }
 int fo_change_native_poll(void *h, int t, char *p, int n, int *k) {
