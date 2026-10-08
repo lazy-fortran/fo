@@ -1,5 +1,5 @@
 module fo_gremlin_context
-    use, intrinsic :: iso_fortran_env, only: int64
+    use, intrinsic :: iso_fortran_env, only: int64, dp => real64
     use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_fpm_config, only: DEP_PATH, DEP_REGISTRY, fpm_config_t, fpm_config_parse, dep_kind
@@ -589,13 +589,13 @@ contains
         integer, intent(out) :: exitcode
         integer :: cancel_status
         logical :: done
-        real :: started
+        real(dp) :: started
 
         call context_clock_seconds(started)
         do
             call process_poll_pid(pid, done, exitcode)
             if (done) return
-            if (context_elapsed_seconds(started) >= real(timeout_seconds)) then
+            if (context_elapsed_seconds(started) >= real(timeout_seconds, dp)) then
                 call context_cancel_owned_process(pid, cancel_status)
                 if (cancel_status == 0) then
                     exitcode = 124
@@ -609,20 +609,20 @@ contains
     end subroutine context_process_wait_bounded
 
     subroutine context_clock_seconds(seconds)
-        real, intent(out) :: seconds
+        real(dp), intent(out) :: seconds
         integer(int64) :: count, rate
 
         call system_clock(count=count, count_rate=rate)
-        seconds = 0.0
-        if (rate > 0_int64) seconds = real(count)/real(rate)
+        seconds = 0.0_dp
+        if (rate > 0_int64) seconds = real(count, dp)/real(rate, dp)
     end subroutine context_clock_seconds
 
-    real function context_elapsed_seconds(started)
-        real, intent(in) :: started
-        real :: now
+    real(dp) function context_elapsed_seconds(started)
+        real(dp), intent(in) :: started
+        real(dp) :: now
 
         call context_clock_seconds(now)
-        context_elapsed_seconds = max(0.0, now - started)
+        context_elapsed_seconds = max(0.0_dp, now - started)
     end function context_elapsed_seconds
 
     function context_text_digest(text) result(digest)

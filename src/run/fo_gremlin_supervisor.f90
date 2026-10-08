@@ -1,5 +1,5 @@
 module fo_gremlin_supervisor
-    use, intrinsic :: iso_fortran_env, only: int64, error_unit
+    use, intrinsic :: iso_fortran_env, only: int64, error_unit, dp => real64
     use fo_build_backend, only: BACKEND_NATIVE, backend_t, detect_backend
     use fo_cache, only: HASH_LEN, cache_digest, cache_store_root
     use fx_action_result_store, only: action_result_store_t, &
@@ -92,7 +92,7 @@ module fo_gremlin_supervisor
         character(len=NAME_LEN) :: case_name = ''
         type(execution_view_t) :: execution_view
         logical :: gate_required = .false.
-        real :: started_at = 0.0
+        real(dp) :: started_at = 0.0_dp
     end type child_t
 
     public :: gremlin_handle, runner_case_outcome
@@ -1370,7 +1370,7 @@ contains
         integer(int64) :: capture_debounce_ms, campaign_started_ms, freshness_ticket
         integer(int64) :: last_idle_reap_ms, last_cache_maintenance_ms, now_ms
         character(len=PATH_LEN) :: freshness_path
-        real :: test_timeout
+        real(dp) :: test_timeout
         logical :: have_active, have_candidate, stop_requested, capture_ok
         logical :: capture_failed, provider_quiet
         logical :: have_active_lease, have_candidate_lease, have_heavy_work_lease
@@ -1648,7 +1648,7 @@ contains
 
             if (test_child%pid > 0) then
                 test_timeout = real(case_wall_timeout(active_generation%project_root, &
-                    test_child%case_name, request%timeout_seconds))
+                    test_child%case_name, request%timeout_seconds), dp)
                 call process_poll_pid(test_child%pid, test_done, test_exit)
                 if (test_done) then
                     state_name = 'testing'
@@ -4192,20 +4192,20 @@ contains
     end subroutine clock_milliseconds
 
     subroutine clock_seconds(seconds)
-        real, intent(out) :: seconds
+        real(dp), intent(out) :: seconds
         integer(int64) :: count, rate
 
         call system_clock(count=count, count_rate=rate)
-        seconds = 0.0
-        if (rate > 0_int64) seconds = real(count)/real(rate)
+        seconds = 0.0_dp
+        if (rate > 0_int64) seconds = real(count, dp)/real(rate, dp)
     end subroutine clock_seconds
 
-    real function elapsed_seconds(started)
-        real, intent(in) :: started
-        real :: now
+    real(dp) function elapsed_seconds(started)
+        real(dp), intent(in) :: started
+        real(dp) :: now
 
         call clock_seconds(now)
-        elapsed_seconds = max(0.0, now - started)
+        elapsed_seconds = max(0.0_dp, now - started)
     end function elapsed_seconds
 
     integer(int64) function system_clock_count()
@@ -4360,13 +4360,13 @@ contains
 
         integer :: cancel_status
         logical :: done
-        real :: started
+        real(dp) :: started
 
         call clock_seconds(started)
         do
             call process_poll_pid(pid, done, exitcode)
             if (done) return
-            if (elapsed_seconds(started) >= real(timeout_seconds)) then
+            if (elapsed_seconds(started) >= real(timeout_seconds, dp)) then
                 call cancel_owned_process(pid, cancel_status)
                 if (cancel_status == 0) then
                     exitcode = 124
