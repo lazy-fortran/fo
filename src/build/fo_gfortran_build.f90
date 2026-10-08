@@ -2017,12 +2017,11 @@ contains
         deallocate (cfiles)
     end subroutine compile_test_dev_c_sources
 
-    subroutine add_external_dep_keys(units, n_units, dag, source_path, &
+    subroutine add_external_dep_keys(units, n_units, source_path, &
             dep_includes, n_dep_includes, dep_keys, n_dep)
         type(scan_unit_t), intent(in) :: units(:)
         integer, intent(in) :: n_units, n_dep_includes
         character(len=*), intent(in) :: source_path
-        type(dag_t), intent(in) :: dag
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
         character(len=HASH_LEN), allocatable, intent(out) :: dep_keys(:)
         integer, intent(inout) :: n_dep
@@ -2038,7 +2037,8 @@ contains
             allocate (dep_keys(units(i)%n_deps + 1))
             dep_keys = ''
             do j = 1, units(i)%n_deps
-                if (dag_find_node(dag, units(i)%deps(j)) > 0) cycle
+                ! Reachable test helpers have already compiled. Their .mod
+                ! interfaces can change even when their object bytes do not.
                 call find_dep_mod_file(units(i)%deps(j), dep_includes, &
                     n_dep_includes, modpath, found)
                 if (.not. found) cycle
@@ -2895,7 +2895,7 @@ contains
             if (run_build_indices(i) /= i) cycle
             node_id = run_nodes(i)
             n_dep = 0
-            call add_external_dep_keys(tunits, n_tests, dag, filenames(node_id), &
+            call add_external_dep_keys(tunits, n_tests, filenames(node_id), &
                 test_includes, n_test_includes, &
                 dep_keys, n_dep)
             if (len_trim(lib_hash) > 0) then
