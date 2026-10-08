@@ -15,9 +15,9 @@ affected-test feedback.
 The product target is a standalone drop-in replacement for FPM, followed by
 native support for a defined CMake subset used by ITpPlasma projects. The staged
 delivery order is in [PLAN.md](PLAN.md).
-Current Git/registry bootstrap and installation still invoke FPM, and the current
-CMake backend invokes CMake/CTest; standalone parity remains under development
-in [PLAN.md](PLAN.md).
+Path, Git and local namespaced registry dependencies use the native backend,
+as does executable installation. The current CMake backend invokes CMake/CTest;
+complete standalone parity remains under development in [PLAN.md](PLAN.md).
 
 Environment management, containers, CI governance, agent scheduling and
 scientific proof or synthesis systems remain outside fo's scope.
@@ -140,12 +140,19 @@ also exposed in `build/fo/app`. This stable path avoids coupling tools to fpm's
 private compiler-flag hash directories. Running fpm after fo is safe because fo
 does not write fpm's private digest metadata.
 
-Git and registry dependencies are currently resolved and bootstrapped through
-an installed fpm when their compiled artifacts are absent. `fo install` also
-builds release-profile app executables through fo's native backend and installs
-them under `prefix/bin`. Example, test, library and module installation remain
-unsupported. Project compilation and testing run through fo's native backend
-and cache.
+Git dependencies are acquired with Git and built through fo's native backend.
+Namespaced registry dependencies resolve from a local FPM registry tree without
+FPM or network access. Fo reads `[registry] path` from
+`~/.local/share/fpm/config.toml`; `FO_FPM_CONFIG_FILE` selects an absolute alternate
+configuration path. A registry package lives under `path/namespace/name/version`.
+An explicit `v` selects that numeric version; omitting `v` selects the latest
+numeric version deterministically. Remote registries, authentication and
+publishing requests fail with explicit diagnostics.
+
+`fo install` builds release-profile app executables through the native backend
+and installs them under `prefix/bin`. Example, test, library and module
+installation remain unsupported. Project compilation and testing use fo's
+native backend and cache.
 
 Tests that require different command-line arguments can declare fo-specific
 metadata without changing fpm's target model:
