@@ -6,6 +6,7 @@ program test_install_native_cli
     use fo_test_harness, only: assert_equal_integer, assert_equal_string
     use fo_test_harness, only: finish_assertions, assert_contains
     use fo_test_cli, only: resolve_driver, run_fo, run_external
+    use fo_fs, only: fs_realpath
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, prefix
@@ -16,9 +17,15 @@ program test_install_native_cli
     character(len=1), parameter :: nl = new_line('a')
     type(string_list_t) :: probe_args
     type(process_result_t) :: probe
+    character(len=4096) :: physical_scratch
+    logical :: scratch_resolved
 
     call resolve_driver(driver)
     call make_scratch('fo-install-native', scratch)
+    call fs_realpath(scratch, physical_scratch, scratch_resolved)
+    call assert_true(scratch_resolved, 'install fixture has a physical source root')
+    if (.not. scratch_resolved) error stop 'install fixture root is unavailable'
+    scratch = trim(physical_scratch)
     project = join_path(scratch, 'project')
     cache = join_path(scratch, 'cache')
     prefix = join_path(scratch, 'prefix')
