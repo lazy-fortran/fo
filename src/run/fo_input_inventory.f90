@@ -584,8 +584,8 @@ contains
         call scan_configured_dir(trim(dependency_root), alias, config%source_dir, &
             'dependency-source', .false., root_index, inventory, ierr, message)
         if (ierr /= 0) return
-        call scan_configured_dir(trim(dependency_root), alias, 'include', &
-            'include', .false., root_index, inventory, ierr, message)
+        call scan_library_include_dirs(trim(dependency_root), alias, config, &
+            root_index, inventory, ierr, message)
         if (ierr /= 0) return
         do i = 1, config%n_deps
             if (dep_kind(config%deps(i)) /= DEP_PATH) cycle
@@ -656,8 +656,8 @@ contains
         call scan_configured_dir(project_root, 'project', 'test-support', &
             'test-support', .false., root_index, inventory, ierr, message)
         if (ierr /= 0) return
-        call scan_configured_dir(project_root, 'project', 'include', 'include', &
-            .false., root_index, inventory, ierr, message)
+        call scan_library_include_dirs(project_root, 'project', config, &
+            root_index, inventory, ierr, message)
         if (ierr /= 0) return
         do i = 1, config%n_exes
             call scan_configured_dir(project_root, 'project', &
@@ -687,6 +687,25 @@ contains
             if (ierr /= 0) return
         end do
     end subroutine discover_project_dirs
+
+    subroutine scan_library_include_dirs(project_root, alias, config, root_index, &
+            inventory, ierr, message)
+        character(len=*), intent(in) :: project_root, alias
+        type(fpm_config_t), intent(in) :: config
+        integer, intent(in) :: root_index
+        type(input_inventory_t), intent(inout) :: inventory
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        integer :: i
+
+        ierr = 0
+        message = ''
+        do i = 1, config%n_include_dirs
+            call scan_configured_dir(project_root, alias, config%include_dirs(i), &
+                'include', .false., root_index, inventory, ierr, message)
+            if (ierr /= 0) return
+        end do
+    end subroutine scan_library_include_dirs
 
     subroutine scan_configured_dir(project_root, alias, relative_dir, role, &
             required, root_index, inventory, ierr, message)
@@ -803,8 +822,8 @@ contains
         call scan_configured_dir(trim(dependency_root), alias, config%source_dir, &
             'dependency-source', .false., root_index, inventory, ierr, message)
         if (ierr /= 0) return
-        call scan_configured_dir(trim(dependency_root), alias, 'include', &
-            'include', .false., root_index, inventory, ierr, message)
+        call scan_library_include_dirs(trim(dependency_root), alias, config, &
+            root_index, inventory, ierr, message)
         if (ierr /= 0) return
         if (.not. follow_regular_deps) return
         do i = 1, config%n_deps
