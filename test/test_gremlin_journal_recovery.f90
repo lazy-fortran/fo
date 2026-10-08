@@ -419,7 +419,7 @@ contains
         type(json_value_t), intent(in) :: value
         logical, intent(in) :: capture
         type(json_value_t) :: events, event, previous
-        character(:), allocatable :: name, path, completion
+        character(:), allocatable :: name, path, completion, recovered_bytes
         integer :: index, prior, passes, failures, blocked
 
         events = json_member(value, 'events')
@@ -457,7 +457,9 @@ contains
                 else if (allocated(pass_path)) then
                     call assert_equal_string(path, pass_path, &
                         'passing receipt retains its original artifact reference')
-                    call assert_equal_string(read_text(path), pass_bytes, &
+                    recovered_bytes = read_text(path)
+                    call assert_true(len(recovered_bytes) == len(pass_bytes) .and. &
+                        recovered_bytes == pass_bytes, &
                         'passing artifact bytes survive repeated interrupted recovery')
                 end if
             else
@@ -472,7 +474,9 @@ contains
                 else if (allocated(fail_path)) then
                     call assert_equal_string(path, fail_path, &
                         'failing receipt retains its original artifact reference')
-                    call assert_equal_string(read_text(path), fail_bytes, &
+                    recovered_bytes = read_text(path)
+                    call assert_true(len(recovered_bytes) == len(fail_bytes) .and. &
+                        recovered_bytes == fail_bytes, &
                         'failing artifact bytes survive repeated interrupted recovery')
                 end if
             end if
