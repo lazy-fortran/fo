@@ -7,6 +7,28 @@ failure detection. The workspace master plan, when present, owns delivery order.
 
 ## Current delivery
 
+The stopped Claude session is recovered. Main `8a267e9` includes its published
+readiness/recovery/test-runner fixes, install diagnostics and Darwin fixtures.
+The controller independently passed five resident baseline cases on `31c795b`;
+the full inventory remains 129 cases, with current full coverage still open.
+Fx main `f9a3f769905ccd74895b2e43e0e7ab1d213996d4` rejects invalid store roots
+before metadata writes. Its owning tests passed and the controller rechecked
+leases/GC (2/2). Fo's source-cleanliness increment passed bootstrap/manifest
+(2/2) on exact main source with that published Fx dependency and pinned driver
+SHA256 `42e03e2cbc4728212606bc5097a1f3aa1a89967e741fa06eac1b883245223268`.
+#211 remains open because the historical sporadic caller is unidentified.
+
+Darwin workers have passing focused candidates for watcher/process recovery
+(3/3) and CMake/compiler context (3/3). The controller is combining them and
+will verify the exact integrated source before promotion. Windows Server 2025
+is reachable through authenticated WinRM without using the active TPX console;
+an isolated Cygwin dependency installation is running. No Windows green or
+native Win32 backend is claimed. Separate workers are implementing remaining
+FPM contracts, unsaved LSP diagnostics, deep lint, safe cleanup and native
+fixture migration. Exact source, host assignments and evidence are retained
+under `/var/tmp/fo-platform-controller-20261008`.
+
+Earlier handoff evidence follows; it does not replace current platform gates.
 The reviewed Claude handoff is published on main, based on
 `95490c97f73e53b2b9c70a61b287bd3aa36b8d38`. On exact source `7056854` and pinned
 driver `369515f7…f786` the final gate passed 42/42 Linux cases, 20/20 Darwin
@@ -113,6 +135,7 @@ stop and remove completed task-owned lanes/worktrees after verifying ownership.
 | Less duplicated build, source, protocol and scheduling behavior | #149, #150, #167, #185, #186 |
 | Smaller useful native tests and no Fo-owned script runtime | #161, #163, #184 |
 | Safe cleanup, useful progress and correct timeout attribution | #129, #130 |
+| Source-clean store metadata and invalid-root rejection | #211 |
 | Remaining native FPM manifests and dependency forms | #201, #202 |
 | Faithful native ITpPlasma profiles | #192–#198; optional reuse #199 |
 | Independent optional project/performance evidence | #145, #190 |
