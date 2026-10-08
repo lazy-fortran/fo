@@ -471,3 +471,5 @@ int fo_test_is_regular_file(const char *path) {
         GetFileInformationByHandle(file, &info) && !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
     CloseHandle(file); return regular;
 }
+
+int fo_test_in_job(void) { BOOL present; return IsProcessInJob(GetCurrentProcess(), NULL, &present) ? (present ? 1 : 0) : -1; }
