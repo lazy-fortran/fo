@@ -7,24 +7,19 @@ failure detection. The workspace master plan, when present, owns delivery order.
 
 ## Current delivery
 
-The reviewed Claude handoff includes the current acceptance repairs,
-based on `95490c97f73e53b2b9c70a61b287bd3aa36b8d38`. Publication requires the
-controller's exact combined gate; individual worker receipts do not substitute
-for it. The final gate selects 42 Linux resident cases, 20 Darwin public cases and
-15 Darwin resident cases. Nested host admission now delegates bounded capacity to descendants and retains
-upstream reservations through owner death, payload drainage and gated
-authority revocation. Recovery publishes exact descendant identities before
-TERM can remove their ancestry; a direct unpolled-scope heartbeat fixture and
-the real public reproduction crash oracle verify drainage. Its independent crash/stop oracles and these combined
-gates must pass before publication. These selections do not claim the full
-Fo inventory.
-The user explicitly authorized faepmac1 for Darwin verification. Its child-state
-fixture now uses native process data to distinguish live and exited children;
-the independent control and affected backend test pass. The long-root frozen registry oracle returns the incorrect live value 31 on
-the old 256-character project-root field and the captured value 19 after expanding
-it to the supported 512-character limit. Longer parse roots are rejected explicitly.
-Final combined/platform gates must pass before publication; neither a retry nor receipts from
-an earlier source version satisfies the final gate.
+The reviewed Claude handoff is published on main, based on
+`95490c97f73e53b2b9c70a61b287bd3aa36b8d38`. On exact source `7056854` and pinned
+driver `369515f7…f786` the final gate passed 42/42 Linux cases, 20/20 Darwin
+public cases and 15/15 Darwin resident cases (faepmac1, user-authorized). These
+selections do not claim the full Fo inventory. Nested host admission delegates
+bounded capacity to descendants and retains upstream reservations through owner
+death and payload drainage. Recovery publishes descendant identities before TERM
+removes their ancestry. The frozen registry replays the captured value 19 instead of
+the live value 31 for project roots up to the supported 512 characters and
+rejects longer ones explicitly. The Darwin resident gate exposed that the state
+portability test read undeclared C sources. Both are now declared fixtures.
+An earlier loaded Linux run failed two resident readiness fixtures on their fixed
+30 s budget; #208 tracks that fixture defect.
 
 | Handoff goal | Independently checked behavior |
 | --- | --- |
