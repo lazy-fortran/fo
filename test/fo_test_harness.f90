@@ -408,7 +408,7 @@ contains
     end subroutine make_c_vector
 
     subroutine run_process(arguments, cwd, result, environment, input, timeout_ms, &
-            max_output_bytes)
+            max_output_bytes, child_start_delay_ms)
         type(string_list_t), intent(in) :: arguments
         character(len=*), intent(in) :: cwd
         type(process_result_t), intent(out) :: result
@@ -416,6 +416,7 @@ contains
         character(len=*), optional, intent(in) :: input
         integer, optional, intent(in) :: timeout_ms
         integer(c_int64_t), optional, intent(in) :: max_output_bytes
+        integer, optional, intent(in) :: child_start_delay_ms
         type(string_list_t) :: empty_environment
         type(c_ptr), allocatable, target :: argument_pointers(:), env_pointers(:)
         character(kind=c_char), allocatable, target :: argument_storage(:, :)
@@ -427,6 +428,7 @@ contains
         integer(c_int) :: child, wait_status, waited, rc, containment_status
         integer(c_int) :: input_descriptor, output_descriptor, error_descriptor
         integer(c_int) :: timeout_value, poll_count, poll_slot(3), poll_ready
+        integer(c_int) :: child_delay_ms
         integer(c_int64_t) :: input_length, input_offset, amount, now_ms
         integer(c_int64_t) :: deadline_ms, kill_deadline_ms, write_amount
         integer(c_int64_t) :: output_limit, started_ms
@@ -437,6 +439,8 @@ contains
         character(:), allocatable :: pipe_error
         type(byte_buffer_t) :: captured_stdout, captured_stderr
 
+        child_delay_ms = 0
+        if (present(child_start_delay_ms)) child_delay_ms = max(0, child_start_delay_ms)
         result = process_result_t()
         result%stdout = ''
         result%stderr = ''
@@ -534,6 +538,8 @@ contains
                 goto 800
             end if
             if (child == 0) then
+                ! A controlled pre-group delay lets the harness test launch-time cleanup.
+                if (child_delay_ms > 0) rc = c_poll(poll_descriptors, 0_c_size_t, child_delay_ms)
                 call execute_child(argument_pointers, argument_storage, env_storage, cwd_bytes, &
                     env_count, input_pipe, output_pipe, error_pipe)
                 call c_exit(127_c_int)
@@ -541,7 +547,8 @@ contains
         end if
 
         result%process_id = int(child)
-        if (.not. monitor_mode) rc = c_setpgid(child, child)
+        ! The child establishes its group before exec. Concurrent parent and child
+        ! setpgid calls can fail with EPERM on Darwin while the group is being created.
         input_descriptor = input_pipe(2)
         input_pipe(2) = -1
         output_descriptor = output_pipe(1)
@@ -629,12 +636,16 @@ contains
                 if (monitor_mode) then
                     rc = c_kill(child, 15_c_int)
                 else
+                    if (.not. child_done) rc = c_kill(child, 15_c_int)
                     rc = c_kill(-child, 15_c_int)
                 end if
                 kill_deadline_ms = now_ms + 1000_c_int64_t
             end if
             if (result%timed_out .and. now_ms >= kill_deadline_ms) then
-                if (.not. monitor_mode) rc = c_kill(-child, 9_c_int)
+                if (.not. monitor_mode) then
+                    if (.not. child_done) rc = c_kill(child, 9_c_int)
+                    rc = c_kill(-child, 9_c_int)
+                end if
                 kill_deadline_ms = huge(kill_deadline_ms)
             end if
             if (child_done .and. output_descriptor < 0 .and. error_descriptor < 0) exit
@@ -845,8 +856,8 @@ contains
             end do
             return
         end if
-        rc = c_kill(-child, 15_c_int)
         if (.not. reaped) rc = c_kill(child, 15_c_int)
+        rc = c_kill(-child, 15_c_int)
         now_ms = c_monotonic_ms()
         deadline = huge(deadline)
         if (now_ms >= 0) deadline = now_ms + 1000_c_int64_t
@@ -863,8 +874,8 @@ contains
             rc = c_poll(no_descriptors, 0_c_size_t, 20_c_int)
             attempts = attempts + 1
         end do
-        rc = c_kill(-child, 9_c_int)
         if (.not. reaped) rc = c_kill(child, 9_c_int)
+        rc = c_kill(-child, 9_c_int)
         if (.not. reaped) then
             do
                 waited = c_waitpid_retry(child, wait_status, 0_c_int)

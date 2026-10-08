@@ -294,3 +294,8 @@ role = "test-fixture"
 [[extra.fo.inputs]]
 path = "test-fixtures/gremlin_process_boundary/fo_boundary_signal.f90"
 role = "test-fixture"
+
+[[test]]
+name = "test_harness_process_group"
+source-dir = "test"
+main = "test_harness_process_group.f90"
