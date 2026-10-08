@@ -410,7 +410,30 @@ contains
                     owner_pid, owner_start, fresh_status, ierr, message)
                 freshness_verified = ierr == 0 .and. &
                     trim(fresh_session) == trim(session%session_id)
-                if (freshness_verified) status_text = fresh_status
+                if (freshness_verified) then
+                    status_text = fresh_status
+                    ! The freshness handshake can advance the owner from testing
+                    ! to quiescence. Its refreshed status needs refreshed coverage,
+                    ! including the new generation if activation occurred meanwhile.
+                    generation_id = ''
+                    coverage_view = gremlin_coverage_view_t()
+                    have_coverage = .false.
+                    call gremlin_json_field(status_text, 'active_generation', &
+                        generation_id)
+                    if (len_trim(generation_id) == HASH_LEN) then
+                        coverage_path = trim(coverage_state_dir)//'/coverage-'// &
+                            generation_id//'.state'
+                        call coverage_read_view_path(trim(coverage_path), generation_id, &
+                            coverage_view, ierr, message)
+                        if (ierr == COVERAGE_OK) then
+                            have_coverage = .true.
+                        else if (ierr /= COVERAGE_NOT_FOUND) then
+                            call error_response('status', trim(message), response)
+                            exitcode = 2
+                            return
+                        end if
+                    end if
+                end if
             end if
             call compute_readiness(session, trim(status_text), coverage_view, &
                 have_coverage, readiness, ierr, message, freshness_verified)

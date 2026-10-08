@@ -139,6 +139,15 @@ static int read_process_record(pid_t pid, fo_test_process_record *record) {
     record->parent = (pid_t)parent;
     record->start_time = start_time;
     return 0;
+#elif defined(__APPLE__)
+    struct proc_bsdinfo info;
+    int bytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+    if (bytes != sizeof(info)) return -1;
+    record->pid = pid;
+    record->parent = (pid_t)info.pbi_ppid;
+    record->start_time = (uint64_t)info.pbi_start_tvsec * 1000000ULL +
+                         (uint64_t)info.pbi_start_tvusec;
+    return record->start_time == 0 ? -1 : 0;
 #else
     (void)pid; (void)record;
     return -1;
@@ -147,7 +156,7 @@ static int read_process_record(pid_t pid, fo_test_process_record *record) {
 
 int fo_test_collect_descendants(int root_pid, uint64_t root_start_time,
                                 int *processes, uint64_t *start_times, int capacity) {
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     if (root_pid <= 0 || root_start_time == 0 || processes == NULL ||
         start_times == NULL || capacity <= 0) return -1;
     if (process_start_time((pid_t)root_pid) != root_start_time) return -2;
@@ -155,6 +164,7 @@ int fo_test_collect_descendants(int root_pid, uint64_t root_start_time,
     size_t count = 0;
     fo_test_process_record *records = calloc(allocated, sizeof(*records));
     if (records == NULL) return -3;
+#if defined(__linux__)
     DIR *directory = opendir("/proc");
     if (directory == NULL) { free(records); return -3; }
     struct dirent *entry;
@@ -173,6 +183,35 @@ int fo_test_collect_descendants(int root_pid, uint64_t root_start_time,
         records[count++] = record;
     }
     closedir(directory);
+#else
+    int bytes = proc_listallpids(NULL, 0);
+    if (bytes <= 0 || (size_t)bytes > SIZE_MAX / sizeof(pid_t) - 1024) {
+        free(records); return -3;
+    }
+    size_t pid_capacity = (size_t)bytes + 1024;
+    if (pid_capacity > INT_MAX / sizeof(pid_t)) { free(records); return -3; }
+    pid_t *pids = calloc(pid_capacity, sizeof(*pids));
+    if (pids == NULL) { free(records); return -3; }
+    int listed = proc_listallpids(pids, (int)(pid_capacity * sizeof(*pids)));
+    if (listed <= 0 || (size_t)listed >= pid_capacity) {
+        free(pids); free(records); return -3;
+    }
+    if ((size_t)listed > allocated) {
+        fo_test_process_record *grown = realloc(records, (size_t)listed * sizeof(*records));
+        if (grown == NULL) { free(pids); free(records); return -3; }
+        records = grown;
+    }
+    for (int i = 0; i < listed; ++i) {
+        fo_test_process_record record;
+        if (pids[i] <= 0 || read_process_record(pids[i], &record) != 0) continue;
+        records[count++] = record;
+    }
+    free(pids);
+#endif
+    /* Refuse a tree observed after the root's recorded identity disappeared. */
+    if (process_start_time((pid_t)root_pid) != root_start_time) {
+        free(records); return -2;
+    }
     int used = 0;
     int frontier = 0;
     processes[used] = root_pid;
