@@ -34,6 +34,39 @@ int fo_test_host_is_linux(void) {
 #endif
 }
 
+void fo_test_child_setup_error(int fd, int operation) {
+    /* Runs before stderr redirection in a forked child. Avoid stdio, allocation
+       and strerror: write the operation and saved errno directly to its pipe. */
+    int saved_error = errno;
+    const char *name;
+    char message[160], digits[16];
+    size_t used = 0, count = 0, offset = 0;
+    unsigned value = saved_error < 0 ? 0U : (unsigned)saved_error;
+    const char *text = "fo test harness: child setup ";
+    switch (operation) {
+    case 1: name = "setpgid"; break;
+    case 2: name = "default SIGPIPE"; break;
+    case 3: name = "stdin dup2"; break;
+    case 4: name = "stdout dup2"; break;
+    case 5: name = "stderr dup2"; break;
+    default: name = "unknown"; break;
+    }
+    while (*text) message[used++] = *text++;
+    while (*name) message[used++] = *name++;
+    text = " failed with errno ";
+    while (*text) message[used++] = *text++;
+    do { digits[count++] = (char)('0' + value % 10U); value /= 10U; } while (value);
+    while (count) message[used++] = digits[--count];
+    message[used++] = '\n';
+    while (offset < used) {
+        ssize_t written = write(fd, message + offset, used - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) break;
+        offset += (size_t)written;
+    }
+    errno = saved_error;
+}
+
 static uint64_t process_start_time(pid_t pid) {
 #if defined(__linux__)
     char path[64], line[4096];

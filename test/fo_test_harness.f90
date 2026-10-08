@@ -181,6 +181,11 @@ module fo_test_harness
             import :: c_int
         end function c_default_sigpipe
 
+        subroutine c_child_setup_error(fd, operation) bind(C, name='fo_test_child_setup_error')
+            import :: c_int
+            integer(c_int), value :: fd, operation
+        end subroutine c_child_setup_error
+
         integer(c_int) function c_silence_output() bind(C, name='fo_test_silence_output')
             import :: c_int
         end function c_silence_output
@@ -884,15 +889,30 @@ contains
         integer :: i, j, equals_at
 
         rc = c_setpgid(0_c_int, 0_c_int)
-        if (rc /= 0) call c_exit(126_c_int)
+        if (rc /= 0) then
+            call c_child_setup_error(error_pipe(2), 1_c_int)
+            call c_exit(126_c_int)
+        end if
         rc = c_default_sigpipe()
-        if (rc /= 0) call c_exit(126_c_int)
+        if (rc /= 0) then
+            call c_child_setup_error(error_pipe(2), 2_c_int)
+            call c_exit(126_c_int)
+        end if
         rc = c_dup2(input_pipe(1), 0_c_int)
-        if (rc < 0) call c_exit(126_c_int)
+        if (rc < 0) then
+            call c_child_setup_error(error_pipe(2), 3_c_int)
+            call c_exit(126_c_int)
+        end if
         rc = c_dup2(output_pipe(2), 1_c_int)
-        if (rc < 0) call c_exit(126_c_int)
+        if (rc < 0) then
+            call c_child_setup_error(error_pipe(2), 4_c_int)
+            call c_exit(126_c_int)
+        end if
         rc = c_dup2(error_pipe(2), 2_c_int)
-        if (rc < 0) call c_exit(126_c_int)
+        if (rc < 0) then
+            call c_child_setup_error(error_pipe(2), 5_c_int)
+            call c_exit(126_c_int)
+        end if
         do i = 1, 2
             rc = c_close(input_pipe(i))
             rc = c_close(output_pipe(i))
