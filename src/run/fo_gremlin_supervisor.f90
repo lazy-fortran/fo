@@ -1319,7 +1319,8 @@ contains
             return
         end if
         if (test_exit /= 0) exitcode = 1
-        call simple_response('reproduce', request%lane_id, session_id, trim(outcome), response)
+        call simple_response('reproduce', request%lane_id, session%session_id, &
+            trim(outcome), response)
     end subroutine handle_reproduce
 
     subroutine run_owner(project_dir, request, response, exitcode)
