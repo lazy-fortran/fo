@@ -17,14 +17,22 @@ program test_archive_publication
     character(:), allocatable :: real_fc, real_gcc, archive, old_archive, marker, lib_dir, bin_dir
     character(:), allocatable :: digest_before
     character(:), allocatable :: timeout_scratch, heartbeat, baseline, alive_sample
+    character(:), allocatable :: shared_extension, truncated_image
     type(string_list_t) :: args, env
     type(process_result_t) :: result, child_result, external
     type(json_value_t) :: report
     integer :: child = -1, status, count, before_calls, timed_child, sentinel
-    logical :: found
+    logical :: found, macos
 
     call resolve_driver(driver)
     call make_scratch('fo-archive-publication-fortran', scratch)
+    call run_external('/usr/bin/uname', words([character(len=8) :: '-s']), &
+        scratch, external)
+    call assert_process_ok(external, 'identify native publication platform')
+    macos = external%stdout == 'Darwin' // new_line('a')
+    shared_extension = '.so'
+    if (macos) shared_extension = '.dylib'
+    truncated_image = join_path(scratch, 'truncated-native.image')
     project = join_path(scratch, 'project')
     cache = join_path(scratch, 'cache')
     fake_bin = join_path(scratch, 'bin')
@@ -56,6 +64,7 @@ program test_archive_publication
     call assert_process_ok(result, 'real executable links against the archive')
     call assert_equal_string(result%stdout, '42' // new_line('a'), &
         'published executable returns expected behavior')
+    call save_native_prefix(join_path(bin_dir, 'probe'))
 
     call invoke(words([character(len=32) :: 'build', '--release']), &
         'normal', 'normal', 'normal', result)
@@ -169,14 +178,14 @@ program test_archive_publication
     call wait_for(marker, 150, child, found)
     call assert_true(found, 'shared linker pauses inside private stage')
     call assert_file_exists(marker, 'shared linker pauses inside private stage')
-    call find_output(lib_dir, 'libproject_', '.so', archive, count)
+    call find_output(lib_dir, 'libproject_', shared_extension, archive, count)
     call assert_equal_integer(count, 0, 'partial shared library is not published')
     call call_fo([character(len=32) :: 'test', '--all', '--json'], &
         'normal', 'normal', 'normal', child_result)
     call assert_process_ok(child_result, 'concurrent shared-library consumer succeeds')
     call poll_until(child, status)
     call assert_equal_integer(status, 0, 'shared library publisher completes')
-    call find_output(lib_dir, 'libproject_', '.so', archive, count)
+    call find_output(lib_dir, 'libproject_', shared_extension, archive, count)
     call assert_equal_integer(count, 1, 'one shared library is atomically published')
     call verify_image(archive)
     call invoke(words([character(len=32) :: 'exec', 'probe']), &
@@ -224,8 +233,13 @@ program test_archive_publication
         'archiver wrapper log records independent observations')
     call assert_true(log_lines(join_path(scratch, 'fc.log')) > 0, &
         'compiler wrapper log records independent observations')
-    call assert_true(log_lines(join_path(scratch, 'gcc.log')) > 0, &
-        'native shared-link wrapper log records independent observations')
+    if (macos) then
+        call assert_true(log_lines(join_path(scratch, 'shared.log')) > 0, &
+            'Fortran driver shared-link wrapper records independent observations')
+    else
+        call assert_true(log_lines(join_path(scratch, 'gcc.log')) > 0, &
+            'native shared-link wrapper log records independent observations')
+    end if
 
     call make_scratch('fo-archive-timeout-cleanup', timeout_scratch)
     heartbeat = join_path(timeout_scratch, 'heartbeat')
@@ -291,12 +305,20 @@ contains
     function locate(name) result(path)
         character(len=*), intent(in) :: name
         character(:), allocatable :: path
+        type(process_result_t) :: located
 
         select case (name)
         case ('ar')
             path = '/usr/bin/ar'
         case ('gfortran')
-            path = '/usr/bin/gfortran'
+            call run_external('/bin/sh', &
+                words([character(len=64) :: '-c', 'command -v gfortran']), &
+                scratch, located)
+            call assert_process_ok(located, 'locate actual Fortran compiler')
+            path = trim(located%stdout)
+            if (len(path) > 0) then
+                if (path(len(path):) == new_line('a')) path = path(:len(path)-1)
+            end if
         case ('gcc')
             path = '/usr/bin/gcc'
         case default
@@ -416,13 +438,15 @@ contains
             'if [ "$test_link" = yes ]; then echo start >> "$FO_TEST_FC_LOG"; fi' // &
             new_line('a') // 'case "$out" in */build/fo/bin/*)' // new_line('a') // &
             ' if [ "$FO_TEST_LINK_MODE" = fail ]; then echo broken > "$out"; exit 41; fi' // &
-            new_line('a') // ' if [ "$FO_TEST_LINK_MODE" = truncated ]; then printf "\\177ELF" > "$out"; exit 0; fi' // &
+            new_line('a') // ' if [ "$FO_TEST_LINK_MODE" = truncated ]; then ' // &
+            'cp "$FO_TEST_TRUNCATED_IMAGE" "$out"; exit 0; fi' // &
             new_line('a') // 'esac' // new_line('a') // &
             'if [ "$shared" = yes ]; then' // new_line('a') // &
             ' echo "$FO_TEST_SHARED_MODE $PPID $out" >> "$FO_TEST_SHARED_LOG"' // new_line('a') // &
             ' case "$FO_TEST_SHARED_MODE" in' // new_line('a') // &
             ' fail) echo broken > "$out"; exit 39 ;;' // new_line('a') // &
-            ' truncated) printf "\\177ELF" > "$out"; exit 0 ;;' // new_line('a') // &
+            ' truncated) cp "$FO_TEST_TRUNCATED_IMAGE" "$out"; exit 0 ;;' // &
+            new_line('a') // &
             ' delay) echo partial > "$out"; : > "$FO_TEST_MARKER"; sleep 1; rm -f "$out" ;;' // new_line('a') // &
             ' esac' // new_line('a') // 'fi' // new_line('a') // &
             'result=0; "$FO_TEST_REAL_FC" "$@" || result=$?' // new_line('a') // &
@@ -444,7 +468,8 @@ contains
             'if [ "$shared" = yes ]; then' // new_line('a') // &
             ' case "$FO_TEST_SHARED_MODE" in' // new_line('a') // &
             ' fail) echo broken > "$out"; exit 39 ;;' // new_line('a') // &
-            ' truncated) printf "\\177ELF" > "$out"; exit 0 ;;' // new_line('a') // &
+            ' truncated) cp "$FO_TEST_TRUNCATED_IMAGE" "$out"; exit 0 ;;' // &
+            new_line('a') // &
             ' delay) echo partial > "$out"; : > "$FO_TEST_MARKER"; sleep 1; rm -f "$out" ;;' // &
             new_line('a') // ' esac' // new_line('a') // 'fi' // new_line('a') // &
             'exec "$FO_TEST_REAL_GCC" "$@"' // new_line('a')
@@ -473,6 +498,7 @@ contains
         call list_add(environment, 'FO_TEST_REAL_AR=' // real_ar)
         call list_add(environment, 'FO_TEST_REAL_FC=' // real_fc)
         call list_add(environment, 'FO_TEST_REAL_GCC=' // real_gcc)
+        call list_add(environment, 'FO_TEST_TRUNCATED_IMAGE=' // truncated_image)
         call list_add(environment, 'FO_TEST_AR_LOG=' // join_path(scratch, 'ar.log'))
         call list_add(environment, 'FO_TEST_FC_LOG=' // join_path(scratch, 'fc.log'))
         call list_add(environment, 'FO_TEST_GCC_LOG=' // join_path(scratch, 'gcc.log'))
@@ -564,13 +590,39 @@ contains
     subroutine verify_image(path)
         character(len=*), intent(in) :: path
         character(:), allocatable :: bytes
+        type(process_result_t) :: native_header
         bytes = read_file(path)
         call assert_true(len(bytes) > 4, 'published shared image is not a short stub')
+        if (macos) then
+            call run_external('/usr/bin/otool', &
+                words([character(len=512) :: '-hv', path]), scratch, native_header)
+            call assert_process_ok(native_header, &
+                'Apple otool reads shared image header')
+            call assert_true(index(native_header%stdout, 'DYLIB') > 0, &
+                'shared image has independently checked Mach-O dylib type')
+            return
+        end if
         if (len(bytes) >= 4) then
             call assert_equal_string(bytes(:4), char(127) // 'ELF', &
                 'shared image has independently checked ELF magic')
         end if
     end subroutine verify_image
+
+    subroutine save_native_prefix(path)
+        !! Retain a real header but omit its declared payload. This models a
+        !! successful wrapper leaving a truncated image on either platform.
+        character(len=*), intent(in) :: path
+        character(:), allocatable :: bytes
+        integer :: unit
+
+        bytes = read_file(path)
+        call assert_true(len(bytes) > 128, 'native fixture has a header and payload')
+        if (len(bytes) <= 128) return
+        open (newunit=unit, file=truncated_image, access='stream', &
+            form='unformatted', status='replace', action='write')
+        write (unit) bytes(:128)
+        close (unit)
+    end subroutine save_native_prefix
 
     subroutine check_concurrent_test_links()
         character(:), allocatable :: text
@@ -728,6 +780,10 @@ contains
             text = ''
             return
         end if
+        if (size_bytes < 0) then
+            text = ''
+            return
+        end if
         allocate(character(len=size_bytes) :: text)
         open(newunit=unit, file=path, access='stream', form='unformatted', status='old')
         if (size_bytes > 0) read(unit) text
@@ -739,9 +795,19 @@ contains
         character(:), allocatable :: digest
         type(string_list_t) :: command
         type(process_result_t) :: hashed
+        if (macos) then
+            call list_add(command, '-a')
+            call list_add(command, '256')
+        end if
         call list_add(command, path)
-        call run_external('/usr/bin/sha256sum', command, scratch, hashed)
+        if (macos) then
+            call run_external('/usr/bin/shasum', command, scratch, hashed)
+        else
+            call run_external('/usr/bin/sha256sum', command, scratch, hashed)
+        end if
         call assert_process_ok(hashed, 'compute independent file digest')
+        digest = ''
+        if (len(hashed%stdout) < 64) return
         digest = hashed%stdout(:64)
     end function file_digest
 

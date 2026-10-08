@@ -16,10 +16,14 @@ program test_atomic_link_artifacts
     type(string_list_t) :: args, env
     type(process_result_t) :: result, external
     integer :: child = -1, status, archive_count
-    logical :: found
+    logical :: found, macos
 
     call resolve_driver(driver)
     call make_scratch('fo-atomic-link-fortran', scratch)
+    call run_external('/usr/bin/uname', words([character(len=8) :: '-s']), &
+        scratch, external)
+    call assert_process_ok(external, 'identify native archive platform')
+    macos = external%stdout == 'Darwin' // new_line('a')
     project = join_path(scratch, 'fixture')
     fake_bin = join_path(scratch, 'bin')
     fake_ar = join_path(fake_bin, 'ar')
@@ -394,9 +398,19 @@ contains
         type(string_list_t) :: command
         type(process_result_t) :: hashed
 
+        if (macos) then
+            call list_add(command, '-a')
+            call list_add(command, '256')
+        end if
         call list_add(command, path)
-        call run_external('/usr/bin/sha256sum', command, project, hashed)
+        if (macos) then
+            call run_external('/usr/bin/shasum', command, project, hashed)
+        else
+            call run_external('/usr/bin/sha256sum', command, project, hashed)
+        end if
         call assert_process_ok(hashed, 'compute independent archive digest')
+        digest = ''
+        if (len(hashed%stdout) < 64) return
         digest = hashed%stdout(:64)
     end function file_digest
 

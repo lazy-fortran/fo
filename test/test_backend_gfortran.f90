@@ -626,9 +626,17 @@ contains
         end if
         if (expect_timeout) then
             call assert(exitcode /= 0, trim(mode)//' child hits the bounded wall cap')
-            call assert(file_contains(log_file, &
-                'test process itself used only '), &
-                trim(mode)//' timeout identifies CPU as test-process-only')
+            if (host_can_measure_child_cpu(project_dir)) then
+                call assert(file_contains(log_file, &
+                    'test process itself used only '), &
+                    trim(mode)//' timeout identifies CPU as test-process-only')
+            else
+                call assert(file_contains(log_file, &
+                    'budget of 1 s exceeded in wall time') .and. &
+                    file_contains(log_file, &
+                    'child CPU time is not measurable on this platform'), &
+                    trim(mode)//' timeout identifies the fallback wall budget')
+            end if
             call assert(.not. file_contains(log_file, 'deadlocked'), &
                 trim(mode)//' timeout does not infer deadlock from parent CPU')
         else
