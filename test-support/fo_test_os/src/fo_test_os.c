@@ -537,8 +537,9 @@ static fo_test_mcp_session *mcp_session_for(int handle) {
     return session->pid > 0 ? session : NULL;
 }
 
-int fo_test_mcp_start(const char *driver, const char *directory, const char *cache,
-                      const char *state, const char *stderr_path) {
+static int fo_test_server_start(const char *driver, const char *directory,
+                                const char *cache, const char *state,
+                                const char *stderr_path, const char *command) {
     if (driver == NULL || directory == NULL || cache == NULL || state == NULL ||
         stderr_path == NULL) return -1;
     int slot = -1;
@@ -572,7 +573,9 @@ int fo_test_mcp_start(const char *driver, const char *directory, const char *cac
             setenv("FO_DISABLE_SELF_REFRESH", "1", 1) != 0 ||
             setenv("FO_SELF_REFRESH", "0", 1) != 0 ||
             setenv("FO_JOBS", "1", 1) != 0) _exit(126);
-        char *const arguments[] = {(char *)driver, "mcp-server", NULL};
+        if (strcmp(command, "lsp") == 0 &&
+            setenv("FO_LSP_DEBOUNCE_MS", "300", 1) != 0) _exit(126);
+        char *const arguments[] = {(char *)driver, (char *)command, NULL};
         execv(driver, arguments);
         _exit(127);
     }
@@ -601,6 +604,18 @@ int fo_test_mcp_start(const char *driver, const char *directory, const char *cac
     mcp_sessions[slot].pending = pending;
     mcp_sessions[slot].pending_size = 0;
     return slot + 1;
+}
+
+int fo_test_mcp_start(const char *driver, const char *directory, const char *cache,
+                      const char *state, const char *stderr_path) {
+    return fo_test_server_start(driver, directory, cache, state, stderr_path,
+                                "mcp-server");
+}
+
+int fo_test_lsp_start(const char *driver, const char *directory, const char *cache,
+                      const char *state, const char *stderr_path) {
+    return fo_test_server_start(driver, directory, cache, state, stderr_path,
+                                "lsp");
 }
 
 int fo_test_mcp_pid(int handle) {
@@ -671,6 +686,32 @@ int fo_test_mcp_read_line(int handle, char *output, size_t capacity, int timeout
         if (count <= 0) return -5;
         session->pending_size += (size_t)count;
     }
+}
+
+/* Exact framed-body bytes, preserving data already buffered by read_line. */
+int fo_test_mcp_read_bytes(int handle, char *output, size_t length, int timeout_ms) {
+    fo_test_mcp_session *session = mcp_session_for(handle);
+    if (session == NULL || output == NULL || length > FO_TEST_MCP_BUFFER) return -1;
+    int64_t deadline = fo_test_monotonic_ms() + timeout_ms;
+    while (session->pending_size < length) {
+        int64_t remaining = deadline - fo_test_monotonic_ms();
+        if (remaining <= 0) return -2;
+        struct pollfd descriptor = {session->output_fd, POLLIN, 0};
+        int ready = poll(&descriptor, 1, remaining > INT_MAX ? INT_MAX : (int)remaining);
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready == 0) return -2;
+        if (ready < 0) return -3;
+        ssize_t count = read(session->output_fd,
+            session->pending + session->pending_size,
+            FO_TEST_MCP_BUFFER - session->pending_size);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) return -5;
+        session->pending_size += (size_t)count;
+    }
+    memcpy(output, session->pending, length);
+    memmove(session->pending, session->pending + length, session->pending_size - length);
+    session->pending_size -= length;
+    return (int)length;
 }
 
 int fo_test_mcp_wait(int handle, int timeout_ms, int *exit_code) {

@@ -1,8 +1,10 @@
 module fo_lsp
-    use fx_lsp, only: lsp_server_t, lsp_server_init, lsp_server_run, &
-        lsp_publish_diagnostics, lsp_uri_to_path, lsp_path_to_uri
-    use fx_diag, only: diag_t, DIAG_ERROR
-    use fo_check, only: check_result_t, fo_check_run
+    use fx_lsp, only: lsp_server_t, lsp_server_init, lsp_server_run
+    use fx_diag, only: diag_t
+    use fortfront_compiler, only: compiler_frontend_options_t, &
+                                  compiler_frontend_result_t, compiler_diagnostic_t, &
+                               compile_frontend_from_string, get_compiler_diagnostics, &
+                                  INPUT_MODE_STANDARD, OPERATING_MODE_INFER
     implicit none
     private
     public :: lsp_serve
@@ -10,61 +12,76 @@ module fo_lsp
 contains
 
     subroutine lsp_serve()
-        type(lsp_server_t) :: s
+        type(lsp_server_t) :: server
+        character(len=32) :: debounce
+        integer :: status, value
 
-        call lsp_server_init(s, 'fo')
-        call lsp_server_run(s, on_save)
+        call lsp_server_init(server, 'fo')
+        call get_environment_variable('FO_LSP_DEBOUNCE_MS', debounce, status=status)
+        if (status == 0) then
+            read (debounce, *, iostat=status) value
+            if (status == 0) server%debounce_ms = max(0, min(60000, value))
+        end if
+        call lsp_server_run(server, diagnose_document)
     end subroutine lsp_serve
 
-    subroutine on_save(uri, text)
-        character(len=*), intent(in) :: uri
-        character(len=*), intent(in) :: text
+    subroutine diagnose_document(uri, text, diags)
+        character(len=*), intent(in) :: uri, text
+        type(diag_t), allocatable, intent(out) :: diags(:)
+        type(compiler_frontend_options_t) :: options
+        type(compiler_frontend_result_t) :: result
+        type(compiler_diagnostic_t), allocatable :: frontend(:)
+        integer :: i
 
-        type(check_result_t) :: res
-        type(diag_t) :: diags(1)
-        integer :: n_diags
-        character(len=512) :: file_path, project_dir, diag_uri
-
-        if (len_trim(text) < 0) return ! text required by interface; content not inspected
-        file_path = lsp_uri_to_path(uri)
-        call find_project_dir(file_path, project_dir)
-        call fo_check_run(trim(project_dir), res)
-
-        n_diags = 0
-        diag_uri = uri
-        if (.not. (res%build_ok .and. res%tests_ok)) then
-            n_diags = 1
-            diags(1)%severity = DIAG_ERROR
-            diags(1)%message = trim(res%error_msg)
-            diags(1)%line = res%diag_line
-            diags(1)%col = res%diag_column
-            if (len_trim(res%diag_file) > 0) then
-                diag_uri = lsp_path_to_uri(trim(res%diag_file))
-            end if
-        end if
-        call lsp_publish_diagnostics(diag_uri, diags, n_diags)
-    end subroutine on_save
-
-    subroutine find_project_dir(file_path, project_dir)
-        character(len=*), intent(in) :: file_path
-        character(len=*), intent(out) :: project_dir
-
-        character(len=512) :: dir
-        integer :: slash
-        logical :: exists
-
-        dir = file_path
-        do
-            slash = index(trim(dir), '/', back=.true.)
-            if (slash < 2) exit
-            dir = dir(1:slash - 1)
-            inquire (file=trim(dir)//'/fpm.toml', exist=exists)
-            if (exists) then
-                project_dir = trim(dir)
-                return
-            end if
+        options = compiler_frontend_options_t()
+        options%input_mode = INPUT_MODE_STANDARD
+        options%operating_mode = OPERATING_MODE_INFER
+        options%run_semantics = .true.
+        call compile_frontend_from_string(text, result, options)
+        frontend = get_compiler_diagnostics(result)
+        allocate (diags(size(frontend)))
+        do i = 1, size(frontend)
+            diags(i)%file = uri
+            diags(i)%line = frontend(i)%span%start%line
+            diags(i)%col = utf16_column(text, diags(i)%line, &
+                                        frontend(i)%span%start%column)
+            diags(i)%end_line = frontend(i)%span%end%line
+            diags(i)%end_col = utf16_column(text, diags(i)%end_line, &
+                                            frontend(i)%span%end%column)
+            diags(i)%severity = max(0, min(3, frontend(i)%severity - 1))
+            diags(i)%code = frontend(i)%code
+            if (allocated(frontend(i)%message)) diags(i)%message = frontend(i)%message
         end do
-        project_dir = '.'
-    end subroutine find_project_dir
+    end subroutine diagnose_document
+
+    integer function utf16_column(text, line, column) result(converted)
+        character(len=*), intent(in) :: text
+        integer, intent(in) :: line, column
+        integer :: i, current_line, first, width, byte
+
+        converted = max(1, column)
+        if (line < 1 .or. column < 1) return
+        first = 1
+        current_line = 1
+        do i = 1, len(text)
+            if (current_line == line) exit
+            if (text(i:i) /= achar(10)) cycle
+            current_line = current_line + 1
+            first = i + 1
+        end do
+        converted = 1
+        i = first
+        do while (i < first + column - 1)
+            if (i > len(text)) exit
+            byte = iachar(text(i:i))
+            width = 1
+            if (byte >= 192 .and. byte < 224) width = 2
+            if (byte >= 224 .and. byte < 240) width = 3
+            if (byte >= 240) width = 4
+            converted = converted + 1
+            if (width == 4) converted = converted + 1
+            i = i + width
+        end do
+    end function utf16_column
 
 end module fo_lsp
