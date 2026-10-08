@@ -577,7 +577,6 @@ int fo_c_find_executable(const char *command, char *out, int cap) {
     size_t dir_len;
 
     if (!fo_has(command) || out == NULL || cap <= 0) return -1;
-    if (strpbrk(command, " \t\r\n") != NULL) return -1;
     if (strchr(command, '/') != NULL
 #if defined(_WIN32) && !defined(__CYGWIN__)
         || strchr(command, '\\') != NULL || strchr(command, ':') != NULL
@@ -591,6 +590,7 @@ int fo_c_find_executable(const char *command, char *out, int cap) {
         strcpy(out, candidate);
         return 0;
     }
+    if (strpbrk(command, " \t\r\n") != NULL) return -1;
     path_env = getenv("PATH");
     if (path_env == NULL) return -1;
     start = path_env;
