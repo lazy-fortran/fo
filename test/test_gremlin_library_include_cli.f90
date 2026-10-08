@@ -1,11 +1,12 @@
 program test_gremlin_library_include_cli
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: write_text, read_text, assert_true
-    use fo_test_harness, only: assert_contains, finish_assertions
+    use fo_test_harness, only: assert_equal_integer, finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json
     use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_wait_ms
     use fo_test_gremlin_oracle, only: gremlin_field, gremlin_stop_lane
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
+    use fo_test_json, only: json_parse, json_string_value
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state
@@ -50,12 +51,12 @@ program test_gremlin_library_include_cli
     session = gremlin_field(response, 'session_id')
     call wait_case('', 'PASS', generation, log_path, ready)
     if (ready) then
-        call assert_contains(read_text(log_path), 'HEADER_PAYLOAD=255'//nl, &
-            'resident runtime consumes captured project, dependency and dev headers')
+        ! The child independently rejects every value except 255. Successful
+        ! Fo test JSON intentionally omits ordinary stdout.
         call write_text(project//'/headers/value.h', '#define VALUE 17'//nl)
         call wait_case(generation, 'FAIL', changed, log_path, ready)
-        if (ready) call assert_contains(read_text(log_path), &
-            'HEADER_PAYLOAD=259'//nl, 'declared root header edit changes warm runtime')
+        if (ready) call assert_equal_integer(receipt_payload(log_path), 259, &
+            'declared root header edit changes warm runtime')
         call gremlin_stop_lane(driver, project, cache, state, lane, session, &
             allow_terminal_error=.true.)
         call frozen_replay(generation)
@@ -66,6 +67,31 @@ program test_gremlin_library_include_cli
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
+
+    integer function receipt_payload(path) result(payload)
+        character(len=*), intent(in) :: path
+        character(:), allocatable :: log, message, output
+        type(json_value_t) :: report, rows, row, field
+        integer :: first, last, position, status
+        logical :: valid
+
+        payload = -huge(payload)
+        log = read_text(path)
+        first = index(log, '{"tests":')
+        if (first == 0) return
+        last = index(log(first:), nl)
+        if (last == 0) last = len(log) - first + 2
+        call json_parse(log(first:first + last - 2), report, valid, message)
+        if (.not. valid) return
+        rows = json_member(report, 'tests')
+        row = json_element(rows, 1)
+        field = json_member(row, 'output')
+        output = json_string_value(field)
+        position = index(output, 'HEADER_PAYLOAD=')
+        if (position == 0) return
+        read(output(position + len('HEADER_PAYLOAD='):), *, iostat=status) payload
+        if (status /= 0) payload = -huge(payload)
+    end function receipt_payload
 
     function c_interface(name) result(source)
         character(len=*), intent(in) :: name
@@ -161,8 +187,6 @@ contains
             receipt_log = gremlin_field(event, 'log_path')
         end do
         call assert_true(len(receipt_log) > 0, 'frozen replay exposes its own log')
-        if (len(receipt_log) > 0) call assert_contains(read_text(receipt_log), &
-            'HEADER_PAYLOAD=255'//nl, 'frozen replay executes original header bytes')
     end subroutine frozen_replay
 
 end program test_gremlin_library_include_cli
