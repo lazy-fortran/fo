@@ -31,16 +31,16 @@ contains
         if (failed(plan, log_file)) return
         allocate (selected(size(plan%targets)))
         selected = 0
-        if (size(context%build_targets) == 0) then
+        if (size(plan%build_targets) == 0) then
             do i = 1, size(selected)
                 call select_target(plan, i, selected)
             end do
         else
-            do i = 1, size(context%build_targets)
-                at = target_index(plan, trim(context%build_targets(i)))
+            do i = 1, size(plan%build_targets)
+                at = target_index(plan, trim(plan%build_targets(i)))
                 if (at == 0) then
                     plan%error = 'native CMake: unknown build target '// &
-                                 trim(context%build_targets(i))
+                        trim(plan%build_targets(i))
                     exit
                 end if
                 call select_target(plan, at, selected)

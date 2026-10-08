@@ -2,7 +2,7 @@ module fo_cmake_native_model
     implicit none
     private
     public :: cm_word_t, cm_target_t, cm_test_t, cm_plan_t, cm_words, cm_add
-    public :: cm_set, cm_get, cm_expand, cm_next, cm_lower, cm_path
+    public :: cm_set, cm_get, cm_defined, cm_expand, cm_next, cm_lower, cm_path
     public :: cm_variable_t
 
     type :: cm_word_t
@@ -25,8 +25,12 @@ module fo_cmake_native_model
         type(cm_target_t), allocatable :: targets(:)
         type(cm_test_t), allocatable :: tests(:)
         type(cm_variable_t), allocatable :: variables(:)
+        type(cm_variable_t), allocatable :: environment(:)
+        logical :: frozen = .false.
+        logical :: fortran_enabled = .false.
         type(cm_word_t), allocatable :: compile_flags(:), link_flags(:), includes(:)
         type(cm_word_t), allocatable :: inputs(:)
+        character(:), allocatable :: build_targets(:)
     end type
 contains
     subroutine cm_add(words, text)
@@ -68,6 +72,17 @@ contains
         if (started) call cm_add(words, word)
     end function
 
+    logical function cm_defined(plan, name) result(defined)
+        type(cm_plan_t), intent(in) :: plan
+        character(len=*), intent(in) :: name
+        integer :: i
+        defined = .false.
+        if (.not. allocated(plan%variables)) return
+        do i = 1, size(plan%variables)
+            if (plan%variables(i)%name == name) defined = .true.
+        end do
+    end function cm_defined
+
     subroutine cm_set(plan, name, value)
         type(cm_plan_t), intent(inout) :: plan
         character(len=*), intent(in) :: name, value
@@ -94,10 +109,11 @@ contains
     end function
 
     function cm_expand(plan, text) result(value)
-        type(cm_plan_t), intent(in) :: plan
+        type(cm_plan_t), intent(inout) :: plan
         character(len=*), intent(in) :: text
         character(:), allocatable :: value, replacement, name
-        integer :: i, close, start, status, length
+        integer :: i, j, close, start, status, length
+        logical :: captured
         value = ''
         i = 1
         do while (i <= len(text))
@@ -120,11 +136,26 @@ contains
             if (start == i + 2) then
                 replacement = cm_get(plan, name)
             else
-                call get_environment_variable(name, length=length, status=status)
-                if (status == 0) then
-                    deallocate (replacement)
-                    allocate (character(len=length) :: replacement)
-                    call get_environment_variable(name, replacement)
+                captured = .false.
+                if (.not. allocated(plan%environment)) allocate (plan%environment(0))
+                do j = 1, size(plan%environment)
+                    if (plan%environment(j)%name /= name) cycle
+                    replacement = plan%environment(j)%value
+                    captured = .true.
+                    exit
+                end do
+                if (.not. captured) then
+                    if (plan%frozen) then
+                     plan%error = 'native CMake: uncaptured environment variable '//name
+                        return
+                    end if
+                    call get_environment_variable(name, length=length, status=status)
+                    if (status == 0) then
+                        deallocate (replacement)
+                        allocate (character(len=length) :: replacement)
+                        call get_environment_variable(name, replacement)
+                    end if
+                 plan%environment = [plan%environment, cm_variable_t(name, replacement)]
                 end if
             end if
             value = value//replacement

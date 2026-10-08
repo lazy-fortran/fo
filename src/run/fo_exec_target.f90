@@ -224,7 +224,7 @@ contains
 
         found = .false.
         bin_path = ''
-        if (native_cmake_selected()) then
+        if (native_cmake_selected(b%project_dir)) then
             call native_cmake_resolve(b%cmake, target, bin_path, found)
             return
         end if

@@ -356,6 +356,7 @@ contains
             allocate(inputs(0))
             context%inputs = inputs
             call append_environment_value(context%environment, 'FO_BACKEND')
+            call append_environment_value(context%environment, 'FO_CMAKE_NATIVE')
             call append_environment_value(context%environment, 'FO_CMAKE_BUILD_DIR')
             call append_environment_value(context%environment, 'FO_CMAKE_CONFIG')
             call append_environment_value(context%environment, 'FO_CMAKE_GENERATOR')
@@ -469,6 +470,7 @@ contains
             call delete_tmpfile(log_file)
         end if
         call append_environment_value(context%environment, 'FC')
+        call append_environment_value(context%environment, 'FO_FC')
         call append_environment_value(context%environment, 'FFLAGS')
         call append_environment_value(context%environment, 'FPM_FC')
         call append_environment_value(context%environment, 'FPM_FFLAGS')

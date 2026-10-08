@@ -3,6 +3,9 @@ module fo_cmake_generation
     !! and registered-test semantics; no FPM manifest or source scanner is used.
     use fo_build_backend, only: backend_t, cmake_configure
     use fo_cmake_context, only: cmake_context_build_path
+    use fo_cmake_native_config, only: native_cmake_selected, native_cmake_configure
+    use fo_cmake_native_model, only: cm_plan_t
+    use fo_cmake_native_snapshot, only: native_snapshot_write
     use fo_input_inventory, only: input_inventory_t, input_inventory_discover_cmake
     use fo_fs, only: fs_make_dir, fs_write_text, fs_collect_files, fs_remove_tree, &
         fs_realpath
@@ -37,6 +40,10 @@ contains
 
         ierr = 1
         message = ''
+        if (native_cmake_selected(backend%project_dir)) then
+            call native_capture_inventory(backend, inventory, ierr, message)
+            return
+        end if
         if (.not. backend%cmake%valid) then
             message = backend%cmake%error
             return
@@ -172,6 +179,67 @@ contains
                                                ierr, message, inventory)
         if (ierr /= 0) call fs_remove_tree(trim(metadata_dir), cleanup_status)
     end subroutine cmake_capture_inventory
+
+    subroutine native_capture_inventory(backend, inventory, ierr, message)
+        type(backend_t), intent(in) :: backend
+        type(input_inventory_t), intent(out) :: inventory
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(cm_plan_t) :: plan
+        character(:), allocatable :: text, path
+        character(len=PATH_LEN) :: temporary, metadata, physical
+        integer :: i, j, cleanup_status
+        logical :: resolved
+        call native_cmake_configure(backend%cmake, plan)
+        ierr = 1
+        message = plan%error
+        if (len(plan%error) > 0) return
+        if (backend%cmake%build_root(1:1) == '/' .or. &
+            index(backend%cmake%build_root, ':') == 2) then
+            message = 'native resident CMake requires a relocatable build directory'
+            return
+        end if
+        call native_snapshot_write(backend%cmake, plan, text)
+        call make_tmpfile('fo-native-cmake-context', temporary)
+        metadata = trim(temporary)//'.dir'
+        call delete_tmpfile(temporary)
+        call fs_make_dir(trim(metadata))
+        call fs_write_text(trim(metadata)//'/native-context.json', text)
+        call fs_write_text(trim(metadata)//'/build-directory.txt', &
+            backend%cmake%build_root)
+        call input_inventory_discover_cmake(backend%project_dir, &
+            [character(len=PATH_LEN) ::], [character(len=PATH_LEN) ::], &
+            [character(len=256) ::], trim(metadata), inventory, ierr, message)
+        if (ierr == 0) then
+            do i = 1, size(plan%inputs)
+                path = plan%inputs(i)%text
+                call fs_realpath(path, physical, resolved)
+                if (resolved) resolved = inventory_has_path(inventory, physical)
+                if (.not. resolved) then
+                    ierr = 1
+                    message = 'native CMake: input is outside frozen inventory: '//path
+                    exit
+                end if
+            end do
+        end if
+        if (ierr == 0) then
+            do i = 1, size(plan%targets)
+                do j = 1, size(plan%targets(i)%sources)
+                    path = plan%targets(i)%sources(j)%text
+                    call fs_realpath(path, physical, resolved)
+                    if (resolved) resolved = inventory_has_path(inventory, physical)
+                    if (.not. resolved) then
+                        ierr = 1
+                        message = 'native CMake: source is outside frozen inventory: '// &
+                            path
+                        exit
+                    end if
+                end do
+                if (ierr /= 0) exit
+            end do
+        end if
+        if (ierr /= 0) call fs_remove_tree(trim(metadata), cleanup_status)
+    end subroutine native_capture_inventory
 
     subroutine capture_provider_metadata(roots, names, labels, metadata, ierr, message)
         character(len=*), intent(in) :: roots(:), names(:), labels(:), metadata
@@ -554,11 +622,32 @@ contains
         character(len=:), allocatable :: text
         type(json_parser_t) :: parser
         type(json_event_t) :: event
+        type(cm_plan_t) :: native_plan
         integer :: n_args, depth, tests_depth, test_depth
 
         names = ''
         count = 0
         message = ''
+        if (native_cmake_selected(backend%project_dir)) then
+            call native_cmake_configure(backend%cmake, native_plan)
+            ierr = 1
+            message = native_plan%error
+            if (len(message) > 0) return
+            if (size(native_plan%tests) > size(names)) then
+                message = 'native registered test inventory exceeds capacity'
+                return
+            end if
+            do n_args = 1, size(native_plan%tests)
+                if (len(native_plan%tests(n_args)%name) > len(names)) then
+                    message = 'native registered test name exceeds capacity'
+                    return
+                end if
+                count = count + 1
+                names(count) = native_plan%tests(n_args)%name
+            end do
+            ierr = 0
+            return
+        end if
         call make_tmpfile('fo-cmake-registered-tests', log_file)
         packed = ''
         n_args = 0

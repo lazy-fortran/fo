@@ -14,7 +14,8 @@ module fo_build_backend
     use fo_cmake_context, only: cmake_context_t, cmake_context_init, &
         cmake_context_query, cmake_context_read_reply, &
         cmake_context_build_path, cmake_context_validate_hint
-    use fo_cmake_native_config, only: native_cmake_selected
+    use fo_cmake_native_config, only: native_cmake_selected, native_cmake_configure
+    use fo_cmake_native_model, only: cm_plan_t
     use fo_cmake_native, only: native_cmake_build, native_cmake_test
     implicit none
     private
@@ -322,7 +323,7 @@ contains
                 call gfortran_run_tests(self%project_dir, log_path, exitcode, &
                     slow, no_names, 0, flags=flag_text)
             case (BACKEND_CMAKE)
-                if (native_cmake_selected()) then
+                if (native_cmake_selected(self%project_dir)) then
                     call native_cmake_test(self%cmake, [character(len=1) ::], &
                         log_path, exitcode)
                 else
@@ -401,7 +402,7 @@ contains
             call gfortran_run_tests(self%project_dir, log_path, exitcode, slow, &
                 fast_names, n_fast, flags=flag_text)
         case (BACKEND_CMAKE)
-            if (native_cmake_selected()) then
+            if (native_cmake_selected(self%project_dir)) then
                 call native_cmake_test(self%cmake, fast_names(:n_fast), &
                     log_path, exitcode)
             else
@@ -439,13 +440,20 @@ contains
         character(len=:), allocatable :: packed, cache_file, configuration
         character(:), allocatable :: effective_flags, selected_flags, compiler
         type(compiler_dialect_t) :: dialect
+        type(cm_plan_t) :: native_plan
         logical :: has_cache, hint_valid, has_frozen_context
         character(len=4096) :: captured_generator
         integer :: n_args, i, line_end
 
-        if (native_cmake_selected()) then
-            write(error_unit, '(a)') 'native CMake: resident capture is not yet supported'
-            exitcode = 1
+        if (native_cmake_selected(context%source_root)) then
+            call native_cmake_configure(context, native_plan)
+            exitcode = 0
+            if (len(native_plan%error) > 0) then
+                write(error_unit, '(a)') native_plan%error
+                exitcode = 1
+            else
+                context%configuration = native_plan%configuration
+            end if
             return
         end if
 
@@ -662,7 +670,7 @@ contains
         character(len=32) :: jobs_text
         integer :: n_args, i
 
-        if (native_cmake_selected()) then
+        if (native_cmake_selected(context%source_root)) then
             if (len_trim(flags) > 0) then
                 if (len(context%profile) == 0) then
                     write(error_unit, '(a)') &

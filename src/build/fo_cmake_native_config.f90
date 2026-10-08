@@ -1,8 +1,11 @@
 module fo_cmake_native_config
+    use, intrinsic :: iso_fortran_env, only: dp => real64
     use fo_cmake_native_model, only: cm_plan_t, cm_word_t, cm_target_t, cm_test_t, &
-                   cm_variable_t, cm_set, cm_get, cm_add, cm_words, cm_lower, cm_path, &
+                          cm_variable_t, cm_set, cm_get, cm_defined, cm_add, cm_words, &
+                                     cm_lower, cm_path, &
                                      cm_expand, cm_next
     use fo_cmake_context, only: cmake_context_t, cmake_context_build_path
+    use fo_cmake_native_snapshot, only: native_snapshot_read
     use fo_compiler_dialect, only: compiler_dialect_t, compiler_dialect, &
                                    selected_compiler_command, COMPILER_GFORTRAN
     use fo_util, only: read_text_file_alloc, make_tmpfile, delete_tmpfile
@@ -12,43 +15,55 @@ module fo_cmake_native_config
     public :: native_cmake_configure, native_cmake_selected
     public :: target_index
 contains
-    logical function native_cmake_selected()
+    logical function native_cmake_selected(root)
+        character(len=*), intent(in), optional :: root
         character(len=16) :: value
         integer :: status
         call get_environment_variable('FO_CMAKE_NATIVE', value, status=status)
         native_cmake_selected = status == 0 .and. trim(value) == '1'
+        if (present(root)) then
+            inquire (file=root//'/.fo-cmake/native-context.json', &
+                     exist=native_cmake_selected)
+            if (status == 0 .and. trim(value) == '1') native_cmake_selected = .true.
+        end if
     end function
 
     subroutine native_cmake_configure(context, plan)
         type(cmake_context_t), intent(in) :: context
         type(cm_plan_t), intent(out) :: plan
+        type(cmake_context_t) :: effective
         type(compiler_dialect_t) :: dialect
         character(:), allocatable :: value, key
         integer :: i, at
         plan%root = context%source_root
-        plan%build = cmake_context_build_path(context)
-        plan%configuration = context%configuration
         plan%error = ''
         plan%project = ''
         allocate (plan%targets(0), plan%tests(0), plan%compile_flags(0), &
-                  plan%link_flags(0), plan%includes(0), plan%inputs(0))
-        if (.not. context%valid) then
-            plan%error = context%error
+                  plan%link_flags(0), plan%includes(0), plan%inputs(0), &
+                  plan%environment(0))
+        effective = context
+        call native_snapshot_read(effective, plan)
+        if (len(plan%error) > 0) return
+        plan%build = cmake_context_build_path(effective)
+        plan%configuration = effective%configuration
+        plan%build_targets = effective%build_targets
+        if (.not. effective%valid) then
+            plan%error = effective%error
             return
         end if
-        if (len(context%configure_preset) + len(context%build_preset) + &
-            len(context%test_preset) > 0) then
+        if (len(effective%configure_preset) + len(effective%build_preset) + &
+            len(effective%test_preset) > 0) then
             plan%error = 'native CMake: presets are not supported by this initial slice'
             return
         end if
-        if (context%multi_config) then
+        if (effective%multi_config) then
             plan%error = 'native CMake: multi-configuration generators unsupported'
             return
         end if
-        select case (context%generator)
+        select case (effective%generator)
         case ('', 'Ninja', 'Unix Makefiles')
         case default
-            plan%error = 'native CMake: unsupported generator '//context%generator
+            plan%error = 'native CMake: unsupported generator '//effective%generator
             return
         end select
         dialect = compiler_dialect(selected_compiler_command())
@@ -59,14 +74,15 @@ contains
         call cm_set(plan, 'CMAKE_SOURCE_DIR', plan%root)
         call cm_set(plan, 'CMAKE_BINARY_DIR', plan%build)
         call cm_set(plan, 'CMAKE_BUILD_TYPE', plan%configuration)
-        call cm_set(plan, 'CMAKE_Fortran_FLAGS', cm_expand(plan, '$ENV{FFLAGS}'))
+        value = cm_expand(plan, '$ENV{FFLAGS}')
+        call cm_set(plan, 'CMAKE_Fortran_FLAGS', value)
         call cm_set(plan, 'CMAKE_Fortran_FLAGS_DEBUG', '-g')
         call cm_set(plan, 'CMAKE_Fortran_FLAGS_RELEASE', '-O3')
         call cm_set(plan, 'CMAKE_Fortran_FLAGS_RELWITHDEBINFO', '-O2 -g')
         call cm_set(plan, 'CMAKE_Fortran_FLAGS_MINSIZEREL', '-Os')
         call host_variables(plan)
-        do i = 1, size(context%extra_args)
-            value = trim(context%extra_args(i))
+        do i = 1, size(effective%extra_args)
+            value = trim(effective%extra_args(i))
             at = index(value, '=')
             if (index(value, '-D') /= 1 .or. at <= 3) then
                 plan%error = 'native CMake: unsupported configure argument '//value
@@ -90,6 +106,8 @@ contains
         end do
         call load_directory(plan, plan%root, plan%build, 0)
         plan%configuration = cm_get(plan, 'CMAKE_BUILD_TYPE')
+        if (size(plan%targets) > 0 .and. .not. plan%fortran_enabled) &
+            plan%error = 'native CMake: Fortran targets require an enabled language'
     end subroutine
 
     logical function condition(plan, words) result(value)
@@ -161,14 +179,27 @@ contains
         type(cm_plan_t), intent(in) :: plan
         character(len=*), intent(in) :: text
         character(:), allocatable :: lowered, variable
-        integer :: number, status
+        real(dp) :: number
+        integer :: status
         lowered = cm_lower(text)
         variable = cm_get(plan, text)
         if (len(variable) > 0) lowered = cm_lower(variable)
         value = lowered == 'true' .or. lowered == 'on' .or. &
                 lowered == 'yes' .or. lowered == '1'
         read (lowered, *, iostat=status) number
-        if (status == 0) value = number /= 0
+        if (status == 0) value = number /= 0.0_dp
+        if (cm_defined(plan, text)) then
+            value = len(lowered) > 0
+            select case (lowered)
+            case ('0', 'off', 'no', 'false', 'n', 'ignore', 'notfound')
+                value = .false.
+            end select
+            if (len(lowered) >= 9) then
+                if (index(lowered, '-notfound', back=.true.) == len(lowered) - 8) &
+                    value = .false.
+            end if
+            if (status == 0) value = number /= 0.0_dp
+        end if
     end function
 
     recursive subroutine execute_command(plan, command, words, directory, binary, depth)
@@ -214,6 +245,7 @@ contains
                 case ('LANGUAGES')
                     i = i + 1
                 case ('Fortran', 'C', 'CXX', 'NONE')
+                    if (words(i)%text == 'Fortran') plan%fortran_enabled = .true.
                     i = i + 1
                 case default
                plan%error = 'native CMake: unsupported project argument '//words(i)%text
@@ -225,7 +257,10 @@ contains
             call cm_set(plan, 'PROJECT_BINARY_DIR', binary)
         case ('enable_language')
             do i = 1, count
-                if (words(i)%text == 'Fortran') cycle
+                if (words(i)%text == 'Fortran') then
+                    plan%fortran_enabled = .true.
+                    cycle
+                end if
                plan%error = 'native CMake: unsupported enabled language '//words(i)%text
             end do
         case ('set')
