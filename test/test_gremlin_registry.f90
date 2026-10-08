@@ -20,7 +20,7 @@ program test_gremlin_registry
     end interface
 
     character(:), allocatable :: driver, scratch, project, cache, state, config
-    character(:), allocatable :: registry, alternate, session, generation
+    character(:), allocatable :: registry, alternate, session, generation, runtime_value
     character(:), allocatable :: first_root, first_source, first_bytes, previous
     type(string_list_t) :: arguments
     type(process_result_t) :: process
@@ -39,6 +39,7 @@ program test_gremlin_registry
     config = scratch//'/config/config.toml'
     registry = scratch//'/registry'
     alternate = scratch//'/alternate'
+    runtime_value = scratch//'/runtime-value.txt'
     call make_directory(project//'/test')
     call make_directory(cache)
     call make_directory(state//'/tmp')
@@ -62,9 +63,13 @@ program test_gremlin_registry
         'program '//case_id//new_line('a')// &
         'use provider, only: provider_value'//new_line('a')// &
         'implicit none'//new_line('a')// &
+        'integer :: unit'//new_line('a')// &
         'select case(provider_value())'//new_line('a')// &
         'case(19,23,29,31)'//new_line('a')// &
-        "print '(a,i0)', 'REGISTRY_VALUE=', provider_value()"//new_line('a')// &
+        'open(newunit=unit, file="'//runtime_value// &
+        '", status="replace", action="write")'//new_line('a')// &
+        "write(unit, '(i0)') provider_value()"//new_line('a')// &
+        'close(unit)'//new_line('a')// &
         'case default'//new_line('a')//'stop 1'//new_line('a')// &
         'end select'//new_line('a')//'end program'//new_line('a'))
 
@@ -145,7 +150,7 @@ contains
         type(string_list_t) :: args
         type(process_result_t) :: result
         type(json_value_t) :: status, receipts, receipt, green
-        character(:), allocatable :: log_path, owner_state
+        character(:), allocatable :: owner_state
         integer :: attempt, i
 
         call list_add(args, 'gremlin')
@@ -174,10 +179,8 @@ contains
                     if (gremlin_field(receipt, 'generation') /= current) cycle
                     if (gremlin_field(receipt, 'case_id') /= case_id) cycle
                     if (gremlin_field(receipt, 'status') /= 'PASS') cycle
-                    log_path = gremlin_field(receipt, 'log_path')
-                    if (.not. file_exists(log_path)) cycle
-                    if (index(read_text(log_path), &
-                            'REGISTRY_VALUE='//expected//new_line('a')) <= 0) cycle
+                    if (.not. file_exists(runtime_value)) cycle
+                    if (trim(read_text(runtime_value)) /= expected) cycle
                     found = .true.
                     return
                 end do
