@@ -323,3 +323,8 @@ role = "test-fixture"
 name = "test_harness_process_group"
 source-dir = "test"
 main = "test_harness_process_group.f90"
+
+[[test]]
+name = "test_native_compiler_path_cli"
+source-dir = "test"
+main = "test_native_compiler_path_cli.f90"

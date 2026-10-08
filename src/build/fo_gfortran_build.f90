@@ -33,7 +33,7 @@ module fo_gfortran_build
     use fo_lock, only: lock_check
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_remove_file, fs_append_file, &
         fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec, &
-        fs_find_executable, fs_rename, fs_mkdir_excl, fs_identity
+        fs_find_executable, fs_rename, fs_mkdir_excl, fs_identity, fs_path_is_absolute
     use fo_progress, only: progress_begin, progress_step, progress_end
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         selected_compiler_command, COMPILER_NVFORTRAN, COMPILER_IFX, &
@@ -56,6 +56,7 @@ module fo_gfortran_build
     integer, parameter :: MAX_SRC_OBJS = 2048
     character(len=512), save :: detected_fc = ''
     character(len=512), save :: detected_fc_path = ''
+    logical, save :: detected_fc_is_executable = .false.
     character(len=512), save :: detected_compiler = ''
     character(len=HASH_LEN), save :: detected_tool_key = ''
     !> The flags the current build was asked for, kept so the baseline can add
@@ -4175,10 +4176,8 @@ contains
             ! External absolute paths can exceed a filesystem component's limit.
             ! Keep project-relative names decodable for app/example targets.
             rel = source_path
-            if (len_trim(source_path) > 0) then
-                if (source_path(1:1) == '/') &
-                    rel = 'external_'//cache_digest([source_path], 1)
-            end if
+            if (fs_path_is_absolute(source_path)) &
+                rel = 'external_'//cache_digest([source_path], 1)
         end if
         do i = 1, len_trim(rel)
             if (rel(i:i) == '/') rel(i:i) = '_'
@@ -4206,13 +4205,21 @@ contains
         logical :: found
 
         detected_fc_path = ''
-        if (index(trim(command), ' ') > 0) then
-            detected_fc_path = command
-            return
-        end if
         call fs_find_executable(command, detected_fc_path, found)
+        detected_fc_is_executable = found
         if (.not. found) detected_fc_path = command
     end subroutine resolve_fc_executable
+
+    subroutine append_fc_command(packed, n_args)
+        character(len=:), allocatable, intent(inout) :: packed
+        integer, intent(inout) :: n_args
+
+        if (detected_fc_is_executable) then
+            call argv_push(packed, n_args, trim(detected_fc_path))
+        else
+            call argv_push_split(packed, n_args, fc_executable_command())
+        end if
+    end subroutine append_fc_command
 
     recursive logical function fc_is_flang()
         !! True when the selected compiler is LLVM flang. Drives flag dialect:
@@ -4377,7 +4384,7 @@ contains
         end if
         call make_tmpfile('fo_compiler_version', tmpfile)
         n_args = 0
-        call argv_push_split(packed, n_args, fc_executable_command())
+        call append_fc_command(packed, n_args)
         call argv_push(packed, n_args, '--version')
         call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
             .false., 30, exitcode)
@@ -4407,7 +4414,8 @@ contains
         program = adjustl(command)
         space = index(trim(program), ' ')
         if (space > 0) program = program(:space - 1)
-        call fs_find_executable(trim(program), executable, found)
+        call fs_find_executable(trim(command), executable, found)
+        if (.not. found) call fs_find_executable(trim(program), executable, found)
         executable_key = ''
         if (found) call cache_file_digest(trim(executable), executable_key)
         parts(1) = command
@@ -4430,7 +4438,7 @@ contains
         ! corrupts libgomp, and it is quote-proof, unlike a shell command line.
         !$omp critical (fo_compile_command)
         n_args = 0
-        call argv_push_split(packed, n_args, fc_executable_command())
+        call append_fc_command(packed, n_args)
         call argv_push(packed, n_args, '-c')
         call argv_push_split(packed, n_args, fc_base_flags())
         call argv_push_split_nl(packed, n_args, includes_flag)
@@ -4820,7 +4828,7 @@ contains
         character(len=512) :: policy_flag
 
         n_args = 0
-        call argv_push_split(packed, n_args, fc_executable_command())
+        call append_fc_command(packed, n_args)
         if (use_lld) call argv_push(packed, n_args, '-fuse-ld=lld')
         call argv_push(packed, n_args, prog_obj)
         do i = 1, n_lib_objs
