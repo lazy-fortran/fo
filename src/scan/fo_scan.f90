@@ -14,7 +14,7 @@ module fo_scan
 
     public :: scan_unit_t, scan_file, scan_file_regex, scan_dir, scan_dir_regex, &
         scan_dir_cached
-    public :: is_slow_test, source_defines_module
+    public :: is_slow_test, source_defines_module, scan_provides_name
     public :: MAX_NAME, MAX_PATH, MAX_UNITS
 
     character(len=32), dimension(10), parameter :: INTRINSIC_MODULES = [ &
@@ -238,6 +238,16 @@ contains
             unit_info%module_name = name
         end select
 
+        do i = 1, size(program_units)
+            if (.not. program_units(i)%found) cycle
+            if (.not. allocated(program_units(i)%unit_kind)) cycle
+            if (program_units(i)%unit_kind /= 'module') cycle
+            if (.not. allocated(program_units(i)%name)) cycle
+            name = program_units(i)%name
+            call to_lower(name)
+            call add_module_provider(unit_info, name)
+        end do
+
         if (trim(unit_kind) == 'submodule' .and. &
             allocated(selected_unit%parent_identifier)) then
             parent_identifier = selected_unit%parent_identifier
@@ -299,6 +309,39 @@ contains
 
         close (funit)
     end subroutine scan_file_regex
+
+    logical function scan_provides_name(unit_info, name) result(provides)
+        type(scan_unit_t), intent(in) :: unit_info
+        character(len=*), intent(in) :: name
+        integer :: i
+
+        provides = trim(unit_info%module_name) == trim(name)
+        if (provides) return
+        if (.not. allocated(unit_info%additional_modules)) return
+        do i = 1, size(unit_info%additional_modules)
+            if (trim(unit_info%additional_modules(i)) /= trim(name)) cycle
+            provides = .true.
+            return
+        end do
+    end function scan_provides_name
+
+    subroutine add_module_provider(unit_info, name)
+        type(scan_unit_t), intent(inout) :: unit_info
+        character(len=*), intent(in) :: name
+        character(len=MAX_NAME), allocatable :: grown(:)
+        integer :: n
+
+        if (scan_provides_name(unit_info, name)) return
+        if (len_trim(unit_info%module_name) == 0) then
+            unit_info%module_name = name
+        else
+            n = size(unit_info%additional_modules)
+            allocate (grown(n + 1))
+            grown(:n) = unit_info%additional_modules
+            grown(n + 1) = name
+            call move_alloc(grown, unit_info%additional_modules)
+        end if
+    end subroutine add_module_provider
 
     subroutine scan_dir(dirname, units, n_units, ierr, allow_regex_fallback)
         character(len=*), intent(in) :: dirname
@@ -446,6 +489,7 @@ contains
 
         unit_info%filename = ''
         unit_info%module_name = ''
+        allocate (unit_info%additional_modules(0))
         unit_info%program_name = ''
         unit_info%is_program = .false.
         unit_info%is_test = .false.
@@ -558,7 +602,7 @@ contains
 
         call extract_module_def(trimmed, name)
         if (len_trim(name) > 0) then
-            unit_info%module_name = name
+            call add_module_provider(unit_info, name)
             unit_info%source_line = current_line
             unit_info%source_column = leading_column(line)
             return

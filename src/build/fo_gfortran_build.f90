@@ -4,10 +4,11 @@ module fo_gfortran_build
         manifest_executable_selected, &
         manifest_test_args, manifest_example_name, dep_kind, &
         DEP_PATH, DEP_REGISTRY, valid_manifest_module_name
-    use fo_scan, only: scan_unit_t, scan_dir, scan_dir_regex, scan_dir_cached, &
+    use fo_scan, only: scan_provides_name, scan_unit_t, scan_dir, scan_dir_regex, &
+        scan_dir_cached, &
         source_defines_module, &
         MAX_UNITS, MAX_NAME, MAX_PATH
-    use fo_dag_bridge, only: build_dag_from_units
+    use fo_dag_bridge, only: build_dag_from_units, dag_find_source_provider
     use fo_dep_update, only: dep_acquire_sources
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
         resolve_dev_dep_srcs, MAX_RESOLVED, join_path, merge_dep_link_libs
@@ -94,6 +95,13 @@ module fo_gfortran_build
             character(kind=c_char), intent(in) :: name(*)
         end function c_unsetenv
     end interface
+
+    character(len=1), parameter :: NO_MODULE_OUTPUTS(0) = [character(len=1) ::]
+
+    type :: source_interfaces_t
+        character(len=MAX_NAME), allocatable :: modules(:)
+        character(len=2 * MAX_NAME + 1), allocatable :: submodules(:)
+    end type source_interfaces_t
 
 contains
 
@@ -1409,10 +1417,10 @@ contains
         character(len=HASH_LEN), allocatable :: level_keys(:)
         logical, allocatable :: level_restored(:)
         logical, allocatable :: smod_cacheable(:)
-        character(len=2 * MAX_NAME + 1), allocatable :: smod_names(:)
+        type(source_interfaces_t), allocatable :: interfaces(:)
         integer, allocatable :: compile_exits(:)
         character(len=512), allocatable :: per_logs(:)
-        integer :: n_compile, n_level, team_size
+        integer :: n_compile, n_level, team_size, smod_index
         character(len=MAX_PATH) :: fname_local
         character(len=512) :: per_log_local
         character(len=512) :: level_obj_path
@@ -1433,7 +1441,7 @@ contains
         allocate (level_nodes(MAX_NODES), level_keys(MAX_NODES))
         allocate (level_restored(MAX_NODES))
         allocate (smod_cacheable(MAX_NODES))
-        allocate (smod_names(MAX_NODES))
+        allocate (interfaces(MAX_NODES))
         allocate (compile_exits(MAX_NODES), per_logs(MAX_NODES))
         allocate (compdb_sources(MAX_NODES), compdb_objects(MAX_NODES))
         allocate (source_flags(MAX_NODES), compdb_flags(MAX_NODES))
@@ -1477,7 +1485,6 @@ contains
 
         old_mod_keys = ''
         new_mod_keys = ''
-        smod_names = ''
         smod_cacheable = .true.
         call load_mod_keys(mod_dir, dag, n_order, topo_order, old_mod_keys)
         call cache_init(c, cache_ierr)
@@ -1497,8 +1504,10 @@ contains
                 project_dir, example_dir)) cycle
             if (is_prog(node_id) .and. .not. app_program_selected( &
                 filenames(node_id), project_dir, app_dir, config)) cycle
-            call source_smod_name(filenames(node_id), dag%nodes(node_id)%label, &
-                smod_names(node_id), smod_cacheable(node_id))
+            call source_module_names(all_units, n_all, filenames(node_id), &
+                interfaces(node_id)%modules)
+            call source_smod_names(filenames(node_id), &
+                interfaces(node_id)%submodules, smod_cacheable(node_id))
             total_source = total_source + 1
             n_compdb = n_compdb + 1
             compdb_sources(n_compdb) = filenames(node_id)
@@ -1507,6 +1516,9 @@ contains
             ! start. Some gfortran versions use process-global result-length
             ! temporaries even for recursive deferred-length functions.
             source_key_flags(node_id) = compile_key_flags(source_flags(node_id))
+            if (size(interfaces(node_id)%modules) > 1) &
+                source_key_flags(node_id) = trim(source_key_flags(node_id))// &
+                    '|fo-interface-vector-v1'
             call make_obj_path(filenames(node_id), project_dir, obj_dir, &
                 compdb_objects(n_compdb))
         end do
@@ -1561,19 +1573,13 @@ contains
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, &
                         level_obj_path)
                     if (cache_ierr == 0 .and. smod_cacheable(node_id)) then
-                        if (source_defines_module(filenames(node_id))) then
-                            call cache_restore_action(c, level_source_key, &
-                                level_obj_path, mod_dir, level_hit, required_mod_name= &
-                                dag%nodes(node_id)%label, required_smod_name= &
-                                trim(smod_names(node_id)))
-                        else
-                            call cache_restore_action(c, level_source_key, &
-                                level_obj_path, mod_dir, level_hit, &
-                                required_smod_name=trim(smod_names(node_id)))
-                        end if
+                        call cache_restore_action(c, level_source_key, &
+                            level_obj_path, mod_dir, level_hit, &
+                            required_mod_names=interfaces(node_id)%modules, &
+                            required_smod_names=interfaces(node_id)%submodules)
                         if (level_hit) then
-                            call get_mod_key(dag%nodes(node_id)%label, mod_dir, &
-                                new_mod_keys(node_id), smod_names(node_id))
+                            call get_interface_key(interfaces(node_id), mod_dir, &
+                                new_mod_keys(node_id))
                             call progress_step()
                         end if
                     end if
@@ -1594,14 +1600,16 @@ contains
 
                 team_size = max(1, min(n_compile, native_jobs()))
                 !$omp parallel do if(n_compile > 1) num_threads(team_size) schedule(static) &
-                !$omp private(node_id, obj_path, fname_local, per_log_local)
+                !$omp private(node_id, obj_path, fname_local, per_log_local, smod_index)
                 do ii = 1, n_compile
                     node_id = compile_nodes(ii)
                     fname_local = filenames(node_id)
                     per_log_local = per_logs(ii)
                     call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
-                    if (len_trim(smod_names(node_id)) > 0) call fs_remove_file( &
-                        trim(mod_dir)//'/'//trim(smod_names(node_id))//'.smod')
+                    do smod_index = 1, size(interfaces(node_id)%submodules)
+                        call fs_remove_file(trim(mod_dir)//'/'// &
+                            trim(interfaces(node_id)%submodules(smod_index))//'.smod')
+                    end do
                     call compile_f90(project_dir, fname_local, obj_path, &
                         with_user_flags(includes_flag, source_flags(node_id)), &
                         per_log_local, compile_exits(ii))
@@ -1639,13 +1647,14 @@ contains
                     node_id = compile_nodes(ii)
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, &
                         obj_path)
-                    call get_mod_key(dag%nodes(node_id)%label, mod_dir, &
-                        new_mod_keys(node_id), smod_names(node_id))
+                    call get_interface_key(interfaces(node_id), mod_dir, &
+                        new_mod_keys(node_id))
                     if (len_trim(compile_keys(ii)) > 0 .and. &
                         smod_cacheable(node_id)) then
-                        call cache_store_action(c, compile_keys(ii), obj_path, mod_dir, &
-                            dag%nodes(node_id)%label, output_id, cache_ierr, &
-                            smod_name=trim(smod_names(node_id)))
+                        call cache_store_action(c, compile_keys(ii), obj_path, &
+                            mod_dir, &
+                            interfaces(node_id)%modules, output_id, cache_ierr, &
+                            smod_names=interfaces(node_id)%submodules)
                     end if
                 end do
                 do ii = 1, n_compile
@@ -1743,16 +1752,17 @@ contains
         selected = manifest_executable_selected(config, app_dir, stem)
     end function app_program_selected
 
-    subroutine source_smod_name(path, label, smod_name, cacheable)
-        character(len=*), intent(in) :: path, label
-        character(len=*), intent(out) :: smod_name
+    subroutine source_smod_names(path, names, cacheable)
+        character(len=*), intent(in) :: path
+        character(len=2 * MAX_NAME + 1), allocatable, intent(out) :: names(:)
         logical, intent(out) :: cacheable
-
         character(len=512) :: line, lower, ancestor
+        character(len=2 * MAX_NAME + 1) :: current_module, child, swap
         integer :: u, ios, open_pos, close_pos, colon_pos, comment_pos
-        integer :: n_modules, n_submodules
+        integer :: n_modules, n_submodules, i, j
 
-        smod_name = ''
+        allocate (names(0))
+        current_module = ''
         cacheable = .true.
         n_modules = 0
         n_submodules = 0
@@ -1779,28 +1789,64 @@ contains
                 ancestor = adjustl(lower(open_pos + 1:close_pos - 1))
                 colon_pos = index(ancestor, ':')
                 if (colon_pos > 0) ancestor = ancestor(:colon_pos - 1)
-                smod_name = trim(ancestor)//'@'//trim(label)
+                read (lower(close_pos + 1:), *, iostat=ios) child
+                if (ios /= 0) then
+                    cacheable = .false.
+                    exit
+                end if
+                call append_smod_name(names, trim(ancestor)//'@'//trim(child))
+                current_module = ''
                 cycle
             end if
             if (index(lower, 'submodule') == 1) cacheable = .false.
+            if (index(lower, 'end module') == 1 .or. &
+                    index(lower, 'endmodule') == 1) current_module = ''
             if (index(lower, 'module ') == 1 .and. &
-                index(lower, ' function ') == 0 .and. &
-                index(lower, ' subroutine ') == 0 .and. &
-                index(lower, ' procedure ') == 0) n_modules = n_modules + 1
-            ! MODULE is a procedure prefix and can follow PURE/ELEMENTAL or
-            ! a return type. The parent interface still produces its .smod.
+                    index(lower, ' function ') == 0 .and. &
+                    index(lower, ' subroutine ') == 0 .and. &
+                    index(lower, ' procedure ') == 0) then
+                read (lower(8:), *, iostat=ios) current_module
+                if (ios /= 0) cacheable = .false.
+                n_modules = n_modules + 1
+                cycle
+            end if
             if (index(' '//trim(lower), ' module ') > 0 .and. &
-                index(lower, 'end ') /= 1 .and. &
-                (index(lower, ' subroutine ') > 0 .or. &
-                index(lower, ' function ') > 0 .or. &
-                index(lower, ' procedure ') > 0)) then
-                if (n_submodules == 0) smod_name = label
+                    index(lower, 'end ') /= 1 .and. &
+                    (index(lower, ' subroutine ') > 0 .or. &
+                    index(lower, ' function ') > 0 .or. &
+                    index(lower, ' procedure ') > 0)) then
+                if (len_trim(current_module) > 0) &
+                    call append_smod_name(names, current_module)
             end if
         end do
         close (u)
-        if (n_modules + n_submodules > 1) cacheable = .false.
-        if (.not. cacheable) smod_name = ''
-    end subroutine source_smod_name
+        if (n_submodules > 1) cacheable = .false.
+        if (n_submodules > 0 .and. n_modules > 0) cacheable = .false.
+        do i = 2, size(names)
+            j = i
+            do while (j > 1)
+                if (names(j) >= names(j - 1)) exit
+                swap = names(j - 1)
+                names(j - 1) = names(j)
+                names(j) = swap
+                j = j - 1
+            end do
+        end do
+    end subroutine source_smod_names
+
+    subroutine append_smod_name(names, name)
+        character(len=2 * MAX_NAME + 1), allocatable, intent(inout) :: names(:)
+        character(len=*), intent(in) :: name
+        character(len=2 * MAX_NAME + 1), allocatable :: grown(:)
+        integer :: n
+
+        if (any(names == name)) return
+        n = size(names)
+        allocate (grown(n + 1))
+        grown(:n) = names
+        grown(n + 1) = name
+        call move_alloc(grown, names)
+    end subroutine append_smod_name
 
     subroutine lowercase_inplace(text)
         character(len=*), intent(inout) :: text
@@ -1883,7 +1929,8 @@ contains
         integer, intent(in) :: n_deps
         integer, intent(out) :: exitcode
         type(fpm_config_t), allocatable :: package
-        character(len=:), allocatable :: prefix, package_name
+        character(len=:), allocatable :: prefix
+        character(len=MAX_NAME), allocatable :: module_names(:)
         integer :: i, d, owner, longest, n, ierr
 
         exitcode = 0
@@ -1902,30 +1949,40 @@ contains
                 owner = d
                 longest = n
             end do
+            call source_module_names(units, size(units), units(i)%filename, &
+                module_names)
             if (owner == 0) then
-                if (valid_manifest_module_name(root_config, &
-                    trim(units(i)%module_name))) cycle
-                package_name = trim(root_config%name)
+                call validate_manifest_modules(root_config, units(i)%filename, &
+                    module_names, exitcode)
             else
                 call fpm_config_parse(trim(deps(owner)%dir), package, ierr)
                 if (ierr /= 0) then
                     exitcode = 1
                     return
                 end if
-                ! FPM's root policy enforces package names even for dependencies
-                ! whose own manifest disables naming. Their custom prefix is
-                ! available only when enabled by that dependency's manifest.
+                ! The root enforces dependency package names; a dependency's
+                ! custom prefix is available only when its own policy enables it.
                 package%module_naming = .true.
-                if (valid_manifest_module_name(package, &
-                    trim(units(i)%module_name))) cycle
-                package_name = trim(package%name)
+                call validate_manifest_modules(package, units(i)%filename, &
+                    module_names, exitcode)
             end if
-            write (error_unit, '(a)') 'fo: module '//trim(units(i)%module_name)// &
-                ' in '//trim(units(i)%filename)//' does not match package '// &
-                package_name//' or its [build] module-naming prefix'
-            exitcode = 1
         end do
     end subroutine validate_module_naming
+
+    subroutine validate_manifest_modules(config, filename, names, exitcode)
+        type(fpm_config_t), intent(in) :: config
+        character(len=*), intent(in) :: filename, names(:)
+        integer, intent(inout) :: exitcode
+        integer :: j
+
+        do j = 1, size(names)
+            if (valid_manifest_module_name(config, trim(names(j)))) cycle
+            write (error_unit, '(a)') 'fo: module '//trim(names(j))// &
+                ' in '//trim(filename)//' does not match package '// &
+                trim(config%name)//' or its [build] module-naming prefix'
+            exitcode = 1
+        end do
+    end subroutine validate_manifest_modules
 
 
 
@@ -1976,7 +2033,7 @@ contains
 
         found = .false.
         do i = 1, n_units
-            if (trim(units(i)%module_name) /= trim(name)) cycle
+            if (.not. scan_provides_name(units(i), name)) cycle
             found = .true.
             return
         end do
@@ -2153,7 +2210,8 @@ contains
             allocate (dep_keys(units(i)%n_deps))
             dep_keys = ''
             do j = 1, units(i)%n_deps
-                dep_id = dag_find_node(dag, units(i)%deps(j))
+                if (scan_provides_name(units(i), units(i)%deps(j))) cycle
+                dep_id = dag_find_source_provider(units, n_units, dag, units(i)%deps(j))
                 if (dep_id > 0) then
                     if (len_trim(mod_keys(dep_id)) == 0) then
                         complete = .false.
@@ -2251,35 +2309,66 @@ contains
         close (u)
     end subroutine save_mod_keys
 
-    subroutine get_mod_key(label, mod_dir, key, smod_name)
-        character(len=*), intent(in) :: label, mod_dir
-        character(len=HASH_LEN), intent(out) :: key
-        character(len=*), intent(in), optional :: smod_name
+    subroutine source_module_names(units, n_units, filename, names)
+        type(scan_unit_t), intent(in) :: units(:)
+        integer, intent(in) :: n_units
+        character(len=*), intent(in) :: filename
+        character(len=MAX_NAME), allocatable, intent(out) :: names(:)
+        integer :: i, j, k, n
+        character(len=MAX_NAME) :: swap
 
-        character(len=MAX_NAME) :: lower_label
-        character(len=512) :: modpath
-        character(len=HASH_LEN) :: smod_key
-        integer :: i
-
-        lower_label = label
-        do i = 1, len_trim(lower_label)
-            if (lower_label(i:i) >= 'A' .and. lower_label(i:i) <= 'Z') &
-                lower_label(i:i) = achar(iachar(lower_label(i:i)) + 32)
+        allocate (names(0))
+        if (.not. source_defines_module(filename)) return
+        do i = 1, n_units
+            if (trim(units(i)%filename) /= trim(filename)) cycle
+            n = 0
+            if (allocated(units(i)%additional_modules)) &
+                n = size(units(i)%additional_modules)
+            deallocate (names)
+            allocate (names(n + 1))
+            names(1) = units(i)%module_name
+            do j = 1, n
+                names(j + 1) = units(i)%additional_modules(j)
+            end do
+            do j = 2, size(names)
+                k = j
+                do while (k > 1)
+                    if (names(k) >= names(k - 1)) exit
+                    swap = names(k - 1)
+                    names(k - 1) = names(k)
+                    names(k) = swap
+                    k = k - 1
+                end do
+            end do
+            return
         end do
+    end subroutine source_module_names
 
-        modpath = trim(mod_dir)//'/'//trim(lower_label)//'.mod'
-        call hash_mod_file(modpath, key)
-        if (.not. present(smod_name)) return
-        if (len_trim(smod_name) == 0) return
-        call hash_mod_file(trim(mod_dir)//'/'//trim(smod_name)//'.smod', smod_key)
-        if (len_trim(smod_key) == 0) then
-            key = ''
-        else if (len_trim(key) == 0) then
-            key = smod_key
-        else
-            key = cache_digest([key, smod_key], 2)
+    subroutine get_interface_key(interfaces, mod_dir, key)
+        type(source_interfaces_t), intent(in) :: interfaces
+        character(len=*), intent(in) :: mod_dir
+        character(len=HASH_LEN), intent(out) :: key
+        character(len=HASH_LEN), allocatable :: hashes(:)
+        integer :: i, n
+
+        key = ''
+        n = size(interfaces%modules) + size(interfaces%submodules)
+        allocate (hashes(n))
+        do i = 1, size(interfaces%modules)
+            call hash_mod_file(trim(mod_dir)//'/'//trim(interfaces%modules(i))// &
+                '.mod', hashes(i))
+        end do
+        do i = 1, size(interfaces%submodules)
+            call hash_mod_file(trim(mod_dir)//'/'//trim(interfaces%submodules(i))// &
+                '.smod', hashes(size(interfaces%modules) + i))
+        end do
+        if (any(len_trim(hashes) == 0)) return
+        if (n == 1) then
+            key = hashes(1)
+        else if (n > 1) then
+            key = cache_digest(hashes, n)
         end if
-    end subroutine get_mod_key
+    end subroutine get_interface_key
 
     subroutine remove_shadow_mods(project_dir, dag)
         character(len=*), intent(in) :: project_dir
@@ -3107,7 +3196,7 @@ contains
                     call make_obj_path(filenames(run_nodes(i)), project_dir, &
                         obj_dir, obj_path)
                     call cache_store_action(c, run_keys(i), obj_path, mod_dir, &
-                        '', output_key, cache_ierr)
+                        NO_MODULE_OUTPUTS, output_key, cache_ierr)
                     if (present(n_compiled)) n_compiled = n_compiled + 1
                 end if
             end if

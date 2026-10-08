@@ -2,9 +2,9 @@ module fo_check
     use, intrinsic :: iso_fortran_env, only: real64
     use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds
     use fo_scan, only: scan_unit_t, scan_dir, MAX_NAME, MAX_PATH, &
-        is_slow_test
+        is_slow_test, scan_provides_name
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_affected_set, MAX_NODES
-    use fo_dag_bridge, only: build_dag_from_units
+    use fo_dag_bridge, only: build_dag_from_units, dag_find_source_provider
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_build_backend, only: backend_t, detect_backend, backend_build, &
         backend_test_affected, BACKEND_NONE, BACKEND_NATIVE
@@ -199,7 +199,7 @@ contains
         do i = 1, n_units
             do j = 1, units(i)%n_deps
                 dep_name = units(i)%deps(j)
-                if (dag_find_node(dag, dep_name) > 0) cycle
+                if (dag_find_source_provider(units, n_units, dag, dep_name) > 0) cycle
 
                 ! skip if already collected
                 already = .false.
@@ -392,7 +392,8 @@ contains
 
             do j = 1, units(i)%n_deps
                 if (n_dep_keys >= 64) return
-                dep_id = dag_find_node(dag, units(i)%deps(j))
+                if (scan_provides_name(units(i), units(i)%deps(j))) cycle
+                dep_id = dag_find_source_provider(units, n_units, dag, units(i)%deps(j))
                 if (dep_id > 0) then
                     if (len_trim(mod_keys(dep_id)) == 0) cycle
                     n_dep_keys = n_dep_keys + 1

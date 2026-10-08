@@ -36,6 +36,7 @@ program test_backend_gfortran
         call test_gfortran_interface_change_rebuilds_dependent()
         call test_gfortran_parallel_test_loop_restores_cached_objects()
         call test_gfortran_parallel_warm_restore()
+        call test_gfortran_multiple_modules()
         call test_gfortran_test_skips_app_but_build_restores_it()
         call test_gfortran_test_links_helper_modules_and_lib()
         call test_gfortran_named_test_links_helper_modules()
@@ -75,6 +76,9 @@ program test_backend_gfortran
         call report('backend_gfortran')
     else
         select case (trim(selector))
+        case ('multiple-modules')
+            call test_gfortran_multiple_modules()
+            call report('backend_gfortran/multiple-modules')
         case ('parallel-warm-restore')
             call test_gfortran_parallel_warm_restore()
             call report('backend_gfortran/parallel-warm-restore')
@@ -101,6 +105,94 @@ program test_backend_gfortran
     end if
 
 contains
+
+    subroutine test_gfortran_multiple_modules()
+        character(len=512) :: project, log_file, binary, output, provider
+        integer :: u, code, compiled
+
+        call make_tmp_path('fo_multiple_modules', project)
+        log_file = trim(project)//'.log'
+        output = trim(project)//'.out'
+        call remove_tree(project)
+        call make_dir(trim(project)//'/src')
+        call make_dir(trim(project)//'/app')
+        open (newunit=u, file=trim(project)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name="multiple_modules"'
+        close (u)
+        open (newunit=u, file=trim(project)//'/src/m_base.f90', status='replace')
+        write (u, '(a)') 'module base_scope'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'integer, parameter :: base=50'
+        write (u, '(a)') 'end module'
+        close (u)
+        open (newunit=u, file=trim(project)//'/src/a_consumer.f90', status='replace')
+        write (u, '(a)') 'module consumer'
+        write (u, '(a)') 'use secondary, only: value'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'integer function answer()'
+        write (u, '(a)') 'answer=value()+1'
+        write (u, '(a)') 'end function'
+        write (u, '(a)') 'end module'
+        close (u)
+        open (newunit=u, file=trim(project)//'/app/main.f90', status='replace')
+        write (u, '(a)') 'program main'
+        write (u, '(a)') 'use consumer, only: answer'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'print *, answer()'
+        write (u, '(a)') 'end program'
+        close (u)
+        provider = trim(project)//'/src/z_provider.f90'
+        call write_multiple_module_provider(provider, 10)
+        call gfortran_build(project, log_file, code, compiled)
+        call assert(code == 0 .and. compiled == 4, &
+            'cold source graph compiles two-module provider once before second user')
+        binary = trim(project)//'/build/fo/bin/multiple_modules'
+        call run_backend_argv(binary, [character(len=1) ::], output, code)
+        call assert(code == 0 .and. file_contains(output, '61'), &
+            'second module implementation produces independent runtime value61')
+        call remove_tree(trim(project)//'/build/fo')
+        call gfortran_build(project, log_file, code, compiled)
+        call assert(code == 0 .and. compiled == 0, &
+            'fresh warm tree restores complete multiple-module action without compile')
+        call fs_remove_file(trim(project)//'/build/fo/mod/secondary.mod')
+        call gfortran_build(project, log_file, code, compiled)
+        call assert(code == 0 .and. compiled == 0, &
+            'missing second interface restores from complete warm packet')
+        call run_backend_argv(binary, [character(len=1) ::], output, code)
+        call assert(code == 0 .and. file_contains(output, '61'), &
+            'restored second module keeps runtime value61')
+        call write_multiple_module_provider(provider, 11)
+        call gfortran_build(project, log_file, code, compiled)
+        call assert(code == 0 .and. compiled == 1, &
+            'second module body change recompiles provider while clients stay cached')
+        call run_backend_argv(binary, [character(len=1) ::], output, code)
+        call assert(code == 0 .and. file_contains(output, '62'), &
+            'changed second-module body reaches runtime value62')
+        call remove_tree(project)
+        call fs_remove_file(log_file)
+        call fs_remove_file(output)
+    end subroutine test_gfortran_multiple_modules
+
+    subroutine write_multiple_module_provider(path, value)
+        character(len=*), intent(in) :: path
+        integer, intent(in) :: value
+        integer :: u
+        open (newunit=u, file=trim(path), status='replace')
+        write (u, '(a)') 'module primary'
+        write (u, '(a)') 'use base_scope, only: base'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'end module'
+        write (u, '(a)') 'module secondary'
+        write (u, '(a)') 'use primary, only: base'
+        write (u, '(a)') 'implicit none'
+        write (u, '(a)') 'contains'
+        write (u, '(a)') 'integer function value()'
+        write (u, '(a,i0)') 'value=base+', value
+        write (u, '(a)') 'end function'
+        write (u, '(a)') 'end module'
+        close (u)
+    end subroutine write_multiple_module_provider
 
     subroutine test_gfortran_parallel_warm_restore()
         !! Independent modules restore together; the app consumes their .mods
@@ -1268,7 +1360,8 @@ contains
         dep_keys = ''
         action_id = cache_key_for(source, 'fixture-compiler', '', dep_keys, 0)
         call cache_init(cache, ierr)
-        call cache_store_action(cache, action_id, object, mod_dir, 'provider', &
+        call cache_store_action(cache, action_id, object, mod_dir, &
+            [character(len=1) ::], &
             output_id, ierr)
 
         call gfortran_build(project_dir, log_file, exitcode, n_compiled, &

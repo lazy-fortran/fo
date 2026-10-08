@@ -11,6 +11,7 @@ module fo_scan_types
     type, public :: scan_unit_t
         character(len=MAX_PATH) :: filename = ''
         character(len=MAX_NAME) :: module_name = ''
+        character(len=MAX_NAME), allocatable :: additional_modules(:)
         character(len=MAX_NAME) :: program_name = ''
         logical :: is_program = .false.
         logical :: is_test = .false.

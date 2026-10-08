@@ -1,10 +1,10 @@
 module fo_dag_bridge
     use fx_dag, only: dag_t, dag_init, dag_add_node, dag_find_node, &
         dag_add_edge, MAX_NODES
-    use fo_scan, only: scan_unit_t, MAX_PATH
+    use fo_scan, only: scan_unit_t, MAX_PATH, scan_provides_name
     implicit none
     private
-    public :: build_dag_from_units
+    public :: build_dag_from_units, dag_find_source_provider
 
 contains
 
@@ -63,11 +63,27 @@ contains
             if (node_id == 0) cycle
 
             do j = 1, units(i)%n_deps
-                dep_id = dag_find_node(dag, trim(units(i)%deps(j)))
+                dep_id = dag_find_source_provider(units, n_units, dag, units(i)%deps(j))
                 if (dep_id == 0 .or. dep_id == node_id) cycle
                 call dag_add_edge(dag, node_id, dep_id)
             end do
         end do
     end subroutine build_dag_from_units
+
+    integer function dag_find_source_provider(units, n_units, dag, name) result(node)
+        type(scan_unit_t), intent(in) :: units(:)
+        integer, intent(in) :: n_units
+        type(dag_t), intent(in) :: dag
+        character(len=*), intent(in) :: name
+        integer :: i
+
+        node = dag_find_node(dag, trim(name))
+        if (node > 0) return
+        do i = 1, n_units
+            if (.not. scan_provides_name(units(i), name)) cycle
+            node = dag_find_node(dag, trim(units(i)%module_name))
+            return
+        end do
+    end function dag_find_source_provider
 
 end module fo_dag_bridge

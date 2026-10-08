@@ -7,7 +7,7 @@ module fo_scan_cache
     implicit none
     private
 
-    character(len=16), parameter :: CACHE_MAGIC = 'fo-scan-v5'
+    character(len=16), parameter :: CACHE_MAGIC = 'fo-scan-v6'
 
     public :: scan_cache_load, scan_cache_load_trusted, scan_cache_save
 
@@ -150,9 +150,16 @@ contains
         integer, intent(in) :: unit
         type(scan_unit_t), intent(in) :: record
         integer, intent(out) :: ios
+        integer :: n_modules
+
+        n_modules = 0
+        if (allocated(record%additional_modules)) &
+            n_modules = size(record%additional_modules)
         write(unit, iostat=ios) record%filename, record%module_name, &
             record%program_name, record%is_program, record%is_test, &
-            record%source_line, record%source_column, record%n_deps
+            record%source_line, record%source_column, record%n_deps, n_modules
+        if (ios /= 0) return
+        if (n_modules > 0) write (unit, iostat=ios) record%additional_modules
         if (ios /= 0 .or. record%n_deps == 0) return
         write(unit, iostat=ios) record%deps(:record%n_deps), &
             record%dependency_lines(:record%n_deps), &
@@ -163,9 +170,18 @@ contains
         integer, intent(in) :: unit
         type(scan_unit_t), intent(out) :: record
         integer, intent(out) :: ios
+        integer :: n_modules
+
         read(unit, iostat=ios) record%filename, record%module_name, &
             record%program_name, record%is_program, record%is_test, &
-            record%source_line, record%source_column, record%n_deps
+            record%source_line, record%source_column, record%n_deps, n_modules
+        if (ios /= 0) return
+        if (n_modules < 0 .or. n_modules > MAX_UNITS) then
+            ios = 1
+            return
+        end if
+        allocate (record%additional_modules(n_modules))
+        if (n_modules > 0) read (unit, iostat=ios) record%additional_modules
         if (ios /= 0) return
         ! Corrupt cache counts cannot allocate an unbounded record. A rejected
         ! cache is rescanned; this bound does not limit source scanning.

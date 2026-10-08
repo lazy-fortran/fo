@@ -15,6 +15,10 @@ program test_cache
     character(len=:), allocatable :: prior_cache_override
     character(len=22), parameter :: SENTINEL_TEXT = 'outside-cache-sentinel'
     logical :: had_cache_override
+    character(len=1), parameter :: MODULE_M(1) = ['m']
+    character(len=11), parameter :: MODULE_PERSIST(1) = ['persist_mod']
+    character(len=6), parameter :: MODULE_BAD(1) = ['badmod']
+    character(len=8), parameter :: MODULE_ROOT(1) = ['root_mod']
 
     interface
         integer(c_int) function c_setenv(name, value, overwrite) &
@@ -176,14 +180,14 @@ contains
         call write_text(mod_path, 'module payload')
 
         action_id = repeat('a', HASH_LEN)
-        call cache_store_action(c, action_id, obj_path, mod_dir, 'm', output_id, ierr)
+        call cache_store_action(c, action_id, obj_path, mod_dir, MODULE_M, output_id, ierr)
         call assert(ierr == 0, 'store action succeeds')
         call assert(cache_lookup(c, action_id), 'action lookup hits')
 
         call fs_remove_file(trim(obj_path))
         call fs_remove_file(trim(mod_path))
         call cache_restore_action(c, action_id, obj_path, mod_dir, restored, &
-            restored_id, 'm')
+            restored_id, MODULE_M)
         call assert(restored, 'action restore reports success')
         call assert(restored_id == output_id .and. output_id /= repeat(' ', HASH_LEN), &
             'restored action retains its output identity')
@@ -218,7 +222,7 @@ contains
         call write_text(mod_path, 'module payload')
 
         action_id = repeat('f', HASH_LEN)
-        call cache_store_action(c, action_id, obj_path, mod_dir, 'm', output_id, &
+        call cache_store_action(c, action_id, obj_path, mod_dir, MODULE_M, output_id, &
             ierr)
         call assert(ierr == 0, 'parallel cache store')
 
@@ -257,7 +261,7 @@ contains
         call write_text(obj_path, 'persist object')
         call write_text(trim(mod_dir)//'/persist_mod.mod', 'persist mod')
         action_id = repeat('b', HASH_LEN)
-        call cache_store_action(c, action_id, obj_path, mod_dir, 'persist_mod', &
+        call cache_store_action(c, action_id, obj_path, mod_dir, MODULE_PERSIST, &
             output_id, ierr)
 
         call cache_init(c, ierr)
@@ -266,7 +270,7 @@ contains
         call fs_remove_file(trim(obj_path))
         call fs_remove_file(trim(mod_dir)//'/persist_mod.mod')
         call cache_restore_action(c, action_id, obj_path, mod_dir, restored, &
-            restored_id, 'persist_mod')
+            restored_id, MODULE_PERSIST)
         call assert(restored, 'fresh cache handle restores the action')
         call assert(restored_id == output_id, &
             'fresh cache handle retains the action output identity')
@@ -294,7 +298,7 @@ contains
         call write_text(obj_path, 'valid object')
         call write_text(trim(mod_dir)//'/badmod.mod', 'valid mod')
         action_id = repeat('c', HASH_LEN)
-        call cache_store_action(c, action_id, obj_path, mod_dir, 'badmod', &
+        call cache_store_action(c, action_id, obj_path, mod_dir, MODULE_BAD, &
             output_id, ierr)
         call assert(ierr == 0, 'store action before payload corruption')
         call assert(cache_lookup(c, action_id), &
@@ -328,7 +332,7 @@ contains
         end if
         call write_text(obj_path, 'valid object')
         call write_text(trim(mod_dir)//'/badmod.mod', 'valid mod')
-        call cache_store_action(c, action_id, obj_path, mod_dir, 'badmod', &
+        call cache_store_action(c, action_id, obj_path, mod_dir, MODULE_BAD, &
             output_id, ierr)
         call assert(ierr == 0, 'valid action republishes its missing payload')
         call fs_remove_file(trim(obj_path))
@@ -439,7 +443,7 @@ contains
         call fs_make_dir(trim(mods_a))
         call write_text(object_a, 'root a object')
         call write_text(trim(mods_a)//'/root_mod.mod', 'root a module')
-        call cache_store_action(cache_a, action_id, object_a, mods_a, 'root_mod', &
+        call cache_store_action(cache_a, action_id, object_a, mods_a, MODULE_ROOT, &
             output_id, ierr)
         call assert(ierr == 0, 'store first root action')
 
@@ -453,7 +457,7 @@ contains
         call fs_make_dir(trim(mods_b))
         call write_text(object_b, 'root b object')
         call write_text(trim(mods_b)//'/root_mod.mod', 'root b module')
-        call cache_store_action(cache_b, action_id, object_b, mods_b, 'root_mod', &
+        call cache_store_action(cache_b, action_id, object_b, mods_b, MODULE_ROOT, &
             output_id, ierr)
         call assert(ierr == 0, 'store same action independently in second root')
         call assert(cache_lookup(cache_a, action_id), 'first root retains its action')
