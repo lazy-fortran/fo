@@ -117,6 +117,7 @@ module fo_fpm_config
         type(fpm_input_t) :: fo_inputs(MAX_FO_INPUTS)
         character(len=512) :: fo_input_parse_error = ''
         character(len=512) :: dependency_parse_error = ''
+        character(len=512) :: manifest_parse_error = ''
         ! [extra.fo] test budgets in seconds; 0 leaves fo's default. The
         ! FO_TEST_TIMEOUT, FO_SLOW_TEST_TIMEOUT and FO_TEST_WALL_TIMEOUT
         ! environment variables override these per invocation.
@@ -292,6 +293,7 @@ contains
         end do
         c%fo_input_parse_error = ''
         c%dependency_parse_error = ''
+        c%manifest_parse_error = ''
         c%test_timeout = 0
         c%slow_test_timeout = 0
         c%test_wall_timeout = 0
@@ -330,6 +332,13 @@ contains
         end if
 
         do
+            if (len_trim(config%manifest_parse_error) > 0) then
+                write (error_unit, '(a)') 'fo: fpm.toml: '// &
+                    trim(config%manifest_parse_error)
+                ierr = 1
+                close (u)
+                return
+            end if
             read (u, '(a)', iostat=ios) line
             if (ios /= 0) exit
             if (len_trim(line) == len(line)) then
@@ -366,6 +375,23 @@ contains
 
             if (line(1:1) == '[') then
                 call get_section(line, section)
+                select case (trim(section))
+                case ('executable')
+                    if (config%n_exes >= MAX_EXES) write ( &
+                        config%manifest_parse_error, '(a,i0,a)') &
+                        '[[executable]] exceeds supported limit ', MAX_EXES, &
+                        ' declarations'
+                case ('test')
+                    if (config%n_tests >= MAX_EXES) write ( &
+                        config%manifest_parse_error, '(a,i0,a)') &
+                        '[[test]] exceeds supported limit ', MAX_EXES, ' declarations'
+                case ('example')
+                    if (config%n_examples >= MAX_EXES) write ( &
+                        config%manifest_parse_error, '(a,i0,a)') &
+                        '[[example]] exceeds supported limit ', MAX_EXES, &
+                        ' declarations'
+                end select
+                if (len_trim(config%manifest_parse_error) > 0) cycle
                 if (trim(section) == 'executable' .and. &
                     config%n_exes < MAX_EXES) then
                     config%n_exes = config%n_exes + 1
@@ -381,9 +407,10 @@ contains
                         fpm_exe_t(source_dir='example')
                 else if (trim(section) == 'extra.fo.inputs') then
                     if (config%n_fo_inputs >= MAX_FO_INPUTS) then
-                        ierr = 1
-                        close(u)
-                        return
+                        write (config%manifest_parse_error, '(a,i0,a)') &
+                            '[[extra.fo.inputs]] exceeds supported limit ', &
+                            MAX_FO_INPUTS, ' declarations'
+                        cycle
                     end if
                     config%n_fo_inputs = config%n_fo_inputs + 1
                     config%fo_inputs(config%n_fo_inputs) = fpm_input_t()
@@ -412,7 +439,8 @@ contains
             case ('dependencies')
                 call parse_dependency_entry(key, val, config)
             case ('dev-dependencies')
-                call parse_dep_entry(key, val, config%dev_deps, config%n_dev_deps)
+                call parse_dep_entry(key, val, config%dev_deps, config%n_dev_deps, &
+                    config%manifest_parse_error)
             case ('executable')
                 if (config%n_exes > 0) &
                     call parse_exe(key, val, config%exes(config%n_exes))
@@ -464,6 +492,11 @@ contains
             return
         end if
         if (ierr == 0) call resolve_metapackages(config, ierr)
+        if (len_trim(config%manifest_parse_error) > 0) then
+            write (error_unit, '(a)') 'fo: fpm.toml: '// &
+                trim(config%manifest_parse_error)
+            ierr = 1
+        end if
     end subroutine fpm_config_parse
 
     subroutine validate_dependency(dep, section, error)
@@ -573,7 +606,8 @@ contains
         type(fpm_config_t), intent(inout) :: config
 
         if (trim(val) /= '"*"' .and. trim(val) /= "'*'") then
-            call parse_dep_entry(key, val, config%deps, config%n_deps)
+            call parse_dep_entry(key, val, config%deps, config%n_deps, &
+                config%manifest_parse_error)
             return
         end if
 
@@ -593,7 +627,8 @@ contains
         case ('minpack')
             config%minpack = .true.
         case default
-            call parse_dep_entry(key, val, config%deps, config%n_deps)
+            call parse_dep_entry(key, val, config%deps, config%n_deps, &
+                config%manifest_parse_error)
         end select
     end subroutine parse_dependency_entry
 
@@ -805,18 +840,23 @@ contains
         end do
     end function manifest_example_name
 
-    subroutine parse_dep_entry(name_key, val, deps, n_deps)
+    subroutine parse_dep_entry(name_key, val, deps, n_deps, error)
         character(len=*), intent(in) :: name_key, val
         type(fpm_dep_t), intent(inout) :: deps(:)
         integer, intent(inout) :: n_deps
 
+        character(len=*), intent(inout) :: error
         character(len=256) :: name, field
         character(len=1024) :: str_val
         integer :: dot, i, found
 
         dot = index(trim(name_key), '.')
         if (dot <= 1) then
-            if (n_deps >= size(deps)) return
+            if (n_deps >= size(deps)) then
+                write (error, '(a,i0)') 'dependency "'//trim(name_key)// &
+                    '" exceeds supported dependency limit ', size(deps)
+                return
+            end if
             n_deps = n_deps + 1
             call parse_dep(name_key, val, deps(n_deps))
             return
@@ -829,7 +869,11 @@ contains
             if (trim(deps(i)%name) == trim(name)) found = i
         end do
         if (found == 0) then
-            if (n_deps >= size(deps)) return
+            if (n_deps >= size(deps)) then
+                write (error, '(a,i0)') 'dependency "'//trim(name_key)// &
+                    '" exceeds supported dependency limit ', size(deps)
+                return
+            end if
             n_deps = n_deps + 1
             found = n_deps
             call parse_dep(name, '', deps(found))
@@ -1214,7 +1258,12 @@ contains
         character(len=512) :: arg
         logical :: in_str
 
-        if (config%n_test_arg_sets >= MAX_TEST_ARG_SETS) return
+        if (config%n_test_arg_sets >= MAX_TEST_ARG_SETS) then
+            write (config%manifest_parse_error, '(a,i0)') &
+                'test arguments "'//trim(name)//'" exceed supported limit ', &
+                MAX_TEST_ARG_SETS
+            return
+        end if
         config%n_test_arg_sets = config%n_test_arg_sets + 1
         slot = config%n_test_arg_sets
         config%test_arg_sets(slot)%name = trim(name)
@@ -1616,9 +1665,11 @@ contains
         type(fpm_config_t), intent(inout) :: config
 
         call add_git_dependency(config%deps, config%n_deps, 'stdlib', &
-            'https://github.com/fortran-lang/stdlib', branch='stdlib-fpm')
+            'https://github.com/fortran-lang/stdlib', config%manifest_parse_error, &
+            branch='stdlib-fpm')
         call add_git_dependency(config%dev_deps, config%n_dev_deps, 'test-drive', &
-            'https://github.com/fortran-lang/test-drive', branch='v0.4.0')
+            'https://github.com/fortran-lang/test-drive', config%manifest_parse_error, &
+            branch='v0.4.0')
         if (config%blas) then
             call append_config_flag('-DSTDLIB_EXTERNAL_BLAS', config)
             call append_config_flag('-DSTDLIB_EXTERNAL_LAPACK', config)
@@ -1629,12 +1680,14 @@ contains
         type(fpm_config_t), intent(inout) :: config
 
         call add_git_dependency(config%deps, config%n_deps, 'minpack', &
-            'https://github.com/fortran-lang/minpack', tag='v2.0.0-rc.1')
+            'https://github.com/fortran-lang/minpack', config%manifest_parse_error, &
+            tag='v2.0.0-rc.1')
     end subroutine resolve_minpack_metapackage
 
-    subroutine add_git_dependency(deps, n_deps, name, url, branch, tag)
+    subroutine add_git_dependency(deps, n_deps, name, url, error, branch, tag)
         type(fpm_dep_t), intent(inout) :: deps(:)
         integer, intent(inout) :: n_deps
+        character(len=*), intent(inout) :: error
         character(len=*), intent(in) :: name, url
         character(len=*), intent(in), optional :: branch, tag
         integer :: i
@@ -1642,7 +1695,11 @@ contains
         do i = 1, n_deps
             if (trim(deps(i)%name) == trim(name)) return
         end do
-        if (n_deps >= size(deps)) return
+        if (n_deps >= size(deps)) then
+            write (error, '(a,i0)') 'dependency "'//trim(name)// &
+                '" exceeds supported dependency limit ', size(deps)
+            return
+        end if
         n_deps = n_deps + 1
         call parse_dep(name, '', deps(n_deps))
         deps(n_deps)%git = trim(url)

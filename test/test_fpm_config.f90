@@ -1,6 +1,7 @@
 program test_fpm_config
     use, intrinsic :: iso_fortran_env, only: output_unit
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_config_init, &
+        fpm_config_allocate, &
         manifest_test_args, manifest_test_name
     use fo_util, only: make_tmpfile
     implicit none
@@ -17,6 +18,7 @@ program test_fpm_config
     call test_parse_missing_file()
     call test_dotted_dependency_keys()
     call test_registry_dependency_fields()
+    call test_manifest_capacity_errors()
     call test_dependency_source_conflicts()
     call test_blas_metapackage()
     call test_source_metapackages()
@@ -277,6 +279,90 @@ contains
         call execute_command_line('rm -rf '//dir, wait=.true.)
     end subroutine test_dotted_dependency_keys
 
+    subroutine test_manifest_capacity_errors()
+        type(fpm_config_t), allocatable :: config
+        character(len=512) :: dir
+        character(len=32) :: number
+        character(len=16), parameter :: sections(3) = &
+            [character(len=16) :: 'executable', 'test', 'example']
+        integer :: kind, count, i, unit, ierr, status
+
+        call fpm_config_allocate(config)
+        call make_tmpfile('fo-manifest-capacity', dir)
+        call execute_command_line('mkdir "'//trim(dir)//'"', exitstat=status)
+        call assert(status == 0, 'manifest capacity fixture created')
+        if (status /= 0) return
+        do kind = 1, 3
+            do count = 64, 65
+                open (newunit=unit, file=trim(dir)//'/fpm.toml', status='replace')
+                write (unit, '(a)') 'name = "capacity"'
+                do i = 1, count
+                    write (number, '(i0)') i
+                    write (unit, '(a)') '[['//trim(sections(kind))//']]'
+                    write (unit, '(a)') 'name = "entry_'//trim(number)//'"'
+                end do
+                close (unit)
+                call fpm_config_parse(trim(dir), config, ierr)
+                if (count == 64) then
+                    call assert(ierr == 0, trim(sections(kind))// &
+                        ': all 64 declared targets are supported')
+                else
+                    call assert(ierr /= 0, trim(sections(kind))// &
+                        ': oversized manifest fails instead of overwriting target 64')
+                    call assert(index(config%manifest_parse_error, &
+                        '[['//trim(sections(kind))//']]') > 0, &
+                        'target capacity error identifies declaration kind')
+                    call assert(index(config%manifest_parse_error, '64') > 0, &
+                        'target capacity error states the supported boundary')
+                end if
+            end do
+        end do
+        do count = 128, 129
+            open (newunit=unit, file=trim(dir)//'/fpm.toml', status='replace')
+            write (unit, '(a)') 'name = "capacity"'
+            write (unit, '(a)') '[extra.fo.test-args]'
+            do i = 1, count
+                write (number, '(i0)') i
+                write (unit, '(a)') 'entry_'//trim(number)//' = ["argument"]'
+            end do
+            close (unit)
+            call fpm_config_parse(trim(dir), config, ierr)
+            if (count == 128) then
+                call assert(ierr == 0, '128 test argument sets are supported')
+            else
+                call assert(ierr /= 0, '129th test argument set fails explicitly')
+                call assert(index(config%manifest_parse_error, 'entry_129') > 0, &
+                    'test argument error names the unsupported declaration')
+            end if
+        end do
+        do kind = 1, 2
+            do count = 0, 1
+                open (newunit=unit, file=trim(dir)//'/fpm.toml', status='replace')
+                write (unit, '(a)') 'name = "capacity"'
+                if (kind == 1) then
+                    write (unit, '(a)') '[dependencies]'
+                else
+                    write (unit, '(a)') '[dev-dependencies]'
+                end if
+                do i = 1, 64/kind + count
+                    write (number, '(i0)') i
+                    write (unit, '(a)') 'dep_'//trim(number)//' = { path = "unused" }'
+                end do
+                close (unit)
+                call fpm_config_parse(trim(dir), config, ierr)
+                if (count == 0) then
+                    call assert(ierr == 0, 'declared dependency boundary is supported')
+                else
+                    call assert(ierr /= 0, 'overflow dependency fails explicitly')
+                    call assert(index(config%manifest_parse_error, 'dep_') > 0, &
+                        'dependency capacity error names the overflowing declaration')
+                end if
+            end do
+        end do
+        call execute_command_line('rm -rf "'//trim(dir)//'"', exitstat=status)
+        call assert(status == 0, 'manifest capacity fixture removed')
+    end subroutine test_manifest_capacity_errors
+
     subroutine test_registry_dependency_fields()
         type(fpm_config_t) :: c
         character(len=512) :: dir
@@ -326,7 +412,8 @@ contains
         call assert(.not. c%deps(1)%namespace_seen .and. &
             .not. c%deps(1)%registry_v_seen, 'registry_fields: selection flags reset')
         call assert(trim(c%deps(1)%namespace) == '' .and. &
-            trim(c%deps(1)%registry_v) == '', 'registry_fields: selection strings reset')
+            trim(c%deps(1)%registry_v) == '', &
+            'registry_fields: selection strings reset')
 
         open (newunit=u, file=trim(dir)//'/fpm.toml', status='replace', &
             iostat=ios)
