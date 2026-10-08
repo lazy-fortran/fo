@@ -147,6 +147,15 @@ program test_native_cmake_cli
     call assert_true(index(process%stdout//process%stderr, &
          'unsupported command add_custom_target') > 0, 'unsupported command diagnostic')
 call assert_file_absent(scratch//'/delegated.ran', 'unsupported inputs never fall back')
+    call write_text(project//'/CMakeLists.txt', cmake_text// &
+        'add_test(NAME cwd_oracle COMMAND oracle.x 19 WORKING_DIRECTORY support)'//nl)
+    call run_fo(driver, args, project, cache, process, env, 60000)
+    call assert_true(process%exit_code /= 0, 'unsupported test cwd fails explicitly')
+    call assert_true(index(process%stdout//process%stderr, &
+        'unsupported test option WORKING_DIRECTORY') > 0, &
+        'unsupported test properties never become program arguments')
+    call assert_file_absent(scratch//'/delegated.ran', &
+        'unsupported test properties do not invoke delegated tools')
     call write_text(project//'/CMakeLists.txt', cmake_text)
     call resident_oracle()
     call finish_assertions()

@@ -402,6 +402,16 @@ contains
             test%cwd = binary
             allocate (test%args(0))
             do i = 5, count
+                select case (words(i)%text)
+                case ('CONFIGURATIONS', 'WORKING_DIRECTORY', &
+                      'COMMAND_EXPAND_LISTS', 'BUILD_DEPENDS')
+                    plan%error = 'native CMake: unsupported test option '//words(i)%text
+                    return
+                end select
+                if (index(words(i)%text, '$<') > 0) then
+                    plan%error = 'native CMake: test generator expressions unsupported'
+                    return
+                end if
                 call cm_add(test%args, words(i)%text)
             end do
             plan%tests = [plan%tests, test]
