@@ -87,7 +87,7 @@ module fo_gfortran_build
     public :: gfortran_selected_test_names, gfortran_named_test_exists
 
     interface
-        integer(c_int) function c_unsetenv(name) bind(C, name='unsetenv')
+        integer(c_int) function c_unsetenv(name) bind(C, name='fo_c_unsetenv')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: name(*)
         end function c_unsetenv
