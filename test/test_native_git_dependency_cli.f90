@@ -12,7 +12,7 @@ program test_native_git_dependency_cli
     character(:), allocatable :: driver, scratch, tools, dependency, consumer
     character(:), allocatable :: offline_dependency
     character(:), allocatable :: path_dependency, nested_consumer
-    character(:), allocatable :: git, compiler, assembler, linker, archiver
+    character(:), allocatable :: git, compiler, assembler, linker, archiver, helper
     character(:), allocatable :: commit, moved_commit, latest_commit, checkout
     type(process_result_t) :: result
     type(string_list_t) :: args, environment
@@ -36,6 +36,11 @@ program test_native_git_dependency_cli
     call make_symlink(assembler, join_path(tools, 'as'))
     call make_symlink(linker, join_path(tools, 'ld'))
     call make_symlink(archiver, join_path(tools, 'ar'))
+    ! Xcode's as wrapper script needs realpath and dirname to locate clang.
+    call find_command('realpath', helper)
+    call make_symlink(helper, join_path(tools, 'realpath'))
+    call find_command('dirname', helper)
+    call make_symlink(helper, join_path(tools, 'dirname'))
     call write_text(join_path(dependency, 'fpm.toml'), &
         'name = "git_provider"' // new_line('a'))
     call write_text(join_path(dependency, 'src/provider.f90'), &

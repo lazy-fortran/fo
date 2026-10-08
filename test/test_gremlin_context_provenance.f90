@@ -75,8 +75,9 @@ program test_gremlin_context_provenance
     call assert_true(len(input_digest(initial_inventory, &
         'dependency:provenance_dep', 'src/provenance_dep.f90')) == 64, &
         'identity includes the path dependency as a generation input')
+    ! Fo records physical paths; /var is a symlink to /private/var on macOS.
     call assert_equal_string(initial_metadata%toolchain, &
-        compiler_dir//'/gfortran:PROVENANCE_COMPILER_ORACLE', &
+        physical_path(compiler_dir)//'/gfortran:PROVENANCE_COMPILER_ORACLE', &
         'toolchain records only the independently controlled compiler version probe')
     do repeat = 1, 2
         baseline = capture_count()
@@ -204,6 +205,25 @@ program test_gremlin_context_provenance
 
 contains
 
+    function physical_path(directory) result(path)
+        !! The directory with symlinks resolved, as getcwd reports it.
+        character(len=*), intent(in) :: directory
+        character(:), allocatable :: path
+        type(string_list_t) :: command
+        type(process_result_t) :: result
+
+        path = directory
+        call list_add(command, '/bin/sh')
+        call list_add(command, '-c')
+        call list_add(command, 'cd "$1" && pwd -P')
+        call list_add(command, 'physical_path')
+        call list_add(command, directory)
+        call run_process(command, directory, result)
+        if (result%exit_code /= 0 .or. .not. allocated(result%stdout)) return
+        if (len(result%stdout) < 2) return
+        path = result%stdout(:len(result%stdout) - 1)
+    end function physical_path
+
     subroutine write_compiler_wrapper(real_compiler, directory, calls_path)
         character(len=*), intent(in) :: real_compiler, directory, calls_path
         character(:), allocatable :: source
@@ -264,16 +284,17 @@ contains
     subroutine assert_probe_arguments(text)
         character(len=*), intent(in) :: text
         integer :: first, last, count
-        character(:), allocatable :: row
+        character(:), allocatable :: row, physical_project
+        physical_project = physical_path(project)
         first = 1
         count = 0
         do while (first <= len(text))
             last = index(text(first:), new_line('a'))
             if (last == 0) exit
             row = text(first:first + last - 2)
-            if (index(row, project//'|') == 1) then
+            if (index(row, physical_project//'|') == 1) then
                 count = count + 1
-                call assert_equal_string(row, project//'|--version', &
+                call assert_equal_string(row, physical_project//'|--version', &
                     'Git arguments never enter a compiler invocation')
             end if
             first = first + last

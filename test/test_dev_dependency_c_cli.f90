@@ -167,7 +167,9 @@ contains
         call list_add(ar_arguments, archive)
         call run_external('ar', ar_arguments, consumer, inventory)
         call assert_process_ok(inventory, 'read cold static archive inventory')
-        call assert_equal_string(inventory%stdout, 'test-support_dev_src_devhelper.f90.o' // nl, &
+        ! Apple ar also lists its symbol table member, __.SYMDEF SORTED.
+        call assert_equal_string(object_members(inventory%stdout), &
+            'test-support_dev_src_devhelper.f90.o' // nl, &
             'cold archive contains exactly the selected Fortran helper')
     end subroutine assert_archive_members
 
@@ -180,5 +182,27 @@ contains
         call run_external('nm', arguments, consumer, result)
         call assert_process_ok(result, 'inspect binary symbols')
     end subroutine symbols
+
+    function object_members(listing) result(members)
+        character(len=*), intent(in) :: listing
+        character(:), allocatable :: members
+        integer :: first, last
+
+        members = ''
+        first = 1
+        do while (first <= len(listing))
+            last = index(listing(first:), nl)
+            if (last == 0) then
+                last = len(listing)
+            else
+                last = first + last - 2
+            end if
+            if (last >= first) then
+                if (index(listing(first:last), '__.SYMDEF') /= 1) &
+                    members = members // listing(first:last) // nl
+            end if
+            first = last + 2
+        end do
+    end function object_members
 
 end program test_dev_dependency_c_cli
