@@ -4,7 +4,9 @@ program test_mcp_session_cleanup
     use fo_test_harness, only: make_scratch, current_directory, write_text
     use fo_test_harness, only: run_process, file_exists, assert_true
     use fo_test_harness, only: assert_contains, assert_equal_integer
-    use fo_test_harness, only: finish_assertions
+    use fo_test_harness, only: finish_assertions, spawn_process, sleep_ms
+    use fo_fs, only: fs_realpath
+    use fo_test_os_link, only: test_os_initialize
     use fo_test_mcp_session, only: mcp_session_t, mcp_session_start
     use fo_test_mcp_session, only: mcp_session_shutdown
     use fo_test_process_identity, only: mcp_process_identity_running
@@ -19,42 +21,31 @@ program test_mcp_session_cleanup
     type(mcp_session_t) :: session
     integer :: unit, status, pid, exit_code, child_pid
     integer(c_int64_t) :: start_time, child_start
+    logical :: resolved_ok
 
-    interface
-        integer(c_int) function c_fork() bind(C, name='fork')
-            import :: c_int
-        end function c_fork
-        integer(c_int) function c_sleep(seconds) bind(C, name='sleep')
-            import :: c_int
-            integer(c_int), value :: seconds
-        end function c_sleep
-    end interface
-
+    status = test_os_initialize()
+    if (status /= 162) error stop 'cannot initialize native binary test IO'
     call get_command_argument(1, argument)
+    call get_command_argument(0, executable_buffer)
+    call fs_realpath(trim(executable_buffer), executable, resolved_ok)
+    if (.not. resolved_ok) error stop 'cannot resolve native test executable'
+    if (trim(argument) == '--peer-descendant') then
+        do
+            call sleep_ms(1000)
+        end do
+    end if
     if (trim(argument) == 'mcp-server') then
-        child_pid = int(c_fork())
-        if (child_pid < 0) error stop 'cannot create owned peer descendant'
-        if (child_pid == 0) then
-            do
-                status = int(c_sleep(1_c_int))
-            end do
-        end if
+        call list_add(args, executable)
+        call list_add(args, '--peer-descendant')
+        call spawn_process(args, '.', child_pid)
+        if (child_pid <= 0) error stop 'cannot create owned peer descendant'
         child_start = mcp_process_start_time(child_pid)
         write(identity, '(i0,1x,i0)') child_pid, child_start
         call write_text('peer.child.identity', trim(identity)//new_line('a'))
-        ! Deliberately accept no response and remain owned until terminated.
         do
             read(*, '(a)', iostat=status) argument
-            ! EOF alone must not hide a forgotten live peer in the outer oracle.
-            if (status /= 0) status = int(c_sleep(1_c_int))
+            if (status /= 0) call sleep_ms(1000)
         end do
-    end if
-    call get_command_argument(0, executable_buffer)
-    executable = trim(executable_buffer)
-    if (len(executable) == 0) error stop 'missing native test executable'
-    if (executable(1:1) /= '/') then
-        call current_directory(cwd)
-        executable = cwd//'/'//executable
     end if
     if (trim(argument) == '--shutdown-probe') then
         call get_command_argument(2, directory_buffer)

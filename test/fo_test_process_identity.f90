@@ -30,7 +30,7 @@ module fo_test_process_identity
             import :: c_int
             integer(c_int), value :: pid
         end function c_process_running
-        integer(c_int) function c_usleep(microseconds) bind(C, name='usleep')
+        integer(c_int) function c_usleep(microseconds) bind(C, name='fo_test_sleep_ms')
             import :: c_int
             integer(c_int), value :: microseconds
         end function c_usleep
@@ -79,7 +79,7 @@ contains
         do attempt = 1, 250
             if (c_process_running(int(pid, c_int)) == 0 .or. &
                     c_process_start_time(int(pid, c_int)) /= start_time) exit
-            signal_status = c_usleep(20000_c_int)
+            signal_status = c_usleep(20_c_int)
         end do
         call assert_true(c_process_running(int(pid, c_int)) == 0 .or. &
             c_process_start_time(int(pid, c_int)) /= start_time, &

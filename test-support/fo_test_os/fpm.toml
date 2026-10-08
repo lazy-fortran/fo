@@ -1,7 +1,7 @@
 name = "fo_test_os"
 version = "0.1.0"
 license = "MIT"
-description = "POSIX shims for standalone fo test harnesses"
+description = "Native OS boundaries for standalone fo test harnesses"
 
 [library]
 type = "static"

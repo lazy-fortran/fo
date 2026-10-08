@@ -10,6 +10,7 @@ program test_cmake_named_cli
     use fo_test_json, only: json_string_value
     use fo_test_harness, only: finish_assertions
     use fo_test_harness, only: run_process
+    use fo_test_harness, only: harness_probe_entry
     implicit none
 
     character(:), allocatable :: driver, project, scratch, selected, neighbor
@@ -18,6 +19,7 @@ program test_cmake_named_cli
     type(process_result_t) :: result
     type(json_value_t) :: report, tests, entry, field
 
+    call harness_probe_entry()
     selected = 'solovev_axis_regularity'
     neighbor = selected // '_extra'
     call resolve_driver(driver)

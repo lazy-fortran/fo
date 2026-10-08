@@ -4,6 +4,8 @@ module fo_test_gremlin_oracle
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_scratch, join_path, make_directory, write_text
     use fo_test_harness, only: read_text, file_exists, run_process, assert_true
+    use fo_test_harness, only: terminate_process_group
+    use fo_fs, only: fs_is_windows
     use fo_test_json, only: json_value_t, json_parse, json_member, json_string_value
     implicit none
     private
@@ -17,28 +19,28 @@ module fo_test_gremlin_oracle
     public :: gremlin_process_running
 
     interface
-        integer(c_int) function c_setenv(name, value, overwrite) bind(C, name='setenv')
+        integer(c_int) function c_setenv(name, value, overwrite) bind(C, name='fo_test_setenv')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: name(*), value(*)
             integer(c_int), value :: overwrite
         end function c_setenv
-        integer(c_int) function c_usleep(microseconds) bind(C, name='usleep')
+        integer(c_int) function c_usleep(microseconds) bind(C, name='fo_test_sleep_ms')
             import :: c_int
             integer(c_int), value :: microseconds
         end function c_usleep
-        integer(c_int) function c_waitpid(process, status, options) &
-                bind(C, name='fo_test_waitpid')
+        integer(c_int) function c_wait_child(process, code, signal_number, blocking) &
+                bind(C, name='fo_test_wait_child')
             import :: c_int
-            integer(c_int), value :: process, options
-            integer(c_int), intent(out) :: status
-        end function c_waitpid
+            integer(c_int), value :: process, blocking
+            integer(c_int), intent(out) :: code, signal_number
+        end function c_wait_child
         integer(c_int) function c_spawn(arguments, cwd, stdout_path, stderr_path) &
                 bind(C, name='fo_test_spawn_capture')
             import :: c_char, c_int, c_ptr
             type(c_ptr), intent(in) :: arguments(*)
             character(kind=c_char), intent(in) :: cwd(*), stdout_path(*), stderr_path(*)
         end function c_spawn
-        integer(c_int) function c_mkfifo(path, mode) bind(C, name='mkfifo')
+        integer(c_int) function c_mkfifo(path, mode) bind(C, name='fo_test_mkfifo')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
             integer(c_int), value :: mode
@@ -277,7 +279,7 @@ contains
                     if (found) return
                 end if
             end if
-            result = c_usleep(20000_c_int)
+            result = c_usleep(20_c_int)
             elapsed = elapsed + 20
         end do
     end subroutine gremlin_wait_file
@@ -288,7 +290,7 @@ contains
 
         remaining = max(0, duration_ms)
         do while (remaining > 0)
-            result = c_usleep(int(min(remaining, 200), c_int) * 1000_c_int)
+            result = c_usleep(int(min(remaining, 200), c_int))
             remaining = remaining - min(remaining, 200)
         end do
     end subroutine gremlin_wait_ms
@@ -337,18 +339,27 @@ contains
     subroutine gremlin_wait_child(process_id, exit_code)
         integer, intent(in) :: process_id
         integer, intent(out) :: exit_code
-        integer(c_int) :: status, waited
+        integer(c_int) :: status, waited, signal_number
 
-        waited = c_waitpid(int(process_id, c_int), status, 0_c_int)
-        call assert_true(waited == process_id, 'reaps concurrently launched fo request')
-        exit_code = ibits(status, 8, 8)
+        waited = c_wait_child(int(process_id, c_int), status, signal_number, 1_c_int)
+        call assert_true(waited == 1, 'reaps concurrently launched fo request')
+        exit_code = int(status)
+        if (signal_number > 0) exit_code = -int(signal_number)
     end subroutine gremlin_wait_child
 
     subroutine gremlin_stop_child(process_id, exit_code)
         integer, intent(in) :: process_id
         integer, intent(out) :: exit_code
         integer(c_int) :: result
-
+        integer :: owned_pid, status
+        logical :: reaped
+        if (fs_is_windows()) then
+            owned_pid = process_id
+            call terminate_process_group(owned_pid, status, reaped)
+            call assert_true(reaped, 'drains the exact owned native child')
+            exit_code = -1 ! Cancellation reports drainage, not an invented child exit.
+            return
+        end if
         result = c_signal_group(int(process_id, c_int), 15_c_int)
         call assert_true(result == 0, 'signals the owned child process group')
         call gremlin_wait_child(process_id, exit_code)
@@ -358,12 +369,15 @@ contains
         integer, intent(in) :: process_id
         logical, intent(out) :: done
         integer, intent(out) :: exit_code
-        integer(c_int) :: status, waited
+        integer(c_int) :: status, waited, signal_number
 
-        waited = c_waitpid(int(process_id, c_int), status, 1_c_int)
-        done = waited == process_id
+        waited = c_wait_child(int(process_id, c_int), status, signal_number, 0_c_int)
+        done = waited == 1
         exit_code = -1
-        if (done) exit_code = ibits(status, 8, 8)
+        if (done) then
+            exit_code = int(status)
+            if (signal_number > 0) exit_code = -int(signal_number)
+        end if
     end subroutine gremlin_poll_child
 
     subroutine gremlin_fifo(path)
