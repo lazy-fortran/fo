@@ -7,26 +7,32 @@ failure detection. The workspace master plan, when present, owns delivery order.
 
 ## Current delivery
 
-The reviewed Claude handoff is complete at implementation commit `c2a3f19`,
+The reviewed Claude handoff is implemented through `d7e8c9b`,
 based on `95490c97f73e53b2b9c70a61b287bd3aa36b8d38`. Publication requires the
 controller's exact combined gate; individual worker receipts do not substitute
-for it. The gate selects 40 Linux cases and 18 Darwin cases, with resident
-verification on both hosts. These selections do not claim the full Fo inventory.
+for it. The final gate selects 42 Linux resident cases, 20 Darwin public cases and
+15 Darwin resident cases. Nested host admission now delegates bounded capacity to descendants and retains
+upstream reservations through owner death, payload drainage and gated
+authority revocation. Its independent crash/stop oracles and these combined
+gates must pass before publication. These selections do not claim the full
+Fo inventory.
 The user explicitly authorized faepmac1 for Darwin verification.
 
-| Completed goal | Independently checked behavior |
+| Handoff goal | Independently checked behavior |
 | --- | --- |
 | #207 private scratch | Parent TMPDIR reaches CLI children; parallel exits are checked; async fixtures use registered private scratch |
 | #119 lossless results | Large CLI/MCP/check reports, late failures, UTF-8 and diagnostics survive; JSON compilation failures and malformed result records retain a nonzero process exit |
 | #203 native local registry | Exact/latest identities, regular/transitive/root-dev dependencies, content/version/config edits and frozen replay after stop through physical directory aliases |
 | #144 safe artifacts | Owned bytes enter cache before publication; corrupt shared images are rejected; conflicting producers preserve complete artifacts |
-| #135 dependency freshness | Source/include/C-header/flag/compiler changes, restored timestamps, missing outputs, private-body runtime changes and warm reuse |
+| #135 dependency freshness | Source/include/C-header/flag/compiler changes, restored timestamps, missing outputs, private-body runtime changes, long external dependency paths and warm reuse |
 
 Review also repaired registry watcher reactivation, frozen compiler-view roots,
 terminal-session replay, physical identity for aliased frozen roots, and the Darwin test harness's concurrent process-group
 setup. The harness now has one group writer and cleans up a child whose group
 has not yet been established. Independent native controls and timeout/grandchild
-oracles distinguish this defect from artifact failures.
+oracles distinguish this defect from artifact failures. External dependency
+object basenames use full path digests so deep private execution views compile
+without exceeding the filesystem component limit.
 
 The #205 JSON increment removes the duplicate scanner and verifies strict
 receipt recovery with nested metadata. It removes 40 physical lines across its
@@ -36,9 +42,11 @@ keys, verified against real compiled runtime changes and rechecked through Fo.
 
 Exact source, pinned drivers, commands and receipts are retained under
 `/var/tmp/fo-codex-controller-20261008/combined`; Darwin evidence is retained
-under `/var/tmp/fo-codex-144-darwin-20261008` on faepmac1. FPM bootstrap cache
-and archive defects have separate owning-repository reproducers and repairs;
-Fo's native build path remains the delivery authority.
+under `/var/tmp/fo-codex-144-darwin-20261008` on faepmac1. FPM bootstrap defects have tested owning-repository repairs and public reports
+[fpm#1334](https://github.com/fortran-lang/fpm/issues/1334) and
+[fpm#1335](https://github.com/fortran-lang/fpm/issues/1335). Linux and Darwin
+warm runtime checks pass without clearing caches; upstream scope review
+precedes a PR. Fo's native build path remains the delivery authority.
 
 Fx #57 remains open. Its two historical allocator aborts do not establish the
 first invalid write or a recurrent reproducer. The audit is retained at
