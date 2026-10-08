@@ -1,7 +1,7 @@
 module fo_capabilities
     use, intrinsic :: iso_c_binding, only: c_int
     use fo_util, only: make_tmpfile, delete_tmpfile, json_bool
-    use fo_fs, only: fs_make_dir, fs_remove_tree
+    use fo_fs, only: fs_make_dir, fs_remove_tree, fs_find_executable
     use fo_process, only: process_run_argv_logged, argv_push, argv_push_split
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         selected_compiler_command, COMPILER_GFORTRAN, COMPILER_NVFORTRAN, &
@@ -168,71 +168,12 @@ contains
 
     subroutine detect_compiler_path(cap)
         type(capabilities_t), intent(inout) :: cap
+        logical :: found
 
-        character(len=512) :: found, compiler
-        logical :: exists
-
-        cap%compiler_path = ''
-        compiler = trim(selected_compiler_command())
-        if (index(compiler, '/') > 0) then
-            inquire (file=trim(compiler), exist=exists)
-            if (exists) cap%compiler_path = trim(compiler)
-            return
-        end if
-
-        select case (trim(cap%compiler_id))
-        case ('gfortran')
-            call which_in_path('gfortran', found)
-        case ('ifx')
-            call which_in_path('ifx', found)
-        case ('nvfortran')
-            call which_in_path('nvfortran', found)
-        case ('flang')
-            call which_in_path('flang', found)
-        case ('lfortran')
-            call which_in_path('lfortran', found)
-        case default
-            return
-        end select
-
-        if (len_trim(found) > 0) cap%compiler_path = trim(found)
+        call fs_find_executable(trim(selected_compiler_command()), &
+            cap%compiler_path, found)
+        if (.not. found) cap%compiler_path = ''
     end subroutine detect_compiler_path
-
-    subroutine which_in_path(name, path)
-        !! Locate an executable on $PATH without a shell. Mirrors `which name`:
-        !! returns the first PATH entry holding an existing file by that name.
-        character(len=*), intent(in) :: name
-        character(len=*), intent(out) :: path
-
-        character(len=:), allocatable :: env
-        character(len=1024) :: candidate
-        integer :: env_len, i, start, stat
-        logical :: present, sc_ok
-
-        path = ''
-        call get_environment_variable('PATH', length=env_len, status=stat)
-        if (stat /= 0 .or. env_len <= 0) return
-        allocate (character(len=env_len) :: env)
-        call get_environment_variable('PATH', value=env, status=stat)
-        if (stat /= 0) return
-
-        start = 1
-        do i = 1, env_len + 1
-            sc_ok = (i > env_len)
-            if (.not. sc_ok) sc_ok = (env(i:i) == ':')
-            if (sc_ok) then
-                if (i > start) then
-                    candidate = env(start:i - 1)//'/'//trim(name)
-                    inquire (file=trim(candidate), exist=present)
-                    if (present) then
-                        path = trim(candidate)
-                        return
-                    end if
-                end if
-                start = i + 1
-            end if
-        end do
-    end subroutine which_in_path
 
     subroutine probe_openmp(cap)
         type(capabilities_t), intent(inout) :: cap
@@ -265,7 +206,9 @@ contains
         else
             n_args = 0
             call argv_push(packed, n_args, trim(compiler))
-            call argv_push_split(packed, n_args, trim(dialect%openmp_flag())//' -o /dev/null')
+            call argv_push_split(packed, n_args, trim(dialect%openmp_flag()))
+            call argv_push(packed, n_args, '-o')
+            call argv_push(packed, n_args, trim(tmpdir)//'/test_omp')
             call argv_push(packed, n_args, trim(srcfile))
             call process_run_argv_logged('', packed, n_args, trim(tmpfile), &
                 .false., 120, exitcode)

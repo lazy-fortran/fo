@@ -1,8 +1,8 @@
 program test_native_contained_capture
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_int64_t, c_null_char, &
-        c_funptr, c_funloc
+        c_funptr
     use, intrinsic :: iso_fortran_env, only: input_unit, error_unit, output_unit
-    use fo_fs, only: fs_sleep_ms
+    use fo_fs, only: fs_sleep_ms, fs_is_windows, fs_path_is_absolute, fs_realpath
     use fo_process, only: argv_push, process_getcwd, process_getpid, &
         process_poll_pid, process_start_argv_logged, process_set_async_scope, &
         process_cancel_pid, process_exit
@@ -11,30 +11,26 @@ program test_native_contained_capture
     use fo_test_harness, only: string_list_t, process_result_t, list_add, &
         make_scratch, make_directory, write_text, read_text, file_exists, &
         environment_value, run_process, process_alive, poll_process, stop_sentinel, assert_true, &
-        assert_equal_integer, assert_equal_string, finish_assertions
+        assert_equal_integer, assert_equal_string, finish_assertions, spawn_unowned_process
+    use fo_test_os_link, only: test_os_initialize
     use fo_test_json, only: json_value_t, json_parse, json_member, json_string_value
     use fo_test_process_identity, only: mcp_process_start_time, &
-        mcp_process_identity_running
+        mcp_process_identity_running, mcp_kill_owned_tree
     implicit none
 
     interface
-        integer(c_int) function c_fork() bind(C, name='fork')
-            import :: c_int
-        end function c_fork
-
-        integer(c_int) function c_kill(pid, signal_number) bind(C, name='kill')
+        integer(c_int) function c_kill(pid, signal_number) bind(C, name='fo_test_signal')
             import :: c_int
             integer(c_int), value :: pid, signal_number
         end function c_kill
+        integer(c_int) function c_ignore_term() bind(C, name='fo_test_ignore_term')
+            import :: c_int
+        end function c_ignore_term
+        integer(c_int) function c_terminate_self() bind(C, name='fo_test_terminate_self')
+            import :: c_int
+        end function c_terminate_self
 
-        function c_signal(number, handler) bind(C, name='signal') result(previous)
-            import :: c_int, c_funptr
-            integer(c_int), value :: number
-            type(c_funptr), value :: handler
-            type(c_funptr) :: previous
-        end function c_signal
-
-        integer(c_int) function c_setenv(name, value, overwrite) bind(C, name='setenv')
+        integer(c_int) function c_setenv(name, value, overwrite) bind(C, name='fo_test_setenv')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: name(*), value(*)
             integer(c_int), value :: overwrite
@@ -61,15 +57,21 @@ program test_native_contained_capture
     integer :: status
     integer(c_int) :: containment_required
 
+    status = test_os_initialize()
+    if (status /= 162) error stop 'cannot initialize native binary test IO'
     call get_command_argument(0, executable)
     call process_getcwd(cwd, status)
-    if (index(trim(executable), '/') == 0) executable = trim(cwd)//'/'//trim(executable)
+    if (.not. fs_path_is_absolute(trim(executable))) executable = trim(cwd)//'/'//trim(executable)
     call get_command_argument(1, mode)
     select case (trim(mode))
     case ('--io-helper')
         call io_helper()
     case ('--signal-helper')
         call signal_helper()
+    case ('--orphan-intermediate')
+        call orphan_intermediate()
+    case ('--orphan-leaf')
+        call orphan_leaf()
     case ('--timeout-helper')
         call timeout_helper()
     case ('--async-exit-helper')
@@ -110,7 +112,7 @@ contains
         driver = environment_value('FO_BIN')
         call assert_true(len(driver) > 1, 'receives a pinned FO_BIN')
         if (len(driver) > 1) then
-            call assert_true(driver(1:1) == '/', 'FO_BIN is absolute')
+            call assert_true(fs_path_is_absolute(driver), 'FO_BIN is absolute')
             call assert_true(file_exists(driver), 'pinned FO_BIN exists')
         end if
         state_root = trim(root)//'/gremlin-state'
@@ -201,8 +203,7 @@ contains
                 'async scope owner acquisition failed: '//trim(message)
             call process_exit(70)
         end if
-        write(pid_text, '(i0)') process_getpid()
-        call write_text(trim(root)//'/outer.pid', trim(pid_text))
+        call write_identity(trim(root)//'/outer.pid', process_getpid())
         call process_set_async_scope(session%state_dir, session%owner_pid, &
             session%owner_start, ierr)
         if (ierr /= 0) then
@@ -244,12 +245,12 @@ contains
         descendant_pid = read_pid(trim(root)//'/descendant.pid')
         target_pid = read_pid(trim(root)//'/target.pid')
         monitor_pid = read_pid(trim(root)//'/timeout-monitor.pid')
-        call stop_exact(sentinel_pid)
-        call stop_exact(descendant_pid)
-        call stop_exact(target_pid)
-        call stop_exact(monitor_pid)
-        call stop_exact(read_pid(trim(root)//'/io-monitor.pid'))
-        call stop_exact(read_pid(trim(root)//'/signal-monitor.pid'))
+        call stop_exact(trim(root)//'/sentinel.pid')
+        call stop_exact(trim(root)//'/descendant.pid')
+        call stop_exact(trim(root)//'/target.pid')
+        call stop_exact(trim(root)//'/timeout-monitor.pid')
+        call stop_exact(trim(root)//'/io-monitor.pid')
+        call stop_exact(trim(root)//'/signal-monitor.pid')
         call gremlin_session_release(session, ierr, message)
         call assert_equal_integer(ierr, 0, 'releases the async owner session')
         call assert_true(done, 'reaps contained capture child')
@@ -282,8 +283,7 @@ contains
         type(json_value_t) :: cli_json
 
         contained_pid = process_getpid()
-        write(pid_text, '(i0)') contained_pid
-        call write_text(trim(root)//'/contained.pid', trim(pid_text))
+        call write_identity(trim(root)//'/contained.pid', contained_pid)
         sentinel_pid = int(c_spawn_same_group_sentinel())
         call assert_true(sentinel_pid > 0, 'starts unrelated same-group sentinel')
         sentinel_running = .false.
@@ -292,8 +292,7 @@ contains
             sentinel_running = sentinel_status == 999
         end if
         call assert_true(sentinel_running, 'same-group sentinel is initially running')
-        write(pid_text, '(i0)') sentinel_pid
-        call write_text(trim(root)//'/sentinel.pid', trim(pid_text))
+        call write_identity(trim(root)//'/sentinel.pid', sentinel_pid)
 
         containment_required = c_containment_required()
         if (c_host_is_linux() == 1) then
@@ -317,8 +316,7 @@ contains
             trim(root)//'/async-exit.log', async_pid, async_start_error)
         call assert_true(async_start_error == 0 .and. async_pid > 0, &
             'starts an async command through the contained monitor')
-        write(pid_text, '(i0)') async_pid
-        call write_text(trim(root)//'/async-monitor.pid', trim(pid_text))
+        call write_identity(trim(root)//'/async-monitor.pid', async_pid)
         async_done = .false.
         async_exit = -1
         if (async_start_error == 0 .and. async_pid > 0) then
@@ -361,8 +359,7 @@ contains
             trim(root)//'/async-timeout.log', async_pid, async_start_error)
         call assert_true(async_start_error == 0 .and. async_pid > 0, &
             'starts a contained async tree for cancellation')
-        write(pid_text, '(i0)') async_pid
-        call write_text(trim(root)//'/async-cancel-monitor.pid', trim(pid_text))
+        call write_identity(trim(root)//'/async-cancel-monitor.pid', async_pid)
         do async_attempt = 1, 200
             if (file_exists(trim(root)//'/async-descendant.ready')) exit
             call fs_sleep_ms(10)
@@ -425,8 +422,7 @@ contains
         if (cli_owner_pid > 0) cli_owner_start = mcp_process_start_time(cli_owner_pid)
         call assert_true(cli_owner_start > 0_c_int64_t, &
             'public session owner has a recorded process birth identity')
-        write(pid_text, '(i0)') cli_owner_pid
-        call write_text(trim(root)//'/public-owner.pid', trim(pid_text))
+        call write_identity(trim(root)//'/public-owner.pid', cli_owner_pid)
         cli_owner_live = cli_owner_pid > 0 .and. cli_owner_start > 0_c_int64_t
         if (cli_owner_live) cli_owner_live = &
             mcp_process_identity_running(cli_owner_pid, cli_owner_start)
@@ -520,8 +516,7 @@ contains
         call assert_equal_string(result%stderr, 'stderr:capture-input'//new_line('a'), &
             'captures child stderr separately')
         monitor_pid = result%process_id
-        write(pid_text, '(i0)') monitor_pid
-        call write_text(trim(root)//'/io-monitor.pid', trim(pid_text))
+        call write_identity(trim(root)//'/io-monitor.pid', monitor_pid, result%process_start_time)
 
         args = string_list_t()
         call list_add(args, trim(executable))
@@ -529,11 +524,14 @@ contains
         call run_process(args, trim(root), result, timeout_ms=5000)
         call assert_true(.not. result%runner_failed .and. result%reaped, &
             'signal helper starts and is reaped')
-        call assert_equal_integer(result%term_signal, 15, &
-            'preserves target termination signal')
+        if (fs_is_windows()) then
+            call assert_equal_integer(result%exit_code, 143, 'preserves native forced process exit code')
+            call assert_equal_integer(result%term_signal, 0, 'native exit does not invent a POSIX signal')
+        else
+            call assert_equal_integer(result%term_signal, 15, 'preserves target termination signal')
+        end if
         monitor_pid = result%process_id
-        write(pid_text, '(i0)') monitor_pid
-        call write_text(trim(root)//'/signal-monitor.pid', trim(pid_text))
+        call write_identity(trim(root)//'/signal-monitor.pid', monitor_pid, result%process_start_time)
 
         args = string_list_t()
         call list_add(args, trim(executable))
@@ -548,8 +546,7 @@ contains
         call assert_true(result%timed_out .and. result%reaped, &
             'timeout cleans and reaps the capture monitor')
         monitor_pid = result%process_id
-        write(pid_text, '(i0)') monitor_pid
-        call write_text(trim(root)//'/timeout-monitor.pid', trim(pid_text))
+        call write_identity(trim(root)//'/timeout-monitor.pid', monitor_pid, result%process_start_time)
         call assert_true(file_exists(trim(root)//'/descendant.ready'), &
             'TERM-resistant descendant reached its ready marker')
         call assert_true(file_exists(trim(root)//'/descendant.heartbeat'), &
@@ -611,7 +608,7 @@ contains
 
     subroutine signal_helper()
         integer(c_int) :: rc
-        rc = c_kill(int(process_getpid(), c_int), 15_c_int)
+        rc = c_terminate_self()
         if (rc /= 0) call process_exit(81)
         call process_exit(82)
     end subroutine signal_helper
@@ -637,36 +634,22 @@ contains
     end function seccomp_mode
 
     subroutine timeout_helper()
-        character(len=4096) :: target_path, descendant_path, ready_path, heartbeat_path
-        integer(c_int) :: first, second
-        integer :: pid, attempt
+        character(len=4096) :: target_path, ready_path, descendant_path, heartbeat_path
         character(len=32) :: pid_text
-        type(c_funptr) :: previous
-
+        integer :: child, attempt
+        type(string_list_t) :: args
         call get_command_argument(2, target_path)
         call get_command_argument(3, descendant_path)
         call get_command_argument(4, ready_path)
         call get_command_argument(5, heartbeat_path)
-        pid = process_getpid()
-        write(pid_text, '(i0)') pid
-        call write_text(trim(target_path), trim(pid_text))
-        first = c_fork()
-        if (first < 0_c_int) call process_exit(83)
-        if (first == 0_c_int) then
-            second = c_fork()
-            if (second < 0_c_int) call process_exit(84)
-            if (second > 0_c_int) call process_exit(0)
-            previous = c_signal(15_c_int, c_funloc(ignore_term))
-            pid = process_getpid()
-            write(pid_text, '(i0)') pid
-            call write_text(trim(descendant_path), trim(pid_text))
-            call write_text(trim(ready_path), 'ready')
-            call write_text(trim(heartbeat_path), 'started'//new_line('a'))
-            do
-                call append_text(trim(heartbeat_path), 'beat'//new_line('a'))
-                call fs_sleep_ms(20)
-            end do
-        end if
+        call write_identity(trim(target_path), process_getpid())
+        call list_add(args, trim(executable))
+        call list_add(args, '--orphan-intermediate')
+        call list_add(args, trim(descendant_path))
+        call list_add(args, trim(ready_path))
+        call list_add(args, trim(heartbeat_path))
+        call spawn_unowned_process(args, trim(cwd), child)
+        if (child <= 0) call process_exit(83)
         do attempt = 1, 200
             if (file_exists(trim(ready_path))) exit
             call fs_sleep_ms(10)
@@ -677,32 +660,90 @@ contains
         end do
     end subroutine timeout_helper
 
-    subroutine stop_exact(pid)
-        integer, intent(in) :: pid
+    subroutine orphan_intermediate()
+        character(len=4096) :: value
+        type(string_list_t) :: args
+        integer :: child, i
+        call list_add(args, trim(executable))
+        call list_add(args, '--orphan-leaf')
+        do i = 2, 4
+            call get_command_argument(i, value)
+            call list_add(args, trim(value))
+        end do
+        call spawn_unowned_process(args, trim(cwd), child)
+        if (child <= 0) call process_exit(84)
+        call process_exit(0)
+    end subroutine orphan_intermediate
+
+    subroutine orphan_leaf()
+        character(len=4096) :: descendant_path, ready_path, heartbeat_path
+        character(len=32) :: pid_text
         integer(c_int) :: rc
-        integer :: attempt
-        if (pid <= 0) return
-        if (.not. process_alive(pid)) return
-        rc = c_kill(int(pid, c_int), 15_c_int)
-        do attempt = 1, 100
-            if (.not. process_alive(pid)) return
-            call fs_sleep_ms(10)
+        call get_command_argument(2, descendant_path)
+        call get_command_argument(3, ready_path)
+        call get_command_argument(4, heartbeat_path)
+        rc = c_ignore_term()
+        if (rc /= 0) call process_exit(84)
+        call write_identity(trim(descendant_path), process_getpid())
+        call write_text(trim(heartbeat_path), 'started'//new_line('a'))
+        call write_text(trim(ready_path), 'ready')
+        do
+            call append_text(trim(heartbeat_path), 'beat'//new_line('a'))
+            call fs_sleep_ms(20)
         end do
-        rc = c_kill(int(pid, c_int), 9_c_int)
-        do attempt = 1, 100
-            if (.not. process_alive(pid)) return
-            call fs_sleep_ms(10)
-        end do
+    end subroutine orphan_leaf
+
+    subroutine write_identity(path, pid, observed_birth)
+        character(len=*), intent(in) :: path
+        integer, intent(in) :: pid
+        integer(c_int64_t), optional, intent(in) :: observed_birth
+        character(len=96) :: text
+        integer(c_int64_t) :: birth
+        birth = 0
+        if (present(observed_birth)) then
+            birth = observed_birth
+        else if (pid > 0) then
+            birth = mcp_process_start_time(pid)
+        end if
+        write(text, '(i0,1x,i0)') pid, birth
+        call write_text(path, trim(text))
+    end subroutine write_identity
+
+    subroutine read_identity(path, pid, birth)
+        character(len=*), intent(in) :: path
+        integer, intent(out) :: pid
+        integer(c_int64_t), intent(out) :: birth
+        integer :: unit, ios
+        pid = -1
+        birth = 0
+        open(newunit=unit, file=path, status='old', action='read', iostat=ios)
+        if (ios /= 0) return
+        read(unit, *, iostat=ios) pid, birth
+        close(unit)
+        if (ios /= 0) then
+            pid = -1
+            birth = 0
+        end if
+    end subroutine read_identity
+
+    subroutine stop_exact(path)
+        character(len=*), intent(in) :: path
+        integer :: pid, status
+        integer(c_int64_t) :: birth
+        call read_identity(path, pid, birth)
+        if (pid <= 0 .or. birth <= 0) return
+        if (.not. mcp_process_identity_running(pid, birth)) return
+        call mcp_kill_owned_tree(pid, birth, status)
     end subroutine stop_exact
 
     subroutine assert_pid_absent(path, label)
         character(len=*), intent(in) :: path, label
         integer :: pid
-        pid = read_pid(path)
-        call assert_true(pid > 0, label//' (PID was recorded)')
-        if (pid > 0) then
-            call assert_true(.not. process_alive(pid), label)
-        end if
+        integer(c_int64_t) :: birth
+        call read_identity(path, pid, birth)
+        call assert_true(pid > 0 .and. birth > 0, label//' (exact process identity was recorded)')
+        if (pid > 0 .and. birth > 0) &
+            call assert_true(.not. mcp_process_identity_running(pid, birth), label)
     end subroutine assert_pid_absent
 
     integer function read_pid(path) result(pid)
@@ -728,8 +769,5 @@ contains
         if (io_status /= 0) call process_exit(87)
     end subroutine append_text
 
-    subroutine ignore_term(signal_number) bind(C)
-        integer(c_int), value :: signal_number
-    end subroutine ignore_term
 
 end program test_native_contained_capture

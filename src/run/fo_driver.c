@@ -13,6 +13,12 @@
 #include <time.h>
 #include <unistd.h>
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#include "fx_win_store.h"
+#include "fo_driver_utf8.h"
+#endif
+#include "../util/fo_private_path.h"
+
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <mach-o/fat.h>
@@ -153,7 +159,24 @@ static int fo_matches_loaded_macos_image(int fd) {
 #endif
 
 static int fo_open_running_image(void) {
-#if defined(__linux__)
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    wchar_t wide[32768];
+    char *path;
+    int fd;
+    DWORD length = GetModuleFileNameW(NULL, wide, (DWORD)(sizeof(wide) / sizeof(*wide)));
+    if (!length || length >= sizeof(wide) / sizeof(*wide)) {
+        if (length) errno = ENAMETOOLONG;
+        else fx_win32_errno(GetLastError());
+        return -1;
+    }
+    path = fx_win32_utf8(wide);
+    if (!path) { fx_win32_errno(GetLastError()); return -1; }
+    /* Windows keeps an image section on the executable while it runs. Open
+       the original path at startup and retain the handle for later pinning. */
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    free(path);
+    return fd;
+#elif defined(__linux__)
     return open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
 #elif defined(__APPLE__)
     char local_path[PATH_MAX];
@@ -202,8 +225,11 @@ int fo_c_driver_image_init(void) {
     if (fo_running_image_fd >= 0) return 0;
     fd = fo_open_running_image();
     if (fd < 0) return -1;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        (st.st_mode & 0111) == 0) {
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)
+#if !defined(_WIN32) || defined(__CYGWIN__)
+        || (st.st_mode & 0111) == 0
+#endif
+        ) {
         close(fd);
         errno = ENOEXEC;
         return -1;
@@ -217,6 +243,13 @@ int fo_c_driver_image_init(void) {
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((constructor))
 static void fo_driver_capture_at_startup(void) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    /* JSON-RPC Content-Length counts bytes; CRT text translation must not
+       insert carriage returns or treat payload byte 0x1a as end-of-file. */
+    if (_fileno(stdin) >= 0) (void)_setmode(_fileno(stdin), _O_BINARY);
+    if (_fileno(stdout) >= 0) (void)_setmode(_fileno(stdout), _O_BINARY);
+    if (_fileno(stderr) >= 0) (void)_setmode(_fileno(stderr), _O_BINARY);
+#endif
     (void)fo_c_driver_image_init();
 }
 #endif
@@ -228,11 +261,20 @@ static int fo_open_private_root(const char *root) {
     if (root == NULL || root[0] == '\0') return -1;
     if (mkdir(root, 0700) != 0 && errno != EEXIST) return -1;
     if (lstat(root, &st) != 0 || !S_ISDIR(st.st_mode) ||
-        st.st_uid != geteuid() || (st.st_mode & 0077) != 0) {
+        !fo_private_path(root)
+#if !defined(_WIN32) || defined(__CYGWIN__)
+        || (st.st_mode & 0077) != 0
+#endif
+        ) {
         errno = EPERM;
         return -1;
     }
     fd = open(root, O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (fd >= 0 && !fo_private_fd(fd)) {
+        close(fd); errno = EPERM; return -1;
+    }
+#endif
     return fd;
 }
 
@@ -361,7 +403,16 @@ int fo_c_driver_publish(const char *root, const char *stage,
         return -1;
     root_fd = fo_open_private_root(root);
     if (root_fd < 0) return -1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    int stage_fd = openat(root_fd, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int linked = stage_fd < 0 ? -1 : fx_win_link_fd(stage_fd, root_fd, digest);
+    int link_error = errno;
+    if (stage_fd >= 0) close(stage_fd);
+    errno = link_error;
+    if (linked == 0) {
+#else
     if (linkat(root_fd, leaf, root_fd, digest, 0) == 0) {
+#endif
         if (unlinkat(root_fd, leaf, 0) == 0 && fsync(root_fd) == 0) {
             strcpy(final_path, full);
             status = 0;
@@ -393,13 +444,19 @@ int fo_c_driver_validate_root(const char *root) {
     int fd;
 
     if (root == NULL || root[0] == '\0' || lstat(root, &st) != 0 ||
-        !S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
-        (st.st_mode & 0077) != 0) {
+        !S_ISDIR(st.st_mode) || !fo_private_path(root)
+#if !defined(_WIN32) || defined(__CYGWIN__)
+        || (st.st_mode & 0077) != 0
+#endif
+        ) {
         errno = EPERM;
         return -1;
     }
     fd = open(root, O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
     if (fd < 0) return -1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (!fo_private_fd(fd)) { close(fd); errno = EPERM; return -1; }
+#endif
     close(fd);
     return 0;
 }
@@ -409,11 +466,24 @@ int fo_c_driver_validate_root(const char *root) {
 int fo_c_driver_validate_pin(const char *path, long long *size) {
     struct stat st;
     if (path == NULL || size == NULL || lstat(path, &st) != 0 ||
-        !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
-        (st.st_mode & 0222) != 0 || (st.st_mode & 0111) == 0) {
+        !S_ISREG(st.st_mode) || !fo_private_path(path) ||
+        (st.st_mode & 0222) != 0
+#if !defined(_WIN32) || defined(__CYGWIN__)
+        || (st.st_mode & 0111) == 0
+#endif
+        ) {
         errno = EPERM;
         return -1;
     }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    wchar_t *wide = fx_win32_path(path);
+    DWORD kind = 0;
+    if (!wide) return -1;
+    int executable = GetBinaryTypeW(wide, &kind) &&
+                     (kind == SCS_32BIT_BINARY || kind == SCS_64BIT_BINARY);
+    free(wide);
+    if (!executable) { errno = ENOEXEC; return -1; }
+#endif
     *size = (long long)st.st_size;
     return 0;
 }

@@ -3,6 +3,10 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#include "fx_win_store.h"
+#endif
+
 /* NUL-separated immediate version directories. Never silently truncate. */
 int fo_c_registry_versions(const char *path, char *out, int cap) {
     DIR *directory = opendir(path);

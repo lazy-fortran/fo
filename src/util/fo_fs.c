@@ -12,13 +12,57 @@
 #include <errno.h>
 #include <limits.h>
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#include "fx_win_store.h"
+#endif
+
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
 
 static int fo_has(const char *s) { return s != NULL && s[0] != '\0'; }
 
+int fo_c_is_windows(void) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+int fo_c_temp_directory(char *out, int capacity) {
+    if (out == NULL || capacity <= 0) { errno = EINVAL; return -1; }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    typedef DWORD (WINAPI *temp_path_fn)(DWORD, wchar_t *);
+    temp_path_fn path_fn = (temp_path_fn)(void *)GetProcAddress(
+        GetModuleHandleW(L"kernel32.dll"), "GetTempPath2W");
+    wchar_t wide[32768];
+    DWORD length = path_fn ? path_fn(32768, wide) : GetTempPathW(32768, wide);
+    if (!length || length >= 32768) {
+        if (length) errno = ENAMETOOLONG;
+        else fx_win32_errno(GetLastError());
+        return -1;
+    }
+    char *path = fx_win32_utf8(wide);
+    if (!path) return fx_win32_errno(GetLastError());
+    size_t size = strlen(path);
+    if (size >= (size_t)capacity) { free(path); errno = ENAMETOOLONG; return -1; }
+    for (char *p = path; *p; ++p) if (*p == '\\') *p = '/';
+    memcpy(out, path, size + 1);
+    free(path);
+#else
+    if (capacity < 9) { errno = ENAMETOOLONG; return -1; }
+    memcpy(out, "/var/tmp", 9);
+#endif
+    return 0;
+}
+
 int fo_c_realpath(const char *path, char *resolved, int capacity) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (path == NULL || resolved == NULL || capacity <= 0) return EINVAL;
+    if (fx_win_resolve_root(path, resolved, (size_t)capacity) != 0) return errno;
+    return 0;
+#else
     char *canonical;
     size_t length;
     if (path == NULL || resolved == NULL || capacity <= 0) return EINVAL;
@@ -32,6 +76,7 @@ int fo_c_realpath(const char *path, char *resolved, int capacity) {
     memcpy(resolved, canonical, length + 1);
     free(canonical);
     return 0;
+#endif
 }
 
 /* Recursively delete a file or directory tree. Missing path is success
@@ -53,7 +98,11 @@ int fo_c_rm_rf(const char *path) {
 
     dir = opendir(path);
     if (dir == NULL) return -1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (
+#else
     if (st.st_uid == geteuid() &&
+#endif
         ((st.st_mode & S_IWUSR) == 0 || (st.st_mode & S_IXUSR) == 0) &&
         fchmod(dirfd(dir), st.st_mode | S_IWUSR | S_IXUSR) != 0) {
         int chmod_error = errno;
@@ -102,6 +151,10 @@ int fo_c_rm_file(const char *path) {
 
 /* mkdir -p: create path and all missing parents. */
 int fo_c_mkdir_p(const char *path) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (!fo_has(path)) { errno = EINVAL; return -1; }
+    return fx_win_mkdirs(path, 0);
+#else
     char clean[PATH_MAX];
     char parent[PATH_MAX];
     char *slash;
@@ -127,6 +180,7 @@ int fo_c_mkdir_p(const char *path) {
     }
     if (mkdir(clean, 0777) != 0 && errno != EEXIST) return -1;
     return 0;
+#endif
 }
 
 /* Delete every regular file under root whose name ends with suffix. When
@@ -188,7 +242,7 @@ static int fo_directory_contains(const char *path, const char *needle) {
     needle_len = strlen(needle);
     match = path;
     while ((match = strstr(match, needle)) != NULL) {
-        if (match + needle_len <= last_slash) return 1;
+        if (match + needle_len <= last_slash + 1) return 1;
         match++;
     }
     return 0;
@@ -200,7 +254,8 @@ static int fo_directory_contains(const char *path, const char *needle) {
    if the buffer overflows or a hard error occurs. Replaces a find pipeline. */
 static int fo_collect_rec(const char *root, const char *infix,
                           const char *suffix, const char *path_needle,
-                          int recursive, char *out, int cap, int *used) {
+                          int recursive, char *out, int cap, int *used,
+                          int reject_aliases) {
     DIR *dir;
     struct dirent *ent;
     char child[PATH_MAX];
@@ -208,22 +263,42 @@ static int fo_collect_rec(const char *root, const char *infix,
     size_t nlen, slen, plen;
     int count = 0, sub;
 
+    if (reject_aliases) {
+        if (lstat(root, &st) != 0) return (errno == ENOENT) ? 0 : -1;
+        if (S_ISLNK(st.st_mode)) return -2;
+    }
     dir = opendir(root);
-    if (dir == NULL) return (errno == ENOENT) ? 0 : 0;
+    if (dir == NULL) return (errno == ENOENT) ? 0 : -1;
     slen = (suffix != NULL) ? strlen(suffix) : 0;
-    while ((ent = readdir(dir)) != NULL) {
+    for (;;) {
+        errno = 0;
+        ent = readdir(dir);
+        if (ent == NULL) {
+            int read_error = errno;
+            closedir(dir);
+            return read_error ? -1 : count;
+        }
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
             continue;
         if (snprintf(child, sizeof(child), "%s/%s", root, ent->d_name) >=
             (int)sizeof(child)) {
-            continue;
+            closedir(dir);
+            return -1;
         }
-        if (lstat(child, &st) != 0) continue;
+        if (lstat(child, &st) != 0) {
+            if (errno == ENOENT) continue;
+            closedir(dir);
+            return -1;
+        }
+        if (reject_aliases && S_ISLNK(st.st_mode)) {
+            closedir(dir);
+            return -2;
+        }
         if (S_ISDIR(st.st_mode)) {
             if (!recursive) continue;
             sub = fo_collect_rec(child, infix, suffix, path_needle, recursive,
-                                 out, cap, used);
-            if (sub < 0) { closedir(dir); return -1; }
+                                 out, cap, used, reject_aliases);
+            if (sub < 0) { closedir(dir); return sub; }
             count += sub;
             continue;
         }
@@ -240,17 +315,15 @@ static int fo_collect_rec(const char *root, const char *infix,
         *used += (int)plen + 1;
         count++;
     }
-    closedir(dir);
-    return count;
 }
 
 int fo_c_collect_files(const char *root, const char *infix, const char *suffix,
                        const char *path_needle, int recursive, char *out,
-                       int cap) {
+                       int cap, int reject_aliases) {
     int used = 0;
     if (!fo_has(root)) return 0;
     return fo_collect_rec(root, infix, suffix, path_needle, recursive, out, cap,
-                          &used);
+                          &used, reject_aliases);
 }
 
 /* List direct dependency checkouts without traversing their Git object stores.
@@ -308,8 +381,16 @@ int fo_c_mkdir_excl(const char *path) {
 /* Return 1 if a process with this pid exists, 0 otherwise (kill -0). */
 int fo_c_pid_alive(int pid) {
     if (pid <= 0) return 0;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (!process) return GetLastError() == ERROR_ACCESS_DENIED;
+    DWORD status = WaitForSingleObject(process, 0);
+    CloseHandle(process);
+    return status == WAIT_TIMEOUT;
+#else
     if (kill((pid_t)pid, 0) == 0) return 1;
     return (errno == EPERM) ? 1 : 0;
+#endif
 }
 
 /* File modification fingerprint for cache "outputs already match" checks:
@@ -460,6 +541,36 @@ int fo_c_tree_fingerprint(const char *root, int input_mode,
     return rc;
 }
 
+static int fo_executable_exists(const char *path) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    wchar_t *wide = fx_win32_wide(path);
+    DWORD attributes, binary_type;
+    if (!wide) return 0;
+    attributes = GetFileAttributesW(wide);
+    int executable = attributes != INVALID_FILE_ATTRIBUTES &&
+                     !(attributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                     GetBinaryTypeW(wide, &binary_type) &&
+                     (binary_type == SCS_32BIT_BINARY || binary_type == SCS_64BIT_BINARY);
+    free(wide);
+    return executable;
+#else
+    return access(path, X_OK) == 0;
+#endif
+}
+
+static int fo_resolve_executable(char *candidate, size_t capacity) {
+    if (fo_executable_exists(candidate)) return 0;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    size_t length = strlen(candidate);
+    if (length + 5 > capacity) return -1;
+    memcpy(candidate + length, ".exe", 5);
+    if (fo_executable_exists(candidate)) return 0;
+#else
+    (void)capacity;
+#endif
+    return -1;
+}
+
 int fo_c_find_executable(const char *command, char *out, int cap) {
     const char *path_env, *start, *end;
     char candidate[PATH_MAX];
@@ -467,9 +578,15 @@ int fo_c_find_executable(const char *command, char *out, int cap) {
 
     if (!fo_has(command) || out == NULL || cap <= 0) return -1;
     if (strpbrk(command, " \t\r\n") != NULL) return -1;
-    if (strchr(command, '/') != NULL) {
-        if (access(command, X_OK) != 0) return -1;
-        if (realpath(command, candidate) == NULL) return -1;
+    if (strchr(command, '/') != NULL
+#if defined(_WIN32) && !defined(__CYGWIN__)
+        || strchr(command, '\\') != NULL || strchr(command, ':') != NULL
+#endif
+        ) {
+        if (strlen(command) >= sizeof(candidate)) return -1;
+        strcpy(candidate, command);
+        if (fo_resolve_executable(candidate, sizeof(candidate)) != 0) return -1;
+        if (realpath(candidate, candidate) == NULL) return -1;
         if ((int)strlen(candidate) + 1 > cap) return -1;
         strcpy(out, candidate);
         return 0;
@@ -478,7 +595,13 @@ int fo_c_find_executable(const char *command, char *out, int cap) {
     if (path_env == NULL) return -1;
     start = path_env;
     while (1) {
-        end = strchr(start, ':');
+        end = strchr(start,
+#if defined(_WIN32) && !defined(__CYGWIN__)
+                     ';'
+#else
+                     ':'
+#endif
+                    );
         dir_len = (end != NULL) ? (size_t)(end - start) : strlen(start);
         if (dir_len == 0) {
             if (snprintf(candidate, sizeof(candidate), "./%s", command) >=
@@ -489,7 +612,7 @@ int fo_c_find_executable(const char *command, char *out, int cap) {
                          start, command) >= (int)sizeof(candidate))
                 return -1;
         }
-        if (access(candidate, X_OK) == 0) {
+        if (fo_resolve_executable(candidate, sizeof(candidate)) == 0) {
             char resolved[PATH_MAX];
             if (realpath(candidate, resolved) == NULL) return -1;
             if ((int)strlen(resolved) + 1 > cap) return -1;
@@ -505,11 +628,15 @@ int fo_c_find_executable(const char *command, char *out, int cap) {
 #include <time.h>
 /* Sleep for the given milliseconds (no shell `sleep`). */
 void fo_c_sleep_ms(int ms) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (ms > 0) Sleep((DWORD)ms);
+#else
     struct timespec ts;
     if (ms <= 0) return;
     ts.tv_sec = ms / 1000;
     ts.tv_nsec = (long)(ms % 1000) * 1000000L;
     nanosleep(&ts, NULL);
+#endif
 }
 
 /* Recursively collect the unique parent directories of every *.mod file under

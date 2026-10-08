@@ -18,9 +18,18 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if !defined(_WIN32) || defined(__CYGWIN__)
 #include <sys/wait.h>
+#endif
 #include <time.h>
 #include <unistd.h>
+
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#include "fx_win_store.h"
+#endif
+#include "../util/fo_private_path.h"
+#include "../util/fo_windows_env.h"
+#include "../util/fo_path.h"
 
 #ifdef __APPLE__
 #include <libproc.h>
@@ -28,6 +37,9 @@
 #endif
 
 static int make_dirs(const char *path) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    return fx_win_mkdirs_mode(path, 0700, 0) == 0 ? 0 : errno;
+#else
     char tmp[PATH_MAX];
     size_t n = strlen(path);
     if (n == 0 || n >= sizeof(tmp)) return ENAMETOOLONG;
@@ -40,6 +52,7 @@ static int make_dirs(const char *path) {
     }
     if (mkdir(tmp, 0700) != 0 && errno != EEXIST) return errno;
     return 0;
+#endif
 }
 
 static uint64_t hash_bytes(uint64_t h, const unsigned char *s) {
@@ -64,7 +77,7 @@ static int cleanup_view_scratch(const char *state_dir) {
     if (snprintf(views, sizeof(views), "%s/views", state_dir) >= (int)sizeof(views))
         return ENAMETOOLONG;
     if (lstat(views, &st) != 0) return errno == ENOENT ? 0 : errno;
-    if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) return EPERM;
+    if (!S_ISDIR(st.st_mode) || !fo_private_path(views)) return EPERM;
     directory = opendir(views);
     if (directory == NULL) return errno;
     for (;;) {
@@ -77,13 +90,13 @@ static int cleanup_view_scratch(const char *state_dir) {
             snprintf(scratch, sizeof(scratch), "%s/.fo-tmp", view) >=
             (int)sizeof(scratch)) { e = ENAMETOOLONG; break; }
         if (lstat(view, &st) != 0) { e = errno; break; }
-        if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) { e = EPERM; break; }
+        if (!S_ISDIR(st.st_mode) || !fo_private_path(view)) { e = EPERM; break; }
         if (lstat(scratch, &st) != 0) {
             if (errno == ENOENT) continue;
             e = errno;
             break;
         }
-        if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) { e = EPERM; break; }
+        if (!S_ISDIR(st.st_mode) || !fo_private_path(scratch)) { e = EPERM; break; }
         if (fo_c_rm_rf(scratch) != 0) { e = errno ? errno : EIO; break; }
     }
     if (closedir(directory) != 0 && e == 0) e = errno;
@@ -96,6 +109,9 @@ static int state_path(const char *project, const char *lane, char *out,
     char resolved[PATH_MAX];
     const char *base = getenv("FO_GREMLIN_STATE_DIR");
     if (!base || !*base) base = getenv("XDG_CACHE_HOME");
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (!base || !*base) base = getenv("LOCALAPPDATA");
+#endif
     char fallback[PATH_MAX];
     if (!base || !*base) {
         const char *home = getenv("HOME");
@@ -223,7 +239,29 @@ static void clear_stop(const char *dir) {
 }
 
 static int process_start(pid_t pid, char *out, size_t cap) {
-#ifdef __APPLE__
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    FILETIME creation, exit_time, kernel, user;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                                  FALSE, (DWORD)pid);
+    ULARGE_INTEGER born;
+    DWORD error;
+    if (!process) return GetLastError() == ERROR_ACCESS_DENIED ? EACCES : ESRCH;
+    if (WaitForSingleObject(process, 0) != WAIT_TIMEOUT) {
+        CloseHandle(process);
+        return ESRCH;
+    }
+    if (!GetProcessTimes(process, &creation, &exit_time, &kernel, &user)) {
+        error = GetLastError();
+        CloseHandle(process);
+        return error == ERROR_ACCESS_DENIED ? EACCES : EIO;
+    }
+    CloseHandle(process);
+    born.LowPart = creation.dwLowDateTime;
+    born.HighPart = creation.dwHighDateTime;
+    if (snprintf(out, cap, "%llu", (unsigned long long)born.QuadPart) >= (int)cap)
+        return ENAMETOOLONG;
+    return 0;
+#elif defined(__APPLE__)
     struct proc_bsdinfo info;
     int n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
     if (n != sizeof(info)) return ESRCH;
@@ -435,11 +473,11 @@ int fo_gremlin_session_retire_views(const char *dir, const char *session, int fd
     e = process_start(getpid(), current, sizeof(current));
     if (e != 0 || strcmp(current, start) != 0) return EPERM;
     if (lstat(dir, &st) != 0) return errno;
-    if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) return EPERM;
+    if (!S_ISDIR(st.st_mode) || !fo_private_path(dir)) return EPERM;
     if (snprintf(views, sizeof(views), "%s/views", dir) >= (int)sizeof(views))
         return ENAMETOOLONG;
     if (lstat(views, &st) != 0) return errno == ENOENT ? 0 : errno;
-    if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) return EPERM;
+    if (!S_ISDIR(st.st_mode) || !fo_private_path(views)) return EPERM;
     directory = opendir(views);
     if (directory == NULL) return errno;
     for (;;) {
@@ -459,7 +497,7 @@ int fo_gremlin_session_retire_views(const char *dir, const char *session, int fd
             e = errno;
             break;
         }
-        if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) {
+        if (!S_ISDIR(st.st_mode) || !fo_private_path(path)) {
             e = EPERM;
             break;
         }
@@ -469,7 +507,7 @@ int fo_gremlin_session_retire_views(const char *dir, const char *session, int fd
             break;
         }
         if (lstat(scratch, &st) == 0) {
-            if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) {
+            if (!S_ISDIR(st.st_mode) || !fo_private_path(scratch)) {
                 e = EPERM;
                 break;
             }
@@ -560,7 +598,9 @@ int fo_gremlin_session_stop_requested(const char *dir, const char *session) {
 int fo_gremlin_process_matches(int pid, const char *start) {
     char have[64];
     if (pid <= 0 || !start || !*start) return 0;
+#if !defined(_WIN32) || defined(__CYGWIN__)
     if (kill((pid_t)pid, 0) != 0 && errno != EPERM) return 0;
+#endif
     if (process_start((pid_t)pid, have, sizeof(have)) != 0) return 0;
     return strcmp(have, start) == 0;
 }
@@ -568,6 +608,9 @@ int fo_gremlin_process_matches(int pid, const char *start) {
 static int lease_dir(const char *kind, char *dir, size_t cap) {
     const char *base = getenv("FO_GREMLIN_STATE_DIR");
     if (!base || !*base) base = getenv("XDG_CACHE_HOME");
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (!base || !*base) base = getenv("LOCALAPPDATA");
+#endif
     char fallback[PATH_MAX];
     if (!base || !*base) {
         const char *home = getenv("HOME"); if (!home || !*home) return ENOENT;
@@ -655,6 +698,14 @@ int fo_gremlin_lease_acquire(const char *kind, int capacity, int *fdout, int *sl
 
 static int host_lease_base(char *base, size_t cap) {
     struct stat st;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    const char *local = getenv("LOCALAPPDATA");
+    if (!local || !*local) return ENOENT;
+    int n = snprintf(base, cap, "%s/fo/gremlin-host-admission", local);
+    if (n < 0 || n >= (int)cap) return ENAMETOOLONG;
+    int error = make_dirs(base);
+    if (error) return error;
+#else
     int n = snprintf(base, cap, "/var/tmp/fo-gremlin-admission-%lu",
                      (unsigned long)geteuid());
     if (n < 0 || n >= (int)cap) return ENAMETOOLONG;
@@ -663,9 +714,13 @@ static int host_lease_base(char *base, size_t cap) {
     } else if (errno != EEXIST) {
         return errno;
     }
+#endif
     if (lstat(base, &st) != 0) return errno;
-    if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
-        (st.st_mode & 0777) != 0700) return EPERM;
+    if (!S_ISDIR(st.st_mode) || !fo_private_path(base)
+#if !defined(_WIN32) || defined(__CYGWIN__)
+        || (st.st_mode & 0777) != 0700
+#endif
+        ) return EPERM;
     return 0;
 }
 
@@ -708,6 +763,10 @@ static int admission_read(int fd, struct admission_owner *owner) {
     return 0;
 }
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#include "fo_admission_windows.h"
+#endif
+
 static int admission_children_busy(const char *scope, int capacity) {
     char path[PATH_MAX];
     for (int i = 0; i < capacity; ++i) {
@@ -726,6 +785,7 @@ static int admission_children_busy(const char *scope, int capacity) {
 /* A guardian retains the original flock descriptions, not newly acquired
    pathname locks. Wrappers may close inherited FDs; owner death cannot release
    capacity while admitted descendants still hold their family reservations. */
+#if !defined(_WIN32) || defined(__CYGWIN__)
 static int admission_guard_path(int pid, const char *start, char *path,
                                 size_t cap) {
     char base[PATH_MAX], directory[PATH_MAX];
@@ -739,8 +799,13 @@ static int admission_guard_path(int pid, const char *start, char *path,
         return ENAMETOOLONG;
     return 0;
 }
+#endif
 
 int fo_gremlin_admission_is_guardian(int pid, const char *start) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    (void)pid; (void)start;
+    return 0; /* Native reservation records replace the Unix admission guardian. */
+#else
     char path[PATH_MAX];
     struct stat st;
     if (admission_guard_path(pid, start, path, sizeof(path)) != 0) return 0;
@@ -749,12 +814,14 @@ int fo_gremlin_admission_is_guardian(int pid, const char *start) {
     int active = flock(fd, LOCK_EX | LOCK_NB) != 0 &&
                  (errno == EAGAIN || errno == EWOULDBLOCK);
     active = active && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
-             st.st_uid == geteuid() && (st.st_mode & 0077) == 0 &&
+             fo_private_fd(fd) &&
              fo_gremlin_process_matches(pid, start);
     close(fd);
     return active;
+#endif
 }
 
+#if !defined(_WIN32) || defined(__CYGWIN__)
 static int admission_guard_close_fds(const int *fds, int weight, int ack, int marker) {
 #ifdef __linux__
     DIR *directory = opendir("/proc/self/fd");
@@ -775,8 +842,14 @@ static int admission_guard_close_fds(const int *fds, int weight, int ack, int ma
     return 0;
 }
 
+#endif
 static int admission_guard_start(const char *scope, const int *fds, int weight,
                                   int *guardian) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    (void)scope; (void)fds; (void)weight;
+    *guardian = 0;
+    return 0; /* Exact job drainage under the machine gate precedes every reuse. */
+#else
     int handshake[2];
     char owner_start[64], authority[PATH_MAX], state[PATH_MAX];
     pid_t owner = getpid();
@@ -862,6 +935,7 @@ static int admission_guard_start(const char *scope, const int *fds, int weight,
     if (e) { (void)waitpid(pid, NULL, 0); return e; }
     *guardian = (int)pid;
     return 0;
+#endif
 }
 
 int fo_gremlin_host_lease_close(int fd) {
@@ -875,12 +949,18 @@ static int admission_parent(const char *scope, uint64_t kind,
     struct stat st;
     if (snprintf(path, sizeof(path), "%s/authority", scope) >= (int)sizeof(path))
         return 0;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    char retired[PATH_MAX];
+    if (snprintf(retired, sizeof(retired), "%s/retired", scope) >= (int)sizeof(retired))
+        return 0;
+    if (lstat(retired, &st) == 0 || errno != ENOENT) return 0;
+#endif
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return 0;
     int active = flock(fd, LOCK_EX | LOCK_NB) != 0 &&
                  (errno == EAGAIN || errno == EWOULDBLOCK);
     int valid = active && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
-                st.st_uid == geteuid() && (st.st_mode & 0077) == 0 &&
+                fo_private_fd(fd) &&
                 admission_read(fd, owner) == 0 && owner->kind == kind &&
                 fo_c_process_owned_by_scope(owner->state, owner->pid, owner->start);
     close(fd);
@@ -908,14 +988,27 @@ static int admission_publish(const char *base, uint64_t kind, int weight,
     *authority = open(path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
     if (*authority < 0) { e = errno; goto failed; }
     if (flock(*authority, LOCK_EX | LOCK_NB) != 0) { e = errno; goto failed; }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    e = admission_bind_native_scope(scope, *authority);
+    if (e) goto failed;
+    state = getenv("FO_GREMLIN_PROCESS_SCOPE_DIR");
+    if (!state || !*state) { e = EIO; goto failed; }
+#endif
     n = snprintf(record, sizeof(record), "%ld %s %d %llx\n%s\n",
                  (long)getpid(), start, weight, (unsigned long long)kind,
                  state && *state ? state : "-");
     if (n < 0 || n >= (int)sizeof(record)) { e = ENAMETOOLONG; goto failed; }
     e = write_all(*authority, record, (size_t)n);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (!e && fsync(*authority) != 0) e = errno;
+    if (!e) e = sync_directory(scope);
+#endif
     if (e == 0 && setenv("FO_GREMLIN_ADMISSION_SCOPE", scope, 1) != 0) e = errno;
     if (e == 0) return 0;
 failed:
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (*authority >= 0) (void)admission_unbind_native_scope(*authority);
+#endif
     if (*authority >= 0) { close(*authority); *authority = -1; }
     fo_c_rm_rf(scope); scope[0] = '\0'; return e;
 }
@@ -923,8 +1016,21 @@ failed:
 int fo_gremlin_host_scope_retire(int *authority, int *guardian, const char *scope,
                                  const char *previous) {
     if (*authority < 0) return 0;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    HANDLE machine_gate = admission_machine_gate();
+    if (!machine_gate) return errno;
+    char base[PATH_MAX];
+    int recovered = host_lease_base(base, sizeof(base));
+    if (!recovered) recovered = admission_recover_records(base);
+    if (recovered) { admission_machine_unlock(machine_gate); return recovered; }
+#endif
     int gate = admission_gate(scope, 0);
-    if (gate < 0) return errno;
+    if (gate < 0) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+        admission_machine_unlock(machine_gate);
+#endif
+        return errno;
+    }
     struct admission_owner owner;
     int e = admission_read(*authority, &owner);
     char path[PATH_MAX];
@@ -932,8 +1038,16 @@ int fo_gremlin_host_scope_retire(int *authority, int *guardian, const char *scop
         >= (int)sizeof(path)) e = ENAMETOOLONG;
     /* Revocation and child admission share this gate. Existing children retain
        their upstream reservation; no new sibling can enter a closing scope. */
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (e == 0) e = atomic_write_file(scope, "retired", "1\n", 2);
+#else
     if (e == 0 && unlink(path) != 0 && errno != ENOENT) e = errno;
+#endif
     if (e == 0) e = admission_children_busy(scope, owner.weight);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (e == 0) e = admission_unbind_native_scope(*authority);
+    *guardian = 0;
+#else
     if (e == 0 && *guardian > 0) {
         pid_t done;
         do { done = waitpid((pid_t)*guardian, NULL, 0); }
@@ -941,6 +1055,7 @@ int fo_gremlin_host_scope_retire(int *authority, int *guardian, const char *scop
         if (done < 0 && errno != ECHILD) e = errno;
         else *guardian = 0;
     }
+#endif
     if (e == 0) {
         const char *current = getenv("FO_GREMLIN_ADMISSION_SCOPE");
         if (current && strcmp(current, scope) == 0) {
@@ -954,6 +1069,9 @@ int fo_gremlin_host_scope_retire(int *authority, int *guardian, const char *scop
         if (fo_c_rm_rf(scope) != 0) e = errno ? errno : EIO;
     }
     flock(gate, LOCK_UN); close(gate);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    admission_machine_unlock(machine_gate);
+#endif
     return e;
 }
 
@@ -965,10 +1083,19 @@ int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
     const char *hint = getenv("FO_GREMLIN_ADMISSION_SCOPE");
     struct admission_owner parent;
     int e = host_lease_base(base, sizeof(base)), gate = -1, delegated = 0;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    HANDLE machine_gate = NULL;
+#endif
     *authority = -1; *guardian = 0; scope[0] = '\0'; previous[0] = '\0';
     if (e) return e;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    machine_gate = admission_machine_gate();
+    if (!machine_gate) return errno;
+    e = admission_recover_records(base);
+    if (e) goto done;
+#endif
     if (hint && *hint) {
-        if (strlen(hint) >= (size_t)text_capacity) return ENAMETOOLONG;
+        if (strlen(hint) >= (size_t)text_capacity) { e = ENAMETOOLONG; goto done; }
         strcpy(previous, hint);
     }
     uint64_t h = hash_bytes(UINT64_C(1469598103934665603),
@@ -995,6 +1122,9 @@ int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
         if (e == 0) e = admission_guard_start(scope, fds, weight, guardian);
         if (e != 0) {
             if (*authority >= 0) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+                (void)admission_unbind_native_scope(*authority);
+#endif
                 close(*authority); *authority = -1;
                 (void)fo_c_rm_rf(scope); scope[0] = '\0';
                 if (*previous) (void)setenv("FO_GREMLIN_ADMISSION_SCOPE", previous, 1);
@@ -1007,6 +1137,9 @@ int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
     }
 done:
     if (gate >= 0) { flock(gate, LOCK_UN); close(gate); }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    admission_machine_unlock(machine_gate);
+#endif
     return e;
 }
 
@@ -1068,7 +1201,7 @@ static int generation_state_path(const char *root, char *dir, size_t cap,
     char resolved[PATH_MAX], parent[PATH_MAX], parent_real[PATH_MAX];
     const char *id, *slash;
     int e;
-    if (!root || root[0] != '/') return EINVAL;
+    if (!fo_path_is_absolute(root)) return EINVAL;
     slash = strrchr(root, '/');
     if (!slash || !valid_generation_id(slash + 1)) return EINVAL;
     if (realpath(root, resolved)) {
@@ -1341,7 +1474,7 @@ int fo_gremlin_generation_mark_release(const char *root, const char *store,
     char dir[PATH_MAX], canonical[PATH_MAX], guard[PATH_MAX], record[PATH_MAX + 128];
     int e = generation_state_path(root, dir, sizeof(dir), canonical, sizeof(canonical));
     if (e) return e;
-    if (!store || store[0] != '/' || !owner || strlen(owner) != 64) return EINVAL;
+    if (!fo_path_is_absolute(store) || !owner || strlen(owner) != 64) return EINVAL;
     for (const char *p = store; *p; ++p)
         if (*p == '\n' || *p == '\r') return EINVAL;
     for (const char *p = owner; *p; ++p)
@@ -1386,7 +1519,7 @@ int fo_gremlin_generation_pending_release(const char *root, char *store,
     end = strchr(separator, '\n');
     if (!end || end[1] != '\0') return EINVAL;
     *end = '\0';
-    if (strlen(separator) != 64 || record[0] != '/' ||
+    if (strlen(separator) != 64 || !fo_path_is_absolute(record) ||
         strlen(record) >= (size_t)store_cap ||
         strlen(separator) >= (size_t)owner_cap) return EINVAL;
     strcpy(store, record);

@@ -1,3 +1,6 @@
+#ifdef _WIN32
+#include "fo_process_windows.inc"
+#else
 #ifdef __APPLE__
 #ifndef _DARWIN_C_SOURCE
 #define _DARWIN_C_SOURCE 1
@@ -3596,3 +3599,4 @@ int fo_c_start_capture_monitor(const char *monitor_executable, const char *cwd,
     return -ENOTSUP;
 }
 #endif
+#endif /* !_WIN32 */

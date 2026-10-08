@@ -11,7 +11,7 @@ void fo_change_watch_error_text(int error, char *buffer, int capacity) {
     if (buffer == NULL || capacity <= 0) return;
     snprintf(buffer, (size_t)capacity, "%s (errno %d)", strerror(error), error);
 }
-#ifndef __APPLE__
+#if !defined(__APPLE__) && (!defined(_WIN32) || defined(__CYGWIN__))
 void fo_change_native_diagnostic(void *handle, char *buffer, int capacity) {
     (void)handle;
     if (buffer != NULL && capacity > 0) buffer[0] = 0;
@@ -19,10 +19,12 @@ void fo_change_native_diagnostic(void *handle, char *buffer, int capacity) {
 #endif
 
 
+#if !defined(_WIN32) || defined(__CYGWIN__)
 int fo_change_watch_is_dir(const char *path) {
     struct stat info;
     return path != NULL && stat(path, &info) == 0 && S_ISDIR(info.st_mode);
 }
+#endif
 
 /* Linux exposes reconciliation and errors that the pinned fx ABI discards.
  * Every directory is subscribed before enumeration; queued structural events
@@ -388,6 +390,8 @@ void fo_change_native_close(void *handle) {
     for (i = 0; i < w->nself; ++i) free(w->self[i].path);
     free(w->self); free(w->entries); free(w);
 }
+#elif defined(_WIN32) && !defined(__CYGWIN__)
+#include "fo_change_watch_windows.h"
 #elif !defined(__APPLE__)
 void *fo_change_native_open(int *error) { *error = 0; return NULL; }
 void *fo_change_native_open_diagnostic(int *error, char *diagnostic, int capacity) {

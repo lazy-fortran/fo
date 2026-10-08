@@ -1,60 +1,15 @@
 ! The tools/ar symlink re-enters the test executable in this mode. Fortran
-! owns listing mutations; POSIX calls only launch and capture the real archiver.
+! owns listing mutations; the shared harness captures the real native archiver.
 module fo_test_archive_fixture
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_ptr, c_loc, &
-        c_null_char, c_null_ptr
-    use, intrinsic :: iso_fortran_env, only: iostat_end, output_unit
+    use, intrinsic :: iso_fortran_env, only: iostat_end, output_unit, error_unit
+    use fo_process, only: process_getpid, process_exit
+    use fo_test_harness, only: string_list_t, process_result_t, list_add, run_process, write_text
     implicit none
     private
 
     integer, parameter :: MAX_LINE = 1024
     integer, parameter :: MAX_ARGUMENT = 16384
     public :: archive_fixture_main, archive_fixture_exit
-
-    interface
-        integer(c_int) function c_fork() bind(C, name='fork')
-            import :: c_int
-        end function c_fork
-
-        integer(c_int) function c_creat(path, mode) bind(C, name='creat')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: path(*)
-            integer(c_int), value :: mode
-        end function c_creat
-
-        integer(c_int) function c_dup2(old_descriptor, new_descriptor) &
-                bind(C, name='dup2')
-            import :: c_int
-            integer(c_int), value :: old_descriptor, new_descriptor
-        end function c_dup2
-
-        integer(c_int) function c_close(descriptor) bind(C, name='close')
-            import :: c_int
-            integer(c_int), value :: descriptor
-        end function c_close
-
-        integer(c_int) function c_execv(path, arguments) bind(C, name='execv')
-            import :: c_char, c_int, c_ptr
-            character(kind=c_char), intent(in) :: path(*)
-            type(c_ptr), intent(in) :: arguments(*)
-        end function c_execv
-
-        integer(c_int) function c_waitpid(pid, status, options) &
-                bind(C, name='waitpid')
-            import :: c_int
-            integer(c_int), value :: pid, options
-            integer(c_int), intent(out) :: status
-        end function c_waitpid
-
-        integer(c_int) function c_getpid() bind(C, name='getpid')
-            import :: c_int
-        end function c_getpid
-
-        subroutine c_exit(status) bind(C, name='_exit')
-            import :: c_int
-            integer(c_int), value :: status
-        end subroutine c_exit
-    end interface
 
 contains
 
@@ -108,7 +63,7 @@ contains
         if (argument_count < 2) return
         call get_command_argument(2, archive_path, status=argument_status)
         if (argument_status /= 0) return
-        write(pid_text, '(i0)') c_getpid()
+        write(pid_text, '(i0)') process_getpid()
         listing_path = trim(archive_path)//'.fo-fixture-listing.'//trim(pid_text)
         exit_code = run_native_ar(real_ar, listing_path)
         if (exit_code /= 0) then
@@ -128,72 +83,40 @@ contains
         integer, intent(in) :: exit_code
 
         flush (output_unit)
-        call c_exit(int(exit_code, c_int))
+        call process_exit(exit_code)
     end subroutine archive_fixture_exit
 
     integer function run_native_ar(real_ar, output_path) result(exit_code)
         character(len=*), intent(in) :: real_ar
         character(len=*), optional, intent(in) :: output_path
-        type(c_ptr), allocatable, target :: arguments(:)
-        character(kind=c_char), allocatable, target :: storage(:, :)
-        character(len=MAX_ARGUMENT) :: argument
-        integer, allocatable :: argument_lengths(:)
-        integer(c_int) :: child, output_descriptor, wait_status, waited
-        integer :: argument_count, maximum_length, argument_status
-        integer :: i, j, k, status
+        character(:), allocatable :: argument
+        type(string_list_t) :: command
+        type(process_result_t) :: result
+        integer :: i, length, status
 
         exit_code = 125
-        argument_count = command_argument_count()
-        allocate(argument_lengths(0:argument_count))
-        argument_lengths(0) = len_trim(real_ar)
-        maximum_length = argument_lengths(0)
-        do i = 1, argument_count
-            call get_command_argument(i, length=argument_lengths(i), &
-                status=argument_status)
-            if (argument_status /= 0 .or. argument_lengths(i) > MAX_ARGUMENT) return
-            maximum_length = max(maximum_length, argument_lengths(i))
+        call list_add(command, real_ar)
+        do i = 1, command_argument_count()
+            call get_command_argument(i, length=length, status=status)
+            if (status /= 0 .or. length > MAX_ARGUMENT) return
+            allocate(character(len=length) :: argument)
+            call get_command_argument(i, argument, status=status)
+            if (status /= 0) return
+            call list_add(command, argument)
+            deallocate(argument)
         end do
-        allocate(storage(maximum_length + 1, argument_count + 1))
-        allocate(arguments(argument_count + 2))
-        storage = c_null_char
-        do i = 0, argument_count
-            if (i == 0) then
-                argument = real_ar
-                j = len_trim(real_ar)
-            else
-                argument = ''
-                call get_command_argument(i, argument, status=argument_status)
-                if (argument_status /= 0) return
-                j = argument_lengths(i)
-            end if
-            do k = 1, j
-                storage(k, i + 1) = argument(k:k)
-            end do
-            arguments(i + 1) = c_loc(storage(1, i + 1))
-        end do
-        arguments(argument_count + 2) = c_null_ptr
-
-        child = c_fork()
-        if (child < 0_c_int) return
-        if (child == 0_c_int) then
-            if (present(output_path)) then
-                output_descriptor = c_creat(trim(output_path)//c_null_char, &
-                    384_c_int)
-                if (output_descriptor < 0_c_int) call c_exit(126_c_int)
-                status = c_dup2(output_descriptor, 1_c_int)
-                if (status < 0) call c_exit(126_c_int)
-                status = c_close(output_descriptor)
-                if (status < 0) call c_exit(126_c_int)
-            end if
-            status = c_execv(trim(real_ar)//c_null_char, arguments)
-            call c_exit(127_c_int)
-        end if
-        waited = c_waitpid(child, wait_status, 0_c_int)
-        if (waited /= child) return
-        if (iand(wait_status, 127_c_int) == 0_c_int) then
-            exit_code = int(ishft(wait_status, -8))
+        call run_process(command, '.', result)
+        if (result%runner_failed .or. .not. result%reaped) return
+        if (present(output_path)) then
+            call write_text(output_path, result%stdout)
         else
-            exit_code = 128 + int(iand(wait_status, 127_c_int))
+            write(output_unit, '(a)', advance='no') result%stdout
+        end if
+        write(error_unit, '(a)', advance='no') result%stderr
+        if (result%term_signal > 0) then
+            exit_code = 128 + result%term_signal
+        else
+            exit_code = result%exit_code
         end if
     end function run_native_ar
 

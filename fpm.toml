@@ -173,6 +173,11 @@ source-dir = "test"
 main = "test_mcp_request_structure.f90"
 
 [[test]]
+name = "test_mcp_gremlin"
+source-dir = "test"
+main = "test_mcp_gremlin.f90"
+
+[[test]]
 name = "test_mcp_response_ownership"
 source-dir = "test"
 main = "test_mcp_response_ownership.f90"
@@ -262,6 +267,11 @@ name = "test_gremlin_crash_receipts"
 source-dir = "test"
 main = "test_gremlin_crash_receipts.f90"
 
+[[test]]
+name = "test_gremlin_journal_recovery"
+source-dir = "test"
+main = "test_gremlin_journal_recovery.f90"
+
 # Containment oracles include several bounded TERM/KILL grace periods.
 # Mark them slow so focused `fo test --all NAME` uses the slow-test budget
 # on Darwin, where live child CPU accounting is unavailable.
@@ -300,6 +310,14 @@ path = "test-fixtures/c/link_publication_peer.c"
 role = "test-fixture"
 
 [[extra.fo.inputs]]
+path = "test-fixtures/c/recovery_barrier.c"
+role = "test-fixture"
+
+[[extra.fo.inputs]]
+path = "test-fixtures/c/cache_snapshot.c"
+role = "test-fixture"
+
+[[extra.fo.inputs]]
 path = "src/proc/fo_gremlin_state.c"
 role = "test-fixture"
 
@@ -323,3 +341,8 @@ role = "test-fixture"
 name = "test_harness_process_group"
 source-dir = "test"
 main = "test_harness_process_group.f90"
+
+[[test]]
+name = "test_native_compiler_path_cli"
+source-dir = "test"
+main = "test_native_compiler_path_cli.f90"

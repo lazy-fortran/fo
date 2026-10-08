@@ -15,8 +15,14 @@ module fo_fs
     public :: fs_tree_fingerprint
     public :: fs_realpath, fs_find_executable
     public :: fs_collect_git_checkouts
+    public :: fs_is_windows, fs_native_path, fs_path_root_len
+    public :: fs_path_is_absolute, fs_path_has_drive, fs_parent_path
 
     interface
+        integer(c_int) function fo_c_is_windows() bind(C, name='fo_c_is_windows')
+            import :: c_int
+        end function fo_c_is_windows
+
         integer(c_int) function fo_c_realpath(path, resolved, capacity) &
                 bind(C, name='fo_c_realpath')
             import :: c_char, c_int
@@ -66,14 +72,14 @@ module fo_fs
         end function fo_c_rename_path
 
         integer(c_int) function fo_c_collect_files(root, infix, suffix, &
-                path_needle, recursive, out, cap) &
+                path_needle, recursive, out, cap, reject_aliases) &
                 bind(C, name='fo_c_collect_files')
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: root(*), infix(*), suffix(*)
             character(kind=c_char), intent(in) :: path_needle(*)
             integer(c_int), value :: recursive
             character(kind=c_char), intent(out) :: out(*)
-            integer(c_int), value :: cap
+            integer(c_int), value :: cap, reject_aliases
         end function fo_c_collect_files
 
         integer(c_int) function fo_c_collect_git_checkouts(root, out, cap, &
@@ -144,6 +150,98 @@ module fo_fs
 
 contains
 
+    logical function fs_is_windows() result(windows)
+        windows = fo_c_is_windows() /= 0
+    end function fs_is_windows
+
+    function fs_native_path(path) result(native)
+        !! Keep native drive/UNC paths; POSIX backslashes remain filename bytes.
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: native
+        integer :: i
+
+        native = trim(path)
+        if (.not. fs_is_windows()) return
+        do i = 1, len(native)
+            if (native(i:i) == achar(92)) native(i:i) = '/'
+        end do
+    end function fs_native_path
+
+    logical function fs_path_has_drive(path) result(drive)
+        character(len=*), intent(in) :: path
+        integer :: code
+
+        drive = .false.
+        if (.not. fs_is_windows()) return
+        if (len_trim(path) < 2) return
+        if (path(2:2) /= ':') return
+        code = iachar(path(1:1))
+        drive = (code >= iachar('A') .and. code <= iachar('Z')) .or. &
+            (code >= iachar('a') .and. code <= iachar('z'))
+    end function fs_path_has_drive
+
+    integer function fs_path_root_len(path) result(root)
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: native
+        integer :: server, share
+
+        native = fs_native_path(path)
+        root = 0
+        if (len(native) == 0) return
+        if (native(1:1) == '/') root = 1
+        if (.not. fs_is_windows()) return
+        if (fs_path_has_drive(native)) then
+            root = 2
+            if (len(native) >= 3) then
+                if (native(3:3) == '/') root = 3
+            end if
+            return
+        end if
+        if (len(native) < 2) return
+        if (native(:2) /= '//') return
+        root = 2
+        server = index(native(3:), '/')
+        if (server <= 1) return
+        server = server + 2
+        if (server >= len(native)) return
+        share = index(native(server + 1:), '/')
+        if (share == 1) return
+        root = len(native)
+        if (share > 0) root = server + share
+    end function fs_path_root_len
+
+    logical function fs_path_is_absolute(path) result(absolute)
+        character(len=*), intent(in) :: path
+        integer :: root
+
+        root = fs_path_root_len(path)
+        absolute = root > 0
+        if (fs_is_windows()) absolute = root >= 3
+    end function fs_path_is_absolute
+
+    subroutine fs_parent_path(path, parent)
+        character(len=*), intent(in) :: path
+        character(len=*), intent(out) :: parent
+        character(len=:), allocatable :: native
+        integer :: n, root, slash
+
+        native = fs_native_path(path)
+        root = fs_path_root_len(native)
+        n = len(native)
+        do while (n > max(1, root))
+            if (native(n:n) /= '/') exit
+            n = n - 1
+        end do
+        native = native(:n)
+        if (n <= root) then
+            parent = native
+            return
+        end if
+        slash = index(native, '/', back=.true.)
+        parent = '.'
+        if (root > 0 .or. slash > 1) parent = native(:max(root, slash - 1))
+    end subroutine fs_parent_path
+
     subroutine fs_remove_tree(path, ierr)
         !! Recursive delete (rm -rf). Missing path is success.
         character(len=*), intent(in) :: path
@@ -201,7 +299,7 @@ contains
     end subroutine fs_write_text
 
     subroutine fs_collect_files(root, infix, suffix, path_needle, items, &
-            n_items, recursive)
+            n_items, recursive, ierr, reject_aliases)
         !! Collect regular files under root whose basename contains infix and
         !! ends with suffix and whose path contains path_needle, into items
         !! (each a full path). Recurses unless recursive is .false. Replaces a
@@ -209,19 +307,29 @@ contains
         character(len=*), intent(in) :: root, infix, suffix, path_needle
         character(len=*), intent(out) :: items(:)
         integer, intent(out) :: n_items
-        logical, intent(in), optional :: recursive
+        logical, intent(in), optional :: recursive, reject_aliases
+        integer, intent(out), optional :: ierr
         character(kind=c_char), allocatable :: buf(:)
-        integer(c_int) :: rc, rec
+        integer(c_int) :: rc, rec, strict_aliases
 
         rec = 1
         if (present(recursive)) then
             if (.not. recursive) rec = 0
         end if
+        strict_aliases = 0
+        if (present(reject_aliases)) then
+            if (reject_aliases) strict_aliases = 1
+        end if
         allocate (buf(FS_COLLECT_CAP))
         rc = fo_c_collect_files(trim(root)//c_null_char, trim(infix)//c_null_char, &
             trim(suffix)//c_null_char, &
             trim(path_needle)//c_null_char, rec, buf, &
-            int(FS_COLLECT_CAP, c_int))
+            int(FS_COLLECT_CAP, c_int), strict_aliases)
+        if (present(ierr)) then
+            ierr = 0
+            if (rc < 0 .or. rc > size(items)) ierr = 1
+            if (rc == -2) ierr = 2
+        end if
         call unpack_buffer(buf, int(rc), items, n_items)
         call sort_items(items, n_items)
         deallocate (buf)

@@ -1,7 +1,8 @@
 module fo_build_backend
     use, intrinsic :: iso_fortran_env, only: error_unit
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_mkdir_excl, fs_sleep_ms, &
-        fs_pid_alive
+        fs_pid_alive, fs_native_path, fs_is_windows, fs_realpath, &
+        fs_path_is_absolute, fs_parent_path
     use fo_process, only: process_detect_nproc, process_getpid, &
         process_getcwd, process_run_argv_logged, argv_push
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
@@ -43,6 +44,10 @@ contains
         integer :: depth, status
 
         current = absolute_dir(dir)
+        if (len_trim(current) == 0) then
+            b%project_dir = ''
+            return
+        end if
         preference = ''
         call get_environment_variable('FO_BACKEND', preference, status=status)
         force_cmake = status == 0 .and. trim(adjustl(preference)) == 'cmake'
@@ -115,26 +120,29 @@ contains
 
     function absolute_dir(dir) result(absdir)
         character(len=*), intent(in) :: dir
-        character(len=512) :: absdir
-
-        character(len=512) :: pwd
+        character(len=512) :: absdir, pwd
+        character(len=:), allocatable :: native
         integer :: cwd_ierr
+        logical :: resolved
 
-        if (len_trim(dir) == 0) then
+        native = fs_native_path(dir)
+        if (fs_is_windows()) then
+            call fs_realpath(native, absdir, resolved)
+            if (.not. resolved) absdir = ''
+            return
+        end if
+        if (len(native) == 0) then
             absdir = '.'
-        else if (dir(1:1) == '/') then
-            absdir = trim(dir)
+        else if (fs_path_is_absolute(native)) then
+            absdir = native
         else
             call process_getcwd(pwd, cwd_ierr)
             if (cwd_ierr /= 0) pwd = ''
+            pwd = fs_native_path(pwd)
+            absdir = native
             if (len_trim(pwd) > 0) then
-                if (trim(dir) == '.') then
-                    absdir = trim(pwd)
-                else
-                    absdir = trim(pwd)//'/'//trim(dir)
-                end if
-            else
-                absdir = trim(dir)
+                absdir = trim(pwd)
+                if (native /= '.') absdir = trim(pwd)//'/'//native
             end if
         end if
     end function absolute_dir
@@ -143,27 +151,7 @@ contains
         character(len=*), intent(in) :: path
         character(len=*), intent(out) :: parent
 
-        character(len=512) :: clean
-        integer :: n, last
-
-        clean = trim(path)
-        n = len_trim(clean)
-        do while (n > 1 .and. clean(n:n) == '/')
-            clean(n:n) = ' '
-            n = n - 1
-        end do
-
-        if (trim(clean) == '/') then
-            parent = '/'
-            return
-        end if
-
-        last = index(trim(clean), '/', back=.true.)
-        if (last <= 1) then
-            parent = '/'
-        else
-            parent = clean(1:last - 1)
-        end if
+        call fs_parent_path(path, parent)
     end subroutine parent_dir
 
     function detect_nproc() result(np)
