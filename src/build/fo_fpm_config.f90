@@ -84,7 +84,8 @@ module fo_fpm_config
         character(len=256) :: app_dir = 'app'
         character(len=256) :: test_dir = 'test'
         character(len=256) :: example_dir = 'example'
-        character(len=256) :: project_dir = '.'
+        ! Project roots follow the native scanner's path limit, not token size.
+        character(len=512) :: project_dir = '.'
         logical :: auto_executables = .true.
         logical :: auto_tests = .true.
         logical :: auto_examples = .true.
@@ -317,8 +318,13 @@ contains
         integer :: u, ios, i
 
         call fpm_config_init(config)
-        config%project_dir = trim(project_dir)
         ierr = 0
+        if (len_trim(project_dir) > len(config%project_dir)) then
+            write (error_unit, '(a)') 'fo: project directory exceeds supported path length'
+            ierr = 1
+            return
+        end if
+        config%project_dir = trim(project_dir)
         section = ''
         in_array = .false.
         accum = ''

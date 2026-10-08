@@ -37,6 +37,12 @@ program test_gremlin_registry
 
     call resolve_driver(driver)
     call make_scratch('fo-gremlin-registry', scratch)
+    ! Keep frozen/reproduction roots beyond the old 256-character manifest cap
+    ! even when this fixture starts outside a resident execution view.
+    if (len(scratch) < 160) then
+        scratch = scratch//'/nested-'//repeat('r', 160 - len(scratch))
+        call make_directory(scratch)
+    end if
     project = scratch//'/project'
     cache = scratch//'/cache'
     state = scratch//'/state'

@@ -7,7 +7,7 @@ failure detection. The workspace master plan, when present, owns delivery order.
 
 ## Current delivery
 
-The reviewed Claude handoff is implemented through `a17df88`,
+The reviewed Claude handoff includes the current acceptance repairs,
 based on `95490c97f73e53b2b9c70a61b287bd3aa36b8d38`. Publication requires the
 controller's exact combined gate; individual worker receipts do not substitute
 for it. The final gate selects 42 Linux resident cases, 20 Darwin public cases and
@@ -20,10 +20,11 @@ gates must pass before publication. These selections do not claim the full
 Fo inventory.
 The user explicitly authorized faepmac1 for Darwin verification. Its child-state
 fixture now uses native process data to distinguish live and exited children;
-the independent control and affected backend test pass. Publication remains
-held on a frozen registry replay mismatch in the deeper Linux resident fixture
-and an instrumented Fx parallel cache-restore memory error. Neither a retry
-nor receipts from an earlier source version satisfies the final gate.
+the independent control and affected backend test pass. The long-root frozen registry oracle returns the incorrect live value 31 on
+the old 256-character project-root field and the captured value 19 after expanding
+it to the supported 512-character limit. Longer parse roots are rejected explicitly.
+Final combined/platform gates remain pending; neither a retry nor receipts from
+an earlier source version satisfies the final gate.
 
 | Handoff goal | Independently checked behavior |
 | --- | --- |
@@ -48,7 +49,7 @@ epoch-based clocks.
 The #205 JSON increment removes the duplicate scanner and verifies strict
 receipt recovery with nested metadata. It removes 40 physical lines across its
 source and tests; #205 and #150 remain open for their broader goals. Fx main
-`879fec283e7c5a8c13436d80af88555697af7bc8` supplies include-search-aware source
+`63f010feff379452f849995f91af327af6e87a31` supplies include-search-aware source
 keys, verified against real compiled runtime changes and rechecked through Fo.
 
 Exact source, pinned drivers, commands and receipts are retained under
@@ -62,9 +63,10 @@ precedes a PR. Fo's native build path remains the delivery authority.
 Fx #57 remains open. The current resident diagnostic build repeated an allocator
 abort. An ASAN Fo build independently identifies an out-of-bounds access in Fx
 local-result matching through a deferred-character function result during
-parallel cache restoration. The owning Fx repair and independent varied-path
-restore oracle are in progress. Evidence is retained under
-`/var/tmp/fx-heap-audit-20261008`; original Fo consumer rechecks are required.
+parallel cache restoration. Fx `63f010f` replaces that private result with a caller-owned
+output; the same varied-path oracle fails under ASAN on old code and passes 640
+cold/warm pairs after repair, including the controller recheck. Evidence is retained under
+`/var/tmp/fx-heap-audit-20261008`; The original instrumented Fo parallel consumer recheck remains required.
 The older allocator aborts remain unattributed until evidence links them.
 
 ## Delivery order
