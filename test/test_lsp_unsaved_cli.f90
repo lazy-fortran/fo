@@ -103,19 +103,39 @@ call assert_equal_integer(int(json_number_value(json_member(diagnostic, 'severit
     call assert_true(json_number_value(json_member(diagnostic, 'code')) > 0, &
                      'frontend stable error code is preserved')
 
-    call notify(edit('didChange', 5, parser_error))
+    call notify(edit('didChange', 5, &
+        'elemental subroutine invalid_intent(a, b)'//achar(10)// &
+        '  integer :: a'//achar(10)//'  integer :: b'//achar(10)// &
+        'end subroutine invalid_intent'))
     call receive(response)
     call check_publication(response, 5, .true.)
+    params = json_member(response, 'params')
+    call assert_equal_integer(json_size(json_member(params, 'diagnostics')), &
+        2, 'publishes every independent semantic error in one document')
+
+    call notify(edit('didChange', 6, parser_error))
+    call receive(response)
+    call check_publication(response, 6, .true.)
     params = json_member(response, 'params')
     diagnostic = json_element(json_member(params, 'diagnostics'), 1)
     position = json_member(json_member(diagnostic, 'range'), 'start')
     call assert_equal_integer(int(json_number_value(json_member(position, 'line'))), &
                               3, 'unsaved parser diagnostic points to exact line')
 
-    call notify(edit('didChange', 6, good))
+    call notify(edit('didChange', 7, good))
     call receive(response)
-    call check_publication(response, 6, .false.)
-    call notify(edit('didChange', 5, parser_error))
+    call check_publication(response, 7, .false.)
+    call notify(edit('didChange', 5, &
+        'elemental subroutine invalid_intent(a, b)'//achar(10)// &
+        '  integer :: a'//achar(10)//'  integer :: b'//achar(10)// &
+        'end subroutine invalid_intent'))
+    call receive(response)
+    call check_publication(response, 5, .true.)
+    params = json_member(response, 'params')
+    call assert_equal_integer(json_size(json_member(params, 'diagnostics')), &
+        2, 'publishes every independent semantic error in one document')
+
+    call notify(edit('didChange', 6, parser_error))
     status = read_line(handle, bytes, int(len(bytes), c_size_t), 400_c_int)
     call assert_equal_integer(int(status), -2, &
                               'older versions cannot replace newer results')
