@@ -115,7 +115,6 @@ program test_gremlin_registry
     call await_value(previous, '31', generation, ready)
     if (.not. ready) call stop_failed()
     call assert_frozen('registry configuration path edit')
-    call gremlin_stop_lane(driver, project, cache, state, lane, session)
     arguments = string_list_t()
     call list_add(arguments, 'gremlin')
     call list_add(arguments, 'reproduce')
@@ -129,10 +128,12 @@ program test_gremlin_registry
     call list_add(arguments, '--generation')
     call list_add(arguments, first_generation)
     call gremlin_json(driver, project, cache, state, arguments, started, process, 30000)
-    call assert_true(process%exit_code == 0, 'captured registry consumer reproduces')
+    call assert_true(process%exit_code == 0, &
+        'captured registry consumer reproduces: '//process%stdout//process%stderr)
     call assert_true(read_text(runtime_value) == '19'//new_line('a'), &
         'reproduction executes original registry source after live selection changes')
     call assert_frozen('old-generation reproduction')
+    call gremlin_stop_lane(driver, project, cache, state, lane, session)
     call unpin_first()
     call finish_assertions(retain_failed_scratch=.true.)
 
