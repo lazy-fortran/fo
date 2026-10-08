@@ -6,11 +6,12 @@ module fo_input_inventory
     use fx_immutable_store, only: immutable_store_hash_file, IMMUTABLE_OK
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_config_allocate, &
         fpm_exe_t, &
-        fpm_input_t, dep_kind, DEP_PATH, DEP_GIT, DEP_REGISTRY
+        fpm_input_t, dep_kind, DEP_PATH, DEP_GIT, DEP_REGISTRY, &
+        absolute_dependency_destination
     use fo_dep_resolve, only: normalize_path, join_path, resolved_src_t, &
         resolve_dev_dep_srcs, MAX_RESOLVED
     use fo_registry, only: registry_resolve, registry_config_path
-    use fo_fs, only: fs_identity
+    use fo_fs, only: fs_identity, fs_path_is_absolute
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file
     use fx_action_result_store, only: action_result_file_mode, ACTION_RESULT_OK
     implicit none
@@ -784,21 +785,22 @@ contains
             message = 'path dependency closure exceeds depth 16 at '//trim(alias)
             return
         end if
-        if (len_trim(dependency_path) == 0 .or. &
-                dependency_path(1:1) == '/') then
-            message = 'unsupported absolute or empty FPM path dependency: '// &
-                trim(alias)
+        if (len_trim(dependency_path) == 0) then
+            message = 'empty FPM path dependency: '//trim(alias)
             return
         end if
-        call validate_relative_path(dependency_path, dependency_root, ierr, message, &
-            allow_parent=.true.)
-        if (ierr /= 0) return
-        call bundle_destination(parent_bundle, dependency_path, bundle_path, &
-            ierr, message)
-        if (ierr /= 0) return
-        if (dependency_root(1:1) /= '/') then
-            dependency_root = trim(parent_root)//'/'//trim(dependency_root)
-            call normalize_path(trim(dependency_root), dependency_root)
+        if (fs_path_is_absolute(dependency_path)) then
+            call normalize_path(dependency_path, dependency_root)
+            bundle_path = 'project/'// &
+                absolute_dependency_destination(dependency_path)
+        else
+            call validate_relative_path(dependency_path, dependency_root, &
+                ierr, message, allow_parent=.true.)
+            if (ierr /= 0) return
+            call bundle_destination(parent_bundle, dependency_path, bundle_path, &
+                ierr, message)
+            if (ierr /= 0) return
+            call join_path(parent_root, dependency_path, dependency_root)
         end if
         inquire(file=trim(dependency_root)//'/fpm.toml', exist=exists)
         if (.not. exists) then

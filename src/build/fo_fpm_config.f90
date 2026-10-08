@@ -1,4 +1,8 @@
 module fo_fpm_config
+    use fx_hash, only: sha256_string
+    use fo_fs, only: fs_path_is_absolute, fs_native_path, fs_parent_path, &
+        fs_realpath, fs_identity
+    use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file
     use, intrinsic :: iso_fortran_env, only: error_unit
@@ -13,7 +17,7 @@ module fo_fpm_config
     public :: manifest_test_args
     public :: MAX_LINK_LIBS, add_link_lib
     public :: MAX_EXTERNAL_MODULES
-    public :: valid_manifest_module_name
+    public :: valid_manifest_module_name, absolute_dependency_destination
 
     ! How a dependency is acquired, derived from which fields the manifest set.
     ! path = local dir (mutable, may be edited); git = cloned at a ref (pinned,
@@ -537,6 +541,12 @@ contains
             ierr = 1
             return
         end if
+        call relocate_frozen_absolute_dependencies(config, ierr)
+        if (ierr /= 0) then
+            write (error_unit, '(a)') 'fo: fpm.toml: '// &
+                trim(config%manifest_parse_error)
+            return
+        end if
         if (ierr == 0) call resolve_metapackages(config, ierr)
         if (len_trim(config%manifest_parse_error) > 0) then
             write (error_unit, '(a)') 'fo: fpm.toml: '// &
@@ -544,6 +554,100 @@ contains
             ierr = 1
         end if
     end subroutine fpm_config_parse
+
+    function absolute_dependency_destination(path) result(destination)
+        character(len=*), intent(in) :: path
+        character(len=96) :: destination
+
+        destination = 'build/dependencies/.fo-path/'// &
+            sha256_string(fs_native_path(trim(path)))
+    end function absolute_dependency_destination
+
+    subroutine relocate_frozen_absolute_dependencies(config, ierr)
+        type(fpm_config_t), intent(inout) :: config
+        integer, intent(out) :: ierr
+        character(len=512) :: frozen, destination
+        integer :: i, status, length
+        logical :: has_absolute
+
+        ierr = 0
+        has_absolute = .false.
+        do i = 1, config%n_deps
+            if (dep_kind(config%deps(i)) /= DEP_PATH) cycle
+            if (fs_path_is_absolute(config%deps(i)%path)) has_absolute = .true.
+        end do
+        do i = 1, config%n_dev_deps
+            if (dep_kind(config%dev_deps(i)) /= DEP_PATH) cycle
+            if (fs_path_is_absolute(config%dev_deps(i)%path)) has_absolute = .true.
+        end do
+        if (.not. has_absolute) return
+        call get_environment_variable('FO_GREMLIN_FROZEN_ROOT', frozen, length, status)
+        if (status == 1 .or. length == 0) return
+        if (status /= 0 .or. .not. fs_path_is_absolute(trim(frozen))) then
+            config%manifest_parse_error = 'invalid or too long frozen dependency root'
+            ierr = 1
+            return
+        end if
+        ! Only captured packages share this private bundle. Tests may create
+        ! unrelated projects in their own TMPDIR while inheriting this marker.
+        if (.not. package_in_frozen_bundle(config%project_dir, frozen)) return
+        do i = 1, config%n_deps + config%n_dev_deps
+            if (i <= config%n_deps) then
+                if (.not. fs_path_is_absolute(config%deps(i)%path)) cycle
+                destination = absolute_dependency_destination(config%deps(i)%path)
+            else
+                if (.not. fs_path_is_absolute( &
+                    config%dev_deps(i - config%n_deps)%path)) cycle
+                destination = absolute_dependency_destination( &
+                    config%dev_deps(i - config%n_deps)%path)
+            end if
+            if (len_trim(frozen) + len_trim(destination) + 1 > len(destination)) then
+                config%manifest_parse_error = &
+                    'frozen absolute dependency path exceeds supported length'
+                ierr = 1
+                return
+            end if
+            destination = trim(frozen)//'/'//trim(destination)
+            if (i <= config%n_deps) then
+                config%deps(i)%path = trim(destination)
+            else
+                config%dev_deps(i - config%n_deps)%path = trim(destination)
+            end if
+        end do
+    end subroutine relocate_frozen_absolute_dependencies
+
+    logical function package_in_frozen_bundle(project, frozen) result(inside)
+        character(len=*), intent(in) :: project, frozen
+        character(len=512) :: current, parent, bundle, temporary
+        integer(c_long_long) :: device, inode, root_device, root_inode
+        integer(c_long_long) :: temporary_device, temporary_inode
+        integer :: depth
+        logical :: ok, temporary_exists
+
+        inside = .false.
+        call fs_parent_path(frozen, bundle)
+        call fs_identity(trim(bundle), root_device, root_inode, ok)
+        if (.not. ok) return
+        temporary = trim(bundle)//'/.fo-tmp'
+        call fs_identity(trim(temporary), temporary_device, temporary_inode, &
+            temporary_exists)
+        call fs_realpath(project, current, ok)
+        if (.not. ok) return
+        do depth = 1, 64
+            call fs_identity(trim(current), device, inode, ok)
+            if (.not. ok) return
+            if (temporary_exists) then
+                if (device == temporary_device .and. inode == temporary_inode) return
+            end if
+            if (device == root_device .and. inode == root_inode) then
+                inside = .true.
+                return
+            end if
+            call fs_parent_path(trim(current), parent)
+            if (len_trim(parent) == 0 .or. parent == current) return
+            current = parent
+        end do
+    end function package_in_frozen_bundle
 
     subroutine validate_dependency(dep, section, error)
         type(fpm_dep_t), intent(in) :: dep

@@ -5,7 +5,7 @@ module fo_gremlin_context
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_CMAKE
     use fo_cmake_generation, only: cmake_capture_inventory, cmake_capture_cleanup
     use fo_fpm_config, only: DEP_PATH, DEP_REGISTRY, fpm_config_t, fpm_config_parse, &
-        dep_kind, fpm_dep_t
+        dep_kind, fpm_dep_t, absolute_dependency_destination
     use fo_dep_update, only: dep_acquire_sources
     use fo_dep_resolve, only: normalize_path, resolve_dev_dep_srcs, &
         resolved_src_t, resolve_dep_srcs, MAX_RESOLVED
@@ -19,7 +19,8 @@ module fo_gremlin_context
     use fo_process, only: argv_push, process_cancel_pid, process_poll_pid, &
         process_start_argv_logged
     use fo_util, only: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, read_text_file
-    use fo_fs, only: fs_find_executable, fs_sleep_ms, fs_tree_fingerprint, fs_rename
+    use fo_fs, only: fs_find_executable, fs_sleep_ms, fs_tree_fingerprint, fs_rename, &
+        fs_path_is_absolute
     implicit none
     private
 
@@ -51,7 +52,8 @@ contains
             end if
             if (dep_kind(dep) /= DEP_PATH) cycle
             root = trim(dep%path)
-            if (root(1:1) /= '/') root = trim(project_dir)//'/'//trim(root)
+            if (.not. fs_path_is_absolute(root)) &
+                root = trim(project_dir)//'/'//trim(root)
             inquire (file=trim(root)//'/fpm.toml', exist=exists)
             if (exists) cycle
             message = 'cannot capture input tree dependency:'//trim(dep%name)
@@ -569,9 +571,16 @@ contains
         ierr = 0
         message = ''
         if (len_trim(dep_path) == 0) return
-        if (dep_path(1:1) == '/') then
-            ierr = 1
-            message = 'absolute fpm path dependencies cannot be frozen safely'
+        if (fs_path_is_absolute(dep_path)) then
+            if (n_inputs >= size(inputs)) then
+                ierr = 1
+                message = 'too many path dependencies to freeze'
+                return
+            end if
+            n_inputs = n_inputs + 1
+            inputs(n_inputs)%label = 'dependency:'//trim(dep_name)
+            inputs(n_inputs)%source_root = trim(dep_path)
+            inputs(n_inputs)%destination = absolute_dependency_destination(dep_path)
             return
         end if
         ! The project-tree manifest already freezes internal path dependencies.
@@ -611,7 +620,7 @@ contains
         if (project_length == 0 .or. dependency_length == 0) return
 
         if (trim(normalized_project) == '.') then
-            if (normalized_dependency(1:1) == '/') return
+            if (fs_path_is_absolute(normalized_dependency)) return
             if (trim(normalized_dependency) == '..') return
             if (dependency_length >= 3) then
                 if (normalized_dependency(:3) == '../') return

@@ -15,58 +15,132 @@ program test_gremlin_library_include_cli
     type(process_result_t) :: process
     type(json_value_t) :: response, document
     character(len=1), parameter :: nl = new_line('a')
-    character(len=*), parameter :: lane = 'declared-library-headers'
+    character(:), allocatable :: lane
     logical :: ready
 
-    call gremlin_setup(driver, scratch, project, cache, state)
-    call write_text(project//'/fpm.toml', &
-        'name = "header_probe"'//nl//'[build]'//nl//'auto-tests = false'//nl// &
-        '[library]'//nl//'include-dir = ["headers"]'//nl// &
-        '[dependencies]'//nl//'provider = { path = "../provider" }'//nl// &
-        '[dev-dependencies]'//nl// &
-        'test_provider = { path = "../test_provider" }'//nl// &
-        '[[test]]'//nl//'name = "test_header_payload"'//nl// &
-        'source-dir = "checks"'//nl//'main = "main.f90"'//nl)
-    call write_package(project, 'root_value', '13')
-    call write_package(scratch//'/provider', 'provider_value', '211')
-    call write_package(scratch//'/test_provider', 'test_value', '31')
-    call write_text(scratch//'/provider/fpm.toml', &
-        'name = "provider"'//nl//'[library]'//nl// &
-        'include-dir = "headers"'//nl)
-    call write_text(scratch//'/test_provider/fpm.toml', &
-        'name = "test_provider"'//nl//'[library]'//nl// &
-        'include-dir = ["headers"]'//nl)
-    call write_text(project//'/checks/main.f90', &
-        'program test_header_payload'//nl//'use iso_c_binding, only: c_int'//nl// &
-        'implicit none'//nl//'integer :: total'//nl//'interface'//nl// &
-        c_interface('root_value')//c_interface('provider_value')// &
-        c_interface('test_value')//'end interface'//nl// &
-        'total = root_value()+provider_value()+test_value()'//nl// &
-        "print '(a,i0)', 'HEADER_PAYLOAD=', total"//nl// &
-        'if (total /= 255) error stop 1'//nl// &
-        'end program test_header_payload'//nl)
-    call gremlin_start_args(args, project, lane, 'test_header_payload')
-    call gremlin_json(driver, project, cache, state, args, response, process, 30000)
-    call assert_true(process%exit_code == 0, 'starts declared header resident lane')
-    session = gremlin_field(response, 'session_id')
-    call wait_case('', 'PASS', generation, log_path, ready)
-    if (ready) then
-        ! The child independently rejects every value except 255. Successful
-        ! Fo test JSON intentionally omits ordinary stdout.
-        call write_text(project//'/headers/value.h', '#define VALUE 17'//nl)
-        call wait_case(generation, 'FAIL', changed, log_path, ready)
-        if (ready) call assert_equal_integer(receipt_payload(log_path), 259, &
-            'declared root header edit changes warm runtime')
-        call gremlin_stop_lane(driver, project, cache, state, lane, session, &
-            allow_terminal_error=.true.)
-        call frozen_replay(generation)
-    else
-        call gremlin_stop_lane(driver, project, cache, state, lane, session, &
-            allow_terminal_error=.true.)
-    end if
+    call run_header_case(.false.)
+    call run_header_case(.true.)
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
+
+    subroutine run_header_case(absolute)
+        logical, intent(in) :: absolute
+        character(:), allocatable :: provider, test_provider, leaf_interface, leaf_call
+        character(:), allocatable :: expected, edit_header, edit_value
+        integer :: edited_payload
+
+        call gremlin_setup(driver, scratch, project, cache, state)
+        provider = '../provider'
+        test_provider = '../test_provider'
+        leaf_interface = ''
+        leaf_call = ''
+        expected = '255'
+        edited_payload = 259
+        edit_header = project//'/headers/value.h'
+        edit_value = '17'
+        lane = 'declared-library-headers'
+        if (absolute) then
+            lane = 'absolute-dependency-headers'
+            provider = scratch//'/provider'
+            test_provider = scratch//'/test_provider'
+            leaf_interface = c_interface('leaf_value')
+            leaf_call = '+leaf_value()'
+            expected = '262'
+            edited_payload = 274
+            edit_header = scratch//'/leaf/headers/value.h'
+            edit_value = '19'
+            call write_package(scratch//'/leaf', 'leaf_value', '7')
+            call write_text(scratch//'/leaf/fpm.toml', &
+                'name = "leaf"'//nl//'[library]'//nl//'include-dir = "headers"'//nl)
+        end if
+        call write_text(project//'/fpm.toml', &
+            'name = "header_probe"'//nl//'[build]'//nl//'auto-tests = false'//nl// &
+            '[library]'//nl//'include-dir = ["headers"]'//nl// &
+            '[dependencies]'//nl//"provider = { path = '"//provider//"' }"//nl// &
+            '[dev-dependencies]'//nl// &
+            "test_provider = { path = '"//test_provider//"' }"//nl// &
+            '[[test]]'//nl//'name = "test_header_payload"'//nl// &
+            'source-dir = "checks"'//nl//'main = "main.f90"'//nl)
+        call write_package(project, 'root_value', '13')
+        call write_package(scratch//'/provider', 'provider_value', '211')
+        call write_package(scratch//'/test_provider', 'test_value', '31')
+        call write_text(scratch//'/provider/fpm.toml', &
+            'name = "provider"'//nl//'[library]'//nl// &
+            'include-dir = "headers"'//nl)
+        if (absolute) call write_text(scratch//'/provider/fpm.toml', &
+            'name = "provider"'//nl//'[library]'//nl//'include-dir = "headers"'//nl// &
+            '[dependencies]'//nl//"leaf = { path = '"//scratch//"/leaf' }"//nl)
+        call write_text(scratch//'/test_provider/fpm.toml', &
+            'name = "test_provider"'//nl//'[library]'//nl// &
+            'include-dir = ["headers"]'//nl)
+        call write_text(project//'/checks/main.f90', &
+            'program test_header_payload'//nl//'use iso_c_binding, only: c_int'//nl// &
+            'implicit none'//nl//'integer :: total'//nl//'interface'//nl// &
+            c_interface('root_value')//c_interface('provider_value')// &
+            c_interface('test_value')//leaf_interface//'end interface'//nl// &
+            'total = root_value()+provider_value()+test_value()'//leaf_call//nl// &
+            "print '(a,i0)', 'HEADER_PAYLOAD=', total"//nl// &
+            'if (total /= '//expected//') error stop 1'//nl// &
+            'end program test_header_payload'//nl)
+        call gremlin_start_args(args, project, lane, 'test_header_payload')
+        call gremlin_json(driver, project, cache, state, args, response, process, 30000)
+        call assert_true(process%exit_code == 0, 'starts declared header resident lane')
+        session = gremlin_field(response, 'session_id')
+        call wait_case('', 'PASS', generation, log_path, ready)
+        if (ready) then
+            ! The child checks the original sum independently of Fo receipts.
+            call write_text(edit_header, '#define VALUE '//edit_value//nl)
+            call wait_case(generation, 'FAIL', changed, log_path, ready)
+            if (ready) call assert_equal_integer( &
+                receipt_payload(log_path), edited_payload, &
+                'declared root or transitive absolute header edit changes warm runtime')
+            call gremlin_stop_lane(driver, project, cache, state, lane, session, &
+                allow_terminal_error=.true.)
+            call frozen_replay(generation)
+            if (absolute) call reject_escaping_input()
+        else
+            call gremlin_stop_lane(driver, project, cache, state, lane, session, &
+                allow_terminal_error=.true.)
+        end if
+    end subroutine run_header_case
+
+    subroutine reject_escaping_input()
+        character(:), allocatable :: manifest, sentinel, sentinel_bytes
+        type(json_value_t) :: result
+        type(process_result_t) :: command
+        integer :: attempt
+
+        sentinel = scratch//'/escape'
+        call write_text(sentinel, 'outside sentinel')
+        sentinel_bytes = read_text(sentinel)
+        manifest = read_text(project//'/fpm.toml')
+        call write_text(project//'/fpm.toml', manifest//nl// &
+            '[[extra.fo.inputs]]'//nl//'path = "../escape"'//nl// &
+            'role = "test-fixture"'//nl)
+        lane = 'absolute-invalid-materialization'
+        call gremlin_start_args(args, project, lane, 'test_header_payload')
+        call gremlin_json(driver, project, cache, state, args, result, command, 30000)
+        session = gremlin_field(result, 'session_id')
+        if (len(session) > 0) then
+            do attempt = 1, 200
+                call read_status()
+                if (gremlin_field(document, 'state') == 'capture_failed') exit
+                call gremlin_wait_ms(50)
+            end do
+            call assert_true(gremlin_field(document, 'state') == 'capture_failed', &
+                'capture refuses an input materialization path escaping its root')
+            call assert_true(index(gremlin_field(document, 'diagnostic'), &
+                'parent traversal') > 0, 'refusal identifies invalid input path')
+        else
+            call assert_true(command%exit_code /= 0, &
+                'invalid input refuses resident launch')
+        end if
+        call assert_true(read_text(sentinel) == sentinel_bytes, &
+            'refused materialization preserves external sentinel bytes')
+        if (len(session) > 0) call gremlin_stop_lane(driver, project, cache, state, &
+            lane, session, allow_terminal_error=.true.)
+    end subroutine reject_escaping_input
 
     integer function receipt_payload(path) result(payload)
         character(len=*), intent(in) :: path
@@ -148,10 +222,13 @@ contains
                 found = .true.
                 return
             end do
+            if (gremlin_field(document, 'state') == 'capture_failed') exit
+            if (gremlin_field(document, 'state') == 'error') exit
             call gremlin_wait_ms(50)
         end do
         call assert_true(.false., 'resident declared-header '//wanted// &
-            ' receipt arrives; last state='//gremlin_field(document, 'state'))
+            ' receipt arrives; last state='//gremlin_field(document, 'state')// &
+            '; diagnostic='//gremlin_field(document, 'diagnostic'))
     end subroutine wait_case
 
     subroutine frozen_replay(frozen)
