@@ -8,7 +8,8 @@ program test_gremlin_registry
     use fo_test_gremlin_oracle, only: gremlin_wait_ms, gremlin_stop_lane, gremlin_field
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
     use fo_test_json, only: json_boolean_value
-    use fo_gremlin_state, only: gremlin_generation_pin_at
+    use fo_gremlin_state, only: gremlin_generation_lease_acquire_at, &
+        gremlin_lease_t, gremlin_lease_release
     implicit none
 
     interface
@@ -25,9 +26,11 @@ program test_gremlin_registry
     type(string_list_t) :: arguments
     type(process_result_t) :: process
     type(json_value_t) :: started
+    type(gremlin_lease_t) :: first_lease
     character(len=*), parameter :: lane = 'registry-resident-oracle'
     character(len=*), parameter :: case_id = 'test_registry_value'
     logical :: ready
+    logical :: have_first_lease = .false.
     character(len=512) :: pin_message
     integer :: pin_error
 
@@ -82,8 +85,11 @@ program test_gremlin_registry
     call await_value('', '19', generation, ready)
     if (.not. ready) call stop_failed()
     first_root = state//'/fo/gremlin/generations-v2/'//generation
-    call gremlin_generation_pin_at(first_root, .true., pin_error, pin_message)
-    call assert_true(pin_error == 0, 'pin first registry generation: '//trim(pin_message))
+    call gremlin_generation_lease_acquire_at(first_root, first_lease, &
+        pin_error, pin_message)
+    call assert_true(pin_error == 0, 'lease first registry generation: '//trim(pin_message))
+    have_first_lease = pin_error == 0
+    if (.not. have_first_lease) call stop_failed()
     first_source = first_root// &
         '/bundle/project/build/dependencies/provider/src/provider.f90'
     call assert_true(file_exists(first_source), &
@@ -207,8 +213,9 @@ contains
     end subroutine stop_failed
 
     subroutine unpin_first()
-        if (.not. allocated(first_root)) return
-        call gremlin_generation_pin_at(first_root, .false., pin_error, pin_message)
-        call assert_true(pin_error == 0, 'unpin first registry generation: '//trim(pin_message))
+        if (.not. have_first_lease) return
+        call gremlin_lease_release(first_lease, pin_error, pin_message)
+        call assert_true(pin_error == 0, 'release first registry generation: '//trim(pin_message))
+        if (pin_error == 0) have_first_lease = .false.
     end subroutine unpin_first
 end program test_gremlin_registry
