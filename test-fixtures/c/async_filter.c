@@ -77,14 +77,14 @@ int main(void) {
 #if defined(FO_ASYNC_TEST_AARCH64) || \
     (!defined(FO_ASYNC_TEST_ARM) && !defined(FO_ASYNC_TEST_X86_64) && \
      defined(__aarch64__))
-    expect(AUDIT_ARCH_AARCH64, 157, denied); /* setsid */
+    expect(AUDIT_ARCH_AARCH64, 157, SECCOMP_RET_ALLOW); /* owned native session */
     expect(AUDIT_ARCH_AARCH64, 154, SECCOMP_RET_ALLOW); /* nested group */
     expect(AUDIT_ARCH_AARCH64, 0, SECCOMP_RET_ALLOW);
     expect(AUDIT_ARCH_ARM, 66, denied); /* compat setsid */
     expect(AUDIT_ARCH_ARM, 57, denied); /* compat setpgid */
     expect(AUDIT_ARCH_ARM, 0, SECCOMP_RET_ALLOW);
 #else
-    expect(AUDIT_ARCH_ARM, 66, denied);
+    expect(AUDIT_ARCH_ARM, 66, SECCOMP_RET_ALLOW); /* owned native session */
     expect(AUDIT_ARCH_ARM, 57, SECCOMP_RET_ALLOW);
     expect(AUDIT_ARCH_ARM, 0, SECCOMP_RET_ALLOW);
 #endif
@@ -98,7 +98,7 @@ int main(void) {
 #endif
 #elif defined(__linux__) && defined(FO_ASYNC_TEST_X86_64)
     const unsigned int denied = SECCOMP_RET_ERRNO | EPERM;
-    expect(AUDIT_ARCH_X86_64, 112, denied); /* native setsid */
+    expect(AUDIT_ARCH_X86_64, 112, SECCOMP_RET_ALLOW); /* owned native session */
     expect(AUDIT_ARCH_X86_64, 109, SECCOMP_RET_ALLOW); /* native setpgid */
     expect(AUDIT_ARCH_X86_64, 112 | 0x40000000U, denied); /* x32 setsid */
     expect(AUDIT_ARCH_X86_64, 109 | 0x40000000U, denied); /* x32 setpgid */
