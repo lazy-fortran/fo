@@ -7,7 +7,7 @@ failure detection. The workspace master plan, when present, owns delivery order.
 
 ## Current delivery
 
-The reviewed Claude handoff is complete at implementation commit `1d64b1f`,
+The reviewed Claude handoff is complete at implementation commit `c2a3f19`,
 based on `95490c97f73e53b2b9c70a61b287bd3aa36b8d38`. Publication requires the
 controller's exact combined gate; individual worker receipts do not substitute
 for it. The gate selects 40 Linux cases and 18 Darwin cases, with resident
@@ -17,13 +17,13 @@ The user explicitly authorized faepmac1 for Darwin verification.
 | Completed goal | Independently checked behavior |
 | --- | --- |
 | #207 private scratch | Parent TMPDIR reaches CLI children; parallel exits are checked; async fixtures use registered private scratch |
-| #119 lossless results | Large CLI/MCP/check reports, late failures, UTF-8 and diagnostics survive; JSON compilation failures retain a nonzero process exit |
-| #203 native local registry | Exact/latest identities, regular/transitive/root-dev dependencies, content/version/config edits and frozen replay after stop |
+| #119 lossless results | Large CLI/MCP/check reports, late failures, UTF-8 and diagnostics survive; JSON compilation failures and malformed result records retain a nonzero process exit |
+| #203 native local registry | Exact/latest identities, regular/transitive/root-dev dependencies, content/version/config edits and frozen replay after stop through physical directory aliases |
 | #144 safe artifacts | Owned bytes enter cache before publication; corrupt shared images are rejected; conflicting producers preserve complete artifacts |
 | #135 dependency freshness | Source/include/C-header/flag/compiler changes, restored timestamps, missing outputs, private-body runtime changes and warm reuse |
 
 Review also repaired registry watcher reactivation, frozen compiler-view roots,
-terminal-session replay and the Darwin test harness's concurrent process-group
+terminal-session replay, physical identity for aliased frozen roots, and the Darwin test harness's concurrent process-group
 setup. The harness now has one group writer and cleans up a child whose group
 has not yet been established. Independent native controls and timeout/grandchild
 oracles distinguish this defect from artifact failures.
