@@ -57,7 +57,7 @@ fo clean --cache           also remove the shared content store
 fo install [--prefix DIR]  install a release build
 fo info                    backend, source, compiler, and cache information
 fo mcp-server              MCP JSON-RPC server on standard input/output
-fo lsp                     diagnostics-on-save language server
+fo lsp                     diagnostics for unsaved editor buffers
 ```
 
 Bare `fo` starts or attaches to the default Gremlin lane. Use explicit

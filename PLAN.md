@@ -10,7 +10,7 @@ failure detection. The workspace master plan, when present, owns delivery order.
 The stopped Claude session is recovered. Main includes its published
 readiness/recovery/test-runner fixes, install diagnostics and Darwin fixtures.
 The controller independently passed five resident baseline cases on `31c795b`;
-the full inventory remains 129 cases, with current full coverage still open.
+that historical inventory contained 129 cases; current full coverage remains open.
 Fx main `f9a3f769905ccd74895b2e43e0e7ab1d213996d4` rejects invalid store roots
 before metadata writes. Its owning tests passed and the controller rechecked
 leases/GC (2/2). Fo's source-cleanliness increment passed bootstrap/manifest
