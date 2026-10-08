@@ -40,6 +40,7 @@ module fo_gfortran_build
         COMPILER_FLANG
     use fo_compiler_flags, only: append_array_temporary_warning_flag, append_pipe_flag
     use fo_linker_policy, only: select_linker
+    use fo_macho_image, only: macho_image_valid
     use fo_capabilities, only: compiler_supports_section_splitting
     use fo_external_modules, only: collect_external_module_dirs
     use fo_build_stamp, only: build_stamp_matches, build_stamp_quick_matches, &
@@ -3596,9 +3597,9 @@ contains
         character(len=*), intent(in) :: path
         logical, intent(out) :: valid
 
-        integer(int64) :: file_size, arch_count, min_file_size
+        integer(int64) :: file_size
         integer :: u, ios, image_class, image_data, header_bytes
-        character(len=4) :: magic, fat_count
+        character(len=4) :: magic
         character(len=64) :: elf_header
 
         valid = .false.
@@ -3611,58 +3612,8 @@ contains
         if (ios /= 0) return
         read (u, pos=1, iostat=ios) magic
         if (is_macos()) then
-            if (ios /= 0) then
-                close (u)
-                return
-            end if
-            select case (magic)
-            case (achar(206)//achar(250)//achar(237)//achar(254), &
-                    achar(254)//achar(237)//achar(250)//achar(206))
-                min_file_size = 28_int64
-            case (achar(207)//achar(250)//achar(237)//achar(254), &
-                    achar(254)//achar(237)//achar(250)//achar(207))
-                min_file_size = 32_int64
-            case (achar(202)//achar(254)//achar(186)//achar(190), &
-                    achar(190)//achar(186)//achar(254)//achar(202), &
-                    achar(202)//achar(254)//achar(186)//achar(191), &
-                    achar(191)//achar(186)//achar(254)//achar(202))
-                if (file_size < 8_int64) then
-                    close (u)
-                    return
-                end if
-                read (u, pos=5, iostat=ios) fat_count
-                if (ios /= 0) then
-                    close (u)
-                    return
-                end if
-                if (magic == achar(202)//achar(254)//achar(186)//achar(190) .or. &
-                    magic == achar(202)//achar(254)//achar(186)//achar(191)) then
-                    arch_count = int(iachar(fat_count(1:1)), int64) * &
-                        16777216_int64 + int(iachar(fat_count(2:2)), int64) * &
-                        65536_int64 + int(iachar(fat_count(3:3)), int64) * &
-                        256_int64 + int(iachar(fat_count(4:4)), int64)
-                else
-                    arch_count = int(iachar(fat_count(4:4)), int64) * &
-                        16777216_int64 + int(iachar(fat_count(3:3)), int64) * &
-                        65536_int64 + int(iachar(fat_count(2:2)), int64) * &
-                        256_int64 + int(iachar(fat_count(1:1)), int64)
-                end if
-                if (arch_count < 1_int64) then
-                    close (u)
-                    return
-                end if
-                if (magic == achar(202)//achar(254)//achar(186)//achar(191) .or. &
-                    magic == achar(191)//achar(186)//achar(254)//achar(202)) then
-                    min_file_size = 8_int64 + arch_count * 32_int64
-                else
-                    min_file_size = 8_int64 + arch_count * 20_int64
-                end if
-            case default
-                close (u)
-                return
-            end select
             close (u)
-            valid = file_size >= min_file_size
+            call macho_image_valid(path, valid)
         else
             if (ios /= 0) then
                 close (u)
