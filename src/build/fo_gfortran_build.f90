@@ -1881,7 +1881,7 @@ contains
         integer, intent(in) :: n_deps
         integer, intent(out) :: exitcode
         type(fpm_config_t), allocatable :: package
-        character(len=:), allocatable :: prefix
+        character(len=:), allocatable :: prefix, package_name
         integer :: i, d, owner, longest, n, ierr
 
         exitcode = 0
@@ -1901,7 +1901,9 @@ contains
                 longest = n
             end do
             if (owner == 0) then
-                package = root_config
+                if (valid_manifest_module_name(root_config, &
+                    trim(units(i)%module_name))) cycle
+                package_name = trim(root_config%name)
             else
                 call fpm_config_parse(trim(deps(owner)%dir), package, ierr)
                 if (ierr /= 0) then
@@ -1912,11 +1914,13 @@ contains
                 ! whose own manifest disables naming. Their custom prefix is
                 ! available only when enabled by that dependency's manifest.
                 package%module_naming = .true.
+                if (valid_manifest_module_name(package, &
+                    trim(units(i)%module_name))) cycle
+                package_name = trim(package%name)
             end if
-            if (valid_manifest_module_name(package, trim(units(i)%module_name))) cycle
             write (error_unit, '(a)') 'fo: module '//trim(units(i)%module_name)// &
                 ' in '//trim(units(i)%filename)//' does not match package '// &
-                trim(package%name)//' or its [build] module-naming prefix'
+                package_name//' or its [build] module-naming prefix'
             exitcode = 1
         end do
     end subroutine validate_module_naming
