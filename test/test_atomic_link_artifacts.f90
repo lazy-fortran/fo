@@ -15,7 +15,7 @@ program test_atomic_link_artifacts
     character(:), allocatable :: archive_state_before
     type(string_list_t) :: args, env
     type(process_result_t) :: result, external
-    integer :: child = -1, status, archive_count
+    integer :: child = -1, status, archive_count, exec_attempt = 0
     logical :: found, macos
 
     call resolve_driver(driver)
@@ -247,9 +247,46 @@ contains
 
         command = words([character(len=32) :: 'exec', '--no-build', 'atomic_link_fixture'])
         environment = build_environment('normal')
+        exec_attempt = exec_attempt + 1
         call run_fo(driver, command, project, cache, child_result, environment, 120000)
+        if (child_result%exit_code /= 0) call describe_launch_failure(child_result)
         call assert_process_ok(child_result, 'run linked archive consumer')
     end subroutine run_program
+
+    subroutine describe_launch_failure(failed)
+        type(process_result_t), intent(in) :: failed
+        character(:), allocatable :: target, digest
+        character(len=4096) :: evidence_dir
+        type(process_result_t) :: inspected
+        integer :: env_status
+
+        target = join_path(project, 'build/fo/bin/atomic_link_fixture')
+        write (*, '(a,i0)') 'FAILED_EXEC_ATTEMPT ', exec_attempt
+        write (*, '(a)') 'FAILED_EXEC_TARGET ' // target
+        write (*, '(a)') 'FAILED_EXEC_CACHE ' // cache
+        write (*, '(a)') 'FAILED_EXEC_STDOUT ' // failed%stdout
+        write (*, '(a)') 'FAILED_EXEC_STDERR ' // failed%stderr
+        if (.not. file_exists(target)) return
+        digest = file_digest(target)
+        write (*, '(a)') 'FAILED_EXEC_SHA256 ' // digest
+        call run_external('/bin/ls', words([character(len=512) :: '-l', target]), &
+            scratch, inspected)
+        write (*, '(a)') inspected%stdout // inspected%stderr
+        if (macos) then
+            call run_external('/usr/bin/otool', &
+                words([character(len=512) :: '-hv', target]), scratch, inspected)
+            write (*, '(a)') inspected%stdout // inspected%stderr
+        end if
+        call get_environment_variable('FO_ARTIFACT_EVIDENCE_DIR', evidence_dir, &
+            status=env_status)
+        if (env_status /= 0 .or. len_trim(evidence_dir) == 0 .or. len(digest) /= 64) &
+            return
+        call run_external('/bin/cp', &
+            words([character(len=4096) :: target, &
+            join_path(trim(evidence_dir), 'failed-exec-' // digest)]), &
+            scratch, inspected)
+        call assert_process_ok(inspected, 'retain exact failed publication image')
+    end subroutine describe_launch_failure
 
     function command(program, arguments) result(combined)
         character(len=*), intent(in) :: program
