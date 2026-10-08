@@ -2,7 +2,7 @@ module fo_lsp
     use fx_lsp, only: lsp_server_t, lsp_server_init, lsp_server_run
     use fx_diag, only: diag_t
     use fortfront_compiler, only: compiler_frontend_options_t, &
-                                  compiler_frontend_result_t, compiler_diagnostic_t, &
+                                  compiler_frontend_result_t, &
                                compile_frontend_from_string, get_compiler_diagnostics, &
                                   INPUT_MODE_STANDARD, OPERATING_MODE_INFER
     implicit none
@@ -30,7 +30,6 @@ contains
         type(diag_t), allocatable, intent(out) :: diags(:)
         type(compiler_frontend_options_t) :: options
         type(compiler_frontend_result_t) :: result
-        type(compiler_diagnostic_t), allocatable :: frontend(:)
         integer :: i
 
         options = compiler_frontend_options_t()
@@ -38,20 +37,21 @@ contains
         options%operating_mode = OPERATING_MODE_INFER
         options%run_semantics = .true.
         call compile_frontend_from_string(text, result, options)
-        frontend = get_compiler_diagnostics(result)
-        allocate (diags(size(frontend)))
-        do i = 1, size(frontend)
-            diags(i)%file = uri
-            diags(i)%line = frontend(i)%span%start%line
-            diags(i)%col = utf16_column(text, diags(i)%line, &
-                                        frontend(i)%span%start%column)
-            diags(i)%end_line = frontend(i)%span%end%line
-            diags(i)%end_col = utf16_column(text, diags(i)%end_line, &
-                                            frontend(i)%span%end%column)
-            diags(i)%severity = max(0, min(3, frontend(i)%severity - 1))
-            diags(i)%code = frontend(i)%code
-            if (allocated(frontend(i)%message)) diags(i)%message = frontend(i)%message
-        end do
+        associate (frontend => get_compiler_diagnostics(result))
+            allocate (diags(size(frontend)))
+            do i = 1, size(frontend)
+                diags(i)%file = uri
+                diags(i)%line = frontend(i)%span%start%line
+                diags(i)%col = utf16_column(text, diags(i)%line, &
+                                            frontend(i)%span%start%column)
+                diags(i)%end_line = frontend(i)%span%end%line
+                diags(i)%end_col = utf16_column(text, diags(i)%end_line, &
+                                                frontend(i)%span%end%column)
+                diags(i)%severity = max(0, min(3, frontend(i)%severity - 1))
+                diags(i)%code = frontend(i)%code
+                if (allocated(frontend(i)%message)) diags(i)%message = frontend(i)%message
+            end do
+        end associate
     end subroutine diagnose_document
 
     integer function utf16_column(text, line, column) result(converted)
