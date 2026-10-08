@@ -4,7 +4,7 @@ program test_install_native_cli
     use fo_test_harness, only: read_text
     use fo_test_harness, only: file_exists, remove_tree, assert_true
     use fo_test_harness, only: assert_equal_integer, assert_equal_string
-    use fo_test_harness, only: finish_assertions
+    use fo_test_harness, only: finish_assertions, assert_contains
     use fo_test_cli, only: resolve_driver, run_fo, run_external
     implicit none
 
@@ -117,6 +117,21 @@ program test_install_native_cli
         'unsupported library install leaves the application intact')
     call assert_equal_string(result%stdout, 'native-install-output'//nl, &
         'unsupported library install does not publish partial output')
+
+    ! A release compile failure reports the compiler diagnostic, its source
+    ! location and the retained log, like fo build.
+    call write_text(join_path(project, 'fpm.toml'), 'name = "install_probe"'//nl)
+    call write_text(join_path(project, 'app/main.f90'), &
+        'program install_probe'//nl//'this is not fortran'//nl// &
+        'end program install_probe'//nl)
+    call run_fo(driver, args, project, cache, result, environment, 120000)
+    call assert_true(result%exit_code /= 0, 'failing release build fails install')
+    call assert_contains(result%stderr, 'fo install: release build failed: ', &
+        'install failure names the release build')
+    call assert_contains(result%stderr, 'fo: at: '//join_path(project, 'app')//'/', &
+        'install failure names the failing source location')
+    call assert_contains(result%stderr, 'fo: full log: ', &
+        'install failure points at the retained build log')
 
     call remove_tree(scratch)
     call finish_assertions()

@@ -1890,7 +1890,8 @@ contains
     subroutine cmd_install()
         type(backend_t) :: b
         character(len=256) :: prefix
-        character(len=512) :: home, error_message, message
+        character(len=512) :: home, error_message
+        character(len=2048) :: message
         integer :: exitcode, status
 
         call parse_install_args(prefix, error_message, status)

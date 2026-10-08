@@ -10,6 +10,7 @@ module fo_install
         fs_collect_files, fs_remove_tree, fs_rename
     use fo_process, only: process_getpid
     use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_diagnostics, only: diagnostic_t, diagnostic_from_log
     implicit none
     private
     public :: install_native_executables
@@ -27,6 +28,8 @@ contains
         character(len=128) :: names(256)
         character(len=512) :: source_dir, stage, source, target
         character(len=512) :: log_path
+        character(len=32) :: line_text
+        type(diagnostic_t) :: diag
         character(len=32) :: pid_text
         character(len=128) :: name
         character(len=512) :: prefix_files(256)
@@ -95,8 +98,16 @@ contains
         call backend_build(backend, build_status, flags=release_flags, &
             log_file=log_path)
         if (build_status /= 0) then
-            call delete_tmpfile(log_path)
-            message = 'fo install: release build failed'
+            ! Report the first compiler diagnostic like fo build, and keep the
+            ! log so the full output stays inspectable.
+            call diagnostic_from_log('build', log_path, 'fo install', diag)
+            message = 'fo install: release build failed: '//trim(diag%message)
+            if (len_trim(diag%file) > 0) then
+                write (line_text, '(i0)') diag%line
+                message = trim(message)//new_line('a')//'fo: at: '// &
+                    trim(diag%file)//':'//trim(line_text)
+            end if
+            message = trim(message)//new_line('a')//'fo: full log: '//trim(log_path)
             exitcode = build_status
             return
         end if
