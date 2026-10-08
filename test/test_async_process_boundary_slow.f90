@@ -9,7 +9,7 @@ program test_async_process_boundary_slow
     use fo_gremlin_state, only: gremlin_session_t, gremlin_session_acquire, &
         gremlin_session_read, gremlin_session_release
     use fo_test_harness, only: string_list_t, process_result_t, list_add, run_process, &
-        spawn_process, poll_process
+        spawn_process, poll_process, make_scratch
     implicit none
 
     interface
@@ -105,7 +105,7 @@ program test_async_process_boundary_slow
     character(len=128) :: session_id, owner_start
     character(len=32) :: setsid_text
     character(len=65536) :: status_text
-    character(len=512) :: scratch
+    character(len=:), allocatable :: scratch
     character(len=:), allocatable :: packed
     integer :: n_args
     type(c_funptr) :: previous_handler
@@ -161,10 +161,7 @@ program test_async_process_boundary_slow
     call check(exitcode == 0 .and. len_trim(workdir) > 0, &
         'reads the test working directory')
     pid = process_getpid()
-    call system_clock(count=ticks_start)
-    write (scratch, '("/var/tmp/fo-async-boundary-",i0,"-",i0)') &
-        pid, ticks_start
-    call fs_make_dir(trim(scratch))
+    call make_scratch('fo-async-boundary', scratch)
 
     call list_add(platform_command, '/usr/bin/uname')
     call list_add(platform_command, '-s')
