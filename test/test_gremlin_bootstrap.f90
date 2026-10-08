@@ -145,6 +145,10 @@ program test_gremlin_bootstrap
     call wait_receipt_for_project(scratch//'/other', 'lane-b', lane_session, &
         'test_lane_b', 'PASS', event)
     call stop_other_lane(scratch//'/other', lane_session)
+    call assert_true(.not. file_exists(project//'/.fx-metadata'), &
+        'resident lifecycle creates no immutable-store metadata in source')
+    call assert_true(.not. file_exists(scratch//'/other/.fx-metadata'), &
+        'independent resident lane leaves its source tree free of store metadata')
     call finish_assertions()
 
 contains
