@@ -23,7 +23,6 @@ module fo_build_backend
     integer, parameter :: BACKEND_NONE = 0
     integer, parameter :: BACKEND_NATIVE = 1
     integer, parameter :: BACKEND_CMAKE = 2
-    integer, parameter :: MAX_TEST_TARGETS = 512
 
     type :: backend_t
         integer :: kind = BACKEND_NONE
@@ -344,7 +343,7 @@ contains
 
     subroutine backend_test_names(self, names, n_names, exitcode, include_slow, &
             log_file, flags, use_cache)
-        use fo_scan, only: is_slow_test, MAX_PATH
+        use fo_scan, only: is_slow_test
         type(backend_t), intent(inout) :: self
         character(len=*), intent(in) :: names(:)
         integer, intent(in) :: n_names
@@ -355,11 +354,11 @@ contains
         logical, intent(in), optional :: use_cache
 
         integer :: i, lock_ierr
-        character(len=MAX_PATH) :: fast_names(MAX_TEST_TARGETS)
+        character(len=:), allocatable :: fast_names(:)
         logical :: slow
         integer :: n_fast
         character(len=512) :: log_path, lock_dir, flag_text
-        character(len=1024) :: regex
+        character(len=:), allocatable :: regex
 
         slow = .false.
         if (present(include_slow)) slow = include_slow
@@ -369,13 +368,12 @@ contains
         flag_text = ''
         if (present(flags)) flag_text = flags
 
+        allocate (character(len=len(names)) :: fast_names(n_names))
         n_fast = 0
         do i = 1, n_names
             if (.not. slow .and. is_slow_test(names(i))) cycle
-            if (n_fast < MAX_TEST_TARGETS) then
-                n_fast = n_fast + 1
-                fast_names(n_fast) = names(i)
-            end if
+            n_fast = n_fast + 1
+            fast_names(n_fast) = names(i)
         end do
         if (n_fast == 0) return
 
@@ -676,9 +674,9 @@ contains
     end function environment_timeout
 
     subroutine names_to_ctest_regex(names, n_names, regex)
-        character(len=*), intent(in) :: names(MAX_TEST_TARGETS)
+        character(len=*), intent(in) :: names(:)
         integer, intent(in) :: n_names
-        character(len=*), intent(out) :: regex
+        character(len=:), allocatable, intent(out) :: regex
 
         integer :: i
 
@@ -691,7 +689,7 @@ contains
     end subroutine names_to_ctest_regex
 
     subroutine append_ctest_regex_name(regex, name)
-        character(len=*), intent(inout) :: regex
+        character(len=:), allocatable, intent(inout) :: regex
         character(len=*), intent(in) :: name
 
         character(len=1) :: ch

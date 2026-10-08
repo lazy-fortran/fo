@@ -6,7 +6,7 @@ module fo_util
     implicit none
     private
     public :: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, read_text_file
-    public :: clean_root_build_artifacts
+    public :: clean_root_build_artifacts, read_text_file_alloc
     public :: strip_path_prefix_in_str
     public :: send_jsonrpc, jsonrpc_error, jsonrpc_null
     public :: json_bool, json_int
@@ -146,6 +146,31 @@ contains
         end do
         close (u)
     end subroutine read_text_file
+
+    subroutine read_text_file_alloc(path, text, ierr)
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable, intent(out) :: text
+        integer, intent(out) :: ierr
+
+        integer :: unit, file_size
+
+        text = ''
+        open (newunit=unit, file=trim(path), status='old', &
+            access='stream', form='unformatted', iostat=ierr)
+        if (ierr /= 0) return
+        inquire (unit=unit, size=file_size, iostat=ierr)
+        if (ierr == 0) then
+            if (file_size < 0) then
+                ierr = 1
+            else
+                deallocate (text)
+                allocate (character(len=file_size) :: text)
+                read (unit, iostat=ierr) text
+                if (ierr /= 0) text = ''
+            end if
+        end if
+        close (unit)
+    end subroutine read_text_file_alloc
 
     subroutine clean_root_build_artifacts(dir, n_removed)
         character(len=*), intent(in) :: dir

@@ -1,7 +1,8 @@
 module fo_mcp
     use fo_util, only: json_bool_text => json_bool, json_int, &
         make_tmpfile, &
-        delete_tmpfile, read_text_file, clean_root_build_artifacts, &
+        delete_tmpfile, read_text_file, read_text_file_alloc, &
+        clean_root_build_artifacts, &
         strip_path_prefix_in_str, jsonrpc_error, jsonrpc_null
     use fx_json_build, only: json_escape_string
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
@@ -157,7 +158,6 @@ contains
         logical :: valid_string
         type(json_event_t) :: dir_event
         character(len=512) :: tmpfile, dir
-        type(check_result_t) :: check_res
 
         call extract_json_member(params_json, 'arguments', arguments, &
             property_count, parse_status)
@@ -214,8 +214,7 @@ contains
                 call handle_async_start(arguments, id_str, response, async_state)
                 return
             end if
-            call handle_check(arguments, id_str, dir, check_res, output_text, &
-                exitcode, response)
+            call handle_check(arguments, id_str, dir, exitcode, response)
         case ('status')
             call handle_async_status(id_str, response, async_state)
             return
@@ -564,14 +563,13 @@ contains
         json_key_matches = key(1:len(expected)) == expected
     end function json_key_matches
 
-    subroutine handle_check(line, id_str, dir, check_res, output_text, &
-            exitcode, response)
+    subroutine handle_check(line, id_str, dir, exitcode, response)
         character(len=*), intent(in) :: line, id_str, dir
-        type(check_result_t), intent(out) :: check_res
-        character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
         character(len=:), allocatable, intent(out) :: response
 
+        type(check_result_t) :: check_res
+        character(len=:), allocatable :: output_text
         logical :: want_full
         integer :: option_count, option_error
         character(len=16) :: json_mode
@@ -679,13 +677,12 @@ contains
         use fo_gfortran_build, only: gfortran_named_test_exists
         use fo_scan, only: is_slow_test
         use fo_test_results, only: test_result_entry_t, parse_test_results, &
-            format_test_results_human, format_test_results_json
+            format_test_results_text, format_test_results_json
         character(len=*), intent(in) :: line, id_str, dir, tmpfile
         character(len=:), allocatable, intent(out) :: response
 
         type(backend_t) :: b
         character(len=:), allocatable :: output_text
-        character(len=16384) :: human_output
         character(len=16) :: json_mode
         integer :: exitcode
         character(len=:), allocatable :: test_names(:)
@@ -702,7 +699,23 @@ contains
         end if
 
         n_names = 0
-        call extract_test_names_from_params(line, test_names, n_names)
+        call extract_test_names_from_params(line, test_names, n_names, ierr)
+        if (ierr /= 0) then
+            call delete_tmpfile(tmpfile)
+            call jsonrpc_error(id_str, -32602, &
+                'test args must be an array of nonempty names', response)
+            return
+        end if
+
+        call extract_json_string_member(line, 'json', json_mode, &
+            mode_count, mode_error)
+        if (mode_count > 1 .or. (mode_count == 1 .and. &
+                (mode_error /= 0 .or. &
+                (json_mode /= 'compact' .and. json_mode /= 'full')))) then
+            call delete_tmpfile(tmpfile)
+            call jsonrpc_error(id_str, -32602, 'invalid test json mode', response)
+            return
+        end if
 
         if (n_names > 0) then
             do i = 1, n_names
@@ -730,56 +743,63 @@ contains
         end if
 
         call parse_test_results(tmpfile, entries, n_entries, ierr)
-        call extract_json_string_member(line, 'json', json_mode, &
-            mode_count, mode_error)
         if (ierr /= 0) then
             output_text = 'fo: could not parse test results'
             exitcode = 1
         else if (&
             mode_error == 0 .and. mode_count == 1 .and. &
             (json_mode == 'compact' .or. json_mode == 'full')) then
-            call format_test_results_json(entries, n_entries, exitcode, output_text)
+            call format_test_results_json(entries, n_entries, exitcode, &
+                output_text, tmpfile)
         else if (n_entries > 0) then
-            call format_test_results_human(entries, n_entries, tmpfile, &
-                n_names == 0, human_output)
-            output_text = trim(human_output)
+            call format_test_results_text(entries, n_entries, tmpfile, &
+                n_names == 0, output_text)
         else
-            call read_text_file(tmpfile, human_output)
-            output_text = trim(human_output)
+            call read_text_file_alloc(tmpfile, output_text, ierr)
+            if (ierr /= 0) then
+                output_text = 'fo: could not read test diagnostics'
+                exitcode = 1
+            end if
         end if
         call delete_tmpfile(tmpfile)
         call make_tool_text_response(id_str, output_text, exitcode, response)
     end subroutine handle_backend_test_named
 
-    subroutine extract_test_names_from_params(line, names, n_names)
-        use fx_dag, only: MAX_NODES
+    subroutine extract_test_names_from_params(line, names, n_names, ierr)
         character(len=*), intent(in) :: line
         character(len=:), allocatable, intent(out) :: names(:)
-        integer, intent(out) :: n_names
+        integer, intent(out) :: n_names, ierr
 
         character(len=MAX_LINE) :: args_json
         type(json_parser_t) :: parser
         type(json_event_t) :: event, array_event
-        integer :: args_count, ierr, max_name_length, name_index
+        integer :: args_count, max_name_length, name_index
 
         n_names = 0
         call extract_json_member(line, 'args', args_json, args_count, ierr, array_event)
-        if (ierr /= 0 .or. args_count /= 1) return
-        if (array_event%event_type /= JSON_ARRAY_START) return
+        if (ierr /= 0) return
+        if (args_count == 0) return
+        if (args_count /= 1 .or. array_event%event_type /= JSON_ARRAY_START) then
+            ierr = 1
+            return
+        end if
         max_name_length = 0
         call json_parser_init_strict(parser, args_json)
         call json_parser_next(parser, event)
         do
             call json_parser_next(parser, event)
-            if (event%event_type == JSON_ARRAY_END .or. &
-                event%event_type == JSON_ERROR .or. &
-                event%event_type == JSON_END_OF_INPUT) exit
+            if (event%event_type == JSON_ARRAY_END) exit
             if (event%event_type /= JSON_STRING .or. &
-                .not. allocated(event%string_val)) exit
-            if (n_names < MAX_NODES) then
-                n_names = n_names + 1
-                max_name_length = max(max_name_length, len(event%string_val))
+                .not. allocated(event%string_val)) then
+                ierr = 1
+                return
             end if
+            if (len_trim(event%string_val) == 0) then
+                ierr = 1
+                return
+            end if
+            n_names = n_names + 1
+            max_name_length = max(max_name_length, len(event%string_val))
         end do
         if (n_names == 0) return
         allocate (character(len=max(1, max_name_length)) :: names(n_names))
@@ -1037,8 +1057,8 @@ contains
         type(mcp_async_state_t), intent(inout) :: async_state
 
         character(len=256) :: uri
-        character(len=8192) :: output_text
-        integer :: exitcode, property_count, parse_status
+        character(len=:), allocatable :: output_text
+        integer :: exitcode, property_count, parse_status, read_error
         type(check_result_t) :: check_res
 
         call extract_json_string_member(params_json, 'uri', uri, &
@@ -1048,7 +1068,13 @@ contains
         if (parse_status == 0 .and. property_count == 1 .and. &
             trim(uri) == 'fo://diagnostics') then
             if (len_trim(async_state%last_output) > 0) then
-                call read_text_file(async_state%last_output, output_text)
+                call read_text_file_alloc(async_state%last_output, &
+                    output_text, read_error)
+                if (read_error /= 0) then
+                    call jsonrpc_error(id_str, -32603, &
+                        'could not read completed check diagnostics', response)
+                    return
+                end if
                 exitcode = async_state%last_exitcode
             else
                 call fo_check_run('.', check_res)
@@ -1152,7 +1178,7 @@ contains
         character(len=:), allocatable, intent(out) :: response
         type(mcp_async_state_t), intent(inout) :: async_state
 
-        character(len=8192) :: output_text
+        character(len=:), allocatable :: output_text
         integer :: run_id, ierr
 
         call async_poll(async_state)
@@ -1165,7 +1191,12 @@ contains
         output_text = ''
         if (run_id > 0 .and. run_id == async_state%last_run_id .and. &
             len_trim(async_state%last_output) > 0) then
-            call read_text_file(async_state%last_output, output_text)
+            call read_text_file_alloc(async_state%last_output, output_text, ierr)
+            if (ierr /= 0) then
+                call jsonrpc_error(id_str, -32603, &
+                    'could not read completed check diagnostics', response)
+                return
+            end if
         end if
 
         if (len_trim(output_text) == 0) then

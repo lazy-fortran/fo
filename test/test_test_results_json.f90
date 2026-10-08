@@ -6,20 +6,22 @@ program test_test_results_json
     use fo_test_harness, only: assert_equal_string, assert_true, assert_process_ok
     use fo_test_cli, only: resolve_driver, run_fo, parse_json_report
     use fo_test_json, only: json_value_t, json_number, json_member, json_element, json_size
-    use fo_test_json, only: json_string_value, json_number_value
-    use fo_test_results, only: test_result_entry_t, parse_test_results
+    use fo_test_json, only: json_string_value, json_number_value, json_parse
+    use fo_test_results, only: test_result_entry_t, parse_test_results, &
+        format_test_results_json, format_test_results_text
     use fo_test_harness, only: finish_assertions
     implicit none
 
     integer, parameter :: name_count = 402
     character(len=1400) :: names(name_count)
     character(:), allocatable :: driver, scratch, cmake, test_name, command_name
+    character(:), allocatable :: formatted, parse_message
     type(process_result_t) :: result
     type(string_list_t) :: arguments, environment
     type(json_value_t) :: report, tests, summary, entry, field
     type(test_result_entry_t), allocatable :: parsed(:)
     integer :: i, j, position, n_parsed, parse_error
-    logical :: seen(name_count)
+    logical :: seen(name_count), valid
     real(real64) :: seconds
 
     call resolve_driver(driver)
@@ -106,6 +108,71 @@ program test_test_results_json
     call parse_test_results(join_path(scratch, 'malformed-results.log'), &
         parsed, n_parsed, parse_error)
     call assert_true(parse_error /= 0, 'malformed result is rejected explicitly')
+    call write_text(join_path(scratch, 'invalid-status.log'), &
+        'TEST_RESULT test_bad UNKNOWN - 0.01'//new_line('a'))
+    call parse_test_results(join_path(scratch, 'invalid-status.log'), &
+        parsed, n_parsed, parse_error)
+    call assert_true(parse_error /= 0, 'unknown native status is reported')
+    call write_text(join_path(scratch, 'invalid-exit.log'), &
+        'TEST_RESULT test_bad FAIL garbage 0.01'//new_line('a'))
+    call parse_test_results(join_path(scratch, 'invalid-exit.log'), &
+        parsed, n_parsed, parse_error)
+    call assert_true(parse_error /= 0, 'malformed exit status is reported')
+    call write_text(join_path(scratch, 'invalid-time.log'), &
+        'TEST_RESULT test_bad PASS - NaN'//new_line('a'))
+    call parse_test_results(join_path(scratch, 'invalid-time.log'), &
+        parsed, n_parsed, parse_error)
+    call assert_true(parse_error /= 0, 'nonfinite duration is reported')
+    call write_text(join_path(scratch, 'long-duration.log'), &
+        'TEST_RESULT long_first PASS - 60000.50'//new_line('a')// &
+        'TEST_RESULT long_second PASS - 60000.50'//new_line('a'))
+    call parse_test_results(join_path(scratch, 'long-duration.log'), &
+        parsed, n_parsed, parse_error)
+    call assert_equal_integer(parse_error, 0, 'supported long durations parse')
+    call format_test_results_json(parsed, n_parsed, 0, formatted)
+    call json_parse(formatted, report, valid, parse_message)
+    call assert_true(valid, &
+        'aggregate duration beyond fixed numeric width is valid JSON')
+    summary = json_member(report, 'summary')
+    field = json_member(summary, 'total_seconds')
+    call assert_true(abs(json_number_value(field) - 120001.0_real64) < 0.01_real64, &
+        'aggregate duration remains a complete exact JSON number')
+    call format_test_results_text(parsed, n_parsed, &
+        join_path(scratch, 'long-duration.log'), .false., formatted)
+    call assert_true(index(formatted, '120001.00s)') > 0, &
+        'human summary retains duration beyond its former numeric width')
+    call write_text(join_path(scratch, 'negative-zero.log'), &
+        'TEST_RESULT zero PASS - -0.0'//new_line('a'))
+    call parse_test_results(join_path(scratch, 'negative-zero.log'), &
+        parsed, n_parsed, parse_error)
+    call assert_equal_integer(parse_error, 0, 'finite negative zero duration parses')
+    call format_test_results_json(parsed, n_parsed, 0, formatted)
+    call json_parse(formatted, report, valid, parse_message)
+    call assert_true(valid, 'negative zero duration produces valid JSON numbers')
+    call write_text(join_path(scratch, 'large-finite-duration.log'), &
+        'TEST_RESULT huge_first PASS - 3.0e38'//new_line('a')// &
+        'TEST_RESULT huge_second PASS - 3.0e38'//new_line('a'))
+    call parse_test_results(join_path(scratch, 'large-finite-duration.log'), &
+        parsed, n_parsed, parse_error)
+    call assert_equal_integer(parse_error, 0, 'two large finite durations parse')
+    call format_test_results_json(parsed, n_parsed, 0, formatted)
+    call json_parse(formatted, report, valid, parse_message)
+    call assert_true(valid, 'large finite duration sum remains valid JSON')
+    summary = json_member(report, 'summary')
+    field = json_member(summary, 'total_seconds')
+    call assert_true(abs(json_number_value(field)/6.0e38_real64 - 1.0_real64) < &
+        1.0e-6_real64, 'large finite durations accumulate without overflow')
+    test_name = 'BUILD_FAIL "quoted" café '//repeat('d', 24000)//' END  '//new_line('a')
+    call write_text(join_path(scratch, 'build-failure.log'), test_name)
+    call parse_test_results(join_path(scratch, 'build-failure.log'), &
+        parsed, n_parsed, parse_error)
+    call format_test_results_json(parsed, n_parsed, 1, formatted, &
+        join_path(scratch, 'build-failure.log'))
+    call json_parse(formatted, report, valid, parse_message)
+    call assert_true(valid, 'failure without executed tests produces valid JSON')
+    field = json_member(report, 'output')
+    call assert_equal_string(json_string_value(field), test_name, &
+        'failure without executed tests preserves the complete raw diagnostic log')
     call write_text(join_path(scratch, 'malformed-ctest-results.log'), &
         '1/1 Test #1: test_missing_status'//new_line('a'))
     call parse_test_results(join_path(scratch, 'malformed-ctest-results.log'), &
@@ -113,23 +180,43 @@ program test_test_results_json
     call assert_true(parse_error /= 0, &
         'malformed CTest result is rejected instead of silently omitted')
     call write_text(join_path(scratch, 'status-words-in-names.log'), &
-        '1/3 Test #1: test_Passed_word ... Passed 0.01 sec'//new_line('a')// &
+        '1/3 Test #1: test_Passed_(Disabled) ... Passed 0.01 sec'//new_line('a')// &
         '2/3 Test #2: test_Skipped_word ... Skipped 0.02 sec'//new_line('a')// &
-        '3/3 Test #3: test_Not_Run_word ... Not Run 0.00 sec'//new_line('a'))
+        '3/4 Test #3: test_Not_Run_word ... Not Run 0.00 sec'//new_line('a')// &
+        '4/4 Test #4: test_disabled ... Not Run (Disabled) 0.00 sec'//new_line('a'))
     call parse_test_results(join_path(scratch, 'status-words-in-names.log'), &
         parsed, n_parsed, parse_error)
     call assert_equal_integer(parse_error, 0, 'CTest status-word names parse')
-    call assert_equal_integer(n_parsed, 3, 'all CTest status-word names remain')
-    if (n_parsed >= 3) then
-        call assert_equal_string(parsed(1)%name, 'test_Passed_word', &
+    call assert_equal_integer(n_parsed, 4, 'all CTest status-word names remain')
+    if (n_parsed >= 4) then
+        call assert_equal_string(parsed(1)%name, 'test_Passed_(Disabled)', &
             'Passed in a test name is not treated as its status')
         call assert_equal_string(parsed(1)%status, 'PASS', 'CTest pass status')
+        call assert_equal_string(parsed(1)%reason, '', &
+            'Disabled in a passing test name does not create a skipped cause')
         call assert_equal_string(parsed(2)%name, 'test_Skipped_word', &
             'Skipped in a test name is not treated as its status')
         call assert_equal_string(parsed(2)%status, 'SKIP', 'CTest skipped status')
         call assert_equal_string(parsed(3)%name, 'test_Not_Run_word', &
             'Not Run in a test name is not treated as its status')
-        call assert_equal_string(parsed(3)%status, 'SKIP', 'CTest not-run status')
+        call assert_equal_string(parsed(3)%status, 'UNTESTED', 'CTest not-run status')
+        call assert_equal_string(parsed(4)%status, 'SKIP', &
+            'disabled CTest remains skip')
+        call format_test_results_json(parsed, n_parsed, 1, formatted)
+        call json_parse(formatted, report, valid, parse_message)
+        call assert_true(valid, 'mixed CTest statuses produce valid JSON')
+        summary = json_member(report, 'summary')
+        field = json_member(summary, 'untested')
+        call assert_equal_integer(int(json_number_value(field)), 1, &
+            'one untested CTest is counted separately')
+        field = json_member(summary, 'skipped')
+        call assert_equal_integer(int(json_number_value(field)), 2, &
+            'only disabled and explicitly skipped tests count as skips')
+        call format_test_results_text(parsed, n_parsed, &
+            join_path(scratch, 'status-words-in-names.log'), .true., formatted)
+        call assert_true(index(formatted, &
+            'Summary: 1 passed, 0 failed, 2 skipped, 1 untested (') > 0, &
+            'human CTest summary separates skipped and untested work')
     end if
     call remove_tree(scratch)
     call finish_assertions()

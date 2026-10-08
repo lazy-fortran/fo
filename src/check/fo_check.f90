@@ -13,17 +13,17 @@ module fo_check
         cache_action_mod_key, hash_mod_file, HASH_LEN
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, is_runner_crash
     use fo_fs, only: fs_collect_files
+    use fo_test_results, only: read_logical_line
     implicit none
     private
     public :: check_result_t, test_result_t, fo_check_run, fo_changed_modules
     public :: should_report_frontend_diagnostics
-    public :: MAX_TEST_RESULTS, collect_failed_test_names
+    public :: collect_failed_test_names
 
     integer, parameter :: MAX_EXT_DEPS = 256
-    integer, parameter :: MAX_TEST_RESULTS = 64
 
     type :: test_result_t
-        character(len=4096) :: name = ''
+        character(len=:), allocatable :: name
         integer :: n_pass = 0
         integer :: n_fail = 0
         character(len=8) :: status = ''
@@ -49,9 +49,9 @@ module fo_check
         character(len=256) :: diag_file = ''
         integer :: diag_line = 0
         integer :: diag_column = 0
-        type(test_result_t) :: test_results(MAX_TEST_RESULTS)
+        type(test_result_t), allocatable :: test_results(:)
         integer :: n_test_results = 0
-        character(len=4096) :: failed_tests(MAX_TEST_RESULTS) = ''
+        character(len=:), allocatable :: failed_tests(:)
         integer :: n_failed_tests = 0
     end type check_result_t
 
@@ -543,12 +543,18 @@ contains
         type(check_result_t), intent(inout) :: res
         character(len=*), intent(in) :: log_file
 
-        integer :: i, n_suites, n_assertions
+        integer :: i, n_suites, n_assertions, max_name_len
         character(len=32) :: suites_str, assertions_str
 
         n_suites = 0
         n_assertions = 0
         res%n_failed_tests = 0
+        if (allocated(res%failed_tests)) deallocate (res%failed_tests)
+        max_name_len = 1
+        do i = 1, res%n_test_results
+            max_name_len = max(max_name_len, len(res%test_results(i)%name))
+        end do
+        allocate (character(len=max_name_len) :: res%failed_tests(res%n_test_results))
         do i = 1, res%n_test_results
             if (trim(res%test_results(i)%status) /= 'fail') cycle
             n_suites = n_suites + 1
@@ -623,20 +629,21 @@ contains
 
     subroutine parse_test_log(log_file, results, n_results)
         character(len=*), intent(in) :: log_file
-        type(test_result_t), intent(out) :: results(MAX_TEST_RESULTS)
+        type(test_result_t), allocatable, intent(out) :: results(:)
         integer, intent(out) :: n_results
 
-        character(len=4096) :: line
-        character(len=4096) :: name
+        character(len=:), allocatable :: line, name
+        type(test_result_t), allocatable :: grown(:)
         integer :: u, iostat, io, colon_pos, pass_pos, fail_pos, comma_pos
         integer :: n_pass, n_fail
 
         n_results = 0
+        allocate (results(64))
         open (newunit=u, file=log_file, status='old', iostat=iostat)
         if (iostat /= 0) return
 
         do
-            read (u, '(a)', iostat=iostat) line
+            call read_logical_line(u, line, iostat)
             if (iostat /= 0) exit
             colon_pos = index(line, ': ')
             if (colon_pos < 2) cycle
@@ -652,16 +659,19 @@ contains
             if (io /= 0) cycle
             read (line(comma_pos + 1:fail_pos - 1), *, iostat=io) n_fail
             if (io /= 0) cycle
-            if (n_results < MAX_TEST_RESULTS) then
-                n_results = n_results + 1
-                results(n_results)%name = trim(name)
-                results(n_results)%n_pass = n_pass
-                results(n_results)%n_fail = n_fail
-                if (n_fail == 0) then
-                    results(n_results)%status = 'pass'
-                else
-                    results(n_results)%status = 'fail'
-                end if
+            if (n_results == size(results)) then
+                allocate (grown(2*size(results)))
+                grown(:n_results) = results
+                call move_alloc(grown, results)
+            end if
+            n_results = n_results + 1
+            results(n_results)%name = trim(name)
+            results(n_results)%n_pass = n_pass
+            results(n_results)%n_fail = n_fail
+            if (n_fail == 0) then
+                results(n_results)%status = 'pass'
+            else
+                results(n_results)%status = 'fail'
             end if
         end do
         close (u)
@@ -674,20 +684,20 @@ contains
         !! full set. A single failing target then never hides the others, which is
         !! what otherwise pushes a user to run the raw binaries (and get stale ones).
         character(len=*), intent(in) :: log_file
-        character(len=4096), intent(out) :: names(MAX_TEST_RESULTS)
+        character(len=:), allocatable, intent(out) :: names(:)
         integer, intent(out) :: n_names
 
         character(len=*), parameter :: pfx = 'fo: test target '
-        character(len=4096) :: line
-        character(len=4096) :: nm
-        integer :: u, ios, p, q, j
+        character(len=:), allocatable :: line, nm, grown(:)
+        integer :: u, ios, p, q, j, capacity
         logical :: seen
 
         n_names = 0
+        allocate (character(len=1) :: names(64))
         open (newunit=u, file=trim(log_file), status='old', iostat=ios)
         if (ios /= 0) return
         do
-            read (u, '(a)', iostat=ios) line
+            call read_logical_line(u, line, ios)
             if (ios /= 0) exit
             p = index(line, pfx)
             if (p == 0) cycle
@@ -699,7 +709,15 @@ contains
             do j = 1, n_names
                 if (trim(names(j)) == trim(nm)) seen = .true.
             end do
-            if (.not. seen .and. n_names < MAX_TEST_RESULTS) then
+            if (.not. seen) then
+                capacity = size(names)
+                if (n_names == capacity) capacity = 2*capacity
+                if (capacity /= size(names) .or. len(nm) > len(names)) then
+                    allocate (character(len=max(len(names), len(nm))) :: &
+                        grown(capacity))
+                    if (n_names > 0) grown(:n_names) = names(:n_names)
+                    call move_alloc(grown, names)
+                end if
                 n_names = n_names + 1
                 names(n_names) = nm
             end if

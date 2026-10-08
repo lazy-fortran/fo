@@ -9,8 +9,7 @@ program fo_main
         backend_test, backend_test_names, backend_test_affected, BACKEND_NONE, &
         BACKEND_NATIVE, BACKEND_CMAKE, profile_flags, backend_profile
     use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
-        collect_failed_test_names, should_report_frontend_diagnostics, &
-        MAX_TEST_RESULTS
+        collect_failed_test_names, should_report_frontend_diagnostics
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, &
         array_temporary_warnings_from_log, frontend_diagnostics_from_file, &
         FO_DIAG_SEVERITY_ERROR
@@ -152,7 +151,7 @@ contains
         character(len=4096), allocatable :: test_names(:)
         character(len=MAX_PATH), allocatable :: filenames(:), changed_files(:)
         character(len=512) :: build_log, test_log
-        character(len=4096) :: failed_tests(MAX_TEST_RESULTS)
+        character(len=:), allocatable :: failed_tests(:)
         integer :: n_failed_tests
         logical :: is_test_arr(MAX_NODES), has_cycle
 
@@ -705,7 +704,7 @@ contains
         !! binaries to find them -- which serves stale artifacts when sources
         !! changed since the last fo run. The full list keeps everything inside
         !! fo, where the content-addressed cache guarantees fresh binaries.
-        character(len=4096), intent(in) :: failed(:)
+        character(len=*), intent(in) :: failed(:)
         integer, intent(in) :: n_failed
         integer :: i
 
@@ -1494,7 +1493,7 @@ contains
         integer :: n_entries, parse_ierr
         character(len=:), allocatable :: json_output, human_output
         type(diagnostic_t) :: diag
-        character(len=4096) :: failed_tests(MAX_TEST_RESULTS)
+        character(len=:), allocatable :: failed_tests(:)
         integer :: n_failed_tests, i
         character(len=8) :: exit_out
         character(len=16) :: secs_out

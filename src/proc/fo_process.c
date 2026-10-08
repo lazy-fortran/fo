@@ -3028,9 +3028,9 @@ void fo_c_start_argv_logged(const char *cwd, const char *args, int args_len,
 void fo_c_start_fo_check(const char *project_dir, const char *mode,
                          const char *output_file, int *pid_out,
                          int *exitcode) {
-    static const char args_compact[] = "fo\0check\0--json=compact\0";
-    static const char args_full[] = "fo\0check\0--json=full\0";
-    const char *packed;
+    char image[PATH_MAX], packed[PATH_MAX + 64];
+    const char *json_mode;
+    size_t image_size, mode_size;
     int args_len;
 
     if (!has_text(project_dir) || !has_text(output_file)) {
@@ -3038,13 +3038,27 @@ void fo_c_start_fo_check(const char *project_dir, const char *mode,
         *exitcode = EINVAL;
         return;
     }
-    if (strcmp(mode, "full") == 0) {
-        packed = args_full;
-        args_len = (int)sizeof(args_full) - 1;
-    } else {
-        packed = args_compact;
-        args_len = (int)sizeof(args_compact) - 1;
+#ifdef __linux__
+    strcpy(image, "/proc/self/exe");
+#elif defined(__APPLE__)
+    if (proc_pidpath(getpid(), image, sizeof(image)) <= 0 || image[0] != '/') {
+        *pid_out = 0;
+        *exitcode = errno != 0 ? errno : ENOENT;
+        return;
     }
+#else
+    *pid_out = 0;
+    *exitcode = ENOTSUP;
+    return;
+#endif
+    /* Async checks use the MCP server's native image, never a PATH fo. */
+    json_mode = strcmp(mode, "full") == 0 ? "--json=full" : "--json=compact";
+    image_size = strlen(image) + 1;
+    mode_size = strlen(json_mode) + 1;
+    memcpy(packed, image, image_size);
+    memcpy(packed + image_size, "check", sizeof("check"));
+    memcpy(packed + image_size + sizeof("check"), json_mode, mode_size);
+    args_len = (int)(image_size + sizeof("check") + mode_size);
     fo_c_start_argv_logged(project_dir, packed, args_len, 3, output_file, NULL,
                            pid_out, exitcode);
 }

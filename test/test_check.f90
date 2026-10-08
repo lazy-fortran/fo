@@ -1,7 +1,7 @@
 program test_check
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_check, only: check_result_t, fo_check_run, &
-        should_report_frontend_diagnostics
+        should_report_frontend_diagnostics, collect_failed_test_names
     use fo_check_output, only: check_result_compact_json, &
         check_result_full_json
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, &
@@ -13,8 +13,9 @@ program test_check
     use fo_fmt, only: fo_fmt_files, fo_fmt_check_run, fo_fmt_check_files, &
         fo_fmt_check_changed_run
     use fo_cache, only: cache_store_root
+    use fo_util, only: make_tmpfile
     use fo_test_results, only: test_result_entry_t, parse_test_results, &
-        format_test_results_human, MAX_TEST_RESULTS_ENTRIES
+        format_test_results_text, MAX_TEST_RESULTS_ENTRIES
     implicit none
 
     integer :: n_pass, n_fail
@@ -55,6 +56,7 @@ program test_check
     call test_padded_ctest_results_parse()
     call test_results_beyond_initial_capacity()
     call test_failure_stdout_shown()
+    call test_failed_names_beyond_initial_capacity()
 
     write (output_unit, '(a,i0,a,i0,a)') 'check: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -202,7 +204,7 @@ contains
         !! status fo derives from them all have to say the same thing.
         type(check_result_t) :: res
         character(len=512) :: project_dir
-        character(len=8192) :: line
+        character(len=:), allocatable :: line
         integer :: i, n_failing_suites
 
         call make_tmp_path('fo_lying_test_project', project_dir)
@@ -216,8 +218,11 @@ contains
                 n_failing_suites = n_failing_suites + 1
             end if
         end do
-        call assert(n_failing_suites > 0, &
-            'parsed summary reports a failing suite')
+        call assert(n_failing_suites == 301, &
+            'parsed summary retains all 301 failing suites beyond 64')
+        call assert(res%n_failed_tests == 301, 'every failing suite remains visible')
+        call assert(trim(res%failed_tests(301)) == 'late_suite_300', &
+            'late failing suite keeps its exact name')
         call assert(.not. res%tests_ok, &
             'zero exit with a failing parsed summary is not a pass')
         call assert(index(res%error_msg, 'exit') > 0, &
@@ -258,8 +263,12 @@ contains
             status='replace')
         write (u, '(a)') 'program test_lying'
         write (u, '(a)') 'use ok, only: noop'
+        write (u, '(a)') 'integer :: i'
         write (u, '(a)') 'call noop()'
         write (u, '(a)') "print '(a)', 'lying: 3 pass, 2 fail'"
+        write (u, '(a)') 'do i = 1, 300'
+        write (u, '(a)') "write (*, '(a,i0,a)') 'late_suite_', i, ': 0 pass, 1 fail'"
+        write (u, '(a)') 'end do'
         write (u, '(a)') 'if (command_argument_count() < 0) stop 1'
         write (u, '(a)') 'end program test_lying'
         close (u)
@@ -308,6 +317,7 @@ contains
         res%rerun = 'fo test test_x'
         res%log_path = '/tmp/fo-test.log'
         res%elapsed = 0.5
+        allocate (character(len=8) :: res%failed_tests(2))
         res%n_failed_tests = 2
         res%failed_tests(1) = 'test_x'
         res%failed_tests(2) = 'test_y'
@@ -1010,13 +1020,7 @@ contains
         character(len=*), intent(in) :: prefix
         character(len=*), intent(out) :: path
 
-        integer :: count
-        integer, save :: serial = 0
-
-        serial = serial + 1
-        call system_clock(count)
-        write (path, '(a,a,a,i0,a,i0)') '/tmp/', trim(prefix), '-', &
-            count, '-', serial
+        call make_tmpfile(prefix, path)
     end subroutine make_tmp_path
 
     subroutine make_dir(path)
@@ -1038,6 +1042,7 @@ contains
         res%build_ok = .true.
         res%tests_ok = .true.
         res%stage = 'done'
+        allocate (res%test_results(2))
         res%n_test_results = 2
         res%test_results(1)%name = 'test_cache'
         res%test_results(1)%n_pass = 8
@@ -1064,6 +1069,7 @@ contains
         res%build_ok = .true.
         res%tests_ok = .true.
         res%stage = 'done'
+        allocate (res%test_results(1))
         res%n_test_results = 1
         res%test_results(1)%name = 'test_scan'
         res%test_results(1)%n_pass = 30
@@ -1164,16 +1170,41 @@ contains
         call execute_command_line('rm -f '//trim(log_file), wait=.true.)
     end subroutine test_results_beyond_initial_capacity
 
+    subroutine test_failed_names_beyond_initial_capacity()
+        character(len=512) :: log_file
+        character(len=:), allocatable :: names(:), long_name
+        integer :: unit, i, count
+
+        long_name = 'failure_'//repeat('l', 5000)
+        call make_tmp_path('fo_many_failures', log_file)
+        open (newunit=unit, file=log_file, status='replace')
+        do i = 1, 299
+            write (unit, '(a,i0,a)') 'fo: test target failure_', i, &
+                ' returned exit code 1'
+        end do
+        write (unit, '(a)') 'fo: test target '//long_name//' returned exit code 1'
+        write (unit, '(a)') 'fo: test target '//long_name//' returned exit code 1'
+        close (unit)
+        call collect_failed_test_names(log_file, names, count)
+        call assert(count == 300, &
+            'failed target collector preserves exact count beyond 64')
+        call assert(trim(names(300)) == long_name, &
+            'full failure identity beyond4096 is retained once')
+        open (newunit=unit, file=log_file, status='old')
+        close (unit, status='delete')
+    end subroutine test_failed_names_beyond_initial_capacity
+
     subroutine test_failure_stdout_shown()
         type(test_result_entry_t), allocatable :: entries(:)
         character(len=512) :: log_file
-        character(len=16384) :: output
+        character(len=:), allocatable :: output
         integer :: u, n, ierr
 
         call make_tmp_path('fo_failure_stdout', log_file)
         open (newunit=u, file=log_file, status='replace')
         write (u, '(a)') '--- stdout test_boom ---'
-        write (u, '(a)') 'FAIL: boom happened'
+        write (u, '(a)') ''
+        write (u, '(a)') 'FAIL: boom happened  '
         write (u, '(a)') '--- end stdout test_boom ---'
         write (u, '(a)') 'fo: test target test_boom returned exit code 1'
         write (u, '(a)') 'TEST_RESULT test_ok PASS -     0.00'
@@ -1182,11 +1213,14 @@ contains
 
         call parse_test_results(log_file, entries, n, ierr)
         call assert(ierr == 0 .and. n == 2, 'failure log parses two results')
-        call format_test_results_human(entries, n, log_file, .true., output)
+        call format_test_results_text(entries, n, log_file, .true., output)
         call assert(index(output, '--- captured stdout ---') > 0, &
             'failure output includes captured-stdout markers')
         call assert(index(output, 'FAIL: boom happened') > 0, &
             'failure output includes the test stdout')
+        call assert(index(output, '  '//achar(10)// &
+            '  FAIL: boom happened  '//achar(10)) > 0, &
+            'native stdout preserves initial blank line and trailing spaces')
         call assert(index(output, 'test_ok') == 0, &
             'summary mode hides passing tests')
         call execute_command_line('rm -f '//trim(log_file), wait=.true.)

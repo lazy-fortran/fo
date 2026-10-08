@@ -1,12 +1,13 @@
 module fo_test_results
-    use, intrinsic :: iso_fortran_env, only: iostat_end, iostat_eor
-    use fo_util, only: json_int
+    use, intrinsic :: iso_fortran_env, only: iostat_end, iostat_eor, real64
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+    use fo_util, only: json_int, read_text_file_alloc
     use fx_json_build, only: json_escape_string
     implicit none
     private
     public :: test_result_entry_t, MAX_TEST_RESULTS_ENTRIES
-    public :: parse_test_results, format_test_results_human, format_test_results_json
-    public :: format_test_results_text
+    public :: parse_test_results, format_test_results_json
+    public :: format_test_results_text, read_logical_line
 
     !! Initial capacity only. The entry buffer grows on demand, so a suite with
     !! more tests than this still reports every result: truncating the list used
@@ -14,7 +15,7 @@ module fo_test_results
     integer, parameter :: MAX_TEST_RESULTS_ENTRIES = 256
 
     type :: test_result_entry_t
-        character(len=:), allocatable :: name
+        character(len=:), allocatable :: name, reason
         character(len=10)   :: status
         real                :: seconds
         integer             :: exit_code
@@ -28,13 +29,14 @@ contains
         integer, intent(out) :: n_entries
         integer, intent(out) :: ierr
 
-        character(len=:), allocatable :: line, name
+        character(len=:), allocatable :: line, name, pending_reason
         character(len=10) :: status
         character(len=10) :: exit_str
         real :: secs
         integer :: u, ios, iostat
 
         n_entries = 0
+        pending_reason = ''
         ierr = 0
         if (.not. allocated(entries)) allocate (entries(MAX_TEST_RESULTS_ENTRIES))
         open (newunit=u, file=trim(log_file), status='old', iostat=ios)
@@ -60,6 +62,7 @@ contains
                 if (n_entries >= size(entries)) call grow_entries(entries)
                 n_entries = n_entries + 1
                 entries(n_entries)%name = name
+                entries(n_entries)%reason = ''
                 entries(n_entries)%status = status
                 entries(n_entries)%seconds = secs
                 entries(n_entries)%exit_code = 0
@@ -73,6 +76,17 @@ contains
                     if (n_entries >= size(entries)) call grow_entries(entries)
                     n_entries = n_entries + 1
                     entries(n_entries)%name = name
+                    entries(n_entries)%reason = ''
+                    if (status == 'UNTESTED') then
+                        entries(n_entries)%reason = pending_reason
+                        if (len(pending_reason) == 0) entries(n_entries)%reason = &
+                            'CTest did not run this test'
+                    else if (status == 'SKIP' .and. &
+                        index(line, 'Not Run (Disabled)', back=.true.) > &
+                        index(line, '...', back=.true.)) then
+                        entries(n_entries)%reason = 'CTest test is disabled'
+                    end if
+                    pending_reason = ''
                     entries(n_entries)%status = status
                     entries(n_entries)%seconds = secs
                     entries(n_entries)%exit_code = 0
@@ -80,6 +94,9 @@ contains
                         trim(status) == 'TIMEOUT') then
                         entries(n_entries)%exit_code = 1
                     end if
+                else if (index(line, 'Unable to find executable:') > 0 .or. &
+                    index(line, 'Could not find executable ') > 0) then
+                    pending_reason = line
                 else if (looks_like_ctest_result_line(line)) then
                     ierr = 1
                     close (u)
@@ -132,8 +149,8 @@ contains
         integer, intent(out) :: iostat
 
         character(len=:), allocatable :: name_local
-        character(len=128) :: status_local, exit_local
-        character(len=10) :: secs_str
+        character(len=:), allocatable :: status_local, exit_local, secs_str
+        integer :: exit_value
 
         name = ''
         status = ''
@@ -144,11 +161,25 @@ contains
         call parse_test_result_fields(line, name_local, status_local, &
             exit_local, secs_str, iostat)
         if (iostat /= 0) return
+        select case (status_local)
+        case ('PASS', 'FAIL', 'TIMEOUT', 'SKIP', 'FLAKY')
+        case default
+            iostat = 1
+            return
+        end select
+        if (exit_local /= '-') then
+            read (exit_local, *, iostat=iostat) exit_value
+            if (iostat /= 0) return
+        end if
+        read (secs_str, *, iostat=iostat) secs
+        if (iostat /= 0) return
+        if (.not. ieee_is_finite(secs) .or. secs < 0.0) then
+            iostat = 1
+            return
+        end if
         name = name_local
         status = status_local
         exit_str = exit_local
-        read (secs_str, *, iostat=iostat) secs
-        if (iostat /= 0) secs = 0.0
     end subroutine parse_test_result_line
 
     subroutine parse_ctest_result_line(line, name, status, secs, iostat)
@@ -190,8 +221,13 @@ contains
             timing = trim(adjustl(timing(2:)))
         end if
         if (len(timing) == 0) return
+        if (index(timing, '(Disabled)') == 1) then
+            if (len(timing) <= len('(Disabled)')) return
+            timing = trim(adjustl(timing(len('(Disabled)') + 1:)))
+        end if
         read (timing, *, iostat=time_iostat) secs
         if (time_iostat /= 0) return
+        if (.not. ieee_is_finite(secs) .or. secs < 0.0) return
         iostat = 0
     end subroutine parse_ctest_result_line
 
@@ -263,7 +299,8 @@ contains
         local_pos = index(status_text, 'Not Run')
         local_width = len('Not Run')
         if (local_pos > 0) then
-            status = 'SKIP'
+            status = 'UNTESTED'
+            if (index(status_text, '(Disabled)') > 0) status = 'SKIP'
             pos = padding_pos + 2 + local_pos
             width = local_width
             return
@@ -294,11 +331,11 @@ contains
             secs_str, iostat)
         character(len=*), intent(in) :: line
         character(len=:), allocatable, intent(out) :: name
-        character(len=*), intent(out) :: status, exit_str, secs_str
+        character(len=:), allocatable, intent(out) :: status, exit_str, secs_str
         integer, intent(out) :: iostat
 
         character(len=:), allocatable :: name_local, status_local, exit_local
-        character(len=:), allocatable :: secs_local
+        character(len=:), allocatable :: secs_local, extra
 
         name = ''
         status = ''
@@ -315,8 +352,11 @@ contains
         call extract_word(line, 3, status_local)
         call extract_word(line, 4, exit_local)
         call extract_word(line, 5, secs_local)
+        call extract_word(line, 6, extra)
 
-        if (len_trim(name_local) == 0) then
+        if (len_trim(name_local) == 0 .or. len_trim(status_local) == 0 .or. &
+            len_trim(exit_local) == 0 .or. len_trim(secs_local) == 0 .or. &
+            len(extra) /= 0) then
             iostat = 1
             return
         end if
@@ -370,25 +410,27 @@ contains
         logical, intent(in) :: summary_mode
         character(len=:), allocatable, intent(out) :: output
 
-        integer :: i, n_pass, n_fail, n_skip, n_shown
-        real :: total_secs
-        character(len=512) :: line
-        character(len=:), allocatable :: captured
+        integer :: i, n_pass, n_fail, n_skip, n_untested, n_shown
+        real(real64) :: total_secs
+        character(len=:), allocatable :: line, captured
 
         n_pass = 0
         n_fail = 0
         n_skip = 0
+        n_untested = 0
         n_shown = 0
         total_secs = 0.0
 
         do i = 1, n_entries
-            total_secs = total_secs + entries(i)%seconds
+            total_secs = total_secs + real(entries(i)%seconds, real64)
             if (trim(entries(i)%status) == 'PASS' .or. &
                 trim(entries(i)%status) == 'FLAKY') then
                 n_pass = n_pass + 1
             else if (trim(entries(i)%status) == 'FAIL' .or. &
                     trim(entries(i)%status) == 'TIMEOUT') then
                 n_fail = n_fail + 1
+            else if (entries(i)%status == 'UNTESTED') then
+                n_untested = n_untested + 1
             else
                 n_skip = n_skip + 1
             end if
@@ -400,6 +442,10 @@ contains
             call format_single_test_entry(entries(i), line)
             output = trim(output)//trim(line)//achar(10)
             n_shown = n_shown + 1
+            if (allocated(entries(i)%reason)) then
+                if (len(entries(i)%reason) > 0) &
+                    output = output//'  '//entries(i)%reason//achar(10)
+            end if
             if (trim(entries(i)%status) == 'FLAKY') then
                 output = trim(output)//'  attempts: first failed, retry passed'//achar(10)
             end if
@@ -409,62 +455,42 @@ contains
                 trim(entries(i)%status) == 'TIMEOUT' .or. &
                 trim(entries(i)%status) == 'FLAKY') then
                 call extract_captured_stdout(log_file, entries(i)%name, captured)
-                if (len_trim(captured) > 0) then
+                if (len(captured) > 0) then
                     output = trim(output)//'  --- captured stdout ---'//achar(10)
-                    output = trim(output)//trim(captured)//achar(10)
+                    output = output//captured//achar(10)
                     output = trim(output)//'  --- end captured stdout ---'//achar(10)
                 end if
             end if
         end do
 
         if (n_entries == n_shown) then
-            call format_summary_line(output, n_pass, n_fail, n_skip, total_secs)
+            call format_summary_line(output, n_pass, n_fail, n_skip, &
+                n_untested, total_secs)
         else if (n_fail > 0 .or. n_shown > 0) then
-            call format_summary_line(output, n_pass, n_fail, n_skip, total_secs)
+            call format_summary_line(output, n_pass, n_fail, n_skip, &
+                n_untested, total_secs)
         else if (n_shown == 0) then
-            output = ''
-            write (line, '(a,i0,a,f6.1,a)') 'Tests: ', n_pass, ' passed (', &
-                total_secs, 's)'
-            output = trim(line)
+            output = 'Tests: '//trim(json_int(n_pass))//' passed ('// &
+                format_seconds(total_secs)//'s)'
         end if
     end subroutine format_test_results_text
 
-    subroutine format_test_results_human(entries, n_entries, log_file, &
-            summary_mode, output)
-        !! Fixed-length form for callers that pass a bounded buffer. Text past
-        !! len(output) is dropped, so new callers use format_test_results_text.
-        type(test_result_entry_t), intent(in) :: entries(:)
-        integer, intent(in) :: n_entries
-        character(len=*), intent(in) :: log_file
-        logical, intent(in) :: summary_mode
-        character(len=*), intent(out) :: output
-
-        character(len=:), allocatable :: text
-
-        call format_test_results_text(entries, n_entries, log_file, &
-            summary_mode, text)
-        output = text
-    end subroutine format_test_results_human
-
     subroutine format_single_test_entry(entry, line)
         type(test_result_entry_t), intent(in) :: entry
-        character(len=*), intent(out) :: line
+        character(len=:), allocatable, intent(out) :: line
 
-        character(len=16) :: secs_str
-
-        write (secs_str, '(f6.2)') entry%seconds
         line = format_name_field(entry%name)//' '// &
             format_status_field(entry%status)//' '// &
-            trim(secs_str)//'s'
+            format_seconds(real(entry%seconds, real64))//'s'
     end subroutine format_single_test_entry
 
     function format_name_field(name) result(field)
         character(len=*), intent(in) :: name
-        character(len=42) :: field
+        character(len=:), allocatable :: field
         integer :: nlen
 
-        nlen = min(len_trim(name), 42)
-        field = trim(name(1:nlen))//repeat(' ', 42 - nlen)
+        nlen = len_trim(name)
+        field = trim(name)//repeat(' ', max(0, 42 - nlen))
     end function format_name_field
 
     function format_status_field(status) result(field)
@@ -476,17 +502,19 @@ contains
         field = trim(status(1:nlen))//repeat(' ', 8 - nlen)
     end function format_status_field
 
-    subroutine format_summary_line(output, n_pass, n_fail, n_skip, total_secs)
+    subroutine format_summary_line(output, n_pass, n_fail, n_skip, &
+            n_untested, total_secs)
         character(len=:), allocatable, intent(inout) :: output
-        integer, intent(in) :: n_pass, n_fail, n_skip
-        real, intent(in) :: total_secs
+        integer, intent(in) :: n_pass, n_fail, n_skip, n_untested
+        real(real64), intent(in) :: total_secs
 
         character(len=512) :: line
 
-        write (line, '(a,i0,a,i0,a,i0,a,f6.2,a)') &
-            'Summary: ', n_pass, ' passed, ', n_fail, ' failed, ', &
-            n_skip, ' skipped (', total_secs, 's)'
-        output = trim(output)//trim(line)
+        write (line, '(a,i0,a,i0,a,i0,a)') &
+            'Summary: ', n_pass, ' passed, ', n_fail, ' failed, ', n_skip, ' skipped'
+        if (n_untested > 0) line = trim(line)//', '// &
+            trim(json_int(n_untested))//' untested'
+        output = output//trim(line)//' ('//format_seconds(total_secs)//'s)'
     end subroutine format_summary_line
 
     subroutine extract_captured_stdout(log_file, test_name, captured)
@@ -497,43 +525,84 @@ contains
         character(len=*), intent(in) :: log_file, test_name
         character(len=:), allocatable, intent(out) :: captured
 
-        character(len=1024) :: chunk
         character(len=:), allocatable :: line
         character(len=:), allocatable :: start_marker, end_marker
-        integer :: u, ios, count
-        logical :: in_block
+        integer :: u, ios
+        logical :: in_block, ctest_block
+        character(len=:), allocatable :: result_name, stripped
+        character(len=10) :: result_status
+        real :: seconds
+        integer :: parse_error
 
         captured = ''
         start_marker = '--- stdout '//trim(test_name)//' ---'
         end_marker = '--- end stdout '//trim(test_name)//' ---'
         in_block = .false.
+        ctest_block = .false.
 
         open (newunit=u, file=trim(log_file), status='old', iostat=ios)
         if (ios /= 0) return
         do
-            line = ''
-            do
-                read (u, '(a)', advance='no', size=count, iostat=ios) chunk
-                if (count > 0) line = line//chunk(:count)
-                if (ios /= 0) exit
-            end do
-            if (ios == iostat_eor) ios = 0
-            if (ios == iostat_end) then
-                if (len(line) > 0) ios = 0
-            end if
+            call read_logical_line(u, line, ios)
             if (ios /= 0) exit
+            stripped = trim(adjustl(line))
             if (.not. in_block) then
-                if (trim(line) == trim(start_marker)) in_block = .true.
-            else if (trim(line) == trim(end_marker)) then
-                exit
-            else if (len_trim(captured) > 0) then
-                captured = trim(captured)//achar(10)//'  '//trim(line)
+                if (trim(line) == trim(start_marker)) then
+                    in_block = .true.
+                else
+                    call parse_ctest_result_line(line, result_name, result_status, &
+                        seconds, parse_error)
+                    if (parse_error == 0) then
+                        if (result_name == test_name) then
+                            in_block = .true.
+                            ctest_block = .true.
+                        end if
+                    end if
+                end if
+                cycle
+            end if
+            if (ctest_block) then
+                if (looks_like_ctest_result_line(line)) exit
+                if (is_ctest_start_line(line)) exit
+                if (is_ctest_summary_line(stripped)) exit
             else
-                captured = '  '//trim(line)
+                if (trim(line) == trim(end_marker)) exit
+            end if
+            if (len(captured) > 0) then
+                captured = captured//achar(10)//'  '//line
+            else
+                captured = '  '//line
             end if
         end do
         close (u)
     end subroutine extract_captured_stdout
+
+    logical function is_ctest_start_line(line) result(is_start)
+        character(len=*), intent(in) :: line
+        character(len=:), allocatable :: stripped, number
+        integer :: colon
+
+        is_start = .false.
+        if (len(line) < 12) return
+        if (line(:4) /= '    ') return
+        stripped = trim(adjustl(line))
+        if (index(stripped, 'Start ') /= 1) return
+        colon = index(stripped, ':')
+        if (colon <= 7) return
+        number = trim(adjustl(stripped(7:colon - 1)))
+        if (len(number) == 0) return
+        is_start = verify(number, '0123456789') == 0
+    end function is_ctest_start_line
+
+    logical function is_ctest_summary_line(line) result(is_summary)
+        character(len=*), intent(in) :: line
+        integer :: percent
+
+        is_summary = .false.
+        percent = index(line, '% tests passed,')
+        if (percent <= 1) return
+        is_summary = verify(line(:percent - 1), '0123456789') == 0
+    end function is_ctest_summary_line
 
     subroutine format_test_results_json(entries, n_entries, exit_code, output, log_file)
         type(test_result_entry_t), intent(in) :: entries(:)
@@ -543,23 +612,25 @@ contains
         character(len=*), optional, intent(in) :: log_file
         character(len=:), allocatable :: captured
 
-        integer :: i, n_pass, n_fail, n_skip
-        real :: total_secs
-        character(len=16) :: secs_str, total_str
+        integer :: i, n_pass, n_fail, n_skip, n_untested, read_error
+        real(real64) :: total_secs
 
         n_pass = 0
         n_fail = 0
         n_skip = 0
+        n_untested = 0
         total_secs = 0.0
 
         do i = 1, n_entries
-            total_secs = total_secs + entries(i)%seconds
+            total_secs = total_secs + real(entries(i)%seconds, real64)
             if (trim(entries(i)%status) == 'PASS' .or. &
                 trim(entries(i)%status) == 'FLAKY') then
                 n_pass = n_pass + 1
             else if (trim(entries(i)%status) == 'FAIL' .or. &
                     trim(entries(i)%status) == 'TIMEOUT') then
                 n_fail = n_fail + 1
+            else if (entries(i)%status == 'UNTESTED') then
+                n_untested = n_untested + 1
             else
                 n_skip = n_skip + 1
             end if
@@ -572,11 +643,14 @@ contains
                 trim(json_escape_string(entries(i)%name))//'"'
             output = trim(output)//',"status":"'//lower_status(entries(i)%status)//'"'
             output = trim(output)//',"seconds":'
-            write (secs_str, '(f8.2)') entries(i)%seconds
-            output = trim(output)//trim(adjustl(secs_str))
+            output = trim(output)//format_seconds(real(entries(i)%seconds, real64))
             if (present(log_file)) then
                 call extract_captured_stdout(log_file, entries(i)%name, captured)
                 output = output//',"output":"'//json_escape_string(captured)//'"'
+            end if
+            if (allocated(entries(i)%reason)) then
+                if (len(entries(i)%reason) > 0) output = output//',"reason":"'// &
+                    json_escape_string(entries(i)%reason)//'"'
             end if
             if (trim(entries(i)%status) == 'FLAKY') then
                 output = output//',"attempts":{"first":"fail",'// &
@@ -589,11 +663,34 @@ contains
         output = trim(output)//'"passed":'//trim(json_int(n_pass))
         output = trim(output)//',"failed":'//trim(json_int(n_fail))
         output = trim(output)//',"skipped":'//trim(json_int(n_skip))
-        write (total_str, '(f8.2)') total_secs
-        output = trim(output)//',"total_seconds":'//trim(adjustl(total_str))
+        if (n_untested > 0) output = output//',"untested":'//trim(json_int(n_untested))
+        output = trim(output)//',"total_seconds":'//format_seconds(total_secs)
         output = trim(output)//'}'
-        output = trim(output)//',"exit_code":'//trim(json_int(exit_code))//'}'
+        output = trim(output)//',"exit_code":'//trim(json_int(exit_code))
+        if (n_entries == 0 .and. exit_code /= 0 .and. present(log_file)) then
+            call read_text_file_alloc(log_file, captured, read_error)
+            if (read_error == 0) then
+                output = output//',"output":"'//json_escape_string(captured)//'"'
+            else
+                output = output//',"error":"could not read test diagnostics"'
+            end if
+        end if
+        output = output//'}'
     end subroutine format_test_results_json
+
+    function format_seconds(seconds) result(text)
+        real(real64), intent(in) :: seconds
+        character(len=:), allocatable :: text
+        character(len=64) :: buffer
+
+        if (seconds == 0.0_real64) then
+            text = '0.00'
+            return
+        end if
+        write (buffer, '(f0.2)') seconds
+        text = trim(buffer)
+        if (text(:1) == '.') text = '0'//text
+    end function format_seconds
 
     pure function lower_status(status) result(out)
         character(len=*), intent(in) :: status
