@@ -265,6 +265,10 @@ kind = "directory"
 role = "test-fixture"
 
 [[extra.fo.inputs]]
+path = "test-fixtures/c/link_publication_peer.c"
+role = "test-fixture"
+
+[[extra.fo.inputs]]
 path = "test-fixtures/gremlin_process_boundary/fpm.toml"
 role = "test-fixture"
 

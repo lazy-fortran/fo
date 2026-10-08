@@ -11,7 +11,9 @@ program test_executable_publication
     use fo_test_harness, only: assert_file_exists, finish_assertions
     use fo_test_harness, only: spawn_process, poll_process
     use fo_test_harness, only: terminate_process_group
+    use fo_test_harness, only: current_directory, remove_path
     use fo_test_cli, only: resolve_driver, run_fo, run_external
+    use fo_fs, only: fs_copy_exec
     implicit none
 
     character(len=1), parameter :: nl = new_line('a')
@@ -22,11 +24,87 @@ program test_executable_publication
     call check_running_peer_replacement()
     call check_truncated_shared_replacement()
     call check_owned_staging_survives_cleanup()
+    call check_competing_action_cache()
     call remove_tree(scratch)
     call finish_assertions()
-    write (*, '(a)') 'executable-publication: peer, shared and staging checks pass'
+    write (*, '(a)') &
+        'executable-publication: peer, shared, staging and cache checks pass'
 
 contains
+
+    subroutine check_competing_action_cache()
+        !! A peer replaces the public binary at the exact publication boundary.
+        !! The original action must still restore its own observable behavior.
+        character(:), allocatable :: project, peer, cache, shim, marker, cwd
+        character(:), allocatable :: output, app
+        type(string_list_t) :: build_args, args, env, no_args
+        type(process_result_t) :: result, ran
+        integer :: round
+
+        call run_external('/usr/bin/uname', no_args, scratch, result)
+        call assert_process_ok(result, 'identify publication interposition platform')
+        if (result%stdout /= 'Linux' // nl) then
+            write (*, '(a)') 'SKIP: deterministic rename interposition requires Linux'
+            return
+        end if
+        project = join_path(scratch, 'cache_owner')
+        peer = join_path(scratch, 'cache_peer')
+        cache = join_path(scratch, 'publication_cache')
+        shim = join_path(scratch, 'publication_peer.so')
+        marker = join_path(scratch, 'publication_peer.marker')
+        output = join_path(project, 'build/fo/bin/selected')
+        app = join_path(project, 'build/fo/app/selected')
+        call current_directory(cwd)
+        call list_add(args, '-shared')
+        call list_add(args, '-fPIC')
+        call list_add(args, '-Wall')
+        call list_add(args, '-Werror')
+        call list_add(args, join_path(cwd, 'test-fixtures/c/link_publication_peer.c'))
+        call list_add(args, '-ldl')
+        call list_add(args, '-o')
+        call list_add(args, shim)
+        call run_external('/usr/bin/cc', args, scratch, result)
+        call assert_process_ok(result, 'compile deterministic publication peer')
+        call make_directory(join_path(peer, 'app'))
+        call write_text(join_path(peer, 'fpm.toml'), staging_manifest())
+        call write_text(join_path(peer, 'app/selected.f90'), &
+            'program selected' // nl // 'print "(a)", "peer"' // nl // &
+            'end program selected' // nl)
+        build_args = words([character(len=16) :: 'build'])
+        call run_fo(driver, build_args, peer, cache, result, timeout_ms=300000)
+        call assert_process_ok(result, 'build complete competing action binary')
+        call make_directory(join_path(project, 'app'))
+        call write_text(join_path(project, 'fpm.toml'), staging_manifest())
+        call write_text(join_path(project, 'app/selected.f90'), selected_source())
+        call list_add(env, 'LD_PRELOAD=' // shim)
+        call list_add(env, 'TMPDIR=' // scratch)
+        call list_add(env, 'FO_TEST_PUBLISH_TARGET=' // output)
+        call list_add(env, 'FO_TEST_PUBLISH_PEER=' // &
+            join_path(peer, 'build/fo/bin/selected'))
+        call list_add(env, 'FO_TEST_PUBLISH_MARKER=' // marker)
+        do round = 1, 2
+            call remove_path(marker)
+            call run_fo(driver, build_args, project, cache, result, env, &
+                timeout_ms=300000)
+            call assert_process_ok(result, 'publisher completes after peer replacement')
+            call assert_file_exists(marker, 'peer replaces the actual published output')
+            call run_external(app, no_args, project, ran)
+            call assert_process_ok(ran, 'complete peer replacement executes')
+            call assert_equal_string(ran%stdout, 'peer' // nl, &
+                'public output independently demonstrates conflicting publication')
+            call remove_path(output)
+            call remove_path(app)
+            call run_fo(driver, build_args, project, cache, result, timeout_ms=300000)
+            call assert_process_ok(result, &
+                'owner restores after conflicting publication')
+            call run_external(app, no_args, project, ran)
+            call assert_process_ok(ran, 'restored action binary executes')
+            call assert_equal_string(ran%stdout, 'selected' // nl, &
+                'fresh and restored publications retain their own cached behavior')
+            call remove_path(output)
+            call remove_path(app)
+        end do
+    end subroutine check_competing_action_cache
 
     subroutine check_running_peer_replacement()
         !! A rebuild replaces a published app binary while a peer runs it. The
@@ -79,10 +157,12 @@ contains
     subroutine check_truncated_shared_replacement()
         !! A published shared library that is truncated but keeps its ELF prefix
         !! must not be reused. The next relink against it replaces it.
-        character(:), allocatable :: project, cache, library
+        character(:), allocatable :: project, cache, library, peer, peer_library
+        character(:), allocatable :: peer_source
         type(string_list_t) :: test_args
         type(process_result_t) :: built, rebuilt
         integer(int64) :: library_bytes
+        integer :: at, rc
 
         project = join_path(scratch, 'shared_reuse_probe')
         cache = join_path(scratch, 'shared_reuse_cache')
@@ -113,6 +193,37 @@ contains
         library_bytes = file_bytes(library)
         call assert_true(library_bytes > 128_int64, &
             'replacement shared library is complete')
+
+        ! A different complete image keeps valid headers and the same length,
+        ! but implements the wrong answer. Reuse must verify its actual bytes.
+        peer = join_path(scratch, 'shared_peer/shared_reuse_probe')
+        call make_directory(join_path(peer, 'src'))
+        call make_directory(join_path(peer, 'test'))
+        call write_text(join_path(peer, 'fpm.toml'), shared_manifest())
+        peer_source = answer_source()
+        at = index(peer_source, 'answer = 42')
+        peer_source(at:at + 10) = 'answer = 43'
+        call write_text(join_path(peer, 'src/answer_mod.f90'), peer_source)
+        call write_text(join_path(peer, 'test/test_peer.f90'), &
+            'program test_peer' // nl // &
+            'use answer_mod, only: answer' // nl // &
+            'if (answer() /= 43) error stop 1' // nl // &
+            'end program test_peer' // nl)
+        call run_fo(driver, test_args, peer, cache, built, timeout_ms=300000)
+        call assert_process_ok(built, 'independent wrong-answer shared image runs')
+        call find_library(join_path(peer, 'build/fo/lib'), peer_library)
+        call assert_true(len(peer_library) > 0, 'complete peer library is available')
+        if (len(peer_library) == 0) return
+        call assert_true(file_bytes(peer_library) == library_bytes, &
+            'wrong-answer peer has the original image length')
+        rc = fs_copy_exec(peer_library, library)
+        call assert_equal_integer(rc, 0, &
+            'replace image with complete conflicting bytes')
+        call write_text(join_path(project, 'test/test_beta.f90'), &
+            test_source('test_beta', 'beta three'))
+        call run_fo(driver, test_args, project, cache, rebuilt, timeout_ms=300000)
+        call assert_process_ok(rebuilt, &
+            'complete wrong-answer shared library is replaced before relinking')
     end subroutine check_truncated_shared_replacement
 
     subroutine check_owned_staging_survives_cleanup()
@@ -256,6 +367,12 @@ contains
             if (index(name, 'libshared_reuse_probe_') == 1) then
                 if (len(name) >= 3) then
                     if (name(len(name) - 2:) == '.so') then
+                        path = join_path(directory, name)
+                        return
+                    end if
+                end if
+                if (len(name) >= 6) then
+                    if (name(len(name) - 5:) == '.dylib') then
                         path = join_path(directory, name)
                         return
                     end if

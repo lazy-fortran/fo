@@ -3446,10 +3446,12 @@ contains
         character(len=:), allocatable :: packed
         character(len=512) :: lib_dir, proj, install_name, member
         character(len=6) :: extension
-        character(len=4096) :: shared_keys(5)
-        character(len=HASH_LEN) :: shared_key
+        character(len=4096) :: shared_keys(7)
+        character(len=512) :: compiler
+        character(len=HASH_LEN) :: shared_key, shared_action
         character(len=1024) :: final_path, owner_dir, stage_so
-        integer :: i, n_args, reserve_rc, rename_rc
+        type(cache_t) :: shared_cache
+        integer :: i, n_args, reserve_rc, rename_rc, cache_rc, store_rc
         logical :: exists, valid
 
         so_path = ''
@@ -3462,6 +3464,7 @@ contains
         extension = '.so'
         if (is_macos()) extension = '.dylib'
         final_path = ''
+        cache_rc = 1
         if (present(content_key)) then
             if (len_trim(content_key) > 0) then
                 shared_key = content_key
@@ -3473,11 +3476,24 @@ contains
                     shared_keys(5) = 'darwin-dylib-v1'
                     shared_key = cache_digest(shared_keys, 5)
                 end if
+                shared_keys(1) = 'fo-shared-1'
+                shared_keys(2) = shared_key
+                shared_keys(3) = fc_executable_command()
+                shared_keys(4) = flags
+                shared_keys(5) = fc_link_policy_flags()
+                shared_keys(6) = trim(proj)//trim(extension)
+                call detect_compiler(compiler)
+                shared_keys(7) = compiler
+                shared_action = cache_digest(shared_keys, 7)
+                call cache_init(shared_cache, cache_rc)
                 final_path = trim(lib_dir)//'/lib'//trim(proj)//'_'// &
                     shared_key(1:min(32, len_trim(shared_key)))//trim(extension)
                 inquire (file=trim(final_path), exist=exists)
                 if (exists) then
-                    call native_image_valid(final_path, valid)
+                    valid = .false.
+                    if (cache_rc == 0) call cache_binary_matches(shared_cache, &
+                        shared_action, final_path, valid)
+                    if (valid) call native_image_valid(final_path, valid)
                     if (valid) then
                         so_path = final_path
                         return
@@ -3554,6 +3570,10 @@ contains
             return
         end if
         if (len_trim(final_path) > 0) then
+            ! Reuse requires the complete bytes recorded from this private
+            ! stage, not merely intact image headers on a mutable public path.
+            if (cache_rc == 0) call cache_store_binary(shared_cache, &
+                shared_action, stage_so, store_rc)
             rename_rc = fs_rename(trim(stage_so), trim(final_path))
             if (rename_rc /= 0) then
                 call append_artifact_error(log_file, &
@@ -4854,7 +4874,7 @@ contains
         integer :: n_args
         logical :: do_cache, restored, use_lld
         character(len=HASH_LEN) :: action_id, prog_key
-        character(len=512) :: key_parts(7), lld_log
+        character(len=512) :: key_parts(8), lld_log, compiler
         character(len=1024) :: stage_dir, staged_output, restore_bin
         character(len=:), allocatable :: flags_str
         integer :: store_ierr, reserve_rc, copy_rc, rename_rc
@@ -4869,7 +4889,7 @@ contains
         if (do_cache) do_cache = len_trim(base_digest) > 0
         if (do_cache) then
             call cache_file_digest(prog_obj, prog_key)
-            key_parts(1) = 'fo-link-2'
+            key_parts(1) = 'fo-link-3'
             key_parts(2) = trim(fc_command())
             key_parts(3) = 'default'
             if (use_lld) key_parts(3) = 'lld-with-default-fallback'
@@ -4877,7 +4897,9 @@ contains
             key_parts(5) = trim(link_lib_flags(project_dir, link_libs, n_link_libs))
             key_parts(6) = trim(base_digest)
             key_parts(7) = trim(prog_key)
-            action_id = cache_digest(key_parts, 7)
+            call detect_compiler(compiler)
+            key_parts(8) = compiler
+            action_id = cache_digest(key_parts, 8)
             ! Fast path: the output is already the binary this action produces.
             ! Leave it untouched - no relink, no copy. This is what keeps warm
             ! builds cheap when outputs are large (2.4 GB of static binaries).
@@ -4912,8 +4934,6 @@ contains
                         rename_rc = fs_rename(trim(staged_output), trim(output))
                         if (rename_rc == 0) then
                             call fs_remove_tree(trim(stage_dir))
-                            call cache_store_binary(cache, action_id, output, &
-                                store_ierr)
                             exitcode = 0
                             return
                         end if
@@ -4972,6 +4992,10 @@ contains
             exitcode = 1
             return
         end if
+        ! Cache only this producer's private bytes. Once published, output may
+        ! immediately be replaced by a different action's complete binary.
+        if (do_cache) &
+            call cache_store_binary(cache, action_id, staged_output, store_ierr)
         rename_rc = fs_rename(trim(staged_output), trim(output))
         if (rename_rc /= 0) then
             call append_artifact_error(log_file, &
@@ -4981,9 +5005,6 @@ contains
             return
         end if
         call fs_remove_tree(trim(stage_dir))
-
-        if (do_cache) &
-            call cache_store_binary(cache, action_id, output, store_ierr)
     end subroutine link_binary
 
     subroutine reserve_link_stage(output, stage_dir, staged_output, reserve_rc)
