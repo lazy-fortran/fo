@@ -274,6 +274,16 @@ contains
                 trim(dep_dir)//'/fpm.toml'
             return
         end if
+        if (present(kind)) then
+            if (kind == DEP_REGISTRY) then
+                if (trim(dcfg%name) /= trim(name)) then
+                    write (error_unit, '(a)') 'fo: registry package name mismatch: '// &
+                        trim(name)//' resolved manifest '//trim(dcfg%name)
+                    ierr = 1
+                    return
+                end if
+            end if
+        end if
         if (len_trim(dcfg%source_dir) > 0) then
             src = trim(dep_dir)//'/'//trim(dcfg%source_dir)
         else

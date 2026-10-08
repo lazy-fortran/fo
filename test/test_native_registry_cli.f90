@@ -93,6 +93,15 @@ program test_native_registry_cli
     call expect_output('250', &
         'root selection overrides the transitive registry version')
 
+    call write_package('provider', '1.9.9', 10)
+    call write_text(join_path(registry, 'demo/provider/1.9.9/fpm.toml'), &
+        'name = "different_package"'//new_line('a')//'version = "1.9.9"'// &
+        new_line('a'))
+    call write_consumer('provider.v = "1.9.9"')
+    call expect_failure('registry package name mismatch', &
+        'registry source must have the requested package identity')
+    call remove_tree(join_path(registry, 'demo/provider/1.9.9'))
+
     call write_consumer('provider.v = "7.0.0"')
     call expect_failure('missing registry', 'missing exact registry version')
     call write_text(join_path(consumer, 'fpm.toml'), &
