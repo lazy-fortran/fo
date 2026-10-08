@@ -1307,12 +1307,19 @@ contains
         character(len=*), intent(in) :: project_dir
         character(len=512), intent(inout) :: directories(MAX_DEP_DIRS)
         integer, intent(inout) :: n_directories
-        character(len=512) :: include_dir(1)
+        character(len=512) :: include_dir
+        integer :: i
         logical :: exists
 
-        include_dir(1) = trim(project_dir)//'/include'
-        inquire (file=trim(include_dir(1)), exist=exists)
-        if (exists) call append_module_dirs(include_dir, 1, directories, n_directories)
+        include_dir = trim(project_dir)//'/include'
+        inquire (file=trim(include_dir), exist=exists)
+        if (.not. exists) return
+        do i = 1, n_directories
+            if (trim(directories(i)) == trim(include_dir)) return
+        end do
+        if (n_directories >= size(directories)) return
+        n_directories = n_directories + 1
+        directories(n_directories) = include_dir
     end subroutine append_library_include_dir
 
 
