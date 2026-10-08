@@ -488,3 +488,5 @@ int fo_test_touch_directory(const char *path) {
     BOOL closed = CloseHandle(handle);
     return changed && closed ? 0 : -1;
 }
+
+#include "fo_test_os_permissions_windows.inc"

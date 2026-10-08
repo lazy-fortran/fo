@@ -331,6 +331,19 @@ int fo_test_mode_bits(const char *path) {
     return stat(path, &info) == 0 ? (int)(info.st_mode & 07777) : -1;
 }
 
+int fo_test_prepare_executable(const char *path) { return chmod(path, 0755); }
+int fo_test_executable_access(const char *path) { return access(path, R_OK | X_OK) == 0; }
+int fo_test_executable_permissions(const char *path) {
+    return fo_test_mode_bits(path) == 0755 && fo_test_executable_access(path);
+}
+int fo_test_permissions_snapshot(const char *path, char *out, int capacity) {
+    struct stat info;
+    if (!out || capacity < 1 || stat(path, &info)) return -1;
+    int size = snprintf(out, (size_t)capacity, "%lu:%lu:%o", (unsigned long)info.st_uid,
+        (unsigned long)info.st_gid, (unsigned)(info.st_mode & 07777));
+    return size >= 0 && size < capacity ? 0 : -1;
+}
+
 int64_t fo_test_monotonic_ms(void) {
     struct timespec now;
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
