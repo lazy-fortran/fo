@@ -10,8 +10,9 @@ program test_native_registry_cli
     character(:), allocatable :: path, config_dir, package
     type(process_result_t) :: result
     type(string_list_t) :: args, environment
-    character(len=8), parameter :: commands(4) = &
-        [character(len=8) :: 'gfortran', 'as', 'ld', 'ar']
+    ! Xcode's as wrapper script needs realpath and dirname to locate clang.
+    character(len=8), parameter :: commands(6) = &
+        [character(len=8) :: 'gfortran', 'as', 'ld', 'ar', 'realpath', 'dirname']
     integer :: i
 
     call resolve_driver(driver)

@@ -18,6 +18,9 @@ removes their ancestry. The frozen registry replays the captured value 19 instea
 the live value 31 for project roots up to the supported 512 characters and
 rejects longer ones explicitly. The Darwin resident gate exposed that the state
 portability test read undeclared C sources. Both are now declared fixtures.
+After installation, `test_native_registry_cli` (outside the Darwin selection)
+failed on Darwin: its restricted tool PATH lacked the `realpath` and `dirname`
+that Xcode's `as` wrapper needs. It now passes on both hosts.
 An earlier loaded Linux run failed two resident readiness fixtures on their fixed
 30 s budget; #208 tracks that fixture defect.
 
