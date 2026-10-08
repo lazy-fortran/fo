@@ -168,44 +168,12 @@ contains
 
     subroutine detect_compiler_path(cap)
         type(capabilities_t), intent(inout) :: cap
-
-        character(len=512) :: found, compiler
-        logical :: exists
-
-        cap%compiler_path = ''
-        compiler = trim(selected_compiler_command())
-        if (index(compiler, '/') > 0) then
-            inquire (file=trim(compiler), exist=exists)
-            if (exists) cap%compiler_path = trim(compiler)
-            return
-        end if
-
-        select case (trim(cap%compiler_id))
-        case ('gfortran')
-            call which_in_path('gfortran', found)
-        case ('ifx')
-            call which_in_path('ifx', found)
-        case ('nvfortran')
-            call which_in_path('nvfortran', found)
-        case ('flang')
-            call which_in_path('flang', found)
-        case ('lfortran')
-            call which_in_path('lfortran', found)
-        case default
-            return
-        end select
-
-        if (len_trim(found) > 0) cap%compiler_path = trim(found)
-    end subroutine detect_compiler_path
-
-    subroutine which_in_path(name, path)
-        character(len=*), intent(in) :: name
-        character(len=*), intent(out) :: path
         logical :: found
 
-        call fs_find_executable(name, path, found)
-        if (.not. found) path = ''
-    end subroutine which_in_path
+        call fs_find_executable(trim(selected_compiler_command()), &
+            cap%compiler_path, found)
+        if (.not. found) cap%compiler_path = ''
+    end subroutine detect_compiler_path
 
     subroutine probe_openmp(cap)
         type(capabilities_t), intent(inout) :: cap
