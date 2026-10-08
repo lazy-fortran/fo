@@ -180,7 +180,7 @@ contains
                     if (gremlin_field(receipt, 'case_id') /= case_id) cycle
                     if (gremlin_field(receipt, 'status') /= 'PASS') cycle
                     if (.not. file_exists(runtime_value)) cycle
-                    if (trim(read_text(runtime_value)) /= expected) cycle
+                    if (read_text(runtime_value) /= expected//new_line('a')) cycle
                     found = .true.
                     return
                 end do
