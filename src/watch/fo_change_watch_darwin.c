@@ -29,6 +29,7 @@ typedef void (*fs_action_fn)(FSEventStreamRef);
 
 #define APPLE_EVENT_LIMIT 2048
 struct apple_event { char *path; int kind; };
+struct apple_self { char *path; long long until; };
 struct change_watch {
     char *excluded_root;
     void *core, *services;
@@ -50,6 +51,8 @@ struct change_watch {
     char **roots;
     size_t nroots, nevents;
     struct apple_event events[APPLE_EVENT_LIMIT];
+    struct apple_self *self;
+    size_t nself;
     int dirty, error;
     long long dirty_deadline, dirty_maximum;
     char diagnostic[PATH_MAX + 192];
@@ -68,6 +71,14 @@ static void apple_mark_dirty(struct change_watch *w) {
     w->dirty_deadline = now + 100;
     if (w->dirty_deadline > w->dirty_maximum)
         w->dirty_deadline = w->dirty_maximum;
+}
+
+static int apple_self_written(struct change_watch *w, const char *path) {
+    long long now = apple_now_ms();
+    size_t i;
+    for (i = 0; i < w->nself; ++i)
+        if (now <= w->self[i].until && !strcmp(w->self[i].path, path)) return 1;
+    return 0;
 }
 
 static void apple_error(struct change_watch *w, const char *operation,
@@ -163,6 +174,8 @@ static void apple_callback(ConstFSEventStreamRef stream, void *info,
         int kind = 0;
         if (flags[i] & lost) { apple_mark_dirty(w); continue; }
         if (!apple_relevant(w, paths[i]) || apple_excluded(paths[i])) continue;
+        if ((flags[i] & kFSEventStreamEventFlagOwnEvent) &&
+            apple_self_written(w, paths[i])) continue;
         if (flags[i] & (kFSEventStreamEventFlagRootChanged |
                 kFSEventStreamEventFlagMount | kFSEventStreamEventFlagUnmount)) {
             apple_mark_dirty(w);
@@ -384,11 +397,12 @@ int fo_change_native_reconcile(void *handle) {
         apple_error(w, "create event root list", "declared roots", ENOMEM);
         goto failed;
     }
-    /* watch --fmt writes through this process, so suppress its feedback. */
+    /* Only explicitly marked formatter writes suppress feedback. Ignoring all
+     * own events hides legitimate changes through the shared provider API. */
     w->stream = w->stream_create(NULL, apple_callback, &context, paths,
         kFSEventStreamEventIdSinceNow, 0.10,
         kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer |
-        kFSEventStreamCreateFlagWatchRoot | kFSEventStreamCreateFlagIgnoreSelf);
+        kFSEventStreamCreateFlagWatchRoot | kFSEventStreamCreateFlagMarkSelf);
     if (!w->stream) {
         apple_error(w, "create recursive event stream", w->nroots ? w->roots[0] :
             "<no declared roots>", EIO);
@@ -485,7 +499,30 @@ int fo_change_native_pending(void *handle) {
 }
 
 void fo_change_native_self(void *handle, const char *path) {
-    (void)handle; (void)path;
+    struct change_watch *w = handle;
+    struct apple_self *next;
+    long long now = apple_now_ms();
+    size_t i;
+    if (!w) return;
+    for (i = 0; i < w->nself; ++i) {
+        if (!strcmp(w->self[i].path, path)) {
+            w->self[i].until = now + 500;
+            return;
+        }
+    }
+    for (i = 0; i < w->nself; ++i) if (w->self[i].until < now) break;
+    if (i == w->nself) {
+        next = realloc(w->self, (w->nself + 1) * sizeof(*next));
+        if (!next) return;
+        w->self = next;
+        w->self[i].path = NULL;
+        ++w->nself;
+    }
+    next = w->self + i;
+    free(next->path);
+    next->path = strdup(path);
+    if (!next->path) { *next = w->self[--w->nself]; return; }
+    next->until = now + 500;
 }
 
 void fo_change_native_close(void *handle) {
@@ -495,6 +532,8 @@ void fo_change_native_close(void *handle) {
     apple_drop_stream(w);
     for (i = 0; i < w->nevents; ++i) free(w->events[i].path);
     for (i = 0; i < w->nroots; ++i) free(w->roots[i]);
+    for (i = 0; i < w->nself; ++i) free(w->self[i].path);
+    free(w->self);
     free(w->roots);
     if (w->mode) w->release(w->mode);
     if (w->services) dlclose(w->services);

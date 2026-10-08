@@ -4,6 +4,7 @@ program test_change_watch_provider
         c_null_char, c_associated
     use fo_change_watch, only: change_watch_t, change_watch_init, &
         change_watch_add_root, change_watch_poll, change_watch_close, &
+        change_watch_mark_self_written, &
         CHANGE_RECONCILE
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_rename, &
         fs_sleep_ms, fs_write_text
@@ -115,6 +116,17 @@ program test_change_watch_provider
     call require(got_event .and. kind == CHANGE_RECONCILE, &
         'positive-budget poll did not complete pending reconciliation')
     captures = captures + 1
+    call settle_events()
+    captures = 0
+
+    ! The provider observes unmarked writes from its own process, while an
+    ! explicitly marked formatter write does not trigger another capture.
+    call fs_write_text(trim(nested)//'/initial.f90', 'program self_formatted')
+    call change_watch_mark_self_written(watch, trim(nested)//'/initial.f90')
+    call assert_idle('marked formatter write')
+    call fs_sleep_ms(600)
+    call fs_write_text(trim(nested)//'/initial.f90', 'program self_changed')
+    call await_path(trim(nested)//'/initial.f90')
     call settle_events()
     captures = 0
 
