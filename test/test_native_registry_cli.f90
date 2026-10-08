@@ -148,7 +148,7 @@ program test_native_registry_cli
     call assert_contains(result%stderr, 'publish', &
         'publishing diagnostic names request')
     call remove_tree(scratch)
-    call finish_assertions('native registry CLI')
+    call finish_assertions()
 contains
     subroutine write_consumer(selector)
         character(len=*), intent(in) :: selector
