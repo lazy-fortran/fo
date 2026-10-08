@@ -28,6 +28,8 @@ program test_native_manifest_cli
     call naming_case('true', 'naming_probe_value', .false.)
     call naming_case('true', 'naming_probe__', .false.)
     call naming_case('true', 'foreign', .false.)
+    call naming_case('true', 'naming_probe', .false., 'foreign')
+    call naming_case('true', 'naming_probe', .true., 'naming_probe__second')
     call naming_case('"Custom"', 'custom', .true.)
     call naming_case('"Custom"', 'custom_value', .true.)
     call naming_case('"Custom"', 'naming_probe__value', .true.)
@@ -403,11 +405,19 @@ contains
             'end module ' // name // nl)
     end subroutine write_module
 
-    subroutine naming_case(policy, name, accepted)
+    subroutine naming_case(policy, name, accepted, second_name)
         character(len=*), intent(in) :: policy, name
         logical, intent(in) :: accepted
+        character(len=*), intent(in), optional :: second_name
         call write_text(join_path(root, 'fpm.toml'), manifest(policy))
         call write_module(name)
+        if (present(second_name)) then
+            call write_text(join_path(root, 'src/value.f90'), &
+                'module ' // name // nl // 'implicit none' // nl // &
+                'end module ' // name // nl // &
+                'module ' // second_name // nl // 'implicit none' // nl // &
+                'end module ' // second_name // nl)
+        end if
         args = string_list_t()
         call list_add(args, 'build')
         if (len_trim(reference) > 0) then
