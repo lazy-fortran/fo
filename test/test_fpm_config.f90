@@ -3,7 +3,7 @@ program test_fpm_config
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_config_init, &
         fpm_config_allocate, &
         manifest_test_args, manifest_test_name
-    use fo_util, only: make_tmpfile
+    use fo_util, only: make_tmpfile, temporary_root
     implicit none
 
     integer :: n_pass, n_fail
@@ -197,7 +197,7 @@ contains
         do attempt = 1, 64
             call system_clock(clock_count)
             write (suffix, '(i0,a,i0)') clock_count, '_', attempt
-            dir = '/var/tmp/fo_test_many_inputs_'//trim(suffix)
+            dir = temporary_root()//'/fo_test_many_inputs_'//trim(suffix)
             call execute_command_line('mkdir '//dir//' 2>/dev/null', &
                 wait=.true., exitstat=exitstat)
             if (exitstat == 0) then

@@ -13,6 +13,7 @@ program test_clean_help
     !! halves of the contract: help is inert, and the flags that are supposed to
     !! delete still delete, because an over-correction that refuses to clean
     !! anything is not a fix either.
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_fs, only: fs_make_dir, fs_write_text, fs_remove_tree
@@ -32,7 +33,7 @@ program test_clean_help
         return
     end if
 
-    root = '/var/tmp/fo_clean_help_test'
+    root = temporary_root()//'/fo_clean_help_test'
     call fs_remove_tree(root)
     ! fs_make_dir is a plain mkdir, not mkdir -p, so every level is created
     ! explicitly - otherwise the fake project root never exists and every later
@@ -120,8 +121,10 @@ contains
             end if
         end if
         pwd = ''
-        call execute_command_line('pwd >/var/tmp/fo_clean_help_pwd.txt', exitstat=stat)
-        open (newunit=u, file='/var/tmp/fo_clean_help_pwd.txt', status='old', &
+        call execute_command_line('pwd >'//temporary_root()//'/fo_clean_help_pwd.txt', &
+            exitstat=stat)
+        open (newunit=u, file=temporary_root()//'/fo_clean_help_pwd.txt', &
+             status='old', &
              action='read', iostat=io)
         if (io == 0) then
             read (u, '(a)', iostat=io) line
@@ -149,7 +152,7 @@ contains
         cmd = trim(fo_bin)//' clean'
         if (len_trim(flags) > 0) cmd = trim(cmd)//' '//trim(flags)
         if (in_root) cmd = 'cd '//trim(root)//' && '//trim(cmd)
-        cmd = trim(cmd)//' >/var/tmp/fo_clean_help_out.txt 2>&1'
+        cmd = trim(cmd)//' >'//temporary_root()//'/fo_clean_help_out.txt 2>&1'
         call execute_command_line(cmd, exitstat=io)
         ! Leave `out` unallocated and let assignment set the length.
         ! `allocate(character(len=0) :: out)` pins the length at zero, so the
@@ -157,7 +160,8 @@ contains
         ! allocatable scalar and aborts at runtime - which is what happened when
         ! the test ran without FO_BIN in the environment, where this path was
         ! first reached after the file read.
-        open (newunit=unit, file='/var/tmp/fo_clean_help_out.txt', status='old', &
+        open (newunit=unit, file=temporary_root()//'/fo_clean_help_out.txt', &
+             status='old', &
              action='read', iostat=io)
         if (io /= 0) return
         do

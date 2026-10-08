@@ -2,7 +2,7 @@ program test_gremlin_copy_tree_modes
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long, c_null_char
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_write_text
     use fo_process, only: process_getpid
-    use fo_util, only: read_text_file
+    use fo_util, only: read_text_file, temporary_root
     implicit none
 
     interface
@@ -44,7 +44,7 @@ program test_gremlin_copy_tree_modes
 
     pid = process_getpid()
     write(pid_text, '(i0)') pid
-    root = '/var/tmp/fo-copy-modes-'//trim(pid_text)
+    root = temporary_root()//'/fo-copy-modes-'//trim(pid_text)
     call fs_remove_tree(trim(root))
     call fs_make_dir(trim(root))
     call fs_make_dir(trim(root)//'/source')

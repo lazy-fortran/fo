@@ -3,6 +3,7 @@ module fo_gremlin_state
     use, intrinsic :: iso_fortran_env, only: int64
     use fo_generation_manifest, only: generation_manifest_release
     use fx_immutable_store, only: IMMUTABLE_OK
+    use fo_fs, only: fs_sleep_ms
     implicit none
     private
 
@@ -286,18 +287,27 @@ contains
         character(kind=c_char) :: dir(PATH_LEN), sid(ID_LEN), recovered(ID_LEN)
         character(kind=c_char) :: start(START_LEN)
         integer(c_int) :: fd, is_owner, pid, c_error
+        integer :: attempt
+        integer(c_int), parameter :: ENOENT_CODE = 2_c_int
 
-        dir = c_null_char
-        sid = c_null_char
-        recovered = c_null_char
-        start = c_null_char
-        fd = -1_c_int
-        is_owner = 0_c_int
-        pid = 0_c_int
-        c_error = c_session_acquire(trim(project_dir)//c_null_char, &
-            trim(lane_id)//c_null_char, dir, int(PATH_LEN, c_int), sid, &
-            int(ID_LEN, c_int), recovered, int(ID_LEN, c_int), fd, is_owner, pid, &
-            start, int(START_LEN, c_int))
+        ! Recovering a dead owner races its exiting descendants, whose records
+        ! and processes can vanish mid-scan (ENOENT). Recovery is idempotent and
+        ! releases the lane lock on failure, so retry such a transient failure.
+        do attempt = 1, 5
+            dir = c_null_char
+            sid = c_null_char
+            recovered = c_null_char
+            start = c_null_char
+            fd = -1_c_int
+            is_owner = 0_c_int
+            pid = 0_c_int
+            c_error = c_session_acquire(trim(project_dir)//c_null_char, &
+                trim(lane_id)//c_null_char, dir, int(PATH_LEN, c_int), sid, &
+                int(ID_LEN, c_int), recovered, int(ID_LEN, c_int), fd, is_owner, &
+                pid, start, int(START_LEN, c_int))
+            if (c_error /= ENOENT_CODE) exit
+            call fs_sleep_ms(50)
+        end do
         ierr = int(c_error)
         message = error_text(ierr)
         if (ierr /= 0) return
@@ -638,7 +648,7 @@ contains
         character(kind=c_char) :: c_store(PATH_LEN), c_owner(ID_LEN)
         integer(c_int) :: c_error, lock_fd
         integer :: slash, locator_status
-        logical :: has_manifest, legacy_manifest, exists, pending
+        logical :: has_manifest, exists, pending
 
         ierr = 1
         message = ''
@@ -679,27 +689,25 @@ contains
             return
         end if
         inquire (file=trim(root)//'/manifest.id', exist=has_manifest)
-        legacy_manifest = .false.
         if (has_manifest .and. .not. pending) then
             call read_generation_locator(trim(root)//'/store.root', store_root, &
                 locator_status)
             if (locator_status == 0) call read_generation_locator( &
                 trim(root)//'/root.owner', root_owner, locator_status)
             if (locator_status /= 0) then
-                ! Legacy generations used a shared execution-identity owner.
-                ! Prune their materialization but retain that ambiguous root.
-                legacy_manifest = .true.
-            else
-                c_error = c_generation_mark_release(trim(root)//c_null_char, &
-                    trim(store_root)//c_null_char, trim(root_owner)//c_null_char)
-                if (c_error /= 0_c_int) then
-                    ierr = int(c_error)
-                    message = 'cannot durably record pending generation root release'
-                    call c_generation_unlock(lock_fd)
-                    return
-                end if
-                pending = .true.
+                message = 'generation manifest is missing its store locator'
+                call c_generation_unlock(lock_fd)
+                return
             end if
+            c_error = c_generation_mark_release(trim(root)//c_null_char, &
+                trim(store_root)//c_null_char, trim(root_owner)//c_null_char)
+            if (c_error /= 0_c_int) then
+                ierr = int(c_error)
+                message = 'cannot durably record pending generation root release'
+                call c_generation_unlock(lock_fd)
+                return
+            end if
+            pending = .true.
         end if
 
         if (exists) then
@@ -721,8 +729,6 @@ contains
                 trim(root)//c_null_char)
             ierr = int(c_error)
             if (ierr /= 0) message = 'generation pruned but locator cleanup failed'
-            if (ierr == 0 .and. legacy_manifest) &
-                message = 'legacy generation pruned; shared Fx root retained'
         end if
         call c_generation_unlock(lock_fd)
     end subroutine gremlin_generation_prune_at

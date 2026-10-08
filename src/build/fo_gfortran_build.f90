@@ -33,7 +33,7 @@ module fo_gfortran_build
     use fo_lock, only: lock_check
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_remove_file, fs_append_file, &
         fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec, &
-        fs_find_executable, fs_rename, fs_mkdir_excl
+        fs_find_executable, fs_rename, fs_mkdir_excl, fs_identity
     use fo_progress, only: progress_begin, progress_step, progress_end
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         selected_compiler_command, COMPILER_NVFORTRAN, COMPILER_IFX, &
@@ -46,7 +46,7 @@ module fo_gfortran_build
     use fo_build_stamp, only: build_stamp_matches, build_stamp_quick_matches, &
         build_stamp_save
     use fo_compiler_memo, only: compiler_memo_load, compiler_memo_save
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char, c_long_long
     use, intrinsic :: iso_fortran_env, only: error_unit, int64
     implicit none
     private
@@ -1150,16 +1150,40 @@ contains
             call run_one_current_test(project_dir, execution_cwd, config, tests(i))
         end do
         !$omp end parallel do
+        ! A failure may have lost a race with a concurrent test; rerun each once,
+        ! serially and in isolation, to tell a genuine failure from flakiness.
+        do i = 1, n_tests
+            call rerun_failed_current_test(execution_cwd, config, tests(i))
+        end do
     end subroutine run_current_team
 
-    subroutine run_one_current_test(project_dir, execution_cwd, config, test)
-        !! One worker: run, time, and if it failed, rerun once to tell a genuine
-        !! failure from flakiness.
-        character(len=*), intent(in) :: project_dir, execution_cwd
+    subroutine rerun_failed_current_test(execution_cwd, config, test)
+        character(len=*), intent(in) :: execution_cwd
         type(fpm_config_t), intent(in) :: config
         type(current_test_t), intent(inout) :: test
 
         character(len=512) :: rerun_log
+
+        if (.not. test%ran) return
+        if (test%exit == 0 .or. test%exit == 124) return
+        call make_tmpfile('fo_test_rerun', rerun_log)
+        call run_test_binary(execution_cwd, test%bin, test%args, &
+            rerun_log, config, is_slow_name(test%name), test%rerun_exit)
+        call delete_tmpfile(rerun_log)
+        if (test%rerun_exit == 0) then
+            test%flaky = .true.
+            test%exit = 0
+        else
+            test%exit = test%rerun_exit
+        end if
+    end subroutine rerun_failed_current_test
+
+    subroutine run_one_current_test(project_dir, execution_cwd, config, test)
+        !! One worker: run and time one test; reruns happen after the team.
+        character(len=*), intent(in) :: project_dir, execution_cwd
+        type(fpm_config_t), intent(in) :: config
+        type(current_test_t), intent(inout) :: test
+
         integer(8) :: clk0, clk1, clk_rate
 
         call system_clock(clk0, clk_rate)
@@ -1168,18 +1192,6 @@ contains
         call system_clock(clk1, clk_rate)
         test%ran = .true.
         if (clk_rate > 0) test%secs = real(clk1 - clk0) / real(clk_rate)
-        if (test%exit /= 0 .and. test%exit /= 124) then
-            call make_tmpfile('fo_test_rerun', rerun_log)
-            call run_test_binary(execution_cwd, test%bin, test%args, &
-                rerun_log, config, is_slow_name(test%name), test%rerun_exit)
-            call delete_tmpfile(rerun_log)
-            if (test%rerun_exit == 0) then
-                test%flaky = .true.
-                test%exit = 0
-            else
-                test%exit = test%rerun_exit
-            end if
-        end if
     end subroutine run_one_current_test
 
     subroutine report_current_tests(project_dir, log_file, tests, n_tests, warn_s, &
@@ -2465,6 +2477,8 @@ contains
         type(scan_unit_t), allocatable :: found(:), merged(:)
         character(len=MAX_PATH) :: root
         integer :: d, i, j, n_found, n_new
+        integer(c_long_long) :: device, inode
+        logical :: root_exists
 
         cached = .false.
         if (present(use_cached)) cached = use_cached
@@ -2475,6 +2489,11 @@ contains
             if (d == 0) then
                 if (.not. config%auto_tests) cycle
                 root = config%test_dir
+                ! An absent automatic test directory means the project has no
+                ! automatic tests; only declared test roots must exist.
+                call fs_identity(trim(project_dir)//'/'//trim(root), device, inode, &
+                    root_exists)
+                if (.not. root_exists) cycle
             else
                 root = config%tests(d)%source_dir
                 do j = 1, d - 1
@@ -3085,6 +3104,7 @@ contains
         real, intent(out), optional :: cpu_seconds
 
         character(len=:), allocatable :: packed
+        character(len=512) :: test_tmp
         integer :: n_args, budget, wall_cap, kind, u, ios
         real :: cpu_s, wall_s
 
@@ -3094,9 +3114,16 @@ contains
         call argv_push_split_nl(packed, n_args, arg_lines)
         budget = test_budget_seconds(config, slow)
         wall_cap = test_wall_cap_seconds(config, budget)
+        ! A private TMPDIR per run: scratch the test leaves behind, including
+        ! logs nested fo commands keep for failures, is removed when the run
+        ! passes and kept as evidence when it fails.
+        call make_tmpfile('fo-test-tmp', test_tmp)
+        call fs_make_dir(trim(test_tmp))
         call process_run_argv_logged(execution_cwd, packed, n_args, log_file, .true., &
-            wall_cap, exitcode, cpu_budget_s=budget, timeout_kind=kind, &
-            cpu_seconds=cpu_s, wall_seconds=wall_s)
+            wall_cap, exitcode, env_extra='TMPDIR='//trim(test_tmp), &
+            cpu_budget_s=budget, timeout_kind=kind, cpu_seconds=cpu_s, &
+            wall_seconds=wall_s)
+        if (exitcode == 0) call fs_remove_tree(trim(test_tmp))
         if (present(cpu_seconds)) cpu_seconds = cpu_s
         if (exitcode /= 124) return
         open (newunit=u, file=trim(log_file), position='append', &
@@ -3701,6 +3728,9 @@ contains
             if (len_trim(filenames(node_id)) == 0) cycle
             if (is_prog(node_id)) cycle
             if (.not. needed(node_id)) cycle
+            ! A module beside a test program shares that program's object, which
+            ! defines main; the program links it directly, never as a helper.
+            if (file_defines_program(filenames(node_id))) cycle
             call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
             call compile_f90(project_dir, filenames(node_id), obj_path, &
                 source_flags(node_id), log_file, exitcode)
@@ -3709,6 +3739,22 @@ contains
             n_helper_objs = n_helper_objs + 1
             helper_objs(n_helper_objs) = obj_path
         end do
+
+    contains
+
+        logical function file_defines_program(filename) result(found)
+            character(len=*), intent(in) :: filename
+            integer :: j
+
+            found = .false.
+            do j = 1, n_order
+                if (.not. is_prog(topo_order(j))) cycle
+                if (trim(filenames(topo_order(j))) /= trim(filename)) cycle
+                found = .true.
+                return
+            end do
+        end function file_defines_program
+
     end subroutine compile_test_helpers
 
     recursive subroutine mark_reachable(dag, node_id, needed)

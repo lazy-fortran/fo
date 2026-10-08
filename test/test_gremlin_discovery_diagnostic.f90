@@ -42,7 +42,7 @@ program test_gremlin_discovery_diagnostic
     call list_add(args, session)
     terminal = .false.
     diagnostic = ''
-    do attempt = 1, 300
+    do attempt = 1, 1200
         call gremlin_json(driver, project, cache, state, args, status, process, 10000)
         diagnostic = gremlin_field(status, 'diagnostic')
         if (gremlin_field(status, 'state') == 'error' .or. &

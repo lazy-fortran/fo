@@ -86,6 +86,9 @@ program test_gremlin_process_boundary_slow
     call initialize_fixture_repository(project)
     rc = c_setenv('FO_GREMLIN_STATE_DIR'//c_null_char, state_dir//c_null_char, 1_c_int)
     call assert_equal_integer(rc, 0, 'test state is isolated under its scratch root')
+    ! One job keeps fixture lanes at host admission weight 1.
+    rc = c_setenv('FO_JOBS'//c_null_char, '1'//c_null_char, 1_c_int)
+    call assert_equal_integer(rc, 0, 'fixture lanes use one host work slot')
     call start_sentinel(sentinel_pid)
 
     call run_cli('start', project, lane_stop, '', marker_stop, driver, &

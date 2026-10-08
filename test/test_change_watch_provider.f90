@@ -7,7 +7,7 @@ program test_change_watch_provider
         CHANGE_RECONCILE
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_rename, &
         fs_sleep_ms, fs_write_text
-    use fo_util, only: make_tmpfile
+    use fo_util, only: make_tmpfile, temporary_root
     implicit none
 
     type, bind(C) :: rlimit_t
@@ -57,7 +57,6 @@ program test_change_watch_provider
     end do
 
     call make_tmpfile('fo-change-provider-public', scratch)
-    scratch = '/var/tmp/'//scratch(index(trim(scratch), '/', back=.true.) + 1:)
     call fs_make_dir(trim(scratch))
     call canonicalize_fixture()
     project = trim(scratch)//'/project'

@@ -6,6 +6,7 @@ program test_gremlin_nested_capture
     use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_wait_ms
     use fo_test_gremlin_oracle, only: gremlin_field, gremlin_stop_lane
     use fo_test_json, only: json_value_t, json_member, json_element, json_size
+    use fo_gremlin_generation, only: generation_t, generation_load_inventory
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state, external
@@ -30,13 +31,14 @@ program test_gremlin_nested_capture
     call start_lane(lane, session)
     call wait_for_pass(lane, session, '', generation, status)
 
-    identity = generation_identity(generation)
-    previous_identity = read_text(identity)
-    call assert_true(len(identity_line(previous_identity, 'input=project|.|')) > 0, &
+    previous_identity = inventory_record(generation)
+    call assert_true(len(identity_line(previous_identity, 'input=project|')) > 0, &
         'the primary project tree is one captured generation input')
+    ! The in-tree dependency keeps its logical root, bundled inside the project
+    ! tree rather than materialized a second time elsewhere.
     call assert_true(len(identity_line(previous_identity, &
-        'input=dependency:nested_dep|')) == 0, &
-        'the internal dependency is not duplicated as another generation root')
+        'input=dependency:nested_dep|bundle=project/test-support/nested_dep|')) > 0, &
+        'the internal dependency is bundled inside the project tree')
     call assert_true(len(identity_line(previous_identity, &
         'input=dependency:external_dep|')) > 0, &
         'the external sibling keeps its distinct dependency identity')
@@ -47,13 +49,13 @@ program test_gremlin_nested_capture
         '/../external_dep/src/external_dep.f90'), external_source, &
         'the external sibling is present at its bundled dependency root')
 
-    previous_identity = identity_line(previous_identity, 'input=project|.|')
+    previous_identity = identity_line(previous_identity, 'input=project|')
     call write_nested_value('12')
     call wait_for_pass(lane, session, generation, next_generation, status)
     call assert_true(next_generation /= generation, &
         'mutating an internal dependency changes the generation')
-    identity = read_text(generation_identity(next_generation))
-    call assert_true(identity_line(identity, 'input=project|.|') /= previous_identity, &
+    identity = inventory_record(next_generation)
+    call assert_true(identity_line(identity, 'input=project|') /= previous_identity, &
         'the project-tree digest records the internal dependency mutation once')
     call assert_equal_string(read_text(generation_project(next_generation)// &
         '/test-support/nested_dep/src/nested_dep.f90'), nested_source, &
@@ -65,12 +67,12 @@ program test_gremlin_nested_capture
     call wait_for_pass(lane, session, generation, next_generation, status)
     call assert_true(next_generation /= generation, &
         'mutating an external sibling changes the generation')
-    identity = read_text(generation_identity(next_generation))
+    identity = inventory_record(next_generation)
     call assert_true(identity_line(identity, 'input=dependency:external_dep|') /= &
         identity_line(previous_identity, 'input=dependency:external_dep|'), &
         'the external dependency digest independently records its mutation')
-    call assert_equal_string(identity_line(identity, 'input=project|.|'), &
-        identity_line(previous_identity, 'input=project|.|'), &
+    call assert_equal_string(identity_line(identity, 'input=project|'), &
+        identity_line(previous_identity, 'input=project|'), &
         'an external dependency mutation leaves the project-tree digest unchanged')
     call assert_equal_string(read_text(generation_project(next_generation)// &
         '/../external_dep/src/external_dep.f90'), external_source, &
@@ -90,7 +92,9 @@ program test_gremlin_nested_capture
         end if
         call gremlin_wait_ms(50)
     end do
-    call assert_true(found, 'a missing dependency produces public capture_failed status')
+    call assert_true(found, 'a missing dependency produces public capture_failed '// &
+        'status; last state='//gremlin_field(status, 'state')//' diagnostic='// &
+        gremlin_field(status, 'diagnostic'))
     call assert_equal_string(gremlin_field(status, 'diagnostic'), expected_diagnostic, &
         'public status exposes the exact bounded capture diagnostic')
     call assert_true(len(gremlin_field(status, 'active_generation')) == 0, &
@@ -246,11 +250,36 @@ contains
         call assert_true(.false., 'public lifecycle page includes capture_failed event')
     end subroutine assert_capture_event
 
-    function generation_identity(value) result(path)
+    function inventory_record(value) result(record)
+        !! One line per captured root, input=<alias>|<path:digest ...>, read from
+        !! the generation's stored input inventory.
         character(len=*), intent(in) :: value
-        character(:), allocatable :: path
-        path = state//'/fo/gremlin/generations-v2/'//trim(value)//'/identity.txt'
-    end function generation_identity
+        character(:), allocatable :: record
+        type(generation_t) :: frozen
+        character(len=512) :: message
+        integer :: ierr, i, j
+
+        record = ''
+        frozen%root = state//'/fo/gremlin/generations-v2/'//trim(value)
+        frozen%identity = trim(value)
+        call generation_load_inventory(frozen, ierr, message)
+        call assert_true(ierr == 0, 'loads the stored generation inventory: '// &
+            trim(message))
+        if (ierr /= 0) return
+        do i = 1, frozen%input_inventory%root_count
+            associate (alias => frozen%input_inventory%roots(i)%canonical_alias)
+                record = record//'input='//trim(alias)//'|bundle='// &
+                    trim(frozen%input_inventory%roots(i)%bundle_path)//'|'
+                do j = 1, frozen%input_inventory%entry_count
+                    if (frozen%input_inventory%entries(j)%root_alias /= alias) cycle
+                    record = record//trim(frozen%input_inventory%entries(j)% &
+                        relative_path)//':'// &
+                        trim(frozen%input_inventory%entries(j)%content_digest)//' '
+                end do
+                record = record//new_line('a')
+            end associate
+        end do
+    end function inventory_record
 
     function generation_project(value) result(path)
         character(len=*), intent(in) :: value

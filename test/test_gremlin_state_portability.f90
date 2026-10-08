@@ -4,15 +4,17 @@ program test_gremlin_state_portability
     implicit none
 
     integer :: checks, failures, command_status, exit_status, io_status, unit
-    character(len=256) :: work_dir, os_file, actual_log, old_log, fixed_log
+    character(len=2048) :: work_dir, os_file, actual_log, old_log, fixed_log, tmp_root
     character(len=32) :: platform
-    character(len=1024) :: command, message
+    character(len=4096) :: command, message
     logical :: is_darwin
 
     checks = 0
     failures = 0
-    write (work_dir, '(a,i0)') '/var/tmp/fo_gremlin_state_portability_', &
-        process_getpid()
+    call get_environment_variable('TMPDIR', tmp_root, status=io_status)
+    if (io_status /= 0 .or. len_trim(tmp_root) == 0) tmp_root = '/var/tmp'
+    write (work_dir, '(a,a,i0)') trim(tmp_root), &
+        '/fo_gremlin_state_portability_', process_getpid()
     os_file = trim(work_dir)//'/os.txt'
     actual_log = trim(work_dir)//'/provider.log'
     old_log = trim(work_dir)//'/old-macros.log'
@@ -108,7 +110,7 @@ contains
         character(len=*), intent(in) :: flags, source, log_file
         integer, intent(out) :: command_result, exit_result
 
-        character(len=1024) :: compile_command, command_message
+        character(len=4096) :: compile_command, command_message
 
         compile_command = 'gcc'//trim(flags)//' '//trim(source)// &
             ' > "'//trim(log_file)//'" 2>&1'

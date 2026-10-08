@@ -1,5 +1,6 @@
 program test_update_dirty_cli
     !! `fo update` must retain locally edited dependency checkouts.
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_process, only: process_getpid, process_getcwd
     implicit none
@@ -22,7 +23,7 @@ program test_update_dirty_cli
         stop 1
     end if
 
-    write (root, '(a,i0)') '/var/tmp/fo_update_dirty_cli-', process_getpid()
+    write (root, '(a,i0)') temporary_root()//'/fo_update_dirty_cli-', process_getpid()
     call execute_command_line('rm -rf "'//trim(root)//'"', exitstat=status)
     call write_file(trim(root)//'/fpm.toml', &
         'name = "update_fixture"'//new_line('a')// &

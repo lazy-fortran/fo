@@ -1475,8 +1475,10 @@ contains
         type(c_ptr), allocatable, target :: arguments(:)
         integer(c_int) :: child, rc
 
+        ! Callers stop the sentinel explicitly; its lifetime only has to outlast
+        ! a slow fixture on a loaded host, never decide the outcome.
         call encode_c_string('/bin/sleep', executable)
-        call encode_c_string('30', duration)
+        call encode_c_string('3600', duration)
         allocate(arguments(3))
         arguments(1) = c_loc(executable(1))
         arguments(2) = c_loc(duration(1))
@@ -1491,11 +1493,26 @@ contains
     end subroutine start_sentinel
 
     logical function process_alive(process_id)
+        !! A zombie has exited and only awaits its reaper, so it is not alive.
         integer, intent(in) :: process_id
+        character(len=64) :: stat_path
+        character(len=512) :: stat_line
+        integer :: unit, ios, close_paren
 
         process_alive = .false.
         if (process_id <= 0) return
         process_alive = c_kill(int(process_id, c_int), 0_c_int) == 0
+        if (.not. process_alive) return
+        write (stat_path, '(a,i0,a)') '/proc/', process_id, '/stat'
+        open (newunit=unit, file=trim(stat_path), status='old', action='read', &
+            iostat=ios)
+        if (ios /= 0) return
+        read (unit, '(a)', iostat=ios) stat_line
+        close (unit)
+        if (ios /= 0) return
+        close_paren = index(stat_line, ')', back=.true.)
+        if (close_paren > 0 .and. close_paren + 2 <= len_trim(stat_line)) &
+            process_alive = stat_line(close_paren + 2:close_paren + 2) /= 'Z'
     end function process_alive
 
     subroutine stop_sentinel(process_id)

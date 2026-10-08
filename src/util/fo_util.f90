@@ -6,6 +6,7 @@ module fo_util
     implicit none
     private
     public :: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, read_text_file
+    public :: temporary_root
     public :: clean_root_build_artifacts, read_text_file_alloc
     public :: strip_path_prefix_in_str
     public :: send_jsonrpc, jsonrpc_error, jsonrpc_null
@@ -33,6 +34,26 @@ contains
         end if
     end function wall_time_seconds
 
+    function temporary_root() result(root)
+        !! TMPDIR without trailing slashes, or /var/tmp when unset or unusable.
+        character(len=:), allocatable :: root
+        character(len=512) :: tmpdir
+        integer :: tmpdir_len, tmpdir_status
+
+        tmpdir = ''
+        call get_environment_variable('TMPDIR', tmpdir, length=tmpdir_len, &
+            status=tmpdir_status)
+        if (tmpdir_status /= 0 .or. tmpdir_len <= 0 .or. tmpdir_len > len(tmpdir)) &
+            tmpdir = '/var/tmp'
+        if (len_trim(tmpdir) == 0) tmpdir = '/var/tmp'
+        root = trim(tmpdir)
+        do while (len(root) > 1)
+            if (root(len(root):len(root)) /= '/') exit
+            root = root(:len(root) - 1)
+        end do
+        if (root == '/') root = ''
+    end function temporary_root
+
     subroutine make_tmpfile(prefix, path)
         character(len=*), intent(in) :: prefix
         character(len=*), intent(out) :: path
@@ -40,8 +61,7 @@ contains
         integer :: count
         integer(c_int) :: pid
         integer, save :: serial = 0
-        integer :: serial_local, tmpdir_len, tmpdir_status
-        character(len=512) :: tmpdir
+        integer :: serial_local
 
         !$omp critical (fo_tmpfile_serial)
         serial = serial + 1
@@ -49,22 +69,8 @@ contains
         !$omp end critical (fo_tmpfile_serial)
         call fo_c_getpid(pid)
         call system_clock(count)
-        tmpdir = ''
-        call get_environment_variable('TMPDIR', tmpdir, length=tmpdir_len, &
-            status=tmpdir_status)
-        if (tmpdir_status /= 0 .or. tmpdir_len <= 0 .or. tmpdir_len > len(tmpdir)) then
-            tmpdir = '/var/tmp'
-        else
-            tmpdir = trim(tmpdir)
-            if (len_trim(tmpdir) == 0) tmpdir = '/var/tmp'
-        end if
-        if (tmpdir(len_trim(tmpdir):len_trim(tmpdir)) == '/') then
-            write (path, '(a,a,a,i0,a,i0,a,i0,a)') trim(tmpdir), trim(prefix), '-', &
-                int(pid), '-', count, '-', serial_local, '.tmp'
-        else
-            write (path, '(a,a,a,a,i0,a,i0,a,i0,a)') trim(tmpdir), '/', &
-                trim(prefix), '-', int(pid), '-', count, '-', serial_local, '.tmp'
-        end if
+        write (path, '(a,a,a,a,i0,a,i0,a,i0,a)') temporary_root(), '/', &
+            trim(prefix), '-', int(pid), '-', count, '-', serial_local, '.tmp'
     end subroutine make_tmpfile
 
     subroutine make_sibling_tmpfile(target, path)

@@ -1,4 +1,5 @@
 program test_cache
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_cache, only: cache_t, cache_init, cache_key_for, cache_lookup, &
@@ -555,7 +556,8 @@ contains
         serial = serial + 1
         pid = process_getpid()
         call system_clock(count)
-        write (path, '(a,a,a,i0,a,i0,a,i0,a)') '/var/tmp/', trim(prefix), '-', &
+        write (path, '(a,a,a,i0,a,i0,a,i0,a)') temporary_root()//'/', trim(prefix), &
+            '-', &
             pid, '-', count, '-', serial, trim(suffix)
     end subroutine make_tmp_path
 

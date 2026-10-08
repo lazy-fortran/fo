@@ -1,4 +1,5 @@
 program test_gremlin_generation
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_c_binding, only: c_char, c_null_char, c_int, c_int64_t, &
         c_size_t
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
@@ -110,7 +111,7 @@ program test_gremlin_generation
     n_pass = 0
     n_fail = 0
     call initialize_directory_oracle()
-    root = '/var/tmp/fo-gremlin-generation-'//int_text(process_getpid())
+    root = temporary_root()//'/fo-gremlin-generation-'//int_text(process_getpid())
     project = trim(root)//'/project'
     dependency = trim(root)//'/fortfront'
     cache = trim(root)//'/cache'

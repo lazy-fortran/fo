@@ -4,6 +4,7 @@ program test_dispatcher_routing
     !! per test. The decision is pure (`dispatch_target`) and the marker is a
     !! real file read (`source_has_marker`), so both are checked here without
     !! invoking a compiler.
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_gfortran_build, only: source_has_marker, dispatch_target
     use fo_fs, only: fs_make_dir, fs_write_text, fs_remove_tree
@@ -44,7 +45,7 @@ contains
         character(len=:), allocatable :: args
         integer :: ios
 
-        root = '/var/tmp/fo_dispatcher_routing_probe'
+        root = temporary_root()//'/fo_dispatcher_routing_probe'
         call fs_remove_tree(root)
         call fs_make_dir(root)
         call fs_write_text(trim(root)//'/test_alpha.f90', &
@@ -87,7 +88,7 @@ contains
         character(len=512) :: root
         integer :: ios
 
-        root = '/var/tmp/fo_dispatcher_marker_probe'
+        root = temporary_root()//'/fo_dispatcher_marker_probe'
         call fs_remove_tree(root)
         call fs_make_dir(root)
         ! A mention inside a string or prose is not a directive.

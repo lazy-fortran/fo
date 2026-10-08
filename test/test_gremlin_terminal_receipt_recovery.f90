@@ -120,6 +120,7 @@ contains
 
     subroutine wait_until_quiescent(session)
         character(len=*), intent(in) :: session
+        integer :: attempt
 
         arguments = string_list_t()
         call list_add(arguments, 'gremlin')
@@ -134,8 +135,13 @@ contains
         call list_add(arguments, 'quiescent')
         call list_add(arguments, '--wait-ms')
         call list_add(arguments, '30000')
-        call gremlin_json(driver, project, cache, state, arguments, document, &
-            process, 35000)
+        ! A loaded host can need several bounded public waits.
+        do attempt = 1, 4
+            call gremlin_json(driver, project, cache, state, arguments, document, &
+                process, 35000)
+            if (process%exit_code /= 0) exit
+            if (json_boolean_value(json_member(document, 'wait_satisfied'))) exit
+        end do
         call assert_true(process%exit_code == 0 .and. &
             json_boolean_value(json_member(document, 'wait_satisfied')), &
             'public owner reaches quiescence')

@@ -2,6 +2,7 @@ program test_self_refresh
     !! Standalone behavior oracle: after `fo build`, run
     !! `FO_RUN_SELF_REFRESH_ORACLE=1 FO_BIN=<worktree>/build/fo/app/fo fo test
     !! test_self_refresh`. Child commands use a temporary HOME and cache.
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, &
         c_null_char
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
@@ -80,32 +81,33 @@ contains
         pid = process_getpid()
         write (pid_text, '(i0)') pid
         root = trim(root)
-        home = '/var/tmp/fo-self-refresh-oracle-'//trim(pid_text)//'/home'
-        cache = '/var/tmp/fo-self-refresh-oracle-'//trim(pid_text)//'/cache'
+        home = temporary_root()//'/fo-self-refresh-oracle-'//trim(pid_text)//'/home'
+        cache = temporary_root()//'/fo-self-refresh-oracle-'//trim(pid_text)//'/cache'
         local_bin = trim(home)//'/.local/bin'
         global_fo = trim(local_bin)//'/fo'
         prefix = trim(home)//'/.local'
-        copied_driver = '/var/tmp/fo-self-refresh-oracle-'//trim(pid_text)// &
+        copied_driver = temporary_root()//'/fo-self-refresh-oracle-'//trim(pid_text)// &
             '/fo-driver-before-build'
-        build_log = '/var/tmp/fo-self-refresh-oracle-'//trim(pid_text)// &
+        build_log = temporary_root()//'/fo-self-refresh-oracle-'//trim(pid_text)// &
             '/build.log'
-        test_log = '/var/tmp/fo-self-refresh-oracle-'//trim(pid_text)// &
+        test_log = temporary_root()//'/fo-self-refresh-oracle-'//trim(pid_text)// &
             '/test.log'
-        disabled_log = '/var/tmp/fo-self-refresh-oracle-'//trim(pid_text)// &
+        disabled_log = temporary_root()//'/fo-self-refresh-oracle-'//trim(pid_text)// &
             '/disabled.log'
-        install_log = '/var/tmp/fo-self-refresh-oracle-'//trim(pid_text)// &
+        install_log = temporary_root()//'/fo-self-refresh-oracle-'//trim(pid_text)// &
             '/install.log'
-        profile_a_log = '/var/tmp/fo-self-refresh-oracle-'//trim(pid_text)// &
+        profile_a_log = temporary_root()//'/fo-self-refresh-oracle-'//trim(pid_text)// &
             '/profile-a.log'
-        profile_b_log = '/var/tmp/fo-self-refresh-oracle-'//trim(pid_text)// &
+        profile_b_log = temporary_root()//'/fo-self-refresh-oracle-'//trim(pid_text)// &
             '/profile-b.log'
-        profile_a_hit_log = '/var/tmp/fo-self-refresh-oracle-'// &
+        profile_a_hit_log = temporary_root()//'/fo-self-refresh-oracle-'// &
             trim(pid_text)//'/profile-a-hit.log'
         install_bin = trim(prefix)//'/bin/fo'
         write (profile_a_flags, '(a,i0)') '-O3 -fmax-errors=', pid + 1
         write (profile_b_flags, '(a,i0)') '-O0 -fmax-errors=', pid + 2
 
-        call fs_remove_tree('/var/tmp/fo-self-refresh-oracle-'//trim(pid_text))
+        call fs_remove_tree(temporary_root()//'/fo-self-refresh-oracle-'// &
+            trim(pid_text))
         call fs_make_dir(trim(local_bin))
         call fs_make_dir(trim(cache))
         call fs_write_text(trim(global_fo), &
@@ -238,7 +240,8 @@ contains
             call check(exists, 'explicit install creates ~/.local/bin/fo')
         end if
 
-        call fs_remove_tree('/var/tmp/fo-self-refresh-oracle-'//trim(pid_text))
+        call fs_remove_tree(temporary_root()//'/fo-self-refresh-oracle-'// &
+            trim(pid_text))
         call report()
     end subroutine run_oracle
 
@@ -292,7 +295,7 @@ contains
         if (disable_refresh) disabled = '1'
         one_rc = c_setenv('HOME'//c_null_char, trim(home)//c_null_char, 1_c_int)
         two_rc = c_setenv('TMPDIR'//c_null_char, &
-            '/var/tmp'//c_null_char, 1_c_int)
+            temporary_root()//c_null_char, 1_c_int)
         three_rc = c_setenv('FO_CACHE_DIR'//c_null_char, &
             trim(cache)//c_null_char, 1_c_int)
         four_rc = c_setenv('FO_DISABLE_SELF_REFRESH'//c_null_char, &

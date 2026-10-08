@@ -1,4 +1,5 @@
 program test_gremlin_coverage_restart
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_c_binding, only: c_int, c_int64_t
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: write_text, read_text, file_exists, remove_path
@@ -36,7 +37,6 @@ program test_gremlin_coverage_restart
         stop
     end if
     call gremlin_setup(driver, scratch, project, cache, state)
-    call write_text('/var/tmp/fo161-coverage-current', scratch)
     write (*, '(a)') 'coverage restart fixture: '//scratch
     lane = 'coverage-restart-native'
     gate = scratch//'/interrupted.fifo'

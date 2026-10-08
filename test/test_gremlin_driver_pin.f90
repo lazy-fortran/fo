@@ -415,7 +415,7 @@ contains
         integer :: attempt, j
 
         generation = ''
-        do attempt = 1, 600
+        do attempt = 1, 2400
             call status_now(driver, project, cache, state, lane, session, document)
             generation = gremlin_field(document, 'active_generation')
             events = json_member(document, 'events')

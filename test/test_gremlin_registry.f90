@@ -215,7 +215,9 @@ contains
         call list_add(args, '0')
         found = .false.
         current = ''
-        do attempt = 1, 300
+        ! Safety bound only: stopped or errored owners exit at once. A new build
+        ! may wait for a host work slot held by other lanes or run slowly under load.
+        do attempt = 1, 3000
             call gremlin_json(driver, project, cache, state, args, status, result, 10000)
             current = gremlin_field(status, 'active_generation')
             green = json_member(status, 'local_gate_green')
@@ -238,7 +240,8 @@ contains
             call gremlin_wait_ms(100)
         end do
         call assert_true(found, 'new immutable generation has current PASS and value '// &
-            expected//'; last state='//owner_state)
+            expected//'; last state='//owner_state//'; diagnostic='// &
+            gremlin_field(status, 'diagnostic'))
     end subroutine await_value
 
     subroutine assert_frozen(label)

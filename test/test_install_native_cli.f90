@@ -14,6 +14,8 @@ program test_install_native_cli
     type(string_list_t) :: args, environment, run_args
     type(process_result_t) :: result
     character(len=1), parameter :: nl = new_line('a')
+    type(string_list_t) :: probe_args
+    type(process_result_t) :: probe
 
     call resolve_driver(driver)
     call make_scratch('fo-install-native', scratch)
@@ -41,7 +43,9 @@ program test_install_native_cli
     call make_directory(join_path(scratch, 'tmp'))
     call list_add(environment, 'FO_JOBS=1')
     call list_add(environment, 'TMPDIR='//join_path(scratch, 'tmp'))
-    call list_add(environment, 'PATH=/usr/bin:/bin')
+    ! Keep the system tools minimal but include the compiler's own directory,
+    ! which is not /usr/bin on every host (Homebrew on macOS).
+    call list_add(environment, 'PATH='//compiler_directory()//':/usr/bin:/bin')
     call list_add(args, 'install')
     call list_add(args, '--prefix')
     call list_add(args, prefix)
@@ -116,4 +120,23 @@ program test_install_native_cli
 
     call remove_tree(scratch)
     call finish_assertions()
+contains
+
+    function compiler_directory() result(directory)
+        character(:), allocatable :: directory, path
+        integer :: slash
+
+        directory = '/usr/bin'
+        call list_add(probe_args, '-c')
+        call list_add(probe_args, 'command -v gfortran')
+        call run_external('/bin/sh', probe_args, scratch, probe)
+        if (probe%exit_code /= 0) return
+        path = trim(probe%stdout)
+        if (len(path) > 0) then
+            if (path(len(path):) == new_line('a')) path = path(:len(path) - 1)
+        end if
+        slash = index(path, '/', back=.true.)
+        if (slash > 1) directory = path(:slash - 1)
+    end function compiler_directory
+
 end program test_install_native_cli

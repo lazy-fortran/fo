@@ -16,7 +16,7 @@ program test_mcp_cancel_error
     use fo_test_process_identity, only: mcp_kill_owned_tree
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_string_value, json_number_value, json_boolean_value
-    use fo_test_json, only: json_boolean
+    use fo_test_json, only: json_boolean, json_object
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state
@@ -219,10 +219,12 @@ contains
             if (last >= first) line = text(first:last)
             call json_parse(line, candidate, valid, message)
             if (valid) then
-                build_field = json_member(candidate, 'build_ok')
-                tests_field = json_member(candidate, 'tests_ok')
+                ! The full receipt is the one carrying its outcome and the
+                ! compiler capabilities; the compact form omits capabilities.
+                build_field = json_member(candidate, 'ok')
+                tests_field = json_member(candidate, 'capabilities')
                 if (build_field%kind == json_boolean .and. &
-                        tests_field%kind == json_boolean) then
+                        tests_field%kind == json_object) then
                     call assert_true(.not. found, &
                         'completed diagnostics contain exactly one full check receipt')
                     document = candidate

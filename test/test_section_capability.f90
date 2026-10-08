@@ -7,7 +7,7 @@ program test_section_capability
     use fo_fs, only: fs_find_executable, fs_make_dir, fs_remove_tree
     use fo_gfortran_build, only: gfortran_test
     use fo_process, only: process_getpid
-    use fo_util, only: make_tmpfile
+    use fo_util, only: make_tmpfile, temporary_root
     implicit none
 
     character(len=512) :: compiler, old_compiler, flang_path
@@ -64,7 +64,8 @@ contains
         if (.not. compiler_found) return
         call system_clock(count)
         write (probe_dir, '(a,i0,a,i0)') &
-            '/var/tmp/fo_parallel_section_probe-', process_getpid(), '-', count
+            temporary_root()//'/fo_parallel_section_probe-', process_getpid(), '-', &
+            count
         call fs_make_dir(trim(probe_dir))
         wrapper = trim(probe_dir)//'/slow-gfortran'
         open (newunit=unit, file=trim(wrapper), status='replace')

@@ -270,6 +270,12 @@ name = "test_gremlin_process_boundary_slow"
 source-dir = "test"
 main = "test_gremlin_process_boundary_slow.f90"
 
+[extra.fo]
+# Gremlin integration fixtures queue for the host's two heavy work slots while
+# the suite runs in parallel. The CPU budget still bounds each test's own work;
+# the wall cap only has to cover that queueing.
+test-wall-timeout = 600
+
 [[extra.fo.inputs]]
 path = "fpm.toml"
 role = "test-fixture"

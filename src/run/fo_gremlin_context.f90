@@ -4,7 +4,8 @@ module fo_gremlin_context
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_CMAKE
     use fo_cmake_generation, only: cmake_capture_inventory, cmake_capture_cleanup
-    use fo_fpm_config, only: DEP_PATH, DEP_REGISTRY, fpm_config_t, fpm_config_parse, dep_kind
+    use fo_fpm_config, only: DEP_PATH, DEP_REGISTRY, fpm_config_t, fpm_config_parse, &
+        dep_kind, fpm_dep_t
     use fo_dep_update, only: dep_acquire_sources
     use fo_dep_resolve, only: normalize_path, resolve_dev_dep_srcs, &
         resolved_src_t, resolve_dep_srcs, MAX_RESOLVED
@@ -28,6 +29,35 @@ module fo_gremlin_context
     public :: common_generation_cas_root
 
 contains
+
+    function missing_path_dependency(project_dir) result(message)
+        !! Name the first declared path dependency whose tree is absent.
+        character(len=*), intent(in) :: project_dir
+        character(len=:), allocatable :: message
+        type(fpm_config_t) :: config
+        type(fpm_dep_t) :: dep
+        character(len=PATH_LEN) :: root
+        integer :: i, status
+        logical :: exists
+
+        message = ''
+        call fpm_config_parse(project_dir, config, status)
+        if (status /= 0) return
+        do i = 1, config%n_deps + config%n_dev_deps
+            if (i <= config%n_deps) then
+                dep = config%deps(i)
+            else
+                dep = config%dev_deps(i - config%n_deps)
+            end if
+            if (dep_kind(dep) /= DEP_PATH) cycle
+            root = trim(dep%path)
+            if (root(1:1) /= '/') root = trim(project_dir)//'/'//trim(root)
+            inquire (file=trim(root)//'/fpm.toml', exist=exists)
+            if (exists) cycle
+            message = 'cannot capture input tree dependency:'//trim(dep%name)
+            return
+        end do
+    end function missing_path_dependency
 
     subroutine capture_candidate(project_dir, driver_pin, generation, lease, ok, &
             registration_error, message, change_watch)
@@ -54,8 +84,11 @@ contains
         if (backend%kind /= BACKEND_CMAKE) &
             call dep_acquire_sources(project_dir, ierr)
         if (ierr /= 0) then
-            message = 'cannot resolve declared dependencies before capture'
-            registration_error = ierr
+            ! A missing or unreachable dependency is a capture failure the owner
+            ! reports and retries on the next change, not an owner fault.
+            message = missing_path_dependency(project_dir)
+            if (len_trim(message) == 0) &
+                message = 'cannot resolve declared dependencies before capture'
             ok = .false.
             return
         end if

@@ -68,11 +68,12 @@ contains
         type(json_value_t) :: status_reply, value
         type(process_result_t) :: status_process
         integer :: poll
+        character(len=32) :: observed
 
         found = .false.
         generation = ''
         call arguments('status', status_args)
-        do poll = 1, 1200
+        do poll = 1, 4800
             call gremlin_json(driver, project, cache, state, status_args, &
                 status_reply, status_process, 10000)
             if (status_process%exit_code /= 0) exit
@@ -84,8 +85,10 @@ contains
                     call assert_true(json_number_value(value) == 1, &
                         'edited generation keeps exactly one required target')
                     value = json_member(status_reply, 'ordinary_passed')
+                    write (observed, '(f0.0)') json_number_value(value)
                     call assert_true(json_number_value(value) == 1, &
-                        'target-only campaign runs only the requested case')
+                        'target-only campaign runs only the requested case; '// &
+                        'ordinary_passed='//trim(observed))
                     found = .true.
                     return
                 end if

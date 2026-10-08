@@ -451,7 +451,7 @@ contains
         type(gremlin_readiness_input_t) :: input
         type(journal_record_t), allocatable :: records(:)
         character(len=HASH_LEN) :: active_id, candidate_id, receipt_generation
-        character(len=NAME_LEN) :: status_name, case_id, raw
+        character(len=NAME_LEN) :: status_name, case_id, raw, receipt_session
         character(len=PATH_LEN) :: journal_path, campaign_state_dir
         character(len=NAME_LEN) :: gate_cases(MAX_NODES)
         character(len=NAME_LEN) :: gate_pass_cases(MAX_NODES)
@@ -574,6 +574,15 @@ contains
                     case_id = ''
                     status_name = ''
                     raw = ''
+                    ! This session's ledger entries precede their coverage update;
+                    ! the session journal receives each one after coverage, so
+                    ! counting them here would report gates ahead of coverage.
+                    if (journal_index == 2) then
+                        receipt_session = ''
+                        call gremlin_json_field(records(i)%json, 'session_id', &
+                            receipt_session)
+                        if (trim(receipt_session) == trim(session%session_id)) cycle
+                    end if
                     call gremlin_json_field(records(i)%json, 'generation', &
                         receipt_generation)
                     call gremlin_json_field(records(i)%json, 'case_id', case_id)
@@ -1377,7 +1386,7 @@ contains
         logical :: have_active, have_candidate, stop_requested, capture_ok
         logical :: capture_failed, provider_quiet
         logical :: have_active_lease, have_candidate_lease, have_heavy_work_lease
-        logical :: active_pinned, candidate_pinned
+        logical :: active_pinned, candidate_pinned, slot_busy
         logical :: build_done, test_done, fatal_error, cache_warning_reported
 
         exitcode = 0
@@ -1522,7 +1531,16 @@ contains
             have_candidate_lease = .true.
             if (.not. fatal_error) then
                 call acquire_heavy_work_slot(session, heavy_work_lease, &
-                    have_heavy_work_lease, .true., stop_requested, ierr, message)
+                    have_heavy_work_lease, .true., stop_requested, ierr, message, &
+                    slot_busy)
+                if (ierr == 0 .and. slot_busy) then
+                    call publish_state(session, owner_request, 'starting', &
+                        active_generation, candidate_generation, '', completed, &
+                        selected_count, campaign_seed, 'NONE', 0, diagnostic= &
+                        'waiting for a host Gremlin work slot held by other lanes')
+                    call acquire_heavy_work_slot(session, heavy_work_lease, &
+                        have_heavy_work_lease, .true., stop_requested, ierr, message)
+                end if
                 if (ierr /= 0) then
                     fatal_error = .true.
                     fatal_message = trim(message)
@@ -1933,15 +1951,8 @@ contains
             call fs_remove_tree(trim(active_generation%build_project_root))
             active_generation%build_project_root = ''
         end if
-        if (len_trim(candidate_generation%root) > 0) then
-            call gremlin_generation_prune_inactive(candidate_generation%root, &
-                state_error, state_message)
-        else if (len_trim(active_generation%root) > 0) then
-            call gremlin_generation_prune_inactive(active_generation%root, &
-                state_error, state_message)
-        end if
-        if (state_error /= 0) write (error_unit, '(a)') &
-            'Gremlin generation cleanup: '//trim(state_message)
+        ! Stopping keeps this session's generations: terminal reproduction replays
+        ! them after the owner exits. Later builds prune inactive generations.
         call maintain_fo_cache(cache_cursor, cache_status)
         if (cache_status /= 0) write (error_unit, '(a,i0)') &
             'Gremlin cache maintenance at stop: ', cache_status
@@ -1969,7 +1980,7 @@ contains
     end subroutine maintain_fo_cache
 
     subroutine acquire_heavy_work_slot(session, lease, held, honor_stop, &
-            stop_requested, ierr, message)
+            stop_requested, ierr, message, would_wait)
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_lease_group_t), intent(inout) :: lease
         logical, intent(inout) :: held
@@ -1977,6 +1988,9 @@ contains
         logical, intent(out) :: stop_requested
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
+        !! When present, return at once with would_wait = .true. instead of
+        !! waiting for a slot that other lanes hold, so callers can publish why.
+        logical, intent(out), optional :: would_wait
 
         logical :: busy
         integer :: weight
@@ -1984,6 +1998,7 @@ contains
         ierr = 0
         message = ''
         stop_requested = .false.
+        if (present(would_wait)) would_wait = .false.
         if (held) then
             if (.not. lease%closing) return
         end if
@@ -2006,6 +2021,13 @@ contains
             end if
             if (.not. busy) then
                 message = 'cannot acquire Gremlin host work slot: '//trim(message)
+                return
+            end if
+            if (present(would_wait)) then
+                ! A busy slot reports EAGAIN; that is a wait, not a failure.
+                ierr = 0
+                message = ''
+                would_wait = .true.
                 return
             end if
             if (honor_stop) then
@@ -2099,7 +2121,7 @@ contains
         type(generation_t) :: current
         type(gremlin_lease_t) :: current_lease
         character(len=PATH_LEN) :: changed_path
-        logical :: ok, got_event
+        logical :: ok, got_event, slot_busy
         integer(int64) :: now_ms
         integer :: spawn_error, journal_error, release_error, event_type, watch_error
         integer :: state_error
@@ -2185,7 +2207,14 @@ contains
             return
         end if
         call acquire_heavy_work_slot(session, heavy_work_lease, &
-            have_heavy_work_lease, .true., stop_requested, ierr, message)
+            have_heavy_work_lease, .true., stop_requested, ierr, message, slot_busy)
+        if (ierr == 0 .and. slot_busy) then
+            call publish_state(session, request, 'capture_pending', active, current, &
+                current_case, completed, selected_count, seed, 'NONE', 0, &
+                diagnostic='waiting for a host Gremlin work slot held by other lanes')
+            call acquire_heavy_work_slot(session, heavy_work_lease, &
+                have_heavy_work_lease, .true., stop_requested, ierr, message)
+        end if
         if (ierr /= 0 .or. stop_requested) then
             call gremlin_lease_release(current_lease, release_error, message)
             if (ierr == 0 .and. release_error /= 0) ierr = release_error
@@ -3575,7 +3604,10 @@ contains
             '","event_epoch":'//trim(json_int(request%event_epoch))// &
             ',"input_changed":'//trim(json_bool(request%input_changed))// &
             ',"diagnostic":"'//trim(json_escape_string(trim(diagnostic_text)))//'"}'
-        call gremlin_session_publish(session, trim(status_text), status, local_message)
+        ! Record the lifecycle transition before publishing the state, so any
+        ! reader that observes a state also finds its lifecycle event.
+        local_message = ''
+        status = 0
         if (status == 0) then
             call lifecycle_path_for_session(session, request, lifecycle_path, &
                 status, event_message)
@@ -3613,6 +3645,8 @@ contains
                     trim(event_message)
             end if
         end if
+        if (status == 0) &
+            call gremlin_session_publish(session, trim(status_text), status, local_message)
         if (present(ierr)) ierr = status
         if (present(message)) message = local_message
         if (present(status_text_out)) status_text_out = trim(status_text)

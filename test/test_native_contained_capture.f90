@@ -117,6 +117,10 @@ contains
         env_status = c_setenv('FO_GREMLIN_STATE_DIR'//c_null_char, &
             trim(state_root)//c_null_char, 1_c_int)
         call assert_equal_integer(int(env_status), 0, 'isolates async owner state')
+        ! One job keeps the fixture lane at host admission weight 1.
+        env_status = c_setenv('FO_JOBS'//c_null_char, '1'//c_null_char, 1_c_int)
+        call assert_equal_integer(int(env_status), 0, &
+            'fixture lane uses one host work slot')
         call make_directory(trim(root)//'/project')
 
         packed = ''
@@ -293,8 +297,12 @@ contains
 
         containment_required = c_containment_required()
         if (c_host_is_linux() == 1) then
-            call assert_equal_integer(int(containment_required), 1, &
-                'nested async launch runs under strict group containment')
+            ! Since descendants may create native sessions, a nested launch runs
+            ! under the inherited async filter without the strict group mode.
+            call assert_equal_integer(seccomp_mode(), 2, &
+                'nested async launch runs under the inherited async filter')
+            call assert_equal_integer(int(containment_required), 0, &
+                'nested async launch keeps native process groups available')
         else
             call assert_equal_integer(int(containment_required), 0, &
                 'nested launch uses the available standard process boundary')
@@ -607,6 +615,26 @@ contains
         if (rc /= 0) call process_exit(81)
         call process_exit(82)
     end subroutine signal_helper
+
+    integer function seccomp_mode() result(mode)
+        !! The Seccomp field of /proc/self/status, or -1 when unavailable.
+        character(len=256) :: line
+        integer :: unit, ios
+
+        mode = -1
+        open (newunit=unit, file='/proc/self/status', status='old', action='read', &
+            iostat=ios)
+        if (ios /= 0) return
+        do
+            read (unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, 'Seccomp:') /= 1) cycle
+            read (line(9:), *, iostat=ios) mode
+            if (ios /= 0) mode = -1
+            exit
+        end do
+        close (unit)
+    end function seccomp_mode
 
     subroutine timeout_helper()
         character(len=4096) :: target_path, descendant_path, ready_path, heartbeat_path

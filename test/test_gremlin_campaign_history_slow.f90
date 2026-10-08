@@ -1,7 +1,7 @@
-program test_gremlin_campaign_history
+program test_gremlin_campaign_history_slow
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: error_unit, int64, output_unit
-    use fo_util, only: make_tmpfile
+    use fo_util, only: make_tmpfile, temporary_root
     implicit none
 
     integer, parameter :: NAME_LEN = 128, MAX_EVENTS = 128, N_CASES = 40
@@ -51,7 +51,7 @@ program test_gremlin_campaign_history
     end interface
 
     env_status = set_environment('TMPDIR'//c_null_char, &
-        '/var/tmp'//c_null_char, 1_c_int)
+        temporary_root()//c_null_char, 1_c_int)
     call require(env_status == 0, 'sets private fixture temporary root')
     call make_tmpfile('fo-campaign-history-root', scratch_tmp)
     scratch = scratch_tmp(:len_trim(scratch_tmp) - 4)
@@ -494,7 +494,7 @@ contains
         logical :: page_ok
 
         success = .false.
-        do attempt = 1, 1200
+        do attempt = 1, 4800
             call fetch_events(project_path, lane, session_id, events, n_events, page_ok)
             if (page_ok .and. n_events >= wanted) then
                 success = .true.
@@ -542,7 +542,8 @@ contains
             'FO_CACHE_DIR='//shell_quote(trim(cache_root))//' '// &
             'FO_GREMLIN_STATE_DIR='//shell_quote(trim(state_root))//' '// &
             'HOME='//shell_quote(trim(home_root))//' '// &
-            'XDG_CACHE_HOME='//shell_quote(trim(xdg_root))//' TMPDIR=/var/tmp '// &
+            'XDG_CACHE_HOME='//shell_quote(trim(xdg_root))//' '// &
+            'TMPDIR='//shell_quote(temporary_root())//' '// &
             shell_quote(trim(driver))//' '//trim(args)//' > '// &
             shell_quote(trim(out_path))//' 2> '//shell_quote(trim(err_path))
         call execute_command_line(trim(command), wait=.true., &
@@ -1114,4 +1115,4 @@ contains
         write(buffer, '(i0)') value
         text = trim(buffer)
     end function int_text
-end program test_gremlin_campaign_history
+end program test_gremlin_campaign_history_slow

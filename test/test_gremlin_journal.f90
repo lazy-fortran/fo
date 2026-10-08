@@ -1,4 +1,5 @@
 program test_gremlin_journal
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_fortran_env, only: int64, output_unit
     use fo_gremlin_journal, only: journal_append, journal_read_page, &
         journal_compact_tail, &
@@ -40,7 +41,7 @@ contains
         integer :: status, unit, pid, ios
 
         pid = process_getpid()
-        write (path, '(a,i0,a)') '/var/tmp/fo-gremlin-journal-', pid, '.jsonl'
+        write (path, '(a,i0,a)') temporary_root()//'/fo-gremlin-journal-', pid, '.jsonl'
         call remove_file(trim(path))
         call journal_read_page(trim(path), 0_int64, 10, 4096_int64, records, &
             next_cursor, status, message)
@@ -177,7 +178,7 @@ contains
         integer :: status, pid, i
 
         pid = process_getpid()
-        write (path, '(a,i0,a)') '/var/tmp/fo-gremlin-bounded-', pid, '.jsonl'
+        write (path, '(a,i0,a)') temporary_root()//'/fo-gremlin-bounded-', pid, '.jsonl'
         call remove_file(trim(path))
         do i = 1, 30
             write (completion_id, '(a,i4.4)') 'bounded-', i

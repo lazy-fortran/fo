@@ -699,8 +699,9 @@ contains
         open (newunit=unit, file=trim(host_file), status='old', action='read')
         read (unit, '(a)') line
         close (unit)
-        supported = .false.
-        if (trim(line) /= 'Linux') return
+        ! Darwin reports per-process CPU through proc_pid_rusage.
+        supported = trim(line) == 'Darwin'
+        if (supported .or. trim(line) /= 'Linux') return
         open (newunit=unit, file='/proc/self/stat', status='old', &
             action='read', iostat=status)
         if (status /= 0) return

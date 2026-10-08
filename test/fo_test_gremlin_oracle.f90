@@ -182,7 +182,45 @@ contains
         call assert_true(.not. result%timed_out, 'fo command completes within its bound')
         call json_parse(result%stdout, document, valid, message)
         if (.not. valid) call assert_true(.false., 'fo returns parseable JSON: '//message)
+        if (valid .and. result%exit_code == 0) &
+            call await_admission(driver, cwd, cache, state, arguments)
     end subroutine gremlin_json
+
+    subroutine await_admission(driver, cwd, cache, state, arguments)
+        !! A started owner may queue for a host work slot held by other lanes.
+        !! Fixture barriers measure the owner's work, so wait out that queue.
+        character(len=*), intent(in) :: driver, cwd, cache, state
+        type(string_list_t), intent(in) :: arguments
+        character(len=*), parameter :: waiting = &
+            'waiting for a host Gremlin work slot held by other lanes'
+        type(string_list_t) :: status_arguments
+        type(process_result_t) :: status_result
+        type(json_value_t) :: status
+        character(:), allocatable :: message
+        integer :: i, attempt
+        logical :: valid
+
+        if (.not. allocated(arguments%items)) return
+        if (size(arguments%items) < 2) return
+        if (arguments%items(1)%value /= 'gremlin' .or. &
+            arguments%items(2)%value /= 'start') return
+        call list_add(status_arguments, 'gremlin')
+        call list_add(status_arguments, 'status')
+        do i = 3, size(arguments%items) - 1
+            if (arguments%items(i)%value /= '--dir' .and. &
+                arguments%items(i)%value /= '--lane') cycle
+            call list_add(status_arguments, arguments%items(i)%value)
+            call list_add(status_arguments, arguments%items(i + 1)%value)
+        end do
+        do attempt = 1, 36000
+            call gremlin_run(driver, cwd, cache, state, status_arguments, status_result)
+            if (status_result%exit_code /= 0) return
+            call json_parse(status_result%stdout, status, valid, message)
+            if (.not. valid) return
+            if (gremlin_field(status, 'diagnostic') /= waiting) return
+            call gremlin_wait_ms(100)
+        end do
+    end subroutine await_admission
 
     function gremlin_field(document, key) result(value)
         type(json_value_t), intent(in) :: document

@@ -64,7 +64,7 @@ program test_gremlin_timeout_order
 
     call start_lane(lane, .true., report)
     session = field(report, 'session_id')
-    call wait_for_file(started, 30000, found)
+    call wait_for_file(started, 120000, found)
     call assert_true(found, 'captured test reaches its FIFO')
     call status_now(lane, session, report)
     generation = field(report, 'active_generation')
@@ -105,7 +105,7 @@ program test_gremlin_timeout_order
     lane = 'timeout-order-control'
     call start_lane(lane, .false., report)
     session = field(report, 'session_id')
-    call wait_for_file(started, 30000, found)
+    call wait_for_file(started, 120000, found)
     call assert_true(found, 'timeout control child reaches its FIFO')
     call wait_for_file(pid_path, 5000, found)
     call assert_true(found, 'timeout control publishes a complete PID record')

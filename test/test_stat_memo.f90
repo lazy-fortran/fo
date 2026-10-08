@@ -40,6 +40,7 @@ program test_stat_memo
     !! The persistent file-hash memo must return the true sha256, reuse it while
     !! (mtime,size) are unchanged, recompute when the file changes, and reload
     !! its persisted entries after a save.
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
     use fo_stat_memo, only: memo_hash_file, memo_save, memo_reset, &
@@ -944,7 +945,7 @@ contains
 
         serial = serial + 1
         call system_clock(count)
-        write (path, '(a,i0,a,i0,a,i0,a)') '/var/tmp/fo_statmemo-', &
+        write (path, '(a,i0,a,i0,a,i0,a)') temporary_root()//'/fo_statmemo-', &
             process_getpid(), '-', count, '-', serial, trim(suffix)
     end subroutine make_tmp_path
 

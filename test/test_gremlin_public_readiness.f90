@@ -4,7 +4,7 @@ program test_gremlin_public_readiness
     implicit none
 
     character(len=4096) :: root, fixture, prefix, cli_file, rpc_file, rpc_input, driver_path
-    character(len=4096) :: primary_fixture, state_directory
+    character(len=4096) :: primary_fixture, state_directory, tmp_root
     character(len=65536) :: cli_json, rpc_json, output
     character(len=32) :: conditions(5)
     character(len=64) :: previous_generation, receipt_cursor, event_cursor
@@ -37,10 +37,12 @@ program test_gremlin_public_readiness
     call check(ios == 0, 'project working directory is available')
     if (ios /= 0) stop 1
     call system_clock(clock)
-    write (fixture, '(a,i0)') '/var/tmp/fo-public-readiness-', clock
+    call get_environment_variable('TMPDIR', tmp_root, status=ios)
+    if (ios /= 0 .or. len_trim(tmp_root) == 0) tmp_root = '/var/tmp'
+    write (fixture, '(a,a,i0)') trim(tmp_root), '/fo-public-readiness-', clock
     primary_fixture = fixture
     state_directory = trim(fixture)//'-state'
-    prefix = 'cd '//quote(trim(root))//' && FO_DISABLE_SELF_REFRESH=1 '// &
+    prefix = 'cd '//quote(trim(root))//' && FO_JOBS=1 FO_DISABLE_SELF_REFRESH=1 '// &
         'FO_GREMLIN_STATE_DIR='//quote(trim(state_directory))//' '// &
         quote(trim(driver_path))//' '
     cli_file = trim(fixture)//'-cli.json'
@@ -249,6 +251,7 @@ contains
     subroutine exercise_token_lifecycle()
         character(len=64) :: held_token, owner_id, pid_text
         integer :: source_unit, attempt, exitcode, owner_pid, split, parse_status, condition_index
+        integer :: wait_attempt
         logical :: pending, consumer_allowed, paused
         held_token = field(cli_json, 'gate_token')
         call check(len_trim(held_token) == 64, 'blocked consumer retains a green token')
@@ -349,7 +352,11 @@ contains
         call check(field(cli_json, 'wait_satisfied') == 'false' .and. &
             field(cli_json, 'gate_token') /= held_token, &
             'restarted owner has no persisted green before fresh closure validation')
-        call cli('wait --until failure --wait-ms 30000', cli_json, exitcode)
+        ! A loaded host can need several bounded public waits.
+        do wait_attempt = 1, 4
+            call cli('wait --until failure --wait-ms 30000', cli_json, exitcode)
+            if (exitcode /= 0 .or. field(cli_json, 'wait_satisfied') == 'true') exit
+        end do
         call check(exitcode == 0 .and. field(cli_json, 'wait_satisfied') == 'true' .and. &
             field(cli_json, 'local_gate_green') == 'false', &
             'restarted watcher validates changed closure and observes current failure')

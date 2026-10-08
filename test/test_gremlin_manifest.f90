@@ -1,4 +1,5 @@
 program test_gremlin_manifest
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long, c_null_char, &
         c_size_t
     use, intrinsic :: iso_fortran_env, only: int64, error_unit
@@ -92,7 +93,7 @@ program test_gremlin_manifest
     type(generation_t) :: legacy_worktree, crash_worktree
     logical :: found_aliases
 
-    root = '/var/tmp/fo-generation-manifest-'//int_text(process_getpid())
+    root = temporary_root()//'/fo-generation-manifest-'//int_text(process_getpid())
     project = trim(root)//'/project'
     dependency = trim(root)//'/shared'
     nested_dependency = trim(project)//'/test-support/fo_test_os'
@@ -522,10 +523,11 @@ contains
         call require(local_status == 0, 'legacy fixture restores frozen root')
         call gremlin_generation_prune_at(trim(legacy_worktree%root), &
             local_status, message)
-        call require(local_status == 0 .and. index(message, 'legacy') > 0, &
-            'legacy manifest materialization prunes with explicit root retention')
+        call require(local_status /= 0 .and. &
+            index(message, 'missing its store locator') > 0, &
+            'a manifest without its owner locator is refused explicitly')
         call assert_generation_root(store, legacy_worktree, .true., &
-            'legacy owner remains protected after materialization prune')
+            'a refused generation keeps its protected store root')
 
         call generation_capture(trim(project), trim(cache_crash), context, &
             crash_worktree, local_status, message)

@@ -1,4 +1,5 @@
 program test_gremlin_readiness
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_fortran_env, only: output_unit, int64
     use fo_gremlin_readiness
     use fo_gremlin_lifecycle
@@ -197,7 +198,7 @@ contains
         character(len=256) :: path, message
         integer :: status, unit
 
-        write (path, '(a,i0)') '/var/tmp/fo-gremlin-coverage-', clock_value()
+        write (path, '(a,i0)') temporary_root()//'/fo-gremlin-coverage-', clock_value()
         generation = repeat('b', 64)
         names = ''
         names(1) = 'test_fast'
@@ -231,7 +232,7 @@ contains
         integer :: ierr, n_events, unit
         logical :: has_more
 
-        write (path, '(a,i0,a)') '/var/tmp/fo-gremlin-lifecycle-', &
+        write (path, '(a,i0,a)') temporary_root()//'/fo-gremlin-lifecycle-', &
             clock_value(), '.jsonl'
         active = repeat('a', 64)
         candidate = repeat('c', 64)

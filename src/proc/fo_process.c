@@ -28,6 +28,8 @@
 #endif
 #ifdef __APPLE__
 #include <libproc.h>
+#include <mach-o/dyld.h>
+#include <mach/mach_time.h>
 #include <sys/proc.h>
 #endif
 #include <sys/resource.h>
@@ -647,6 +649,18 @@ static long long child_cpu_ms(pid_t pid) {
     stime = strtoull(p, &end, 10);
     if (end == p) return -1;
     return (long long)((utime + stime) * 1000ULL / (unsigned long long)ticks);
+#elif defined(__APPLE__)
+    /* rusage CPU times are Mach absolute-time units, not nanoseconds. */
+    struct rusage_info_v2 info;
+    mach_timebase_info_data_t timebase;
+    unsigned long long units;
+
+    if (proc_pid_rusage(pid, RUSAGE_INFO_V2, (rusage_info_t *)&info) != 0)
+        return -1;
+    if (mach_timebase_info(&timebase) != KERN_SUCCESS || timebase.denom == 0)
+        return -1;
+    units = info.ri_user_time + info.ri_system_time;
+    return (long long)(units * timebase.numer / timebase.denom / 1000000ULL);
 #else
     (void)pid;
     return -1;
@@ -1396,6 +1410,27 @@ void fo_c_setenv_default(const char *name, const char *value) {
     if (name == NULL || value == NULL) return;
     if (getenv(name) != NULL) return;
     setenv(name, value, 1);
+}
+
+/* Absolute path of the running fo image. Test children receive it as FO so
+   they exercise this driver, not whichever fo PATH would find. */
+int fo_c_self_executable(char *out, int capacity) {
+    char resolved[PATH_MAX];
+    size_t length;
+#if defined(__linux__)
+    if (realpath("/proc/self/exe", resolved) == NULL) return -1;
+#elif defined(__APPLE__)
+    char raw[PATH_MAX];
+    uint32_t raw_size = (uint32_t)sizeof(raw);
+    if (_NSGetExecutablePath(raw, &raw_size) != 0) return -1;
+    if (realpath(raw, resolved) == NULL) return -1;
+#else
+    return -1;
+#endif
+    length = strlen(resolved);
+    if (out == NULL || capacity <= 0 || length >= (size_t)capacity) return -1;
+    memcpy(out, resolved, length + 1);
+    return 0;
 }
 
 /* Terminate with a status and no runtime banner: Fortran ERROR STOP prints
@@ -2424,9 +2459,19 @@ read_registry:
                      entry->d_name) >= (int)sizeof(path)) { e = ENAMETOOLONG; break; }
         if (entry->d_name[0] == '.' && name_len > 4 &&
             strcmp(entry->d_name + name_len - 4, ".tmp") == 0) {
-            if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
-                st.st_uid != geteuid() || unlink(path) != 0) {
-                e = errno != 0 ? errno : EPERM;
+            /* A live descendant may rename or drop its staging file while
+               this scan runs; a vanished entry needs no cleanup. */
+            if (lstat(path, &st) != 0) {
+                if (errno == ENOENT) continue;
+                e = errno;
+                break;
+            }
+            if (!S_ISREG(st.st_mode) || st.st_uid != geteuid()) {
+                e = EPERM;
+                break;
+            }
+            if (unlink(path) != 0 && errno != ENOENT) {
+                e = errno;
                 break;
             }
             continue;
@@ -2452,6 +2497,9 @@ read_registry:
                 e = read_recovery_session(registry, entry->d_name, owner_start,
                                           &items[count]);
         }
+        /* An entry removed after readdir belongs to a member that already
+           finished; it leaves nothing to recover. */
+        if (e == ENOENT) { e = 0; continue; }
         if (e != 0) break;
         count++;
     }

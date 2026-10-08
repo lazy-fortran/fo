@@ -1,4 +1,5 @@
 program test_submodule_build_order
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree
@@ -130,7 +131,7 @@ contains
         integer :: count
 
         call system_clock(count)
-        write (project, '(a,i0,a,i0)') '/var/tmp/fo_submodule_order-', &
+        write (project, '(a,i0,a,i0)') temporary_root()//'/fo_submodule_order-', &
             process_getpid(), '-', count
         log = trim(project)//'.log'
         call fs_remove_tree(project)

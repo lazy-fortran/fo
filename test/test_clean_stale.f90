@@ -2,6 +2,7 @@ program test_clean_stale
     !! `fo clean --stale` deletes what nothing references and keeps what
     !! something does. Runs over a fake build tree in /var/tmp, so the
     !! selection logic is the thing under test and not the compiler.
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_clean_stale, only: clean_stale_select, clean_stale_plan, clean_stale_run
     use fo_fs, only: fs_make_dir, fs_write_text, fs_remove_tree
@@ -67,7 +68,7 @@ contains
         integer(8) :: sizes(64), freed
         integer :: n, removed
 
-        proj = '/var/tmp/ffc-goal/clean-stale-tree'
+        proj = temporary_root()//'/ffc-goal/clean-stale-tree'
         call make_tree(proj)
 
         call clean_stale_plan(proj, 0, paths, sizes, n, freed)

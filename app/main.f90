@@ -31,7 +31,7 @@ program fo_main
         fo_fmt_deep_check_run, fo_fmt_deep_check_files, &
         write_git_changed_source_list
     use fo_process, only: process_exit, process_run_argv_logged, argv_push, &
-        process_configure_openmp
+        process_configure_openmp, process_export_self_driver
     use fo_ffc_cli, only: ffc_cmd_build, ffc_cmd_run, ffc_native_requested
     use fo_gremlin_cli, only: gremlin_cli_run
     use fo_exec_target, only: resolve_exec_target, exec_target_is_app, &
@@ -84,6 +84,7 @@ program fo_main
             call cmd_build()
         end if
     case ('test')
+        call process_export_self_driver()
         call cmd_test()
     case ('verify')
         call cmd_verify()

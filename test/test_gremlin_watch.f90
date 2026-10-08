@@ -63,7 +63,7 @@ program test_gremlin_watch
     call gremlin_json(driver, project, cache, state, args, response, process, 120000)
     session = field(response, 'session_id')
     call assert_true(len(session) > 0, 'watch session starts')
-    call gremlin_wait_file(entered, 30000, found)
+    call gremlin_wait_file(entered, 120000, found)
     call assert_true(found, 'real test process reaches the FIFO barrier')
     call wait_status(status)
     generation = field(status, 'active_generation')

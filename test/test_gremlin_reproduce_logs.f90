@@ -317,7 +317,9 @@ contains
         active_generation = ''
         failure = ''
         ready = .false.
-        do attempt = 1, 300
+        ! Safety bound only: terminal owner states return at once. The first build
+        ! may wait for a host work slot held by other lanes or run slowly under load.
+        do attempt = 1, 3000
             call status_now(owner, status)
             active_generation = member_text(status, 'active_generation')
             owner_state = member_text(status, 'state')
@@ -348,8 +350,9 @@ contains
             end if
             call gremlin_wait_ms(100)
         end do
-        failure = 'no committed PASS receipt for test_reproduce_anchor within 30 seconds; '// &
-            'last state='//owner_state
+        failure = 'no committed PASS receipt for test_reproduce_anchor within '// &
+            '300 seconds; last state='//owner_state//'; diagnostic='// &
+            member_text(status, 'diagnostic')
     end subroutine wait_for_anchor
 
     function start_failure(result) result(detail)

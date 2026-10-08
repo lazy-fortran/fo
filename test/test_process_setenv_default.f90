@@ -4,6 +4,7 @@ program test_process_setenv_default
     !! silently changes the run the user asked for. The child-side walker reads
     !! the same variable, so the test observes the value through a real child
     !! process rather than through the driver's own memory.
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_process, only: process_setenv_default
     implicit none
@@ -66,15 +67,17 @@ contains
 
         ! The harness exports no PID, so ask a child for one: the probe file
         ! must not collide with another concurrent run's probe file.
-        call execute_command_line('echo $$ > /var/tmp/'//trim(prefix)//'.pid 2>/dev/null')
-        open (newunit=unit, file='/var/tmp/'//trim(prefix)//'.pid', status='old', &
+        call execute_command_line('echo $$ > '//temporary_root()//'/'// &
+            trim(prefix)//'.pid 2>/dev/null')
+        open (newunit=unit, file=temporary_root()//'/'//trim(prefix)//'.pid', &
+            status='old', &
             action='read', iostat=status)
         if (status == 0) then
             read (unit, '(A)', iostat=status) pid
             close (unit)
         end if
         if (status /= 0) pid = '0'
-        out = '/var/tmp/'//trim(prefix)//'_'//trim(adjustl(pid))//'.txt'
+        out = temporary_root()//'/'//trim(prefix)//'_'//trim(adjustl(pid))//'.txt'
     end subroutine temp_name
 
     subroutine check_unset_gets_default(pass, fail)
@@ -125,8 +128,10 @@ contains
         character(len=:), allocatable :: seen
         integer :: rc
 
-        call process_setenv_default('FFC_CONFORMANCE_JOBS', '1')
-        call child_reads('FFC_CONFORMANCE_JOBS', seen, rc)
+        ! A private name: fo test itself sets FFC_CONFORMANCE_JOBS for its
+        ! sharded children, so the real hint is already present here.
+        call process_setenv_default('FO_SHARD_HINT_PROBE', '1')
+        call child_reads('FO_SHARD_HINT_PROBE', seen, rc)
         if (seen == '1') then
             pass = pass + 1
         else

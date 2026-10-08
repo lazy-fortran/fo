@@ -1,4 +1,5 @@
 program test_gremlin_capture_pending
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_fortran_env, only: error_unit
     use, intrinsic :: iso_c_binding, only: c_int
     implicit none
@@ -29,7 +30,7 @@ program test_gremlin_capture_pending
     call check(ios == 0, 'project working directory is available')
     if (ios /= 0) stop 1
     call system_clock(count=ios)
-    write (fixture, '(a,i0)') '/var/tmp/fo-capture-pending-', ios
+    write (fixture, '(a,i0)') temporary_root()//'/fo-capture-pending-', ios
     state_directory = trim(fixture)//'-state'
     cli_file = trim(fixture)//'-cli.json'
     initial_hold = trim(fixture)//'-initial-hold'
@@ -205,6 +206,7 @@ contains
                 len_trim(field(cli_json, 'gate_token')) == 64) return
             sleep_status = pause_microseconds(10000_c_int)
         end do
+        call diagnose_status('await new green')
         exitcode = 1
     end subroutine await_new_green
 
@@ -344,12 +346,18 @@ contains
         character(len=*), intent(in) :: arguments
         character(len=*), intent(out) :: json
         integer, intent(out) :: exitcode
-        character(len=:), allocatable :: prefix
-        prefix = 'cd '//quote(trim(root))//' && FO_DISABLE_SELF_REFRESH=1 '// &
+        character(len=:), allocatable :: prefix, detail
+        ! Readiness fields such as gate_token appear only in full detail.
+        detail = ''
+        if (index(arguments, 'status') == 1 .or. index(arguments, 'wait') == 1) &
+            detail = ' --detail full'
+        prefix = 'cd '//quote(trim(root))//' && FO_JOBS=1 '// &
+            'FO_DISABLE_SELF_REFRESH=1 '// &
             'FO_GREMLIN_STATE_DIR='//quote(trim(state_directory))//' '// &
             'FO_FC='//quote(trim(compiler_wrapper))//' '//quote(trim(driver_path))
-        call command(prefix//' gremlin '//arguments//' --dir '//quote(trim(fixture))// &
-            ' --lane capture-pending > '//quote(trim(cli_file)), exitcode)
+        call command(prefix//' gremlin '//arguments//detail//' --dir '// &
+            quote(trim(fixture))//' --lane capture-pending > '//quote(trim(cli_file)), &
+            exitcode)
         call read_output(cli_file, json)
     end subroutine cli
 

@@ -1,4 +1,5 @@
 program test_gremlin_state
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_int64_t, c_null_char
     use, intrinsic :: iso_fortran_env, only: output_unit
     use fo_cache, only: HASH_LEN
@@ -1145,7 +1146,7 @@ contains
         if (env_status == 0 .and. len_trim(temp_root) > 0) then
             root = trim(temp_root)//'/fo_gremlin_state_test_'//trim(suffix)
         else
-            root = '/var/tmp/fo_gremlin_state_test_'//trim(suffix)
+            root = temporary_root()//'/fo_gremlin_state_test_'//trim(suffix)
         end if
         call execute_command_line('mkdir -p '//trim(root))
     end subroutine test_root

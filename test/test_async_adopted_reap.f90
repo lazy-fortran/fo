@@ -1,4 +1,5 @@
 program test_async_adopted_reap
+    use fo_util, only: temporary_root
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
     use fo_fs, only: fs_remove_tree, fs_sleep_ms
@@ -42,7 +43,7 @@ program test_async_adopted_reap
     owner_pid = process_getpid()
     write (pid_text, '(i0)') owner_pid
     write (start_text, '(i0)') mcp_process_start_time(owner_pid)
-    scratch = '/var/tmp/fo-async-adopted-'//trim(pid_text)
+    scratch = temporary_root()//'/fo-async-adopted-'//trim(pid_text)
     pid_file = trim(scratch)//'/adopted.pid'
     log_file = trim(scratch)//'/active.log'
     ierr = c_mkdir(trim(scratch)//c_null_char, 448_c_int)
@@ -56,7 +57,7 @@ program test_async_adopted_reap
     n_args = 0
     call argv_push(args, n_args, '/usr/bin/sleep')
     call argv_push(args, n_args, '1')
-    call process_start_argv_logged('/var/tmp', args, n_args, &
+    call process_start_argv_logged(trim(scratch), args, n_args, &
         trim(log_file), active_pid, ierr)
     call check(ierr == 0 .and. active_pid > 0, 'starts a tracked async leader')
     if (ierr /= 0 .or. active_pid <= 0) error stop 1
