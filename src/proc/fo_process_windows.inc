@@ -969,6 +969,34 @@ int fo_c_recover_async_scope(const char *directory, int owner, const char *birth
     if (!error && active) error = EIO;
     CloseHandle(job); free(receipt); return error;
 }
+/* Admission references the physical job incarnation captured while delegation
+   is live. Missing receipts are never drainage proof for published authority. */
+int fo_c_process_scope_identity(const char *directory, int owner, const char *birth,
+                               char *identity, int capacity) {
+    wchar_t name[128];
+    int error = scope_name(directory, owner, birth, name, 128);
+    if (error) return error;
+    if (capacity <= 0 || !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+            name, -1, identity, capacity, NULL, NULL)) return EINVAL;
+    return 0;
+}
+int fo_c_process_scope_drained(const char *directory, int owner, const char *birth,
+                              const char *identity) {
+    wchar_t name[128]; char actual[128];
+    if (scope_name(directory, owner, birth, name, 128) ||
+        fo_c_process_scope_identity(directory, owner, birth, actual, sizeof(actual)) ||
+        (identity && strcmp(actual, identity))) return 0;
+    wchar_t *receipt = scope_receipt_path(directory, name);
+    if (!receipt) return 0;
+    int drained = read_scope_receipt(receipt) == 2;
+    free(receipt);
+    if (!drained) return 0;
+    HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY, FALSE, name);
+    if (!job) return GetLastError() == ERROR_FILE_NOT_FOUND;
+    DWORD active = 0;
+    drained = !job_accounting(job, &active, NULL) && active == 0;
+    CloseHandle(job); return drained;
+}
 int fo_c_reap_adopted_scope_zombies(void) {
     /* Windows process objects do not become Unix zombies; owned handles are
        closed by poll/cancel, and last job-handle close drains crash descendants. */

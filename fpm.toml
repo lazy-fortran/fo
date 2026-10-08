@@ -310,6 +310,10 @@ path = "test-fixtures/c/link_publication_peer.c"
 role = "test-fixture"
 
 [[extra.fo.inputs]]
+path = "test-fixtures/c/windows_admission.c"
+role = "test-fixture"
+
+[[extra.fo.inputs]]
 path = "test-fixtures/c/recovery_barrier.c"
 role = "test-fixture"
 

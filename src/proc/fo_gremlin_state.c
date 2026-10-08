@@ -968,7 +968,9 @@ static int admission_parent(const char *scope, uint64_t kind,
 }
 
 static int admission_publish(const char *base, uint64_t kind, int weight,
-                              char *scope, int cap, int *authority) {
+                              char *scope, int cap, int *authority,
+                              const char *parent_scope,
+                              const struct admission_owner *parent) {
     char directory[PATH_MAX], path[PATH_MAX], start[64], record[PATH_MAX+160];
     const char *state = getenv("FO_GREMLIN_PROCESS_SCOPE_DIR");
     int n = snprintf(directory, sizeof(directory), "%s/scopes", base);
@@ -981,6 +983,15 @@ static int admission_publish(const char *base, uint64_t kind, int weight,
     int gate = admission_gate(scope, 1);
     if (gate < 0) { e = errno; goto failed; }
     close(gate);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    /* Persist verified outer membership before arming the nested guardian. */
+    if (parent) {
+        e = admission_write_ancestor(scope, parent_scope, parent);
+        if (e) goto failed;
+    }
+#else
+    (void)parent_scope; (void)parent;
+#endif
     e = process_start(getpid(), start, sizeof(start));
     if (e) goto failed;
     n = snprintf(path, sizeof(path), "%s/authority", scope);
@@ -1046,6 +1057,7 @@ int fo_gremlin_host_scope_retire(int *authority, int *guardian, const char *scop
     if (e == 0) e = admission_children_busy(scope, owner.weight);
 #if defined(_WIN32) && !defined(__CYGWIN__)
     if (e == 0) e = admission_unbind_native_scope(*authority);
+    if (e == 0) e = admission_recover_records(base);
     *guardian = 0;
 #else
     if (e == 0 && *guardian > 0) {
@@ -1118,7 +1130,8 @@ int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
     e = make_dirs(dir);
     if (e == 0) e = lease_acquire_in_dir_weighted(dir, capacity, weight, fds, slots);
     if (e == 0) {
-        e = admission_publish(base, h, weight, scope, text_capacity, authority);
+        e = admission_publish(base, h, weight, scope, text_capacity, authority,
+                              previous, delegated ? &parent : NULL);
         if (e == 0) e = admission_guard_start(scope, fds, weight, guardian);
         if (e != 0) {
             if (*authority >= 0) {
