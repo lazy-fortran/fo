@@ -2475,6 +2475,8 @@ contains
         state_name = 'testing'
         if (selected_count == 0) then
             state_name = 'idle'
+            if (request%random_count == 0 .and. request%gate_required_count > 0) &
+                state_name = 'quiescent'
             coverage_path = trim(session%state_dir)//'/coverage-'// &
                 trim(active%identity)//'.state'
             call coverage_read_view_path(trim(coverage_path), active%identity, &
@@ -2744,6 +2746,10 @@ contains
             ierr = coverage_status
             message = 'coverage scheduler rejected eligible inventory or priorities'
             return
+        end if
+        if (request%random_count == 0) then
+            selected(n_selected_priorities + 1:) = ''
+            n_selected = n_selected_priorities
         end if
         if (n_priorities == 0) then
             if (n_selected > 0) then
@@ -3324,6 +3330,8 @@ contains
         end if
         if (n_selected == 0) then
             state_name = 'idle'
+            if (request%random_count == 0 .and. request%gate_required_count > 0) &
+                state_name = 'quiescent'
             coverage_path = trim(session%state_dir)//'/coverage-'// &
                 trim(generation%identity)//'.state'
             call coverage_read_view_path(trim(coverage_path), generation%identity, &
