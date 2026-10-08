@@ -430,7 +430,7 @@ contains
         end if
     end subroutine backend_test_affected
 
-    subroutine cmake_configure(context, flags, log_file, exitcode)
+    recursive subroutine cmake_configure(context, flags, log_file, exitcode)
         type(cmake_context_t), intent(inout) :: context
         character(len=*), intent(in) :: flags, log_file
         integer, intent(out) :: exitcode
@@ -531,6 +531,20 @@ contains
             exitcode)
         if (exitcode /= 0) return
         if (len_trim(context%configure_preset) > 0) then
+            if (.not. context%build_root_hint) then
+                ! Let CMake expand inherited presets and choose binaryDir.
+                ! Its final configure record locates the File API request;
+                ! the second configure validates that request and source.
+                call locate_preset_build(context, log_file, hint_valid)
+                if (.not. hint_valid) then
+                    write (error_unit, '(a)') &
+                        'fo: CMake did not report its preset build directory'
+                    exitcode = 1
+                    return
+                end if
+                call cmake_configure(context, flags, log_file, exitcode)
+                return
+            end if
             if (context%build_root_hint) then
                 call cmake_context_read_reply(context)
                 call cmake_context_validate_hint(context, hint_valid)
@@ -547,6 +561,39 @@ contains
         end if
 
     end subroutine cmake_configure
+
+    subroutine locate_preset_build(context, log_file, found)
+        type(cmake_context_t), intent(inout) :: context
+        character(len=*), intent(in) :: log_file
+        logical, intent(out) :: found
+        character(len=*), parameter :: marker = &
+            '-- Build files have been written to: '
+        character(len=4096) :: line
+        character(:), allocatable :: build, prefix
+        integer :: unit, ios
+
+        found = .false.
+        build = ''
+        open (newunit=unit, file=log_file, status='old', action='read', &
+              iostat=ios)
+        if (ios /= 0) return
+        do
+            read (unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, marker) /= 1) cycle
+            if (len_trim(line) == len(line)) cycle
+            build = trim(line(len(marker) + 1:))
+        end do
+        close (unit)
+        if (len(build) == 0) return
+        if (build(1:1) /= '/') return
+        prefix = trim(context%source_root)//'/'
+        context%build_root = build
+        if (index(build, prefix) == 1) &
+            context%build_root = build(len(prefix) + 1:)
+        context%build_root_hint = .true.
+        found = .true.
+    end subroutine locate_preset_build
 
     subroutine cmake_build(context, flags, log_file, exitcode)
         type(cmake_context_t), intent(inout) :: context

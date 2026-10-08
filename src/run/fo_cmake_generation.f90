@@ -51,6 +51,11 @@ contains
             return
         end if
         call delete_tmpfile(log_file)
+        if (backend%cmake%build_root(1:1) == '/') then
+            ierr = 1
+            message = 'resident CMake requires a relocatable build directory'
+            return
+        end if
         allocate(character(len=1048576) :: cache_text)
         call read_text_file(cmake_context_build_path(backend%cmake)// &
                             '/CMakeCache.txt', cache_text)
