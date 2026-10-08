@@ -29,11 +29,11 @@ contains
         integer, intent(out) :: n_entries
         integer, intent(out) :: ierr
 
-        character(len=:), allocatable :: line, name, pending_reason
+        character(len=:), allocatable :: line, name, pending_reason, continuation
         character(len=10) :: status
         character(len=10) :: exit_str
         real :: secs
-        integer :: u, ios, iostat
+        integer :: u, ios, iostat, n_continuations
 
         n_entries = 0
         pending_reason = ''
@@ -72,6 +72,20 @@ contains
                 end if
             else
                 call parse_ctest_result_line(line, name, status, secs, iostat)
+                ! CTest puts the closing regex bracket and duration on a
+                ! following line when a required expression was not found.
+                n_continuations = 0
+                do while (iostat /= 0 .and. len_trim(status) > 0 .and. &
+                          index(line, 'Regex=[') > 0)
+                    call read_logical_line(u, continuation, ios)
+                    if (ios /= 0) exit
+                    if (looks_like_ctest_result_line(continuation) .or. &
+                        index(continuation, 'TEST_RESULT ') == 1) exit
+                    line = line//' '//continuation
+                    n_continuations = n_continuations + 1
+                    if (n_continuations > 4096) exit
+                    call parse_ctest_result_line(line, name, status, secs, iostat)
+                end do
                 if (iostat == 0) then
                     if (n_entries >= size(entries)) call grow_entries(entries)
                     n_entries = n_entries + 1
@@ -192,7 +206,7 @@ contains
         character(len=:), allocatable :: tail, timing
         integer :: test_pos, hash_offset, hash_pos
         integer :: colon_offset, colon_pos, status_pos, status_width
-        integer :: time_iostat
+        integer :: time_iostat, seconds_end, seconds_start
 
         name = ''
         status = ''
@@ -221,11 +235,21 @@ contains
             timing = trim(adjustl(timing(2:)))
         end if
         if (len(timing) == 0) return
-        if (index(timing, '(Disabled)') == 1) then
-            if (len(timing) <= len('(Disabled)')) return
-            timing = trim(adjustl(timing(len('(Disabled)') + 1:)))
-        end if
-        read (timing, *, iostat=time_iostat) secs
+        ! Reasons such as "SegFault" or regex diagnostics precede the
+        ! duration. Parse the final numeric field before CTest's unit.
+        seconds_end = index(timing, ' sec', back=.true.) - 1
+        if (seconds_end < 1) return
+        do while (seconds_end > 0)
+            if (timing(seconds_end:seconds_end) /= ' ') exit
+            seconds_end = seconds_end - 1
+        end do
+        seconds_start = seconds_end
+        do while (seconds_start > 1)
+            if (timing(seconds_start - 1:seconds_start - 1) == ' ') exit
+            seconds_start = seconds_start - 1
+        end do
+        if (seconds_end < seconds_start) return
+        read (timing(seconds_start:seconds_end), *, iostat=time_iostat) secs
         if (time_iostat /= 0) return
         if (.not. ieee_is_finite(secs) .or. secs < 0.0) return
         iostat = 0
