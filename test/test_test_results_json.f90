@@ -173,6 +173,7 @@ program test_test_results_json
     field = json_member(report, 'output')
     call assert_equal_string(json_string_value(field), test_name, &
         'failure without executed tests preserves the complete raw diagnostic log')
+    call test_public_compilation_failure()
     call write_text(join_path(scratch, 'malformed-ctest-results.log'), &
         '1/1 Test #1: test_missing_status'//new_line('a'))
     call parse_test_results(join_path(scratch, 'malformed-ctest-results.log'), &
@@ -224,6 +225,43 @@ program test_test_results_json
         ' complete entries, ', len(result%stdout), ' bytes; failure and escapes preserved'
 
 contains
+
+    subroutine test_public_compilation_failure()
+        character(len=:), allocatable :: project
+        type(process_result_t) :: failure_result
+        type(string_list_t) :: failure_arguments
+        type(json_value_t) :: failure_report, failure_field
+
+        project = join_path(scratch, 'compile-failure-project')
+        call write_text(join_path(project, 'fpm.toml'), &
+            'name = "cli_compile_failure_probe"')
+        call write_text(join_path(project, 'test/test_compile_failure.f90'), &
+            'program test_compile_failure'//new_line('a')// &
+            'implicit none'//new_line('a')// &
+            'CLI_COMPILE_DIAGNOSTIC_TOKEN_119'//new_line('a')// &
+            'end program'//new_line('a'))
+        call list_add(failure_arguments, 'test')
+        call list_add(failure_arguments, '--json')
+        call list_add(failure_arguments, 'test_compile_failure')
+        call run_fo(driver, failure_arguments, project, &
+            join_path(project, 'fo-cache'), failure_result, environment)
+        call assert_equal_integer(failure_result%term_signal, 0, &
+            'CLI failed compilation exits normally')
+        call assert_true(failure_result%exit_code /= 0, &
+            'CLI failed compilation reports nonzero exit status')
+        call parse_json_report(failure_result, failure_report, &
+            'CLI failed compilation returns a JSON report on stdout')
+        failure_field = json_member(failure_report, 'tests')
+        call assert_equal_integer(json_size(failure_field), 0, &
+            'CLI failed compilation claims no executed tests')
+        failure_field = json_member(failure_report, 'exit_code')
+        call assert_true(json_number_value(failure_field) /= 0.0_real64, &
+            'CLI failed compilation retains its failure in JSON')
+        failure_field = json_member(failure_report, 'output')
+        call assert_true(index(json_string_value(failure_field), &
+            'CLI_COMPILE_DIAGNOSTIC_TOKEN_119') > 0, &
+            'CLI failed compilation retains the compiler diagnostic in JSON')
+    end subroutine test_public_compilation_failure
 
     function integer_text(value) result(text)
         integer, intent(in) :: value

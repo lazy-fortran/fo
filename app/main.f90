@@ -1526,17 +1526,18 @@ contains
             end do
         end if
 
+        if (use_json) then
+            call format_test_results_json(entries, n_entries, exitcode, &
+                json_output, test_log)
+            write (output_unit, '(a)') trim(json_output)
+            return
+        end if
+
         if (n_entries > 0) then
-            if (use_json) then
-                call format_test_results_json(entries, n_entries, exitcode, &
-                    json_output, test_log)
-                write (output_unit, '(a)') trim(json_output)
-            else
-                call format_test_results_text(entries, n_entries, test_log, &
-                    summary_mode, human_output)
-                if (len_trim(human_output) > 0) then
-                    write (output_unit, '(a)') trim(human_output)
-                end if
+            call format_test_results_text(entries, n_entries, test_log, &
+                summary_mode, human_output)
+            if (len_trim(human_output) > 0) then
+                write (output_unit, '(a)') trim(human_output)
             end if
         else if (exitcode == 0) then
             if (.not. summary_mode) return
