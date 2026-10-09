@@ -13,7 +13,7 @@ verification and regular gated main pushes. One controller integrates parallel
 source workers; each host admits one heavy campaign. Full platform and consumer
 qualification remain completion gates in this delivery.
 
-Published Fo `51249a6`, Fx `38c4591` and FortFront `8eced2d` are the current
+Published Fo `32dea8e`, Fx `b669f31` and FortFront `8eced2d` are the current
 baseline. Fo-owned fixtures and orchestration have no Python/JavaScript runtime;
 the offline qualification image contains neither interpreter. Native protocol,
 process, recovery, DWARF, slow-impact and frozen-CMake oracles replace the removed
@@ -35,6 +35,14 @@ by its runtime provider. Both frozen-view portability/watch gates pass on Linux
 and Darwin. The prior Darwin full milestone retains 125 PASS, three FAIL, one
 TIMEOUT, one INFRA_ERROR, one CANCELLED and eleven UNKNOWN on its exact source;
 these outcomes remain distinct from the focused repair.
+
+`32dea8e` repairs the reproduced Darwin parallel generation stack failure.
+Four local manifest configurations use the existing heap allocator. The
+unchanged generation test passes on Darwin with ordinary stack/time budgets;
+Linux generation, input-inventory and both registry gates pass. Fx `b669f31`
+repairs hashing the long Windows driver-pin path; its independent native hash
+oracle passes 127/127 and the focused Linux hash gate passes. Native MCP now
+advances past pinning; the next image-launch path repair is under qualification.
 
 The native Windows candidate now builds Fo through its pinned image with the ordinary
 2 MiB stack. The combined repair uses measured heap buffers, binary archive
