@@ -491,7 +491,7 @@ contains
         end do
         call call_tool('{"action":"gremlin_start","dir":'//mcp_quote(parity)// &
             ',"lane_id":"mcp-parity","random_count":2,"seed":1729,'// &
-            '"timeout_seconds":5,"campaign_seconds":1}', body)
+            '"timeout_seconds":5,"campaign_seconds":30}', body)
         parity_owner = gremlin_field(body, 'session_id')
         call cli_begin('start', parity, 'cli-parity', '')
         call sample_arguments(2, '1729')
@@ -584,7 +584,7 @@ contains
         call list_add(arguments, '--random'); call list_add(arguments, digits(random_count))
         call list_add(arguments, '--seed'); call list_add(arguments, seed)
         call list_add(arguments, '--timeout-seconds'); call list_add(arguments, '5')
-        call list_add(arguments, '--campaign-seconds'); call list_add(arguments, '1')
+        call list_add(arguments, '--campaign-seconds'); call list_add(arguments, '30')
     end subroutine sample_arguments
 
     subroutine sample_status(mcp, directory, lane, session, body)

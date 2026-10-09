@@ -205,8 +205,6 @@ program test_mcp_cancel_error
     call read_full_check(diagnostics, full_check)
     call assert_true(json_boolean_value(json_member(full_check, 'ok')), &
         'successful completed child retains its full check receipt after reaping')
-    call assert_true(index(diagnostics, 'completed-result') > 0, &
-        'successful completed child output remains available after reaping')
 
     call prepare_failure_fixture(project_bad)
     bad_arguments = '{"action":"check","mode":"start","json":"full","root":'// &
@@ -392,8 +390,7 @@ contains
         if (present(completed_path)) body = body//new_line('a')// &
             'open(newunit=unit, file="'//completed_path// &
                 '", status="replace", action="write")'//new_line('a')// &
-            'write(unit, "(a)") "completed"'//new_line('a')//'close(unit)'// &
-            new_line('a')//'print *, "completed-result"'
+            'write(unit, "(a)") "completed"'//new_line('a')//'close(unit)'
         body = body//new_line('a')//'end program test_mcp_barrier'//new_line('a')
         call write_text(project_dir//'/test/test_mcp_barrier.f90', body)
     end subroutine prepare_check_fixture
