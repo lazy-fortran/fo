@@ -310,7 +310,7 @@ contains
         logical, intent(in), optional :: recursive, reject_aliases
         integer, intent(out), optional :: ierr
         character(kind=c_char), allocatable :: buf(:)
-        integer(c_int) :: rc, rec, strict_aliases
+        integer(c_int) :: rc, rec, strict_aliases, capacity
 
         rec = 1
         if (present(recursive)) then
@@ -320,11 +320,18 @@ contains
         if (present(reject_aliases)) then
             if (reject_aliases) strict_aliases = 1
         end if
-        allocate (buf(FS_COLLECT_CAP))
-        rc = fo_c_collect_files(trim(root)//c_null_char, trim(infix)//c_null_char, &
-            trim(suffix)//c_null_char, &
-            trim(path_needle)//c_null_char, rec, buf, &
-            int(FS_COLLECT_CAP, c_int), strict_aliases)
+        capacity = FS_COLLECT_CAP
+        do
+            allocate (buf(capacity))
+            rc = fo_c_collect_files(trim(root)//c_null_char, &
+                trim(infix)//c_null_char, trim(suffix)//c_null_char, &
+                trim(path_needle)//c_null_char, rec, buf, capacity, strict_aliases)
+            if (rc /= -3) exit
+            ! Retry only buffer exhaustion; preserve I/O and alias errors.
+            if (capacity > huge(capacity) - capacity) exit
+            deallocate (buf)
+            capacity = 2*capacity
+        end do
         if (present(ierr)) then
             ierr = 0
             if (rc < 0 .or. rc > size(items)) ierr = 1

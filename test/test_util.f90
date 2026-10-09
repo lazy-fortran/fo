@@ -35,6 +35,7 @@ program test_util
     call test_readonly_owned_scratch_cleanup()
     call test_read_text_file_preserves_long_records()
     call test_profile_filter_ignores_compiler_name_in_basename()
+    call test_large_file_collection_preserves_every_match()
     write (output_unit, '(a,i0,a,i0,a)') 'util: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
 
@@ -163,6 +164,49 @@ contains
             'profile filter accepts versioned NVHPC profile directory')
         call fs_remove_tree(root)
     end subroutine test_profile_filter_ignores_compiler_name_in_basename
+
+    subroutine test_large_file_collection_preserves_every_match()
+        character(len=512) :: root, nested, path
+        character(len=512) :: items(800), expected(800), small_items(8)
+        character(len=4) :: number
+        integer :: i, unit, n_items, status, path_bytes
+        logical :: same
+
+        call make_tmpfile('fo-large-collection', root)
+        nested = trim(root)//'/'//repeat('d', 190)
+        call fs_make_dir(trim(nested))
+        path_bytes = 0
+        do i = 1, size(expected)
+            write (number, '(i4.4)') i
+            path = trim(nested)//'/'//repeat('x', 180)//number//'.f90'
+            expected(i) = path
+            path_bytes = path_bytes + len_trim(path) + 1
+            open (newunit=unit, file=trim(path), status='replace')
+            close (unit)
+        end do
+        call assert(path_bytes > 262144, 'large inventory exceeds old byte limit')
+        call fs_collect_files(root, '', '.f90', '', items, n_items, ierr=status)
+        same = n_items == size(expected)
+        if (same) same = all(items == expected)
+        call assert(status == 0 .and. same, &
+            'large inventory returns every full path in sorted order')
+        call fs_collect_files(root, '', '.f90', '', small_items, n_items, ierr=status)
+        call assert(status == 1 .and. n_items == size(small_items), &
+            'caller item limit remains a reported partial inventory')
+        same = .true.
+        do i = 1, n_items
+            if (.not. any(small_items(i) == expected)) same = .false.
+        end do
+        do i = 2, n_items
+            if (llt(small_items(i), small_items(i - 1))) same = .false.
+        end do
+        call assert(same, 'bounded caller retains sorted complete paths')
+        call fs_collect_files(trim(expected(1)), '', '.f90', '', items, n_items, &
+            ierr=status)
+        call assert(status == 1 .and. n_items == 0, &
+            'non-directory input remains an error, not a buffer retry')
+        call fs_remove_tree(root)
+    end subroutine test_large_file_collection_preserves_every_match
 
     subroutine assert(cond, msg)
         logical, intent(in) :: cond

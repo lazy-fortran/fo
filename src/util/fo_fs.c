@@ -251,7 +251,8 @@ static int fo_directory_contains(const char *path, const char *needle) {
 /* Recursively collect regular files under root whose basename contains infix
    and ends with suffix, and whose directory path contains path_needle (when set).
    Matches are written to out as NUL-separated paths; returns the count, or -1
-   if the buffer overflows or a hard error occurs. Replaces a find pipeline. */
+   for hard errors, -2 for rejected aliases, or -3 for buffer overflow.
+   Replaces a find pipeline. */
 static int fo_collect_rec(const char *root, const char *infix,
                           const char *suffix, const char *path_needle,
                           int recursive, char *out, int cap, int *used,
@@ -309,7 +310,7 @@ static int fo_collect_rec(const char *root, const char *infix,
         if (!fo_str_contains(ent->d_name, infix)) continue;
         if (!fo_directory_contains(child, path_needle)) continue;
         plen = strlen(child);
-        if (*used + (int)plen + 1 > cap) { closedir(dir); return -1; }
+        if (plen + 1 > (size_t)(cap - *used)) { closedir(dir); return -3; }
         memcpy(out + *used, child, plen);
         out[*used + (int)plen] = '\0';
         *used += (int)plen + 1;
@@ -322,6 +323,7 @@ int fo_c_collect_files(const char *root, const char *infix, const char *suffix,
                        int cap, int reject_aliases) {
     int used = 0;
     if (!fo_has(root)) return 0;
+    if (cap < 0) return -1;
     return fo_collect_rec(root, infix, suffix, path_needle, recursive, out, cap,
                           &used, reject_aliases);
 }
