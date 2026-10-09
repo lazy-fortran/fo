@@ -13,7 +13,7 @@ verification and regular gated main pushes. One controller integrates parallel
 source workers; each host admits one heavy campaign. Full platform and consumer
 qualification remain completion gates in this delivery.
 
-Published Fo `32dea8e`, Fx `b669f31` and FortFront `8eced2d` are the current
+Published Fo `4ce66c2`, Fx `b669f31` and FortFront `8eced2d` are the current
 baseline. Fo-owned fixtures and orchestration have no Python/JavaScript runtime;
 the offline qualification image contains neither interpreter. Native protocol,
 process, recovery, DWARF, slow-impact and frozen-CMake oracles replace the removed
@@ -43,6 +43,18 @@ Linux generation, input-inventory and both registry gates pass. Fx `b669f31`
 repairs hashing the long Windows driver-pin path; its independent native hash
 oracle passes 127/127 and the focused Linux hash gate passes. Native MCP now
 advances past pinning; the next image-launch path repair is under qualification.
+
+`4ce66c2` repairs two native fixture preconditions: the program-name provider
+declares its explicit interface, and stat-memo's optional alias padding respects
+the actual path capacity. Native FPM/compiler controls and the preserved
+long-root worker establish the parent faults. Both public cases pass on Linux
+and Darwin with unchanged stress counts and time budgets. These focused results
+do not combine the historical partial suite into a full fixed-version green.
+
+The combined candidate's durable retained-TMP repair passes all five Linux
+view/state/reproduction/readiness/portability gates; its parent restart oracle
+loses both failed journals. Impact's original CPU limit and native Windows MCP
+still need owning diagnosis before this larger candidate is promoted.
 
 The native Windows candidate now builds Fo through its pinned image with the ordinary
 2 MiB stack. The combined repair uses measured heap buffers, binary archive
