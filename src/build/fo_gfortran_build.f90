@@ -3813,6 +3813,10 @@ contains
         character(len=1024) :: stage_dir, stage_archive, ready_archive
         integer :: i, n_args, reserve_rc, rename_rc
         logical :: exists, members_ok
+        type(cache_t) :: archive_cache
+        character(len=HASH_LEN) :: archive_action
+        character(len=512) :: archive_key_parts(3)
+        integer :: cache_rc, store_rc
 
         archive_path = ''
         exitcode = 0
@@ -3820,14 +3824,30 @@ contains
         archive_dir = trim(project_dir)//'/build/fo/lib'
         call fs_make_dir(archive_dir)
         final_path = ''
+        cache_rc = 1
+        archive_action = ''
         if (present(content_key)) then
             if (len_trim(content_key) > 0) then
                 final_path = trim(archive_dir)//'/objects_'// &
                     content_key(1:min(32, len_trim(content_key)))//'.a'
+                archive_key_parts(1) = 'fo-archive-1'
+                archive_key_parts(2) = content_key
+                archive_key_parts(3) = compiler_tool_key('ar')
+                archive_action = cache_digest(archive_key_parts, 3)
+                call cache_init(archive_cache, cache_rc)
                 inquire (file=trim(final_path), exist=exists)
                 if (exists) then
-                    call archive_has_expected_members(project_dir, final_path, &
-                        objects, n_objects, members_ok)
+                    members_ok = .false.
+                    if (cache_rc == 0) then
+                        ! The complete artifact digest must match a receipt from
+                        ! a validated private stage for this object-vector/tool
+                        ! action. Avoid spawning ar once for every member.
+                        call cache_binary_matches(archive_cache, archive_action, &
+                            final_path, members_ok)
+                    else
+                        call archive_has_expected_members(project_dir, final_path, &
+                            objects, n_objects, members_ok)
+                    end if
                     if (members_ok) then
                         archive_path = final_path
                         return
@@ -3877,6 +3897,17 @@ contains
             archive_path = ''
             exitcode = 1
             return
+        end if
+        if (cache_rc == 0) then
+            ! Record only this producer's private bytes: a peer may replace the
+            ! public pathname immediately after an independent validation.
+            call cache_store_binary(archive_cache, archive_action, stage_archive, store_rc)
+            if (store_rc /= 0) then
+                call append_artifact_error(log_file, 'fo: could not record validated archive action')
+                call fs_remove_tree(trim(stage_dir))
+                exitcode = 1
+                return
+            end if
         end if
         rename_rc = fs_rename(trim(stage_archive), trim(ready_archive))
         if (rename_rc /= 0) then

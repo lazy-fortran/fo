@@ -87,6 +87,7 @@ program test_archive_publication
     call assert_process_ok(result, 'warm archive build')
     call assert_equal_integer(log_lines(join_path(scratch, 'ar.log')), before_calls, &
         'unchanged archive inputs reuse the validated artifact')
+    call check_warm_named_archive(archive)
 
     call write_text(archive, 'partial stale archive')
     old_archive = archive
@@ -873,6 +874,58 @@ contains
         after = archive_rcs_calls(join_path(scratch, 'ar.log'))
         call assert_true(after > before, 'stale member content causes archive rebuild')
     end subroutine exercise_stale_archive
+
+    subroutine check_warm_named_archive(archive_path)
+        character(len=*), intent(in) :: archive_path
+        character(:), allocatable :: source, execution_marker, expected_digest
+        type(process_result_t) :: result
+        type(json_value_t) :: report
+        integer :: before
+        character(len=1), parameter :: nl = new_line('a')
+
+        execution_marker = join_path(scratch, 'warm-named-executed')
+        source = 'program test_alpha'//nl// &
+            'use archive_left, only: left_value'//nl// &
+            'use archive_right, only: right_value'//nl// &
+            'integer :: unit'//nl// &
+            'if (left_value() + right_value() /= 42) stop 1'//nl// &
+            "open(newunit=unit, file='"//execution_marker//"', status='replace')"//nl// &
+            "write(unit, '(a)') 'warm-current'"//nl//'close(unit)'//nl//'end program'//nl
+        ! A changed selected main defeats the whole-build stamp fast path. Its
+        ! library object vector stays fixed and must reuse the complete archive.
+        call write_text(join_path(project, 'test/test_alpha.f90'), source)
+        expected_digest = file_digest(archive_path)
+        before = log_lines(join_path(scratch, 'ar.log'))
+        call invoke(words([character(len=32) :: 'test', 'test_alpha', '--json']), &
+            'normal', 'normal', 'normal', result)
+        call assert_process_ok(result, 'warm named case uses validated archive')
+        call parse_json_report(result, report, 'warm named archive report')
+        call check_tests_pass(report, 1, 'warm named archive consumer passes')
+        call assert_equal_string(read_text(execution_marker), 'warm-current'//nl, &
+            'the changed named program actually executes against the archive')
+        call assert_equal_integer(log_lines(join_path(scratch, 'ar.log')), before, &
+            'complete warm archive receipt removes all per-member ar subprocesses')
+        call assert_equal_string(file_digest(archive_path), expected_digest, &
+            'warm archive reuse leaves its complete bytes unchanged')
+
+        call write_text(join_path(fake_bin, 'ar'), ar_wrapper()//nl//'# revised archiver image'//nl)
+        call chmod_executable(join_path(fake_bin, 'ar'))
+        call write_text(join_path(project, 'test/test_alpha.f90'), source//'! new tool action'//nl)
+        call invoke(words([character(len=32) :: 'test', 'test_alpha', '--json']), &
+            'fail', 'normal', 'normal', result)
+        call assert_true(result%exit_code /= 0, &
+            'a changed archiver image invalidates the receipt and exposes actual archiver failure')
+        call assert_equal_string(file_digest(archive_path), expected_digest, &
+            'failed replacement under a new archiver preserves the published archive')
+        call write_text(join_path(fake_bin, 'ar'), ar_wrapper())
+        call chmod_executable(join_path(fake_bin, 'ar'))
+        call remove_path(execution_marker)
+        call invoke(words([character(len=32) :: 'test', 'test_alpha', '--json']), &
+            'normal', 'normal', 'normal', result)
+        call assert_process_ok(result, 'restored archiver consumes its unchanged validated artifact')
+        call assert_equal_string(read_text(execution_marker), 'warm-current'//nl, &
+            'named execution recovers after the invalidated archiver action fails')
+    end subroutine check_warm_named_archive
 
     subroutine test_no_cache_shared_cleanup(shared_path)
         character(len=*), intent(in) :: shared_path
