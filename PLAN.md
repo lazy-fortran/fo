@@ -36,6 +36,22 @@ cleanup action history, idle MCP progress and native Windows fixtures. Deep lint
 also requires the witnessed owning Fluff configuration/import repair. Each
 candidate still needs combined local verification before promotion.
 
+Fo `feb2318` is now published after 13/13 combined resident cases pass on fixed
+generation `8b472de606fb`, using digest-pinned driver `fcaabca506e1`. Pending MCP
+work progresses while clients are idle; failed fixtures retain their evidence
+outside owned temporary scopes; child/execution-view fixtures use native Windows
+interfaces. Fx `9e97af4` provides the native timed reader, with three transport
+gates and the recorded ASAN check passing. Promotion receipt:
+`/var/tmp/fo-complete-20261009/output/promotion-feb2318.json`.
+
+Current follow-up repairs Fo's dependency C-header planning, which incorrectly
+resolves transitive development dependencies. Canonical inventory capture and
+duplicate artifact/test cleanup are next. Darwin's frozen 143-case milestone
+and a fresh Windows native qualification remain active; the historical native
+Windows bootstrap hit a stack overflow while building current source, so its
+output is not yet a qualified candidate. These focused deliveries do not claim
+complete platform, FPM, deep-lint or scientific CMake coverage.
+
 The earlier development deployment remains recorded below for its exact scope.
 
 Fo source `2ac0121` and Fx `090acb4` are published on main. The Fx repair makes
