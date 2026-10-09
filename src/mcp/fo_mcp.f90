@@ -57,7 +57,8 @@ contains
         character(len=MAX_LINE) :: id_str
         integer :: framing, read_status, parse_status, property_count
         integer :: cancel_retry_delay_ms
-        logical :: eof_flag
+        logical :: eof_flag, valid_version, request_has_id, stop_requested
+        type(json_event_t) :: envelope_event
         type(mcp_async_state_t) :: async_state
 
         call process_suppress_heartbeats(.true.)
@@ -68,6 +69,22 @@ contains
             if (read_status /= 0) cycle
             if (len_trim(line) == 0) cycle
 
+            call extract_json_member(line, 'jsonrpc', raw_value, property_count, &
+                parse_status, envelope_event)
+            valid_version = .false.
+            if (parse_status == 0 .and. property_count == 1) then
+                if (envelope_event%event_type == JSON_STRING) then
+                    if (allocated(envelope_event%string_val)) then
+                        valid_version = len(envelope_event%string_val) == 3 .and. &
+                            envelope_event%string_val == '2.0'
+                    end if
+                end if
+            end if
+            if (.not. valid_version) then
+                call jsonrpc_error('null', -32600, 'invalid JSON-RPC request', response)
+                call mcp_send_response(trim(response), framing)
+                cycle
+            end if
             call extract_json_string_member(line, 'method', method, &
                 property_count, parse_status)
             if (parse_status /= 0 .or. property_count /= 1) then
@@ -75,13 +92,26 @@ contains
                 call mcp_send_response(trim(response), framing)
                 cycle
             end if
-            call extract_json_member(line, 'id', id_str, property_count, parse_status)
+            call extract_json_member(line, 'id', id_str, property_count, parse_status, &
+                envelope_event)
             if (parse_status /= 0 .or. property_count > 1) then
                 call jsonrpc_error('null', -32600, 'invalid JSON-RPC id', response)
                 call mcp_send_response(trim(response), framing)
                 cycle
             end if
-            if (property_count == 0) id_str = ''
+            request_has_id = property_count == 1
+            if (request_has_id) then
+                select case (envelope_event%event_type)
+                case (JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_NULL_VAL)
+                    ! Preserve the exact legal ID token without numeric conversion.
+                case default
+                    call jsonrpc_error('null', -32600, 'invalid JSON-RPC id', response)
+                    call mcp_send_response(trim(response), framing)
+                    cycle
+                end select
+            else
+                id_str = 'null'
+            end if
             params_json = '{}'
             call extract_json_member(line, 'params', raw_value, property_count, &
                 parse_status)
@@ -91,44 +121,39 @@ contains
                 end if
             end if
             call async_poll(async_state)
+            stop_requested = .false.
 
             select case (trim(method))
             case ('initialize')
                 call make_initialize_response(id_str, params_json, response)
-                call mcp_send_response(trim(response), framing)
-            case ('initialized')
+            case ('initialized', 'notifications/initialized')
                 ! notification, no response needed
                 cycle
             case ('tools/list')
                 call make_tools_list_response(id_str, response)
-                call mcp_send_response(trim(response), framing)
             case ('tools/call')
                 call handle_tools_call(params_json, id_str, response, async_state)
-                call mcp_send_response(trim(response), framing)
             case ('resources/list')
                 call make_resources_list_response(id_str, response)
-                call mcp_send_response(trim(response), framing)
             case ('resources/read')
                 call handle_resources_read(params_json, id_str, response, async_state)
-                call mcp_send_response(trim(response), framing)
             case ('shutdown')
                 call async_cancel_all(async_state, read_status)
                 if (read_status /= 0) then
                     call jsonrpc_error(id_str, -32603, &
                         'failed to cancel active run; shutdown remains active', response)
-                    call mcp_send_response(trim(response), framing)
-                    cycle
+                else
+                    call jsonrpc_null(id_str, response)
+                    stop_requested = .true.
                 end if
-                call jsonrpc_null(id_str, response)
-                call mcp_send_response(trim(response), framing)
-                exit
             case default
-                if (len_trim(id_str) > 0) then
+                if (request_has_id) then
                     call jsonrpc_error(id_str, -32601, &
                         'method not found', response)
-                    call mcp_send_response(trim(response), framing)
                 end if
             end select
+            if (request_has_id) call mcp_send_response(trim(response), framing)
+            if (stop_requested) exit
         end do
         cancel_retry_delay_ms = CANCEL_RETRY_INITIAL_DELAY_MS
         do

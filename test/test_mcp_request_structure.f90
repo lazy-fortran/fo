@@ -6,6 +6,7 @@ program test_mcp_request_structure
     use fo_test_cli, only: resolve_driver, run_fo
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_string_value, json_boolean_value, json_number_value
+    use fo_test_json, only: json_string, json_number, json_null
     use fo_test_mcp, only: mcp_encode, mcp_request, mcp_call, mcp_quote, mcp_exchange
     implicit none
 
@@ -119,6 +120,7 @@ program test_mcp_request_structure
     field = json_member(error_object, 'code')
     call assert_equal_integer(int(json_number_value(field)), -32600, &
         'trailing JSON after the RPC envelope is rejected')
+    call test_envelope_validation()
 
     arguments = string_list_t()
     call list_add(arguments, 'gremlin')
@@ -136,6 +138,80 @@ program test_mcp_request_structure
     write(*, '(a)') 'mcp-request-structure: envelope, composite values and strict fields passed'
 
 contains
+
+    subroutine test_envelope_validation()
+        character(len=80), parameter :: invalid_fields(9) = [character(len=80) :: &
+            '"jsonrpc":"2.0","id":{}', '"jsonrpc":"2.0","id":[]', &
+            '"jsonrpc":"2.0","id":true', '"id":1', &
+            '"jsonrpc":"1.0","id":1', '"jsonrpc":"2.0 ","id":1', &
+            '"jsonrpc":2,"id":1', '"jsonrpc":null,"id":1', &
+            '"jsonrpc":"2.0","jsonrpc":"1.0","id":1']
+        type(json_value_t), allocatable :: replies(:)
+        type(json_value_t) :: reply_id, reply_error, reply_field
+        type(process_result_t) :: exchange
+        character(:), allocatable :: messages
+        integer :: framing_case, index, first_valid
+        logical :: framed
+
+        do framing_case = 1, 2
+            framed = framing_case == 2
+            messages = mcp_encode('{"jsonrpc":"2.0","method":"tools/list"}', framed)
+            do index = 1, size(invalid_fields)
+                messages = messages // &
+                    mcp_encode('{' // trim(invalid_fields(index)) // &
+                    ',"method":"tools/list"}', framed)
+            end do
+            messages = messages // mcp_encode('{"jsonrpc":"2.0","id":null,' // &
+                '"method":"unsupported/method"}', framed) // &
+                mcp_encode('{"jsonrpc":"\u0032.0","id":"trace\u002d\"quoted",' // &
+                '"method":"unsupported/method"}', framed) // &
+                mcp_encode('{"jsonrpc":"2.0","id":9007199254740993,' // &
+                '"method":"unsupported/method"}', framed) // &
+                mcp_encode('{"jsonrpc":"2.0","id":1.25e+2,' // &
+                '"method":"unsupported/method"}', framed) // &
+                mcp_encode('{"jsonrpc":"2.0","method":"unsupported/method"}', &
+                framed) // &
+                mcp_encode(mcp_request(7, 'shutdown'), framed)
+            call mcp_exchange(driver, project, cache, messages, framed, replies, exchange)
+            call assert_equal_integer(exchange%exit_code, 0, &
+                'invalid envelopes preserve a usable server in both framing modes')
+            call assert_equal_integer(size(replies), size(invalid_fields) + 5, &
+                'known and unknown lawful notifications emit no response')
+            if (size(replies) /= size(invalid_fields) + 5) cycle
+            do index = 1, size(invalid_fields)
+                reply_error = json_member(replies(index), 'error')
+                reply_field = json_member(reply_error, 'code')
+                call assert_equal_integer(int(json_number_value(reply_field)), -32600, &
+                    'invalid envelope is rejected before method dispatch: ' // &
+                    trim(invalid_fields(index)))
+                reply_id = json_member(replies(index), 'id')
+                call assert_equal_integer(reply_id%kind, json_null, &
+                    'invalid envelope returns a null response ID')
+            end do
+            first_valid = size(invalid_fields) + 1
+            do index = first_valid, first_valid + 3
+                reply_error = json_member(replies(index), 'error')
+                reply_field = json_member(reply_error, 'code')
+                call assert_equal_integer(int(json_number_value(reply_field)), -32601, &
+                    'lawful IDs reach method dispatch after invalid envelopes')
+            end do
+            reply_id = json_member(replies(first_valid), 'id')
+            call assert_equal_integer(reply_id%kind, json_null, &
+                'explicit null ID remains a request with a response')
+            reply_id = json_member(replies(first_valid + 1), 'id')
+            call assert_equal_integer(reply_id%kind, json_string, 'string ID remains a string')
+            call assert_equal_string(json_string_value(reply_id), 'trace-"quoted', &
+                'escaped string ID and escaped protocol version decode losslessly')
+            reply_id = json_member(replies(first_valid + 2), 'id')
+            call assert_equal_integer(reply_id%kind, json_number, 'integer ID stays numeric')
+            call assert_equal_string(reply_id%text, '9007199254740993', &
+                'large integer ID preserves digits beyond exact floating-point range')
+            reply_id = json_member(replies(first_valid + 3), 'id')
+            call assert_equal_integer(reply_id%kind, json_number, 'real ID stays numeric')
+            call assert_equal_string(reply_id%text, '1.25e+2', &
+                'real ID preserves its exact legal numeric token')
+        end do
+    end subroutine test_envelope_validation
 
     subroutine append(message)
         character(len=*), intent(in) :: message
