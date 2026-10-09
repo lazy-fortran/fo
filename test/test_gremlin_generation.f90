@@ -9,6 +9,8 @@ program test_gremlin_generation
         generation_capture, generation_driver_identity
     use fo_input_inventory, only: input_declaration_t, &
         input_inventory_discover, input_inventory_declarations_from_config
+    use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
+        execution_view_release
     use fo_process, only: process_getpid
     implicit none
 
@@ -85,7 +87,7 @@ program test_gremlin_generation
         end function c_chmod
     end interface
 
-    integer :: n_pass, n_fail, race_ierr, generation_count
+    integer :: n_pass, n_fail, first_ierr, race_ierr, generation_count
     integer(c_int), parameter :: WRITE_ACCESS = 2_c_int
     integer(c_int), parameter :: EXEC_ACCESS = 1_c_int
     integer(c_int), parameter :: MODE_NONEXEC = 420_c_int, MODE_EXEC = 493_c_int
@@ -102,6 +104,7 @@ program test_gremlin_generation
     type(generation_t) :: metadata_changed, race_generation
     type(generation_t) :: mode_changed, mode_restored
     type(generation_t) :: parallel_one, parallel_two
+    type(execution_view_t) :: build_view
     logical :: exists, atomic_edit_observed
     integer :: parallel_ierr_one, parallel_ierr_two
     integer :: parent_swap_count
@@ -162,10 +165,10 @@ program test_gremlin_generation
     call fs_write_text(trim(dependency)//'/fpm.toml', 'name="fortfront"')
 
     call capture_generation(trim(project), trim(cache), context, first, &
-        race_ierr, message)
-    call check(race_ierr == 0, &
+        first_ierr, message)
+    call check(first_ierr == 0, &
         'capture publishes an immutable generation with an in-tree file link')
-    if (race_ierr /= 0) write (error_unit, '(a)') trim(message)
+    if (first_ierr /= 0) write (error_unit, '(a)') trim(message)
     call check(first%driver_digest == context%driver_digest .and. &
         first%driver_size == context%driver_size .and. &
         first%driver_path == context%driver_path, &
@@ -201,7 +204,7 @@ program test_gremlin_generation
     generation_count = count_generation_roots(trim(concurrent_cache))
     call check(generation_count == 1, &
         'concurrent publication stores one validated generation')
-    if (race_ierr == 0) then
+    if (first_ierr == 0) then
         call check(c_access(trim(first%root)//'/identity.txt'//c_null_char, &
             WRITE_ACCESS) /= 0, 'published generation metadata is read-only')
         call check(c_access(trim(first%root)//'/bundle'//c_null_char, &
@@ -242,9 +245,24 @@ program test_gremlin_generation
         call check(.not. exists, 'Subversion metadata is excluded from the snapshot')
         inquire (file=trim(first%project_root)//'/.bzr/branch', exist=exists)
         call check(.not. exists, 'Bazaar metadata is excluded from the snapshot')
-        call fs_write_text(trim(first%project_root)//'/build/probe.txt', 'writable')
-        call check(file_equals(trim(first%project_root)//'/build/probe.txt', &
-            'writable'), 'excluded build directory remains writable')
+        call execution_view_create(trim(root)//'/views', first%identity, &
+            'generation-fixture', 'build', first%input_inventory, &
+            first%input_inventory_ready, first%input_inventory_complete, &
+            build_view, race_ierr, message, trim(first%root)//'/bundle')
+        call check(race_ierr == 0, 'frozen inputs create a private build view')
+        if (race_ierr == 0) then
+            call fs_make_dir(trim(build_view%cwd)//'/build')
+            call fs_write_text(trim(build_view%cwd)//'/build/probe.txt', 'writable')
+            call check(file_equals(trim(build_view%cwd)//'/build/probe.txt', &
+                'writable'), 'excluded build directory remains writable')
+            inquire (file=trim(first%project_root)//'/build/probe.txt', exist=exists)
+            call check(.not. exists, &
+                'private build output leaves frozen inputs unchanged')
+            call check(file_equals(trim(first%project_root)//'/src/main.f90', &
+                'program version_one'), 'private build preserves frozen source bytes')
+        end if
+        call execution_view_release(build_view, .false., race_ierr, message)
+        call check(race_ierr == 0, 'private build view and scratch are removed')
     end if
 
     call capture_generation(trim(project), trim(cache), context, reused, &

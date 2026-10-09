@@ -54,6 +54,12 @@ module fo_gremlin_generation
         generation_load_inventory
 
     interface
+        integer(c_int) function fo_c_generation_validate_root(root) &
+                bind(C, name='fo_c_generation_validate_root')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: root(*)
+        end function fo_c_generation_validate_root
+
         integer(c_int) function fo_c_generation_freeze_tree(root) &
                 bind(C, name='fo_c_generation_freeze_tree')
             import :: c_char, c_int
@@ -83,6 +89,12 @@ module fo_gremlin_generation
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
         end function fo_c_generation_remove_stage
+
+        integer(c_int) function fo_c_generation_remove_empty_stage(path) &
+                bind(C, name='fo_c_generation_remove_empty_stage')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+        end function fo_c_generation_remove_empty_stage
     end interface
 
 contains
@@ -116,6 +128,10 @@ contains
         if (index(project_root, achar(0)) /= 0 .or. &
             index(cas_root, achar(0)) /= 0) then
             message = 'generation paths cannot contain a null byte'
+            return
+        end if
+        if (fo_c_generation_validate_root(trim(project_root)//c_null_char) /= 0) then
+            message = 'generation project root must be a directory, not a symlink'
             return
         end if
         if (.not. identity_field_fits(context%toolchain) .or. &
@@ -359,6 +375,12 @@ contains
             inquire (file=trim(cache), exist=exists)
             if (crc == 0 .and. .not. exists) call release_failed_manifest( &
                 store_root, generation%identity, root_owner, message)
+            call fo_c_generation_unlock(int(fd, c_int))
+            return
+        end if
+        crc = fo_c_generation_remove_empty_stage(trim(capture_dir)//c_null_char)
+        if (crc /= 0) then
+            message = 'cannot remove published manifest generation staging directory'
             call fo_c_generation_unlock(int(fd, c_int))
             return
         end if

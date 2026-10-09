@@ -65,6 +65,10 @@ static int validate_tree_root(const char *root) {
     return 0;
 }
 
+int fo_c_generation_validate_root(const char *root) {
+    return validate_tree_root(root) == 0 ? 0 : (errno == 0 ? 1 : errno);
+}
+
 static int make_dirs(const char *path) {
 #if defined(_WIN32) && !defined(__CYGWIN__)
     return fx_win_mkdirs(path, 0);
@@ -849,4 +853,8 @@ static int remove_frozen(const char *path) {
 
 int fo_c_generation_remove_stage(const char *path) {
     return remove_frozen(path) == 0 ? 0 : (errno == 0 ? 1 : errno);
+}
+
+int fo_c_generation_remove_empty_stage(const char *path) {
+    return rmdir(path) == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
