@@ -4,12 +4,10 @@ module fo_gremlin_context
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_CMAKE
     use fo_cmake_generation, only: cmake_capture_inventory, cmake_capture_cleanup
-    use fo_fpm_config, only: DEP_PATH, DEP_REGISTRY, fpm_config_t, fpm_config_parse, &
-        dep_kind, fpm_dep_t, absolute_dependency_destination
+    use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_dep_t, &
+        dep_kind, DEP_PATH
     use fo_dep_update, only: dep_acquire_sources
-    use fo_dep_resolve, only: normalize_path, resolve_dev_dep_srcs, &
-        resolved_src_t, resolve_dep_srcs, MAX_RESOLVED
-    use fo_gremlin_generation, only: generation_context_t, generation_input_t, &
+    use fo_gremlin_generation, only: generation_context_t, &
         generation_t, generation_capture, generation_load_inventory
     use fo_driver, only: driver_pin_t
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
@@ -328,9 +326,6 @@ contains
 
         type(backend_t) :: backend
         type(fpm_config_t), allocatable :: config
-        type(generation_input_t), allocatable :: inputs(:)
-        type(resolved_src_t) :: resolved_dev_deps(MAX_RESOLVED)
-        type(resolved_src_t) :: resolved_deps(MAX_RESOLVED)
         character(len=PATH_LEN) :: compiler_path, command_path
         character(len=:), allocatable :: packed
         character(len=PATH_LEN) :: log_file, output_line
@@ -338,11 +333,9 @@ contains
         character(len=131072) :: git_status
         character(len=256) :: fingerprint
         integer(c_long_long) :: tree_sum, tree_mixed, tree_count
-        type(generation_input_t), allocatable :: captured_inputs(:)
-        integer :: i, n_inputs, n_args, n_resolved_dev, resolve_status
-        integer :: n_resolved, n_unresolved
+        integer :: i, n_args
         integer :: exitcode, git_exit
-        logical :: found, git_found, fingerprint_ok, exists
+        logical :: found, git_found, fingerprint_ok
 
         ierr = 0
         message = ''
@@ -353,8 +346,6 @@ contains
         context%patch_digest = ''
         backend = detect_backend(project_dir)
         if (backend%kind == BACKEND_CMAKE) then
-            allocate(inputs(0))
-            context%inputs = inputs
             call append_environment_value(context%environment, 'FO_BACKEND')
             call append_environment_value(context%environment, 'FO_CMAKE_NATIVE')
             call append_environment_value(context%environment, 'FO_CMAKE_BUILD_DIR')
@@ -372,75 +363,6 @@ contains
                 message = 'cannot parse fpm.toml for generation inputs'
                 return
             end if
-            call resolve_dev_dep_srcs(project_dir, resolved_dev_deps, &
-                n_resolved_dev, resolve_status)
-            if (resolve_status /= 0) n_resolved_dev = 0
-            call resolve_dep_srcs(project_dir, resolved_deps, n_resolved, &
-                n_unresolved, ierr)
-            if (ierr /= 0) return
-            n_inputs = count(resolved_deps(:n_resolved)%kind == DEP_REGISTRY)
-            do i = 1, config%n_deps
-                if (dep_kind(config%deps(i)) == DEP_PATH) n_inputs = n_inputs + 1
-            end do
-            do i = 1, config%n_dev_deps
-                if (dep_kind(config%dev_deps(i)) == DEP_PATH) n_inputs = n_inputs + 1
-            end do
-            do i = 1, n_resolved_dev
-                if (dev_dependency_is_path(config, &
-                        trim(resolved_dev_deps(i)%name))) cycle
-                inquire(file=trim(resolved_dev_deps(i)%dir)//'/fpm.toml', exist=exists)
-                if (exists) n_inputs = n_inputs + 1
-            end do
-            allocate (inputs(n_inputs))
-            n_inputs = 0
-            do i = 1, n_resolved
-                if (resolved_deps(i)%kind /= DEP_REGISTRY) cycle
-                n_inputs = n_inputs + 1
-                inputs(n_inputs)%label = 'dependency:'//trim(resolved_deps(i)%name)
-                inputs(n_inputs)%source_root = trim(resolved_deps(i)%dir)
-                context%environment = context%environment//'registry:'// &
-                    trim(resolved_deps(i)%name)//'='//trim(resolved_deps(i)%dir)//';'
-                inputs(n_inputs)%destination = 'build/dependencies/'// &
-                    trim(resolved_deps(i)%name)
-            end do
-            do i = 1, config%n_deps
-                if (dep_kind(config%deps(i)) /= DEP_PATH) cycle
-                call append_path_dependency(project_dir, config%deps(i)%path, &
-                    config%deps(i)%name, inputs, n_inputs, ierr, message)
-                if (ierr /= 0) return
-            end do
-            do i = 1, config%n_dev_deps
-                if (dep_kind(config%dev_deps(i)) /= DEP_PATH) cycle
-                call append_path_dependency(project_dir, config%dev_deps(i)%path, &
-                    config%dev_deps(i)%name, inputs, n_inputs, ierr, message)
-                if (ierr /= 0) return
-            end do
-            do i = 1, n_resolved_dev
-                if (dev_dependency_is_path(config, &
-                        trim(resolved_dev_deps(i)%name))) cycle
-                inquire(file=trim(resolved_dev_deps(i)%dir)//'/fpm.toml', exist=exists)
-                if (.not. exists) cycle
-                if (n_inputs >= size(inputs)) then
-                    ierr = 1
-                    message = 'too many resolved development dependencies to freeze'
-                    return
-                end if
-                n_inputs = n_inputs + 1
-                inputs(n_inputs)%label = 'dependency:'// &
-                    trim(resolved_dev_deps(i)%name)
-                inputs(n_inputs)%source_root = trim(resolved_dev_deps(i)%dir)
-                if (resolved_dev_deps(i)%kind == DEP_REGISTRY) &
-                    context%environment = context%environment//'registry-dev:'// &
-                    trim(resolved_dev_deps(i)%name)//'='//trim(resolved_dev_deps(i)%dir)//';'
-                inputs(n_inputs)%destination = 'build/dependencies/'// &
-                    trim(resolved_dev_deps(i)%name)
-            end do
-            if (n_inputs < size(inputs)) then
-                allocate (captured_inputs(n_inputs))
-                if (n_inputs > 0) captured_inputs = inputs(:n_inputs)
-                call move_alloc(captured_inputs, inputs)
-            end if
-            context%inputs = inputs
             do i = 1, config%n_flags
                 context%flags = context%flags//' '//trim(config%flags(i))
             end do
@@ -533,19 +455,6 @@ contains
         call delete_tmpfile(log_file)
     end subroutine capture_context
 
-    logical function dev_dependency_is_path(config, dependency_name)
-        type(fpm_config_t), intent(in) :: config
-        character(len=*), intent(in) :: dependency_name
-        integer :: i
-
-        dev_dependency_is_path = .false.
-        do i = 1, config%n_dev_deps
-            if (trim(config%dev_deps(i)%name) /= trim(dependency_name)) cycle
-            dev_dependency_is_path = dep_kind(config%dev_deps(i)) == DEP_PATH
-            return
-        end do
-    end function dev_dependency_is_path
-
     subroutine append_environment_value(environment, name)
         character(len=:), allocatable, intent(inout) :: environment
         character(len=*), intent(in) :: name
@@ -558,93 +467,6 @@ contains
         if (len_trim(environment) > 0) environment = trim(environment)//';'
         environment = trim(environment)//trim(name)//'='//value(:min(length, len(value)))
     end subroutine append_environment_value
-
-    subroutine append_path_dependency(project_dir, dep_path, dep_name, inputs, &
-            n_inputs, ierr, message)
-        character(len=*), intent(in) :: project_dir, dep_path, dep_name
-        type(generation_input_t), intent(inout) :: inputs(:)
-        integer, intent(inout) :: n_inputs
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-
-        integer :: i
-        logical :: exists
-
-        ierr = 0
-        message = ''
-        if (len_trim(dep_path) == 0) return
-        if (fs_path_is_absolute(dep_path)) then
-            if (n_inputs >= size(inputs)) then
-                ierr = 1
-                message = 'too many path dependencies to freeze'
-                return
-            end if
-            n_inputs = n_inputs + 1
-            inputs(n_inputs)%label = 'dependency:'//trim(dep_name)
-            inputs(n_inputs)%source_root = trim(dep_path)
-            inputs(n_inputs)%destination = absolute_dependency_destination(dep_path)
-            return
-        end if
-        ! The project-tree manifest already freezes internal path dependencies.
-        ! Keep them out of the separate-root list so capture never overlays a
-        ! second copy onto their existing project-tree destination.
-        if (path_dependency_is_internal(project_dir, dep_path)) then
-            inquire (file=trim(project_dir)//'/'//trim(dep_path), exist=exists)
-            if (exists) return
-        end if
-        do i = 1, n_inputs
-            if (trim(inputs(i)%destination) == trim(dep_path)) return
-        end do
-        if (n_inputs >= size(inputs)) then
-            ierr = 1
-            message = 'too many path dependencies to freeze'
-            return
-        end if
-        n_inputs = n_inputs + 1
-        inputs(n_inputs)%label = 'dependency:'//trim(dep_name)
-        inputs(n_inputs)%source_root = trim(project_dir)//'/'//trim(dep_path)
-        inputs(n_inputs)%destination = trim(dep_path)
-    end subroutine append_path_dependency
-
-    logical function path_dependency_is_internal(project_dir, dep_path)
-        character(len=*), intent(in) :: project_dir, dep_path
-
-        character(len=PATH_LEN) :: normalized_project, normalized_dependency
-        integer :: project_length, dependency_length
-
-        path_dependency_is_internal = .false.
-        if (len_trim(project_dir) + len_trim(dep_path) + 1 >= PATH_LEN) return
-        call normalize_path(project_dir, normalized_project)
-        call normalize_path(trim(project_dir)//'/'//trim(dep_path), &
-            normalized_dependency)
-        project_length = len_trim(normalized_project)
-        dependency_length = len_trim(normalized_dependency)
-        if (project_length == 0 .or. dependency_length == 0) return
-
-        if (trim(normalized_project) == '.') then
-            if (fs_path_is_absolute(normalized_dependency)) return
-            if (trim(normalized_dependency) == '..') return
-            if (dependency_length >= 3) then
-                if (normalized_dependency(:3) == '../') return
-            end if
-            path_dependency_is_internal = .true.
-            return
-        end if
-
-        if (normalized_project(:project_length) == '/') then
-            path_dependency_is_internal = normalized_dependency(1:1) == '/'
-            return
-        end if
-        if (dependency_length < project_length) return
-        if (normalized_dependency(:project_length) /= &
-            normalized_project(:project_length)) return
-        if (dependency_length == project_length) then
-            path_dependency_is_internal = .true.
-            return
-        end if
-        path_dependency_is_internal = &
-            normalized_dependency(project_length + 1:project_length + 1) == '/'
-    end function path_dependency_is_internal
 
     subroutine context_cancel_owned_process(pid, ierr)
         integer, intent(in) :: pid

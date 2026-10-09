@@ -6,9 +6,10 @@ program test_gremlin_state
     use fo_gremlin_state
     use fo_gremlin_generation, only: generation_context_t, generation_t, &
         generation_capture
+    use fo_input_inventory, only: input_declaration_t, input_inventory_discover
     use fo_process, only: process_getpid, process_set_async_scope, argv_push, &
         process_start_argv_logged, process_poll_pid
-    use fo_fs, only: fs_sleep_ms, fs_remove_tree, fs_make_dir
+    use fo_fs, only: fs_sleep_ms, fs_remove_tree, fs_make_dir, fs_write_text
     implicit none
 
     interface
@@ -648,6 +649,7 @@ contains
         integer(c_int) :: list_rc
         type(generation_context_t) :: context
         type(generation_t) :: generation
+        type(input_declaration_t) :: declarations(0)
         type(gremlin_lease_t) :: lease
         logical :: exists
 
@@ -661,6 +663,11 @@ contains
         write (u, '(a)') 'program immutable_generation_fixture'
         write (u, '(a)') 'end program immutable_generation_fixture'
         close (u)
+        call fs_write_text(trim(project)//'/fpm.toml', 'name="state-generation"')
+        call input_inventory_discover(trim(project), declarations, &
+            context%input_inventory, ierr, message)
+        call assert(ierr == 0, 'state fixture discovers declared project inputs')
+        if (ierr /= 0) return
         context%toolchain = 'state integration fixture'
         context%flags = '-O0'
         context%environment = 'test'

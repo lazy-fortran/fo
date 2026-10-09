@@ -6,11 +6,6 @@ program test_gremlin_copy_tree_modes
     implicit none
 
     interface
-        integer(c_int) function copy_tree(root, destination, manifest) &
-                bind(C, name='fo_c_generation_copy_tree')
-            import :: c_char, c_int
-            character(kind=c_char), intent(in) :: root(*), destination(*), manifest(*)
-        end function copy_tree
         integer(c_int) function copy_tree_ephemeral(root, destination, manifest) &
                 bind(C, name='fo_c_generation_copy_tree_ephemeral')
             import :: c_char, c_int
@@ -37,8 +32,7 @@ program test_gremlin_copy_tree_modes
         end function c_access
     end interface
 
-    character(len=512) :: root, durable, ephemeral, text, pid_text
-    character(len=2048) :: durable_manifest, ephemeral_manifest
+    character(len=512) :: root, ephemeral, text, pid_text
     integer(c_int) :: rc
     integer :: pid
 
@@ -57,21 +51,7 @@ program test_gremlin_copy_tree_modes
         (trim(root)//'/source/allowed-link')//c_null_char)
     call check(rc == 0, 'prepare allowed relative symlink')
 
-    durable = trim(root)//'/durable'
     rc = int(copy_sync_count(1_c_int), c_int)
-    rc = copy_tree((trim(root)//'/source')//c_null_char, trim(durable)//c_null_char, &
-        (trim(root)//'/durable.manifest')//c_null_char)
-    call check(rc == 0, 'durable tree copy succeeds')
-    call check(copy_sync_count(0_c_int) == 2_c_long, &
-        'durable tree copy synchronizes every regular file')
-    rc = int(copy_sync_count(1_c_int), c_int)
-    call read_text_file(trim(durable)//'/nested/data', text)
-    call check(index(text, 'nested bytes') > 0, 'durable copy preserves nested bytes')
-    call check(c_access((trim(durable)//'/executable')//c_null_char, 1_c_int) == 0, &
-        'durable copy preserves executable mode')
-    call read_text_file(trim(durable)//'/allowed-link', text)
-    call check(index(text, 'payload') > 0, 'durable copy preserves allowed symlink')
-
     ephemeral = trim(root)//'/ephemeral'
     rc = copy_tree_ephemeral((trim(root)//'/source')//c_null_char, &
         trim(ephemeral)//c_null_char, (trim(root)//'/ephemeral.manifest')//c_null_char)
@@ -84,10 +64,6 @@ program test_gremlin_copy_tree_modes
         'ephemeral copy preserves executable mode')
     call read_text_file(trim(ephemeral)//'/allowed-link', text)
     call check(index(text, 'payload') > 0, 'ephemeral copy preserves allowed symlink')
-    call read_text_file(trim(root)//'/durable.manifest', durable_manifest)
-    call read_text_file(trim(root)//'/ephemeral.manifest', ephemeral_manifest)
-    call check(durable_manifest == ephemeral_manifest, &
-        'durable and ephemeral copies report the same tree manifest')
     call fs_remove_tree(trim(root))
 
 contains

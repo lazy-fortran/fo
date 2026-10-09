@@ -7,6 +7,8 @@ program test_gremlin_generation
     use fo_fs, only: fs_make_dir, fs_rename, fs_write_text
     use fo_gremlin_generation, only: generation_context_t, generation_t, &
         generation_capture, generation_driver_identity
+    use fo_input_inventory, only: input_declaration_t, &
+        input_inventory_discover, input_inventory_declarations_from_config
     use fo_process, only: process_getpid
     implicit none
 
@@ -153,12 +155,13 @@ program test_gremlin_generation
     context%driver_path = '/state/driver-pins/test'
     context%driver_digest = repeat('a', HASH_LEN)
     context%driver_size = 1234_c_int64_t
-    allocate (context%inputs(1))
-    context%inputs(1)%label = 'path-dependency:../fortfront'
-    context%inputs(1)%source_root = trim(dependency)
-    context%inputs(1)%destination = '../fortfront'
+    call fs_write_text(trim(project)//'/fpm.toml', &
+        'name="generation-fixture"'//new_line('a')// &
+        '[dependencies]'//new_line('a')// &
+        'fortfront={path="../fortfront"}')
+    call fs_write_text(trim(dependency)//'/fpm.toml', 'name="fortfront"')
 
-    call generation_capture(trim(project), trim(cache), context, first, &
+    call capture_generation(trim(project), trim(cache), context, first, &
         race_ierr, message)
     call check(race_ierr == 0, &
         'capture publishes an immutable generation with an in-tree file link')
@@ -174,7 +177,7 @@ program test_gremlin_generation
         recorded_driver_size == context%driver_size, &
         'immutable generation metadata records the pinned driver identity')
     context%driver_path = '/another/owned/path'
-    call generation_capture(trim(project), trim(cache), context, reused, race_ierr, &
+    call capture_generation(trim(project), trim(cache), context, reused, race_ierr, &
         message)
     call check(race_ierr == 0 .and. reused%identity == first%identity, &
         'pin pathname changes preserve execution identity for identical bytes')
@@ -184,7 +187,7 @@ program test_gremlin_generation
         trim(project_link)//c_null_char)
     call check(symlink_rc == 0, 'symlink fixture is created')
     if (symlink_rc == 0) then
-        call generation_capture(trim(project_link), trim(cache), context, reused, &
+        call capture_generation(trim(project_link), trim(cache), context, reused, &
             race_ierr, message)
         call check(race_ierr /= 0, 'a symlink input root is rejected')
     end if
@@ -244,7 +247,7 @@ program test_gremlin_generation
             'writable'), 'excluded build directory remains writable')
     end if
 
-    call generation_capture(trim(project), trim(cache), context, reused, &
+    call capture_generation(trim(project), trim(cache), context, reused, &
         race_ierr, message)
     call check(race_ierr == 0 .and. reused%identity == first%identity .and. &
         trim(reused%root) == trim(first%root), &
@@ -258,7 +261,7 @@ program test_gremlin_generation
     symlink_rc = c_symlink('alternate.f90'//c_null_char, &
         trim(source_link)//c_null_char)
     call check(symlink_rc == 0, 'same-content alternate link is created')
-    call generation_capture(trim(project), trim(cache), context, reused, &
+    call capture_generation(trim(project), trim(cache), context, reused, &
         race_ierr, message)
     call check(race_ierr == 0 .and. reused%identity /= first%identity, &
         'changing raw link text changes generation identity for equal content')
@@ -272,7 +275,7 @@ program test_gremlin_generation
     call check(symlink_rc == 0, 'original relative link is restored')
 
     call fs_write_text(trim(project)//'/src/main.f90', 'program version_two')
-    call generation_capture(trim(project), trim(cache), context, source_changed, &
+    call capture_generation(trim(project), trim(cache), context, source_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. source_changed%identity /= first%identity, &
         'source changes invalidate generation identity')
@@ -286,24 +289,24 @@ program test_gremlin_generation
         'new generation captures the current relative-link target')
 
     external_target = trim(root)//'/outside-input.txt'
-    escaping_link = trim(project)//'/escaping-alias'
+    escaping_link = trim(project)//'/src/escaping-alias'
     call fs_write_text(trim(external_target), 'external')
-    escaping_rc = c_symlink('../outside-input.txt'//c_null_char, &
+    escaping_rc = c_symlink('../../outside-input.txt'//c_null_char, &
         trim(escaping_link)//c_null_char)
     call check(escaping_rc == 0, 'escaping relative link fixture is created')
-    call generation_capture(trim(project), trim(cache), context, reused, &
+    call capture_generation(trim(project), trim(cache), context, reused, &
         race_ierr, message)
     call check(race_ierr /= 0, &
         'relative file link resolving outside the input root is rejected')
     remove_rc = c_unlink(trim(escaping_link)//c_null_char)
     call check(remove_rc == 0, 'escaping link fixture is removed')
 
-    excluded_link = trim(project)//'/build-alias'
-    escaping_rc = c_symlink('build/old.o'//c_null_char, &
+    excluded_link = trim(project)//'/src/build-alias'
+    escaping_rc = c_symlink('../build/old.o'//c_null_char, &
         trim(excluded_link)//c_null_char)
     call check(escaping_rc == 0, 'excluded-output link fixture is created')
     generation_count = count_generation_roots(trim(cache))
-    call generation_capture(trim(project), trim(cache), context, reused, &
+    call capture_generation(trim(project), trim(cache), context, reused, &
         race_ierr, message)
     call check(race_ierr /= 0, &
         'a link to an excluded root build output is rejected')
@@ -317,14 +320,14 @@ program test_gremlin_generation
     call check_chained_file_aliases()
 
     call fs_write_text(trim(project)//'/include/config.inc', 'include_two')
-    call generation_capture(trim(project), trim(cache), context, include_changed, &
+    call capture_generation(trim(project), trim(cache), context, include_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
         include_changed%identity /= source_changed%identity, &
         'include changes invalidate generation identity')
 
     call fs_write_text(trim(dependency)//'/src/runtime.f90', 'runtime_two')
-    call generation_capture(trim(project), trim(cache), context, &
+    call capture_generation(trim(project), trim(cache), context, &
         dependency_changed, race_ierr, message)
     call check(race_ierr == 0 .and. &
         dependency_changed%identity /= include_changed%identity, &
@@ -332,7 +335,7 @@ program test_gremlin_generation
 
     call fs_write_text(trim(project)//'/src/build/fo_gremlin_provider.f90', &
         'module generation_provider_v2')
-    call generation_capture(trim(project), trim(cache), context, &
+    call capture_generation(trim(project), trim(cache), context, &
         build_source_changed, race_ierr, message)
     call check(race_ierr == 0 .and. &
         build_source_changed%identity /= dependency_changed%identity, &
@@ -349,7 +352,7 @@ program test_gremlin_generation
     source_file = trim(project)//'/src/main.f90'
     chmod_rc = c_chmod(trim(source_file)//c_null_char, MODE_EXEC)
     call check(chmod_rc == 0, 'source executable mode is set')
-    call generation_capture(trim(project), trim(cache), context, mode_changed, &
+    call capture_generation(trim(project), trim(cache), context, mode_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
         mode_changed%identity /= build_source_changed%identity, &
@@ -362,56 +365,50 @@ program test_gremlin_generation
         'older snapshot preserves its original non-executable mode')
     chmod_rc = c_chmod(trim(source_file)//c_null_char, MODE_NONEXEC)
     call check(chmod_rc == 0, 'source non-executable mode is restored')
-    call generation_capture(trim(project), trim(cache), context, mode_restored, &
+    call capture_generation(trim(project), trim(cache), context, mode_restored, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
         mode_restored%identity == build_source_changed%identity, &
         'restored file mode reuses its unchanged generation')
 
-    context%inputs(1)%source_root = ''
-    call generation_capture(trim(project), trim(cache), context, metadata_changed, &
-        race_ierr, message)
-    call check(race_ierr /= 0, 'empty path dependency roots are rejected')
-    context%inputs(1)%source_root = trim(dependency)
-
     context%toolchain = 'gfortran 15 test'
-    call generation_capture(trim(project), trim(cache), context, metadata_changed, &
+    call capture_generation(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
         metadata_changed%identity /= build_source_changed%identity, &
         'toolchain changes invalidate generation identity')
     context%toolchain = 'gfortran 14 test'
     context%flags = '-O2 -g'
-    call generation_capture(trim(project), trim(cache), context, metadata_changed, &
+    call capture_generation(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
         metadata_changed%identity /= build_source_changed%identity, &
         'compiler flag changes invalidate generation identity')
     context%flags = '-O0 -g'
     context%environment = 'OMP_NUM_THREADS=2'
-    call generation_capture(trim(project), trim(cache), context, metadata_changed, &
+    call capture_generation(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
         metadata_changed%identity /= build_source_changed%identity, &
         'environment changes invalidate generation identity')
     context%environment = 'OMP_NUM_THREADS=1'
     context%base_commit = 'different-base'
-    call generation_capture(trim(project), trim(cache), context, metadata_changed, &
+    call capture_generation(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
-        metadata_changed%identity /= build_source_changed%identity, &
-        'base commit changes invalidate generation identity')
+        metadata_changed%identity == build_source_changed%identity, &
+        'base commit provenance preserves execution identity')
     context%base_commit = 'base-commit'
     context%patch_digest = 'different-patch-digest'
-    call generation_capture(trim(project), trim(cache), context, metadata_changed, &
+    call capture_generation(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
-        metadata_changed%identity /= build_source_changed%identity, &
-        'patch digest changes invalidate generation identity')
+        metadata_changed%identity == build_source_changed%identity, &
+        'patch provenance preserves execution identity')
 
     context%patch_digest = 'uncommitted-patch-digest'
     context%driver_digest = repeat('b', HASH_LEN)
-    call generation_capture(trim(project), trim(cache), context, metadata_changed, &
+    call capture_generation(trim(project), trim(cache), context, metadata_changed, &
         race_ierr, message)
     call check(race_ierr == 0 .and. &
         metadata_changed%identity /= build_source_changed%identity, &
@@ -420,8 +417,9 @@ program test_gremlin_generation
 
     race_project = trim(root)//'/race-project'
     call fs_make_dir(trim(race_project)//'/src')
+    call fs_write_text(trim(race_project)//'/fpm.toml', 'name="race-fixture"')
     call write_version_file(trim(race_project)//'/src/value.dat', 'A', &
-        32 * 1024 * 1024)
+        64 * 1024)
     race_context%toolchain = 'gfortran race fixture'
     race_context%flags = '-O0'
     race_context%base_commit = 'race-base'
@@ -432,12 +430,12 @@ program test_gremlin_generation
         race_context, race_generation, race_ierr, message, &
         atomic_edit_observed)
     call check(atomic_edit_observed, &
-        'atomic source edit followed the completed first staged copy')
+        'source edit followed declared input discovery')
     call check(file_is_byte_value(trim(race_project)//'/src/value.dat', 'H', &
-        32 * 1024 * 1024), &
-        'concurrent editor completed all atomic source revisions')
+        64 * 1024), &
+        'editor replaced the discovered source bytes')
     call check(race_ierr /= 0, &
-        'capture rejects input that changes during concurrent atomic edits')
+        'capture rejects bytes changed after declared input discovery')
     inquire (file=trim(race_generation%root), exist=exists)
     call check(.not. exists, &
         'unstable input capture does not publish a generation')
@@ -446,6 +444,7 @@ program test_gremlin_generation
     outside_source = trim(root)//'/outside-source'
     link_race_cache = trim(root)//'/link-race-cache'
     call fs_make_dir(trim(link_race_project)//'/src')
+    call fs_write_text(trim(link_race_project)//'/fpm.toml', 'name="link-race"')
     call fs_make_dir(trim(outside_source))
     call write_version_file(trim(link_race_project)//'/src/value.dat', 'I')
     call write_version_file(trim(outside_source)//'/value.dat', 'X')
@@ -511,6 +510,28 @@ program test_gremlin_generation
 
 contains
 
+    subroutine capture_generation(project_path, cache_path, supplied_context, &
+            generation, ierr, error_message)
+        character(len=*), intent(in) :: project_path, cache_path
+        type(generation_context_t), intent(in) :: supplied_context
+        type(generation_t), intent(out) :: generation
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: error_message
+        type(generation_context_t) :: declared_context
+        type(input_declaration_t), allocatable :: declarations(:)
+
+        generation = generation_t()
+        declared_context = supplied_context
+        call input_inventory_declarations_from_config(project_path, declarations, &
+            ierr, error_message)
+        if (ierr /= 0) return
+        call input_inventory_discover(project_path, declarations, &
+            declared_context%input_inventory, ierr, error_message)
+        if (ierr /= 0) return
+        call generation_capture(project_path, cache_path, declared_context, &
+            generation, ierr, error_message)
+    end subroutine capture_generation
+
     subroutine check_chained_file_aliases()
         character(len=512) :: fixture, local_cache, link, middle
         character(len=64), parameter :: invalid_targets(4) = &
@@ -525,7 +546,9 @@ contains
         local_cache = trim(root)//'/chain-cache'
         call fs_make_dir(trim(fixture)//'/lib')
         call fs_make_dir(trim(fixture)//'/build')
-        call fs_write_text(trim(fixture)//'/fpm.toml', 'name="chain_fixture"')
+        call fs_write_text(trim(fixture)//'/fpm.toml', &
+            'name="chain_fixture"'//new_line('a')// &
+            '[library]'//new_line('a')//'source-dir="lib"')
         call fs_write_text(trim(fixture)//'/lib/libanswer.1.0.dylib', 'answer=42')
         call fs_write_text(trim(fixture)//'/build/ignored.o', 'excluded')
         middle = trim(fixture)//'/lib/libanswer.1.dylib'
@@ -534,7 +557,7 @@ contains
         call check(rc == 0, 'prepare versioned library alias')
         rc = c_symlink('libanswer.1.dylib'//c_null_char, trim(link)//c_null_char)
         call check(rc == 0, 'prepare chained library alias')
-        call generation_capture(trim(fixture), trim(local_cache), context, &
+        call capture_generation(trim(fixture), trim(local_cache), context, &
             captured, code, diagnostic)
         call check(code == 0, 'valid two-hop in-root library chain is captured')
         if (code == 0) then
@@ -555,7 +578,7 @@ contains
             rc = c_symlink(trim(invalid_targets(i))//c_null_char, &
                 trim(middle)//c_null_char)
             call check(rc == 0, 'prepare invalid middle alias')
-            call generation_capture(trim(fixture), trim(local_cache), context, &
+            call capture_generation(trim(fixture), trim(local_cache), context, &
                 captured, code, diagnostic)
             call check(code /= 0, &
                 'reject chained cycle/escape/dangling/excluded target '//int_text(i))
@@ -577,7 +600,7 @@ contains
         call check(rc == 5, 'directory inventory propagates readdir EIO')
         before = count_generation_roots(trim(cache))
         call arm_directory_oracle(1_c_int)
-        call generation_capture(trim(project), trim(cache), context, &
+        call capture_generation(trim(project), trim(cache), context, &
             race_generation, race_ierr, message)
         call check(directory_oracle_state(1_c_int) == 1 .and. race_ierr /= 0, &
             'capture rejects directory I/O failure after partial enumeration')
@@ -598,6 +621,9 @@ contains
         space_cache = trim(root)//'/space-cache'
         manifest = trim(root)//'/space.list'
         call fs_make_dir(trim(space_project)//'/nested')
+        call fs_write_text(trim(space_project)//'/fpm.toml', &
+            'name="space_fixture"'//new_line('a')// &
+            '[library]'//new_line('a')//'source-dir="."')
         call fs_write_text(trim(space_project)//'/target', 'same bytes')
         call fs_write_text(trim(space_project)//'/extra', 'same bytes')
         call fs_write_text(trim(space_project)//'/nested/child', 'same bytes')
@@ -607,7 +633,7 @@ contains
         space_context%toolchain = 'space-path-oracle'
         space_context%driver_digest = repeat('a', HASH_LEN)
         space_context%driver_size = 1234_c_int64_t
-        call generation_capture(trim(space_project), trim(space_cache), &
+        call capture_generation(trim(space_project), trim(space_cache), &
             space_context, baseline, rc, message)
         call check(rc == 0, 'ordinary path spellings publish a baseline')
         names = [character(len=32) :: 'alias', 'extra', 'nested']
@@ -621,7 +647,7 @@ contains
             call check(list_rc /= 0, &
                 'inventory rejects trailing-space '//trim(names(i)))
             count_before = count_generation_roots(trim(space_cache))
-            call generation_capture(trim(space_project), trim(space_cache), &
+            call capture_generation(trim(space_project), trim(space_cache), &
                 space_context, rejected, rc, message)
             call check(rc /= 0, &
                 'capture rejects trailing-space '//trim(names(i)))
@@ -654,60 +680,20 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: error_message
         logical, intent(out) :: edit_observed
-        character(len=512) :: data_path
-        integer(c_int) :: ignored_wait
+        type(generation_context_t) :: declared_context
+        type(input_declaration_t), allocatable :: declarations(:)
 
-        data_path = trim(project_path)//'/src/value.dat'
-        !$omp parallel sections num_threads(2) shared(generation, ierr, error_message)
-        !$omp section
-        call generation_capture(project_path, cache_path, capture_context, &
+        declared_context = capture_context
+        allocate(declarations(0))
+        call input_inventory_discover(project_path, declarations, &
+            declared_context%input_inventory, ierr, error_message)
+        edit_observed = ierr == 0
+        if (.not. edit_observed) return
+        call write_version_file(trim(project_path)//'/src/value.dat', 'H', &
+            64 * 1024)
+        call generation_capture(project_path, cache_path, declared_context, &
             generation, ierr, error_message)
-        !$omp section
-        edit_observed = wait_for_completed_stage_copy(cache_path, &
-            'src/value.dat', 'A', 32 * 1024 * 1024)
-        if (edit_observed) call write_version_file(data_path, 'H', &
-            32 * 1024 * 1024)
-        !$omp end parallel sections
     end subroutine run_capture_during_atomic_edits
-
-    logical function wait_for_completed_stage_copy(cache_path, relative_file, &
-            expected, n_bytes)
-        character(len=*), intent(in) :: cache_path, relative_file, expected
-        integer, intent(in) :: n_bytes
-        character(len=512) :: manifest, record, staged_file
-        integer :: attempt, unit, ios
-        integer(c_int) :: rc, ignored_wait
-        wait_for_completed_stage_copy = .false.
-        manifest = trim(root)//'/atomic-stage.list'
-        do attempt = 1, 5000
-            rc = fo_c_generation_list_tree(trim(cache_path)// &
-                '/gremlin/generations-v2/.capture'//c_null_char, &
-                trim(manifest)//c_null_char)
-            if (rc == 0) then
-                open (newunit=unit, file=trim(manifest), status='old', &
-                    action='read', iostat=ios)
-                if (ios == 0) then
-                    do
-                        read (unit, '(a)', iostat=ios) record
-                        if (ios /= 0) exit
-                        if (index(trim(record), &
-                            '/stage/bundle/project/'//trim(relative_file)) == 0) &
-                            cycle
-                        staged_file = trim(cache_path)// &
-                            '/gremlin/generations-v2/.capture/'//trim(record(7:))
-                        if (file_is_byte_value(trim(staged_file), expected, &
-                            n_bytes)) then
-                            wait_for_completed_stage_copy = .true.
-                            exit
-                        end if
-                    end do
-                    close (unit, status='delete')
-                end if
-            end if
-            if (wait_for_completed_stage_copy) return
-            ignored_wait = c_usleep(1000_c_int)
-        end do
-    end function wait_for_completed_stage_copy
 
     subroutine run_capture_during_parent_swaps(project_path, cache_path, &
             capture_context, generation, ierr, error_message, &
@@ -728,7 +714,7 @@ contains
         !$omp parallel sections num_threads(2) &
         !$omp& shared(generation, ierr, error_message, swap_count)
         !$omp section
-        call generation_capture(project_path, cache_path, capture_context, &
+        call capture_generation(project_path, cache_path, capture_context, &
             generation, ierr, error_message)
         !$omp section
         ! Pause at EOF of the pinned src descriptor, after it was opened and
@@ -769,10 +755,10 @@ contains
         !$omp& shared(first_generation, first_ierr, first_message, &
         !$omp& second_generation, second_ierr, second_message)
         !$omp section
-        call generation_capture(project_path, cache_path, capture_context, &
+        call capture_generation(project_path, cache_path, capture_context, &
             first_generation, first_ierr, first_message)
         !$omp section
-        call generation_capture(project_path, cache_path, capture_context, &
+        call capture_generation(project_path, cache_path, capture_context, &
             second_generation, second_ierr, second_message)
         !$omp end parallel sections
     end subroutine run_parallel_captures

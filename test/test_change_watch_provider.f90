@@ -226,7 +226,7 @@ contains
         call fs_write_text(authored, 'known17')
         call fs_write_text(provider, 'known17')
         call fs_write_text(metadata//'/build-directory.txt', 'out/native')
-        allocate(context%inputs(0), context%input_inventory%roots(2))
+        allocate(context%input_inventory%roots(2))
         context%input_inventory%root_count = 2
         context%input_inventory%roots(1)%canonical_alias = 'cmake-context'
         context%input_inventory%roots(1)%physical_path = metadata

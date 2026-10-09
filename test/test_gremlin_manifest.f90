@@ -169,6 +169,11 @@ program test_gremlin_manifest
     context%driver_path = trim(driver)
     context%driver_digest = driver_digest
     context%driver_size = driver_size
+    call generation_capture(trim(project), trim(cache)//'-undeclared', &
+        context, conflict, ierr, message)
+    call require(ierr /= 0, 'capture rejects a missing declared input inventory')
+    call require(.not. file_exists(trim(cache)//'-undeclared/gremlin'), &
+        'missing inventory publishes no generation or staging directory')
     context%input_inventory = inventory
     status = int(copy_sync_count(1_c_int), c_int)
     call generation_capture(trim(project), trim(cache), &

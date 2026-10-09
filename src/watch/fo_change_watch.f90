@@ -215,15 +215,6 @@ contains
                 end do
             end do
         end if
-        do i = 1, size(context%inputs)
-            root = canonical_or_entry(context%inputs(i)%source_root)
-            if (len_trim(root) == 0) cycle
-            call change_watch_add_root(watch, trim(root), ierr, message)
-            if (ierr /= 0) return
-            do j = 1, watch%n_roots
-                if (trim(watch%roots(j)) == trim(root)) watch%active(j) = .true.
-            end do
-        end do
         if (c_associated(watch%native)) then
             call sync_native_roots(watch, ierr, message)
         else

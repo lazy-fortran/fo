@@ -591,19 +591,6 @@ int fo_c_generation_list_cmake_input_tree(const char *root, const char *manifest
     return list_input_tree(root, manifest, 2, build_directory);
 }
 
-int fo_c_generation_copy_tree(const char *root, const char *dest,
-                              const char *manifest) {
-    FILE *out;
-    int rc;
-    if (validate_tree_root(root) != 0) return errno == 0 ? 1 : errno;
-    if (make_dirs(dest) != 0) return errno == 0 ? 1 : errno;
-    out = fopen(manifest, "w");
-    if (out == NULL) return errno == 0 ? 1 : errno;
-    rc = walk_tree(root, dest, out, 1, 1, 1);
-    if (fclose(out) != 0 && rc == 0) rc = -1;
-    return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
-}
-
 /* Reconstructable invocation views need complete bytes, not durable writes. */
 int fo_c_generation_copy_tree_ephemeral(const char *root, const char *dest,
                                        const char *manifest) {
