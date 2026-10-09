@@ -737,31 +737,6 @@
         close (u)
     end subroutine run_capture
 
-    subroutine test_config_flags_str_joins_with_spaces()
-        !! Regression: multiple [build] flags must be space-separated.
-        !! The old code added a space then trimmed it back off, producing
-        !! e.g. "-O2-fopenmp" which gfortran rejects.
-        type(fpm_config_t) :: config
-
-        config%n_flags = 2
-        config%flags(1) = '-O2'
-        config%flags(2) = '-fopenmp'
-        call assert(trim(config_flags_str(config)) == '-O2 -fopenmp', &
-            'config_flags_str joins two flags with a space')
-
-        config%n_flags = 3
-        config%flags(1) = '-O2'
-        config%flags(2) = '-fopenmp'
-        config%flags(3) = '-funroll-loops'
-        call assert(trim(config_flags_str(config)) == '-O2 -fopenmp -funroll-loops', &
-            'config_flags_str joins three flags with spaces')
-
-        config%n_flags = 1
-        config%flags(1) = '-fopenmp'
-        call assert(trim(config_flags_str(config)) == '-fopenmp', &
-            'config_flags_str passes a single flag through')
-    end subroutine test_config_flags_str_joins_with_spaces
-
     subroutine test_gfortran_flags_change_action_id()
         integer :: exitcode, n_first, n_same, n_changed
         character(len=512) :: project_dir, log_file

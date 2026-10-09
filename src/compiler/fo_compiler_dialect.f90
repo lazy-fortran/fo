@@ -76,7 +76,11 @@ contains
         case ('g0')
             flag = '-g0'
         case ('line-tables')
-            flag = '-gline-tables-only'
+            if (self%kind == COMPILER_GFORTRAN) then
+                flag = '-g1'
+            else
+                flag = '-gline-tables-only'
+            end if
         case ('full')
             flag = '-g'
         case default

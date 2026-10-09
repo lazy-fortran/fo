@@ -6,7 +6,7 @@ program test_backend
         backend_test_names, backend_test_affected, backend_clean, &
         BACKEND_NATIVE, BACKEND_CMAKE, BACKEND_NONE
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
-        gfortran_test_names, config_flags_str
+        gfortran_test_names
     use fo_fpm_config, only: fpm_config_t
     use fo_process, only: process_getpid, process_getcwd, &
         process_run_argv_logged, argv_push
@@ -28,7 +28,6 @@ program test_backend
     call test_detect_none()
     call test_nproc()
     call test_detect_jobs()
-    call test_config_flags_str_joins_with_spaces()
     call test_fpm_skips_slow_by_default()
     call test_native_test_runs_without_build_lock()
     call test_cmake_build_and_test()

@@ -6,7 +6,7 @@ program test_backend_gfortran
         backend_test_names, backend_test_affected, &
         BACKEND_NATIVE, BACKEND_CMAKE, BACKEND_NONE
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
-        gfortran_test_names, config_flags_str
+        gfortran_test_names
     use fo_fpm_config, only: fpm_config_t
     use fo_cache, only: cache_t, cache_init, cache_key_for, cache_store_action, &
         HASH_LEN

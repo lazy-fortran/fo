@@ -84,7 +84,6 @@ module fo_gfortran_build
 
     public :: gfortran_build, gfortran_test, gfortran_test_names
     public :: gfortran_run_tests
-    public :: config_flags_str
     public :: gfortran_app_source_name, gfortran_test_source_name
     public :: scan_project_app_units
     public :: source_has_marker, dispatch_target
@@ -4574,8 +4573,8 @@ contains
     recursive function fc_policy_flags() result(flags)
         !! Compiler-appropriate baseline compile flags. gfortran needs the long
         !! free-form line length; flang has no line limit and rejects that flag.
-        !! -fopenmp is added per project via the fpm openmp metapackage (see
-        !! config_flags_str), not here.
+        !! -fopenmp is added per project via the fpm openmp metapackage in
+        !! merge_flags, not here.
         character(len=:), allocatable :: flags
 
         type(compiler_dialect_t) :: dialect
@@ -5656,6 +5655,10 @@ contains
             mapped = dialect%translate_flag(config%flags(i))
             if (len_trim(mapped) > 0) flags = trim(flags)//' '//mapped
         end do
+        ! Package defaults precede request flags, so --debug and --asan retain
+        ! their explicit debug information even when the manifest defaults to g0.
+        mapped = dialect%debug_info_flag(config%debug_info)
+        if (len_trim(mapped) > 0) flags = trim(flags)//' '//mapped
         flags = trim(adjustl(flags))
     end function manifest_compile_flags
 
@@ -5692,11 +5695,8 @@ contains
                 combined = trim(flag_text)
             end if
         end if
-        ! PIC last, and here rather than only in `config_flags_str`: this is
-        ! the function the compile path actually calls (three call sites),
-        ! while `config_flags_str` has no callers at all - the first time this
-        ! flag was wired it went into the dead function and the linker kept
-        ! refusing the archive with "recompile with -fPIC".
+        ! Required PIC must survive both manifest and request flags for shared
+        ! libraries to link without relocation errors.
         mapped = dialect%pic_flag(config%pic)
         if (len_trim(mapped) > 0) then
             if (len_trim(combined) > 0) then
@@ -5707,52 +5707,5 @@ contains
         end if
         flag_text = combined
     end subroutine merge_flags
-
-    function config_flags_str(config) result(s)
-        type(fpm_config_t), intent(in) :: config
-        character(len=1024) :: s
-        character(len=:), allocatable :: mapped
-        type(compiler_dialect_t) :: dialect
-        integer :: i
-
-        s = ''
-        dialect = compiler_dialect(fc_command())
-        if (config%openmp) s = trim(dialect%openmp_flag())
-        do i = 1, config%n_flags
-            mapped = dialect%translate_flag(config%flags(i))
-            if (len_trim(mapped) == 0) cycle
-            if (len_trim(s) > 0) then
-                s = trim(s)//' '//trim(mapped)
-            else
-                s = trim(mapped)
-            end if
-        end do
-
-        ! The manifest's debug-info budget goes last: a project that declares
-        ! `debug-info = "g0"` means it, even against its own [build] flags.
-        mapped = dialect%debug_info_flag(config%debug_info)
-        if (len_trim(mapped) > 0) then
-            if (len_trim(s) > 0) then
-                s = trim(s)//' '//trim(mapped)
-            else
-                s = trim(mapped)
-            end if
-        end if
-
-        ! PIC last, like the debug budget: the manifest states what this
-        ! project needs to be able to link at all, so it must not be beaten by
-        ! a stale [build] flag. Without it the linker refuses to fold the
-        ! archive into a shared object at all:
-        ! "relocation R_X86_64_PC32 ... can not be used when making a shared
-        ! object; recompile with -fPIC".
-        mapped = dialect%pic_flag(config%pic)
-        if (len_trim(mapped) > 0) then
-            if (len_trim(s) > 0) then
-                s = trim(s)//' '//trim(mapped)
-            else
-                s = trim(mapped)
-            end if
-        end if
-    end function config_flags_str
 
 end module fo_gfortran_build
