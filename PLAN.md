@@ -8,10 +8,35 @@ failure detection. The workspace master plan, when present, owns delivery order.
 
 ## Current delivery
 
-Current scope is the Fo support needed to develop our codes. Publish focused
-verified repairs on main, deploy them locally and on mailuefterl, and conclude
-task-owned processes and temporary worktrees. The remaining issue inventory and
-full platform qualification below are separate future work.
+Current scope is active completion of the Fo issue inventory, isolated local
+verification and regular gated main pushes. One controller integrates parallel
+source workers; each host admits one heavy campaign. Full platform and consumer
+qualification remain completion gates in this delivery.
+
+Main `7a434fb` removes all thirteen remaining checked-in Python/JavaScript
+fixtures and their redundant CI launches. Useful native behavioral coverage
+replaces the Python reproducers and reuses the existing MCP, journal and process
+fixtures. The same increment repairs MCP envelope validation, native manifest
+debug information, required slow-test impact and frozen CMake reproduction.
+It also deletes the unused debug-flag compatibility helper and its shallow tests.
+The combined diff removes 1880 maintained lines across 34 files.
+
+The exact Linux candidate passes 23/23 required cases on one immutable resident
+generation in offline, unprivileged container `fo-complete-linux-20261009`.
+The qualification image contains neither Python nor Node. Native architecture
+filter probes and actual i386/x32 containment probes pass separately. The new
+MCP, DWARF and affected-slow oracles detect their intended parent failures.
+Receipt, driver identity and promotion evidence are under
+`/var/tmp/fo-complete-20261009/output`; the promotion receipt is
+`promotion-7a434fb.json`. This is a focused gate, not a complete platform suite.
+
+Darwin qualification is active on authorized faepmac1. Remaining source workers
+own canonical capture simplification, safe retention, dependency completeness,
+cleanup action history, idle MCP progress and native Windows fixtures. Deep lint
+also requires the witnessed owning Fluff configuration/import repair. Each
+candidate still needs combined local verification before promotion.
+
+The earlier development deployment remains recorded below for its exact scope.
 
 Fo source `2ac0121` and Fx `090acb4` are published on main. The Fx repair makes
 manifest encoding length metadata caller-owned: an independent Linux ASAN/OpenMP
