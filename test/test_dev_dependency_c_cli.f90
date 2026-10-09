@@ -177,7 +177,7 @@ contains
         logical, intent(in) :: include_dev
         character(:), allocatable :: archive, members
         type(process_result_t) :: inventory
-        type(string_list_t) :: ar_arguments
+        type(string_list_t) :: tool_arguments
         integer :: last, first, i, count
 
         last = index(link_log, '.a ')
@@ -189,28 +189,34 @@ contains
             first = first - 1
         end do
         archive = link_log(first:last + 1)
-        call list_add(ar_arguments, 't')
-        call list_add(ar_arguments, archive)
-        call run_external('ar', ar_arguments, consumer, inventory)
+        call list_add(tool_arguments, 't')
+        call list_add(tool_arguments, archive)
+        call run_external('ar', tool_arguments, consumer, inventory)
         call assert_process_ok(inventory, 'read selected static archive inventory')
         ! Apple ar also lists its symbol table member, __.SYMDEF SORTED.
         members = object_members(inventory%stdout)
-        call assert_contains(members, 'regular_src_regular.c.o' // nl, &
-            'selected archive contains the legitimate regular C provider')
-        if (include_dev) then
-            call assert_contains(members, &
-                'test-support_dev_src_devhelper.f90.o' // nl, &
-                'test archive contains the selected Fortran development helper')
-        else
-            call assert_not_contains(members, 'test-support_dev_src_', &
-                'production archive excludes every development helper object')
-        end if
         count = 0
         do i = 1, len(members)
             if (members(i:i) == nl) count = count + 1
         end do
         call assert_equal_integer(count, merge(2, 1, include_dev), &
             'archive contains exactly the necessary selected provider objects')
+        tool_arguments = string_list_t()
+        call list_add(tool_arguments, '-g')
+        call list_add(tool_arguments, archive)
+        call run_external('nm', tool_arguments, consumer, inventory)
+        call assert_process_ok(inventory, 'inspect selected archive provider symbols')
+        call assert_contains(inventory%stdout, 'regular_value', &
+            'selected archive provides the legitimate regular C function')
+        if (include_dev) then
+            call assert_contains(inventory%stdout, 'current_value', &
+                'test archive provides the selected development helper function')
+        else
+            call assert_not_contains(inventory%stdout, 'current_value', &
+                'production archive excludes the development helper function')
+            call assert_not_contains(inventory%stdout, 'devhelper', &
+                'production archive excludes development helper symbols')
+        end if
     end subroutine assert_archive_members
 
     subroutine symbols(binary)
