@@ -1,6 +1,6 @@
 # Fo delivery goals
 
-Updated 2026-10-08; reconciled with published main and GitHub issue states.
+Updated 2026-10-09; current development-support delivery and retained backlog.
 Issues define observable success; this plan orders delivery.
 Apply [goals and architectural freedom](doc/GOAL_DRIVEN_DEVELOPMENT.md), choose
 the smallest complete change, and preserve supported behavior and independent
@@ -8,18 +8,51 @@ failure detection. The workspace master plan, when present, owns delivery order.
 
 ## Current delivery
 
-Handoff requested by the user on 2026-10-08: publish the assembled work and stop
-for another computer to continue. Main contains the native Win32 provider,
-complete multi-module cache artifacts, private resident scratch, absolute FPM
-path capture, declared executable directories, an opt-in native CMake slice,
-and opt-in deep lint. This is a source handoff, not a stable release: the final
-combined source has not completed its runtime gates or full platform suites.
+Current scope is the Fo support needed to develop our codes. Publish focused
+verified repairs on main, deploy them locally and on mailuefterl, and conclude
+task-owned processes and temporary worktrees. The remaining issue inventory and
+full platform qualification below are separate future work.
 
-The reviewed source baseline is Fo `de85cf9`, Fx `f55e30d` and Fluff
-`9076ff6` on their published main branches. The local Fluff checkout is older;
-use the published provider for the deep-lint recheck. The recorded handoff
-stopped task processes and preserved the VM/TPX and evidence. Worker assignments
-and driver paths in earlier receipts do not identify an active lane now.
+Fo source `2ac0121` and Fx `090acb4` are published on main. The Fx repair makes
+manifest encoding length metadata caller-owned: an independent Linux ASAN/OpenMP
+oracle changes from ten parse failures to zero across 20000 varied-length calls.
+The focused immutable-store test passes with eight jobs/OpenMP. The original
+Fo parallel library-include consumer passes with eight jobs on the rebuilt
+combined driver. This repairs the reproduced parser race; broader Fx #57
+warm-cache qualification remains open.
+
+Fo `2ac0121` exposes Darwin temporary-directory declarations in the benchmark
+helper; the parent fails its C compile check and the fixed source passes.
+Rebuilt release drivers are installed at `/opt/homebrew/bin/fo` locally and
+`/home/ert/.local/bin/fo` on mailuefterl. Their SHA256 digests are respectively
+`0a30bed211446db2e18b5e8253cc9b5440f86e2703d5ae09ffbb34323406f972` and
+`65e15c374cab0c92e526a77d82f9c05cc9f057b6b57ccde5e5247ff27ab66559`.
+Each build pins Fx `090acb4` in its disposable manifest; no consumer manifest
+change is committed. Original manifests, build logs and deployment receipts are
+under `/var/tmp/fo-finish-development-20261009` on each host.
+
+KIN6D's registered mapped-P2 finite-forms test passes through the new Darwin
+driver. Its lint JSON exactly matches the prior verified result, with 53 existing
+findings. The Darwin immutable-store parent and fixed versions have the same
+59 existing watcher/process-fixture failures; the new concurrency regression
+passes. These focused checks do not establish full-platform green.
+
+Fourteen abandoned task-owned Linux residents and eighteen local fixture
+residents were stopped with identity checks; previous local abandoned MCP
+cleanup is retained in the deployment receipts.
+Live unrelated development/MCP sessions remain. Completed task worktrees were
+removed after preserving source bundles, patches and diagnostics. Preservation
+archives are under `worktree-preservation` and `final-worktree-preservation` in
+the evidence root; the Linux stop receipt is
+`/var/tmp/fo-deploy-20261009-linux/stopped-background-20261009.json`,
+with the final Linux and local stop receipts in the current evidence root.
+
+Main also contains the native Win32 provider, complete multi-module cache
+artifacts, private resident scratch, absolute FPM path capture, declared
+executable directories, an opt-in native CMake slice and opt-in deep lint.
+The prior handoff baseline Fo `de85cf9`, Fx `f55e30d` and Fluff `9076ff6`
+remains available for historical reproduction. Worker assignments and old
+driver paths do not identify an active task lane.
 
 For Linux and Windows testing, SSH to **mailuefterl** (`ssh mailuefterl`).
 The source checkouts on that host are:
@@ -39,33 +72,15 @@ host. Windows scripts, source archives and receipts are under
 `C:\fo\msys64\ucrt64`. Rebuild from the current source checkouts: earlier
 Windows archives and pinned executables precede the final combined main.
 
-The excluded allocator proposal is in
-`/var/tmp/fo-linux-compile-flags-20261008`; the excluded barrier experiment is in
-`/var/tmp/fx-action-publication-oracle-20261009`. These are unfinished task
-worktrees, not the published source. The local evidence paths below refer to
-mailuefterl; the Darwin worker's handoff was copied there too.
+The excluded allocator proposal and recovery-barrier experiment were preserved
+as bundles and patches before their task worktrees were removed. They are not
+published fixes; the parser repair above supplies the demonstrated Linux fix.
 
-Resume in this order:
-
-1. Repair the remaining reproducible Linux parallel allocator/parser failure
-   tracked under Fx #57. The earlier `63f010f` ASAN repair and original Fo
-   eight-job consumer recheck passed; this later failure remains unresolved.
-   The flags-preparation proposal still fails and was excluded from main.
-2. Build the exact combined Fo/Fx source and recheck resident scratch recovery,
-   absolute dependencies, naming, compiler paths and declared executable/install
-   behavior. The readiness stamp was advanced to invalidate old discovery.
-3. Finish native Windows coherent build/replay/cleanup tests: a simple Fortran
-   pipe variant still increases the handle count; permission and full-suite
-   gates remain open. The VM and TPX were left running, with no task processes.
-4. Run deep lint against repaired Fluff and fix its remaining Windows fixture
-   assumptions; recheck the original Darwin Fluff submodule consumer. Verify
-   native CMake against the actual GORILLA oracle and then the maintained
-   ITpPlasma profiles. The current CMake slice is deliberately
-   partial; neither broader goal is complete.
-5. Correct the recovery-test barrier only after its deterministic reproducer
-   passes; its experimental patch was excluded. Recheck the parallel-restore
-   oracle's OpenMP flags and timeout. Then run exact full platform coverage and
-   delete obsolete scripts only after their replacements pass.
+Remaining qualification includes resident scratch/dependency/install behavior,
+Windows handle/permission/full-suite checks, deep lint with repaired Fluff,
+native CMake against GORILLA and maintained ITpPlasma profiles, and a corrected
+recovery-barrier oracle. Existing focused receipts retain their exact scope.
+None of these broader gates is claimed complete by the development deployment.
 
 Local evidence remains in `/var/tmp/fo-platform-controller-20261008/resumed`,
 `/var/tmp/fo-linux-compile-flags-evidence-20261008`,
@@ -86,13 +101,14 @@ PURE/ELEMENTAL submodule companion restoration, complete per-source module
 artifact vectors, native Windows adapters, private execution scratch and
 absolute FPM dependency capture. Earlier Linux/Darwin focused gates passed on
 recorded exact sources. The original Darwin Fluff submodule consumer recheck,
-combined-source runtime gates and full platform suites remain open. Historical
-129/130-case counts and mixed-generation receipts do not establish the current
-inventory or complete green.
+broader combined-source runtime gates and full platform suites remain open.
+Historical 129/130-case counts and mixed-generation receipts do not establish
+the current inventory or complete green.
 
-Fx #57 remains open for broader warm-cache behavior and the remaining Linux
-failure. The demonstrated deferred-character restoration race was repaired in
-Fx `63f010f`: the independent varied-path oracle passed 640 cold/warm pairs,
+Fx #57 remains open for broader warm-cache behavior. The reproduced Linux
+manifest-parser race is repaired by `090acb4` and rechecked above. The earlier
+deferred-character restoration race was repaired in Fx `63f010f`: the independent
+varied-path oracle passed 640 cold/warm pairs,
 and the original instrumented Fo parallel consumer passed with eight jobs.
 Older allocator aborts remain unattributed. That completed repair must stay
 distinct from the failed flags-preparation proposal in the current handoff.
@@ -110,8 +126,9 @@ Fo's native build path remains the delivery authority.
 
 Detailed earlier source/driver identities, test selections and evidence paths
 are preserved in [the audited handoff plan](https://github.com/lazy-fortran/fo/blob/de85cf9cdb8710fab414cfae7184476c311d3b89/PLAN.md)
-and the evidence roots above. This documentation review does not rerun or extend
-those runtime claims and does not change GitHub issue states.
+and the evidence roots above. Current focused rechecks are recorded above; older
+runtime claims retain their original scope. GitHub issue states were not changed
+by this handoff.
 
 ## Delivery order
 
