@@ -323,6 +323,10 @@ path = "test-fixtures/c/cache_snapshot.c"
 role = "test-fixture"
 
 [[extra.fo.inputs]]
+path = "test-fixtures/c/compiler_probe.c"
+role = "test-fixture"
+
+[[extra.fo.inputs]]
 path = "src/proc/fo_gremlin_state.c"
 role = "test-fixture"
 
