@@ -8,18 +8,38 @@ failure detection. The workspace master plan, when present, owns delivery order.
 
 ## Current delivery
 
-Current scope is active completion of the Fo issue inventory, isolated local
-verification and regular gated main pushes. One controller integrates parallel
-source workers; each host admits one heavy campaign. Full platform and consumer
-qualification remain completion gates in this delivery.
+The user's final instruction is to conclude/push qualified work, deploy Fo from
+main on mailuefterl, faepmac1 and faepkub4, tidy task branches/issues/plans, then
+stop and report. Broader issue implementation is suspended by that shutdown
+scope. Each host admits one heavy campaign during final verification.
 
-Published Fo `4ce66c2`, Fx `b669f31` and FortFront `8eced2d` are the current
-baseline. Fo-owned fixtures and orchestration have no Python/JavaScript runtime;
+Deployment builds use published Fo `1c104b7`, Fx `7282d45` and FortFront
+`8eced2d`. Fx `9ec49fb` changes only a hash fixture, preserving production source
+and manifest identity. Fo-owned fixtures and orchestration have no Python/JavaScript runtime;
 the offline qualification image contains neither interpreter. Native protocol,
 process, recovery, DWARF, slow-impact and frozen-CMake oracles replace the removed
 fixtures. Resident increments completed 23/23, 13/13 and 12/12 required cases on
 their own recorded immutable generations. Canonical input capture, dependency
 C-header planning and duplicate artifact/test cleanup are delivered.
+
+Final main release gates pass on all three requested hosts: four scoped Linux
+cases and three each on Darwin and faepkub4, plus native C/Fortran smoke tests.
+Faepkub4 also passes warm/edit/reject/restore with zero warm project actions;
+existing per-process compiler capability probes are reported separately.
+Readonly driver/controller records and installed checks are under
+`/var/tmp/fo-complete-20261009/output`; its `FINAL-REPORT.md` records exact
+prefixes/digests and final retirement. No unqualified combined source is deployed.
+
+The first faepkub4 attempts used the experimental 422-source bootstrap and failed
+at archive-object availability and allocator corruption. Both remain recorded
+RED. The newly qualified published-main Linux driver builds the native main
+release successfully; these experimental faults are not current-main evidence.
+
+Administrative cleanup archives and removes 78 inactive local worktrees and
+390 delivery-owned local refs. Unknown/user refs, unrelated PR128, warm caches,
+unique evidence, the FFC primary edit and Windows VM/TPX remain intact. Unfinished
+draft PR212 is archived/closed and its branch removed. Task containers are
+stopped/removed; final task-owned residents are stopped before handoff.
 
 Archive reuse validates actual bytes, modes, object vectors and tool keys.
 `0aacb44` makes Darwin archive timestamps deterministic in the archiver child.
@@ -51,26 +71,36 @@ long-root worker establish the parent faults. Both public cases pass on Linux
 and Darwin with unchanged stress counts and time budgets. These focused results
 do not combine the historical partial suite into a full fixed-version green.
 
-The combined candidate's durable retained-TMP repair passes all five Linux
-view/state/reproduction/readiness/portability gates; its parent restart oracle
-loses both failed journals. Impact's original CPU limit and native Windows MCP
-still need owning diagnosis before this larger candidate is promoted.
+The combined candidate's durable retained-TMP repair passes all five Linux and
+five Darwin view/state/reproduction/readiness/portability gates; its parent
+restart oracle loses both failed journals. This source remains unpromoted and
+archived. Owning Fx `7282d45` repairs impact's measured hash bottleneck: three
+owning cases, an explicit OpenMP hash case and the original three Fo
+check/impact/receipt cases pass. Impact passes its unchanged 10-second CPU
+budget in 13.85 seconds wall. Darwin caught a giant compile-time fixture
+constant; fixture-only `9ec49fb` preserves the independent 16 MiB + 1 byte SHA
+oracle through runtime allocation, and the original OpenMP hash case passes.
 
 The native Windows candidate now builds Fo through its pinned image with the ordinary
 2 MiB stack. The combined repair uses measured heap buffers, binary archive
 extraction, owned response files for the actual 512-object command and bounded
 PE resource validation. C/Fortran execution and the independent stale-test
-change/reject/restore oracle pass. The current fixture increment is under
-verification; default ownership and CRLF parsing are repaired through existing
-native authorities. Component and focused receipts retain their exact scope.
+change/reject/restore oracle pass. The independent native process-group fixture
+passes, including Unicode argv, long image paths, exact peer identity and owned
+cleanup. Original MCP advances to guardian ownership readiness, then fails with
+`cannot configure exact process ownership: 5`; this is not established as Win32
+AccessDenied. The replay was cancelled during final shutdown; its complete
+source and closed fixture archive are preserved. Component and focused receipts
+retain their exact scope.
 
 Current source candidates cover shared ordinary/Gremlin test execution and
 accepted execution receipts, safe retention and pressure reporting, canonical
 executable publication, native manifest arrays, cleanup history, deep lint with
 the owning Fluff repair, process environment vectors and finite native CMake
-profiles. Each needs its combined behavioral gate before publication. Darwin's
-full fixed-version suite and native Windows qualification are active. Full
-platform, standalone FPM, deep-lint and scientific profile matrices remain open.
+profiles. Each needs its combined behavioral gate before publication. These
+task sources are archived for a future resumption and excluded from the main
+deployment. Full platform, standalone FPM, deep-lint and scientific profile
+matrices remain open.
 
 The earlier development deployment remains recorded below for its exact scope.
 
