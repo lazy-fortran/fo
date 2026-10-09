@@ -168,13 +168,14 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
-        type(fpm_config_t) :: config
+        type(fpm_config_t), allocatable :: config
         type(resolved_src_t) :: resolved_dev_deps(MAX_RESOLVED)
         character(len=PATH_LEN) :: project_root
         character(len=:), allocatable :: dependency_root
         integer :: project_index, i, j, status, n_resolved_dev
         logical :: is_local
 
+        allocate(config)
         inventory = input_inventory_t()
         inventory%declarations = declarations
         allocate(inventory%roots(MAX_ROOTS), inventory%entries(64))
@@ -372,9 +373,10 @@ contains
         type(input_declaration_t), allocatable, intent(out) :: declarations(:)
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-        type(fpm_config_t) :: config
+        type(fpm_config_t), allocatable :: config
         integer :: i
 
+        allocate(config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) then
             message = 'cannot parse fixture declarations from fpm.toml'
