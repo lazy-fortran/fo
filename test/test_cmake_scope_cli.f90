@@ -23,8 +23,10 @@ program test_cmake_scope_cli
     call write_text(leaf, 'integer,parameter::value=23'//nl)
     call write_text(project//'/main.f90', 'program gate'//nl// &
         'include "out/authored/value.inc"'//nl// &
-        'integer::unit'//nl//'open(newunit=unit,file="'//scratch// &
-        '/gate-runs",status="unknown",position="append")'//nl// &
+        'integer::unit'//nl//'open(newunit=unit, &'//nl// &
+        'file="'//scratch(:len(scratch)/2)//'"// &'//nl// &
+        '"'//scratch(len(scratch)/2 + 1:)//'/gate-runs", &'//nl// &
+        'status="unknown",position="append")'//nl// &
         'write(unit,*)value'//nl//'close(unit)'//nl// &
         'if(value/=17)error stop "independent oracle17"'//nl// &
         'print *,"oracle17"'//nl//'end program'//nl)
