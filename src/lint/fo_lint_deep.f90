@@ -86,7 +86,7 @@ contains
                 error = 'fo lint --deep: fluff execution failed (exit '// &
                         trim(json_int(tool_exit))//')'//new_line('a')//output
             end if
-            if (len(error) == 0) diagnostics = trim(output)
+            if (len(error) == 0) diagnostics = trim_json_whitespace(output)
         end if
         valid = .false.
         if (len(error) == 0) call validate_diagnostics(diagnostics, count, valid)
@@ -223,6 +223,19 @@ contains
         end if
         hit = .true.
     end subroutine restore_cached
+
+    function trim_json_whitespace(text) result(value)
+        character(len=*), intent(in) :: text
+        character(len=:), allocatable :: value
+        character(len=*), parameter :: whitespace = ' '//achar(9)//achar(10)//achar(13)
+        integer :: first, last
+
+        first = verify(text, whitespace)
+        value = ''
+        if (first == 0) return
+        last = verify(text, whitespace, back=.true.)
+        value = text(first:last)
+    end function trim_json_whitespace
 
     subroutine decode_cached(record, diagnostics, exitcode, valid)
         character(len=*), intent(in) :: record

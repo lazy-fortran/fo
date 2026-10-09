@@ -93,6 +93,8 @@ program test_lint_deep_cli
     call assert_equal_integer(json_size(field), 1, &
                               'fix suggestions remain in full object')
 
+    call assert_contains(result%stdout, '['//new_line('a')//'  {', &
+                         'internal diagnostic whitespace survives')
     snapshot = result%stdout
     call lint(.true., .true.)
     call assert_equal_integer(run_count() - before, 0, &
@@ -143,7 +145,7 @@ program test_lint_deep_cli
     call assert_equal_integer(result%exit_code, 0, 'warm clean result passes')
     call assert_equal_integer(run_count() - before, 0, 'clean warm result is cached')
 
-    do i = 1, 3
+    do i = 1, 5
         select case (i)
         case (1)
             call write_text(config, 'malformed')
@@ -151,6 +153,10 @@ program test_lint_deep_cli
             call write_text(config, 'scalar')
         case (3)
             call write_text(config, 'missing-field')
+        case (4)
+            call write_text(config, 'whitespace')
+        case (5)
+            call write_text(config, 'empty')
         end select
         call lint(.true., .true.)
         call assert_equal_integer(result%exit_code, 2, &
@@ -363,6 +369,11 @@ contains
             write (output_unit, '(a)') '[{"file":"oracle.f90"}]'
             call process_exit(1)
         end if
+        if (index(settings, 'whitespace') > 0) then
+            write (output_unit, '(a)') ' '//achar(9)//achar(13)
+            call process_exit(1)
+        end if
+        if (index(settings, 'empty') > 0) call process_exit(1)
         if (index(settings, 'crash') > 0) then
             write (output_unit, '(a)') '[]'
             call process_exit(3)
@@ -373,14 +384,14 @@ contains
         end if
         suffix = ''
         if (index(input, 'SOURCE_VARIANT') > 0) suffix = ' SOURCE_VARIANT'
-        body = '[{"file":"'//trim(filename)//'","code":"F999",'// &
+        body = '['//new_line('a')//'  {"file":"'//trim(filename)//'","code":"F999",'// &
                '"severity":"warning","message":"deep \"quoted\" café '// &
                repeat('z', 24000)//' END-DEEP '//settings//suffix//'",'// &
                '"location":{"start":{"line":2,"column":1},'// &
                '"end":{"line":2,"column":6}},"revision":9223372036854775807,'// &
                '"fixes":[{"description":"known \"fix\"",'// &
                '"edits":[{"new_text":"replacement"}]}]}]'
-        write (output_unit, '(a)') body
+        write (output_unit, '(a)') ' '//achar(9)//body//achar(13)//' '
         call process_exit(1)
     end subroutine fake_fluff
 
