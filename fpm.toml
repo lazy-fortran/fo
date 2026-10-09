@@ -306,23 +306,24 @@ kind = "directory"
 role = "test-fixture"
 
 [[extra.fo.inputs]]
-path = "test-fixtures/c/link_publication_peer.c"
-role = "test-fixture"
-
-[[extra.fo.inputs]]
-path = "test-fixtures/c/recovery_barrier.c"
-role = "test-fixture"
-
-[[extra.fo.inputs]]
-path = "test-fixtures/c/cache_snapshot.c"
-role = "test-fixture"
-
-[[extra.fo.inputs]]
-path = "test-fixtures/c/compiler_probe.c"
+path = "test-fixtures/c"
+kind = "directory"
 role = "test-fixture"
 
 [[extra.fo.inputs]]
 path = "src/proc/fo_gremlin_state.c"
+role = "test-fixture"
+
+[[extra.fo.inputs]]
+path = "src/util/fo_private_path.h"
+role = "test-fixture"
+
+[[extra.fo.inputs]]
+path = "src/util/fo_windows_env.h"
+role = "test-fixture"
+
+[[extra.fo.inputs]]
+path = "src/util/fo_path.h"
 role = "test-fixture"
 
 [[extra.fo.inputs]]
