@@ -59,6 +59,7 @@ program test_archive_publication
     call parse_json_report(result, report, 'archive consumer test report')
     call check_tests_pass(report, 2, 'archive consumers pass')
     call check_concurrent_test_links()
+    call check_selected_test_library_relink()
     args = words([character(len=32) :: 'exec', 'probe'])
     call invoke(args, 'normal', 'normal', 'normal', result)
     call assert_process_ok(result, 'real executable links against the archive')
@@ -380,16 +381,62 @@ contains
             '! ' // comment // new_line('a') // 'end program probe' // new_line('a')
     end function app_source
 
-    function test_source(name, marker_text) result(source)
+    function test_source(name, marker_text, expected_value) result(source)
         character(len=*), intent(in) :: name, marker_text
+        integer, intent(in), optional :: expected_value
         character(:), allocatable :: source
+        character(16) :: expected
+
+        expected = '42'
+        if (present(expected_value)) write(expected, '(i0)') expected_value
         source = 'program ' // name // new_line('a') // &
             'use archive_left, only: left_value' // new_line('a') // &
             'use archive_right, only: right_value' // new_line('a') // 'implicit none' // &
-            new_line('a') // 'if (left_value() + right_value() /= 42) stop 1' // &
+            new_line('a') // 'if (left_value() + right_value() /= ' // &
+            trim(expected) // ') stop 1' // &
             new_line('a') // "print '(a)', '" // marker_text // "'" // new_line('a') // &
             'end program ' // name // new_line('a')
     end function test_source
+
+    subroutine check_selected_test_library_relink()
+        type(json_value_t) :: tests, entry, field
+
+        ! Both executables already passed against 42. Rebuild only alpha after
+        ! an implementation edit; untouched beta must observe 43 and fail its
+        ! independent 42 expectation instead of executing its historical image.
+        call write_text(join_path(project, 'src/left_impl.f90'), &
+            left_impl_source(21))
+        call write_text(join_path(project, 'test/test_alpha.f90'), &
+            test_source('test_alpha', 'alpha observes 43', 43))
+        call invoke(words([character(len=32) :: 'test', '--json', 'test_alpha']), &
+            'normal', 'normal', 'normal', result)
+        call assert_process_ok(result, 'selected alpha links the changed library')
+        call parse_json_report(result, report, 'selected alpha library report')
+        call check_tests_pass(report, 1, 'alpha observes the changed implementation')
+
+        call invoke(words([character(len=32) :: 'test', '--json', 'test_beta']), &
+            'normal', 'normal', 'normal', result)
+        call assert_true(result%exit_code /= 0, &
+            'untouched beta fails against the changed library implementation')
+        call parse_json_report(result, report, 'selected beta library report')
+        tests = json_member(report, 'tests')
+        call assert_equal_integer(json_size(tests), 1, &
+            'beta library report contains its selected case')
+        entry = json_element(tests, 1)
+        field = json_member(entry, 'status')
+        call assert_equal_string(json_string_value(field), 'fail', &
+            'beta reports its independent obsolete value expectation')
+
+        call write_text(join_path(project, 'src/left_impl.f90'), &
+            left_impl_source(20))
+        call write_text(join_path(project, 'test/test_alpha.f90'), &
+            test_source('test_alpha', 'alpha'))
+        call invoke(words([character(len=32) :: 'test', '--all', '--json']), &
+            'normal', 'normal', 'normal', result)
+        call assert_process_ok(result, 'warm tests recover after restoring the library')
+        call parse_json_report(result, report, 'restored library test report')
+        call check_tests_pass(report, 2, 'both warm tests observe the restored library')
+    end subroutine check_selected_test_library_relink
 
     function shared_manifest() result(text)
         character(:), allocatable :: text

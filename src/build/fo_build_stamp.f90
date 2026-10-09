@@ -7,7 +7,7 @@ module fo_build_stamp
     private
 
     integer, parameter :: TEXT_LEN = 4096
-    character(len=16), parameter :: STAMP_MAGIC = 'fo-build-v9'
+    character(len=16), parameter :: STAMP_MAGIC = 'fo-build-v10'
 
     type :: stamp_t
         character(len=512) :: project = ''

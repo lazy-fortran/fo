@@ -560,7 +560,7 @@ contains
             flags=flag_text, &
             build_only=bonly, use_cache=use_cache)
         if (exitcode == 0) call refresh_build_stamp(project_dir, flag_text, &
-            request_flags, apps_current, config%test_dir, use_cache)
+            request_flags, slow, apps_current, config%test_dir, use_cache)
         call memo_save()
     end subroutine gfortran_test
 
@@ -648,7 +648,8 @@ contains
             names, n_names, slow, exitcode, n_compiled, &
             flags=flag_text, build_only=bonly, use_cache=use_cache)
         if (exitcode == 0) call refresh_build_stamp(project_dir, flag_text, &
-            request_flags, apps_current, config%test_dir, use_cache)
+            request_flags, n_names == 0 .and. slow, apps_current, &
+            config%test_dir, use_cache)
     end subroutine gfortran_test_names
 
     subroutine gfortran_run_tests(project_dir, log_file, exitcode, include_slow, &
@@ -759,10 +760,10 @@ contains
         end do
     end subroutine collect_stamp_roots
 
-    subroutine refresh_build_stamp(project_dir, flags, request_flags, apps_ready, &
-            test_dir, use_cache)
+    subroutine refresh_build_stamp(project_dir, flags, request_flags, tests_ready, &
+            apps_ready, test_dir, use_cache)
         character(len=*), intent(in) :: project_dir, flags, request_flags
-        logical, intent(in) :: apps_ready
+        logical, intent(in) :: tests_ready, apps_ready
         character(len=*), intent(in) :: test_dir
         logical, intent(in), optional :: use_cache
 
@@ -782,8 +783,11 @@ contains
         stamp_flags = compile_key_flags(stamp_flags)
         stamp_request_flags = request_key_flags(request_flags)
         call detect_compiler(compiler)
+        ! Only a complete test preparation can certify every executable for
+        ! this source closure. Named or fast-only subsets leave other images
+        ! for their normal compile/link action checks when requested.
         call build_stamp_save(project_dir, compiler, stamp_flags, &
-            stamp_request_flags, roots, n_roots, .true., apps_ready, test_dir)
+            stamp_request_flags, roots, n_roots, tests_ready, apps_ready, test_dir)
     end subroutine refresh_build_stamp
 
     integer function dispatcher_node(filenames, is_prog, topo_order, n_order, &
