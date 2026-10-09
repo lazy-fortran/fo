@@ -129,7 +129,8 @@ jobs:
           verifier_dir="$(mktemp -d)"
           trap 'rm -rf "$verifier_dir"' EXIT
           fixture_dir=test-fixtures/c
-          process_dependencies=(src/proc/fo_gremlin_state.c src/util/fo_fs.c)
+          process_dependencies=(src/proc/fo_gremlin_state.c
+                                src/proc/fo_execution_scratch.c src/util/fo_fs.c)
           cc -std=gnu11 -O2 -Wall -Wextra -Wno-unused-function \
             "$fixture_dir/async_filter.c" "${process_dependencies[@]}" -o "$verifier_dir/filter-native"
           "$verifier_dir/filter-native"
