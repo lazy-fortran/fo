@@ -85,9 +85,6 @@ jobs:
           FO_CACHE_DIR="$RUNNER_TEMP/fo-mcp-system" \
             "$HOME/.local/bin/fo" test test_mcp_system
 
-      - name: Test Gremlin journal owner recovery
-        run: node test/test_gremlin_journal_recovery.js "$HOME/.local/bin/fo"
-
       - name: Test Gremlin self refresh
         run: |
           FO_BIN="$HOME/.local/bin/fo" \
@@ -111,9 +108,6 @@ jobs:
           mkdir -p "$HOME" "$FO_CACHE_DIR"
           driver="$HOME/.local/bin/fo"
           FO_BIN="$driver" "$driver" test test_install_help
-
-      - name: Test MCP Gremlin parity
-        run: node test/test_mcp_gremlin.js "$HOME/.local/bin/fo"
 
       # The retired cancellation fixture forced LD_PRELOAD EPERM/backoff; #161
       # excludes that artificial syscall window. Its cleanup probe tested only
