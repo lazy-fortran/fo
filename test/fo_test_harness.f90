@@ -49,6 +49,7 @@ module fo_test_harness
 
     type(string_t), allocatable, save :: failures(:)
     type(string_t), allocatable, save :: scratch_paths(:)
+    integer, parameter :: MAX_SCRATCH_DIRECTORIES = 128
 
     type, bind(C) :: pollfd_t
         integer(c_int) :: descriptor
@@ -84,6 +85,15 @@ module fo_test_harness
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
         end function c_remove_tree
+
+        integer(c_int) function c_preserve_scratch(path, output, capacity, bytes) &
+                bind(C, name='fo_c_execution_scratch_preserve')
+            import :: c_char, c_int, c_int64_t
+            character(kind=c_char), intent(in) :: path(*)
+            character(kind=c_char), intent(out) :: output(*)
+            integer(c_int), value :: capacity
+            integer(c_int64_t), intent(out) :: bytes
+        end function c_preserve_scratch
 
         integer(c_int) function c_unlink(path) bind(C, name='fo_test_unlink')
             import :: c_char, c_int
@@ -1032,11 +1042,24 @@ contains
     subroutine register_scratch(path)
         character(len=*), intent(in) :: path
         type(string_t), allocatable :: grown(:)
-        integer :: count
+        character(kind=c_char), allocatable :: path_bytes(:)
+        integer :: count, rc, i
 
         if (len_trim(path) == 0) return
         count = 0
         if (allocated(scratch_paths)) count = size(scratch_paths)
+        do i = 1, count
+            if (scratch_paths(i)%value == trim(path)) return
+        end do
+        if (count >= MAX_SCRATCH_DIRECTORIES) then
+            call record_failure('fixture scratch registration exceeds 128 directories')
+            call encode_c_string(path, path_bytes)
+            rc = c_remove_tree(path_bytes)
+            if (rc /= 0) call record_failure('remove excess fixture scratch: '//trim(path))
+            ! Stop the producer before an unregistered path can be recreated.
+            call finish_assertions()
+            return
+        end if
         allocate(grown(count + 1))
         if (count > 0) grown(1:count) = scratch_paths
         grown(count + 1)%value = trim(path)
@@ -1337,8 +1360,11 @@ contains
         logical, optional, intent(in) :: retain_failed_scratch
         type(string_t), allocatable :: pending_failures(:)
         character(kind=c_char), allocatable, target :: path_bytes(:)
+        character(kind=c_char) :: retained_path(4096)
+        character(len=32) :: native_error
         integer(c_int) :: rc
-        integer :: i, failure_count
+        integer(c_int64_t) :: retained_bytes
+        integer :: i, j, path_length, failure_count
         logical :: retain
 
         rc = c_gate_close_all()
@@ -1356,8 +1382,30 @@ contains
             do i = 1, size(scratch_paths)
                 if (.not. allocated(scratch_paths(i)%value)) cycle
                 if (retain) then
+                    call encode_c_string(scratch_paths(i)%value, path_bytes)
+                    retained_path = c_null_char
+                    rc = c_preserve_scratch(path_bytes, retained_path, &
+                        int(size(retained_path), c_int), retained_bytes)
+                    if (rc /= 0) then
+                        write(native_error, '(i0)') rc
+                        call record_failure('preserve failed fixture scratch: '// &
+                            scratch_paths(i)%value//' (native error '// &
+                            trim(native_error)//')')
+                        cycle
+                    end if
+                    path_length = 0
+                    do j = 1, size(retained_path)
+                        if (retained_path(j) == c_null_char) exit
+                        path_length = j
+                    end do
+                    scratch_paths(i)%value = repeat(' ', path_length)
+                    do j = 1, path_length
+                        scratch_paths(i)%value(j:j) = retained_path(j)
+                    end do
                     write(error_unit, '(a)') 'Retained failed fixture scratch: '// &
                         scratch_paths(i)%value
+                    write(error_unit, '(a,i0)') 'Retained failed fixture bytes: ', &
+                        retained_bytes
                     cycle
                 end if
                 call encode_c_string(scratch_paths(i)%value, path_bytes)
@@ -1518,11 +1566,32 @@ contains
         scratch = read_text(marker)
         call assert_true(len(scratch) > 0, 'cleanup probe reports its scratch path')
         if (retain) then
+            block
+                character(len=*), parameter :: prefix = 'Retained failed fixture scratch: '
+                integer :: first, last
+
+                first = index(result%stderr, prefix)
+                call assert_true(first > 0, 'retention reports the final evidence path')
+                if (first == 0) return
+                first = first + len(prefix)
+                last = index(result%stderr(first:), new_line('a'))
+                if (last == 0) last = len(result%stderr) - first + 2
+                scratch = result%stderr(first:first + last - 2)
+            end block
             call assert_true(file_exists(scratch), &
                 'opt-in retains unique failure evidence after probe exits')
             call assert_file_equals(join_path(scratch, 'journal.jsonl'), &
                 'unique failure receipt', 'retained journal keeps exact evidence bytes')
             call remove_tree(scratch)
+            block
+                integer :: slash
+
+                slash = index(scratch, '/fixture', back=.true.)
+                if (slash > 0) then
+                    if (index(scratch(:slash), '/fo-failed-evidence-') > 0) &
+                        call remove_tree(scratch(:slash - 1))
+                end if
+            end block
         else
             call assert_true(.not. file_exists(scratch), &
                 'assertion failure cleans registered scratch before exiting')
