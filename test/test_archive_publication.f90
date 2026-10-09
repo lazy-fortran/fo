@@ -280,8 +280,7 @@ program test_archive_publication
         'forced-timeout scratch is removed after child cleanup')
 
     if (child > 0) call cleanup_child()
-    call remove_tree(scratch)
-    call finish_assertions()
+    call finish_assertions(retain_failed_scratch=.true.)
     write(*, '(a)') 'archive-publication: archive, executable and shared output checks pass'
 
 contains
@@ -843,7 +842,7 @@ contains
     subroutine exercise_stale_archive(archive_path)
         character(len=*), intent(in) :: archive_path
         character(:), allocatable :: stale_dir, stale_source, stale_object, module_dir
-        character(:), allocatable :: source
+        character(:), allocatable :: source, expected_digest
         type(string_list_t) :: command, fo_arguments
         type(process_result_t) :: result
         integer :: before, after
@@ -852,6 +851,7 @@ contains
         stale_source = join_path(stale_dir, 'right.f90')
         stale_object = join_path(stale_dir, 'src_right.f90.o')
         module_dir = join_path(project, 'build/fo/mod')
+        expected_digest = file_digest(archive_path)
         source = 'module archive_right' // new_line('a') // 'contains' // new_line('a') // &
             'integer function right_value()' // new_line('a') // 'right_value = 29' // &
             new_line('a') // 'end function right_value' // new_line('a') // &
@@ -871,6 +871,8 @@ contains
         call assert_process_ok(result, 'stale member triggers archive validation')
         call assert_equal_string(result%stdout, '42' // new_line('a'), &
             'stale member bytes are not used by the published executable')
+        call assert_equal_string(file_digest(archive_path), expected_digest, &
+            'same object vector rebuild preserves complete archive bytes')
         after = archive_rcs_calls(join_path(scratch, 'ar.log'))
         call assert_true(after > before, 'stale member content causes archive rebuild')
     end subroutine exercise_stale_archive

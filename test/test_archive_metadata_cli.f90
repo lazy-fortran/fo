@@ -3,7 +3,7 @@ program test_archive_metadata_cli
     use fo_test_archive_fixture, only: archive_fixture_main, archive_fixture_exit
     use fo_test_harness, only: process_result_t, string_list_t, list_add
     use fo_test_harness, only: make_scratch, make_directory, make_symlink
-    use fo_test_harness, only: join_path, write_text, remove_tree
+    use fo_test_harness, only: join_path, write_text
     use fo_test_harness, only: current_directory, file_exists
     use fo_test_harness, only: assert_process_ok, assert_equal_string, assert_true
     use fo_test_harness, only: assert_equal_integer
@@ -104,8 +104,7 @@ program test_archive_metadata_cli
     call expect_rejected('truncate', 16, 'truncated archive is rejected')
     call verify_missing_native_index()
 
-    call remove_tree(scratch)
-    call finish_assertions()
+    call finish_assertions(retain_failed_scratch=.true.)
     write(*, '(a)') 'archive-metadata-cli: native/controlled index accepted; invalid members rejected'
 
 contains

@@ -3732,6 +3732,7 @@ contains
         type(cache_t) :: archive_cache
         character(len=HASH_LEN) :: archive_action
         character(len=512) :: archive_key_parts(3)
+        character(len=*), parameter :: archive_environment = 'ZERO_AR_DATE=1'
         integer :: cache_rc, store_rc
 
         archive_path = ''
@@ -3746,7 +3747,7 @@ contains
             if (len_trim(content_key) > 0) then
                 final_path = trim(archive_dir)//'/objects_'// &
                     content_key(1:min(32, len_trim(content_key)))//'.a'
-                archive_key_parts(1) = 'fo-archive-1'
+                archive_key_parts(1) = 'fo-archive-2:'//archive_environment
                 archive_key_parts(2) = content_key
                 archive_key_parts(3) = compiler_tool_key('ar')
                 archive_action = cache_digest(archive_key_parts, 3)
@@ -3798,7 +3799,8 @@ contains
             call argv_push(packed, n_args, objects(i))
         end do
         call process_run_argv_logged(project_dir, packed, n_args, log_file, &
-            .true., build_timeout_seconds(), exitcode)
+            .true., build_timeout_seconds(), exitcode, &
+            env_extra=archive_environment)
         if (exitcode /= 0) then
             call fs_remove_tree(trim(stage_dir))
             archive_path = ''
