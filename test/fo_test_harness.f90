@@ -1296,6 +1296,11 @@ contains
 
         if (result%exit_code /= 0 .or. result%term_signal /= 0 .or. &
             result%runner_failed .or. result%timed_out) then
+            if (allocated(result%stdout)) then
+                if (len(result%stdout) > 0) &
+                    write (error_unit, '(a)') message // ': captured stdout: ' // &
+                        result%stdout
+            end if
             if (allocated(result%stderr)) then
                 if (len(result%stderr) > 0) &
                     write (error_unit, '(a)') message // ': captured stderr: ' // &
