@@ -501,13 +501,14 @@ contains
         call sample_status(.false., parity, 'cli-parity', cli_owner, cli_sample)
         mcp_sample = json_member(mcp_sample, 'events')
         cli_sample = json_member(cli_sample, 'events')
-        call assert_equal_integer(json_size(mcp_sample), 3, &
+        call assert_equal_integer(case_receipt_count(mcp_sample), 3, &
             'MCP seed selects one priority case and two additional random cases')
-        call assert_equal_integer(json_size(cli_sample), 3, &
+        call assert_equal_integer(case_receipt_count(cli_sample), 3, &
             'CLI seed selects one priority case and two additional random cases')
         do index = 1, json_size(mcp_sample)
             receipt = json_element(mcp_sample, index)
             name = gremlin_field(receipt, 'case_id')
+            if (name == '<build>') cycle
             call assert_equal_string(gremlin_field(receipt, 'status'), 'PASS', &
                 'real MCP first-sample case passes')
             call assert_equal_integer(int(json_number_value(json_member(receipt, 'seed'))), &
@@ -515,6 +516,7 @@ contains
             matches = 0
             do prior = 1, json_size(cli_sample)
                 counterpart = json_element(cli_sample, prior)
+                if (gremlin_field(counterpart, 'case_id') == '<build>') cycle
                 call assert_equal_string(gremlin_field(counterpart, 'status'), 'PASS', &
                     'real CLI first-sample case passes')
                 call assert_equal_integer(int(json_number_value(json_member(counterpart, 'seed'))), &
@@ -533,7 +535,7 @@ contains
         call call_tool('{"action":"gremlin_start","dir":'//mcp_quote(gate_project)// &
             ',"lane_id":"mcp-gate-only","targets":["test_parity_a"],'// &
             '"random_count":0,"seed":20261005,"timeout_seconds":5,'// &
-            '"campaign_seconds":1}', body)
+            '"campaign_seconds":30}', body)
         gate_owner = gremlin_field(body, 'session_id')
         call cli_begin('start', gate_project, 'mcp-gate-only', '')
         call list_add(arguments, '--target'); call list_add(arguments, 'test_parity_a')
@@ -576,6 +578,19 @@ contains
             1, 'the new generation executes and passes the required gate')
         call gremlin_stop_lane(driver, gate_project, cache, state, 'mcp-gate-only', gate_owner)
     end subroutine selection_and_quiescence
+
+    integer function case_receipt_count(receipts) result(count)
+        type(json_value_t), intent(in) :: receipts
+        type(json_value_t) :: receipt
+        integer :: index
+
+        count = 0
+        do index = 1, json_size(receipts)
+            receipt = json_element(receipts, index)
+            if (gremlin_field(receipt, 'case_id') == '<build>') cycle
+            count = count + 1
+        end do
+    end function case_receipt_count
 
     subroutine sample_arguments(random_count, seed)
         integer, intent(in) :: random_count
