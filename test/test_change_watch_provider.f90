@@ -3,9 +3,11 @@ program test_change_watch_provider
     use, intrinsic :: iso_c_binding, only: c_int, c_long, c_char, c_ptr, &
         c_null_char, c_associated
     use fo_change_watch, only: change_watch_t, change_watch_init, &
-        change_watch_add_root, change_watch_poll, change_watch_close, &
+        change_watch_add_root, change_watch_add_context, change_watch_poll, &
+        change_watch_close, &
         change_watch_mark_self_written, &
         CHANGE_RECONCILE
+    use fo_gremlin_generation, only: generation_context_t
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_rename, &
         fs_sleep_ms, fs_write_text
     use fo_util, only: make_tmpfile, temporary_root
@@ -203,11 +205,48 @@ program test_change_watch_provider
     call assert_idle('recovered root')
 
     call change_watch_close(watch)
+    call custom_output_roots()
     if (.not. linux_inotify) call verify_root_diagnostic()
     call fs_remove_tree(trim(scratch))
     print '(a)', 'shared change provider: roots, events, idle and recovery passed'
 
 contains
+
+    subroutine custom_output_roots()
+        type(generation_context_t) :: context
+        character(:), allocatable :: output, authored, provider, metadata
+
+        output = trim(project)//'/out/native'
+        authored = trim(project)//'/out/authored/input.dat'
+        provider = output//'/provider/input.dat'
+        metadata = trim(scratch)//'/custom-context'
+        call fs_make_dir(output//'/provider')
+        call fs_make_dir(trim(project)//'/out/authored')
+        call fs_make_dir(metadata)
+        call fs_write_text(authored, 'known17')
+        call fs_write_text(provider, 'known17')
+        call fs_write_text(metadata//'/build-directory.txt', 'out/native')
+        allocate(context%inputs(0), context%input_inventory%roots(2))
+        context%input_inventory%root_count = 2
+        context%input_inventory%roots(1)%canonical_alias = 'cmake-context'
+        context%input_inventory%roots(1)%physical_path = metadata
+        context%input_inventory%roots(2)%canonical_alias = 'declared-provider'
+        context%input_inventory%roots(2)%physical_path = output//'/provider'
+        call change_watch_init(watch, trim(project), ierr, error_text)
+        call require(ierr == 0, 'custom output watcher initialization')
+        call change_watch_add_context(watch, context, ierr, error_text)
+        call require(ierr == 0, 'custom output and nested provider declarations')
+        call settle_events()
+        call fs_write_text(output//'/generated.f90', 'generated output')
+        call assert_idle('custom CMake build output')
+        call fs_write_text(authored, 'known23')
+        call await_path(authored)
+        call settle_events()
+        call fs_write_text(provider, 'known29')
+        call await_path(provider)
+        call settle_events()
+        call change_watch_close(watch)
+    end subroutine custom_output_roots
 
     subroutine verify_root_diagnostic()
         character(len=4096) :: bad_root, diagnostic, recovered, event

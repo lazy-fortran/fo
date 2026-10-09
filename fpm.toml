@@ -351,3 +351,23 @@ main = "test_harness_process_group.f90"
 name = "test_native_compiler_path_cli"
 source-dir = "test"
 main = "test_native_compiler_path_cli.f90"
+
+[[test]]
+name = "test_native_manifest_runtime_cli"
+source-dir = "test"
+main = "test_native_manifest_runtime_cli.f90"
+
+[[test]]
+name = "test_package_macros_cli"
+source-dir = "test"
+main = "test_package_macros_cli.f90"
+
+[[test]]
+name = "test_cmake_scope_cli"
+source-dir = "test"
+main = "test_cmake_scope_cli.f90"
+
+[[test]]
+name = "test_cmake_declared_inputs_cli"
+source-dir = "test"
+main = "test_cmake_declared_inputs_cli.f90"
