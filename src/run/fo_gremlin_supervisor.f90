@@ -1,6 +1,7 @@
 module fo_gremlin_supervisor
     use, intrinsic :: iso_fortran_env, only: int64, error_unit, dp => real64
-    use fo_build_backend, only: BACKEND_NATIVE, BACKEND_CMAKE, backend_t, detect_backend
+    use fo_build_backend, only: BACKEND_NATIVE, BACKEND_CMAKE, backend_t, &
+        detect_backend, cmake_configure
     use fo_cmake_generation, only: cmake_registered_names
     use fo_cache, only: HASH_LEN, cache_digest, cache_store_root
     use fx_action_result_store, only: action_result_store_t, &
@@ -1085,6 +1086,7 @@ contains
         type(execution_view_t) :: execution_view, build_view
         type(driver_pin_t) :: reproduction_pin
         type(gremlin_request_t) :: selection_request
+        type(backend_t) :: reproduction_backend
         character(len=PATH_LEN) :: message, active_project, log_file, executable
         character(len=PATH_LEN) :: cleanup_message
         character(len=PATH_LEN) :: work_release_message
@@ -1204,32 +1206,6 @@ contains
             exitcode = 2
             return
         end if
-        selection_request = request
-        selection_request%targets = ''
-        selection_request%targets(1) = request%case_id
-        selection_request%n_targets = 1
-        selection_request%random_count = 0
-        call discover_campaign(campaign_project(generation), generation%identity, session, &
-            selection_request, selected, n_selected, mandatory_count, seed, ierr, message, &
-            bypass_coverage=.true.)
-        if (ierr /= 0 .or. n_selected == 0) then
-            call release_generation_lease(reproduction_lease, have_reproduction_lease, &
-                release_error, cleanup_message)
-            call release_if_owner(session, release_error, cleanup_message)
-            call error_response('reproduce', 'case_id is not present in that generation', &
-                response)
-            exitcode = 2
-            return
-        end if
-        if (trim(selected(1)) /= trim(request%case_id)) then
-            call release_generation_lease(reproduction_lease, have_reproduction_lease, &
-                release_error, cleanup_message)
-            call release_if_owner(session, release_error, cleanup_message)
-            call error_response('reproduce', 'case_id is not present in that generation', &
-                response)
-            exitcode = 2
-            return
-        end if
         executable = reproduction_pin%path
         ! The completion sequence is the reproduction execution ID. Allocate it
         ! before launch so its output path and durable receipt identify the same
@@ -1286,6 +1262,52 @@ contains
             message = 'cannot claim reproduction process ownership: '//trim(int_text(ierr))
         end if
         if (ierr /= 0) then
+            call process_scope_end(reproduction_scope, scope_restore_error)
+            call execution_view_release(execution_view, .false., release_error, &
+                cleanup_message)
+            call execution_view_release(build_view, .false., release_error, &
+                cleanup_message)
+            call release_generation_lease(reproduction_lease, &
+                have_reproduction_lease, release_error, cleanup_message)
+            call release_if_owner(session, release_error, cleanup_message)
+            call error_response('reproduce', trim(message), response)
+            exitcode = 2
+            return
+        end if
+        ! Captured generations contain authored inputs rather than generated
+        ! CTest files. Query the frozen configuration in the owned writable view.
+        generation%build_project_root = build_view%cwd
+        reproduction_backend = detect_backend(build_view%cwd)
+        if (reproduction_backend%kind == BACKEND_CMAKE) then
+            call cmake_configure(reproduction_backend%cmake, '', log_file, ierr)
+            if (ierr /= 0) message = &
+                'cannot configure frozen CMake test inventory; diagnostic: '// &
+                trim(log_file)
+        end if
+        if (ierr == 0) then
+            selection_request = request
+            selection_request%targets = ''
+            selection_request%targets(1) = request%case_id
+            selection_request%n_targets = 1
+            selection_request%random_count = 0
+            call discover_campaign(campaign_project(generation), &
+                generation%identity, session, selection_request, selected, &
+                n_selected, mandatory_count, seed, ierr, message, &
+                bypass_coverage=.true.)
+            if (ierr == 0) then
+                if (n_selected /= 1) then
+                    ierr = 1
+                    message = 'case_id is not present in that generation'
+                else if (trim(selected(1)) /= trim(request%case_id)) then
+                    ierr = 1
+                    message = 'case_id is not present in that generation'
+                end if
+            end if
+        end if
+        if (ierr /= 0) then
+            call release_heavy_work_slot(reproduction_work_lease, &
+                have_reproduction_work_lease, work_release_error, &
+                work_release_message, drain=.true.)
             call process_scope_end(reproduction_scope, scope_restore_error)
             call execution_view_release(execution_view, .false., release_error, &
                 cleanup_message)
