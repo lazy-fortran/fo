@@ -64,7 +64,13 @@ contains
         call process_suppress_heartbeats(.true.)
         framing = MCP_FRAME_UNKNOWN
         do
-            call mcp_read_message(line, MAX_LINE, framing, eof_flag, read_status)
+            call async_poll(async_state)
+            if (async_state%active_pid > 0) then
+                call mcp_read_message(line, MAX_LINE, framing, eof_flag, read_status, &
+                    timeout_ms=100)
+            else
+                call mcp_read_message(line, MAX_LINE, framing, eof_flag, read_status)
+            end if
             if (eof_flag) exit
             if (read_status /= 0) cycle
             if (len_trim(line) == 0) cycle

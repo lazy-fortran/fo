@@ -2,7 +2,7 @@ program test_mcp_cancel_error
     use, intrinsic :: iso_c_binding, only: c_int64_t
     use fo_test_harness, only: make_directory, write_text, read_text, start_sentinel
     use fo_test_harness, only: process_alive, stop_sentinel
-    use fo_test_harness, only: remove_path
+    use fo_test_harness, only: remove_path, file_exists
     use fo_test_harness, only: assert_true, assert_equal_integer, finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_gate_create, gremlin_gate_destroy
     use fo_test_gremlin_oracle, only: gremlin_wait_file, gremlin_gate_release
@@ -244,10 +244,85 @@ program test_mcp_cancel_error
         'duplicate cancellation rejects the now-stale run ID')
     call assert_true(process_alive(sentinel), &
         'cancelling owned work preserves an unrelated sentinel process')
+    call test_idle_pending_progress()
 900 call cleanup_fixture()
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
+
+    subroutine test_idle_pending_progress()
+        character(:), allocatable :: first_project, obsolete_project, newest_project
+        character(:), allocatable :: first_gate, obsolete_gate, newest_gate
+        character(:), allocatable :: first_ready, obsolete_ready, newest_ready
+        character(:), allocatable :: first_done, newest_done, request
+        type(json_value_t) :: envelope, result, completed
+        integer :: first_id, obsolete_id, newest_id, shutdown_status
+        logical :: entered
+
+        first_project = scratch//'/idle-active'
+        obsolete_project = scratch//'/idle-obsolete'
+        newest_project = scratch//'/idle-newest'
+        first_gate = scratch//'/idle-active.fifo'
+        obsolete_gate = scratch//'/idle-obsolete.fifo'
+        newest_gate = scratch//'/idle-newest.fifo'
+        first_ready = scratch//'/idle-active.ready'
+        obsolete_ready = scratch//'/idle-obsolete.ready'
+        newest_ready = scratch//'/idle-newest.ready'
+        first_done = scratch//'/idle-active.done'
+        newest_done = scratch//'/idle-newest.done'
+        call prepare_check_fixture(first_project, first_ready, first_gate, &
+            'idle_active_probe', first_done)
+        call prepare_check_fixture(obsolete_project, obsolete_ready, obsolete_gate, &
+            'idle_obsolete_probe')
+        call prepare_check_fixture(newest_project, newest_ready, newest_gate, &
+            'idle_newest_probe', newest_done)
+        request = '{"action":"check","mode":"start","root":'// &
+            mcp_quote(first_project)//'}'
+        call mcp_session_call(server, request, envelope)
+        result = json_member(envelope, 'result')
+        first_id = int(json_number_value(json_member(result, 'run_id')))
+        call assert_true(first_id > 0, 'idle-progress active check has a real owner')
+        call gremlin_wait_file(first_ready, 30000, entered)
+        call assert_true(entered, 'active check enters its independently observed barrier')
+        if (.not. entered) goto 800
+        request = '{"action":"check","mode":"start","root":'// &
+            mcp_quote(obsolete_project)//'}'
+        call mcp_session_call(server, request, envelope)
+        result = json_member(envelope, 'result')
+        obsolete_id = int(json_number_value(json_member(result, 'run_id')))
+        call assert_true(json_boolean_value(json_member(result, 'pending')), &
+            'second request remains pending while the first child is blocked')
+        request = '{"action":"check","mode":"start","root":'// &
+            mcp_quote(newest_project)//',"json":"full"}'
+        call mcp_session_call(server, request, envelope)
+        result = json_member(envelope, 'result')
+        newest_id = int(json_number_value(json_member(result, 'run_id')))
+        call assert_true(json_boolean_value(json_member(result, 'pending')), &
+            'newest request replaces the single pending check')
+        call assert_true(first_id /= obsolete_id .and. obsolete_id /= newest_id, &
+            'coalesced requests retain distinct public run identities')
+        ! No MCP requests follow until real newest-child progress has been observed.
+        call gremlin_gate_release(first_gate)
+        call gremlin_wait_file(newest_ready, 30000, entered)
+        call assert_true(entered, 'newest pending check starts while its MCP client is idle')
+        call assert_true(file_exists(first_done), &
+            'active child completed before pending child progress')
+        call assert_true(.not. file_exists(obsolete_ready), &
+            'coalescing never executes the replaced pending check')
+        if (.not. entered) goto 800
+        call gremlin_gate_release(newest_gate)
+        call gremlin_wait_file(newest_done, 10000, entered)
+        call assert_true(entered, 'newest child completes while the client remains idle')
+        call wait_finished(server, newest_id, completed)
+        call assert_equal_integer(int(json_number_value(json_member(completed, &
+            'exitcode'))), 0, 'newest coalesced check publishes its successful exit')
+800     call mcp_session_shutdown(server, shutdown_status)
+        call assert_equal_integer(shutdown_status, 0, &
+            'idle-progress server drains only its owned work on shutdown')
+        call gremlin_gate_destroy(first_gate)
+        call gremlin_gate_destroy(obsolete_gate)
+        call gremlin_gate_destroy(newest_gate)
+    end subroutine test_idle_pending_progress
 
     subroutine read_full_check(text, document)
         character(len=*), intent(in) :: text
