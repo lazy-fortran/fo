@@ -72,6 +72,7 @@ program test_gremlin_cmake
                     new_line('a')// &
                     'FetchContent_MakeAvailable(value_dep)'//new_line('a')// &
                     'add_executable(marker marker.f90)'//new_line('a')// &
+                    'install(TARGETS marker RUNTIME DESTINATION lib)'//new_line('a')// &
                     'add_executable(unselected broken.f90)'//new_line('a')// &
                     'target_link_libraries(marker PRIVATE value_dep)'//new_line('a')// &
                   'target_include_directories(marker PRIVATE "${CMAKE_BINARY_DIR}" '// &
@@ -94,7 +95,9 @@ program test_gremlin_cmake
     call write_text(project//'/CMakePresets.json', &
                     '{"version":3,"configurePresets":[{"name":"cpu",'// &
                     '"generator":"Ninja","binaryDir":"${sourceDir}/build",'// &
-                    '"cacheVariables":{"CMAKE_BUILD_TYPE":"Release"}}],'// &
+                    '"cacheVariables":{"CMAKE_BUILD_TYPE":"Release",'// &
+                    '"CMAKE_INSTALL_PREFIX":"'//scratch// &
+                    '/uncreated-install-prefix"}}],'// &
                     '"buildPresets":[{"name":"cpu","configurePreset":"cpu"}],'// &
                     '"testPresets":[{"name":"cpu","configurePreset":"cpu"}]}')
     rc = c_setenv('FO_CMAKE_CONFIGURE_PRESET'//c_null_char, 'cpu'//c_null_char, 1_c_int)

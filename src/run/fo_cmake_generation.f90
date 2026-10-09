@@ -511,6 +511,10 @@ contains
                 if (event%event_type /= JSON_STRING) cycle
                 ! Target artifacts are outputs relative to the build tree.
                 if (any(ancestors(:depth) == 'artifacts')) cycle
+                ! Target install destinations/prefix are output locations.
+                if (any(ancestors(:depth) == 'install') .and. &
+                    (any(ancestors(:depth) == 'destinations') .or. &
+                     any(ancestors(:depth) == 'prefix'))) cycle
                 if (key /= 'path') cycle
                 path = event%string_val
                 if (len(path) == 0) cycle
