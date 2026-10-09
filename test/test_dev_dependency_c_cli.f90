@@ -1,8 +1,9 @@
 program test_dev_dependency_c_cli
     use fo_test_harness, only: process_result_t, string_list_t, list_add
     use fo_test_harness, only: make_scratch, join_path, write_text, write_lines
-    use fo_test_harness, only: remove_tree, remove_path, assert_process_ok
+    use fo_test_harness, only: remove_path, assert_process_ok
     use fo_test_harness, only: assert_equal_string, assert_file_equals, assert_true
+    use fo_test_harness, only: assert_equal_integer
     use fo_test_harness, only: assert_contains, assert_not_contains, finish_assertions
     use fo_test_cli, only: resolve_driver, run_fo, run_external
     implicit none
@@ -61,7 +62,7 @@ program test_dev_dependency_c_cli
     call expect_value('21', '', 'cold static dev dependency')
     call assert_contains(result%stderr, 'test-support_dev_src_devshim.c.o', &
         'cold link explicitly includes the C shim')
-    call assert_archive_members(result%stderr)
+    call assert_archive_members(result%stderr, .true.)
     call expect_value('21', '', 'warm static dev dependency')
 
     call write_text(join_path(dependency, 'include/value.h'), '#define DEV_VALUE 27' // nl)
@@ -99,8 +100,7 @@ program test_dev_dependency_c_cli
     call assert_equal_string(result%stdout, 'production' // nl, 'production behavior')
     call assert_not_contains(result%stderr, 'test-support_dev_src_', &
         'production link excludes all dev dependency objects')
-    call assert_not_contains(result%stderr, 'objects_', &
-        'standalone production link has no dev dependency archive')
+    call assert_archive_members(result%stderr, .false.)
     call symbols(join_path(consumer, 'build/fo/bin/production'))
     call assert_not_contains(result%stdout, 'dev_shim', 'production has no C test symbols')
     call assert_not_contains(result%stdout, 'devhelper', 'production has no Fortran test symbols')
@@ -108,8 +108,7 @@ program test_dev_dependency_c_cli
     call assert_contains(result%stdout, 'dev_shim', 'test binary contains the C provider')
     call assert_contains(result%stdout, 'devhelper', 'test binary contains the Fortran provider')
 
-    call remove_tree(scratch)
-    call finish_assertions()
+    call finish_assertions(retain_failed_scratch=.true.)
     write (*, '(a)') 'dev-dependency-c-cli: cold closure, invalidation and production isolation'
 
 contains
@@ -173,15 +172,16 @@ contains
         call assert_file_equals(join_path(consumer, 'dev.receipt'), expected // nl, context)
     end subroutine expect_value
 
-    subroutine assert_archive_members(link_log)
+    subroutine assert_archive_members(link_log, include_dev)
         character(len=*), intent(in) :: link_log
-        character(:), allocatable :: archive
+        logical, intent(in) :: include_dev
+        character(:), allocatable :: archive, members
         type(process_result_t) :: inventory
         type(string_list_t) :: ar_arguments
-        integer :: last, first
+        integer :: last, first, i, count
 
         last = index(link_log, '.a ')
-        call assert_true(last > 0, 'cold link has a static Fortran helper archive')
+        call assert_true(last > 0, 'selected link has its regular dependency archive')
         if (last == 0) return
         first = last
         do while (first > 1)
@@ -192,11 +192,25 @@ contains
         call list_add(ar_arguments, 't')
         call list_add(ar_arguments, archive)
         call run_external('ar', ar_arguments, consumer, inventory)
-        call assert_process_ok(inventory, 'read cold static archive inventory')
+        call assert_process_ok(inventory, 'read selected static archive inventory')
         ! Apple ar also lists its symbol table member, __.SYMDEF SORTED.
-        call assert_equal_string(object_members(inventory%stdout), &
-            'test-support_dev_src_devhelper.f90.o' // nl, &
-            'cold archive contains exactly the selected Fortran helper')
+        members = object_members(inventory%stdout)
+        call assert_contains(members, 'regular_src_regular.c.o' // nl, &
+            'selected archive contains the legitimate regular C provider')
+        if (include_dev) then
+            call assert_contains(members, &
+                'test-support_dev_src_devhelper.f90.o' // nl, &
+                'test archive contains the selected Fortran development helper')
+        else
+            call assert_not_contains(members, 'test-support_dev_src_', &
+                'production archive excludes every development helper object')
+        end if
+        count = 0
+        do i = 1, len(members)
+            if (members(i:i) == nl) count = count + 1
+        end do
+        call assert_equal_integer(count, merge(2, 1, include_dev), &
+            'archive contains exactly the necessary selected provider objects')
     end subroutine assert_archive_members
 
     subroutine symbols(binary)
