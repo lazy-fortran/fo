@@ -1,6 +1,7 @@
 program test_gremlin_execution_view
     use fo_cache, only: HASH_LEN, cache_file_digest
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree, fs_write_text, fs_realpath, fs_rename
+    use fo_fs, only: fs_path_is_absolute
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release, execution_view_copy_app_outputs
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
@@ -91,7 +92,7 @@ program test_gremlin_execution_view
         'fixture writes leave source bytes unchanged')
 
     call get_command_argument(0, executable)
-    if (len_trim(executable) > 0 .and. executable(1:1) /= '/') then
+    if (.not. fs_path_is_absolute(trim(executable))) then
         call process_getcwd(current_dir, cwd_status)
         call check(cwd_status == 0, 'resolve the native test executable path')
         executable = trim(current_dir)//'/'//trim(executable)

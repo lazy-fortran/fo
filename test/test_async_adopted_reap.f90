@@ -1,54 +1,67 @@
 program test_async_adopted_reap
-    use fo_util, only: temporary_root
-    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_c_binding, only: c_int, c_int64_t
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
-    use fo_fs, only: fs_remove_tree, fs_sleep_ms
+    use fo_fs, only: fs_remove_tree, fs_sleep_ms, fs_is_windows
     use fo_process, only: argv_push, process_getpid, process_poll_pid, &
         process_reap_adopted_scope_zombies, process_set_async_scope, &
-        process_start_argv_logged, process_exit
+        process_start_argv_logged, process_cancel_pid, process_exit
+    use fo_process, only: process_scope_t, process_scope_begin, process_scope_end
     use fo_test_process_identity, only: mcp_process_start_time
+    use fo_test_process_identity, only: mcp_process_identity_running
+    use fo_test_harness, only: make_scratch, resolve_test_executable, write_text
     implicit none
 
     interface
-        integer(c_int) function c_fork() bind(C, name='fork')
+        integer(c_int) function c_fork() bind(C, name='fo_test_adopted_fork')
             import :: c_int
         end function c_fork
 
-        integer(c_int) function c_waitpid(pid, status, options) bind(C, name='waitpid')
+        integer(c_int) function c_waitpid(pid, status, options) &
+                bind(C, name='fo_test_adopted_wait')
             import :: c_int
             integer(c_int), value :: pid, options
             integer(c_int), intent(out) :: status
         end function c_waitpid
-
-        integer(c_int) function c_mkdir(path, mode) bind(C, name='mkdir')
-            import :: c_char, c_int
-            character(c_char), intent(in) :: path(*)
-            integer(c_int), value :: mode
-        end function c_mkdir
     end interface
 
-    character(len=64) :: pid_text, start_text
-    character(len=256) :: scratch, pid_file, log_file
-    character(len=:), allocatable :: args
+    character(len=64) :: start_text, mode
+    character(len=4096) :: helper_root
+    character(len=256) :: pid_file, log_file
+    character(len=:), allocatable :: args, scratch
     integer(c_int) :: intermediate, adopted, waited, status
     integer :: owner_pid, active_pid, ierr, exitcode, n_args, attempt
     logical :: done, linux, failed
 
+    call get_command_argument(1, mode)
+    if (trim(mode) == '--native-child') then
+        call get_command_argument(2, helper_root)
+        call write_text(trim(helper_root)//'/ready', 'ready')
+        do attempt = 1, 1000
+            inquire(file=trim(helper_root)//'/release', exist=done)
+            if (done) call process_exit(7)
+            call fs_sleep_ms(10)
+        end do
+        call process_exit(9)
+    end if
+    failed = .false.
+    if (fs_is_windows()) then
+        call native_windows_oracle()
+        if (failed) error stop 1
+        write (output_unit, '(a)') 'PASS: native child status survives idle sweep'
+        stop
+    end if
     inquire(file='/proc/self/stat', exist=linux)
     if (.not. linux) then
         write (output_unit, '(a)') 'SKIP: Linux subreaper oracle'
         stop
     end if
-    failed = .false.
     owner_pid = process_getpid()
-    write (pid_text, '(i0)') owner_pid
     write (start_text, '(i0)') mcp_process_start_time(owner_pid)
-    scratch = temporary_root()//'/fo-async-adopted-'//trim(pid_text)
+    call make_scratch('fo-async-adopted', scratch)
     pid_file = trim(scratch)//'/adopted.pid'
     log_file = trim(scratch)//'/active.log'
-    ierr = c_mkdir(trim(scratch)//c_null_char, 448_c_int)
-    call check(ierr == 0, 'creates a private scope directory')
-    if (ierr /= 0) error stop 1
+    call check(len(scratch) > 0, 'creates a private scope directory')
+    if (len(scratch) == 0) error stop 1
     call process_set_async_scope(trim(scratch), owner_pid, trim(start_text), ierr)
     call check(ierr == 0, 'registers the exact subreaper scope')
     if (ierr /= 0) error stop 1
@@ -101,6 +114,67 @@ program test_async_adopted_reap
     if (failed) error stop 1
     write (output_unit, '(a)') 'PASS: adopted child reaping'
 contains
+    subroutine native_windows_oracle()
+        character(:), allocatable :: executable, root, packed
+        type(process_scope_t) :: scope
+        integer(c_int64_t) :: birth
+        integer :: child, rc, child_status, count, iteration
+        logical :: resolved, ready, finished
+
+        call resolve_test_executable(executable, resolved)
+        call check(resolved, 'resolves the native child executable')
+        if (.not. resolved) return
+        call make_scratch('fo-native-idle-sweep', root)
+        if (len(root) == 0) error stop 1
+        call process_scope_begin(root, scope, rc)
+        call check(rc == 0, 'registers an owned native Job scope')
+        if (rc /= 0) error stop 1
+        packed = ''
+        count = 0
+        call argv_push(packed, count, executable)
+        call argv_push(packed, count, '--native-child')
+        call argv_push(packed, count, root)
+        call process_start_argv_logged(root, packed, count, root//'/child.log', &
+            child, rc)
+        call check(rc == 0 .and. child > 0, 'starts the native tracked child')
+        if (rc == 0 .and. child > 0) then
+            birth = mcp_process_start_time(child)
+            call check(birth > 0_c_int64_t, 'captures the exact native child birth')
+            do iteration = 1, 500
+                inquire(file=root//'/ready', exist=ready)
+                if (ready) exit
+                call fs_sleep_ms(10)
+            end do
+            call check(ready, 'native child reaches its real release barrier')
+            call process_reap_adopted_scope_zombies(rc)
+            call check(rc == 0, 'native idle sweep accepts its owned scope')
+            call process_poll_pid(child, finished, child_status)
+            call check(.not. finished .and. child_status == 0, &
+                'idle sweep preserves the still-active tracked child')
+            call check(mcp_process_identity_running(child, birth), &
+                'independent native child identity remains live after sweep')
+            call write_text(root//'/release', 'release')
+            do iteration = 1, 500
+                call process_poll_pid(child, finished, child_status)
+                if (finished) exit
+                call fs_sleep_ms(10)
+            end do
+            call check(finished .and. child_status == 7, &
+                'native poll preserves the exact nonzero child exit status')
+            if (.not. finished) then
+                call process_cancel_pid(child, rc)
+                call check(rc == 0, 'cleans the exact child after a bounded failure')
+            end if
+            call check(.not. mcp_process_identity_running(child, birth), &
+                'exact native child has exited before scope cleanup')
+        end if
+        call process_reap_adopted_scope_zombies(rc)
+        call check(rc == 0, 'native idle sweep succeeds after child completion')
+        call process_scope_end(scope, rc)
+        call check(rc == 0, 'drains native scoped resources before scratch cleanup')
+        if (rc == 0) call fs_remove_tree(root)
+    end subroutine native_windows_oracle
+
     subroutine spawn_adopted_child(path, child_pid)
         character(len=*), intent(in) :: path
         integer(c_int), intent(out) :: child_pid
