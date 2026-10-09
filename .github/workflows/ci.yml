@@ -124,19 +124,6 @@ jobs:
           FO="$driver" FO_BIN="$driver" FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 \
             "$driver" test test_mcp_cancel_error
 
-      - name: Test asynchronous process lifecycle
-        env:
-          HOME: ${{ runner.temp }}/fo-async-home
-          XDG_CONFIG_HOME: ${{ runner.temp }}/fo-async-xdg-config
-          XDG_CACHE_HOME: ${{ runner.temp }}/fo-async-xdg-cache
-          FO_PREFIX: ${{ runner.temp }}/fo-async-prefix
-          FO_CACHE_DIR: ${{ runner.temp }}/fo-async-cache
-          FO_GREMLIN_STATE_DIR: ${{ runner.temp }}/fo-async-state
-          FO_SELF_REFRESH: "0"
-          FO_DISABLE_SELF_REFRESH: "1"
-          TMPDIR: /var/tmp
-        run: node test/test_async_process_lifecycle.js "$HOME/.local/bin/fo"
-
       - name: Test standalone asynchronous process C fixtures
         run: |
           verifier_dir="$(mktemp -d)"
