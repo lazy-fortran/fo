@@ -44,13 +44,20 @@ interfaces. Fx `9e97af4` provides the native timed reader, with three transport
 gates and the recorded ASAN check passing. Promotion receipt:
 `/var/tmp/fo-complete-20261009/output/promotion-feb2318.json`.
 
-Current follow-up repairs Fo's dependency C-header planning, which incorrectly
-resolves transitive development dependencies. Canonical inventory capture and
-duplicate artifact/test cleanup are next. Darwin's frozen 143-case milestone
-and a fresh Windows native qualification remain active; the historical native
-Windows bootstrap hit a stack overflow while building current source, so its
-output is not yet a qualified candidate. These focused deliveries do not claim
-complete platform, FPM, deep-lint or scientific CMake coverage.
+Fo `66336cf` repairs dependency C-header planning: transitive development
+dependencies no longer supply headers or emit missing-manifest warnings.
+The original Fo consumer builds and both focused dependency cases pass.
+Fo `b85cb5d` reuses validated archive bytes through the shared action receipt
+authority. Archive publication, metadata and GNU backend gates pass; independent
+parent oracles detect repeated warm archiver work and stale archiver-image reuse.
+Their promotion receipts are beside the earlier delivery evidence.
+
+Canonical inventory capture and duplicate artifact/test cleanup are next.
+Darwin's current frozen full-suite milestone and fresh Windows native
+qualification remain active. The native Windows candidate reproduces a default
+stack overflow during self-build; a measured caller-buffer heap repair is under
+verification. These focused deliveries do not claim complete platform, FPM,
+deep-lint or scientific CMake coverage.
 
 The earlier development deployment remains recorded below for its exact scope.
 
