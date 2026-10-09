@@ -4,7 +4,8 @@ program test_mcp_gremlin
     use fo_test_harness, only: write_text, read_text, append_text, file_exists
     use fo_test_harness, only: make_directory, make_symlink, assert_true
     use fo_test_harness, only: assert_equal_string, assert_equal_integer
-    use fo_test_harness, only: assert_contains, finish_assertions, run_process, current_directory
+    use fo_test_harness, only: assert_contains, assert_process_ok, finish_assertions, &
+        run_process, current_directory
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, gremlin_field, gremlin_run
     use fo_test_gremlin_oracle, only: gremlin_write_case, gremlin_wait_ms
     use fo_test_gremlin_oracle, only: gremlin_gate_create, gremlin_wait_file, gremlin_stop_lane
@@ -640,7 +641,7 @@ contains
             call list_add(command, cwd//'/test-fixtures/c/cache_snapshot.c')
             call list_add(command, '-o'); call list_add(command, snapshot_image)
             call run_process(command, project, result, timeout_ms=30000)
-            call assert_equal_integer(result%exit_code, 0, 'builds native metadata enumerator')
+            call assert_process_ok(result, 'builds native metadata enumerator')
         end if
         command = string_list_t()
         call list_add(command, snapshot_image); call list_add(command, cache)
