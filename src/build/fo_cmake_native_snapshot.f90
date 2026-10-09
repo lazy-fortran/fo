@@ -7,8 +7,10 @@ module fo_cmake_native_snapshot
                          json_object_end, json_key_string, json_key, json_array_start, &
                              json_array_end, json_value_string, json_to_string
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
-               json_parser_next, JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, &
-                    JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_ERROR, JSON_END_OF_INPUT
+        json_parser_next, PARSE_OBJECT_START => JSON_OBJECT_START, &
+        PARSE_OBJECT_END => JSON_OBJECT_END, PARSE_ARRAY_START => JSON_ARRAY_START, &
+        PARSE_ARRAY_END => JSON_ARRAY_END, PARSE_KEY => JSON_KEY, &
+        JSON_STRING, JSON_ERROR, JSON_END_OF_INPUT
     implicit none
     private
     public :: native_snapshot_read, native_snapshot_write
@@ -56,7 +58,7 @@ contains
         type(json_parser_t) :: parser
         type(json_event_t) :: event
         character(:), allocatable :: text, key, section
-        integer :: ierr, depth, n
+        integer :: ierr, depth
         logical :: exists, schema
       inquire (file=context%source_root//'/.fo-cmake/native-context.json', exist=exists)
         if (.not. exists) return
@@ -76,13 +78,13 @@ contains
         do
             call json_parser_next(parser, event)
             select case (event%event_type)
-            case (JSON_OBJECT_START, JSON_ARRAY_START)
+            case (PARSE_OBJECT_START, PARSE_ARRAY_START)
                 depth = depth + 1
                 if (depth == 2) section = key
-            case (JSON_OBJECT_END, JSON_ARRAY_END)
+            case (PARSE_OBJECT_END, PARSE_ARRAY_END)
                 depth = depth - 1
                 if (depth == 1) section = ''
-            case (JSON_KEY)
+            case (PARSE_KEY)
                 key = event%string_val
             case (JSON_STRING)
                 if (depth == 1) then
@@ -118,14 +120,11 @@ contains
                             return
                         end if
                         if (section == 'configure_arguments') then
-                            context%extra_args = [context%extra_args, repeat(' ', 4096)]
-                            n = size(context%extra_args)
-                            context%extra_args(n) = event%string_val
+                            context%extra_args = [character(len=4096) :: &
+                                context%extra_args, event%string_val]
                         else
-                            context%build_targets = [context%build_targets, &
-                                repeat(' ', 4096)]
-                            n = size(context%build_targets)
-                            context%build_targets(n) = event%string_val
+                            context%build_targets = [character(len=4096) :: &
+                                context%build_targets, event%string_val]
                         end if
                     case default
                         plan%error = 'native CMake: unsupported frozen context section'

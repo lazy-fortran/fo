@@ -636,7 +636,7 @@ contains
             call native_cmake_configure(backend%cmake, native_plan)
             ierr = 1
             message = native_plan%error
-            if (len(message) > 0) return
+            if (len_trim(message) > 0) return
             if (size(native_plan%tests) > size(names)) then
                 message = 'native registered test inventory exceeds capacity'
                 return

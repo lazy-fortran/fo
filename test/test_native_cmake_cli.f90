@@ -3,7 +3,7 @@ program test_native_cmake_cli
                           make_scratch, make_directory, write_text, environment_value, &
                     run_process, assert_process_ok, assert_true, assert_equal_integer, &
           assert_equal_string, assert_file_exists, assert_file_absent, finish_assertions
-    use fo_test_harness, only: remove_tree, remove_path
+    use fo_test_harness, only: remove_tree, remove_path, resolve_test_executable
     use fo_test_cli, only: resolve_driver, run_fo, parse_json_report
     use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_run, &
                                       gremlin_field, gremlin_wait_ms, gremlin_stop_lane
@@ -12,15 +12,16 @@ program test_native_cmake_cli
     implicit none
     character(:), allocatable :: driver, scratch, project, cache, self, cmake_text
     character(:), allocatable :: state, owner, first_generation, previous_generation
-    character(len=4096) :: executable
     character(len=*), parameter :: nl = new_line('a')
     type(string_list_t) :: args, env
     type(process_result_t) :: process
     type(json_value_t) :: report, tests, entry
     integer :: phase
+    logical :: executable_ok
 
-    call get_command_argument(0, executable)
-    self = trim(executable)
+    call resolve_test_executable(self, executable_ok)
+    call assert_true(executable_ok, 'resolves the native test executable')
+    if (.not. executable_ok) call finish_assertions()
     if (index(self, '/cmake') > 0 .or. index(self, '/ctest') > 0 .or. &
         index(self, achar(92)//'cmake') > 0 .or. &
         index(self, achar(92)//'ctest') > 0) then
@@ -61,7 +62,7 @@ program test_native_cmake_cli
   'if(index(compiler_options(),"-ffpe-trap=")==0)error stop "project flag lost"'//nl// &
         'if(index(compiler_options(),"-fcheck=")>0)error stop "invented checks"'//nl// &
         'if(index(compiler_options(),"-O3")==0)error stop "Release profile lost"'//nl// &
-                    'if(index(compiler_options(),"170003")==0)'//nl// &
+        'if(index(compiler_options(),"170003")==0) &'//nl// &
                     'error stop "captured environment/compiler flags lost"'//nl// &
                     'print *,"numerical-oracle",value()'//nl//'end program'//nl)
     call write_text(project//'/invalid.f90', 'unselected source must not compile')
@@ -245,14 +246,17 @@ contains
         call list_add(request, project)
         call list_add(request, '--lane')
         call list_add(request, 'native-numeric')
+        call list_add(request, '--session')
+        call list_add(request, owner)
         call list_add(request, '--generation')
         call list_add(request, first_generation)
         call list_add(request, '--case')
         call list_add(request, 'numerical_oracle')
     call gremlin_run(driver, project, cache, state, request, process, replay_env, 60000)
+        if (process%exit_code /= 0) write (*, '(a)') process%stdout//process%stderr
         call assert_process_ok(process, 'stopped owner replays frozen native inputs')
         call parse_json_report(process, reply, 'native frozen replay')
-        call assert_equal_string(gremlin_field(reply, 'last_outcome'), 'PASS', &
+        call assert_equal_string(gremlin_field(reply, 'state'), 'PASS', &
             'frozen numerical runtime and compiler flags survive live source/env edits')
         call assert_file_absent(scratch//'/delegated.ran', &
              'frozen replay retains the captured native route despite changed selector')

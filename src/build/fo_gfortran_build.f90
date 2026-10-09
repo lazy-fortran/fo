@@ -2795,6 +2795,8 @@ contains
             if (d == 0) then
                 if (.not. config%auto_executables) cycle
                 root = config%app_dir
+                inquire (file=trim(project_dir)//'/'//trim(root), exist=exists)
+                if (.not. exists) cycle
             else
                 root = config%exes(d)%source_dir
                 call join_path(project_dir, trim(root)//'/'// &

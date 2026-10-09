@@ -575,7 +575,7 @@ static int fo_resolve_executable(char *candidate, size_t capacity) {
 
 int fo_c_find_executable(const char *command, char *out, int cap) {
     const char *path_env, *start, *end;
-    char candidate[PATH_MAX];
+    char candidate[PATH_MAX], resolved[PATH_MAX];
     size_t dir_len;
 
     if (!fo_has(command) || out == NULL || cap <= 0) return -1;
@@ -587,9 +587,9 @@ int fo_c_find_executable(const char *command, char *out, int cap) {
         if (strlen(command) >= sizeof(candidate)) return -1;
         strcpy(candidate, command);
         if (fo_resolve_executable(candidate, sizeof(candidate)) != 0) return -1;
-        if (realpath(candidate, candidate) == NULL) return -1;
-        if ((int)strlen(candidate) + 1 > cap) return -1;
-        strcpy(out, candidate);
+        if (realpath(candidate, resolved) == NULL) return -1;
+        if ((int)strlen(resolved) + 1 > cap) return -1;
+        strcpy(out, resolved);
         return 0;
     }
     if (strpbrk(command, " \t\r\n") != NULL) return -1;
@@ -615,7 +615,6 @@ int fo_c_find_executable(const char *command, char *out, int cap) {
                 return -1;
         }
         if (fo_resolve_executable(candidate, sizeof(candidate)) == 0) {
-            char resolved[PATH_MAX];
             if (realpath(candidate, resolved) == NULL) return -1;
             if ((int)strlen(resolved) + 1 > cap) return -1;
             strcpy(out, resolved);

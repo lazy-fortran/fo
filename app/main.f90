@@ -1672,6 +1672,7 @@ contains
             lint_files, lint_compiler, lint_dedup_warnings, collect_fortran_sources, &
             lint_all_json, lint_fix_dir, MAX_FINDINGS, MAX_WARNINGS
         use fo_lint_deep, only: lint_deep_run, lint_deep_print
+        use fo_process, only: process_getcwd
         use fx_path, only: path_normalize, path_is_absolute
         type(backend_t) :: b
         type(lint_finding_t), allocatable :: findings(:)

@@ -22,7 +22,7 @@ contains
         call get_environment_variable('FO_CMAKE_NATIVE', value, status=status)
         native_cmake_selected = status == 0 .and. trim(value) == '1'
         if (present(root)) then
-            inquire (file=root//'/.fo-cmake/native-context.json', &
+            inquire (file=trim(root)//'/.fo-cmake/native-context.json', &
                      exist=native_cmake_selected)
             if (status == 0 .and. trim(value) == '1') native_cmake_selected = .true.
         end if

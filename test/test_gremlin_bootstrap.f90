@@ -3,7 +3,7 @@ program test_gremlin_bootstrap
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_directory, write_text, read_text, process_alive
     use fo_test_harness, only: run_process
-    use fo_test_harness, only: file_exists
+    use fo_test_harness, only: file_exists, remove_path
     use fo_test_harness, only: assert_true, assert_equal_string, assert_equal_integer
     use fo_test_harness, only: finish_assertions
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_run, gremlin_json

@@ -1,5 +1,10 @@
+#if defined(__APPLE__)
+/* Darwin hides O_NOFOLLOW and mkdtemp behind strict POSIX feature macros. */
+#define _DARWIN_C_SOURCE
+#else
 #define _XOPEN_SOURCE 700
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>

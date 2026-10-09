@@ -135,7 +135,8 @@ program test_install_help
     call assert_true(executable_permissions(sentinel//c_null_char) == 1, &
         'sentinel has real owner read/write/execute and public read/execute permissions')
     original_permissions = permissions_of(sentinel)
-    call fingerprint(project, before_sum, before_mixed, before_count, before_ok)
+    call fs_tree_fingerprint(project, .true., before_sum, before_mixed, &
+                             before_count, before_ok)
     call assert_true(before_ok, 'project tree can be fingerprinted')
     call fingerprint(prefix, prefix_sum, prefix_mixed, prefix_count, before_ok)
     call assert_true(before_ok, 'isolated installation tree can be fingerprinted')
@@ -219,7 +220,8 @@ program test_install_help
     call assert_equal_integer(result%exit_code, 0, 'installed application really executes outside its project')
     call assert_equal_string(result%stdout, 'installed native application: 16903'//new_line('a'), &
         'installed application runs authored code with exact argv and environment values')
-    call fingerprint(project, after_sum, after_mixed, after_count, after_ok)
+    call fs_tree_fingerprint(project, .true., after_sum, after_mixed, &
+                             after_count, after_ok)
     call assert_true(after_ok .and. after_count == before_count .and. &
         after_sum == before_sum .and. after_mixed == before_mixed, &
         'explicit install does not alter project source files')
@@ -278,7 +280,8 @@ contains
         call assert_true(tree_ok .and. count_value == home_count .and. &
             sum_value == home_sum .and. mixed_value == home_mixed, &
             trim(context)//': isolated HOME tree is unchanged')
-        call fingerprint(project, sum_value, mixed_value, count_value, tree_ok)
+        call fs_tree_fingerprint(project, .true., sum_value, mixed_value, &
+                                 count_value, tree_ok)
         call assert_true(tree_ok .and. count_value == before_count .and. &
             sum_value == before_sum .and. mixed_value == before_mixed, &
             trim(context)//': project tree is unchanged')

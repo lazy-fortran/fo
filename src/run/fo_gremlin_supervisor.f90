@@ -2645,7 +2645,9 @@ contains
         type(backend_t) :: backend
         backend = detect_backend(generation%project_root)
         project = generation%project_root
-        if (backend%kind == BACKEND_CMAKE) project = generation%build_project_root
+        if (backend%kind == BACKEND_CMAKE .and. &
+            len_trim(generation%build_project_root) > 0) &
+            project = generation%build_project_root
     end function campaign_project
 
     subroutine discover_campaign(project_dir, generation_id, session, request, &
