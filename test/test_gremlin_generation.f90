@@ -314,6 +314,7 @@ program test_gremlin_generation
 
     call check_directory_read_errors()
     call check_trailing_space_paths()
+    call check_chained_file_aliases()
 
     call fs_write_text(trim(project)//'/include/config.inc', 'include_two')
     call generation_capture(trim(project), trim(cache), context, include_changed, &
@@ -509,6 +510,59 @@ program test_gremlin_generation
     end if
 
 contains
+
+    subroutine check_chained_file_aliases()
+        character(len=512) :: fixture, local_cache, link, middle
+        character(len=64), parameter :: invalid_targets(4) = &
+            [character(len=64) :: 'libanswer.dylib', '../../outside-input.txt', &
+                                 'missing.dylib', '../build/ignored.o']
+        type(generation_t) :: captured
+        integer :: code, before, i
+        integer(c_int) :: rc
+        character(len=256) :: diagnostic
+
+        fixture = trim(root)//'/chain-project'
+        local_cache = trim(root)//'/chain-cache'
+        call fs_make_dir(trim(fixture)//'/lib')
+        call fs_make_dir(trim(fixture)//'/build')
+        call fs_write_text(trim(fixture)//'/fpm.toml', 'name="chain_fixture"')
+        call fs_write_text(trim(fixture)//'/lib/libanswer.1.0.dylib', 'answer=42')
+        call fs_write_text(trim(fixture)//'/build/ignored.o', 'excluded')
+        middle = trim(fixture)//'/lib/libanswer.1.dylib'
+        link = trim(fixture)//'/lib/libanswer.dylib'
+        rc = c_symlink('libanswer.1.0.dylib'//c_null_char, trim(middle)//c_null_char)
+        call check(rc == 0, 'prepare versioned library alias')
+        rc = c_symlink('libanswer.1.dylib'//c_null_char, trim(link)//c_null_char)
+        call check(rc == 0, 'prepare chained library alias')
+        call generation_capture(trim(fixture), trim(local_cache), context, &
+            captured, code, diagnostic)
+        call check(code == 0, 'valid two-hop in-root library chain is captured')
+        if (code == 0) then
+            call check(file_equals(trim(captured%project_root)// &
+                '/lib/libanswer.dylib', 'answer=42'), &
+                'captured library chain reaches its captured regular target')
+            call check(link_target_equals(trim(captured%project_root)// &
+                '/lib/libanswer.dylib', 'libanswer.1.dylib'), &
+                'capture preserves the outer raw library alias')
+            call check(link_target_equals(trim(captured%project_root)// &
+                '/lib/libanswer.1.dylib', 'libanswer.1.0.dylib'), &
+                'capture preserves the inner raw library alias')
+        end if
+        before = count_generation_roots(trim(local_cache))
+        do i = 1, size(invalid_targets)
+            rc = c_unlink(trim(middle)//c_null_char)
+            call check(rc == 0, 'remove previous middle alias')
+            rc = c_symlink(trim(invalid_targets(i))//c_null_char, &
+                trim(middle)//c_null_char)
+            call check(rc == 0, 'prepare invalid middle alias')
+            call generation_capture(trim(fixture), trim(local_cache), context, &
+                captured, code, diagnostic)
+            call check(code /= 0, &
+                'reject chained cycle/escape/dangling/excluded target '//int_text(i))
+            call check(count_generation_roots(trim(local_cache)) == before, &
+                'invalid chain publishes no generation')
+        end do
+    end subroutine check_chained_file_aliases
 
     subroutine check_directory_read_errors()
         integer(c_int) :: rc

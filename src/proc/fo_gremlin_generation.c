@@ -219,37 +219,69 @@ static int relative_path_is_excluded(const char *rel, int exclusion_policy) {
     return 0;
 }
 
-static int open_regular_at(int root_fd, const char *rel, struct stat *st) {
-    char copy[8192];
+static int open_regular_at(int root_fd, const char *rel, struct stat *st,
+                           int exclusion_policy) {
+    char copy[8192], current[8192], raw[8192], resolved[8192];
     char *part, *next;
-    int dir_fd = dup(root_fd), file_fd = -1;
-    if (dir_fd < 0) return -1;
-    if (strlen(rel) >= sizeof(copy)) {
-        close(dir_fd);
+    int links;
+    if (strlen(rel) >= sizeof(current)) {
         errno = ENAMETOOLONG;
         return -1;
     }
-    strcpy(copy, rel);
-    part = copy;
-    while ((next = strchr(part, '/')) != NULL) {
-        *next = '\0';
-        file_fd = openat(dir_fd, part,
-                         O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    strcpy(current, rel);
+    /* Resolve only file aliases, with a bounded hop count. Every hop retains
+     * root confinement, output exclusions and no-follow directory traversal. */
+    for (links = 0; links < 40; ++links) {
+        int dir_fd = dup(root_fd), file_fd;
+        if (dir_fd < 0) return -1;
+        strcpy(copy, current);
+        part = copy;
+        while ((next = strchr(part, '/')) != NULL) {
+            *next = '\0';
+            file_fd = openat(dir_fd, part,
+                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            close(dir_fd);
+            if (file_fd < 0) return -1;
+            dir_fd = file_fd;
+            part = next + 1;
+        }
+        file_fd = openat(dir_fd, part, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (file_fd < 0) {
+            int saved = errno;
+            ssize_t n;
+            if (saved != ELOOP) {
+                close(dir_fd);
+                errno = saved;
+                return -1;
+            }
+            n = readlinkat(dir_fd, part, raw, sizeof(raw) - 1);
+            saved = errno;
+            close(dir_fd);
+            if (n < 0 || (size_t)n >= sizeof(raw) - 1) {
+                errno = n < 0 ? saved : ENAMETOOLONG;
+                return -1;
+            }
+            raw[n] = '\0';
+            if (normalize_link_target(current, raw, resolved,
+                                      sizeof(resolved)) != 0) return -1;
+            if (relative_path_is_excluded(resolved, exclusion_policy)) {
+                errno = EPERM;
+                return -1;
+            }
+            strcpy(current, resolved);
+            continue;
+        }
         close(dir_fd);
-        if (file_fd < 0) return -1;
-        dir_fd = file_fd;
-        part = next + 1;
-    }
-    file_fd = openat(dir_fd, part, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    close(dir_fd);
-    if (file_fd < 0) return -1;
-    if (fstat(file_fd, st) != 0 || !S_ISREG(st->st_mode)) {
+        if (fstat(file_fd, st) != 0 || !S_ISREG(st->st_mode)) {
+            close(file_fd);
+            errno = EINVAL;
+            return -1;
+        }
         close(file_fd);
-        errno = EINVAL;
-        return -1;
+        return 0;
     }
-    close(file_fd);
-    return 0;
+    errno = ELOOP;
+    return -1;
 }
 
 static int write_link_path(FILE *manifest, const char *rel,
@@ -445,7 +477,7 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
                 if (normalize_link_target(child, link_target, resolved,
                                           sizeof(resolved)) != 0 ||
                     relative_path_is_excluded(resolved, exclusion_policy) ||
-                    open_regular_at(root_fd, resolved, &st) != 0) {
+                    open_regular_at(root_fd, resolved, &st, exclusion_policy) != 0) {
                     /* Delegated CMake checks referenced File API paths
                      * against the resulting inventory. Unused invalid aliases
                      * are not inputs and must not escape or block capture. */
