@@ -69,6 +69,7 @@ program test_lint_deep_cli
     call list_add(environment, 'PATH='//binary//':'//native_path)
     call list_add(environment, 'FO_GREMLIN_STATE_DIR='//join_path(scratch, 'state'))
     call test_native_json()
+    call test_cmake_without_manifest()
 
     call lint(.true., .true.)
     call assert_equal_integer(result%exit_code, 1, &
@@ -212,6 +213,55 @@ program test_lint_deep_cli
     call finish_assertions()
 
 contains
+
+    subroutine test_cmake_without_manifest()
+        character(:), allocatable :: root, test_source, parse_error
+        type(string_list_t) :: selected
+        type(process_result_t) :: child
+        type(json_value_t) :: output, warnings, warning, value
+        logical :: parsed
+
+        root = join_path(scratch, 'cmake-project')
+        test_source = join_path(root, 'test/test_cannot_fail.f90')
+        call write_text(join_path(root, 'CMakeLists.txt'), &
+            'cmake_minimum_required(VERSION 3.20)'//new_line('a')// &
+            'project(lint_fixture LANGUAGES Fortran)'//new_line('a'))
+        call write_text(test_source, &
+            'program test_cannot_fail'//new_line('a')// &
+            'implicit none'//new_line('a')// &
+            'print *, "some tests failed"'//new_line('a')// &
+            'end program test_cannot_fail'//new_line('a'))
+        call write_text(join_path(root, 'src/tool.f90'), &
+            'program tool'//new_line('a')// &
+            'implicit none'//new_line('a')// &
+            'print *, "done"'//new_line('a')// &
+            'end program tool'//new_line('a'))
+        call list_add(selected, 'lint')
+        call list_add(selected, '--json')
+        call list_add(selected, 'test/test_cannot_fail.f90')
+        call list_add(selected, 'src/tool.f90')
+        call run_fo(driver, selected, root, join_path(scratch, 'cmake-cache'), &
+            child, environment, timeout_ms=30000)
+        call assert_equal_integer(child%exit_code, 1, &
+            'CMake lint reports the deliberately vacuous test')
+        call json_parse(child%stdout, output, parsed, parse_error)
+        call assert_true(parsed, 'CMake lint returns its JSON diagnostic')
+        if (parsed) then
+            warnings = json_member(output, 'warnings')
+            call assert_equal_integer(json_size(warnings), 1, &
+                'CMake lint uses default test/ and ignores the src/ tool')
+            warning = json_element(warnings, 1)
+            value = json_member(warning, 'message')
+            call assert_contains(json_string_value(value), 'cannot fail the build', &
+                'CMake lint reaches actual Fortran failure-path analysis')
+            value = json_member(warning, 'file')
+            call assert_equal_string(json_string_value(value), test_source, &
+                'CMake lint identifies the defective test source')
+        end if
+        call assert_not_contains(child%stderr, &
+            'cannot open dependency/project manifest', &
+            'CMake lint accepts the absent optional fpm manifest')
+    end subroutine test_cmake_without_manifest
 
     subroutine test_subdirectory_configuration()
         character(:), allocatable :: directory, counter, subconfig

@@ -1013,10 +1013,13 @@ contains
 
         type(fpm_config_t) :: config
         integer :: ierr
+        logical :: has_manifest
 
+        test_dir = 'test'
+        inquire (file=trim(dir)//'/fpm.toml', exist=has_manifest)
+        if (.not. has_manifest) return
         call fpm_config_init(config)
         call fpm_config_parse(dir, config, ierr)
-        test_dir = 'test'
         if (ierr == 0 .and. len_trim(config%test_dir) > 0) &
             test_dir = trim(config%test_dir)
     end subroutine project_test_dir
