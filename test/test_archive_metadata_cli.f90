@@ -97,7 +97,9 @@ program test_archive_metadata_cli
     call write_text(join_path(dependency, 'src/provider.f90'), provider_source(14))
     call expect_value(14, 'controlled-cache', 'build archive for duplicate-listing preflight')
     call verify_duplicate_listing(scratch)
-    call expect_rejected('duplicate', 14, 'duplicate expected object')
+    ! The changed helper mode is not an archive input. Change the provider's
+    ! object so publication must inspect the independently verified bad listing.
+    call expect_rejected('duplicate', 17, 'duplicate expected object')
     call expect_rejected('corrupt-member', 15, 'archive member differs from its object')
     call expect_rejected('truncate', 16, 'truncated archive is rejected')
     call verify_missing_native_index()
