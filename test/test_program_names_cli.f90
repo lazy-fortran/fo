@@ -18,7 +18,7 @@ program test_program_names_cli
     type(process_result_t) :: result
     type(string_list_t) :: arguments, environment
     type(json_value_t) :: report, tests, entry, field
-    character(len=192) :: source_lines(12)
+    character(len=192) :: source_lines(15)
     character(:), allocatable :: number
     integer :: i, pass, j, found
 
@@ -48,13 +48,16 @@ program test_program_names_cli
         source_lines(4) = 'program private_name'
         source_lines(5) = 'use support_' // number // ', only: value'
         source_lines(6) = 'implicit none'
-        source_lines(7) = 'integer, external :: external_bridge'
-        source_lines(8) = 'integer :: unit'
-        source_lines(9) = "open(newunit=unit, file='" // trim(names(i)) // &
+        source_lines(7) = 'interface'
+        source_lines(8) = 'integer function external_bridge()'
+        source_lines(9) = 'end function external_bridge'
+        source_lines(10) = 'end interface'
+        source_lines(11) = 'integer :: unit'
+        source_lines(12) = "open(newunit=unit, file='" // trim(names(i)) // &
             ".receipt', status='replace')"
-        source_lines(10) = "write(unit, '(i0)') value() + external_bridge()"
-        source_lines(11) = 'close(unit)'
-        source_lines(12) = 'end program private_name'
+        source_lines(13) = "write(unit, '(i0)') value() + external_bridge()"
+        source_lines(14) = 'close(unit)'
+        source_lines(15) = 'end program private_name'
         call write_lines(join_path(scratch, 'test/' // trim(names(i)) // '.f90'), &
             source_lines)
     end do
