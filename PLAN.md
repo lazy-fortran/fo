@@ -13,51 +13,44 @@ verification and regular gated main pushes. One controller integrates parallel
 source workers; each host admits one heavy campaign. Full platform and consumer
 qualification remain completion gates in this delivery.
 
-Main `7a434fb` removes all thirteen remaining checked-in Python/JavaScript
-fixtures and their redundant CI launches. Useful native behavioral coverage
-replaces the Python reproducers and reuses the existing MCP, journal and process
-fixtures. The same increment repairs MCP envelope validation, native manifest
-debug information, required slow-test impact and frozen CMake reproduction.
-It also deletes the unused debug-flag compatibility helper and its shallow tests.
-The combined diff removes 1880 maintained lines across 34 files.
+Published Fo `51249a6`, Fx `38c4591` and FortFront `8eced2d` are the current
+baseline. Fo-owned fixtures and orchestration have no Python/JavaScript runtime;
+the offline qualification image contains neither interpreter. Native protocol,
+process, recovery, DWARF, slow-impact and frozen-CMake oracles replace the removed
+fixtures. Resident increments completed 23/23, 13/13 and 12/12 required cases on
+their own recorded immutable generations. Canonical input capture, dependency
+C-header planning and duplicate artifact/test cleanup are delivered.
 
-The exact Linux candidate passes 23/23 required cases on one immutable resident
-generation in offline, unprivileged container `fo-complete-linux-20261009`.
-The qualification image contains neither Python nor Node. Native architecture
-filter probes and actual i386/x32 containment probes pass separately. The new
-MCP, DWARF and affected-slow oracles detect their intended parent failures.
-Receipt, driver identity and promotion evidence are under
-`/var/tmp/fo-complete-20261009/output`; the promotion receipt is
-`promotion-7a434fb.json`. This is a focused gate, not a complete platform suite.
+Archive reuse validates actual bytes, modes, object vectors and tool keys.
+`0aacb44` makes Darwin archive timestamps deterministic in the archiver child.
+`af872bb` repairs partial preparation falsely certifying stale test executables;
+Linux's four focused gates and Darwin's retained warm-cache change/reject/restore
+oracle pass. Fx `38c4591` repairs publication from paths longer than 512 bytes;
+its parent selects the wrong prefix file and the independent fixed oracle passes.
+Promotion receipts and exact driver identities are under
+`/var/tmp/fo-complete-20261009/output`.
 
-Darwin qualification is active on authorized faepmac1. Remaining source workers
-own canonical capture simplification, safe retention, dependency completeness,
-cleanup action history, idle MCP progress and native Windows fixtures. Deep lint
-also requires the witnessed owning Fluff configuration/import repair. Each
-candidate still needs combined local verification before promotion.
+`51249a6` declares the native C fixture directory and the actual headers used
+by its runtime provider. Both frozen-view portability/watch gates pass on Linux
+and Darwin. The prior Darwin full milestone retains 125 PASS, three FAIL, one
+TIMEOUT, one INFRA_ERROR, one CANCELLED and eleven UNKNOWN on its exact source;
+these outcomes remain distinct from the focused repair.
 
-Fo `feb2318` is now published after 13/13 combined resident cases pass on fixed
-generation `8b472de606fb`, using digest-pinned driver `fcaabca506e1`. Pending MCP
-work progresses while clients are idle; failed fixtures retain their evidence
-outside owned temporary scopes; child/execution-view fixtures use native Windows
-interfaces. Fx `9e97af4` provides the native timed reader, with three transport
-gates and the recorded ASAN check passing. Promotion receipt:
-`/var/tmp/fo-complete-20261009/output/promotion-feb2318.json`.
+The native Windows candidate now builds Fo through its pinned image with the ordinary
+2 MiB stack. The combined repair uses measured heap buffers, binary archive
+extraction, owned response files for the actual 512-object command and bounded
+PE resource validation. C/Fortran execution and the independent stale-test
+change/reject/restore oracle pass. The current fixture increment is under
+verification; default ownership and CRLF parsing are repaired through existing
+native authorities. Component and focused receipts retain their exact scope.
 
-Fo `66336cf` repairs dependency C-header planning: transitive development
-dependencies no longer supply headers or emit missing-manifest warnings.
-The original Fo consumer builds and both focused dependency cases pass.
-Fo `b85cb5d` reuses validated archive bytes through the shared action receipt
-authority. Archive publication, metadata and GNU backend gates pass; independent
-parent oracles detect repeated warm archiver work and stale archiver-image reuse.
-Their promotion receipts are beside the earlier delivery evidence.
-
-Canonical inventory capture and duplicate artifact/test cleanup are next.
-Darwin's current frozen full-suite milestone and fresh Windows native
-qualification remain active. The native Windows candidate reproduces a default
-stack overflow during self-build; a measured caller-buffer heap repair is under
-verification. These focused deliveries do not claim complete platform, FPM,
-deep-lint or scientific CMake coverage.
+Current source candidates cover shared ordinary/Gremlin test execution and
+accepted execution receipts, safe retention and pressure reporting, canonical
+executable publication, native manifest arrays, cleanup history, deep lint with
+the owning Fluff repair, process environment vectors and finite native CMake
+profiles. Each needs its combined behavioral gate before publication. Darwin's
+full fixed-version suite and native Windows qualification are active. Full
+platform, standalone FPM, deep-lint and scientific profile matrices remain open.
 
 The earlier development deployment remains recorded below for its exact scope.
 
