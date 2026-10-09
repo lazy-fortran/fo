@@ -846,10 +846,18 @@ contains
         integer, intent(in) :: group, item
         character(len=512) :: path
         character(len=16) :: group_text
-        integer :: bit
+        character(len=32) :: suffix
+        integer :: bit, components
 
+        write (group_text, '(i0)') group
+        suffix = '/payload-'//trim(group_text)//'.dat'
+        ! Keep all distinguishing bits; only redundant slash padding may shrink
+        ! when a private execution TMPDIR gives the fixture a longer root.
+        components = min(130, &
+            (len(path) - len_trim(root) - len_trim(suffix)) / 3)
+        if (components < 10) error stop 'stat memo alias root leaves no room for 10 distinct bits'
         path = trim(root)
-        do bit = 1, 130
+        do bit = 1, components
             if (bit <= 10) then
                 if (btest(item, bit - 1)) then
                     path = trim(path)//'/./'
@@ -860,18 +868,20 @@ contains
                 path = trim(path)//'///'
             end if
         end do
-        write (group_text, '(i0)') group
-        path = trim(path)//'/payload-'//trim(group_text)//'.dat'
+        path = trim(path)//trim(suffix)
     end function alias_path
 
     function large_alias_path(root, item) result(path)
         character(len=*), intent(in) :: root
         integer, intent(in) :: item
         character(len=512) :: path
-        integer :: bit
+        integer :: bit, components
 
+        components = min(130, &
+            (len(path) - len_trim(root) - len('/payload.dat')) / 3)
+        if (components < 14) error stop 'stat memo alias root leaves no room for 14 distinct bits'
         path = trim(root)
-        do bit = 1, 130
+        do bit = 1, components
             if (bit <= 14) then
                 if (btest(item, bit - 1)) then
                     path = trim(path)//'/./'
