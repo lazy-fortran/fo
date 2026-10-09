@@ -7,23 +7,40 @@ program test_dev_dependency_c_cli
     use fo_test_cli, only: resolve_driver, run_fo, run_external
     implicit none
 
-    character(:), allocatable :: driver, scratch, consumer, dependency, cache
+    character(:), allocatable :: driver, scratch, consumer, dependency, cache, regular
     type(process_result_t) :: result
     type(string_list_t) :: arguments, environment
-    character(len=88) :: test_lines(8), production_lines(4)
+    character(len=88) :: test_lines(8), production_lines(11)
     character(len=1), parameter :: nl = new_line('a')
 
     call resolve_driver(driver)
     call make_scratch('fo-dev-dependency-c', scratch)
     consumer = join_path(scratch, 'consumer')
     dependency = join_path(consumer, 'test-support/dev')
+    regular = join_path(scratch, 'regular')
     cache = join_path(scratch, 'empty-cache')
     call list_add(environment, 'FO_JOBS=1')
     call list_add(environment, 'FO_DEBUG_LINKS=1')
     call write_text(join_path(consumer, 'fpm.toml'), &
-        'name = "dev_consumer"' // nl // '[dev-dependencies]' // nl // &
+        'name = "dev_consumer"' // nl // '[dependencies]' // nl // &
+        'regularhelper = { path = "../regular" }' // nl // &
+        '[dev-dependencies]' // nl // &
         'devhelper = { path = "test-support/dev" }' // nl)
-    call write_text(join_path(dependency, 'fpm.toml'), 'name = "devhelper"' // nl)
+    call write_text(join_path(regular, 'fpm.toml'), &
+        'name = "regularhelper"' // nl // '[dev-dependencies]' // nl // &
+        'ignored_dev = { path = "test-support/ignored_transitive_dev" }' // nl)
+    call write_text(join_path(regular, 'include/regular.h'), &
+        '#define REGULAR_VALUE 13' // nl)
+    call write_text(join_path(regular, 'src/regular.c'), &
+        '#include "regular.h"' // nl // &
+        'int regular_value(void) { return REGULAR_VALUE; }' // nl)
+    call write_text(join_path(dependency, 'fpm.toml'), &
+        'name = "devhelper"' // nl // '[dev-dependencies]' // nl // &
+        'transitive_dev_only = { path = "test-only" }' // nl)
+    call write_text(join_path(dependency, 'test-only/fpm.toml'), &
+        'name = "transitive_dev_only"' // nl)
+    call write_text(join_path(dependency, 'test-only/include/transitive_dev_only.h'), &
+        '#error Transitive development header must not be consumed' // nl)
     call write_text(join_path(dependency, 'include/value.h'), '#define DEV_VALUE 21' // nl)
     call write_shim(.false.)
     call write_helper(0)
@@ -33,7 +50,10 @@ program test_dev_dependency_c_cli
         "write(unit, '(i0)') current_value()", 'close(unit)', 'end program test_probe']
     call write_lines(join_path(consumer, 'test/test_probe.f90'), test_lines)
     production_lines = [character(len=88) :: &
-        'program production', 'implicit none', "print '(a)', 'production'", &
+        'program production', 'use iso_c_binding, only: c_int', 'implicit none', &
+        'interface', 'integer(c_int) function regular_value() bind(C)', &
+        'import c_int', 'end function', 'end interface', &
+        'if (regular_value() /= 13) error stop 2', "print '(a)', 'production'", &
         'end program production']
     call write_lines(join_path(consumer, 'app/production.f90'), production_lines)
 
@@ -74,6 +94,8 @@ program test_dev_dependency_c_cli
     call arguments_for('exec', 'production')
     call run_fo(driver, arguments, consumer, cache, result, environment)
     call assert_process_ok(result, 'production builds after dev dependency tests')
+    call assert_not_contains(result%stderr, 'ignored_transitive_dev', &
+        'production does not resolve its regular dependency development provider')
     call assert_equal_string(result%stdout, 'production' // nl, 'production behavior')
     call assert_not_contains(result%stderr, 'test-support_dev_src_', &
         'production link excludes all dev dependency objects')
@@ -97,6 +119,8 @@ contains
         character(:), allocatable :: source
 
         source = '#include "value.h"' // nl
+        source = source // '#if __has_include("transitive_dev_only.h")' // nl // &
+            '#include "transitive_dev_only.h"' // nl // '#endif' // nl
         if (with_member) source = source // 'extern int dev_member(void);' // nl
         source = source // 'int dev_shim(void) { return DEV_VALUE'
         if (with_member) source = source // ' + dev_member()'
@@ -144,6 +168,8 @@ contains
         call test_arguments(flags)
         call run_fo(driver, arguments, consumer, cache, result, environment)
         call assert_process_ok(result, context)
+        call assert_not_contains(result%stderr, 'ignored_transitive_dev', &
+            context // ' excludes regular dependencies development providers')
         call assert_file_equals(join_path(consumer, 'dev.receipt'), expected // nl, context)
     end subroutine expect_value
 

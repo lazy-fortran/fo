@@ -350,7 +350,7 @@ contains
         call merge_dep_link_libs(project_dir, config)
 
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
-            dep_objs, n_dep_objs)
+            dep_objs, n_dep_objs, .true.)
         stamp_flags = compile_key_flags(flag_text)
         allocate (stamp_roots(8 * MAX_RESOLVED))
         call collect_stamp_roots(project_dir, stamp_roots, n_stamp_roots, stamp_ok)
@@ -548,7 +548,7 @@ contains
         allocate (dep_includes(MAX_DEP_DIRS), dep_objs(MAX_DEP_OBJS), &
             lib_objs(MAX_SRC_OBJS))
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
-            dep_objs, n_dep_objs)
+            dep_objs, n_dep_objs, .true.)
         call collect_current_lib_objs(project_dir, config, obj_dir, dep_includes, &
             n_dep_includes, dep_objs, n_dep_objs, lib_objs, n_lib_objs)
 
@@ -637,7 +637,7 @@ contains
         allocate (dep_includes(MAX_DEP_DIRS), dep_objs(MAX_DEP_OBJS), &
             lib_objs(MAX_SRC_OBJS))
         call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
-            dep_objs, n_dep_objs)
+            dep_objs, n_dep_objs, .true.)
         call collect_current_lib_objs(project_dir, config, obj_dir, dep_includes, &
             n_dep_includes, dep_objs, n_dep_objs, lib_objs, n_lib_objs)
 
@@ -1372,13 +1372,14 @@ contains
     end subroutine warn_current_slow_test
 
     subroutine find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
-            dep_objs, n_dep_objs)
+            dep_objs, n_dep_objs, include_dev_deps)
         character(len=*), intent(in) :: project_dir
         type(fpm_config_t), intent(in) :: config
         character(len=512), intent(out) :: dep_includes(MAX_DEP_DIRS)
         integer, intent(out) :: n_dep_includes
         character(len=512), intent(out) :: dep_objs(MAX_DEP_OBJS)
         integer, intent(out) :: n_dep_objs
+        logical, intent(in) :: include_dev_deps
 
         type(resolved_src_t), allocatable :: deps(:)
         type(resolved_src_t) :: devs(MAX_RESOLVED)
@@ -1391,8 +1392,11 @@ contains
         call fpm_config_allocate(dep_config)
         call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
         if (ierr /= 0) return
-        call resolve_dev_dep_srcs(project_dir, devs, n_devs, ierr)
-        if (ierr /= 0) n_devs = 0
+        n_devs = 0
+        if (include_dev_deps) then
+            call resolve_dev_dep_srcs(project_dir, devs, n_devs, ierr)
+            if (ierr /= 0) n_devs = 0
+        end if
 
         call append_library_include_dir(project_dir, config, &
             dep_includes, n_dep_includes)
@@ -1864,7 +1868,7 @@ contains
             if (len_trim(c_line) == 0) cycle
             call make_obj_path(trim(c_line), project_dir, obj_dir, obj_path)
             call compile_c_family(trim(c_line), obj_path, &
-                project_dir, log_file, exitcode)
+                project_dir, log_file, exitcode, .true.)
             if (exitcode /= 0) then
                 deallocate (cfiles)
                 return
@@ -2255,7 +2259,7 @@ contains
                 if (len_trim(c_line) == 0) cycle
                 call make_obj_path(trim(c_line), project_dir, obj_dir, obj_path)
                 call compile_c_family(trim(c_line), obj_path, &
-                    trim(deps(d)%dir), log_file, exitcode)
+                    trim(deps(d)%dir), log_file, exitcode, .false.)
                 if (exitcode /= 0) then
                     deallocate (cfiles)
                     return
@@ -2296,7 +2300,7 @@ contains
                 source = cfiles(i)
                 call make_obj_path(trim(source), project_dir, obj_dir, object_path)
                 call compile_c_family(trim(source), object_path, &
-                    trim(deps(d)%dir), log_file, exitcode)
+                    trim(deps(d)%dir), log_file, exitcode, .false.)
                 if (exitcode /= 0) then
                     deallocate (cfiles)
                     return
@@ -4926,9 +4930,11 @@ contains
         if (n >= 4) is_cxx = path(n - 3:n) == '.cpp'
     end function is_cxx_source
 
-    subroutine compile_c_family(source, objfile, package_dir, log_file, exitcode)
+    subroutine compile_c_family(source, objfile, package_dir, log_file, exitcode, &
+            include_dev_deps)
         character(len=*), intent(in) :: source, objfile, package_dir, log_file
         integer, intent(out) :: exitcode
+        logical, intent(in) :: include_dev_deps
         type(fpm_config_t), allocatable :: config
         character(len=512) :: directories(MAX_DEP_DIRS), objects(MAX_DEP_OBJS)
         character(:), allocatable :: packed
@@ -4937,8 +4943,10 @@ contains
         call fpm_config_allocate(config)
         call fpm_config_parse(package_dir, config, exitcode)
         if (exitcode /= 0) return
+        ! Dependency libraries consume their regular closure. Only sources
+        ! owned by the root may receive that root's development headers.
         call find_dep_artifacts(package_dir, config, directories, n_directories, &
-            objects, n_objects)
+            objects, n_objects, include_dev_deps)
         n_args = 0
         if (is_cxx_source(source)) then
             call argv_push(packed, n_args, 'g++')
