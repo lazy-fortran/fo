@@ -2640,7 +2640,8 @@ contains
             cases(i)%public_name = all_names(i)
             cases(i)%identity = 'gfortran-test:'//trim(all_names(i))
             cases(i)%node_id = selected_node_ids(i)
-            cases(i)%eligible = .not. is_slow_test(all_names(i))
+            ! Slow classification changes execution budgets, not required impact.
+            cases(i)%eligible = .true.
             cases(i)%slow = is_slow_test(all_names(i))
             cases(i)%dependency_complete = .true.
         end do
@@ -2745,11 +2746,7 @@ contains
         n_impacted = 0
         if (request%has_previous_generation) then
             if (request%impact_all) then
-                do i = 1, n_all
-                    if (is_slow_test(all_names(i))) cycle
-                    call append_priority_names(all_names(i:i), 1, impacted, &
-                        n_impacted)
-                end do
+                call append_priority_names(all_names, n_all, impacted, n_impacted)
             else
                 if (request%n_impact_cases > 0) &
                     call append_priority_names(request%impact_cases, &
@@ -2764,6 +2761,9 @@ contains
         n_priorities = 0
         ! Zero-random campaigns keep their explicit gate across source edits.
         focused_targets = request%n_targets > 0 .and. request%random_count == 0
+        ! Recheck durable failures before new affected work without dropping either.
+        if (.not. focused_targets) &
+            call append_priority_names(history, n_history, priorities, n_priorities)
         if (request%only_changed .or. request%has_previous_generation .or. &
             request%n_targets > 0 .or. n_history > 0) then
             call append_priority_names(request%gate_cases, request%gate_required_count, &
@@ -2773,7 +2773,6 @@ contains
             n_priorities)
         if (.not. focused_targets) then
             call append_priority_names(impacted, n_impacted, priorities, n_priorities)
-            call append_priority_names(history, n_history, priorities, n_priorities)
         end if
         do i = 1, n_priorities
             if (.not. any(all_names(:n_all) == priorities(i))) then
