@@ -7,6 +7,8 @@ module fo_gremlin_context
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse, fpm_dep_t, &
         dep_kind, DEP_PATH
     use fo_dep_update, only: dep_acquire_sources
+    use fo_dep_resolve, only: resolved_src_t, MAX_RESOLVED, &
+        resolve_dep_srcs, resolve_dev_dep_srcs
     use fo_gremlin_generation, only: generation_context_t, &
         generation_t, generation_capture, generation_load_inventory
     use fo_driver, only: driver_pin_t
