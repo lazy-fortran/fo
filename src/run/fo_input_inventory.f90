@@ -175,7 +175,7 @@ contains
         integer :: project_index, i, j, status, n_resolved_dev
         logical :: is_local
 
-        allocate(config)
+        call fpm_config_allocate(config)
         inventory = input_inventory_t()
         inventory%declarations = declarations
         allocate(inventory%roots(MAX_ROOTS), inventory%entries(64))
@@ -376,7 +376,7 @@ contains
         type(fpm_config_t), allocatable :: config
         integer :: i
 
-        allocate(config)
+        call fpm_config_allocate(config)
         call fpm_config_parse(project_dir, config, ierr)
         if (ierr /= 0) then
             message = 'cannot parse fixture declarations from fpm.toml'
@@ -543,7 +543,7 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         integer, intent(in) :: depth
-        type(fpm_config_t) :: config
+        type(fpm_config_t), allocatable :: config
         character(len=PATH_LEN) :: manifest
         character(len=:), allocatable :: child_root, child_bundle, child_alias
         integer :: root_index, i, status
@@ -571,6 +571,7 @@ contains
                 ' is not present in the existing FPM resolved-dependency tree')
             return
         end if
+        call fpm_config_allocate(config)
         call fpm_config_parse(trim(dependency_root), config, status)
         if (status /= 0) then
             call mark_incomplete(inventory, trim(alias)// &
@@ -775,7 +776,7 @@ contains
         character(len=*), intent(out) :: message
         integer, intent(in) :: depth
 
-        type(fpm_config_t) :: config
+        type(fpm_config_t), allocatable :: config
         character(len=PATH_LEN) :: dependency_root, bundle_path
         character(len=:), allocatable :: child_root, child_bundle, child_alias
         integer :: root_index, i, status
@@ -810,6 +811,7 @@ contains
             message = 'declared path dependency has no fpm.toml: '//trim(alias)
             return
         end if
+        call fpm_config_allocate(config)
         call fpm_config_parse(trim(dependency_root), config, status)
         if (status /= 0) then
             ierr = 1
