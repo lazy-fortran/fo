@@ -1448,22 +1448,6 @@ contains
     end subroutine append_library_include_dir
 
 
-    function dep_object_module_key(basename) result(key)
-        !! Reduce an fpm dependency object basename to its module identity by
-        !! dropping everything up to and including the first '_src_' marker, so
-        !! git-dep and path-dep spellings of the same module compare equal.
-        character(len=*), intent(in) :: basename
-        character(len=512) :: key
-        integer :: p
-
-        p = index(basename, '_src_')
-        if (p == 0) then
-            key = basename
-        else
-            key = basename(p + 5:)
-        end if
-    end function dep_object_module_key
-
     subroutine compile_sources(project_dir, src_dir, app_dir, example_dir, &
             include_examples, mod_dir, obj_dir, &
             dep_includes, n_dep_includes, dep_objs, n_dep_objs, log_file, &
@@ -2053,9 +2037,8 @@ contains
         !! its module units to all_units. Program units in a dep are skipped: a
         !! dependency contributes a library, never an executable of ours. The
         !! resolved dep list is returned so the caller can also compile each
-        !! dep's C sources for linking. Acquired external dependencies normally
-        !! keep using fpm artifacts; only source providers for modules absent
-        !! from those artifacts are added to the native DAG.
+        !! dep's C sources for linking. All resolved library source providers
+        !! join the native DAG.
         character(len=*), intent(in) :: project_dir
         type(scan_unit_t), allocatable, intent(inout) :: all_units(:)
         integer, intent(inout) :: n_all
@@ -2146,73 +2129,6 @@ contains
     end subroutine validate_manifest_modules
 
 
-
-    logical function dep_provider_object_exists(source, dep_objs, n_dep_objs) &
-            result(found)
-        !! fpm object names end in the original source basename plus '.o',
-        !! prefixed by the dependency-relative path with '_' separators.
-        character(len=*), intent(in) :: source
-        character(len=512), intent(in) :: dep_objs(MAX_DEP_OBJS)
-        integer, intent(in) :: n_dep_objs
-
-        character(len=512) :: source_base, object_base, needle
-        integer :: i, slash, nbase, nneedle
-
-        found = .false.
-        slash = index(trim(source), '/', back=.true.)
-        if (slash > 0) then
-            source_base = source(slash + 1:len_trim(source))
-        else
-            source_base = trim(source)
-        end if
-        needle = trim(source_base)//'.o'
-        nneedle = len_trim(needle)
-        do i = 1, n_dep_objs
-            slash = index(trim(dep_objs(i)), '/', back=.true.)
-            if (slash > 0) then
-                object_base = dep_objs(i)(slash + 1:len_trim(dep_objs(i)))
-            else
-                object_base = trim(dep_objs(i))
-            end if
-            nbase = len_trim(object_base)
-            if (nbase < nneedle) cycle
-            if (object_base(nbase - nneedle + 1:nbase) /= needle(1:nneedle)) cycle
-            if (nbase > nneedle) then
-                if (object_base(nbase - nneedle:nbase - nneedle) /= '_') cycle
-            end if
-            found = .true.
-            return
-        end do
-    end function dep_provider_object_exists
-
-    logical function unit_set_defines_module(units, n_units, name) result(found)
-        type(scan_unit_t), intent(in) :: units(:)
-        integer, intent(in) :: n_units
-        character(len=*), intent(in) :: name
-
-        integer :: i
-
-        found = .false.
-        do i = 1, n_units
-            if (.not. scan_provides_name(units(i), name)) cycle
-            found = .true.
-            return
-        end do
-    end function unit_set_defines_module
-
-    subroutine append_module_unit(units, n_units, candidate)
-        type(scan_unit_t), allocatable, intent(inout) :: units(:)
-        integer, intent(inout) :: n_units
-        type(scan_unit_t), intent(in) :: candidate
-
-        type(scan_unit_t), allocatable :: grown(:)
-
-        allocate (grown(n_units + 1))
-        if (n_units > 0) grown(1:n_units) = units(1:n_units)
-        n_units = n_units + 1
-        grown(n_units) = candidate
-        call move_alloc(grown, units)
-    end subroutine append_module_unit
 
     subroutine append_module_units(units, n_units, candidates, n_candidates)
         type(scan_unit_t), allocatable, intent(inout) :: units(:)
