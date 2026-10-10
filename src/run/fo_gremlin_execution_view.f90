@@ -2,7 +2,7 @@ module fo_gremlin_execution_view
     !! Private per-invocation working directories over frozen Gremlin inputs.
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_fs, only: fs_collect_files, fs_copy_exec, fs_make_dir, &
-        fs_mkdir_excl, fs_remove_tree, fs_rename
+        fs_mkdir_excl, fs_remove_tree, fs_rename, fs_write_text
     use fo_input_inventory, only: input_entry_t, input_inventory_t, INPUT_FILE, &
         INPUT_DIRECTORY
     use fo_process, only: process_getpid
@@ -244,6 +244,10 @@ contains
                     'candidate bundle does not contain a project root', ierr, message)
                 return
             end if
+            inquire(file=trim(view%cwd)//'/.fo-cmake/project-git/HEAD', &
+                exist=already_materialized)
+            if (already_materialized) call fs_write_text(trim(view%cwd)//'/.git', &
+                'gitdir: .fo-cmake/project-git'//new_line('a'))
             call publish_execution_view(view, scratch_parent, published, &
                 ierr, message)
             if (ierr /= 0) return

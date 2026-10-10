@@ -176,6 +176,11 @@ contains
             call fs_remove_tree(metadata_dir, cleanup_status)
             return
         end if
+        call capture_project_git(trim(project_path), metadata_dir, script, ierr, message)
+        if (ierr /= 0) then
+            call fs_remove_tree(metadata_dir, cleanup_status)
+            return
+        end if
         call fs_write_text(trim(metadata_dir)//'/cache.cmake', script)
         call fs_write_text(trim(metadata_dir)//'/generator.txt', generator)
         call fs_write_text(trim(metadata_dir)//'/build-directory.txt', &
@@ -259,7 +264,7 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         type(cm_plan_t) :: plan
-        character(:), allocatable :: text, path
+        character(:), allocatable :: text, path, git_script
         character(len=PATH_LEN) :: temporary, metadata, physical
         integer :: i, j, cleanup_status
         logical :: resolved
@@ -280,6 +285,16 @@ contains
         call fs_write_text(trim(metadata)//'/native-context.json', text)
         call fs_write_text(trim(metadata)//'/build-directory.txt', &
             backend%cmake%build_root)
+        call fs_realpath(backend%project_dir, physical, resolved)
+        if (resolved) then
+            git_script = ''
+            call capture_project_git(trim(physical), trim(metadata), git_script, &
+                ierr, message)
+            if (ierr /= 0) then
+                call fs_remove_tree(trim(metadata), cleanup_status)
+                return
+            end if
+        end if
         call input_inventory_discover_cmake(backend%project_dir, &
             [character(len=PATH_LEN) ::], [character(len=PATH_LEN) ::], &
             [character(len=256) ::], trim(metadata), inventory, ierr, message)
@@ -314,14 +329,95 @@ contains
         if (ierr /= 0) call fs_remove_tree(trim(metadata), cleanup_status)
     end subroutine native_capture_inventory
 
+    subroutine git_command(directory, arguments, log_file, ierr)
+        character(len=*), intent(in) :: directory, arguments(:), log_file
+        integer, intent(out) :: ierr
+        character(:), allocatable :: packed
+        integer :: i, n_args
+        n_args = 0
+        call argv_push(packed, n_args, 'git')
+        do i = 1, size(arguments)
+            call argv_push(packed, n_args, trim(arguments(i)))
+        end do
+        call process_run_argv_logged(directory, packed, n_args, log_file, .false., &
+            60, ierr)
+    end subroutine git_command
+
+    subroutine capture_git_repository(source, destination, log_file, ierr)
+        character(len=*), intent(in) :: source, destination, log_file
+        integer, intent(out) :: ierr
+        character(len=PATH_LEN) :: arguments(5)
+        arguments(1) = 'clone'
+        arguments(2) = '--bare'
+        arguments(3) = '--depth=1'
+        arguments(4) = 'file://'//source
+        arguments(5) = destination
+        call git_command('.', arguments, log_file, ierr)
+    end subroutine capture_git_repository
+
+    subroutine capture_project_git(source, metadata, script, ierr, message)
+        character(len=*), intent(in) :: source, metadata
+        character(:), allocatable, intent(inout) :: script
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        character(len=PATH_LEN) :: log_file, root, physical
+        character(:), allocatable :: repository
+        integer :: newline_at
+        character(len=32) :: arguments(3)
+
+        message = ''
+        call make_tmpfile('fo-cmake-project-git', log_file)
+        arguments(1) = 'rev-parse'
+        arguments(2) = '--show-toplevel'
+        call git_command(source, arguments(:2), log_file, ierr)
+        if (ierr /= 0) then
+            call delete_tmpfile(log_file)
+            ierr = 0
+            return
+        end if
+        call read_text_file(log_file, root)
+        newline_at = index(root, new_line('a'))
+        if (newline_at > 0) root = root(:newline_at - 1)
+        call canonical_directory(trim(root), physical)
+        root = physical
+        if (trim(root) /= source) then
+            call delete_tmpfile(log_file)
+            ierr = 0
+            return
+        end if
+        repository = trim(metadata)//'/project-git'
+        call capture_git_repository(source, repository, log_file, ierr)
+        arguments(1) = 'config'
+        arguments(2) = '--remove-section'
+        arguments(3) = 'remote.origin'
+        if (ierr == 0) call git_command(repository, arguments, log_file, ierr)
+        arguments(2) = 'core.bare'
+        arguments(3) = 'false'
+        if (ierr == 0) call git_command(repository, arguments, log_file, ierr)
+        arguments(2) = 'core.worktree'
+        arguments(3) = '../..'
+        if (ierr == 0) call git_command(repository, arguments, log_file, ierr)
+        arguments(1) = 'read-tree'
+        arguments(2) = 'HEAD'
+        if (ierr == 0) call git_command(repository, arguments(:2), log_file, ierr)
+        if (ierr /= 0) then
+            message = 'cannot freeze project Git build provenance; diagnostic: '// &
+                trim(log_file)
+            return
+        end if
+        call delete_tmpfile(log_file)
+        script = script//'file(WRITE "${CMAKE_CURRENT_LIST_DIR}/../.git" '// &
+            '"gitdir: .fo-cmake/project-git\n")'//new_line('a')
+    end subroutine capture_project_git
+
     subroutine capture_provider_metadata(roots, names, labels, metadata, ierr, message)
         character(len=*), intent(in) :: roots(:), names(:), labels(:), metadata
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         character(len=1048576), allocatable :: cache
         character(len=PATH_LEN) :: log_file
-        character(:), allocatable :: line, key, kind, value, source, frozen, packed
-        integer :: i, cursor, n_args
+        character(:), allocatable :: line, key, kind, value, source, frozen
+        integer :: i, cursor
 
         allocate(cache)
         ierr = 0
@@ -342,14 +438,8 @@ contains
             end if
             call fs_make_dir(trim(metadata)//'/provider-git')
             call make_tmpfile('fo-cmake-provider-git', log_file)
-            n_args = 0
-            call argv_push(packed, n_args, 'git')
-            call argv_push(packed, n_args, 'clone')
-            call argv_push(packed, n_args, '--bare')
-            call argv_push(packed, n_args, '--depth=1')
-            call argv_push(packed, n_args, 'file://'//source)
-            call argv_push(packed, n_args, trim(metadata)//'/provider-git/'//trim(names(i)))
-            call process_run_argv_logged('.', packed, n_args, log_file, .true., 60, ierr)
+            call capture_git_repository(source, &
+                trim(metadata)//'/provider-git/'//trim(names(i)), log_file, ierr)
             if (ierr /= 0) then
                 message = 'cannot freeze Git source provenance for CMake provider; '// &
                     'diagnostic: '//trim(log_file)

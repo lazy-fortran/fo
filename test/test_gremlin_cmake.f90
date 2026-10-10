@@ -89,8 +89,10 @@ program test_gremlin_cmake
                     '"${VALUE_PROVIDER_BUILD}/include")'// &
                     new_line('a')// &
                  'file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/sandbox")'//new_line('a')// &
-                    'add_test(NAME setup COMMAND "${CMAKE_COMMAND}" -E touch '// &
-                    '"${CMAKE_BINARY_DIR}/sandbox/setup.ran")'//new_line('a')// &
+                    'add_test(NAME setup COMMAND "${CMAKE_COMMAND}" '// &
+                    '-DSOURCE=${CMAKE_SOURCE_DIR} '// &
+                    '-DOUTPUT=${CMAKE_BINARY_DIR}/sandbox/setup.ran '// &
+                    '-P "${CMAKE_SOURCE_DIR}/git_check.cmake")'//new_line('a')// &
         'set_tests_properties(setup PROPERTIES FIXTURES_SETUP value)'//new_line('a')// &
                     'add_test(NAME registered_marker COMMAND marker)'//new_line('a')// &
         'set_tests_properties(registered_marker PROPERTIES FIXTURES_REQUIRED value '// &
@@ -110,6 +112,22 @@ program test_gremlin_cmake
                     '/uncreated-install-prefix"}}],'// &
                     '"buildPresets":[{"name":"cpu","configurePreset":"cpu"}],'// &
                     '"testPresets":[{"name":"cpu","configurePreset":"cpu"}]}')
+    call write_text(project//'/git_check.cmake', &
+        'file(STRINGS "${SOURCE}/expected-head" expected)'//new_line('a')// &
+        'execute_process(COMMAND git -C "${SOURCE}" rev-parse HEAD '// &
+        'OUTPUT_VARIABLE actual OUTPUT_STRIP_TRAILING_WHITESPACE '// &
+        'RESULT_VARIABLE status)'//new_line('a')// &
+        'if(NOT status EQUAL 0 OR NOT actual STREQUAL expected)'//new_line('a')// &
+        'message(FATAL_ERROR "frozen project Git revision changed")'//new_line('a')// &
+        'endif()'//new_line('a')// &
+        'execute_process(COMMAND git -C "${SOURCE}" status --porcelain '// &
+        '--untracked-files=no OUTPUT_VARIABLE dirty RESULT_VARIABLE status)'// &
+        new_line('a')// &
+        'if(NOT status EQUAL 0 OR dirty STREQUAL "")'//new_line('a')// &
+        'message(FATAL_ERROR "captured tracked edits lost Git dirty status")'// &
+        new_line('a')//'endif()'//new_line('a')// &
+        'file(TOUCH "${OUTPUT}")'//new_line('a'))
+    call initialize_project_git()
     rc = c_setenv('FO_CMAKE_CONFIGURE_PRESET'//c_null_char, 'cpu'//c_null_char, 1_c_int)
     rc = c_setenv('FO_CMAKE_BUILD_PRESET'//c_null_char, 'cpu'//c_null_char, 1_c_int)
     rc = c_setenv('FO_CMAKE_BUILD_TARGETS'//c_null_char, 'marker'//c_null_char, 1_c_int)
@@ -190,6 +208,44 @@ contains
         character(len=*), intent(in) :: path
         inquire(file=path, exist=file_present)
     end function file_present
+    subroutine initialize_project_git()
+        type(string_list_t) :: command
+        type(process_result_t) :: observed
+        character(:), allocatable :: head
+        integer :: newline_at
+        call write_text(project//'/tracked.txt', 'committed state')
+        call list_add(command, 'git')
+        call list_add(command, 'init')
+        call run_process(command, project, observed)
+        call assert_process_ok(observed, 'CMake project Git initializes')
+        command = string_list_t()
+        call list_add(command, 'git')
+        call list_add(command, 'add')
+        call list_add(command, '.')
+        call run_process(command, project, observed)
+        command = string_list_t()
+        call list_add(command, 'git')
+        call list_add(command, '-c')
+        call list_add(command, 'user.name=Fixture')
+        call list_add(command, '-c')
+        call list_add(command, 'user.email=fixture@example.invalid')
+        call list_add(command, 'commit')
+        call list_add(command, '-qm')
+        call list_add(command, 'project source')
+        call run_process(command, project, observed)
+        call assert_process_ok(observed, 'CMake project source commit exists')
+        command = string_list_t()
+        call list_add(command, 'git')
+        call list_add(command, 'rev-parse')
+        call list_add(command, 'HEAD')
+        call run_process(command, project, observed)
+        head = trim(observed%stdout)
+        newline_at = index(head, new_line('a'))
+        if (newline_at > 0) head = head(:newline_at - 1)
+        call write_text(project//'/expected-head', head//new_line('a'))
+        call write_text(project//'/tracked.txt', 'captured dirty state')
+    end subroutine initialize_project_git
+
     subroutine make_provider()
         type(string_list_t) :: command
         type(process_result_t) :: observed

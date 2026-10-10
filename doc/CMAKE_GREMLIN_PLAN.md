@@ -110,6 +110,8 @@ FetchContent source directories. `FO_CMAKE_BUILD_TARGETS` selects native build
 targets while `--target` selects registered test names; neither changes native
 project flags. Declared prebuilt `*_BUILD` providers capture their include/lib
 inputs and real Git HEAD provenance for the observed CMakeCache source probe.
+Repository-root projects also retain shallow, self-contained Git metadata so
+configure-time and runtime revision/dirty-state queries use the frozen sources.
 Arbitrary provider protocols, uncaptured external authored inputs, metadata
 capacity overflow and unsupported referenced symlinks fail explicitly.
 
