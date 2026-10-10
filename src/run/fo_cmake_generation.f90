@@ -14,7 +14,8 @@ module fo_cmake_generation
     use fo_cache, only: cache_digest, HASH_LEN
     use fo_process, only: argv_push, process_run_argv_logged
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
-               json_parser_next, JSON_KEY, JSON_STRING, JSON_ERROR, JSON_END_OF_INPUT, &
+               json_parser_next, JSON_KEY, JSON_STRING, JSON_BOOL, JSON_ERROR, &
+                    JSON_END_OF_INPUT, &
                     JSON_ARRAY_START, JSON_ARRAY_END, JSON_OBJECT_START, JSON_OBJECT_END
     implicit none
     private
@@ -621,7 +622,8 @@ contains
         type(json_event_t) :: event
         integer :: n_files, i, j, depth
         character(len=64) :: ancestors(64)
-        logical :: captured
+        character(len=PATH_LEN) :: pending_paths(64)
+        logical :: generated(64), captured, exists
 
         allocate(files(2048))
         allocate(character(len=1048576) :: text)
@@ -644,6 +646,8 @@ contains
             key = ''
             depth = 0
             ancestors = ''
+            pending_paths = ''
+            generated = .false.
             do
                 call json_parser_next(parser, event)
                 if (event%event_type == JSON_END_OF_INPUT) exit
@@ -661,14 +665,74 @@ contains
                         return
                     end if
                     ancestors(depth) = key
+                    pending_paths(depth) = ''
+                    generated(depth) = .false.
                     key = ''
                     cycle
                 case (JSON_ARRAY_END, JSON_OBJECT_END)
+                    if (event%event_type == JSON_OBJECT_END .and. depth > 0) then
+                        path = trim(pending_paths(depth))
+                        if (len(path) > 0) then
+                            if (path(1:1) /= '/') then
+                                call normalize_path(trim(project)//'/'//path, normalized)
+                            else
+                                call normalize_path(path, normalized)
+                            end if
+                            ! CMake's codemodel also lists outputs and virtual
+                            ! .rule entries of targets that have not been built.
+                            ! They are not authored inputs to freeze yet.
+                            if (index(files(i), '/target-') > 0 .and. &
+                                generated(depth) .and. &
+                                (inside(normalized, project) .or. &
+                                 inside(normalized, build))) then
+                                inquire(file=trim(normalized), exist=exists)
+                                if (.not. exists) then
+                                    depth = depth - 1
+                                    key = ''
+                                    cycle
+                                end if
+                            end if
+                            call canonical_authored_path(normalized)
+                            captured = inside(normalized, project) .or. &
+                                       inside(normalized, build)
+                            do j = 1, size(roots)
+                                if (inside(normalized, roots(j))) captured = .true.
+                            end do
+                            ! System compiler/CMake inputs retain the delegated
+                            ! toolchain boundary. External authored inputs must
+                            ! be frozen.
+                            if (inside(normalized, '/usr') .or. &
+                                inside(normalized, '/opt')) captured = .true.
+                            if (.not. captured) then
+                                ierr = 1
+                                message = 'unsupported uncaptured external CMake input: '// &
+                                          trim(normalized)
+                                return
+                            end if
+                            if (present(inventory)) then
+                                if (.not. inside(normalized, build) .and. &
+                                    .not. inside(normalized, '/usr') .and. &
+                                    .not. inside(normalized, '/opt')) then
+                                    if (.not. inventory_has_path(inventory, normalized)) then
+                                        ierr = 1
+                                        message = 'referenced CMake input is missing or unsupported: '// &
+                                                  trim(normalized)
+                                        return
+                                    end if
+                                end if
+                            end if
+                        end if
+                    end if
                     if (depth > 0) depth = depth - 1
                     key = ''
                     cycle
                 case (JSON_KEY)
                     key = event%string_val
+                    cycle
+                case (JSON_BOOL)
+                    if (key == 'isGenerated' .and. depth > 0) &
+                        generated(depth) = event%bool_val
+                    key = ''
                     cycle
                 end select
                 if (event%event_type /= JSON_STRING) cycle
@@ -681,39 +745,7 @@ contains
                 if (key /= 'path') cycle
                 path = event%string_val
                 if (len(path) == 0) cycle
-                if (path(1:1) /= '/') then
-                    call normalize_path(trim(project)//'/'//path, normalized)
-                else
-                    call normalize_path(path, normalized)
-                end if
-                call canonical_authored_path(normalized)
-                captured = inside(normalized, project) .or. &
-                           inside(normalized, build)
-                do j = 1, size(roots)
-                    if (inside(normalized, roots(j))) captured = .true.
-                end do
-                ! System compiler/CMake inputs retain the delegated toolchain
-                ! boundary. Arbitrary external authored inputs must be frozen.
-                if (inside(normalized, '/usr') .or. &
-                    inside(normalized, '/opt')) captured = .true.
-                if (.not. captured) then
-                    ierr = 1
-                    message = 'unsupported uncaptured external CMake input: '// &
-                              trim(normalized)
-                    return
-                end if
-                if (present(inventory)) then
-                    if (.not. inside(normalized, build) .and. &
-                        .not. inside(normalized, '/usr') .and. &
-                        .not. inside(normalized, '/opt')) then
-                        if (.not. inventory_has_path(inventory, normalized)) then
-                            ierr = 1
-                            message = 'referenced CMake input is missing or unsupported: '// &
-                                      trim(normalized)
-                            return
-                        end if
-                    end if
-                end if
+                pending_paths(depth) = path
                 key = ''
             end do
         end do

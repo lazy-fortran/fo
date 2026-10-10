@@ -80,6 +80,16 @@ program test_gremlin_cmake
                     'endif()'//new_line('a')// &
                     'add_library(raw_dep "${raw_dep_SOURCE_DIR}/raw.f90")'// &
                     new_line('a')// &
+                    'add_custom_command(OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/'// &
+                    'unselected_generated.f90" COMMAND "${CMAKE_COMMAND}" -E copy '// &
+                    '"${CMAKE_CURRENT_SOURCE_DIR}/marker.f90" '// &
+                    '"${CMAKE_CURRENT_SOURCE_DIR}/unselected_generated.f90")'// &
+                    new_line('a')// &
+                    'add_custom_target(unselected_generate DEPENDS '// &
+                    '"${CMAKE_CURRENT_SOURCE_DIR}/unselected_generated.f90")'// &
+                    new_line('a')// &
+                    'add_executable(unselected_generated_target EXCLUDE_FROM_ALL '// &
+                    'unselected_generated.f90)'//new_line('a')// &
                     'add_executable(marker marker.f90)'//new_line('a')// &
                     'install(TARGETS marker RUNTIME DESTINATION lib)'//new_line('a')// &
                     'add_executable(unselected broken.f90)'//new_line('a')// &
