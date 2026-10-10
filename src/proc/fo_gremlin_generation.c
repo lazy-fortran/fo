@@ -39,7 +39,8 @@ static int excluded_entry(const char *parent_rel, const char *name,
     if (exclusion_policy >= 1 && strcmp(name, "build") == 0) return 1;
     /* Input inventories also skip other root output/cache directories. */
     return exclusion_policy >= 2 &&
-           (strcmp(name, ".cache") == 0 || strcmp(name, "cache") == 0 ||
+           (strcmp(name, ".cache") == 0 || strcmp(name, ".venv") == 0 ||
+            strcmp(name, "cache") == 0 ||
             strcmp(name, "caches") == 0 || strcmp(name, "session") == 0 ||
             strcmp(name, "sessions") == 0 || strcmp(name, "log") == 0 ||
             strcmp(name, "logs") == 0);

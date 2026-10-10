@@ -1506,7 +1506,7 @@ contains
                     ignored_input_path = .true.
                     return
                 end if
-            case ('.cache', 'build', 'cache', 'caches', 'session', &
+            case ('.cache', '.venv', 'build', 'cache', 'caches', 'session', &
                     'sessions', 'log', 'logs')
                 if (whole_root_scan .and. component_index == 1 .and. &
                         (stop /= 0 .or. is_directory)) then

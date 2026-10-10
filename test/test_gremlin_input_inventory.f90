@@ -333,6 +333,7 @@ contains
         call fs_make_dir(trim(whole_root)//'/build')
         call fs_make_dir(trim(whole_root)//'/cache')
         call fs_make_dir(trim(whole_root)//'/.cache')
+        call fs_make_dir(trim(whole_root)//'/.venv')
         call write(trim(whole_root)//'/fpm.toml', &
             'name = "whole-root-fixture"'//new_line('a')// &
             '[build]'//new_line('a')// &
@@ -342,6 +343,7 @@ contains
             'program generated')
         call write(trim(whole_root)//'/cache/generated.dat', 'generated')
         call write(trim(whole_root)//'/.cache/generated.dat', 'generated')
+        call write(trim(whole_root)//'/.venv/generated.dat', 'generated')
 
         call input_inventory_discover(trim(whole_root), none, before, status, &
             message)
@@ -352,6 +354,7 @@ contains
             'program generated_changed')
         call write(trim(whole_root)//'/cache/generated.dat', 'changed')
         call write(trim(whole_root)//'/.cache/generated.dat', 'changed')
+        call write(trim(whole_root)//'/.venv/generated.dat', 'changed')
         call input_inventory_discover(trim(whole_root), none, after, status, &
             message)
         call require(status == 0, &
