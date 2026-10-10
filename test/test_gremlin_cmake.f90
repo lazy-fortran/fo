@@ -9,7 +9,7 @@ program test_gremlin_cmake
     implicit none
     character(:), allocatable :: driver, scratch, project, cache, state
     character(:), allocatable :: owner, generation, previous, dependency
-    character(:), allocatable :: provider, provider_source, revision
+    character(:), allocatable :: provider, provider_source, revision, raw_archive
     type(string_list_t) :: args
     type(process_result_t) :: process
     type(json_value_t) :: reply
@@ -34,6 +34,7 @@ program test_gremlin_cmake
     provider = scratch//'/provider-build'
     provider_source = scratch//'/provider-source'
     call make_provider()
+    call make_populate_only_dependency()
     dependency = scratch//'/dependency'
     call make_directory(dependency)
     call write_text(dependency//'/CMakeLists.txt', &
@@ -71,10 +72,19 @@ program test_gremlin_cmake
                     'FetchContent_Declare(value_dep SOURCE_DIR "'//dependency//'" )'// &
                     new_line('a')// &
                     'FetchContent_MakeAvailable(value_dep)'//new_line('a')// &
+                    'FetchContent_Declare(raw_dep URL "'//raw_archive//'" )'// &
+                    new_line('a')// &
+                    'FetchContent_GetProperties(raw_dep)'//new_line('a')// &
+                    'if(NOT raw_dep_POPULATED)'//new_line('a')// &
+                    'FetchContent_Populate(raw_dep)'//new_line('a')// &
+                    'endif()'//new_line('a')// &
+                    'add_library(raw_dep "${raw_dep_SOURCE_DIR}/raw.f90")'// &
+                    new_line('a')// &
                     'add_executable(marker marker.f90)'//new_line('a')// &
                     'install(TARGETS marker RUNTIME DESTINATION lib)'//new_line('a')// &
                     'add_executable(unselected broken.f90)'//new_line('a')// &
-                    'target_link_libraries(marker PRIVATE value_dep)'//new_line('a')// &
+                    'target_link_libraries(marker PRIVATE value_dep raw_dep)'// &
+                    new_line('a')// &
                   'target_include_directories(marker PRIVATE "${CMAKE_BINARY_DIR}" '// &
                     '"${VALUE_PROVIDER_BUILD}/include")'// &
                     new_line('a')// &
@@ -155,6 +165,27 @@ program test_gremlin_cmake
                            allow_terminal_error=.true.)
     call finish_assertions()
 contains
+    subroutine make_populate_only_dependency()
+        type(string_list_t) :: command
+        type(process_result_t) :: observed
+        character(:), allocatable :: raw_source
+        raw_source = scratch//'/raw-dependency'
+        raw_archive = scratch//'/raw-dependency.tar'
+        call make_directory(raw_source)
+        call write_text(raw_source//'/raw.f90', &
+            'module raw_values'//new_line('a')// &
+            'integer, parameter :: raw_result = 11'//new_line('a')// &
+            'end module raw_values'//new_line('a'))
+        call list_add(command, 'cmake')
+        call list_add(command, '-E')
+        call list_add(command, 'tar')
+        call list_add(command, 'cf')
+        call list_add(command, raw_archive)
+        call list_add(command, '--format=gnutar')
+        call list_add(command, 'raw.f90')
+        call run_process(command, raw_source, observed)
+        call assert_process_ok(observed, 'populate-only dependency archive builds')
+    end subroutine make_populate_only_dependency
     logical function file_present(path)
         character(len=*), intent(in) :: path
         inquire(file=path, exist=file_present)
@@ -225,6 +256,7 @@ contains
         end if
         call write_text(project//'/marker.f90', &
                         'program marker'//new_line('a')//'use values, only: result'// &
+                        new_line('a')//'use raw_values, only: raw_result'// &
                         new_line('a')//'implicit none'//new_line('a')// &
                         'logical :: exists'//new_line('a')// &
                         'include "provider.inc"'//new_line('a')// &
@@ -233,6 +265,7 @@ contains
                         'inquire(file="setup.ran", exist=exists)'//new_line('a')// &
            'if (.not. exists) error stop "CTest fixture or cwd lost"'//new_line('a')// &
             'if (result /= 7) error stop "dependency result changed"'//new_line('a')// &
+            'if (raw_result /= 11) error stop "populated source lost"'//new_line('a')// &
                         'print *, "marker passed"'//new_line('a')//'end program marker')
     end subroutine write_marker
     subroutine wait_result(old, outcome, current)

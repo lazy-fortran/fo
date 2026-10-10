@@ -8,6 +8,14 @@ failure detection. The workspace master plan, when present, owns delivery order.
 
 ## Current delivery
 
+Populated FetchContent sources consumed without `add_subdirectory` are now
+captured from the target inputs reported by CMake. The expanded native CMake
+resident oracle fails on the prior driver and passes on candidate
+`8121b4c6a695604664fb298ae2ea545747bf956e77954215e1cf0c2d1da3121c`;
+named CMake and input-inventory gates also pass on Linux. The original KIN6D
+consumer now builds its frozen view and passes its selected analytic GS gate.
+This is focused capture verification, not a full platform qualification.
+
 The user's final instruction is to conclude/push qualified work, deploy Fo from
 main on mailuefterl, faepmac1 and faepkub4, tidy task branches/issues/plans, then
 stop and report. Broader issue implementation is suspended by that shutdown
