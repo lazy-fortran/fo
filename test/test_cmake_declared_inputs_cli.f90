@@ -1,4 +1,5 @@
 program test_cmake_declared_inputs_cli
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_test_harness, only: string_list_t, process_result_t, list_add, &
         write_text, make_directory, make_symlink, assert_true, assert_contains, &
         assert_process_ok, run_process, finish_assertions
@@ -6,16 +7,30 @@ program test_cmake_declared_inputs_cli
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_start_args, gremlin_run, &
         gremlin_json, gremlin_field, gremlin_wait_ms, gremlin_stop_lane
     use fo_test_json, only: json_value_t, json_member, json_boolean_value
+    use fo_util, only: temporary_root
     implicit none
     character(:), allocatable :: driver, scratch, project, cache, state, owner
     character(:), allocatable :: provider, sibling, key, extra, generation, diagnostic
+    character(:), allocatable :: fixture_root
     character(len=*), parameter :: nl = new_line('a')
     type(string_list_t) :: args, environment
     type(process_result_t) :: process
     type(json_value_t) :: reply
     integer :: kind, attempt
+    integer(c_int) :: rc
+    interface
+        integer(c_int) function c_setenv(name, value, overwrite) &
+                bind(C, name='fo_test_setenv')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: name(*), value(*)
+            integer(c_int), value :: overwrite
+        end function c_setenv
+    end interface
 
+    fixture_root = temporary_root()
     do kind = 1, 4
+        rc = c_setenv('TMPDIR'//c_null_char, fixture_root//c_null_char, 1_c_int)
+        call assert_true(rc == 0, 'each fixture uses the original scratch root')
         call gremlin_setup(driver, scratch, project, cache, state)
         provider = scratch//'/payload'
         sibling = scratch//'/sibling'
