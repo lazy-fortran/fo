@@ -19,6 +19,7 @@ module fo_gremlin_supervisor
         json_parser_next, JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, &
         JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_ERROR, JSON_END_OF_INPUT
     use fo_gremlin_generation, only: generation_t, generation_driver_identity
+    use fo_gremlin_log_text, only: gremlin_retain_build_log, gremlin_log_tail
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release
     use fo_driver, only: driver_pin_t, driver_pin_current, driver_pin_existing
@@ -198,6 +199,8 @@ contains
         character(len=128) :: session_id
         character(len=HASH_LEN) :: stored_policy
         integer :: ierr, owner_pid, pid, spawn_exit, i, n_args
+        integer, parameter :: READY_WAIT_POLLS = 1200
+        logical :: ready, owner_exited
         character(len=:), allocatable :: packed
         character(len=PATH_LEN) :: executable, log_file
 
@@ -302,13 +305,21 @@ contains
             return
         end if
         ! The child obtains the lane lock. Wait only for its ready publication;
-        ! campaign progress never depends on this caller staying connected.
-        do i = 1, 60
+        ! campaign progress never depends on this caller staying connected. A
+        ! loaded host can need several seconds before the owner publishes, so
+        ! give up only when the owner exited or after READY_WAIT_POLLS.
+        ready = .false.
+        owner_exited = .false.
+        do i = 1, READY_WAIT_POLLS
             call fs_sleep_ms(50)
             call gremlin_session_read(project_dir, trim(request%lane_id), session_id, &
                 owner_pid, owner_start, status_text, ierr, message)
             if (ierr /= 0 .or. len_trim(session_id) == 0 .or. &
-                len_trim(status_text) == 0) cycle
+                len_trim(status_text) == 0) then
+                call process_poll_pid(pid, owner_exited, spawn_exit)
+                if (owner_exited) exit
+                cycle
+            end if
             call gremlin_json_field(status_text, 'policy_key', stored_policy)
             if (trim(stored_policy) /= request_policy_key(request)) then
                 call cancel_launched_owner(pid, spawn_exit)
@@ -323,17 +334,21 @@ contains
                 exitcode = 2
                 return
             end if
+            ready = .true.
             exit
         end do
-        if (i > 60 .or. len_trim(session_id) == 0 .or. len_trim(status_text) == 0) then
-            call cancel_launched_owner(pid, spawn_exit)
-            if (spawn_exit == 0) then
-                call error_response('start', 'Gremlin owner did not publish ready state', &
-                    response)
+        if (.not. ready) then
+            if (.not. owner_exited) call cancel_launched_owner(pid, spawn_exit)
+            if (owner_exited) then
+                message = 'Gremlin owner exited before publishing ready state'
+            else if (spawn_exit == 0) then
+                message = 'Gremlin owner did not publish ready state'
             else
-                call error_response('start', 'Gremlin owner did not publish ready state; '// &
-                    'launcher cancellation failed', response)
+                message = 'Gremlin owner did not publish ready state; '// &
+                    'launcher cancellation failed'
             end if
+            call error_response('start', trim(message)//'; owner log '// &
+                trim(log_file)//': '//gremlin_log_tail(log_file, 1500), response)
             exitcode = 2
             return
         end if
@@ -2404,6 +2419,7 @@ contains
         if (ierr /= 0) return
         build_child%pid = 0
         if (build_exit /= 0) then
+            call gremlin_retain_build_log(build_child%log_file)
             if (build_child%execution_view%active) &
                 call execution_view_release(build_child%execution_view, .false., &
                     release_status, release_message)

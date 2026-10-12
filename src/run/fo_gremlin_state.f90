@@ -817,6 +817,9 @@ contains
             message = 'resource is busy because a lease or pin is still active'
         case (1)
             message = 'operation requires current session or lease ownership'
+        case (2)
+            message = 'no Gremlin session state exists for this lane (the owner '// &
+                'may have exited before publishing; check the lane logs directory)'
         case default
             write (message, '(a,i0)') 'Gremlin state provider error: ', ierr
         end select
