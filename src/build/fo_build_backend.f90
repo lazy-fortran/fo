@@ -134,8 +134,8 @@ contains
                 depth = max(0, depth - 1)
             else if (depth == 0) then
                 if (command_is(lowered, 'enable_testing') .or. &
-                        (command_is(lowered, 'include') .and. &
-                        index(lowered, 'include(ctest') > 0)) then
+                    (command_is(lowered, 'include') .and. &
+                    index(lowered, 'include(ctest') > 0)) then
                     declares_tests = .true.
                     exit
                 end if
