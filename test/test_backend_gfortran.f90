@@ -45,6 +45,7 @@ program test_backend_gfortran
         call test_compiler_switch_clears_the_tree()
         call test_slow_test_gets_its_own_timeout()
         call test_test_budget_respects_available_clock()
+        call test_test_budget_ignores_kernel_time()
         call test_process_tree_supervision()
         call test_gfortran_builds_manifest_example()
         call test_gfortran_preprocesses_lowercase_f90()
@@ -530,6 +531,40 @@ contains
         call fs_remove_file(log_file)
     end subroutine test_slow_test_gets_its_own_timeout
 
+    subroutine test_test_budget_ignores_kernel_time()
+        !! The budget charges the test's user CPU time. Kernel time is what a
+        !! loaded host inflates (a trivial test starting a thread pool among
+        !! many runnable processes spends seconds in lock contention), so a
+        !! test whose time is almost all system time must not be killed for it.
+        character(len=512) :: project_dir, log_file
+        integer :: u, exitcode
+
+        call make_tmp_path('fo_kernel_budget', project_dir)
+        call make_tmp_path('fo_kernel_budget_log', log_file)
+        call remove_tree(project_dir)
+        call make_dir(trim(project_dir)//'/test')
+        if (.not. host_can_measure_child_cpu(project_dir)) then
+            call remove_tree(project_dir)
+            return
+        end if
+        open (newunit=u, file=trim(project_dir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "kernel-budget"'
+        close (u)
+        call write_kernel_test(trim(project_dir)//'/test/test_kernel.f90', &
+            'test_kernel')
+
+        call set_env('FO_TEST_TIMEOUT', '1')
+        call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
+        call set_env('FO_TEST_TIMEOUT', '')
+        call assert(exitcode == 0, &
+            'kernel time: 1.5 s of system CPU stays within a 1 s budget')
+        call assert(file_contains(log_file, 'TEST_RESULT test_kernel PASS'), &
+            'kernel time: the system-time test reports a pass')
+
+        call remove_tree(project_dir)
+        call fs_remove_file(log_file)
+    end subroutine test_test_budget_ignores_kernel_time
+
     subroutine test_test_budget_respects_available_clock()
         !! Linux measures live child CPU time; other platforms use a wall-time
         !! budget. Sleeping and busy children distinguish those behaviors, and
@@ -833,8 +868,32 @@ contains
         close (u)
     end subroutine write_idle_test
 
+    subroutine write_kernel_test(path, name)
+        !! A test that spends 1.5 s of CPU almost entirely in the kernel
+        !! (reads from /dev/zero), with next to no user time.
+        character(len=*), intent(in) :: path, name
+        integer :: u
+
+        open (newunit=u, file=trim(path), status='replace')
+        write (u, '(a)') 'program '//trim(name)
+        write (u, '(a)') 'integer(1), allocatable :: buf(:)'
+        write (u, '(a)') 'real :: t'
+        write (u, '(a)') 'integer :: z'
+        write (u, '(a)') 'allocate (buf(4*1024*1024))'
+        write (u, '(a)') 'open (newunit=z, file="/dev/zero", access="stream", &'
+        write (u, '(a)') '    form="unformatted", action="read")'
+        write (u, '(a)') 'do'
+        write (u, '(a)') '    read (z) buf'
+        write (u, '(a)') '    call cpu_time(t)'
+        write (u, '(a)') '    if (t > 1.5) exit'
+        write (u, '(a)') 'end do'
+        write (u, '(a)') 'print *, "done", buf(1)'
+        write (u, '(a)') 'end program '//trim(name)
+        close (u)
+    end subroutine write_kernel_test
+
     subroutine write_sleeping_test(path, name)
-        !! A test that burns 1.5 s of CPU time (not wall time), so it exceeds a
+        !! A test that burns 1.5 s of user CPU time (not wall time), so it exceeds a
         !! one-second CPU budget however loaded the host is.
         character(len=*), intent(in) :: path, name
         integer :: u
@@ -842,11 +901,17 @@ contains
         open (newunit=u, file=trim(path), status='replace')
         write (u, '(a)') 'program '//trim(name)
         write (u, '(a)') 'real :: t'
+        write (u, '(a)') 'real(8) :: x'
+        write (u, '(a)') 'integer :: i'
+        write (u, '(a)') 'x = 0'
         write (u, '(a)') 'do'
+        write (u, '(a)') '    do i = 1, 2000000'
+        write (u, '(a)') '        x = x + sin(real(i, 8))'
+        write (u, '(a)') '    end do'
         write (u, '(a)') '    call cpu_time(t)'
         write (u, '(a)') '    if (t > 1.5) exit'
         write (u, '(a)') 'end do'
-        write (u, '(a)') 'print *, "done"'
+        write (u, '(a)') 'print *, "done", x'
         write (u, '(a)') 'end program '//trim(name)
         close (u)
     end subroutine write_sleeping_test

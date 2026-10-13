@@ -72,9 +72,11 @@ proof that a change is safe. Build-cache reuse is not evidence that tests passed
 Gremlin capabilities and remaining limitations are recorded in [PLAN.md](PLAN.md).
 
 Each test has a budget of 10 seconds of CPU time (300 for tests named
-`*_slow`, which run only under `fo test --all`). The budget counts CPU, not
-wall time, so a heavily loaded host does not turn a passing test into a
-timeout. A wall-clock cap of ten times the budget still stops a test that hangs
+`*_slow`, which run only under `fo test --all`). The budget counts the user
+CPU time of the test process alone, from the moment it starts: not wall time,
+not queueing or building, and not system time, which a loaded host inflates
+by orders of magnitude through kernel lock contention. A heavily loaded host
+therefore does not turn a passing test into a timeout. A wall-clock cap of ten times the budget still stops a test that hangs
 without using CPU. A timeout names the limit that fired. Override per project
 in `fpm.toml`, or per invocation with `FO_TEST_TIMEOUT`,
 `FO_SLOW_TEST_TIMEOUT` and `FO_TEST_WALL_TIMEOUT` (these take precedence):

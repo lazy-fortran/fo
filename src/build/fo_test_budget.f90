@@ -1,6 +1,7 @@
 module fo_test_budget
-    !! Per-test time limits. A test gets a CPU-time budget, not a wall-clock
-    !! one: on a loaded host a test that needs three seconds of CPU can take
+    !! Per-test time limits. A test gets a budget of user CPU time, not a
+    !! wall-clock one (system time is not charged: host load inflates it
+    !! without bound, see child_cpu_ms in fo_process.c): on a loaded host a test that needs three seconds of CPU can take
     !! thirty of wall time, and whether it passes must not depend on what else
     !! the machine is doing. A much larger wall-clock cap still catches tests
     !! that hang without using CPU (blocked on I/O, sleeping, deadlocked).

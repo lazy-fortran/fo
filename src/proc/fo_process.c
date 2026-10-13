@@ -616,14 +616,19 @@ struct run_budget {
     long long wall_ms; /* out: wall time at the kill */
 };
 
-/* User plus system CPU time of a live (or zombie) child over all of its
-   threads, in milliseconds; -1 where it cannot be read cheaply. Processes the
-   child spawns are not counted, matching RLIMIT_CPU. */
+/* User CPU time of a live (or zombie) child over all of its threads, in
+   milliseconds; -1 where it cannot be read cheaply. Processes the child
+   spawns are not counted. System time is left out on purpose: it is the part
+   that host load inflates without bound. A trivial test that starts a thread
+   pool on a node with many runnable processes spends tens of seconds in
+   kernel lock contention (mmap, TLB shootdown, scheduler) while its user time
+   stays at milliseconds, so charging it would make the budget measure the
+   load. A test that really hangs in the kernel is caught by the wall cap. */
 static long long child_cpu_ms(pid_t pid) {
 #ifdef __linux__
     char path[64], buf[1024];
     char *p, *end;
-    unsigned long long utime, stime;
+    unsigned long long utime;
     long ticks = sysconf(_SC_CLK_TCK);
     ssize_t n;
     int fd, field;
@@ -639,8 +644,7 @@ static long long child_cpu_ms(pid_t pid) {
     p = strrchr(buf, ')');
     if (p == NULL) return -1;
     p++;
-    /* After "pid (comm)" come field 3 (state) onward; utime and stime are
-       fields 14 and 15. */
+    /* After "pid (comm)" come field 3 (state) onward; utime is field 14. */
     for (field = 3; field < 14; field++) {
         while (*p == ' ') p++;
         while (*p != ' ' && *p != '\0') p++;
@@ -648,10 +652,7 @@ static long long child_cpu_ms(pid_t pid) {
     }
     utime = strtoull(p, &end, 10);
     if (end == p) return -1;
-    p = end;
-    stime = strtoull(p, &end, 10);
-    if (end == p) return -1;
-    return (long long)((utime + stime) * 1000ULL / (unsigned long long)ticks);
+    return (long long)(utime * 1000ULL / (unsigned long long)ticks);
 #elif defined(__APPLE__)
     /* rusage CPU times are Mach absolute-time units, not nanoseconds. */
     struct rusage_info_v2 info;
@@ -662,7 +663,7 @@ static long long child_cpu_ms(pid_t pid) {
         return -1;
     if (mach_timebase_info(&timebase) != KERN_SUCCESS || timebase.denom == 0)
         return -1;
-    units = info.ri_user_time + info.ri_system_time;
+    units = info.ri_user_time;
     return (long long)(units * timebase.numer / timebase.denom / 1000000ULL);
 #else
     (void)pid;
@@ -1264,10 +1265,8 @@ static int run_argv(const char *cwd, char *const argv[], const char *log_file,
                             own = reported;
                     }
                     if (own < 0) {
-                        own = (long long)(usage.ru_utime.tv_sec +
-                                          usage.ru_stime.tv_sec) * 1000LL +
-                              (long long)(usage.ru_utime.tv_usec +
-                                          usage.ru_stime.tv_usec) / 1000LL;
+                        own = (long long)usage.ru_utime.tv_sec * 1000LL +
+                              (long long)usage.ru_utime.tv_usec / 1000LL;
                     }
                     budget->cpu_ms = own;
                 }
@@ -3495,10 +3494,8 @@ static int monitor_run(int argc, char **argv) {
         waited = wait4(target, &status, WNOHANG, &usage);
         if (waited == target) {
             target_done = 1;
-            cpu_ms = (long long)(usage.ru_utime.tv_sec +
-                                 usage.ru_stime.tv_sec) * 1000LL +
-                     (long long)(usage.ru_utime.tv_usec +
-                                 usage.ru_stime.tv_usec) / 1000LL;
+            cpu_ms = (long long)usage.ru_utime.tv_sec * 1000LL +
+                     (long long)usage.ru_utime.tv_usec / 1000LL;
             if (WIFEXITED(status)) {
                 code = WEXITSTATUS(status);
             } else if (WIFSIGNALED(status)) {
