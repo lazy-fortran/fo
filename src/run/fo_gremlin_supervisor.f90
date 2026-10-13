@@ -2605,6 +2605,7 @@ contains
         type(dag_t) :: dag
         type(test_impact_case_t), allocatable :: cases(:)
         type(test_impact_result_t) :: impact
+        type(backend_t) :: backend
         integer, allocatable :: changed_ids(:), affected_ids(:)
         integer, allocatable :: candidate_ids(:), selected_node_ids(:)
         integer :: n_changed, n_affected, n_cached, n_all, ierr, i
@@ -2620,6 +2621,12 @@ contains
         if (allocated(request%impact_cases)) deallocate(request%impact_cases)
         request%n_impact_cases = 0
         request%impact_all = .false.
+        backend = detect_backend(candidate%project_root)
+        if (backend%kind == BACKEND_CMAKE) then
+            ! Native Fortran program names do not identify registered CTest cases.
+            request%impact_all = .true.
+            return
+        end if
         if (.not. baseline%input_inventory_ready) then
             call generation_inventory_restore(baseline, ierr, message)
             if (ierr /= 0) then
