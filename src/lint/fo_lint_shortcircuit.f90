@@ -40,7 +40,66 @@ contains
     end subroutine shortcircuit_scan_file
 
     subroutine scan_logical(code, start_line, lines_no, msgs, n, cap)
-        !! Walk a joined logical line; for every .and./.or. pair the operand to
+        !! Scan a joined logical line. In a one-line `if (cond) action` the
+        !! condition guards the action as a statement, not as an operand, so
+        !! `if (present(x)) ok = ok .and. f(x)` is sound: the condition and the
+        !! action are scanned separately.
+        character(len=*), intent(in) :: code
+        integer, intent(in) :: start_line
+        integer, intent(inout) :: lines_no(:)
+        character(len=*), intent(inout) :: msgs(:)
+        integer, intent(inout) :: n
+        integer, intent(in) :: cap
+
+        integer :: cond_end
+
+        cond_end = one_line_if_condition_end(code)
+        if (cond_end > 0) then
+            call scan_text(code(:cond_end), start_line, lines_no, msgs, n, cap)
+            call scan_text(code(cond_end + 1:), start_line, lines_no, msgs, n, cap)
+        else
+            call scan_text(code, start_line, lines_no, msgs, n, cap)
+        end if
+    end subroutine scan_logical
+
+    integer function one_line_if_condition_end(code) result(cond_end)
+        !! Index of the ')' closing the condition of a one-line `if (cond)
+        !! action` statement; 0 for a block if (`... then`), any other
+        !! statement, or an if without an action.
+        character(len=*), intent(in) :: code
+        integer :: i, first, depth, last
+
+        cond_end = 0
+        last = len_trim(code)
+        first = verify(code(:last), ' ')
+        if (first == 0) return
+        if (first + 2 > last) return
+        if (code(first:first + 1) /= 'if') return
+        i = first + 2
+        do while (i <= last)
+            if (code(i:i) /= ' ') exit
+            i = i + 1
+        end do
+        if (i > last) return
+        if (code(i:i) /= '(') return
+        depth = 0
+        do while (i <= last)
+            if (code(i:i) == '(') then
+                depth = depth + 1
+            else if (code(i:i) == ')') then
+                depth = depth - 1
+                if (depth == 0) exit
+            end if
+            i = i + 1
+        end do
+        if (i >= last) return
+        if (depth /= 0) return
+        if (adjustl(code(i + 1:last)) == 'then') return
+        cond_end = i
+    end function one_line_if_condition_end
+
+    subroutine scan_text(code, start_line, lines_no, msgs, n, cap)
+        !! Walk statement text; for every .and./.or. pair the operand to
         !! its left is the guard candidate and the operand to its right the
         !! protected access.
         character(len=*), intent(in) :: code
@@ -70,7 +129,7 @@ contains
                 i = i + 1
             end if
         end do
-    end subroutine scan_logical
+    end subroutine scan_text
 
     subroutine record(line_no, var, kind, lines_no, msgs, n, cap)
         integer, intent(in) :: line_no
@@ -413,7 +472,8 @@ contains
         character(len=*), parameter :: list = &
             ' real dble dfloat int nint cmplx aimag conjg abs sign mod modulo '// &
             'sqrt exp log log10 sin cos tan all any sum product count merge '// &
-            'maxval minval dot_product max min huge tiny epsilon '
+            'maxval minval dot_product max min huge tiny epsilon '// &
+            'ieee_is_finite ieee_is_nan ieee_is_normal ieee_is_negative '
         is_value_intrinsic = len_trim(name) > 0 .and. &
             index(list, ' '//trim(name)//' ') > 0
     end function is_value_intrinsic

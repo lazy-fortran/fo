@@ -29,6 +29,9 @@ program test_lint_shortcircuit
     call test_flags_alloc_guard_same_component()
     call test_ignores_array_reduction_bound()
     call test_ignores_value_intrinsic_conversion()
+    call test_ignores_ieee_inquiry_of_compared_scalar()
+    call test_ignores_one_line_if_present_guard()
+    call test_flags_hazard_in_one_line_if_action()
 
     write (output_unit, '(a,i0,a,i0,a)') 'lint_shortcircuit: ', n_pass, &
         ' pass, ', n_fail, ' fail'
@@ -231,6 +234,33 @@ contains
         call scan_lines(lines, 1, flagged, n)
         call assert(n == 0, 'real(ntot, dp) conversion is not an ntot-subscript')
     end subroutine test_ignores_value_intrinsic_conversion
+
+    subroutine test_ignores_ieee_inquiry_of_compared_scalar()
+        integer :: flagged(64), n
+        character(len=200) :: lines(1)
+
+        lines(1) = '        if (tol <= 0.0_dp .or. .not. ieee_is_finite(tol)) return'
+        call scan_lines(lines, 1, flagged, n)
+        call assert(n == 0, 'ieee_is_finite(tol) is not a tol-subscript')
+    end subroutine test_ignores_ieee_inquiry_of_compared_scalar
+
+    subroutine test_ignores_one_line_if_present_guard()
+        integer :: flagged(64), n
+        character(len=200) :: lines(1)
+
+        lines(1) = '        if (present(w)) ok = ok .and. all(w > 0.0_dp)'
+        call scan_lines(lines, 1, flagged, n)
+        call assert(n == 0, 'if (present(w)) action guards w as a statement')
+    end subroutine test_ignores_one_line_if_present_guard
+
+    subroutine test_flags_hazard_in_one_line_if_action()
+        integer :: flagged(64), n
+        character(len=200) :: lines(1)
+
+        lines(1) = '        if (ok) ok = size(v) > 0 .and. v(1) > 0.0_dp'
+        call scan_lines(lines, 1, flagged, n)
+        call assert(n == 1, 'hazard inside the action of a one-line if is flagged')
+    end subroutine test_flags_hazard_in_one_line_if_action
 
     subroutine scan_lines(lines, n_lines, flagged, n_flag)
         character(len=200), intent(in) :: lines(:)
