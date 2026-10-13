@@ -167,6 +167,41 @@
         call remove_tree(tmpdir)
     end subroutine test_detect_cmake_tests_preferred_over_fpm
 
+    subroutine test_detect_conditional_cmake_tests_keep_fpm()
+        !! fortfem declares enable_testing() only behind an optional feature, so
+        !! its default CMake configuration registers no tests; fpm stays authority.
+        type(backend_t) :: b
+        character(len=512) :: tmpdir
+        integer :: u
+
+        call make_tmp_path('fo_test_conditional_ctest', tmpdir)
+        call make_dir(tmpdir)
+        open (newunit=u, file=trim(tmpdir)//'/fpm.toml', status='replace')
+        write (u, '(a)') 'name = "conditional_ctest"'
+        close (u)
+        open (newunit=u, file=trim(tmpdir)//'/CMakeLists.txt', status='replace')
+        write (u, '(a)') 'cmake_minimum_required(VERSION 3.20)'
+        write (u, '(a)') '# enable_testing() in a comment is not a declaration'
+        write (u, '(a)') 'if(OPTIONAL_FEATURE)'
+        write (u, '(a)') '    enable_testing()'
+        write (u, '(a)') 'endif()'
+        close (u)
+        b = detect_backend(tmpdir)
+        call assert(b%kind == BACKEND_NATIVE, &
+            'conditional or commented CTest declaration keeps the fpm backend')
+
+        open (newunit=u, file=trim(tmpdir)//'/CMakeLists.txt', status='replace')
+        write (u, '(a)') 'if(OPTIONAL_FEATURE)'
+        write (u, '(a)') '    message(STATUS "x")'
+        write (u, '(a)') 'endif()'
+        write (u, '(a)') 'ENABLE_TESTING ()'
+        close (u)
+        b = detect_backend(tmpdir)
+        call assert(b%kind == BACKEND_CMAKE, &
+            'top-level CTest declaration after a closed block selects CMake')
+        call remove_tree(tmpdir)
+    end subroutine test_detect_conditional_cmake_tests_keep_fpm
+
     subroutine test_detect_fpm_from_child()
         type(backend_t) :: b
         integer :: u

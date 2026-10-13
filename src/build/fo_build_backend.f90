@@ -94,15 +94,20 @@ contains
     end function detect_backend
 
     logical function cmake_declares_tests(filename) result(declares_tests)
+        !! True when the top-level file unconditionally declares a CTest contract.
+        !! A declaration nested in if()/foreach()/function()/macro()/while()/block()
+        !! (for example behind an optional feature) does not make CMake the test
+        !! authority: with the option off it registers no tests at all.
         character(len=*), intent(in) :: filename
 
         character(len=2048) :: line, lowered
-        integer :: unit, iostat, i, code
+        integer :: unit, iostat, i, code, depth, hash
 
         declares_tests = .false.
         open (newunit=unit, file=filename, status='old', action='read', &
             iostat=iostat)
         if (iostat /= 0) return
+        depth = 0
         do
             read (unit, '(a)', iostat=iostat) line
             if (iostat /= 0) exit
@@ -112,14 +117,45 @@ contains
                 if (code >= iachar('A') .and. code <= iachar('Z')) &
                     lowered(i:i) = achar(code + iachar('a') - iachar('A'))
             end do
-            if (index(lowered, 'include(ctest') > 0 .or. &
-                index(lowered, 'enable_testing') > 0) then
-                declares_tests = .true.
-                exit
+            hash = index(lowered, '#')
+            if (hash > 0) lowered(hash:) = ''
+            lowered = adjustl(lowered)
+            if (command_is(lowered, 'if') .or. command_is(lowered, 'foreach') .or. &
+                command_is(lowered, 'while') .or. command_is(lowered, 'macro') .or. &
+                command_is(lowered, 'function') .or. &
+                command_is(lowered, 'block')) then
+                depth = depth + 1
+            else if (command_is(lowered, 'endif') .or. &
+                    command_is(lowered, 'endforeach') .or. &
+                    command_is(lowered, 'endwhile') .or. &
+                    command_is(lowered, 'endmacro') .or. &
+                    command_is(lowered, 'endfunction') .or. &
+                    command_is(lowered, 'endblock')) then
+                depth = max(0, depth - 1)
+            else if (depth == 0) then
+                if (command_is(lowered, 'enable_testing') .or. &
+                        (command_is(lowered, 'include') .and. &
+                        index(lowered, 'include(ctest') > 0)) then
+                    declares_tests = .true.
+                    exit
+                end if
             end if
         end do
         close (unit)
     end function cmake_declares_tests
+
+    logical function command_is(text, name) result(matches)
+        !! True when the (lowercased, left-adjusted) line invokes CMake command name.
+        character(len=*), intent(in) :: text, name
+        integer :: n
+
+        matches = .false.
+        n = len(name)
+        if (len_trim(text) <= n) return
+        if (text(1:n) /= name) return
+        matches = text(n + 1:n + 1) == '(' .or. text(n + 1:n + 1) == ' '
+        if (matches) matches = index(adjustl(text(n + 1:)), '(') == 1
+    end function command_is
 
     function absolute_dir(dir) result(absdir)
         character(len=*), intent(in) :: dir

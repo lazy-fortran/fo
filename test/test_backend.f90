@@ -22,6 +22,7 @@ program test_backend
     call test_detect_fpm()
     call test_detect_fpm_preferred_over_cmake()
     call test_detect_cmake_tests_preferred_over_fpm()
+    call test_detect_conditional_cmake_tests_keep_fpm()
     call test_detect_cmake_override()
     call test_detect_fpm_from_child()
     call test_detect_cmake_from_child()
