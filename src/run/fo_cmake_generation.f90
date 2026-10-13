@@ -243,6 +243,7 @@ contains
                 if (len(path) == 0) cycle
                 if (path(1:1) /= '/') path = backend%project_dir//'/'//path
                 call normalize_path(path, normalized)
+                call canonical_authored_path(normalized)
                 if (.not. inside(normalized, base)) cycle
                 if (len_trim(normalized) <= len_trim(base) + 1) cycle
                 component = normalized(len_trim(base) + 2:)
