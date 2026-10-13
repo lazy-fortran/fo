@@ -55,6 +55,9 @@ module fo_gfortran_build
     private
 
     integer, parameter :: MAX_DEP_DIRS = 64
+    !! OpenMP threads each concurrently running test may use; 0 outside a
+    !! concurrent team. Set before the team starts and only read inside it.
+    integer, save :: team_omp_threads = 0
     integer, parameter :: MAX_DEP_OBJS = 1024
     integer, parameter :: MAX_SRC_OBJS = 2048
     character(len=512), save :: detected_fc = ''
@@ -1250,12 +1253,22 @@ contains
             write(shard_txt, '(i0)') shard_allow
             call process_setenv_default('FFC_CONFORMANCE_JOBS', trim(shard_txt))
         end if
+        ! Each OpenMP test program would otherwise start one thread per core, so
+        ! a team of N concurrent tests runs N times the machine's threads. Their
+        ! CPU time then multiplies and tests that need a second alone exceed the
+        ! CPU budget. Give each test its share of the cores; a value the user
+        ! exported wins.
+        team_omp_threads = 0
+        if (n_tests > 1) &
+            team_omp_threads = max(1, native_jobs() / min(n_tests, native_jobs()))
         !$omp parallel do if (n_tests > 1) num_threads(max(1, min(n_tests, native_jobs()))) &
         !$omp& schedule(dynamic) private(i, rerun_log, clk0, clk1, clk_rate)
         do i = 1, n_tests
             call run_one_current_test(project_dir, execution_cwd, config, tests(i))
         end do
         !$omp end parallel do
+        ! Reruns are serial, in isolation, with the machine to themselves.
+        team_omp_threads = 0
         ! A failure may have lost a race with a concurrent test; rerun each once,
         ! serially and in isolation, to tell a genuine failure from flakiness.
         do i = 1, n_tests
@@ -3409,6 +3422,23 @@ contains
             n_run, test_warn, log_file)
     end subroutine compile_and_run_tests
 
+    function team_openmp_env() result(extra)
+        !! `;OMP_NUM_THREADS=n` for a test running inside a concurrent team;
+        !! empty outside one, and when the user exported OMP_NUM_THREADS. Passive
+        !! waiting is already the default for every child (fo_c_configure_openmp).
+        character(len=:), allocatable :: extra
+
+        character(len=32) :: value
+        integer :: status
+
+        extra = ''
+        if (team_omp_threads < 1) return
+        call get_environment_variable('OMP_NUM_THREADS', value, status=status)
+        if (status == 0) return
+        write (value, '(i0)') team_omp_threads
+        extra = ';OMP_NUM_THREADS='//trim(value)
+    end function team_openmp_env
+
     subroutine run_test_binary(execution_cwd, bin_path, arg_lines, log_file, &
             config, slow, exitcode, cpu_seconds)
         !! Run one test binary under its CPU budget and wall-clock cap (see
@@ -3438,7 +3468,8 @@ contains
         call make_tmpfile('fo-test-tmp', test_tmp)
         call fs_make_dir(trim(test_tmp))
         call process_run_argv_logged(execution_cwd, packed, n_args, log_file, .true., &
-            wall_cap, exitcode, env_extra='TMPDIR='//trim(test_tmp), &
+            wall_cap, exitcode, env_extra='TMPDIR='//trim(test_tmp)// &
+            team_openmp_env(), &
             cpu_budget_s=budget, timeout_kind=kind, cpu_seconds=cpu_s, &
             wall_seconds=wall_s)
         if (exitcode == 0) call fs_remove_tree(trim(test_tmp))
