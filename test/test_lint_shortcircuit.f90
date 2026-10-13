@@ -32,6 +32,7 @@ program test_lint_shortcircuit
     call test_ignores_ieee_inquiry_of_compared_scalar()
     call test_ignores_one_line_if_present_guard()
     call test_flags_hazard_in_one_line_if_action()
+    call test_ignores_guard_on_element_component()
 
     write (output_unit, '(a,i0,a,i0,a)') 'lint_shortcircuit: ', n_pass, &
         ' pass, ', n_fail, ' fail'
@@ -261,6 +262,16 @@ contains
         call scan_lines(lines, 1, flagged, n)
         call assert(n == 1, 'hazard inside the action of a one-line if is flagged')
     end subroutine test_flags_hazard_in_one_line_if_action
+
+    subroutine test_ignores_guard_on_element_component()
+        integer :: flagged(64), n
+        character(len=200) :: lines(1)
+
+        lines(1) = '        if (.not. allocated(m(f)%p) .or. '// &
+            '.not. allocated(m(f)%q)) return'
+        call scan_lines(lines, 1, flagged, n)
+        call assert(n == 0, 'allocated(m(f)%p) does not guard the array m')
+    end subroutine test_ignores_guard_on_element_component
 
     subroutine scan_lines(lines, n_lines, flagged, n_flag)
         character(len=200), intent(in) :: lines(:)

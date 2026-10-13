@@ -226,13 +226,36 @@ contains
             if (boundary_before(expr, p)) then
                 call read_ident(expr, p + len(fname), var)
                 if (len_trim(var) > 0) then
-                    guard_var = .true.
-                    return
+                    ! allocated(a(i)%c), size(a(i)%c): the guard is on an element
+                    ! component, not on the array a, so a(...) later is not
+                    ! protected or endangered by it.
+                    if (.not. names_element(expr, p + len(fname), var)) then
+                        guard_var = .true.
+                        return
+                    end if
                 end if
             end if
             base = p
         end do
+        var = ''
     end function guard_var
+
+    logical function names_element(expr, start, var)
+        !! True when the identifier var read at start is subscripted, `var(`.
+        character(len=*), intent(in) :: expr, var
+        integer, intent(in) :: start
+        integer :: i, after
+
+        names_element = .false.
+        i = start
+        do while (i <= len_trim(expr))
+            if (expr(i:i) /= ' ') exit
+            i = i + 1
+        end do
+        after = i + len_trim(var)
+        if (after > len_trim(expr)) return
+        names_element = expr(after:after) == '('
+    end function names_element
 
     subroutine index_guard_vars(left, idx1, idx2)
         !! Pull the bare identifiers compared by a <, <=, >, >= bound in left.
