@@ -85,7 +85,7 @@ program test_native_cmake_gorilla_cli
     args = string_list_t()
     call list_add(args, 'test')
     call list_add(args, 'fx_registered')
-    call list_add(args, '--json')
+    call list_add(args, '--json=full')
     call run_fo(driver, args, project, cache, process, env, 120000)
     call assert_process_ok(process, 'registered GORILLA-shaped test passes natively')
     call parse_json_report(process, report, 'native registered test report')
