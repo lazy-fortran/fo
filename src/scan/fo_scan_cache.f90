@@ -7,7 +7,7 @@ module fo_scan_cache
     implicit none
     private
 
-    character(len=16), parameter :: CACHE_MAGIC = 'fo-scan-v6'
+    character(len=16), parameter :: CACHE_MAGIC = 'fo-scan-v7'
 
     public :: scan_cache_load, scan_cache_load_trusted, scan_cache_save
 
@@ -157,6 +157,7 @@ contains
             n_modules = size(record%additional_modules)
         write(unit, iostat=ios) record%filename, record%module_name, &
             record%program_name, record%is_program, record%is_test, &
+            record%has_other_units, &
             record%source_line, record%source_column, record%n_deps, n_modules
         if (ios /= 0) return
         if (n_modules > 0) write (unit, iostat=ios) record%additional_modules
@@ -174,6 +175,7 @@ contains
 
         read(unit, iostat=ios) record%filename, record%module_name, &
             record%program_name, record%is_program, record%is_test, &
+            record%has_other_units, &
             record%source_line, record%source_column, record%n_deps, n_modules
         if (ios /= 0) return
         if (n_modules < 0 .or. n_modules > MAX_UNITS) then

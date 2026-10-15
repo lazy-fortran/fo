@@ -13,15 +13,17 @@ module fo_gremlin_supervisor
         common_generation_cas_root
     use fo_gremlin_request, only: gremlin_request_t, parse_request, is_hex_digest, &
         gremlin_json_field
-    use fo_test_impact, only: test_impact_case_t, test_impact_result_t, &
-        test_impact_select
+    use fo_gremlin_case_inputs, only: generation_model_roots, &
+        generation_units_ensure, generation_case_digests_ensure, &
+        generation_case_digest, generation_inventory_changes
+    use fx_string, only: string_t
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
         json_parser_next, JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, &
         JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_ERROR, JSON_END_OF_INPUT
     use fo_gremlin_generation, only: generation_t, generation_driver_identity, &
         generation_model_key
     use fo_project_load, only: project_has_model, project_load_configured, &
-        project_inventory_cases
+        project_inventory_cases, project_affected_cases
     use fo_project_model, only: model_find_case, model_select, model_request_t, &
         model_selection_t, SELECT_OK, SELECT_EMPTY
     use fo_gremlin_log_text, only: gremlin_retain_build_log, gremlin_log_tail
@@ -101,6 +103,9 @@ module fo_gremlin_supervisor
         type(execution_view_t) :: execution_view
         logical :: gate_required = .false.
         real(dp) :: started_at = 0.0_dp
+        ! Not launched: an earlier generation's PASS receipt with the same
+        ! case input closure digest is reused (see case_reuse_source).
+        logical :: reused = .false.
     end type child_t
 
     public :: gremlin_handle, runner_case_outcome
@@ -1754,6 +1759,14 @@ contains
                         call launch_selected_case(session, owner_request, active_generation, &
                             selected, selected_count, test_index, campaign_seed, &
                             campaign_number, test_child, ierr, message, completed, sequence)
+                        if (ierr == 0 .and. test_child%reused) then
+                            completed = completed + 1
+                            call advance_campaign(project_dir, session, owner_request, &
+                                active_generation, selected, selected_count, &
+                                test_index, campaign_seed, campaign_number, &
+                                campaign_started_ms, test_child, ierr, message, &
+                                completed, state_name, sequence)
+                        end if
                         if (ierr /= 0) then
                             fatal_error = .true.
                             exit
@@ -2509,7 +2522,6 @@ contains
         if (allocated(request%impact_cases)) deallocate(request%impact_cases)
         request%n_impact_cases = 0
         request%impact_all = .false.
-        if (was_active) call compute_generation_impact(active, candidate, request)
         call gremlin_generation_lease_acquire_at(candidate%root, new_active_lease, &
             ierr, message)
         if (ierr /= 0) then
@@ -2582,6 +2594,8 @@ contains
         request%gate_cases = ''
         if (was_active) then
             call generation_model_adopt(active, candidate)
+            ! Impact on the candidate's model and its built view.
+            call compute_generation_impact(active, candidate, request)
         else if (allocated(candidate%model)) then
             deallocate (candidate%model)
         end if
@@ -2655,90 +2669,73 @@ contains
     end subroutine complete_build
 
     subroutine compute_generation_impact(baseline, candidate, request)
+        !! Cases of the candidate affected by its input changes against the
+        !! previous generation: model_affected on the candidate's model
+        !! (fpm and CMake alike) with the changed project files of the two
+        !! inventories. Changed inputs outside the project files (global
+        !! roles, dependency trees, CMake context), an incomplete inventory
+        !! or another fo driver widen to every case.
         type(generation_t), intent(inout) :: baseline, candidate
         type(gremlin_request_t), intent(inout) :: request
 
-        type(dag_t) :: dag
-        type(test_impact_case_t), allocatable :: cases(:)
-        type(test_impact_result_t) :: impact
         type(backend_t) :: backend
-        integer, allocatable :: changed_ids(:), affected_ids(:)
-        integer, allocatable :: candidate_ids(:), selected_node_ids(:)
-        integer :: n_changed, n_affected, n_cached, n_all, ierr, i
-        character(len=MAX_PATH), allocatable :: filenames(:)
-        character(len=NAME_LEN), allocatable :: all_names(:)
-        character(len=PATH_LEN) :: message
-        logical, allocatable :: is_test_arr(:)
-        logical :: dependency_model_complete
+        type(string_t), allocatable :: changed(:), reasons(:), roots(:)
+        type(string_t), allocatable :: widen_reasons(:)
+        integer, allocatable :: cases(:), affected(:)
+        character(len=PATH_LEN) :: message, project
+        integer :: ierr, i
 
-        allocate (changed_ids(MAX_NODES), affected_ids(MAX_NODES), &
-            candidate_ids(MAX_NODES), selected_node_ids(MAX_NODES), &
-            filenames(MAX_NODES), all_names(MAX_NODES), is_test_arr(MAX_NODES))
         if (allocated(request%impact_cases)) deallocate(request%impact_cases)
         request%n_impact_cases = 0
-        request%impact_all = .false.
-        backend = detect_backend(candidate%project_root)
-        if (backend%kind == BACKEND_CMAKE) then
-            ! Native Fortran program names do not identify registered CTest cases.
-            request%impact_all = .true.
-            return
-        end if
+        request%impact_all = .true.
+        project = campaign_project(candidate)
+        backend = detect_backend(trim(project))
+        ! The frozen FO_CMAKE_NATIVE route has no model: every case.
+        if (.not. project_has_model(backend)) return
         if (.not. baseline%input_inventory_ready) then
             call generation_inventory_restore(baseline, ierr, message)
-            if (ierr /= 0) then
-                request%impact_all = .true.
-                return
-            end if
+            if (ierr /= 0) return
         end if
         if (.not. candidate%input_inventory_ready) then
             call generation_inventory_restore(candidate, ierr, message)
-            if (ierr /= 0) then
-                request%impact_all = .true.
-                return
-            end if
+            if (ierr /= 0) return
         end if
-        call fo_changed_modules(candidate%project_root, dag, changed_ids, &
-            n_changed, affected_ids, n_affected, n_cached, ierr, &
-            filenames=filenames, is_test_arr=is_test_arr)
-        if (ierr /= 0) then
-            request%impact_all = .true.
-            return
+        call generation_model_ensure(candidate, ierr, message)
+        if (ierr /= 0 .or. .not. allocated(candidate%model)) return
+        call generation_units_ensure(candidate, trim(project))
+        call generation_inventory_changes(baseline%input_inventory, &
+            candidate%input_inventory, changed, reasons)
+        if (baseline%driver_digest /= candidate%driver_digest .or. &
+            baseline%driver_size /= candidate%driver_size) &
+            call push_reason('fo driver changed')
+        call generation_model_roots(candidate, trim(project), roots)
+        call project_inventory_cases(candidate%model, cases)
+        if (size(reasons) > 0) then
+            call project_affected_cases(candidate%model, candidate%units, roots, &
+                cases, changed, affected, widen_reasons, force_reason=reasons(1)%s)
+        else
+            call project_affected_cases(candidate%model, candidate%units, roots, &
+                cases, changed, affected, widen_reasons)
         end if
-        do i = 1, dag%n_nodes
-            candidate_ids(i) = i
+        request%impact_all = .false.
+        request%n_impact_cases = size(affected)
+        allocate (request%impact_cases(size(affected)))
+        do i = 1, size(affected)
+            request%impact_cases(i) = candidate%model%cases(affected(i))%name
         end do
-        call gfortran_selected_test_names(candidate%project_root, filenames, &
-            candidate_ids, dag%n_nodes, .true., all_names, n_all, &
-            selected_node_ids)
-        if (n_all == 0) then
-            request%impact_all = .true.
-            return
-        end if
-        allocate(cases(n_all))
-        do i = 1, n_all
-            cases(i)%public_name = all_names(i)
-            cases(i)%identity = 'gfortran-test:'//trim(all_names(i))
-            cases(i)%node_id = selected_node_ids(i)
-            ! Slow classification changes execution budgets, not required impact.
-            cases(i)%eligible = .true.
-            cases(i)%slow = is_slow_test(all_names(i))
-            cases(i)%dependency_complete = .true.
-        end do
-        dependency_model_complete = &
-            baseline%driver_digest == candidate%driver_digest .and. &
-            baseline%driver_size == candidate%driver_size
-        call test_impact_select(baseline%input_inventory, &
-            candidate%input_inventory, dag, filenames, cases, &
-            dependency_model_complete, impact, ierr, message)
-        if (ierr /= 0) then
-            request%impact_all = .true.
-            return
-        end if
-        request%n_impact_cases = min(impact%required_count, MAX_NODES)
-        allocate(request%impact_cases(request%n_impact_cases))
-        do i = 1, request%n_impact_cases
-            request%impact_cases(i) = impact%required(i)%public_name
-        end do
+
+    contains
+
+        subroutine push_reason(text)
+            character(len=*), intent(in) :: text
+            type(string_t), allocatable :: grown(:)
+
+            allocate (grown(size(reasons) + 1))
+            grown(1:size(reasons)) = reasons
+            grown(size(grown))%s = text
+            call move_alloc(grown, reasons)
+        end subroutine push_reason
+
     end subroutine compute_generation_impact
 
     function campaign_project(generation) result(project)
@@ -2774,13 +2771,15 @@ contains
             call generation_inventory_restore(generation, restore_status, message)
         message = ''
         allocate (generation%model)
-        call project_load_configured(backend, generation%model, ierr, detail)
+        call project_load_configured(backend, generation%model, ierr, detail, &
+            scanned=generation%model_extra)
         if (ierr /= 0) then
             deallocate (generation%model)
             message = 'cannot load the generation project model: '//detail
             return
         end if
         generation%model_generation = generation%identity
+        generation%model_root = campaign_project(generation)
         ! fpm source layers follow module use, so every source counts.
         generation%model_full_key = backend%kind == BACKEND_NATIVE .and. &
             generation%model%n_layers > 0
@@ -2824,6 +2823,9 @@ contains
         candidate%model_key = key
         candidate%model_generation = previous%model_generation
         candidate%model_full_key = previous%model_full_key
+        candidate%model_root = previous%model_root
+        if (allocated(previous%model_extra)) &
+            candidate%model_extra = previous%model_extra
     end subroutine generation_model_adopt
 
     logical function case_needs_all(generation, name) result(needs)
@@ -2912,6 +2914,7 @@ contains
         message = ''
         call generation_model_ensure(generation, ierr, message)
         if (ierr /= 0) return
+        call generation_case_digests_ensure(generation, trim(project_dir))
         capacity = MAX_NODES
         if (allocated(generation%model)) then
             call project_inventory_cases(generation%model, model_cases)
@@ -3493,6 +3496,7 @@ contains
         integer :: view_status
         logical :: exists
         character(len=PATH_LEN) :: coverage_path
+        character(len=HASH_LEN) :: reused_from
 
         child = child_t()
         ierr = 0
@@ -3520,6 +3524,23 @@ contains
             return
         end if
         executable = session%driver_path
+        call case_reuse_source(session, generation, selected(index_case), &
+            reused_from, ierr, message)
+        if (ierr /= 0) return
+        if (len_trim(reused_from) > 0) then
+            ! Same input closure as a PASS of an earlier generation: no run.
+            child%case_name = selected(index_case)
+            child%campaign = campaign
+            child%case_index = index_case
+            child%seed = seed
+            child%reused = .true.
+            sequence = sequence + 1
+            call record_immediate_case(session, request, generation, &
+                selected(index_case), 0, 'PASS', sequence, index_case, seed, '', &
+                ierr, message, gate_required=child%gate_required, &
+                reused_from=reused_from)
+            return
+        end if
         write (log_name, '(a,i0,a,i0,a)') 'case-', campaign, '-', index_case, '.log'
         call log_path(session, trim(log_name), child%log_file)
         write(view_owner, '(a,"-case-",i0,"-",i0)') trim(session%session_id), &
@@ -3586,6 +3607,35 @@ contains
     subroutine advance_campaign(project_dir, session, request, generation, selected, &
             n_selected, index_case, seed, campaign, campaign_started_ms, child, ierr, message, &
             completed, state_name, sequence)
+        !! Launch the next case; a reused case completes at once and the
+        !! campaign advances again.
+        character(len=*), intent(in) :: project_dir
+        type(gremlin_session_t), intent(in) :: session
+        type(gremlin_request_t), intent(inout) :: request
+        type(generation_t), intent(inout) :: generation
+        character(len=*), intent(inout) :: selected(:)
+        integer, intent(inout) :: n_selected, index_case, seed, campaign
+        integer(int64), intent(inout) :: campaign_started_ms
+        type(child_t), intent(inout) :: child
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message, state_name
+        integer, intent(inout) :: completed
+        integer, intent(inout) :: sequence
+
+        do
+            child%reused = .false.
+            call advance_campaign_step(project_dir, session, request, generation, &
+                selected, n_selected, index_case, seed, campaign, &
+                campaign_started_ms, child, ierr, message, completed, state_name, &
+                sequence)
+            if (ierr /= 0 .or. .not. child%reused) return
+            completed = completed + 1
+        end do
+    end subroutine advance_campaign
+
+    subroutine advance_campaign_step(project_dir, session, request, generation, &
+            selected, n_selected, index_case, seed, campaign, campaign_started_ms, &
+            child, ierr, message, completed, state_name, sequence)
         character(len=*), intent(in) :: project_dir
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(inout) :: request
@@ -3707,7 +3757,7 @@ contains
                 message = trim(state_message)
             end if
         end if
-    end subroutine advance_campaign
+    end subroutine advance_campaign_step
 
     integer function next_campaign_seed(seed) result(next_seed)
         integer, intent(in) :: seed
@@ -3739,7 +3789,7 @@ contains
 
     subroutine record_immediate_case(session, request, generation, case_name, exitcode, &
             outcome, sequence, case_index, seed, log_file, ierr, message, &
-            credit_coverage, gate_required)
+            credit_coverage, gate_required, reused_from)
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(in) :: request
         type(generation_t), intent(in) :: generation
@@ -3750,7 +3800,11 @@ contains
 
         logical, intent(in), optional :: credit_coverage
         logical, intent(in), optional :: gate_required
+        !! The receipt reuses this earlier generation's PASS (no run).
+        character(len=*), intent(in), optional :: reused_from
         logical :: credit, is_gate
+        character(len=:), allocatable :: reuse_identity
+        character(len=HASH_LEN) :: closure
         character(len=160) :: gate_identity
         character(len=256) :: completion_id
         character(len=:), allocatable :: record
@@ -3776,6 +3830,18 @@ contains
             request%requirement_digest//'"'
         receipt_identity = ',"evidence_kind":"reproduction"'
         if (credit) receipt_identity = ',"evidence_kind":"campaign"'
+        ! Case receipts carry the case input closure digest (reuse key) and
+        ! whether the case ran or reused an earlier PASS.
+        reuse_identity = ''
+        if (case_name /= '<build>') then
+            closure = generation_case_digest(generation, case_name)
+            if (len_trim(closure) > 0) reuse_identity = &
+                ',"closure_digest":"'//trim(closure)//'"'
+            reuse_identity = reuse_identity//',"disposition":"run"'
+            if (present(reused_from)) reuse_identity = &
+                ',"closure_digest":"'//trim(closure)//'","disposition":"reused",'// &
+                '"reused_from":"'//trim(reused_from)//'"'
+        end if
         if (credit .and. coverage_outcome(outcome)) then
             coverage_path = trim(session%state_dir)//'/coverage-'// &
                 generation%identity//'.state'
@@ -3800,7 +3866,7 @@ contains
             '","driver_digest":"'//generation%driver_digest// &
             '","driver_size":'//trim(int64_text(generation%driver_size))// &
             ',"case_id":"'//trim(json_escape_string(case_name))//'"'// &
-            case_attributes_json(generation, case_name)// &
+            case_attributes_json(generation, case_name)//reuse_identity// &
             ',"outcome":"'//trim(journal_outcome)//'","status":"'// &
             trim(outcome)//'","exitcode":'// &
             trim(json_int(exitcode))//',"seed":'//trim(json_int(seed))// &
@@ -4129,6 +4195,70 @@ contains
             if (ierr /= 0) return
         end if
     end subroutine publish_lifecycle_transition
+
+    subroutine case_reuse_source(session, generation, case_name, source, ierr, &
+            message)
+        !! The earlier generation whose PASS this case may reuse: the latest
+        !! lane campaign receipt of the case with the same input closure
+        !! digest is a PASS, and the case has no receipt in this generation
+        !! yet (a later campaign epoch runs it again). '' = run the case.
+        type(gremlin_session_t), intent(in) :: session
+        type(generation_t), intent(in) :: generation
+        character(len=*), intent(in) :: case_name
+        character(len=HASH_LEN), intent(out) :: source
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(journal_record_t), allocatable :: records(:)
+        character(len=HASH_LEN) :: digest, receipt_generation, receipt_digest
+        character(len=HASH_LEN) :: last_generation
+        character(len=NAME_LEN) :: receipt_case
+        character(len=32) :: verdict, last_verdict
+        character(len=PATH_LEN) :: journal_path
+        integer(int64) :: cursor, next_cursor
+        integer :: i
+        logical :: exists
+
+        source = ''
+        ierr = 0
+        message = ''
+        digest = generation_case_digest(generation, case_name)
+        if (len_trim(digest) /= HASH_LEN) return
+        journal_path = trim(session%state_dir)//'/campaign-journal.jsonl'
+        inquire (file=trim(journal_path), exist=exists)
+        if (.not. exists) return
+        last_verdict = ''
+        last_generation = ''
+        cursor = 0_int64
+        do
+            call journal_read_page(trim(journal_path), cursor, 64, &
+                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, next_cursor, &
+                ierr, message)
+            if (ierr /= JOURNAL_OK) return
+            if (size(records) == 0) exit
+            do i = 1, size(records)
+                call gremlin_json_field(records(i)%json, 'case_id', receipt_case)
+                if (trim(receipt_case) /= trim(case_name)) cycle
+                call gremlin_json_field(records(i)%json, 'generation', &
+                    receipt_generation)
+                ! Already verified (or run) in this generation: run again.
+                if (receipt_generation == generation%identity) return
+                call gremlin_json_field(records(i)%json, 'closure_digest', &
+                    receipt_digest)
+                if (receipt_digest /= digest) cycle
+                call gremlin_json_field(records(i)%json, 'status', verdict)
+                last_verdict = verdict
+                last_generation = receipt_generation
+            end do
+            if (next_cursor <= cursor) then
+                ierr = JOURNAL_INVALID
+                message = 'journal cursor did not advance during receipt reuse'
+                return
+            end if
+            cursor = next_cursor
+        end do
+        ierr = 0
+        if (trim(last_verdict) == 'PASS') source = last_generation
+    end subroutine case_reuse_source
 
     subroutine prior_generation_case_passed(session, generation, case_name, passed, &
             ierr, message)

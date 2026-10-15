@@ -236,6 +236,20 @@ fo test --list [--json] [same selection]
   `active_model_generation` (the generation that loaded it). Case receipts
   carry the case `labels` and `layer`, and a label-excluded case runs with
   `--all`.
+- Gremlin prioritizes the cases a new generation's edits affect by the
+  `--only-changed` rule below, applied to the project files whose inventory
+  entries differ from the previous generation. A changed input outside the
+  project files (manifests, include trees, dependency trees, CMake context),
+  an incomplete inventory or another fo driver affect every case.
+- Each case receipt carries `closure_digest`, the digest of the case's input
+  closure: the contents of every file whose change affects the case by that
+  rule, the files that affect every case, the case labels and attributes, the
+  toolchain identity and the fo driver. A case whose latest lane campaign
+  receipt with the same digest is a `PASS` from an earlier generation, and
+  which has no receipt in the current generation yet, is not run: its receipt
+  is a `PASS` with `"disposition":"reused"` and `reused_from` naming that
+  generation. Run cases have `"disposition":"run"`. A failure with the same
+  digest after that `PASS` prevents reuse.
 
 - `--only-changed` restricts the selection to the cases the files changed
   against Git HEAD affect (tracked edits, staged or not, deletions and

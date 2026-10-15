@@ -16,7 +16,8 @@ module fo_scan_types
         logical :: is_program = .false.
         logical :: is_test = .false.
         !! The file holds a module or submodule and also a program, procedure
-        !! or block data outside it. Not stored in the scan cache.
+        !! or block data outside it. True when the scanner cannot tell (the
+        !! regex fallback), so affected selection links such a file everywhere.
         logical :: has_other_units = .false.
         integer :: source_line = 0
         integer :: source_column = 0

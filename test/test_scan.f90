@@ -2,7 +2,7 @@ program test_scan
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_scan, only: scan_unit_t, scan_file, scan_file_regex, scan_dir, &
-        scan_dir_regex, is_slow_test
+        scan_dir_regex, is_slow_test, scan_dir_cached
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: make_scratch, join_path, make_directory, make_symlink
     use fo_test_harness, only: write_text, remove_path, current_directory
@@ -46,6 +46,7 @@ program test_scan
     call test_scan_dir_skips_build_outputs()
     call test_scan_dir_skips_agent_worktrees()
     call test_scan_cache_invalidates()
+    call test_scan_cache_keeps_mixed_units()
     call test_scan_classifies_test_by_directory()
 
     write (output_unit, '(a,i0,a,i0,a)') 'scan: ', n_pass, ' pass, ', n_fail, ' fail'
@@ -853,6 +854,39 @@ contains
         call assert(n_units == 2, 'scan cache: added source invalidates file list')
         call remove_tree(dir)
     end subroutine test_scan_cache_invalidates
+
+    subroutine test_scan_cache_keeps_mixed_units()
+        !! A cache hit keeps the mixed-unit flag; the regex scanner, which
+        !! cannot tell, reports it conservatively.
+        type(scan_unit_t), allocatable :: units(:)
+        type(scan_unit_t) :: info
+        integer :: n_units, ierr
+        character(len=512) :: dir
+        character(len=80) :: lines(5)
+
+        call make_tmp_path('fo_test_scan_cache_mixed', dir, '')
+        call remove_tree(dir)
+        call make_dir(trim(dir)//'/src')
+        lines = [character(len=80) :: 'module mixed_mod', 'implicit none', &
+            'end module mixed_mod', 'subroutine outer_proc()', &
+            'end subroutine outer_proc']
+        call write_file(trim(dir)//'/src/mixed.f90', lines, 5)
+        call scan_dir_cached(dir, units, n_units, ierr)
+        call assert(ierr == 0 .and. n_units == 1, 'mixed cache: initial scan')
+        if (n_units == 1) call assert(units(1)%has_other_units, &
+            'mixed cache: fresh scan flags the mixed file')
+        call scan_dir_cached(dir, units, n_units, ierr)
+        call assert(ierr == 0 .and. n_units == 1, 'mixed cache: cached scan')
+        if (n_units == 1) call assert(units(1)%has_other_units, &
+            'mixed cache: cache hit keeps the mixed-unit flag')
+        lines(4) = ''
+        lines(5) = ''
+        call write_file(trim(dir)//'/src/mixed.f90', lines, 5)
+        call scan_file_regex(trim(dir)//'/src/mixed.f90', info, ierr)
+        call assert(ierr == 0 .and. info%has_other_units, &
+            'regex scan: unknown mixing is reported as mixed')
+        call remove_tree(dir)
+    end subroutine test_scan_cache_keeps_mixed_units
 
     subroutine test_scan_classifies_test_by_directory()
         ! Classification follows fpm: a unit is a test iff it lives under a test
