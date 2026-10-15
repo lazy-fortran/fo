@@ -42,6 +42,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "../util/fo_sys.h"
+
 #ifdef __linux__
 #define FO_MONITOR_FD 9
 #define FO_MONITOR_ARG "\037fo-process-monitor-v1"
@@ -73,7 +75,6 @@ struct async_process {
 static struct async_process *async_processes = NULL;
 
 int fo_gremlin_process_matches(int pid, const char *start);
-static uint64_t process_start_identity(pid_t pid);
 int fo_c_process_containment_required(void);
 
 static int heartbeats_suppressed = 0;
@@ -836,70 +837,6 @@ struct owned_process_record {
     int alive;
 };
 
-static int owned_process_details(pid_t pid, pid_t *parent, pid_t *group,
-                                  pid_t *session, uint64_t *start, int *alive) {
-#ifdef __APPLE__
-    struct proc_bsdinfo info;
-    pid_t sid;
-    int bytes;
-
-    if (pid <= 0) return ESRCH;
-    bytes = proc_pidinfo((int)pid, PROC_PIDTBSDINFO, 0, &info,
-                         (int)sizeof(info));
-    if (bytes != (int)sizeof(info) || info.pbi_pid != (uint32_t)pid) return ESRCH;
-    sid = getsid(pid);
-    if (sid <= 0 && info.pbi_status != SZOMB)
-        return errno != 0 ? errno : ESRCH;
-    if (parent != NULL) *parent = (pid_t)info.pbi_ppid;
-    if (group != NULL) *group = (pid_t)info.pbi_pgid;
-    if (session != NULL) *session = sid;
-    if (alive != NULL) *alive = info.pbi_status != SZOMB;
-    if (start != NULL) {
-        *start = (uint64_t)info.pbi_start_tvsec * 1000000ULL +
-                 (uint64_t)info.pbi_start_tvusec;
-        if (*start == 0) return ESRCH;
-    }
-    return 0;
-#else
-    char path[64], line[4096], *end, *cursor;
-    char state;
-    long ppid, pgid, sid;
-    uint64_t identity = 0;
-    int field;
-    FILE *file;
-    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
-    file = fopen(path, "r");
-    if (file == NULL) return errno;
-    if (fgets(line, sizeof(line), file) == NULL) {
-        fclose(file);
-        return ESRCH;
-    }
-    fclose(file);
-    end = strrchr(line, ')');
-    if (end == NULL || sscanf(end + 1, " %c %ld %ld %ld",
-                              &state, &ppid, &pgid, &sid) != 4) return EIO;
-    cursor = end + 1;
-    for (field = 3; field <= 22; field++) {
-        while (*cursor == ' ') cursor++;
-        if (*cursor == '\0') return EIO;
-        end = cursor;
-        while (*end != '\0' && *end != ' ') end++;
-        if (field == 22) {
-            identity = strtoull(cursor, NULL, 10);
-            break;
-        }
-        cursor = end;
-    }
-    if (identity == 0) return ESRCH;
-    if (parent != NULL) *parent = (pid_t)ppid;
-    if (group != NULL) *group = (pid_t)pgid;
-    if (session != NULL) *session = (pid_t)sid;
-    if (start != NULL) *start = identity;
-    if (alive != NULL) *alive = state != 'Z' && state != 'X';
-    return 0;
-#endif
-}
-
 static int owned_list_processes(pid_t **pids_out, size_t *count_out) {
 #ifdef __APPLE__
     pid_t *pids = NULL;
@@ -1002,7 +939,7 @@ static int collect_owned_tree(pid_t root, uint64_t root_start,
     if (records == NULL) { free(pids); return ENOMEM; }
     for (i = 0; i < count; i++) {
         struct owned_process_record item;
-        if (owned_process_details(pids[i], &item.parent, &item.group,
+        if (fo_sys_process_info(pids[i], &item.parent, &item.group,
                                    &item.session, &item.start, &item.alive) != 0) continue;
         item.pid = pids[i];
         item.owned = 0;
@@ -1044,11 +981,11 @@ static int collect_owned_tree(pid_t root, uint64_t root_start,
             if (records[i].owned) continue;
             parent_index = owned_find_record(records, used, records[i].parent);
             if (parent_index == SIZE_MAX || !records[parent_index].owned) continue;
-            if (owned_process_details(records[i].pid, &current_parent, NULL, NULL,
+            if (fo_sys_process_info(records[i].pid, &current_parent, NULL, NULL,
                                        &current_start, NULL) != 0 ||
                 current_start != records[i].start ||
                 current_parent != records[i].parent ||
-                owned_process_details(records[i].parent, NULL, NULL, NULL,
+                fo_sys_process_info(records[i].parent, NULL, NULL, NULL,
                                        &parent_start, NULL) != 0 ||
                 parent_start != records[i].parent_start) continue;
             records[i].owned = 1;
@@ -1090,7 +1027,7 @@ static int signal_owned_tree(pid_t root, uint64_t root_start,
             fo_gremlin_admission_is_guardian((int)records[i].pid, stamp)) continue;
         matched++;
         if (signal_number == 0) continue;
-        if (owned_process_details(records[i].pid, NULL, NULL, NULL,
+        if (fo_sys_process_info(records[i].pid, NULL, NULL, NULL,
                                    &current_start, NULL) != 0 ||
             current_start != records[i].start) continue;
 #ifdef __linux__
@@ -1101,7 +1038,7 @@ static int signal_owned_tree(pid_t root, uint64_t root_start,
                 if (errno == ESRCH) continue;
                 error = errno; free(records); errno = error; return -1;
             }
-            if (process_start_identity(records[i].pid) == records[i].start &&
+            if (fo_sys_process_start(records[i].pid) == records[i].start &&
                 syscall(SYS_pidfd_send_signal, fd, signal_number, NULL, 0) != 0 &&
                 errno != ESRCH) {
                 error = errno; close(fd); free(records); errno = error; return -1;
@@ -1716,54 +1653,6 @@ static int install_async_group_containment(int strict_group) {
 #endif
 }
 
-/* Start ticks on Linux and start time on macOS protect against signalling a
-   reused leader PID. A surviving process group keeps its group ID allocated. */
-static uint64_t process_start_identity(pid_t pid) {
-#ifdef __linux__
-    char path[64], buf[4096], *close, *p, *end;
-    FILE *file;
-    int field;
-    unsigned long long value = 0;
-
-    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
-    file = fopen(path, "r");
-    if (file == NULL) return 0;
-    if (fgets(buf, sizeof(buf), file) == NULL) {
-        fclose(file);
-        return 0;
-    }
-    fclose(file);
-    close = strrchr(buf, ')');
-    if (close == NULL) return 0;
-    p = close + 1;
-    for (field = 3; field <= 22; field++) {
-        while (*p == ' ') p++;
-        if (*p == '\0') return 0;
-        end = p;
-        while (*end != '\0' && *end != ' ') end++;
-        if (field == 22) {
-            char saved = *end;
-            *end = '\0';
-            value = strtoull(p, NULL, 10);
-            *end = saved;
-            break;
-        }
-        p = end;
-    }
-    return (uint64_t)value;
-#elif defined(__APPLE__)
-    struct proc_bsdinfo info;
-    int bytes = proc_pidinfo((int)pid, PROC_PIDTBSDINFO, 0, &info,
-                             (int)sizeof(info));
-    if (bytes != (int)sizeof(info)) return 0;
-    return (uint64_t)info.pbi_start_tvsec * 1000000ULL +
-           (uint64_t)info.pbi_start_tvusec;
-#else
-    (void)pid;
-    return 0;
-#endif
-}
-
 static int read_exact(int fd, void *buffer, size_t size) {
     char *p = buffer;
     size_t used = 0;
@@ -1777,32 +1666,14 @@ static int read_exact(int fd, void *buffer, size_t size) {
 }
 
 static int write_exact(int fd, const void *buffer, size_t size) {
-    const char *p = buffer;
-    size_t used = 0;
-    while (used < size) {
-        ssize_t n = write(fd, p + used, size - used);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) return -1;
-        used += (size_t)n;
-    }
-    return 0;
-}
-
-static int process_identity_value_text(uint64_t identity, char *out, size_t cap) {
-    int n;
-    if (identity == 0) return ESRCH;
-#ifdef __APPLE__
-    n = snprintf(out, cap, "%llu.%06llu",
-                 (unsigned long long)(identity / 1000000ULL),
-                 (unsigned long long)(identity % 1000000ULL));
-#else
-    n = snprintf(out, cap, "%llu", (unsigned long long)identity);
-#endif
-    return n < 0 || (size_t)n >= cap ? ENAMETOOLONG : 0;
+    int e = fo_sys_write_all(fd, buffer, size);
+    if (e == 0) return 0;
+    errno = e;
+    return -1;
 }
 
 static int process_identity_text(pid_t pid, char *out, size_t cap) {
-    return process_identity_value_text(process_start_identity(pid), out, cap);
+    return fo_sys_identity_text(fo_sys_process_start(pid), out, cap);
 }
 
 static int parse_identity_text(const char *text, uint64_t *identity) {
@@ -1917,7 +1788,7 @@ static int async_publish_record(const char *registry, const char *path,
                                 size_t record_size, int member_record) {
     char temporary[PATH_MAX];
     struct timespec ts;
-    int e, n, fd, dirfd, created = 0;
+    int e, n, fd, created = 0;
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return errno;
     n = snprintf(temporary, sizeof(temporary), "%s/.%s.%ld.%lld.%09ld.tmp",
                  registry, stem, (long)getpid(), (long long)ts.tv_sec,
@@ -1937,13 +1808,7 @@ static int async_publish_record(const char *registry, const char *path,
     }
     if (unlink(temporary) != 0 && e == 0) e = errno;
     if (e != 0) return e;
-    if (created) {
-        dirfd = open(registry, O_RDONLY | O_CLOEXEC);
-        if (dirfd < 0) return errno;
-        if (fsync(dirfd) != 0) e = errno;
-        if (close(dirfd) != 0 && e == 0) e = errno;
-    }
-    return e;
+    return created ? fo_sys_sync_dir(registry) : e;
 }
 
 static int register_async_session(struct async_process *item) {
@@ -2032,11 +1897,11 @@ static int register_async_descendants(struct async_process *item,
             item->members = member;
         }
         if (item->registry_dir[0] == '\0') continue;
-        e = process_identity_value_text(records[i].start, member_start,
+        e = fo_sys_identity_text(records[i].start, member_start,
                                         sizeof(member_start));
         if (e != 0) break;
         if (records[i].parent_start == 0) continue;
-        e = process_identity_value_text(records[i].parent_start, parent_start,
+        e = fo_sys_identity_text(records[i].parent_start, parent_start,
                                         sizeof(parent_start));
         if (e != 0) break;
         n = snprintf(path, sizeof(path),
@@ -2327,7 +2192,7 @@ int fo_c_process_owned_by_scope(const char *state_dir, int owner_pid,
         parse_identity_text(owner_start, &owner_identity) != 0 ||
         !fo_gremlin_process_matches(owner_pid, owner_start)) return 0;
     for (int depth = 0; depth < 256 && current > 1; ++depth) {
-        if (owned_process_details(current, &parent, NULL, NULL, &identity,
+        if (fo_sys_process_info(current, &parent, NULL, NULL, &identity,
                                   &alive) != 0 || !alive) break;
         if (current == (pid_t)owner_pid) return identity == owner_identity;
         if (parent == current) break;
@@ -2366,7 +2231,7 @@ static int recovery_session_count(const struct recovery_session *item) {
 #if defined(__APPLE__) || defined(__linux__)
     int count = signal_owned_tree(item->pid, item->identity, item->session,
                                    item->owns_session, NULL, 0);
-    if (count == 0 && process_start_identity(item->pid) == item->identity) {
+    if (count == 0 && fo_sys_process_start(item->pid) == item->identity) {
         int status;
         pid_t got;
         do { got = waitpid(item->pid, &status, WNOHANG); }
@@ -2714,7 +2579,7 @@ static int reap_registered_scope_children(const struct async_process *item) {
         if (error != 0) break;
         if (child.pid == item->pid || find_async_process(child.pid) != NULL)
             continue;
-        error = owned_process_details(child.pid, &parent, NULL, NULL,
+        error = fo_sys_process_info(child.pid, &parent, NULL, NULL,
                                       &current_start, &alive);
         if (error == ESRCH || error == ENOENT) { error = 0; continue; }
         if (error != 0) break;
@@ -2748,7 +2613,7 @@ static int reap_adopted_scope_zombies(void) {
         pid_t parent = 0, got;
         int alive = 1;
         if (find_async_process(pids[i]) != NULL) continue;
-        error = owned_process_details(pids[i], &parent, NULL, NULL,
+        error = fo_sys_process_info(pids[i], &parent, NULL, NULL,
                                       NULL, &alive);
         if (error != 0) { error = 0; continue; }
         if (parent != getpid() || alive) continue;
@@ -2809,7 +2674,7 @@ static int async_identity_matches(const struct async_process *item) {
         uint64_t current;
         if ((item->owns_group && group != item->pid) ||
             getsid(item->pid) != item->session) return 0;
-        current = process_start_identity(item->pid);
+        current = fo_sys_process_start(item->pid);
         if (item->start_identity != 0 && current != item->start_identity) return 0;
         return 1;
     }
@@ -2879,9 +2744,9 @@ static int reap_owned_members(const struct async_process *item) {
     const struct owned_process_identity *member;
     int pending = 0;
     for (member = item->members; member != NULL; member = member->next) {
-        if (process_start_identity(member->pid) == member->start) {
+        if (fo_sys_process_start(member->pid) == member->start) {
             (void)waitpid(member->pid, NULL, WNOHANG);
-            if (process_start_identity(member->pid) == member->start) pending++;
+            if (fo_sys_process_start(member->pid) == member->start) pending++;
         }
     }
     return pending;
@@ -3142,7 +3007,7 @@ static void start_argv_session(const char *cwd, const char *args, int args_len,
         return;
     }
     close(ready_pipe[0]);
-    identity = process_start_identity(pid);
+    identity = fo_sys_process_start(pid);
 #if defined(__linux__) || defined(__APPLE__)
     if (identity == 0) {
         close(gate_pipe[1]);
@@ -3366,7 +3231,7 @@ static int capture_handoff_child(pid_t child) {
                           owner_start, sizeof(owner_start));
     if (e != 0 || owner_pid == getpid() ||
         parse_identity_text(owner_start, &owner_identity) != 0 ||
-        owned_process_details(owner_pid, NULL, NULL, NULL, &observed_identity,
+        fo_sys_process_info(owner_pid, NULL, NULL, NULL, &observed_identity,
                               &owner_alive) != 0 || !owner_alive ||
         observed_identity != owner_identity) return 0;
     e = async_owner_registry(state_dir, owner_pid, owner_start, registry,
@@ -3382,7 +3247,7 @@ static int capture_handoff_child(pid_t child) {
         if (read_recovery_session(registry, entry->d_name, owner_start,
                                   &session) != 0 ||
             session.pid != child ||
-            owned_process_details(child, NULL, NULL, NULL, &child_identity,
+            fo_sys_process_info(child, NULL, NULL, NULL, &child_identity,
                                   &child_alive) != 0 || !child_alive ||
             child_identity != session.identity || getsid(child) != session.session)
             continue;
@@ -3390,10 +3255,10 @@ static int capture_handoff_child(pid_t child) {
                               current_owner_start, sizeof(current_owner_start));
         if (e == 0 && current_owner_pid == owner_pid &&
             strcmp(current_owner_start, owner_start) == 0 &&
-            owned_process_details(owner_pid, NULL, NULL, NULL, &observed_identity,
+            fo_sys_process_info(owner_pid, NULL, NULL, NULL, &observed_identity,
                                   &owner_alive) == 0 && owner_alive &&
             observed_identity == owner_identity &&
-            owned_process_details(child, NULL, NULL, NULL, &child_identity,
+            fo_sys_process_info(child, NULL, NULL, NULL, &child_identity,
                                   &child_alive) == 0 && child_alive &&
             child_identity == session.identity && getsid(child) == session.session &&
             !monitor_stop) {

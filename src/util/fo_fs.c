@@ -12,6 +12,8 @@
 #include <errno.h>
 #include <limits.h>
 
+#include "fo_sys.h"
+
 #if defined(_WIN32) && !defined(__CYGWIN__)
 #include "fx_win_store.h"
 #endif
@@ -151,36 +153,10 @@ int fo_c_rm_file(const char *path) {
 
 /* mkdir -p: create path and all missing parents. */
 int fo_c_mkdir_p(const char *path) {
-#if defined(_WIN32) && !defined(__CYGWIN__)
-    if (!fo_has(path)) { errno = EINVAL; return -1; }
-    return fx_win_mkdirs(path, 0);
-#else
-    char clean[PATH_MAX];
-    char parent[PATH_MAX];
-    char *slash;
-    struct stat st;
-    size_t len, plen;
-
-    if (!fo_has(path)) return -1;
-    len = strlen(path);
-    while (len > 1 && path[len - 1] == '/') len--;
-    if (len >= sizeof(clean)) return -1;
-    memcpy(clean, path, len);
-    clean[len] = '\0';
-    if (strcmp(clean, "/") == 0) return 0;
-    if (stat(clean, &st) == 0) return S_ISDIR(st.st_mode) ? 0 : -1;
-
-    slash = strrchr(clean, '/');
-    if (slash != NULL && slash != clean) {
-        plen = (size_t)(slash - clean);
-        if (plen >= sizeof(parent)) return -1;
-        memcpy(parent, clean, plen);
-        parent[plen] = '\0';
-        if (fo_c_mkdir_p(parent) != 0) return -1;
-    }
-    if (mkdir(clean, 0777) != 0 && errno != EEXIST) return -1;
-    return 0;
-#endif
+    int e = fo_sys_mkdirs(path, 0777);
+    if (e == 0) return 0;
+    errno = e;
+    return -1;
 }
 
 /* Number of directory entries excluding . and .., or -1 when path cannot be
@@ -467,30 +443,19 @@ int fo_c_stat_change_fingerprint(const char *path, long long *mtime_ns,
     return 0;
 }
 
-static unsigned long long fo_fnv1a_bytes(unsigned long long hash,
-                                         const void *data, size_t len) {
-    const unsigned char *bytes = data;
-    size_t i;
-    for (i = 0; i < len; i++) {
-        hash ^= (unsigned long long)bytes[i];
-        hash *= 1099511628211ULL;
-    }
-    return hash;
-}
-
 static void fo_fingerprint_file(const char *path, const struct stat *st,
                                 unsigned long long *sum,
                                 unsigned long long *mixed, long long *count) {
     unsigned long long item = 1469598103934665603ULL;
-    item = fo_fnv1a_bytes(item, path, strlen(path));
+    item = fo_fnv1a(item, path, strlen(path));
 #if defined(__APPLE__)
-    item = fo_fnv1a_bytes(item, &st->st_mtimespec, sizeof(st->st_mtimespec));
-    item = fo_fnv1a_bytes(item, &st->st_ctimespec, sizeof(st->st_ctimespec));
+    item = fo_fnv1a(item, &st->st_mtimespec, sizeof(st->st_mtimespec));
+    item = fo_fnv1a(item, &st->st_ctimespec, sizeof(st->st_ctimespec));
 #else
-    item = fo_fnv1a_bytes(item, &st->st_mtim, sizeof(st->st_mtim));
-    item = fo_fnv1a_bytes(item, &st->st_ctim, sizeof(st->st_ctim));
+    item = fo_fnv1a(item, &st->st_mtim, sizeof(st->st_mtim));
+    item = fo_fnv1a(item, &st->st_ctim, sizeof(st->st_ctim));
 #endif
-    item = fo_fnv1a_bytes(item, &st->st_size, sizeof(st->st_size));
+    item = fo_fnv1a(item, &st->st_size, sizeof(st->st_size));
     *sum += item;
     *mixed ^= (item << (item & 31)) | (item >> ((64 - (item & 31)) & 63));
     (*count)++;

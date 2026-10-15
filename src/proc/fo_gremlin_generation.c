@@ -16,6 +16,7 @@
 #include "fx_win_store.h"
 #endif
 #include "../util/fo_path.h"
+#include "../util/fo_sys.h"
 
 /* Exposed only as a focused native oracle for copy durability behavior. */
 static atomic_ulong generation_copy_sync_count;
@@ -70,37 +71,6 @@ int fo_c_generation_validate_root(const char *root) {
     return validate_tree_root(root) == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
 
-static int make_dirs(const char *path) {
-#if defined(_WIN32) && !defined(__CYGWIN__)
-    return fx_win_mkdirs(path, 0);
-#else
-    char *copy = strdup(path);
-    char *p;
-    struct stat st;
-    if (copy == NULL) return -1;
-    for (p = copy + 1; *p != '\0'; ++p) {
-        if (*p != '/') continue;
-        *p = '\0';
-        if (mkdir(copy, 0777) != 0 && errno != EEXIST) {
-            free(copy);
-            return -1;
-        }
-        *p = '/';
-    }
-    if (mkdir(copy, 0777) != 0 && errno != EEXIST) {
-        free(copy);
-        return -1;
-    }
-    if (stat(copy, &st) != 0 || !S_ISDIR(st.st_mode)) {
-        free(copy);
-        errno = ENOTDIR;
-        return -1;
-    }
-    free(copy);
-    return 0;
-#endif
-}
-
 static int inventory_path_is_valid(const char *rel) {
     const char *p;
     for (p = rel; *p != '\0'; ++p) {
@@ -135,7 +105,7 @@ static int make_parent(const char *path) {
         return 0;
     }
     *slash = '\0';
-    rc = make_dirs(copy);
+    rc = fo_c_mkdir_p(copy);
     free(copy);
     return rc;
 }
@@ -440,7 +410,7 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
             errno = ENAMETOOLONG;
             return -1;
         }
-        if (make_dirs(target) != 0) return -1;
+        if (fo_c_mkdir_p(target) != 0) return -1;
     }
     if (list_names(dir_fd, &names) != 0) return -1;
     for (i = 0; i < names.count; ++i) {
@@ -602,7 +572,7 @@ int fo_c_generation_copy_tree_ephemeral(const char *root, const char *dest,
     FILE *out;
     int rc;
     if (validate_tree_root(root) != 0) return errno == 0 ? 1 : errno;
-    if (make_dirs(dest) != 0) return errno == 0 ? 1 : errno;
+    if (fo_c_mkdir_p(dest) != 0) return errno == 0 ? 1 : errno;
     out = fopen(manifest, "w");
     if (out == NULL) return errno == 0 ? 1 : errno;
     rc = walk_tree(root, dest, out, 1, 1, 0);
@@ -801,14 +771,7 @@ int fo_c_generation_freeze_directory(const char *path) {
 }
 
 int fo_c_generation_lock(const char *path) {
-    int fd = open(path, O_CREAT | O_RDWR, 0666);
-    if (fd < 0) return -errno;
-    if (flock(fd, LOCK_EX) != 0) {
-        int error = errno;
-        close(fd);
-        return -error;
-    }
-    return fd;
+    return fo_sys_lock_file(path, 0, 0666, LOCK_EX);
 }
 
 void fo_c_generation_unlock(int fd) {
@@ -824,36 +787,8 @@ int fo_c_generation_publish(const char *stage, const char *target) {
     return 0;
 }
 
-static int remove_frozen(const char *path) {
-    struct stat st;
-    DIR *dir;
-    struct dirent *entry;
-    char child[8192];
-    if (lstat(path, &st) != 0) return errno == ENOENT ? 0 : -1;
-    if (!S_ISDIR(st.st_mode)) return unlink(path);
-    if (chmod(path, 0700) != 0) return -1;
-    dir = opendir(path);
-    if (dir == NULL) return -1;
-    while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 ||
-            strcmp(entry->d_name, "..") == 0) continue;
-        if (snprintf(child, sizeof(child), "%s/%s", path, entry->d_name) >=
-            (int)sizeof(child)) {
-            closedir(dir);
-            errno = ENAMETOOLONG;
-            return -1;
-        }
-        if (remove_frozen(child) != 0) {
-            closedir(dir);
-            return -1;
-        }
-    }
-    closedir(dir);
-    return rmdir(path);
-}
-
 int fo_c_generation_remove_stage(const char *path) {
-    return remove_frozen(path) == 0 ? 0 : (errno == 0 ? 1 : errno);
+    return fo_c_rm_rf(path) == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
 
 int fo_c_generation_remove_empty_stage(const char *path) {

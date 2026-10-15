@@ -30,40 +30,11 @@
 #include "../util/fo_private_path.h"
 #include "../util/fo_windows_env.h"
 #include "../util/fo_path.h"
-
-#ifdef __APPLE__
-#include <libproc.h>
-#include <sys/proc.h>
-#endif
-
-static int make_dirs(const char *path) {
-#if defined(_WIN32) && !defined(__CYGWIN__)
-    return fx_win_mkdirs_mode(path, 0700, 0) == 0 ? 0 : errno;
-#else
-    char tmp[PATH_MAX];
-    size_t n = strlen(path);
-    if (n == 0 || n >= sizeof(tmp)) return ENAMETOOLONG;
-    memcpy(tmp, path, n + 1);
-    for (char *p = tmp + 1; *p; ++p) {
-        if (*p != '/') continue;
-        *p = '\0';
-        if (mkdir(tmp, 0700) != 0 && errno != EEXIST) return errno;
-        *p = '/';
-    }
-    if (mkdir(tmp, 0700) != 0 && errno != EEXIST) return errno;
-    return 0;
-#endif
-}
-
-static uint64_t hash_bytes(uint64_t h, const unsigned char *s) {
-    while (*s) { h ^= *s++; h *= UINT64_C(1099511628211); }
-    return h;
-}
+#include "../util/fo_sys.h"
 
 int fo_gremlin_process_matches(int pid, const char *start);
 int fo_c_recover_async_scope(const char *state_dir, int owner_pid,
                              const char *owner_start);
-int fo_c_rm_rf(const char *path);
 int fo_c_execution_scratch_release(const char *view);
 int fo_c_execution_scratch_active(const char *view);
 
@@ -119,12 +90,12 @@ static int state_path(const char *project, const char *lane, char *out,
     if (!realpath(project, resolved)) return errno;
     if (strlen(resolved) + 1 > canonical_cap) return ENAMETOOLONG;
     strcpy(canonical, resolved);
-    uint64_t hp = hash_bytes(UINT64_C(1469598103934665603), (const unsigned char *)resolved);
-    uint64_t hl = hash_bytes(UINT64_C(1469598103934665603), (const unsigned char *)lane);
+    uint64_t hp = fo_fnv1a_text(FO_FNV1A_SEED, resolved);
+    uint64_t hl = fo_fnv1a_text(FO_FNV1A_SEED, lane);
     if (snprintf(out, cap, "%s/fo/gremlin/projects/%016llx/%016llx",
                  base, (unsigned long long)hp, (unsigned long long)hl) >= (int)cap)
         return ENAMETOOLONG;
-    return create_dirs ? make_dirs(out) : 0;
+    return create_dirs ? fo_sys_mkdirs(out, 0700) : 0;
 }
 
 int fo_gremlin_session_state_dir(const char *project, const char *lane,
@@ -134,44 +105,12 @@ int fo_gremlin_session_state_dir(const char *project, const char *lane,
                       sizeof(canonical), 0);
 }
 
-static int write_all(int fd, const char *s, size_t n) {
-    while (n) {
-        ssize_t k = write(fd, s, n);
-        if (k < 0) { if (errno == EINTR) continue; return errno; }
-        s += k; n -= (size_t)k;
-    }
-    return 0;
-}
-
-static int sync_directory(const char *dir) {
-    int fd = open(dir, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return errno;
-    int e = fsync(fd) == 0 ? 0 : errno;
-    close(fd);
-    return e;
-}
-
 static int atomic_write_file(const char *dir, const char *name,
                              const char *text, size_t length) {
-    char path[PATH_MAX], tmp[PATH_MAX];
-    struct timespec ts;
-    int n, fd, e;
-
+    char path[PATH_MAX];
     if (snprintf(path, sizeof(path), "%s/%s", dir, name) >= (int)sizeof(path))
         return ENAMETOOLONG;
-    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return errno;
-    n = snprintf(tmp, sizeof(tmp), "%s/.%s.%ld.%lld.%09ld.tmp", dir, name,
-                 (long)getpid(), (long long)ts.tv_sec, ts.tv_nsec);
-    if (n < 0 || n >= (int)sizeof(tmp)) return ENAMETOOLONG;
-    fd = open(tmp, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
-    if (fd < 0) return errno;
-    e = write_all(fd, text, length);
-    if (e == 0 && fsync(fd) != 0) e = errno;
-    if (close(fd) != 0 && e == 0) e = errno;
-    if (e == 0 && rename(tmp, path) != 0) e = errno;
-    if (e == 0) e = sync_directory(dir);
-    if (e != 0) unlink(tmp);
-    return e;
+    return fo_sys_publish_file(path, text, length);
 }
 
 static int read_owner(const char *dir, char *id, size_t idcap, int *pid,
@@ -232,64 +171,6 @@ static int stop_path(const char *dir, char *path, size_t cap) {
 static void clear_stop(const char *dir) {
     char path[PATH_MAX];
     if (stop_path(dir, path, sizeof(path)) == 0) unlink(path);
-}
-
-static int process_start(pid_t pid, char *out, size_t cap) {
-#if defined(_WIN32) && !defined(__CYGWIN__)
-    FILETIME creation, exit_time, kernel, user;
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
-                                  FALSE, (DWORD)pid);
-    ULARGE_INTEGER born;
-    DWORD error;
-    if (!process) return GetLastError() == ERROR_ACCESS_DENIED ? EACCES : ESRCH;
-    if (WaitForSingleObject(process, 0) != WAIT_TIMEOUT) {
-        CloseHandle(process);
-        return ESRCH;
-    }
-    if (!GetProcessTimes(process, &creation, &exit_time, &kernel, &user)) {
-        error = GetLastError();
-        CloseHandle(process);
-        return error == ERROR_ACCESS_DENIED ? EACCES : EIO;
-    }
-    CloseHandle(process);
-    born.LowPart = creation.dwLowDateTime;
-    born.HighPart = creation.dwHighDateTime;
-    if (snprintf(out, cap, "%llu", (unsigned long long)born.QuadPart) >= (int)cap)
-        return ENAMETOOLONG;
-    return 0;
-#elif defined(__APPLE__)
-    struct proc_bsdinfo info;
-    int n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
-    if (n != sizeof(info)) return ESRCH;
-    if (info.pbi_status == SZOMB) return ESRCH;
-    if (snprintf(out, cap, "%llu.%06llu",
-                 (unsigned long long)info.pbi_start_tvsec,
-                 (unsigned long long)info.pbi_start_tvusec) >= (int)cap)
-        return ENAMETOOLONG;
-    return 0;
-#else
-    char path[64], buf[8192];
-    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return errno;
-    ssize_t n = read(fd, buf, sizeof(buf) - 1); close(fd);
-    if (n < 0) return errno;
-    buf[n] = 0;
-    char *p = strrchr(buf, ')');
-    if (!p || p[1] != ' ') return EINVAL;
-    p += 2;
-    if (p[0] == 'Z' || p[0] == 'X') return ESRCH;
-    for (int field = 3; field < 22; ++field) {
-        p = strchr(p, ' ');
-        if (!p) return EINVAL;
-        while (*p == ' ') ++p;
-    }
-    char *end = strchr(p, ' ');
-    size_t len = end ? (size_t)(end - p) : strlen(p);
-    if (len + 1 > cap) return ENAMETOOLONG;
-    memcpy(out, p, len); out[len] = 0;
-    return 0;
-#endif
 }
 
 static int verify_owner_fd(const char *dir, int fd) {
@@ -387,7 +268,7 @@ int fo_gremlin_session_acquire(const char *project, const char *lane,
     char sid[128], stamp[64];
     struct timespec ts;
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0) { e = errno; goto fail; }
-    e = process_start(getpid(), stamp, sizeof(stamp));
+    e = fo_sys_process_start_text(getpid(), stamp, sizeof(stamp));
     if (e != 0) goto fail;
     snprintf(sid, sizeof(sid), "%ld-%lld-%09ld", (long)getpid(), (long long)ts.tv_sec, ts.tv_nsec);
     if (strlen(sid) + 1 > (size_t)sessioncap || strlen(stamp) + 1 > (size_t)startcap) { e = ENAMETOOLONG; goto fail; }
@@ -405,7 +286,7 @@ int fo_gremlin_session_acquire(const char *project, const char *lane,
     strcpy(session, sid); strcpy(start, stamp); *pid = (int)getpid(); *owner = 1; *lockfd = fd;
     return 0;
 fail:
-    flock(fd, LOCK_UN); close(fd); return e;
+    fo_sys_unlock(fd); return e;
 }
 
 int fo_gremlin_session_recovery_complete(const char *dir, const char *session,
@@ -417,7 +298,7 @@ int fo_gremlin_session_recovery_complete(const char *dir, const char *session,
     e = read_owner(dir, id, sizeof(id), &pid, start, sizeof(start));
     if (e) return e;
     if (strcmp(id, session) != 0 || pid != (int)getpid()) return EPERM;
-    e = process_start(getpid(), current, sizeof(current));
+    e = fo_sys_process_start_text(getpid(), current, sizeof(current));
     if (e || strcmp(current, start) != 0) return EPERM;
     e = read_recovery_source(dir, pending, sizeof(pending));
     if (e == ENOENT) return 0;
@@ -427,7 +308,7 @@ int fo_gremlin_session_recovery_complete(const char *dir, const char *session,
     if (snprintf(path, sizeof(path), "%s/recovery.source", dir) >= (int)sizeof(path))
         return ENAMETOOLONG;
     if (unlink(path) != 0) return errno;
-    return sync_directory(dir);
+    return fo_sys_sync_dir(dir);
 }
 
 int fo_gremlin_session_release(const char *dir, const char *session, int fd) {
@@ -438,7 +319,7 @@ int fo_gremlin_session_release(const char *dir, const char *session, int fd) {
     if (e) return e;
     if (strcmp(id, session) != 0 || pid != (int)getpid()) return EPERM;
     char current[64];
-    e = process_start(getpid(), current, sizeof(current));
+    e = fo_sys_process_start_text(getpid(), current, sizeof(current));
     if (e != 0 || strcmp(current, start) != 0) return EPERM;
     char path[PATH_MAX], statuspath[PATH_MAX];
     if (snprintf(path, sizeof(path), "%s/owner", dir) >= (int)sizeof(path) ||
@@ -447,8 +328,8 @@ int fo_gremlin_session_release(const char *dir, const char *session, int fd) {
     clear_stop(dir);
     if (unlink(statuspath) != 0 && errno != ENOENT) return errno;
     if (unlink(path) != 0) return errno;
-    (void)sync_directory(dir);
-    if (fd >= 0) { flock(fd, LOCK_UN); close(fd); }
+    (void)fo_sys_sync_dir(dir);
+    if (fd >= 0) { fo_sys_unlock(fd); }
     return 0;
 }
 
@@ -465,7 +346,7 @@ int fo_gremlin_session_retire_views(const char *dir, const char *session, int fd
     e = read_owner(dir, id, sizeof(id), &pid, start, sizeof(start));
     if (e != 0) return e;
     if (strcmp(id, session) != 0 || pid != (int)getpid()) return EPERM;
-    e = process_start(getpid(), current, sizeof(current));
+    e = fo_sys_process_start_text(getpid(), current, sizeof(current));
     if (e != 0 || strcmp(current, start) != 0) return EPERM;
     if (lstat(dir, &st) != 0) return errno;
     if (!S_ISDIR(st.st_mode) || !fo_private_path(dir)) return EPERM;
@@ -547,7 +428,7 @@ int fo_gremlin_session_publish(const char *dir, const char *session,
     if (e) return e;
     if (strcmp(id, session) != 0 || pid != (int)getpid()) return EPERM;
     char current[64];
-    e = process_start(getpid(), current, sizeof(current));
+    e = fo_sys_process_start_text(getpid(), current, sizeof(current));
     if (e != 0 || strcmp(current, start) != 0) return EPERM;
     return atomic_write_file(dir, "status", text, (size_t)textlen);
 }
@@ -585,7 +466,7 @@ int fo_gremlin_process_matches(int pid, const char *start) {
 #if !defined(_WIN32) || defined(__CYGWIN__)
     if (kill((pid_t)pid, 0) != 0 && errno != EPERM) return 0;
 #endif
-    if (process_start((pid_t)pid, have, sizeof(have)) != 0) return 0;
+    if (fo_sys_process_start_text((pid_t)pid, have, sizeof(have)) != 0) return 0;
     return strcmp(have, start) == 0;
 }
 
@@ -601,9 +482,9 @@ static int lease_dir(const char *kind, char *dir, size_t cap) {
         if (snprintf(fallback, sizeof(fallback), "%s/.cache", home) >= (int)sizeof(fallback)) return ENAMETOOLONG;
         base = fallback;
     }
-    uint64_t h = hash_bytes(UINT64_C(1469598103934665603), (const unsigned char *)kind);
+    uint64_t h = fo_fnv1a_text(FO_FNV1A_SEED, kind);
     if (snprintf(dir, cap, "%s/fo/gremlin/leases/%016llx", base, (unsigned long long)h) >= (int)cap) return ENAMETOOLONG;
-    return make_dirs(dir);
+    return fo_sys_mkdirs(dir, 0700);
 }
 
 static int lease_acquire_in_dir_weighted(const char *dir, int capacity, int weight,
@@ -634,7 +515,7 @@ static int lease_acquire_in_dir_weighted(const char *dir, int capacity, int weig
                 slots[acquired] = i;
                 acquired++;
             }
-            else { flock(sfd, LOCK_UN); close(sfd); }
+            else { fo_sys_unlock(sfd); }
         } else if (errno == EWOULDBLOCK || errno == EAGAIN) {
             active++;
             close(sfd);
@@ -663,7 +544,7 @@ undo:
         slots[i] = -1;
     }
 done:
-    flock(cfd, LOCK_UN); close(cfd); return e;
+    fo_sys_unlock(cfd); return e;
 }
 
 static int lease_acquire_in_dir(const char *dir, int capacity, int *fdout, int *slot) {
@@ -687,7 +568,7 @@ static int host_lease_base(char *base, size_t cap) {
     if (!local || !*local) return ENOENT;
     int n = snprintf(base, cap, "%s/fo/gremlin-host-admission", local);
     if (n < 0 || n >= (int)cap) return ENAMETOOLONG;
-    int error = make_dirs(base);
+    int error = fo_sys_mkdirs(base, 0700);
     if (error) return error;
 #else
     int n = snprintf(base, cap, "/var/tmp/fo-gremlin-admission-%lu",
@@ -777,7 +658,7 @@ static int admission_guard_path(int pid, const char *start, char *path,
     if (e) return e;
     if (snprintf(directory, sizeof(directory), "%s/guardians", base)
         >= (int)sizeof(directory)) return ENAMETOOLONG;
-    e = make_dirs(directory);
+    e = fo_sys_mkdirs(directory, 0700);
     if (e) return e;
     if (snprintf(path, cap, "%s/%d-%s", directory, pid, start) >= (int)cap)
         return ENAMETOOLONG;
@@ -837,7 +718,7 @@ static int admission_guard_start(const char *scope, const int *fds, int weight,
     int handshake[2];
     char owner_start[64], authority[PATH_MAX], state[PATH_MAX];
     pid_t owner = getpid();
-    int e = process_start(owner, owner_start, sizeof(owner_start));
+    int e = fo_sys_process_start_text(owner, owner_start, sizeof(owner_start));
     if (e) return e;
     const char *state_hint = getenv("FO_GREMLIN_PROCESS_SCOPE_DIR");
     const char *pid_hint = getenv("FO_GREMLIN_PROCESS_SCOPE_PID");
@@ -860,7 +741,7 @@ static int admission_guard_start(const char *scope, const int *fds, int weight,
         int detach_error = detached ? 0 : errno;
         char stamp[64], marker_path[PATH_MAX];
         int marker = -1;
-        e = detach_error ? detach_error : process_start(getpid(), stamp, sizeof(stamp));
+        e = detach_error ? detach_error : fo_sys_process_start_text(getpid(), stamp, sizeof(stamp));
         if (e == 0) e = admission_guard_path((int)getpid(), stamp, marker_path,
                                            sizeof(marker_path));
         if (e == 0) {
@@ -899,7 +780,7 @@ static int admission_guard_start(const char *scope, const int *fds, int weight,
                     else if (unlink(authority) != 0 && errno != ENOENT) e = errno;
                 }
                 if (!e) e = admission_children_busy(scope, weight);
-                if (gate >= 0) { flock(gate, LOCK_UN); close(gate); }
+                if (gate >= 0) { fo_sys_unlock(gate); }
                 if (!e) break;
             }
             nanosleep(&pause, NULL);
@@ -959,7 +840,7 @@ static int admission_publish(const char *base, uint64_t kind, int weight,
     const char *state = getenv("FO_GREMLIN_PROCESS_SCOPE_DIR");
     int n = snprintf(directory, sizeof(directory), "%s/scopes", base);
     if (n < 0 || n >= (int)sizeof(directory)) return ENAMETOOLONG;
-    int e = make_dirs(directory);
+    int e = fo_sys_mkdirs(directory, 0700);
     if (e) return e;
     n = snprintf(scope, (size_t)cap, "%s/%ld-XXXXXX", directory, (long)getpid());
     if (n < 0 || n >= cap) return ENAMETOOLONG;
@@ -976,7 +857,7 @@ static int admission_publish(const char *base, uint64_t kind, int weight,
 #else
     (void)parent_scope; (void)parent;
 #endif
-    e = process_start(getpid(), start, sizeof(start));
+    e = fo_sys_process_start_text(getpid(), start, sizeof(start));
     if (e) goto failed;
     n = snprintf(path, sizeof(path), "%s/authority", scope);
     if (n < 0 || n >= (int)sizeof(path)) { e = ENAMETOOLONG; goto failed; }
@@ -993,10 +874,10 @@ static int admission_publish(const char *base, uint64_t kind, int weight,
                  (long)getpid(), start, weight, (unsigned long long)kind,
                  state && *state ? state : "-");
     if (n < 0 || n >= (int)sizeof(record)) { e = ENAMETOOLONG; goto failed; }
-    e = write_all(*authority, record, (size_t)n);
+    e = fo_sys_write_all(*authority, record, (size_t)n);
 #if defined(_WIN32) && !defined(__CYGWIN__)
     if (!e && fsync(*authority) != 0) e = errno;
-    if (!e) e = sync_directory(scope);
+    if (!e) e = fo_sys_sync_dir(scope);
 #endif
     if (e == 0 && setenv("FO_GREMLIN_ADMISSION_SCOPE", scope, 1) != 0) e = errno;
     if (e == 0) return 0;
@@ -1064,7 +945,7 @@ int fo_gremlin_host_scope_retire(int *authority, int *guardian, const char *scop
         close(*authority); *authority = -1;
         if (fo_c_rm_rf(scope) != 0) e = errno ? errno : EIO;
     }
-    flock(gate, LOCK_UN); close(gate);
+    fo_sys_unlock(gate);
 #if defined(_WIN32) && !defined(__CYGWIN__)
     admission_machine_unlock(machine_gate);
 #endif
@@ -1094,8 +975,7 @@ int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
         if (strlen(hint) >= (size_t)text_capacity) { e = ENAMETOOLONG; goto done; }
         strcpy(previous, hint);
     }
-    uint64_t h = hash_bytes(UINT64_C(1469598103934665603),
-                            (const unsigned char *)kind);
+    uint64_t h = fo_fnv1a_text(FO_FNV1A_SEED, kind);
     if (hint && *hint) {
         gate = admission_gate(hint, 0);
         if (gate >= 0 && admission_parent(hint, h, &parent)) {
@@ -1111,7 +991,7 @@ int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
                  base, (unsigned long long)h) >= (int)sizeof(dir)) {
         e = ENAMETOOLONG; goto done;
     }
-    e = make_dirs(dir);
+    e = fo_sys_mkdirs(dir, 0700);
     if (e == 0) e = lease_acquire_in_dir_weighted(dir, capacity, weight, fds, slots);
     if (e == 0) {
         e = admission_publish(base, h, weight, scope, text_capacity, authority,
@@ -1133,7 +1013,7 @@ int fo_gremlin_host_lease_acquire_weighted(const char *kind, int capacity,
         }
     }
 done:
-    if (gate >= 0) { flock(gate, LOCK_UN); close(gate); }
+    if (gate >= 0) { fo_sys_unlock(gate); }
 #if defined(_WIN32) && !defined(__CYGWIN__)
     admission_machine_unlock(machine_gate);
 #endif
@@ -1149,34 +1029,6 @@ int fo_gremlin_lease_release(int fd) {
     int e = flock(fd, LOCK_UN) == 0 ? 0 : errno;
     if (close(fd) != 0 && e == 0) e = errno;
     return e;
-}
-
-static int remove_generated_tree(const char *path) {
-    struct stat st;
-    if (lstat(path, &st) != 0) return errno == ENOENT ? 0 : errno;
-    if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode))
-        return unlink(path) == 0 ? 0 : errno;
-
-    /* Frozen generations have read-only directories.  Change only the
-       directory being removed; files remain immutable until unlink. */
-    if (chmod(path, 0700) != 0) return errno;
-
-    DIR *dir = opendir(path);
-    if (!dir) return errno;
-    int e = 0;
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-            continue;
-        char child[PATH_MAX];
-        int n = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
-        if (n < 0 || n >= (int)sizeof(child)) { e = ENAMETOOLONG; break; }
-        e = remove_generated_tree(child);
-        if (e != 0) break;
-    }
-    if (closedir(dir) != 0 && e == 0) e = errno;
-    if (e != 0) return e;
-    return rmdir(path) == 0 ? 0 : errno;
 }
 
 static int valid_generation_id(const char *id) {
@@ -1221,7 +1073,7 @@ static int generation_state_path(const char *root, char *dir, size_t cap,
     slash = strrchr(resolved, '/');
     if (snprintf(dir, cap, "%.*s/.state/%s", (int)(slash - resolved),
                  resolved, id) >= (int)cap) return ENAMETOOLONG;
-    e = make_dirs(dir);
+    e = fo_sys_mkdirs(dir, 0700);
     return e;
 }
 
@@ -1277,12 +1129,9 @@ int fo_gremlin_generation_prune_candidates(const char *anchor, char *roots,
                      (int)(nbase - strlen("/.state")), base, entry->d_name) >=
             (int)sizeof(expected)) continue;
         if (strcmp(stored, expected) != 0) continue;
-        int fd = open(lease, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+        int fd = fo_sys_lock_file(lease, O_CLOEXEC, 0600, LOCK_EX | LOCK_NB);
         if (fd < 0) continue;
-        int idle = flock(fd, LOCK_EX | LOCK_NB) == 0;
-        if (idle) flock(fd, LOCK_UN);
-        close(fd);
-        if (!idle) continue;
+        fo_sys_unlock(fd);
         memcpy(roots + (size_t)count * (size_t)slot_size,
                stored, strlen(stored) + 1);
         ++count;
@@ -1325,16 +1174,24 @@ static int generation_valid_at(const char *dir, const char *canonical) {
     return lstat(marker, &st) == 0 && S_ISREG(st.st_mode);
 }
 
+static int lock_in(const char *dir, const char *name, int operation) {
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/%s", dir, name) >= (int)sizeof(path))
+        return -ENAMETOOLONG;
+    return fo_sys_lock_file(path, O_CLOEXEC, 0600, operation);
+}
+
+static int rm_tree(const char *path) {
+    return fo_c_rm_rf(path) == 0 ? 0 : (errno ? errno : EIO);
+}
+
 static int generation_register_path(const char *root, int *lease_fd) {
-    char dir[PATH_MAX], canonical[PATH_MAX], guard[PATH_MAX], record[PATH_MAX + 1];
+    char dir[PATH_MAX], canonical[PATH_MAX], record[PATH_MAX + 1];
     struct stat st;
     int e = generation_state_path(root, dir, sizeof(dir), canonical, sizeof(canonical));
     if (e) return e;
-    if (snprintf(guard, sizeof(guard), "%s/guard.lock", dir) >= (int)sizeof(guard))
-        return ENAMETOOLONG;
-    int fd = open(guard, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (fd < 0) return errno;
-    if (flock(fd, LOCK_EX) != 0) { e = errno; close(fd); return e; }
+    int fd = lock_in(dir, "guard.lock", LOCK_EX);
+    if (fd < 0) return -fd;
     if (lstat(canonical, &st) != 0) e = errno;
     else if (!S_ISDIR(st.st_mode) || (st.st_mode & 0222) != 0) e = EPERM;
     char old_root[PATH_MAX + 1];
@@ -1349,126 +1206,89 @@ static int generation_register_path(const char *root, int *lease_fd) {
     }
     if (e == 0 && !generation_valid_at(dir, canonical))
         e = atomic_write_file(dir, "registered", "generation-v1\n", 14);
-    if (e == 0) e = sync_directory(dir);
+    if (e == 0) e = fo_sys_sync_dir(dir);
     if (lstat(canonical, &st) != 0 && e == 0) e = errno;
     if (e == 0) {
-        char lease[PATH_MAX];
-        if (snprintf(lease, sizeof(lease), "%s/lease.lock", dir) >=
-            (int)sizeof(lease)) e = ENAMETOOLONG;
-        else {
-            int lfd = open(lease, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-            if (lfd < 0) e = errno;
-            else if (flock(lfd, LOCK_SH | LOCK_NB) != 0) {
-                e = errno;
-                close(lfd);
-            } else *lease_fd = lfd;
-        }
+        int lfd = lock_in(dir, "lease.lock", LOCK_SH | LOCK_NB);
+        if (lfd < 0) e = -lfd;
+        else *lease_fd = lfd;
     }
-    flock(fd, LOCK_UN);
-    close(fd);
+    fo_sys_unlock(fd);
     return e;
 }
 
 static int generation_lease_path(const char *root, int *fdout) {
-    char dir[PATH_MAX], canonical[PATH_MAX], guard[PATH_MAX], lease[PATH_MAX];
+    char dir[PATH_MAX], canonical[PATH_MAX];
     int e = generation_state_path(root, dir, sizeof(dir), canonical, sizeof(canonical));
     if (e) return e;
     if (!generation_valid_at(dir, canonical)) return ENOENT;
-    if (snprintf(guard, sizeof(guard), "%s/guard.lock", dir) >= (int)sizeof(guard) ||
-        snprintf(lease, sizeof(lease), "%s/lease.lock", dir) >= (int)sizeof(lease))
-        return ENAMETOOLONG;
-    int gfd = open(guard, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (gfd < 0) return errno;
-    if (flock(gfd, LOCK_SH) != 0) { e = errno; close(gfd); return e; }
+    int gfd = lock_in(dir, "guard.lock", LOCK_SH);
+    if (gfd < 0) return -gfd;
     if (!generation_valid_at(dir, canonical)) {
-        flock(gfd, LOCK_UN);
-        close(gfd);
+        fo_sys_unlock(gfd);
         return ENOENT;
     }
-    int lfd = open(lease, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (lfd < 0) { e = errno; flock(gfd, LOCK_UN); close(gfd); return e; }
-    if (flock(lfd, LOCK_SH | LOCK_NB) != 0) {
-        e = errno; close(lfd); flock(gfd, LOCK_UN); close(gfd); return e;
-    }
-    flock(gfd, LOCK_UN);
-    close(gfd);
+    int lfd = lock_in(dir, "lease.lock", LOCK_SH | LOCK_NB);
+    fo_sys_unlock(gfd);
+    if (lfd < 0) return -lfd;
     *fdout = lfd;
     return 0;
 }
 
 static int generation_pin_path(const char *root, int pinned) {
-    char dir[PATH_MAX], canonical[PATH_MAX], guard[PATH_MAX], pin[PATH_MAX];
+    char dir[PATH_MAX], canonical[PATH_MAX], pin[PATH_MAX];
     int e = generation_state_path(root, dir, sizeof(dir), canonical, sizeof(canonical));
     if (e) return e;
     if (!generation_valid_at(dir, canonical)) return ENOENT;
-    if (snprintf(guard, sizeof(guard), "%s/guard.lock", dir) >= (int)sizeof(guard) ||
-        snprintf(pin, sizeof(pin), "%s/pinned", dir) >= (int)sizeof(pin))
+    if (snprintf(pin, sizeof(pin), "%s/pinned", dir) >= (int)sizeof(pin))
         return ENAMETOOLONG;
-    int fd = open(guard, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (fd < 0) return errno;
-    if (flock(fd, LOCK_EX) != 0) { e = errno; close(fd); return e; }
+    int fd = lock_in(dir, "guard.lock", LOCK_EX);
+    if (fd < 0) return -fd;
     if (!generation_valid_at(dir, canonical)) {
-        flock(fd, LOCK_UN);
-        close(fd);
+        fo_sys_unlock(fd);
         return ENOENT;
     }
     if (pinned) e = atomic_write_file(dir, "pinned", "pinned\n", 7);
     else if (unlink(pin) != 0 && errno != ENOENT) e = errno;
-    else e = sync_directory(dir);
-    flock(fd, LOCK_UN);
-    close(fd);
+    else e = fo_sys_sync_dir(dir);
+    fo_sys_unlock(fd);
     return e;
 }
 
 static int generation_prune_path(const char *root) {
-    char dir[PATH_MAX], canonical[PATH_MAX], guard[PATH_MAX];
-    char lease[PATH_MAX], pin[PATH_MAX], registered[PATH_MAX], root_record[PATH_MAX];
+    char dir[PATH_MAX], canonical[PATH_MAX], pin[PATH_MAX], registered[PATH_MAX];
     int e = generation_state_path(root, dir, sizeof(dir), canonical, sizeof(canonical));
     if (e) return e;
     if (!generation_valid_at(dir, canonical)) return EPERM;
-    if (snprintf(guard, sizeof(guard), "%s/guard.lock", dir) >= (int)sizeof(guard) ||
-        snprintf(lease, sizeof(lease), "%s/lease.lock", dir) >= (int)sizeof(lease) ||
-        snprintf(pin, sizeof(pin), "%s/pinned", dir) >= (int)sizeof(pin) ||
-        snprintf(registered, sizeof(registered), "%s/registered", dir) >= (int)sizeof(registered) ||
-        snprintf(root_record, sizeof(root_record), "%s/root", dir) >= (int)sizeof(root_record))
+    if (snprintf(pin, sizeof(pin), "%s/pinned", dir) >= (int)sizeof(pin) ||
+        snprintf(registered, sizeof(registered), "%s/registered", dir) >= (int)sizeof(registered))
         return ENAMETOOLONG;
-    int gfd = open(guard, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (gfd < 0) return errno;
-    if (flock(gfd, LOCK_EX | LOCK_NB) != 0) {
-        e = errno;
-        close(gfd);
-        return e == EAGAIN || e == EWOULDBLOCK ? EBUSY : e;
-    }
+    int gfd = lock_in(dir, "guard.lock", LOCK_EX | LOCK_NB);
+    if (gfd < 0) return -gfd == EAGAIN || -gfd == EWOULDBLOCK ? EBUSY : -gfd;
     if (!generation_valid_at(dir, canonical)) {
-        flock(gfd, LOCK_UN);
-        close(gfd);
+        fo_sys_unlock(gfd);
         return ENOENT;
     }
     struct stat pin_stat;
-    if (lstat(pin, &pin_stat) == 0) { flock(gfd, LOCK_UN); close(gfd); return EBUSY; }
-    if (errno != ENOENT) { e = errno; flock(gfd, LOCK_UN); close(gfd); return e; }
-    int lfd = open(lease, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (lfd < 0) { e = errno; flock(gfd, LOCK_UN); close(gfd); return e; }
-    if (flock(lfd, LOCK_EX | LOCK_NB) != 0) {
-        e = errno;
-        close(lfd);
-        flock(gfd, LOCK_UN);
-        close(gfd);
+    if (lstat(pin, &pin_stat) == 0) { fo_sys_unlock(gfd); return EBUSY; }
+    if (errno != ENOENT) { e = errno; fo_sys_unlock(gfd); return e; }
+    int lfd = lock_in(dir, "lease.lock", LOCK_EX | LOCK_NB);
+    if (lfd < 0) {
+        e = -lfd;
+        fo_sys_unlock(gfd);
         return e == EAGAIN || e == EWOULDBLOCK ? EBUSY : e;
     }
-    e = remove_generated_tree(canonical);
+    e = rm_tree(canonical);
     if (e == 0 && unlink(registered) != 0 && errno != ENOENT) e = errno;
-    if (e == 0) e = sync_directory(dir);
-    flock(lfd, LOCK_UN);
-    close(lfd);
-    flock(gfd, LOCK_UN);
-    close(gfd);
+    if (e == 0) e = fo_sys_sync_dir(dir);
+    fo_sys_unlock(lfd);
+    fo_sys_unlock(gfd);
     return e;
 }
 
 int fo_gremlin_generation_mark_release(const char *root, const char *store,
                                        const char *owner) {
-    char dir[PATH_MAX], canonical[PATH_MAX], guard[PATH_MAX], record[PATH_MAX + 128];
+    char dir[PATH_MAX], canonical[PATH_MAX], record[PATH_MAX + 128];
     int e = generation_state_path(root, dir, sizeof(dir), canonical, sizeof(canonical));
     if (e) return e;
     if (!fo_path_is_absolute(store) || !owner || strlen(owner) != 64) return EINVAL;
@@ -1476,19 +1296,15 @@ int fo_gremlin_generation_mark_release(const char *root, const char *store,
         if (*p == '\n' || *p == '\r') return EINVAL;
     for (const char *p = owner; *p; ++p)
         if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f'))) return EINVAL;
-    if (snprintf(guard, sizeof(guard), "%s/guard.lock", dir) >= (int)sizeof(guard))
-        return ENAMETOOLONG;
-    int fd = open(guard, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (fd < 0) return errno;
-    if (flock(fd, LOCK_EX) != 0) { e = errno; close(fd); return e; }
+    int fd = lock_in(dir, "guard.lock", LOCK_EX);
+    if (fd < 0) return -fd;
     if (!generation_valid_at(dir, canonical)) e = ENOENT;
     if (e == 0) {
         int n = snprintf(record, sizeof(record), "%s\n%s\n", store, owner);
         if (n < 0 || n >= (int)sizeof(record)) e = ENAMETOOLONG;
         else e = atomic_write_file(dir, "pending-root-release", record, (size_t)n);
     }
-    flock(fd, LOCK_UN);
-    close(fd);
+    fo_sys_unlock(fd);
     return e;
 }
 
@@ -1525,17 +1341,14 @@ int fo_gremlin_generation_pending_release(const char *root, char *store,
 }
 
 int fo_gremlin_generation_forget(const char *root) {
-    char dir[PATH_MAX], canonical[PATH_MAX], guard[PATH_MAX], path[PATH_MAX];
+    char dir[PATH_MAX], canonical[PATH_MAX], path[PATH_MAX];
     char recorded[PATH_MAX + 1];
     struct stat st;
     int e = generation_state_path(root, dir, sizeof(dir), canonical,
                                   sizeof(canonical));
     if (e) return e;
-    if (snprintf(guard, sizeof(guard), "%s/guard.lock", dir) >= (int)sizeof(guard))
-        return ENAMETOOLONG;
-    int fd = open(guard, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (fd < 0) return errno;
-    if (flock(fd, LOCK_EX) != 0) { e = errno; close(fd); return e; }
+    int fd = lock_in(dir, "guard.lock", LOCK_EX);
+    if (fd < 0) return -fd;
     e = read_generation_root(dir, recorded, sizeof(recorded));
     if (e == 0 && strcmp(recorded, canonical) != 0) e = EEXIST;
     if (e == 0 && lstat(recorded, &st) == 0) e = EBUSY;
@@ -1550,9 +1363,8 @@ int fo_gremlin_generation_forget(const char *root) {
             e = ENAMETOOLONG;
         else if (unlink(path) != 0 && errno != ENOENT) e = errno;
     }
-    if (e == 0) e = sync_directory(dir);
-    flock(fd, LOCK_UN);
-    close(fd);
+    if (e == 0) e = fo_sys_sync_dir(dir);
+    fo_sys_unlock(fd);
     return e;
 }
 

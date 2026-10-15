@@ -16,42 +16,11 @@
 #include "fx_win_store.h"
 #endif
 
+#include "../util/fo_sys.h"
+
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
-
-static int make_dirs(const char *path) {
-#if defined(_WIN32) && !defined(__CYGWIN__)
-    return fx_win_mkdirs_mode(path, 0700, 0) == 0 ? 0 : errno;
-#else
-    char tmp[PATH_MAX];
-    size_t n = strlen(path);
-    if (n == 0 || n >= sizeof(tmp)) return ENAMETOOLONG;
-    memcpy(tmp, path, n + 1);
-    for (char *p = tmp + 1; *p; ++p) {
-        if (*p != '/') continue;
-        *p = '\0';
-        if (mkdir(tmp, 0700) != 0 && errno != EEXIST) return errno;
-        *p = '/';
-    }
-    if (mkdir(tmp, 0700) != 0 && errno != EEXIST) return errno;
-    return 0;
-#endif
-}
-
-static uint64_t hash_text(uint64_t h, const char *text) {
-    for (const unsigned char *p = (const unsigned char *)text; *p; ++p) {
-        h ^= *p;
-        h *= UINT64_C(1099511628211);
-    }
-    return h;
-}
-
-static uint64_t hash_separator(uint64_t h) {
-    h ^= 0;
-    h *= UINT64_C(1099511628211);
-    return h;
-}
 
 static int safe_session_id(const char *session) {
     size_t n = strlen(session);
@@ -80,7 +49,7 @@ static int base_path(char *out, size_t cap, int create_dirs) {
     }
     if (snprintf(out, cap, "%s/fo/gremlin", base) >= (int)cap)
         return ENAMETOOLONG;
-    return create_dirs ? make_dirs(out) : 0;
+    return create_dirs ? fo_sys_mkdirs(out, 0700) : 0;
 }
 
 static int paths(const char *project, const char *lane, const char *session,
@@ -97,9 +66,9 @@ static int paths(const char *project, const char *lane, const char *session,
     if (!realpath(project, resolved)) return errno;
     if (strlen(resolved) + 1 > canonical_cap) return ENAMETOOLONG;
     strcpy(canonical, resolved);
-    hp = hash_text(UINT64_C(1469598103934665603), resolved);
-    hp = hash_separator(hp);
-    hl = hash_text(UINT64_C(1469598103934665603), lane);
+    hp = fo_fnv1a_text(FO_FNV1A_SEED, resolved);
+    hp = fo_fnv1a(hp, "", 1);
+    hl = fo_fnv1a_text(FO_FNV1A_SEED, lane);
     e = base_path(root, sizeof(root), create_dirs);
     if (e) return e;
     if (snprintf(terminal_parent, terminal_parent_cap,
@@ -115,22 +84,9 @@ static int paths(const char *project, const char *lane, const char *session,
     if (snprintf(journal_path, journal_path_cap, "%s/journal.jsonl",
             journal_root) >= (int)journal_path_cap) return ENAMETOOLONG;
     if (!create_dirs) return 0;
-    e = make_dirs(terminal_parent);
+    e = fo_sys_mkdirs(terminal_parent, 0700);
     if (e) return e;
-    return make_dirs(journal_root);
-}
-
-static int write_all(int fd, const char *data, size_t length) {
-    while (length) {
-        ssize_t n = write(fd, data, length);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return errno;
-        }
-        data += n;
-        length -= (size_t)n;
-    }
-    return 0;
+    return fo_sys_mkdirs(journal_root, 0700);
 }
 
 static int write_file(const char *dir, const char *name,
@@ -140,17 +96,9 @@ static int write_file(const char *dir, const char *name,
         return ENAMETOOLONG;
     int fd = open(path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
     if (fd < 0) return errno;
-    int e = write_all(fd, data, length);
+    int e = fo_sys_write_all(fd, data, length);
     if (e == 0 && fsync(fd) != 0) e = errno;
     if (close(fd) != 0 && e == 0) e = errno;
-    return e;
-}
-
-static int sync_dir(const char *path) {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return errno;
-    int e = fsync(fd) == 0 ? 0 : errno;
-    close(fd);
     return e;
 }
 
@@ -237,7 +185,7 @@ int fo_gremlin_terminal_publish(const char *project, const char *lane,
     e = write_file(stage, "identity", identity, (size_t)strlen(identity));
     if (e == 0) e = write_file(stage, "status", status, (size_t)status_len);
     if (e == 0) e = write_file(stage, "journal-path", journal, strlen(journal));
-    if (e == 0) e = sync_dir(stage);
+    if (e == 0) e = fo_sys_sync_dir(stage);
     if (e == 0 && rename(stage, final) != 0) {
         int rename_error = errno;
         if (rename_error == EEXIST || rename_error == ENOTEMPTY) {
@@ -246,7 +194,7 @@ int fo_gremlin_terminal_publish(const char *project, const char *lane,
             else e = read_error ? read_error : EEXIST;
         } else e = rename_error;
     }
-    if (e == 0) e = sync_dir(parent);
+    if (e == 0) e = fo_sys_sync_dir(parent);
     if (access(stage, F_OK) == 0) {
         char path[PATH_MAX];
         const char *names[] = {"identity", "status", "journal-path"};

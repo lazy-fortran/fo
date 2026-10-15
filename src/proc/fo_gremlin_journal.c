@@ -13,6 +13,7 @@
 #if defined(_WIN32) && !defined(__CYGWIN__)
 #include "fx_win_store.h"
 #endif
+#include "../util/fo_sys.h"
 
 #define JOURNAL_LINE_MAX (256 * 1024)
 #define JSON_DEPTH_MAX 64
@@ -278,22 +279,6 @@ static int validate_receipt(const char *record, size_t length,
     return parse_receipt(record, length, fields);
 }
 
-static int sync_parent(const char *path) {
-    char *copy = strdup(path), *slash;
-    int fd, result;
-    if (copy == NULL) return -1;
-    slash = strrchr(copy, '/');
-    if (slash == NULL) strcpy(copy, ".");
-    else if (slash == copy) slash[1] = '\0';
-    else *slash = '\0';
-    fd = open(copy, O_RDONLY | O_DIRECTORY);
-    free(copy);
-    if (fd < 0) return -1;
-    result = fsync(fd);
-    close(fd);
-    return result;
-}
-
 int fo_c_gremlin_journal_validate_record(const char *record) {
     receipt_fields_t fields;
     size_t length;
@@ -303,18 +288,17 @@ int fo_c_gremlin_journal_validate_record(const char *record) {
     return 0;
 }
 
+static int journal_line_id(const char *line, size_t length, const char *id) {
+    receipt_fields_t fields;
+    if (validate_receipt(line, length, &fields) != 0) return -1;
+    return strcmp(fields.completion_id, id) == 0;
+}
+
 int fo_c_gremlin_journal_append(const char *path, const char *completion_id,
                                 const char *record) {
-    int fd = -1, result = 2;
-    size_t length, written, id_length;
-    receipt_fields_t fields, existing;
-    struct stat st;
-    off_t end, complete_end = 0, scan_offset = 0;
-    char line[JOURNAL_LINE_MAX + 1];
-    char chunk[8192];
-    size_t line_length = 0;
-    int oversized = 0;
-    int found = 0, found_identical = 0;
+    receipt_fields_t fields;
+    size_t length, id_length;
+    int result;
 
     if (path == NULL || completion_id == NULL || record == NULL ||
         path[0] == '\0' || completion_id[0] == '\0') return 1;
@@ -328,82 +312,8 @@ int fo_c_gremlin_journal_append(const char *path, const char *completion_id,
     result = validate_receipt(record, length, &fields);
     if (result != 0) return result;
     if (strcmp(fields.completion_id, completion_id) != 0) return 1;
-    result = 2;
-
-    fd = open(path, O_CREAT | O_EXCL | O_RDWR | O_APPEND, 0600);
-    if (fd < 0 && errno == EEXIST) fd = open(path, O_RDWR | O_APPEND);
-    if (fd < 0) return 2;
-    if (flock(fd, LOCK_EX) != 0) goto done;
-    if (fstat(fd, &st) != 0) goto done;
-    end = st.st_size;
-    while (scan_offset < end) {
-        size_t want = sizeof(chunk);
-        ssize_t count;
-        size_t i;
-        off_t remaining = end - scan_offset;
-        if ((off_t)want > remaining) want = (size_t)remaining;
-        count = pread(fd, chunk, want, scan_offset);
-        if (count < 0 && errno == EINTR) continue;
-        if (count <= 0) goto done;
-        for (i = 0; i < (size_t)count; i++) {
-            unsigned char c = (unsigned char)chunk[i];
-            if (c == '\n') {
-                if (oversized) {
-                    result = 4;
-                    goto done;
-                }
-                line[line_length] = '\0';
-                result = validate_receipt(line, line_length, &existing);
-                if (result != 0) {
-                    result = 1;
-                    goto done;
-                }
-                if (strcmp(existing.completion_id, completion_id) == 0) {
-                    if (found) {
-                        result = 3;
-                        goto done;
-                    }
-                    found = 1;
-                    found_identical = line_length == length &&
-                        memcmp(line, record, length) == 0;
-                }
-                complete_end = scan_offset + (off_t)i + 1;
-                line_length = 0;
-                oversized = 0;
-            } else if (!oversized) {
-                if (line_length == JOURNAL_LINE_MAX) oversized = 1;
-                else line[line_length++] = (char)c;
-            }
-        }
-        scan_offset += count;
-    }
-    if (found) {
-        result = found_identical && fsync(fd) == 0 && sync_parent(path) == 0 ? 0 :
-                 (found_identical ? 2 : 3);
-        goto done;
-    }
-    if (complete_end < end && ftruncate(fd, complete_end) != 0) goto done;
-    if (lseek(fd, 0, SEEK_END) < 0) goto done;
-    written = 0;
-    while (written < length) {
-        ssize_t count = write(fd, record + written, length - written);
-        if (count < 0 && errno == EINTR) continue;
-        if (count <= 0) goto done;
-        written += (size_t)count;
-    }
-    {
-        ssize_t count;
-        do {
-            count = write(fd, "\n", 1);
-        } while (count < 0 && errno == EINTR);
-        if (count != 1) goto done;
-    }
-    if (fsync(fd) != 0 || sync_parent(path) != 0) goto done;
-    result = 0;
-done:
-    flock(fd, LOCK_UN);
-    close(fd);
-    return result;
+    return fo_sys_append_once(path, completion_id, record, length,
+                              JOURNAL_LINE_MAX, 3, journal_line_id);
 }
 
 /* Keep the lane policy journal bounded without rewriting it for each receipt.
@@ -464,21 +374,15 @@ int fo_c_gremlin_journal_compact_tail(const char *path, int max_records) {
     fd = open(temporary, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
     if (fd < 0) goto done;
     for (size_t i = 0; i < count; ++i) {
-        size_t offset = 0;
-        while (offset < lengths[i]) {
-            ssize_t written = write(fd, records[i] + offset, lengths[i] - offset);
-            if (written < 0 && errno == EINTR) continue;
-            if (written <= 0) goto done;
-            offset += (size_t)written;
-        }
-        if (write(fd, "\n", 1) != 1) goto done;
+        if (fo_sys_write_all(fd, records[i], lengths[i]) != 0 ||
+            fo_sys_write_all(fd, "\n", 1) != 0) goto done;
     }
     if (fsync(fd) != 0 || close(fd) != 0) {
         fd = -1;
         goto done;
     }
     fd = -1;
-    if (rename(temporary, path) != 0 || sync_parent(path) != 0) goto done;
+    if (rename(temporary, path) != 0 || fo_sys_sync_parent(path) != 0) goto done;
     result = 0;
 done:
     if (input != NULL) fclose(input);
