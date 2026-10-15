@@ -21,6 +21,7 @@ program test_project_model_twin
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_size, json_string_value, json_boolean_value
     use fo_test_twin, only: twin_write
+    use fo_test_mcp, only: mcp_encode, mcp_request, mcp_call, mcp_quote, mcp_exchange
     implicit none
 
     integer, parameter :: n_requests = 22
@@ -191,15 +192,39 @@ contains
         type(string_list_t), intent(in) :: env
         type(process_result_t) :: result
 
+        type(json_value_t), allocatable :: responses(:)
+        type(json_value_t) :: field
+        character(:), allocatable :: messages, text
+
         call edit(dir, 'src/tw_phys.f90')
         call run_fo(driver, split_words('test --only-changed'), dir, cache, result, env)
-        call revert(dir)
         call assert_equal_integer(result%exit_code, 0, tag//' affected run: '// &
             result%stderr)
         call assert_contains(result%stdout//result%stderr, 'test_phys_b', &
             tag//' affected run runs test_phys_b')
         call assert_not_contains(result%stdout//result%stderr, 'test_core_a', &
             tag//' affected run skips test_core_a')
+        ! MCP test with only_changed runs the same cases.
+        messages = mcp_encode(mcp_request(1, 'initialize', &
+            '{"protocolVersion":"2025-11-25","capabilities":{}}'), .false.)
+        messages = messages//mcp_encode(mcp_call(2, '{"action":"test","dir":'// &
+            mcp_quote(dir)//',"only_changed":true,"json":"full"}'), .false.)
+        messages = messages//mcp_encode(mcp_request(3, 'shutdown'), .false.)
+        call mcp_exchange(driver, dir, cache, messages, .false., responses, result)
+        call revert(dir)
+        call assert_equal_integer(result%exit_code, 0, tag//' MCP exits cleanly')
+        if (size(responses) < 2) then
+            call assert_true(.false., tag//' MCP answers the test call')
+            return
+        end if
+        field = json_member(json_member(responses(2), 'result'), 'isError')
+        call assert_true(.not. json_boolean_value(field), &
+            tag//' MCP affected run passes')
+        field = json_member(json_element(json_member(json_member(responses(2), &
+            'result'), 'content'), 1), 'text')
+        text = json_string_value(field)
+        call assert_contains(text, 'test_phys_b', tag//' MCP runs test_phys_b')
+        call assert_not_contains(text, 'test_core_a', tag//' MCP skips test_core_a')
     end subroutine run_affected
 
     function case_names(report) result(text)
