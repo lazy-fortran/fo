@@ -1,29 +1,30 @@
 module fo_mcp
-    use fo_util, only: json_bool_text => json_bool, json_int, &
-        make_tmpfile, &
-        delete_tmpfile, read_text_file, read_text_file_alloc, &
-        clean_root_build_artifacts, &
-        strip_path_prefix_in_str, jsonrpc_error, jsonrpc_null
-    use fx_json_build, only: json_escape_string
+    use, intrinsic :: iso_fortran_env, only: int64
+    use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file_alloc
+    use fo_json_object, only: json_object_member, json_value_raw, &
+        json_text_has_control, json_skip_value
+    use fx_json_build, only: json_builder_t, json_new, json_object_start, &
+        json_object_end, json_array_start, json_array_end, json_key, &
+        json_value_string, json_value_bool, &
+        json_key_string, json_key_int, json_key_bool, json_to_string
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
-        json_parser_next, &
-        JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, &
-        JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_BOOL, &
+        json_parser_next, EV_OBJECT_START => JSON_OBJECT_START, &
+        EV_OBJECT_END => JSON_OBJECT_END, EV_ARRAY_START => JSON_ARRAY_START, &
+        EV_ARRAY_END => JSON_ARRAY_END, EV_KEY => JSON_KEY, &
+        JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_BOOL, &
         JSON_NULL_VAL, JSON_ERROR, JSON_END_OF_INPUT
     use fx_mcp, only: mcp_read_message, mcp_send_response, MCP_FRAME_UNKNOWN
     use fo_check, only: check_result_t, fo_check_run
-    use fo_check_output, only: check_result_compact_json, &
-        check_result_full_json
+    use fo_check_output, only: check_result_compact_json
+    use fo_commands, only: command_graph, command_info, command_changed, &
+        command_clean, command_install, command_check, command_lint
     use fo_fmt, only: fmt_sources, FMT_SELECT_ALL
-    use fo_capabilities, only: capabilities_t, detect_capabilities, &
-        capabilities_json
+    use fo_gremlin_request, only: GREMLIN_OPTIONS, N_GREMLIN_OPTIONS, &
+        gremlin_apply_adapter_defaults
     use fo_process, only: process_start_fo_check, process_poll_pid, &
-        process_cancel_pid, process_run_argv_logged, argv_push, &
-        process_suppress_heartbeats
-    use fo_progress, only: progress_suppress
+        process_cancel_pid, process_suppress_heartbeats
     use fo_version_info, only: FO_VERSION
-    use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING, &
-        RUN_RERUN_PENDING
+    use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
     use fo_fs, only: fs_sleep_ms
     use fo_gremlin_supervisor, only: gremlin_handle
@@ -51,10 +52,9 @@ contains
 
     subroutine mcp_serve()
         character(len=MAX_LINE) :: line
-        character(len=MAX_LINE) :: params_json, raw_value
-        character(len=:), allocatable :: response
+        character(len=:), allocatable :: request, response, raw_value, params_json
+        character(len=:), allocatable :: id_str
         character(len=256) :: method
-        character(len=MAX_LINE) :: id_str
         integer :: framing, read_status, parse_status, property_count
         integer :: cancel_retry_delay_ms
         logical :: eof_flag, valid_version, request_has_id, stop_requested
@@ -74,35 +74,36 @@ contains
             if (eof_flag) exit
             if (read_status /= 0) cycle
             if (len_trim(line) == 0) cycle
+            request = trim(line)
 
-            call extract_json_member(line, 'jsonrpc', raw_value, property_count, &
+            call json_object_member(request, 'jsonrpc', raw_value, property_count, &
                 parse_status, envelope_event)
             valid_version = .false.
             if (parse_status == 0 .and. property_count == 1) then
                 if (envelope_event%event_type == JSON_STRING) then
                     if (allocated(envelope_event%string_val)) then
-                        valid_version = len(envelope_event%string_val) == 3 .and. &
-                            envelope_event%string_val == '2.0'
+                        valid_version = envelope_event%string_val == '2.0' .and. &
+                            len(envelope_event%string_val) == 3
                     end if
                 end if
             end if
             if (.not. valid_version) then
-                call jsonrpc_error('null', -32600, 'invalid JSON-RPC request', response)
-                call mcp_send_response(trim(response), framing)
+                call rpc_error('null', -32600, 'invalid JSON-RPC request', response)
+                call mcp_send_response(response, framing)
                 cycle
             end if
-            call extract_json_string_member(line, 'method', method, &
+            call extract_json_string_member(request, 'method', method, &
                 property_count, parse_status)
             if (parse_status /= 0 .or. property_count /= 1) then
-                call jsonrpc_error('null', -32600, 'invalid JSON-RPC request', response)
-                call mcp_send_response(trim(response), framing)
+                call rpc_error('null', -32600, 'invalid JSON-RPC request', response)
+                call mcp_send_response(response, framing)
                 cycle
             end if
-            call extract_json_member(line, 'id', id_str, property_count, parse_status, &
+            call json_object_member(request, 'id', id_str, property_count, parse_status, &
                 envelope_event)
             if (parse_status /= 0 .or. property_count > 1) then
-                call jsonrpc_error('null', -32600, 'invalid JSON-RPC id', response)
-                call mcp_send_response(trim(response), framing)
+                call rpc_error('null', -32600, 'invalid JSON-RPC id', response)
+                call mcp_send_response(response, framing)
                 cycle
             end if
             request_has_id = property_count == 1
@@ -111,19 +112,19 @@ contains
                 case (JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_NULL_VAL)
                     ! Preserve the exact legal ID token without numeric conversion.
                 case default
-                    call jsonrpc_error('null', -32600, 'invalid JSON-RPC id', response)
-                    call mcp_send_response(trim(response), framing)
+                    call rpc_error('null', -32600, 'invalid JSON-RPC id', response)
+                    call mcp_send_response(response, framing)
                     cycle
                 end select
             else
                 id_str = 'null'
             end if
             params_json = '{}'
-            call extract_json_member(line, 'params', raw_value, property_count, &
+            call json_object_member(request, 'params', raw_value, property_count, &
                 parse_status)
             if (parse_status == 0 .and. property_count == 1) then
-                if (len_trim(raw_value) > 0) then
-                    if (raw_value(1:1) == '{') params_json = trim(raw_value)
+                if (len(raw_value) > 0) then
+                    if (raw_value(1:1) == '{') params_json = raw_value
                 end if
             end if
             call async_poll(async_state)
@@ -146,19 +147,18 @@ contains
             case ('shutdown')
                 call async_cancel_all(async_state, read_status)
                 if (read_status /= 0) then
-                    call jsonrpc_error(id_str, -32603, &
+                    call rpc_error(id_str, -32603, &
                         'failed to cancel active run; shutdown remains active', response)
                 else
-                    call jsonrpc_null(id_str, response)
+                    call rpc_result(id_str, 'null', response)
                     stop_requested = .true.
                 end if
             case default
                 if (request_has_id) then
-                    call jsonrpc_error(id_str, -32601, &
-                        'method not found', response)
+                    call rpc_error(id_str, -32601, 'method not found', response)
                 end if
             end select
-            if (request_has_id) call mcp_send_response(trim(response), framing)
+            if (request_has_id) call mcp_send_response(response, framing)
             if (stop_requested) exit
         end do
         cancel_retry_delay_ms = CANCEL_RETRY_INITIAL_DELAY_MS
@@ -177,34 +177,111 @@ contains
         call process_suppress_heartbeats(.false.)
     end subroutine mcp_serve
 
+    ! ---- JSON-RPC envelopes, built so every response is valid by construction
+
+    subroutine rpc_open(jb, id_str)
+        type(json_builder_t), intent(out) :: jb
+        character(len=*), intent(in) :: id_str
+
+        jb = json_new()
+        call json_object_start(jb)
+        call json_key_string(jb, 'jsonrpc', '2.0')
+        call json_key(jb, 'id')
+        call json_value_raw(jb, trim(id_str))
+    end subroutine rpc_open
+
+    subroutine rpc_result(id_str, result_json, response)
+        character(len=*), intent(in) :: id_str, result_json
+        character(len=:), allocatable, intent(out) :: response
+        type(json_builder_t) :: jb
+
+        call rpc_open(jb, id_str)
+        call json_key(jb, 'result')
+        call json_value_raw(jb, result_json)
+        call json_object_end(jb)
+        response = json_to_string(jb)
+    end subroutine rpc_result
+
+    subroutine rpc_error(id_str, code, message, response)
+        character(len=*), intent(in) :: id_str, message
+        integer, intent(in) :: code
+        character(len=:), allocatable, intent(out) :: response
+        type(json_builder_t) :: jb
+
+        call rpc_open(jb, id_str)
+        call json_key(jb, 'error')
+        call json_object_start(jb)
+        call json_key_int(jb, 'code', code)
+        call json_key_string(jb, 'message', message)
+        call json_object_end(jb)
+        call json_object_end(jb)
+        response = json_to_string(jb)
+    end subroutine rpc_error
+
+    subroutine command_response(id_str, text, err_text, exitcode, response)
+        !! A tool result: the stdout text, then the stderr text as a second
+        !! block when the command wrote any. isError mirrors the exit code.
+        character(len=*), intent(in) :: id_str, text, err_text
+        integer, intent(in) :: exitcode
+        character(len=:), allocatable, intent(out) :: response
+        type(json_builder_t) :: jb
+
+        jb = json_new()
+        call json_object_start(jb)
+        call json_key(jb, 'content')
+        call json_array_start(jb)
+        if (len(text) > 0 .or. len(err_text) == 0) call text_block(jb, text)
+        if (len(err_text) > 0) call text_block(jb, err_text)
+        call json_array_end(jb)
+        call json_key_bool(jb, 'isError', exitcode /= 0)
+        call json_object_end(jb)
+        call rpc_result(id_str, json_to_string(jb), response)
+    end subroutine command_response
+
+    subroutine text_block(jb, text)
+        type(json_builder_t), intent(inout) :: jb
+        character(len=*), intent(in) :: text
+
+        call json_object_start(jb)
+        call json_key_string(jb, 'type', 'text')
+        call json_key_string(jb, 'text', text)
+        call json_object_end(jb)
+    end subroutine text_block
+
+    subroutine make_tool_text_response(id_str, output_text, exitcode, response)
+        character(len=*), intent(in) :: id_str, output_text
+        integer, intent(in) :: exitcode
+        character(len=:), allocatable, intent(out) :: response
+
+        call command_response(id_str, output_text, '', exitcode, response)
+    end subroutine make_tool_text_response
+
     subroutine handle_tools_call(params_json, id_str, response, async_state)
         character(len=*), intent(in) :: params_json, id_str
         character(len=:), allocatable, intent(out) :: response
         type(mcp_async_state_t), intent(inout) :: async_state
 
         character(len=64) :: action, mode
-        character(len=MAX_LINE) :: arguments, raw_value
-        character(len=16384) :: output_text
+        character(len=:), allocatable :: arguments, raw_value, dir, text, err_text
+        character(len=:), allocatable :: message
+        character(len=512) :: tmpfile, fmt_output
         integer :: exitcode, property_count, parse_status
-        logical :: valid_string
         type(json_event_t) :: dir_event
-        character(len=512) :: tmpfile, dir
 
-        call extract_json_member(params_json, 'arguments', arguments, &
+        call json_object_member(params_json, 'arguments', arguments, &
             property_count, parse_status)
-        if (parse_status /= 0 .or. property_count /= 1 .or. &
-            len_trim(arguments) == 0) then
-            call jsonrpc_error(id_str, -32602, 'missing MCP arguments object', response)
+        if (parse_status /= 0 .or. property_count /= 1 .or. len(arguments) == 0) then
+            call rpc_error(id_str, -32602, 'missing MCP arguments object', response)
             return
         end if
         if (arguments(1:1) /= '{') then
-            call jsonrpc_error(id_str, -32602, 'MCP arguments must be an object', response)
+            call rpc_error(id_str, -32602, 'MCP arguments must be an object', response)
             return
         end if
         call extract_json_string_member(arguments, 'action', action, &
             property_count, parse_status)
         if (parse_status /= 0 .or. property_count /= 1) then
-            call jsonrpc_error(id_str, -32602, 'arguments need one string action', response)
+            call rpc_error(id_str, -32602, 'arguments need one string action', response)
             return
         end if
         select case (trim(action))
@@ -214,77 +291,83 @@ contains
             call handle_gremlin_action(arguments, id_str, response)
             return
         end select
-        call extract_json_member(arguments, 'dir', raw_value, property_count, &
+        call json_object_member(arguments, 'dir', raw_value, property_count, &
             parse_status, dir_event)
-        dir = ''
+        dir = '.'
         if (parse_status /= 0 .or. property_count > 1) then
-            call jsonrpc_error(id_str, -32602, 'dir must occur at most once', response)
+            call rpc_error(id_str, -32602, 'dir must occur at most once', response)
             return
         end if
         if (property_count == 1) then
-            valid_string = dir_event%event_type == JSON_STRING .and. &
-                allocated(dir_event%string_val)
-            if (.not. valid_string) then
-                call jsonrpc_error(id_str, -32602, 'dir must be a valid string', response)
+            if (dir_event%event_type /= JSON_STRING .or. &
+                .not. allocated(dir_event%string_val)) then
+                call rpc_error(id_str, -32602, 'dir must be a valid string', response)
                 return
             end if
-            if (len_trim(dir_event%string_val) > len(dir)) then
-                call jsonrpc_error(id_str, -32602, 'dir must be a valid string', response)
-                return
-            end if
-            dir = trim(dir_event%string_val)
+            if (len_trim(dir_event%string_val) > 0) dir = trim(dir_event%string_val)
         end if
-        if (len_trim(dir) == 0) dir = '.'
+        select case (trim(action))
+        case ('lint')
+            message = first_bad_member(arguments, ['fix ', 'deep'], 'b')
+        case ('graph')
+            message = first_bad_member(arguments, ['dot'], 'b')
+        case ('clean')
+            message = first_bad_member(arguments, ['cache'], 'b')
+        case ('install')
+            message = first_bad_member(arguments, ['prefix'], 's')
+        case default
+            message = ''
+        end select
+        if (len(message) > 0) then
+            call rpc_error(id_str, -32602, message, response)
+            return
+        end if
         call make_tmpfile('fo_mcp_output', tmpfile)
 
+        text = ''
+        err_text = ''
         select case (trim(action))
         case ('check')
             call extract_json_string_member(arguments, 'mode', mode, &
                 property_count, parse_status)
             if (trim(mode) == 'start') then
+                call delete_tmpfile(tmpfile)
                 call handle_async_start(arguments, id_str, response, async_state)
                 return
             end if
-            call handle_check(arguments, id_str, dir, exitcode, response)
+            call handle_check(arguments, id_str, dir, response)
         case ('status')
             call handle_async_status(id_str, response, async_state)
-            return
         case ('diagnostics')
             call handle_async_diagnostics(arguments, id_str, response, async_state)
-            return
         case ('cancel')
             call handle_async_cancel(arguments, id_str, response, async_state)
-            return
         case ('lint')
-            call handle_lint(arguments, id_str, dir, output_text, exitcode, response)
+            call handle_lint(arguments, id_str, dir, response)
         case ('fmt')
             call fmt_sources(trim(dir), FMT_SELECT_ALL, .false., .false., &
-                [character(len=1) ::], 0, output_text, exitcode)
-            if (exitcode == 0) then
-                output_text = 'formatted'
-            else
-                output_text = 'fo fmt: formatting failed'
-            end if
-            call make_tool_text_response(id_str, output_text, exitcode, response)
+                [character(len=1) ::], 0, fmt_output, exitcode)
+            text = 'formatted'
+            if (exitcode /= 0) text = 'fo fmt: formatting failed'
+            call make_tool_text_response(id_str, text, exitcode, response)
         case ('build')
             call handle_backend_build(id_str, dir, tmpfile, response)
-            return
         case ('test')
             call handle_backend_test_named(arguments, id_str, dir, tmpfile, response)
-            return
         case ('graph')
-            call handle_graph(arguments, id_str, dir, output_text, exitcode, response)
+            call handle_graph(arguments, id_str, dir, response)
         case ('info')
-            call handle_info(id_str, dir, output_text, exitcode, response)
+            call command_info(dir, .false., text, exitcode)
+            call command_response(id_str, text, '', exitcode, response)
         case ('changed')
-            call handle_changed(id_str, dir, output_text, exitcode, response)
+            call command_changed(dir, text, err_text, exitcode)
+            call command_response(id_str, text, err_text, exitcode, response)
         case ('clean')
-            call handle_clean(arguments, id_str, dir, output_text, exitcode, response)
+            call handle_clean(arguments, id_str, dir, response)
         case ('install')
-            call handle_install(arguments, id_str, dir, output_text, exitcode, response)
+            call handle_install(arguments, id_str, dir, response)
         case default
-            call jsonrpc_error(id_str, -32602, &
-                'unknown action: '//trim(action), response)
+            call rpc_error(id_str, -32602, 'unknown action: '//trim(action), response)
         end select
         call delete_tmpfile(tmpfile)
     end subroutine handle_tools_call
@@ -293,17 +376,21 @@ contains
         character(len=*), intent(in) :: arguments, id_str
         character(len=:), allocatable, intent(out) :: response
 
-        character(len=MAX_LINE) :: project_dir
+        character(len=4096) :: project_dir
         character(len=64) :: public_action, core_action
         character(len=256) :: message
         character(len=:), allocatable :: request_json, result_json
+        type(json_builder_t) :: jb
         integer :: ierr, exitcode
 
         call normalize_gremlin_arguments(arguments, public_action, core_action, &
             project_dir, request_json, ierr, message)
         if (ierr /= 0) then
-            call make_tool_text_response(id_str, '{"error":"'// &
-                trim(json_escape_string(trim(message)))//'"}', 2, response)
+            jb = json_new()
+            call json_object_start(jb)
+            call json_key_string(jb, 'error', trim(message))
+            call json_object_end(jb)
+            call make_tool_text_response(id_str, json_to_string(jb), 2, response)
             return
         end if
 
@@ -312,69 +399,16 @@ contains
         call make_tool_text_response(id_str, result_json, exitcode, response)
     end subroutine handle_gremlin_action
 
-    subroutine extract_json_member(object_json, property, raw_value, count, ierr, &
-            selected_event)
-        character(len=*), intent(in) :: object_json, property
-        character(len=*), intent(out) :: raw_value
-        integer, intent(out) :: count, ierr
-        type(json_event_t), intent(out), optional :: selected_event
-
-        type(json_parser_t) :: parser
-        type(json_event_t) :: event, value_event
-        integer :: value_start, value_end, value_error
-        logical :: matches
-
-        raw_value = ''
-        count = 0
-        ierr = 1
-        call json_parser_init_strict(parser, object_json)
-        call json_parser_next(parser, event)
-        if (event%event_type /= JSON_OBJECT_START) return
-        do
-            call json_parser_next(parser, event)
-            if (event%event_type == JSON_OBJECT_END) exit
-            if (event%event_type /= JSON_KEY .or. .not. allocated(event%string_val)) return
-            matches = len(event%string_val) == len(property)
-            if (matches) matches = event%string_val == property
-            call json_parser_next(parser, value_event)
-            if (value_event%event_type == JSON_ERROR .or. &
-                value_event%event_type == JSON_END_OF_INPUT) return
-            value_start = value_event%raw_start
-            value_end = value_event%raw_end
-            if (value_event%event_type == JSON_ARRAY_START .or. &
-                value_event%event_type == JSON_OBJECT_START) then
-                call consume_json_value(parser, value_event, value_error)
-                if (value_error /= 0) return
-                value_end = parser%pos - 1
-            end if
-            if (matches) then
-                count = count + 1
-                if (count == 1) then
-                    if (value_start < 1 .or. value_end < value_start) return
-                    if (value_end - value_start + 1 > len(raw_value)) return
-                    raw_value = object_json(value_start:value_end)
-                    if (present(selected_event)) selected_event = value_event
-                end if
-            end if
-        end do
-        call json_parser_next(parser, event)
-        if (event%event_type /= JSON_END_OF_INPUT) then
-            ierr = 1
-            return
-        end if
-        ierr = 0
-    end subroutine extract_json_member
-
     subroutine extract_json_string_member(object_json, property, value, count, ierr)
         character(len=*), intent(in) :: object_json, property
         character(len=*), intent(out) :: value
         integer, intent(out) :: count, ierr
 
-        character(len=MAX_LINE) :: raw_value
+        character(len=:), allocatable :: raw_value
         type(json_event_t) :: event
 
         value = ''
-        call extract_json_member(object_json, property, raw_value, count, ierr, event)
+        call json_object_member(object_json, property, raw_value, count, ierr, event)
         if (ierr /= 0 .or. count /= 1) return
         if (event%event_type /= JSON_STRING .or. .not. allocated(event%string_val)) then
             ierr = 1
@@ -392,11 +426,11 @@ contains
         logical, intent(out) :: value
         integer, intent(out) :: count, ierr
 
-        character(len=MAX_LINE) :: raw_value
+        character(len=:), allocatable :: raw_value
         type(json_event_t) :: event
 
         value = .false.
-        call extract_json_member(object_json, property, raw_value, count, ierr, event)
+        call json_object_member(object_json, property, raw_value, count, ierr, event)
         if (ierr /= 0 .or. count /= 1) return
         if (event%event_type /= JSON_BOOL) then
             ierr = 1
@@ -405,8 +439,46 @@ contains
         value = event%bool_val
     end subroutine extract_json_bool_member
 
+    logical function bool_option(arguments, name) result(on)
+        !! A boolean tool argument; absent is false (first_bad_member has
+        !! already rejected duplicates and other types).
+        character(len=*), intent(in) :: arguments, name
+        integer :: count, ierr
+
+        call extract_json_bool_member(arguments, name, on, count, ierr)
+        if (ierr /= 0 .or. count /= 1) on = .false.
+    end function bool_option
+
+    function first_bad_member(arguments, names, kind) result(message)
+        !! An option must occur at most once and have the declared type
+        !! ('b' boolean, 's' string); a duplicate or mistyped one is an error
+        !! instead of being read as the default.
+        character(len=*), intent(in) :: arguments, names(:), kind
+        character(len=:), allocatable :: message
+        character(len=:), allocatable :: raw_value
+        type(json_event_t) :: event
+        integer :: i, count, ierr
+
+        message = ''
+        do i = 1, size(names)
+            call json_object_member(arguments, trim(names(i)), raw_value, count, ierr, &
+                event)
+            if (ierr /= 0 .or. count > 1) then
+                message = trim(names(i))//' must occur at most once'
+            else if (count == 1) then
+                if (kind == 'b' .and. event%event_type /= JSON_BOOL) &
+                    message = trim(names(i))//' must be a boolean'
+                if (kind == 's' .and. event%event_type /= JSON_STRING) &
+                    message = trim(names(i))//' must be a string'
+            end if
+            if (len(message) > 0) return
+        end do
+    end function first_bad_member
+
     subroutine normalize_gremlin_arguments(arguments, public_action, core_action, &
             project_dir, request_json, ierr, message)
+        !! Split the MCP arguments into the action, the project directory and
+        !! the request object that the shared Gremlin core validates.
         character(len=*), intent(in) :: arguments
         character(len=*), intent(out) :: public_action, core_action, project_dir
         character(len=:), allocatable, intent(out) :: request_json
@@ -415,33 +487,31 @@ contains
 
         type(json_parser_t) :: parser
         type(json_event_t) :: event, value_event
-        character(len=:), allocatable :: raw_key, raw_value
-        character(len=4096) :: decoded_dir
-        integer :: action_count, dir_count, detail_count
-        integer :: value_start, value_end, dir_length
-        logical :: valid_string
+        type(json_builder_t) :: jb
+        character(len=:), allocatable :: key
+        integer :: action_count, dir_count, skip_error, value_end
 
         public_action = ''
         project_dir = '.'
         core_action = ''
-        request_json = '{'
+        request_json = '{}'
         message = 'malformed Gremlin request JSON'
         ierr = 1
         action_count = 0
         dir_count = 0
-        detail_count = 0
+        jb = json_new()
+        call json_object_start(jb)
         call json_parser_init_strict(parser, arguments)
         call json_parser_next(parser, event)
-        if (event%event_type /= JSON_OBJECT_START) return
+        if (event%event_type /= EV_OBJECT_START) return
         do
             call json_parser_next(parser, event)
-            if (event%event_type == JSON_OBJECT_END) exit
-            if (event%event_type /= JSON_KEY .or. .not. allocated(event%string_val)) return
-            raw_key = parser%input(event%raw_start:event%raw_end)
+            if (event%event_type == EV_OBJECT_END) exit
+            if (event%event_type /= EV_KEY .or. .not. allocated(event%string_val)) return
+            key = event%string_val
             call json_parser_next(parser, value_event)
-            value_start = value_event%raw_start
             if (value_event%event_type == JSON_ERROR) return
-            if (json_key_matches(event%string_val, len(event%string_val), 'action')) then
+            if (len(key) == 6 .and. key == 'action') then
                 action_count = action_count + 1
                 if (value_event%event_type /= JSON_STRING .or. &
                     .not. allocated(value_event%string_val)) then
@@ -455,45 +525,37 @@ contains
                     return
                 end if
                 public_action = value_event%string_val
-            else if (json_key_matches(event%string_val, len(event%string_val), 'dir')) then
+            else if (len(key) == 3 .and. key == 'dir') then
                 dir_count = dir_count + 1
                 if (value_event%event_type /= JSON_STRING .or. &
                     .not. allocated(value_event%string_val)) then
                     message = 'Gremlin dir must be a string'
                     return
                 end if
-                dir_length = len(value_event%string_val)
-                if (dir_length > len(project_dir) .or. &
-                    dir_length > len(decoded_dir)) then
+                if (len(value_event%string_val) > len(project_dir)) then
                     message = 'Gremlin dir is too long'
                     return
                 end if
-                if (dir_length == 0) then
+                if (len_trim(value_event%string_val) == 0) then
                     message = 'Gremlin dir must be nonempty'
                     return
                 end if
-                decoded_dir = value_event%string_val
-                if (json_text_has_control(decoded_dir(:dir_length))) then
+                if (json_text_has_control(value_event%string_val)) then
                     message = 'Gremlin dir contains a control character'
                     return
                 end if
-                if (len_trim(decoded_dir(:dir_length)) == 0) then
-                    message = 'Gremlin dir must be nonempty'
-                    return
-                end if
-                project_dir = decoded_dir(:dir_length)
+                project_dir = value_event%string_val
             else
-                if (json_key_matches(event%string_val, len(event%string_val), 'detail')) &
-                    detail_count = detail_count + 1
-                call consume_json_value(parser, value_event, ierr)
-                if (ierr /= 0) then
+                value_end = value_event%raw_end
+                call json_skip_value(parser, value_event, skip_error)
+                if (skip_error /= 0) then
                     message = 'malformed Gremlin request JSON'
                     return
                 end if
-                value_end = parser%pos - 1
-                raw_value = parser%input(value_start:value_end)
-                if (len(request_json) > 1) request_json = request_json//','
-                request_json = request_json//raw_key//':'//raw_value
+                if (value_event%event_type == EV_ARRAY_START .or. &
+                    value_event%event_type == EV_OBJECT_START) value_end = parser%pos - 1
+                call json_key(jb, key)
+                call json_value_raw(jb, arguments(value_event%raw_start:value_end))
             end if
         end do
         call json_parser_next(parser, event)
@@ -502,194 +564,104 @@ contains
             message = 'Gremlin arguments need one action and at most one dir'
             return
         end if
-        call map_gremlin_action(trim(public_action), core_action, valid_string)
-        if (.not. valid_string) then
+        if (index(public_action, 'gremlin_') /= 1) then
             message = 'unknown Gremlin MCP action: '//trim(public_action)
             return
         end if
-        if ((core_action == 'status' .or. core_action == 'wait') .and. &
-            detail_count == 0) then
-            if (len(request_json) > 1) request_json = request_json//','
-            request_json = request_json//'"detail":"summary"'
-        end if
-        request_json = request_json//'}'
+        core_action = trim(public_action(9:))
+        select case (trim(core_action))
+        case ('start', 'status', 'wait', 'events', 'failures', 'reproduce', 'stop')
+        case default
+            message = 'unknown Gremlin MCP action: '//trim(public_action)
+            return
+        end select
+        call json_object_end(jb)
+        request_json = json_to_string(jb)
+        call gremlin_apply_adapter_defaults(core_action, request_json)
         ierr = 0
         message = ''
     end subroutine normalize_gremlin_arguments
 
-    logical function json_text_has_control(text)
-        character(len=*), intent(in) :: text
-        integer :: i
-
-        json_text_has_control = .false.
-        do i = 1, len(text)
-            if (iachar(text(i:i)) < 32 .or. iachar(text(i:i)) == 127) then
-                json_text_has_control = .true.
-                return
-            end if
-        end do
-    end function json_text_has_control
-
-    recursive subroutine consume_json_value(parser, first, ierr)
-        type(json_parser_t), intent(inout) :: parser
-        type(json_event_t), intent(in) :: first
-        integer, intent(out) :: ierr
-
-        type(json_event_t) :: event
-        integer :: depth
-
-        ierr = 0
-        if (first%event_type /= JSON_ARRAY_START .and. &
-            first%event_type /= JSON_OBJECT_START) return
-        depth = 1
-        do while (depth > 0)
-            call json_parser_next(parser, event)
-            select case (event%event_type)
-            case (JSON_ARRAY_START, JSON_OBJECT_START)
-                depth = depth + 1
-            case (JSON_ARRAY_END, JSON_OBJECT_END)
-                depth = depth - 1
-            case (JSON_END_OF_INPUT)
-                ierr = 1
-                return
-            case (JSON_ERROR)
-                ierr = 1
-                return
-            end select
-        end do
-    end subroutine consume_json_value
-
-    subroutine map_gremlin_action(public_action, core_action, valid)
-        character(len=*), intent(in) :: public_action
-        character(len=*), intent(out) :: core_action
-        logical, intent(out) :: valid
-
-        valid = .true.
-        select case (trim(public_action))
-        case ('gremlin_start')
-            core_action = 'start'
-        case ('gremlin_status')
-            core_action = 'status'
-        case ('gremlin_wait')
-            core_action = 'wait'
-        case ('gremlin_events')
-            core_action = 'events'
-        case ('gremlin_failures')
-            core_action = 'failures'
-        case ('gremlin_reproduce')
-            core_action = 'reproduce'
-        case ('gremlin_stop')
-            core_action = 'stop'
-        case default
-            core_action = ''
-            valid = .false.
-        end select
-    end subroutine map_gremlin_action
-
-    logical function json_key_matches(key, key_length, expected)
-        character(len=*), intent(in) :: key, expected
-        integer, intent(in) :: key_length
-
-        json_key_matches = .false.
-        if (key_length /= len(expected)) return
-        json_key_matches = key(1:len(expected)) == expected
-    end function json_key_matches
-
-    subroutine handle_check(line, id_str, dir, exitcode, response)
+    subroutine handle_check(line, id_str, dir, response)
         character(len=*), intent(in) :: line, id_str, dir
-        integer, intent(out) :: exitcode
         character(len=:), allocatable, intent(out) :: response
 
-        type(check_result_t) :: check_res
-        character(len=:), allocatable :: output_text
-        logical :: want_full
-        integer :: option_count, option_error
+        character(len=:), allocatable :: text, err_text
         character(len=16) :: json_mode
-        type(capabilities_t) :: cap
-        character(len=2048) :: cap_json
-        character(len=514) :: dir_prefix
+        integer :: option_count, option_error, mode, exitcode
+
         call extract_json_string_member(line, 'json', json_mode, &
             option_count, option_error)
         if (option_count > 1 .or. (option_count == 1 .and. &
             (option_error /= 0 .or. &
             (trim(json_mode) /= 'compact' .and. trim(json_mode) /= 'full')))) then
-            call jsonrpc_error(id_str, -32602, 'invalid json mode', response)
+            call rpc_error(id_str, -32602, 'invalid json mode', response)
             return
         end if
-        want_full = option_error == 0 .and. option_count == 1 .and. &
-            trim(json_mode) == 'full'
-        cap_json = ''
-        if (want_full) then
-            call detect_capabilities(cap)
-            call capabilities_json(cap, cap_json)
-        end if
-        call progress_suppress(.true.)
-        call fo_check_run(trim(dir), check_res)
-        call progress_suppress(.false.)
-        if (want_full) then
-            output_text = check_result_full_json(check_res, cap_json)
-        else
-            output_text = check_result_compact_json(check_res)
-        end if
-        dir_prefix = trim(dir)//'/'
-        call strip_path_prefix_in_str(output_text, trim(dir_prefix))
-        exitcode = 0
-        if (.not. (check_res%build_ok .and. check_res%tests_ok)) exitcode = 1
-        call make_tool_text_response(id_str, output_text, exitcode, response)
+        mode = 1
+        if (option_count == 1 .and. trim(json_mode) == 'full') mode = 2
+        call command_check(dir, mode, .true., text, err_text, exitcode)
+        call command_response(id_str, text, err_text, exitcode, response)
     end subroutine handle_check
 
-    subroutine handle_lint(line, id_str, dir, output_text, exitcode, response)
-        use fo_lint, only: lint_finding_t, lint_warning_t, lint_dir, &
-            lint_compiler, lint_dedup_warnings, lint_all_json, &
-            lint_fix_dir, MAX_FINDINGS, MAX_WARNINGS
+    subroutine handle_lint(line, id_str, dir, response)
         character(len=*), intent(in) :: line, id_str, dir
-        character(len=*), intent(out) :: output_text
-        integer, intent(out) :: exitcode
         character(len=:), allocatable, intent(out) :: response
 
-        type(lint_finding_t) :: findings(MAX_FINDINGS)
-        type(lint_warning_t), allocatable :: warnings(:)
-        integer :: n_findings, n_warnings, n_removed, n_remaining
-        character(len=16384) :: lint_output
-        character(len=514) :: dir_prefix
-        logical :: fix_requested
-        integer :: fix_count, fix_error
+        character(len=:), allocatable :: text, deep_report, tail, err_text
+        integer :: exitcode
 
-        call extract_json_bool_member(line, 'fix', fix_requested, &
-            fix_count, fix_error)
-        if (fix_error == 0 .and. fix_count == 1 .and. fix_requested) then
-            call lint_fix_dir(trim(dir), n_removed, n_remaining)
-            write (lint_output, '(a,i0,a,i0,a)') &
-                '{"removed":', n_removed, ',"remaining":', n_remaining, '}'
-            output_text = trim(lint_output)
-            exitcode = 0
-            if (n_remaining > 0) exitcode = 1
-            call make_tool_text_response(id_str, lint_output, exitcode, response)
-            return
-        end if
-
-        allocate (warnings(MAX_WARNINGS))
-        call lint_dir(trim(dir), findings, n_findings)
-        call lint_compiler(trim(dir), warnings, n_warnings)
-        call lint_dedup_warnings(warnings, n_warnings)
-        lint_output = lint_all_json(findings, n_findings, warnings, n_warnings)
-        dir_prefix = trim(dir)//'/'
-        call strip_path_prefix_in_str(lint_output, trim(dir_prefix))
-        output_text = trim(lint_output)
-        exitcode = 0
-        if (n_findings > 0 .or. n_warnings > 0) exitcode = 1
-        call make_tool_text_response(id_str, lint_output, exitcode, response)
+        call command_lint(dir, [character(len=1) ::], bool_option(line, 'deep'), &
+            bool_option(line, 'fix'), .true., text, deep_report, tail, err_text, exitcode)
+        call command_response(id_str, text, err_text, exitcode, response)
     end subroutine handle_lint
 
+    subroutine handle_graph(line, id_str, dir, response)
+        character(len=*), intent(in) :: line, id_str, dir
+        character(len=:), allocatable, intent(out) :: response
+
+        character(len=:), allocatable :: text, err_text
+        integer :: exitcode
+
+        call command_graph(dir, bool_option(line, 'dot'), text, err_text, exitcode)
+        call command_response(id_str, text, err_text, exitcode, response)
+    end subroutine handle_graph
+
+    subroutine handle_clean(line, id_str, dir, response)
+        character(len=*), intent(in) :: line, id_str, dir
+        character(len=:), allocatable, intent(out) :: response
+
+        character(len=:), allocatable :: text
+        integer :: exitcode
+
+        call command_clean(dir, bool_option(line, 'cache'), text, exitcode)
+        call command_response(id_str, text, '', exitcode, response)
+    end subroutine handle_clean
+
+    subroutine handle_install(line, id_str, dir, response)
+        character(len=*), intent(in) :: line, id_str, dir
+        character(len=:), allocatable, intent(out) :: response
+
+        character(len=:), allocatable :: text, err_text, raw_value, prefix
+        type(json_event_t) :: event
+        integer :: exitcode, prefix_count, prefix_error
+
+        prefix = ''
+        call json_object_member(line, 'prefix', raw_value, prefix_count, prefix_error, &
+            event)
+        if (prefix_error == 0 .and. prefix_count == 1) prefix = trim(event%string_val)
+        call command_install(dir, prefix, text, err_text, exitcode)
+        call command_response(id_str, text, err_text, exitcode, response)
+    end subroutine handle_install
+
     subroutine handle_backend_build(id_str, dir, tmpfile, response)
-        use fo_build_backend, only: backend_t, detect_backend, backend_build, &
-            BACKEND_NONE
+        use fo_build_backend, only: backend_build
         character(len=*), intent(in) :: id_str, dir, tmpfile
         character(len=:), allocatable, intent(out) :: response
 
         type(backend_t) :: b
-        character(len=8192) :: output_text
-        integer :: exitcode
+        character(len=:), allocatable :: output_text
+        integer :: exitcode, ierr
 
         b = detect_backend(trim(dir))
         if (b%kind == BACKEND_NONE) then
@@ -697,15 +669,15 @@ contains
             exitcode = 1
         else
             call backend_build(b, exitcode, log_file=tmpfile)
-            call read_text_file(tmpfile, output_text)
+            call read_text_file_alloc(tmpfile, output_text, ierr)
+            if (ierr /= 0) output_text = 'fo: could not read build log'
         end if
         call delete_tmpfile(tmpfile)
         call make_tool_text_response(id_str, output_text, exitcode, response)
     end subroutine handle_backend_build
 
     subroutine handle_backend_test_named(line, id_str, dir, tmpfile, response)
-        use fo_build_backend, only: backend_t, detect_backend, backend_test, &
-            backend_test_names, BACKEND_NONE
+        use fo_build_backend, only: backend_test, backend_test_names
         use fo_project_model, only: model_request_t, model_selection_t, &
             project_model_t, SELECT_EMPTY
         use fo_project_load, only: project_has_model, project_select, &
@@ -744,7 +716,7 @@ contains
         call extract_test_names_from_params(line, test_names, n_names, ierr)
         if (ierr /= 0) then
             call delete_tmpfile(tmpfile)
-            call jsonrpc_error(id_str, -32602, &
+            call rpc_error(id_str, -32602, &
                 'test args must be an array of nonempty names', response)
             return
         end if
@@ -755,7 +727,7 @@ contains
             (mode_error /= 0 .or. &
             (json_mode /= 'compact' .and. json_mode /= 'full')))) then
             call delete_tmpfile(tmpfile)
-            call jsonrpc_error(id_str, -32602, 'invalid test json mode', response)
+            call rpc_error(id_str, -32602, 'invalid test json mode', response)
             return
         end if
 
@@ -763,8 +735,7 @@ contains
             changed_count, changed_error)
         if (changed_count > 1 .or. changed_error /= 0) then
             call delete_tmpfile(tmpfile)
-            call jsonrpc_error(id_str, -32602, 'only_changed must be a boolean', &
-                response)
+            call rpc_error(id_str, -32602, 'only_changed must be a boolean', response)
             return
         end if
         if (only_changed .and. .not. project_has_model(b)) then
@@ -846,16 +817,16 @@ contains
         character(len=:), allocatable, intent(out) :: names(:)
         integer, intent(out) :: n_names, ierr
 
-        character(len=MAX_LINE) :: args_json
+        character(len=:), allocatable :: args_json
         type(json_parser_t) :: parser
         type(json_event_t) :: event, array_event
         integer :: args_count, max_name_length, name_index
 
         n_names = 0
-        call extract_json_member(line, 'args', args_json, args_count, ierr, array_event)
+        call json_object_member(line, 'args', args_json, args_count, ierr, array_event)
         if (ierr /= 0) return
         if (args_count == 0) return
-        if (args_count /= 1 .or. array_event%event_type /= JSON_ARRAY_START) then
+        if (args_count /= 1 .or. array_event%event_type /= EV_ARRAY_START) then
             ierr = 1
             return
         end if
@@ -864,7 +835,7 @@ contains
         call json_parser_next(parser, event)
         do
             call json_parser_next(parser, event)
-            if (event%event_type == JSON_ARRAY_END) exit
+            if (event%event_type == EV_ARRAY_END) exit
             if (event%event_type /= JSON_STRING .or. &
                 .not. allocated(event%string_val)) then
                 ierr = 1
@@ -885,7 +856,7 @@ contains
         name_index = 0
         do
             call json_parser_next(parser, event)
-            if (event%event_type == JSON_ARRAY_END .or. &
+            if (event%event_type == EV_ARRAY_END .or. &
                 event%event_type == JSON_ERROR .or. &
                 event%event_type == JSON_END_OF_INPUT) exit
             if (event%event_type /= JSON_STRING .or. &
@@ -896,261 +867,6 @@ contains
         end do
     end subroutine extract_test_names_from_params
 
-    subroutine handle_graph(line, id_str, dir, output_text, exitcode, response)
-        use fo_scan, only: scan_unit_t, scan_dir
-        use fx_dag, only: dag_t, dag_to_dot
-        use fo_dag_bridge, only: build_dag_from_units
-        use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
-        character(len=*), intent(in) :: line, id_str, dir
-        character(len=*), intent(out) :: output_text
-        integer, intent(out) :: exitcode
-        character(len=:), allocatable, intent(out) :: response
-
-        type(backend_t) :: b
-        type(scan_unit_t), allocatable :: units(:)
-        type(dag_t) :: dag
-        character(len=512) :: scan_root
-        integer :: n_units, ierr, i, j, dot_count, dot_error
-        character(len=:), allocatable :: dot_out
-        logical :: dot_format
-
-        b = detect_backend(trim(dir))
-        call extract_json_bool_member(line, 'dot', dot_format, &
-            dot_count, dot_error)
-        if (dot_error /= 0 .or. dot_count /= 1) dot_format = .false.
-        scan_root = trim(dir)
-        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-        call scan_dir(trim(scan_root), units, n_units, ierr)
-        if (ierr /= 0) then
-            output_text = 'fo: scan failed'
-            exitcode = 1
-        else
-            call build_dag_from_units(units, n_units, dag)
-            exitcode = 0
-            if (dot_format) then
-                call dag_to_dot(dag, dot_out)
-                output_text = trim(dot_out)
-            else
-                output_text = ''
-                do i = 1, dag%n_nodes
-                    if (dag%nodes(i)%n_edges == 0) then
-                        output_text = trim(output_text)// &
-                            trim(dag%nodes(i)%label)//achar(10)
-                    else
-                        do j = 1, dag%nodes(i)%n_edges
-                            output_text = trim(output_text)// &
-                                trim(dag%nodes(i)%label)//' -> '// &
-                                trim(dag%nodes(dag%nodes(i)%edges(j))%label)//achar(10)
-                        end do
-                    end if
-                end do
-            end if
-        end if
-        call make_tool_text_response(id_str, output_text, exitcode, response)
-    end subroutine handle_graph
-
-    subroutine handle_info(id_str, dir, output_text, exitcode, response)
-        use fo_scan, only: scan_unit_t, scan_dir
-        use fx_dag, only: dag_t
-        use fo_dag_bridge, only: build_dag_from_units
-        use fo_build_backend, only: backend_t, detect_backend, &
-            BACKEND_NONE, BACKEND_NATIVE, BACKEND_CMAKE
-        use fo_cache, only: cache_schema, cache_store_root
-        character(len=*), intent(in) :: id_str, dir
-        character(len=*), intent(out) :: output_text
-        integer, intent(out) :: exitcode
-        character(len=:), allocatable, intent(out) :: response
-
-        type(backend_t) :: b
-        type(scan_unit_t), allocatable :: units(:)
-        type(dag_t) :: dag
-        character(len=512) :: scan_root, cache_text
-        integer :: n_units, ierr
-
-        b = detect_backend(trim(dir))
-        scan_root = trim(dir)
-        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-        select case (b%kind)
-        case (BACKEND_NATIVE)
-            output_text = 'backend: native'//achar(10)
-        case (BACKEND_CMAKE)
-            output_text = 'backend: cmake'//achar(10)
-        case default
-            output_text = 'backend: none'//achar(10)
-        end select
-        call cache_schema(cache_text)
-        output_text = trim(output_text)//'cache-schema: '// &
-            trim(cache_text)//achar(10)
-        call cache_store_root(cache_text)
-        output_text = trim(output_text)//'cache-root: '// &
-            trim(cache_text)//achar(10)//'cache-shards: 256'//achar(10)
-        call scan_dir(trim(scan_root), units, n_units, ierr)
-        if (ierr == 0) then
-            call build_dag_from_units(units, n_units, dag)
-            write (output_text(len_trim(output_text) + 1:), '(a,i0)') &
-                'files: ', n_units
-            output_text = trim(output_text)//achar(10)
-            write (output_text(len_trim(output_text) + 1:), '(a,i0)') &
-                'modules: ', dag%n_nodes
-        end if
-        exitcode = 0
-        call make_tool_text_response(id_str, output_text, exitcode, response)
-    end subroutine handle_info
-
-    subroutine handle_changed(id_str, dir, output_text, exitcode, response)
-        use fo_check, only: fo_changed_modules
-        use fx_dag, only: dag_t, MAX_NODES
-        use fo_scan, only: MAX_PATH
-        use fo_build_backend, only: backend_t, detect_backend
-        use fo_project_model, only: model_request_t, model_selection_t, &
-            project_model_t, SELECT_OK
-        use fo_project_load, only: project_has_model, project_affected
-        use fx_string, only: string_t
-        character(len=*), intent(in) :: id_str, dir
-        character(len=*), intent(out) :: output_text
-        integer, intent(out) :: exitcode
-        character(len=:), allocatable, intent(out) :: response
-
-        type(dag_t) :: dag
-        integer :: changed_ids(MAX_NODES), n_changed
-        integer :: affected_ids(MAX_NODES), n_affected
-        integer :: n_cached, ierr, i
-        character(len=MAX_PATH) :: filenames(MAX_NODES)
-        type(backend_t) :: b
-        type(model_request_t) :: request
-        type(model_selection_t) :: selection
-        type(project_model_t) :: model
-        type(string_t), allocatable :: changed(:), widen_reasons(:)
-        character(len=:), allocatable :: message
-        call fo_changed_modules(trim(dir), dag, changed_ids, n_changed, &
-            affected_ids, n_affected, n_cached, ierr, filenames=filenames)
-        if (ierr /= 0) then
-            output_text = 'fo: scan or dag failed'
-            exitcode = 1
-            call make_tool_text_response(id_str, output_text, exitcode, response)
-            return
-        end if
-        exitcode = 0
-        if (n_changed == 0) then
-            write (output_text, '(a,i0,a)') 'all ', n_cached, ' modules cached'
-            call make_tool_text_response(id_str, output_text, exitcode, response)
-            return
-        end if
-        write (output_text, '(a,i0,a)') 'changed (', n_changed, '):'
-        do i = 1, n_changed
-            output_text = trim(output_text)//achar(10)//'  '// &
-                trim(dag%nodes(changed_ids(i))%label)//'  '// &
-                trim(filenames(changed_ids(i)))
-        end do
-        output_text = trim(output_text)//achar(10)
-        write (output_text(len_trim(output_text) + 1:), '(a,i0,a)') &
-            'affected (', n_affected, '):'
-        do i = 1, n_affected
-            output_text = trim(output_text)//achar(10)//'  '// &
-                trim(dag%nodes(affected_ids(i))%label)//'  '// &
-                trim(filenames(affected_ids(i)))
-        end do
-        ! Affected tests come from the project model, as in fo test
-        ! --only-changed and fo check.
-        b = detect_backend(trim(dir))
-        if (project_has_model(b)) then
-            allocate (changed(n_changed))
-            do i = 1, n_changed
-                changed(i)%s = trim(filenames(changed_ids(i)))
-            end do
-            allocate (request%names(0), request%include_labels(0), &
-                request%exclude_labels(0), request%layers(0))
-            call project_affected(b, '', request, changed, model, selection, &
-                widen_reasons, ierr, message)
-            output_text = trim(output_text)//achar(10)
-            if (ierr /= 0) then
-                output_text = trim(output_text)//'affected tests unavailable: '// &
-                    message
-            else if (selection%status /= SELECT_OK) then
-                output_text = trim(output_text)//'affected tests (0):'
-            else
-                write (output_text(len_trim(output_text) + 1:), '(a,i0,a)') &
-                    'affected tests (', size(selection%cases), '):'
-                do i = 1, size(selection%cases)
-                    output_text = trim(output_text)//achar(10)//'  '// &
-                        trim(model%cases(selection%cases(i))%name)
-                end do
-                do i = 1, size(widen_reasons)
-                    output_text = trim(output_text)//achar(10)// &
-                        'affected selection widened: '//widen_reasons(i)%s
-                end do
-            end if
-        end if
-        call make_tool_text_response(id_str, output_text, exitcode, response)
-    end subroutine handle_changed
-
-    subroutine handle_clean(line, id_str, dir, output_text, exitcode, response)
-        use fo_cache, only: cache_store_root
-        use fo_build_backend, only: backend_clean
-        character(len=*), intent(in) :: line, id_str, dir
-        character(len=*), intent(out) :: output_text
-        integer, intent(out) :: exitcode
-        character(len=:), allocatable, intent(out) :: response
-
-        character(len=512) :: store_root
-        type(backend_t) :: b
-        logical :: purge_store, build_removed, store_removed
-        integer :: cache_count, cache_error
-
-        call extract_json_bool_member(line, 'cache', purge_store, &
-            cache_count, cache_error)
-        if (cache_error /= 0 .or. cache_count /= 1) purge_store = .false.
-        call cache_store_root(store_root)
-        b = detect_backend(trim(dir))
-        call backend_clean(trim(b%project_dir), purge_store, build_removed, &
-            store_removed)
-        output_text = ''
-        if (build_removed) output_text = 'build tree cleared: '// &
-            trim(b%project_dir)//'/build'
-        if (store_removed) then
-            if (len_trim(output_text) > 0) output_text = trim(output_text)//achar(10)
-            output_text = trim(output_text)//'cache cleared: '//trim(store_root)
-        else
-            if (len_trim(output_text) > 0) output_text = trim(output_text)//achar(10)
-            output_text = trim(output_text)//'cache kept (shared store)'
-        end if
-        exitcode = 0
-        call make_tool_text_response(id_str, output_text, exitcode, response)
-    end subroutine handle_clean
-
-    subroutine handle_install(line, id_str, dir, output_text, exitcode, response)
-        use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
-        use fo_install, only: install_native_executables
-        character(len=*), intent(in) :: line, id_str, dir
-        character(len=*), intent(out) :: output_text
-        integer, intent(out) :: exitcode
-        character(len=:), allocatable, intent(out) :: response
-
-        type(backend_t) :: b
-        character(len=256) :: prefix, requested_prefix
-        character(len=512) :: home
-        integer :: status, prefix_count, prefix_error
-
-        call get_environment_variable('HOME', home, status=status)
-        if (status /= 0 .or. len_trim(home) == 0) home = '/usr/local'
-        prefix = trim(home)//'/.local'
-        call extract_json_string_member(line, 'prefix', requested_prefix, &
-            prefix_count, prefix_error)
-        if (prefix_error == 0 .and. prefix_count == 1 .and. &
-            len_trim(requested_prefix) > 0) prefix = trim(requested_prefix)
-
-        b = detect_backend(trim(dir))
-        if (b%kind == BACKEND_NONE) then
-            output_text = 'fo: no fpm.toml or CMakeLists.txt found'
-            exitcode = 1
-            call make_tool_text_response(id_str, output_text, exitcode, response)
-            return
-        end if
-
-        call install_native_executables(b, trim(prefix), output_text, exitcode)
-        call make_tool_text_response(id_str, output_text, exitcode, response)
-    end subroutine handle_install
-
     subroutine handle_resources_read(params_json, id_str, response, async_state)
         character(len=*), intent(in) :: params_json, id_str
         character(len=:), allocatable, intent(out) :: response
@@ -1158,7 +874,8 @@ contains
 
         character(len=256) :: uri
         character(len=:), allocatable :: output_text
-        integer :: exitcode, property_count, parse_status, read_error
+        type(json_builder_t) :: jb
+        integer :: property_count, parse_status, read_error
         type(check_result_t) :: check_res
 
         call extract_json_string_member(params_json, 'uri', uri, &
@@ -1171,26 +888,29 @@ contains
                 call read_text_file_alloc(async_state%last_output, &
                     output_text, read_error)
                 if (read_error /= 0) then
-                    call jsonrpc_error(id_str, -32603, &
+                    call rpc_error(id_str, -32603, &
                         'could not read completed check diagnostics', response)
                     return
                 end if
-                exitcode = async_state%last_exitcode
             else
                 call fo_check_run('.', check_res)
                 output_text = check_result_compact_json(check_res)
-                exitcode = 0
-                if (.not. (check_res%build_ok .and. check_res%tests_ok)) exitcode = 1
             end if
 
-            output_text = json_escape_string(output_text)
-            response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-                '"result":{"contents":[{"uri":"fo://diagnostics",'// &
-                '"mimeType":"text/plain",'// &
-                '"text":"'//trim(output_text)//'"}]}}'
+            jb = json_new()
+            call json_object_start(jb)
+            call json_key(jb, 'contents')
+            call json_array_start(jb)
+            call json_object_start(jb)
+            call json_key_string(jb, 'uri', 'fo://diagnostics')
+            call json_key_string(jb, 'mimeType', 'text/plain')
+            call json_key_string(jb, 'text', output_text)
+            call json_object_end(jb)
+            call json_array_end(jb)
+            call json_object_end(jb)
+            call rpc_result(id_str, json_to_string(jb), response)
         else
-            call jsonrpc_error(id_str, -32602, &
-                'unknown resource', response)
+            call rpc_error(id_str, -32602, 'unknown resource', response)
         end if
     end subroutine handle_resources_read
 
@@ -1201,13 +921,14 @@ contains
 
         character(len=512) :: root
         character(len=32) :: output_mode
+        type(json_builder_t) :: jb
         integer :: ierr, run_id, started_before
         integer :: root_count, root_error, mode_count, mode_error
         logical :: pending
 
         call extract_json_string_member(line, 'root', root, root_count, root_error)
         if (root_count > 1 .or. (root_count == 1 .and. root_error /= 0)) then
-            call jsonrpc_error(id_str, -32602, 'invalid root', response)
+            call rpc_error(id_str, -32602, 'invalid root', response)
             return
         end if
         if (root_count == 0 .or. len_trim(root) == 0) root = '.'
@@ -1217,14 +938,14 @@ contains
         if (mode_count > 1 .or. (mode_count == 1 .and. &
             (mode_error /= 0 .or. &
             (output_mode /= 'compact' .and. output_mode /= 'full')))) then
-            call jsonrpc_error(id_str, -32602, 'invalid json mode', response)
+            call rpc_error(id_str, -32602, 'invalid json mode', response)
             return
         end if
         if (mode_count == 0) output_mode = 'compact'
         started_before = async_state%queue%started
         call async_state%queue%request(root, output_mode, ierr)
         if (ierr /= 0) then
-            call jsonrpc_error(id_str, -32602, 'invalid root', response)
+            call rpc_error(id_str, -32602, 'invalid root', response)
             return
         end if
 
@@ -1236,14 +957,20 @@ contains
         else
             call async_start_current(async_state, 0, ierr)
             if (ierr /= 0) then
-                call jsonrpc_error(id_str, -32603, &
-                    'could not start check', response)
+                call rpc_error(id_str, -32603, 'could not start check', response)
                 return
             end if
             run_id = async_state%active_run_id
         end if
 
-        call make_run_start_response(id_str, run_id, pending, response)
+        jb = json_new()
+        call json_object_start(jb)
+        call json_key_int(jb, 'run_id', run_id)
+        call json_key_string(jb, 'state', merge('rerun-pending', 'running      ', &
+            pending))
+        call json_key_bool(jb, 'pending', pending)
+        call json_object_end(jb)
+        call rpc_result(id_str, json_to_string(jb), response)
     end subroutine handle_async_start
 
     subroutine handle_async_status(id_str, response, async_state)
@@ -1251,26 +978,27 @@ contains
         character(len=:), allocatable, intent(out) :: response
         type(mcp_async_state_t), intent(inout) :: async_state
 
-        character(len=1024) :: status_text
+        type(json_builder_t) :: jb
 
         call async_poll(async_state)
 
+        jb = json_new()
+        call json_object_start(jb)
         if (async_state%active_pid > 0) then
-            status_text = '{"state":"running"'// &
-                ',"run_id":'//trim(json_int(async_state%active_run_id))//'}'
+            call json_key_string(jb, 'state', 'running')
+            call json_key_int(jb, 'run_id', async_state%active_run_id)
         else if (async_state%pending_run_id > 0) then
-            status_text = '{"state":"rerun-pending"'// &
-                ',"run_id":'//trim(json_int(async_state%pending_run_id))//'}'
+            call json_key_string(jb, 'state', 'rerun-pending')
+            call json_key_int(jb, 'run_id', async_state%pending_run_id)
         else if (async_state%last_run_id > 0) then
-            status_text = '{"state":"finished"'// &
-                ',"run_id":'//trim(json_int(async_state%last_run_id))// &
-                ',"exitcode":'// &
-                trim(json_int(async_state%last_exitcode))//'}'
+            call json_key_string(jb, 'state', 'finished')
+            call json_key_int(jb, 'run_id', async_state%last_run_id)
+            call json_key_int(jb, 'exitcode', async_state%last_exitcode)
         else
-            status_text = '{"state":"idle"}'
+            call json_key_string(jb, 'state', 'idle')
         end if
-
-        call make_tool_text_response(id_str, status_text, 0, response)
+        call json_object_end(jb)
+        call make_tool_text_response(id_str, json_to_string(jb), 0, response)
     end subroutine handle_async_status
 
     subroutine handle_async_diagnostics(line, id_str, response, async_state)
@@ -1284,7 +1012,7 @@ contains
         call async_poll(async_state)
         call requested_run_id(line, async_state, run_id, ierr)
         if (ierr /= 0) then
-            call jsonrpc_error(id_str, -32602, 'unknown run_id', response)
+            call rpc_error(id_str, -32602, 'unknown run_id', response)
             return
         end if
 
@@ -1293,7 +1021,7 @@ contains
             len_trim(async_state%last_output) > 0) then
             call read_text_file_alloc(async_state%last_output, output_text, ierr)
             if (ierr /= 0) then
-                call jsonrpc_error(id_str, -32603, &
+                call rpc_error(id_str, -32603, &
                     'could not read completed check diagnostics', response)
                 return
             end if
@@ -1311,21 +1039,22 @@ contains
         character(len=:), allocatable, intent(out) :: response
         type(mcp_async_state_t), intent(inout) :: async_state
 
+        type(json_builder_t) :: jb
         integer :: run_id, ierr, exitcode
 
         call requested_run_id(line, async_state, run_id, ierr)
         if (ierr /= 0) then
-            call jsonrpc_error(id_str, -32602, 'unknown run_id', response)
+            call rpc_error(id_str, -32602, 'unknown run_id', response)
             return
         end if
         if (run_id /= async_state%active_run_id .or. async_state%active_pid <= 0) then
-            call jsonrpc_error(id_str, -32602, 'run is not active', response)
+            call rpc_error(id_str, -32602, 'run is not active', response)
             return
         end if
 
         call process_cancel_pid(async_state%active_pid, exitcode)
         if (exitcode /= 0) then
-            call jsonrpc_error(id_str, -32603, &
+            call rpc_error(id_str, -32603, &
                 'failed to cancel active run; ownership remains active', response)
             return
         end if
@@ -1338,12 +1067,12 @@ contains
         async_state%active_run_id = 0
         call async_start_pending_if_ready(async_state)
 
-        block
-            character(len=256) :: cancel_text
-            cancel_text = '{"cancelled":true,"run_id":'// &
-                trim(json_int(run_id))//'}'
-            call make_tool_text_response(id_str, cancel_text, 0, response)
-        end block
+        jb = json_new()
+        call json_object_start(jb)
+        call json_key_bool(jb, 'cancelled', .true.)
+        call json_key_int(jb, 'run_id', run_id)
+        call json_object_end(jb)
+        call make_tool_text_response(id_str, json_to_string(jb), 0, response)
     end subroutine handle_async_cancel
 
     subroutine async_poll(async_state)
@@ -1451,14 +1180,14 @@ contains
         type(mcp_async_state_t), intent(in) :: async_state
         integer, intent(out) :: run_id, ierr
 
-        character(len=64) :: run_text, raw_value
+        character(len=64) :: run_text
+        character(len=:), allocatable :: raw_value
         type(json_event_t) :: run_event
         integer :: iostat, run_count
 
         ierr = 0
         run_id = async_state%last_run_id
-        call extract_json_member(line, 'run_id', raw_value, run_count, &
-            ierr, run_event)
+        call json_object_member(line, 'run_id', raw_value, run_count, ierr, run_event)
         if (ierr /= 0 .or. run_count > 1) then
             ierr = 1
             return
@@ -1507,118 +1236,197 @@ contains
         character(len=:), allocatable, intent(out) :: response
 
         character(len=32) :: proto_ver
+        type(json_builder_t) :: jb
         integer :: property_count, parse_status
 
         call extract_json_string_member(params_json, 'protocolVersion', proto_ver, &
             property_count, parse_status)
         if (parse_status /= 0 .or. property_count /= 1 .or. &
             len_trim(proto_ver) == 0) proto_ver = '2025-03-26'
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-            '"result":{"protocolVersion":"'//trim(proto_ver)//'",'// &
-            '"capabilities":{"tools":{"listChanged":false},'// &
-            '"resources":{"listChanged":false}},'// &
-            '"serverInfo":{"name":"fo","version":"'//FO_VERSION//'"}}}'
+        jb = json_new()
+        call json_object_start(jb)
+        call json_key_string(jb, 'protocolVersion', trim(proto_ver))
+        call json_key(jb, 'capabilities')
+        call json_object_start(jb)
+        call json_key(jb, 'tools')
+        call json_object_start(jb)
+        call json_key_bool(jb, 'listChanged', .false.)
+        call json_object_end(jb)
+        call json_key(jb, 'resources')
+        call json_object_start(jb)
+        call json_key_bool(jb, 'listChanged', .false.)
+        call json_object_end(jb)
+        call json_object_end(jb)
+        call json_key(jb, 'serverInfo')
+        call json_object_start(jb)
+        call json_key_string(jb, 'name', 'fo')
+        call json_key_string(jb, 'version', FO_VERSION)
+        call json_object_end(jb)
+        call json_object_end(jb)
+        call rpc_result(id_str, json_to_string(jb), response)
     end subroutine make_initialize_response
+
+    subroutine schema_property(jb, name, type_name, description, choices)
+        type(json_builder_t), intent(inout) :: jb
+        character(len=*), intent(in) :: name, type_name
+        character(len=*), intent(in), optional :: description, choices
+        integer :: start, comma
+
+        call json_key(jb, name)
+        call json_object_start(jb)
+        call json_key_string(jb, 'type', type_name)
+        if (present(choices)) then
+            call json_key(jb, 'enum')
+            call json_array_start(jb)
+            start = 1
+            do
+                comma = index(choices(start:), ',')
+                if (comma == 0) then
+                    call json_value_string(jb, trim(choices(start:)))
+                    exit
+                end if
+                call json_value_string(jb, choices(start:start + comma - 2))
+                start = start + comma
+            end do
+            call json_array_end(jb)
+        end if
+        if (present(description)) call json_key_string(jb, 'description', description)
+        call json_object_end(jb)
+    end subroutine schema_property
 
     subroutine make_tools_list_response(id_str, response)
         character(len=*), intent(in) :: id_str
         character(len=:), allocatable, intent(out) :: response
 
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-            '"result":{"tools":[{"name":"fo",'// &
-            '"description":"Fortran build driver",'// &
-            '"inputSchema":{"type":"object","properties":{'// &
-            '"action":{"type":"string",'// &
-            '"enum":["check","status","diagnostics","cancel",'// &
-            '"build","test","graph","info","changed","clean",'// &
-            '"lint","fmt","install","gremlin_start",'// &
-            '"gremlin_status","gremlin_wait","gremlin_events",'// &
-            '"gremlin_failures","gremlin_reproduce","gremlin_stop"],'// &
-            '"description":"Action to run"},'// &
-            '"dir":{"type":"string",'// &
-            '"description":"Project directory (default: cwd)"},'// &
-            '"json":{"type":"string","enum":["compact","full"],'// &
-            '"description":"check/test: structured JSON result"},'// &
-            '"dot":{"type":"boolean",'// &
-            '"description":"graph: output Graphviz DOT"},'// &
-            '"cache":{"type":"boolean",'// &
-            '"description":"clean: also purge the shared content store"},'// &
-            '"prefix":{"type":"string",'// &
-            '"description":"install: destination prefix"},'// &
-            '"fix":{"type":"boolean",'// &
-            '"description":"lint: remove unused imports in place"},'// &
-            '"lane_id":{"type":"string"},'// &
-            '"session_id":{"type":"string"},'// &
-            '"targets":{"type":"array","items":{"type":"string"}},'// &
-            '"labels":{"type":"array","items":{"type":"string"},'// &
-            '"description":"gremlin lane scope: fo test -L regexes (AND)"},'// &
-            '"exclude_labels":{"type":"array","items":{"type":"string"},'// &
-            '"description":"gremlin lane scope: fo test -LE regexes"},'// &
-            '"layers":{"type":"array","items":{"type":"string"},'// &
-            '"description":"gremlin lane scope: layer names (union)"},'// &
-            '"only_changed":{"type":"boolean"},'// &
-            '"shuffle":{"type":"boolean"},'// &
-            '"random_count":{"type":"integer","minimum":0,"maximum":32,'// &
-            '"description":"additional random cases; 0 quiesces after gate targets pass"},'// &
-            '"seed":{"type":"integer"},'// &
-            '"campaign_seconds":{"type":"integer","minimum":1,"maximum":60},'// &
-            '"timeout_seconds":{"type":"integer","minimum":0,"maximum":86400},'// &
-            '"jobs":{"type":"integer","const":1},'// &
-            '"cursor":{"type":"integer","minimum":0},'// &
-            '"lifecycle_cursor":{"type":"integer","minimum":0},'// &
-            '"max_records":{"type":"integer","minimum":1,"maximum":128},'// &
-            '"max_bytes":{"type":"integer","minimum":1,"maximum":262144},'// &
-            '"wait_ms":{"type":"integer","minimum":0,"maximum":30000},'// &
-            '"detail":{"type":"string","enum":["summary","full"],'// &
-            '"description":"gremlin_status/gremlin_wait response detail"},'// &
-            '"wait_until":{"type":"string","enum":['// &
-            '"local-gate-green","ordinary-verified","fully-verified",'// &
-            '"quiescent","failure"]},'// &
-            '"case_id":{"type":"string"},'// &
-            '"generation_id":{"type":"string"}},'// &
-            '"required":["action"]}}]}}'
+        type(json_builder_t) :: jb
+        integer :: i
+        character(len=*), parameter :: actions = 'check,status,diagnostics,cancel,'// &
+            'build,test,graph,info,changed,clean,lint,fmt,install,gremlin_start,'// &
+            'gremlin_status,gremlin_wait,gremlin_events,gremlin_failures,'// &
+            'gremlin_reproduce,gremlin_stop'
+
+        jb = json_new()
+        call json_object_start(jb)
+        call json_key(jb, 'tools')
+        call json_array_start(jb)
+        call json_object_start(jb)
+        call json_key_string(jb, 'name', 'fo')
+        call json_key_string(jb, 'description', 'Fortran build driver')
+        call json_key(jb, 'inputSchema')
+        call json_object_start(jb)
+        call json_key_string(jb, 'type', 'object')
+        call json_key(jb, 'properties')
+        call json_object_start(jb)
+        call schema_property(jb, 'action', 'string', 'Action to run', actions)
+        call schema_property(jb, 'dir', 'string', 'Project directory (default: cwd)')
+        call schema_property(jb, 'json', 'string', 'check/test: structured JSON result', &
+            'compact,full')
+        call schema_property(jb, 'dot', 'boolean', 'graph: output Graphviz DOT')
+        call schema_property(jb, 'cache', 'boolean', &
+            'clean: also purge the shared content store')
+        call schema_property(jb, 'prefix', 'string', 'install: destination prefix')
+        call schema_property(jb, 'fix', 'boolean', &
+            'lint: remove unused imports in place')
+        call schema_property(jb, 'deep', 'boolean', &
+            'lint: add the fluff deep diagnostics')
+        do i = 1, N_GREMLIN_OPTIONS
+            call gremlin_schema_property(jb, GREMLIN_OPTIONS(i))
+        end do
+        call json_object_end(jb)
+        call json_key(jb, 'required')
+        call json_array_start(jb)
+        call json_value_string(jb, 'action')
+        call json_array_end(jb)
+        call json_object_end(jb)
+        call json_object_end(jb)
+        call json_array_end(jb)
+        call json_object_end(jb)
+        call rpc_result(id_str, json_to_string(jb), response)
     end subroutine make_tools_list_response
+
+    subroutine gremlin_schema_property(jb, option)
+        use fo_gremlin_request, only: gremlin_option_t, GA_UNBOUNDED
+        type(json_builder_t), intent(inout) :: jb
+        type(gremlin_option_t), intent(in) :: option
+        integer :: start, comma
+
+        call json_key(jb, trim(option%key))
+        call json_object_start(jb)
+        select case (trim(option%kind))
+        case ('list')
+            call json_key_string(jb, 'type', 'array')
+            call json_key(jb, 'items')
+            call json_object_start(jb)
+            call json_key_string(jb, 'type', 'string')
+            call json_object_end(jb)
+        case ('int')
+            call json_key_string(jb, 'type', 'integer')
+            if (option%lo == option%hi) then
+                call json_key(jb, 'const')
+                call json_value_raw(jb, int_text(option%lo))
+            else
+                if (option%lo /= -int(huge(0), int64) - 1_int64) then
+                    call json_key(jb, 'minimum')
+                    call json_value_raw(jb, int_text(option%lo))
+                end if
+                if (option%hi /= GA_UNBOUNDED .and. option%hi /= int(huge(0), int64)) then
+                    call json_key(jb, 'maximum')
+                    call json_value_raw(jb, int_text(option%hi))
+                end if
+            end if
+        case ('bool')
+            call json_key_string(jb, 'type', 'boolean')
+        case default
+            call json_key_string(jb, 'type', 'string')
+            if (len_trim(option%choices) > 0) then
+                call json_key(jb, 'enum')
+                call json_array_start(jb)
+                start = 1
+                do
+                    comma = index(option%choices(start:), ',')
+                    if (comma == 0) then
+                        call json_value_string(jb, trim(option%choices(start:)))
+                        exit
+                    end if
+                    call json_value_string(jb, option%choices(start:start + comma - 2))
+                    start = start + comma
+                end do
+                call json_array_end(jb)
+            end if
+        end select
+        if (len_trim(option%note) > 0) &
+            call json_key_string(jb, 'description', trim(option%note))
+        call json_object_end(jb)
+    end subroutine gremlin_schema_property
+
+    function int_text(value) result(text)
+        integer(int64), intent(in) :: value
+        character(len=:), allocatable :: text
+        character(len=24) :: buffer
+
+        write (buffer, '(i0)') value
+        text = trim(buffer)
+    end function int_text
 
     subroutine make_resources_list_response(id_str, response)
         character(len=*), intent(in) :: id_str
         character(len=:), allocatable, intent(out) :: response
 
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-            '"result":{"resources":[{"uri":"fo://diagnostics",'// &
-            '"name":"diagnostics",'// &
-            '"description":"Current fo check diagnostics",'// &
-            '"mimeType":"text/plain"}]}}'
+        type(json_builder_t) :: jb
+
+        jb = json_new()
+        call json_object_start(jb)
+        call json_key(jb, 'resources')
+        call json_array_start(jb)
+        call json_object_start(jb)
+        call json_key_string(jb, 'uri', 'fo://diagnostics')
+        call json_key_string(jb, 'name', 'diagnostics')
+        call json_key_string(jb, 'description', 'Current fo check diagnostics')
+        call json_key_string(jb, 'mimeType', 'text/plain')
+        call json_object_end(jb)
+        call json_array_end(jb)
+        call json_object_end(jb)
+        call rpc_result(id_str, json_to_string(jb), response)
     end subroutine make_resources_list_response
-
-    subroutine make_run_start_response(id_str, run_id, pending, response)
-        character(len=*), intent(in) :: id_str
-        integer, intent(in) :: run_id
-        logical, intent(in) :: pending
-        character(len=:), allocatable, intent(out) :: response
-
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-            '"result":{"run_id":'//trim(json_int(run_id))// &
-            ',"state":"'
-        if (pending) then
-            response = trim(response)//'rerun-pending"'
-        else
-            response = trim(response)//'running"'
-        end if
-        response = trim(response)//',"pending":'//trim(json_bool_text(pending))//'}}'
-    end subroutine make_run_start_response
-
-    subroutine make_tool_text_response(id_str, output_text, exitcode, response)
-        character(len=*), intent(in) :: id_str, output_text
-        integer, intent(in) :: exitcode
-        character(len=:), allocatable, intent(out) :: response
-
-        character(len=:), allocatable :: escaped
-
-        escaped = json_escape_string(output_text)
-        response = '{"jsonrpc":"2.0","id":'//trim(id_str)//','// &
-            '"result":{"content":[{"type":"text",'// &
-            '"text":"'//trim(escaped)//'"}],"isError":'// &
-            trim(json_bool_text(exitcode /= 0))//'}}'
-    end subroutine make_tool_text_response
 
 end module fo_mcp

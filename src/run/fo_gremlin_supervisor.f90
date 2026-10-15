@@ -985,9 +985,14 @@ contains
                 readiness%verification_level = GREMLIN_VERIFY_FULL
             end select
             failed = readiness%health == GREMLIN_HEALTH_FAILURE
-            call read_json_cursor(status_json, 'next_cursor', next_cursor)
+            call read_json_cursor(status_json, 'next_cursor', next_cursor, ierr)
             call read_json_cursor(status_json, 'next_lifecycle_cursor', &
-                next_lifecycle_cursor)
+                next_lifecycle_cursor, ierr)
+            if (ierr /= 0) then
+                response = '{"error":"malformed cursor in Gremlin status"}'
+                exitcode = 1
+                return
+            end if
             has_events = next_cursor > poll_request%cursor .or. &
                 next_lifecycle_cursor > poll_request%lifecycle_cursor
 
@@ -1055,16 +1060,22 @@ contains
         exitcode = 0
     end subroutine handle_wait
 
-    subroutine read_json_cursor(json, name, value)
+    subroutine read_json_cursor(json, name, value, ierr)
+        !! An absent cursor is 0; a malformed, negative or oversized one sets ierr.
         character(len=*), intent(in) :: json, name
         integer(int64), intent(out) :: value
+        integer, intent(inout) :: ierr
         character(len=64) :: raw
-        integer :: ios
+        integer :: ios, status
 
         value = 0_int64
-        call gremlin_json_field(json, name, raw)
+        call gremlin_json_field(json, name, raw, status=status)
+        if (status == 1) return
         read(raw, *, iostat=ios) value
-        if (ios /= 0) value = 0_int64
+        if (status /= 0 .or. ios /= 0 .or. value < 0_int64) then
+            value = 0_int64
+            ierr = 1
+        end if
     end subroutine read_json_cursor
 
     subroutine handle_failures(project_dir, request, response, exitcode)

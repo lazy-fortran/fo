@@ -1,13 +1,19 @@
 module fo_gremlin_cli
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
+    use fo_gremlin_request, only: GREMLIN_OPTIONS, N_GREMLIN_OPTIONS, &
+        gremlin_option_index, gremlin_apply_adapter_defaults
     use fo_gremlin_supervisor, only: gremlin_handle
+    use fo_json_object, only: json_value_raw
     use fo_process, only: process_exit
-    use fx_json_build, only: json_escape_string
+    use fx_json_build, only: json_builder_t, json_new, json_object_start, &
+        json_object_end, json_array_start, json_array_end, json_key, &
+        json_value_string, json_value_bool, json_to_string
+    use fx_string, only: string_t
     implicit none
     private
     public :: gremlin_cli_run
 
-    integer, parameter :: ARG_LEN = 4096, KEY_LEN = 128
+    integer, parameter :: ARG_LEN = 4096
 
 contains
 
@@ -42,32 +48,28 @@ contains
 
     subroutine parse_cli(tokens, n_tokens, action, project_dir, request_json, &
             show_help)
+        !! Flags come from the shared option table; this routine only splits
+        !! `--flag value` / `--flag=value` and renders the request object.
         character(len=*), intent(in) :: tokens(:)
         integer, intent(in) :: n_tokens
         character(len=*), intent(out) :: action, project_dir
         character(len=:), allocatable, intent(out) :: request_json
         logical, intent(out) :: show_help
 
-        character(len=KEY_LEN), allocatable :: keys(:)
-        character(len=ARG_LEN), allocatable :: values(:), items(:, :)
-        character(len=ARG_LEN) :: arg, name, value, raw
-        character(len=:), allocatable :: escaped
-        integer :: first, i, n_fields, n_items(4), eq, j, list
-        logical :: recognized, needs_value, has_equal, missing_value
-        character(len=8) :: kind
+        type(json_builder_t) :: jb
+        type(string_t) :: lists(N_GREMLIN_OPTIONS)
+        logical :: seen(N_GREMLIN_OPTIONS)
+        character(len=ARG_LEN) :: arg, name, value
+        integer :: first, i, eq, row, j
+        logical :: has_equal, missing_value
+        character(len=6) :: kind
 
-        allocate (keys(max(1, n_tokens)))
-        allocate (values(max(1, n_tokens)))
-        allocate (items(max(1, n_tokens), 4))
-        keys = ''
-        values = ''
-        items = ''
-        n_fields = 0
-        n_items = 0
+        seen = .false.
         action = 'start'
         project_dir = '.'
         first = 1
         show_help = .false.
+        request_json = '{}'
 
         if (n_tokens > 0) then
             if (len_trim(tokens(1)) > 0) then
@@ -79,10 +81,11 @@ contains
         end if
         if (trim(action) == 'help') then
             show_help = .true.
-            request_json = '{}'
             return
         end if
 
+        jb = json_new()
+        call json_object_start(jb)
         i = first
         do while (i <= n_tokens)
             arg = trim(tokens(i))
@@ -91,20 +94,23 @@ contains
                 request_json = '{}'
                 return
             end if
-
             if (len_trim(arg) == 0) then
                 i = i + 1
                 cycle
             end if
             if (arg(1:1) /= '-') then
-                if (trim(action) == 'reproduce' .and. &
-                    .not. field_present(keys, n_fields, 'case_id')) then
-                    call add_string_field('case_id', trim(arg), keys, values, &
-                        n_fields)
-                else
-                    call add_string_field('argument', trim(arg), keys, values, &
-                        n_fields)
+                row = 0
+                if (trim(action) == 'reproduce') row = gremlin_option_index('case_id')
+                if (row > 0) then
+                    if (seen(row)) row = 0
                 end if
+                if (row > 0) then
+                    seen(row) = .true.
+                    call json_key(jb, 'case_id')
+                else
+                    call json_key(jb, 'argument')
+                end if
+                call json_value_string(jb, trim(arg))
                 i = i + 1
                 cycle
             end if
@@ -118,19 +124,13 @@ contains
                 name = arg
                 value = ''
             end if
-            call option_spec(trim(name), raw, kind, needs_value, &
-                recognized)
 
             if (trim(name) == '--dir') then
                 if (has_equal) then
                     project_dir = value
-                else if (i < n_tokens) then
-                    if (.not. looks_like_option(tokens(i + 1))) then
-                        project_dir = trim(tokens(i + 1))
-                        i = i + 1
-                    else
-                        project_dir = ''
-                    end if
+                else if (i < n_tokens .and. .not. looks_like_option(tokens(min(i + 1, n_tokens)))) then
+                    project_dir = trim(tokens(i + 1))
+                    i = i + 1
                 else
                     project_dir = ''
                 end if
@@ -138,262 +138,85 @@ contains
                 cycle
             end if
 
-            list = list_index(raw)
-            if (recognized .and. list > 0) then
+            row = gremlin_option_index(trim(name), flag=.true.)
+            if (row == 0) then
+                write (error_unit, '(a)') 'fo gremlin: unknown option '//trim(name)
+                call process_exit(2)
+            end if
+            kind = GREMLIN_OPTIONS(row)%kind
+
+            missing_value = .false.
+            if (trim(kind) == 'list') then
                 if (.not. has_equal .and. i < n_tokens) then
                     if (.not. looks_like_option(tokens(i + 1))) then
                         value = trim(tokens(i + 1))
                         i = i + 1
-                    else
-                        value = ''
                     end if
-                else
-                    value = ''
                 end if
-                n_items(list) = n_items(list) + 1
-                items(n_items(list), list) = value
+                if (.not. allocated(lists(row)%s)) then
+                    lists(row)%s = ''
+                else
+                    lists(row)%s = lists(row)%s//char(0)
+                end if
+                lists(row)%s = lists(row)%s//trim(value)
                 i = i + 1
                 cycle
             end if
-
-            if (.not. recognized) then
-                write (error_unit, '(a)') &
-                    'fo gremlin: unknown option '//trim(name)
-                call process_exit(2)
-            end if
-
-            missing_value = .false.
-            if (needs_value) then
-                if (.not. has_equal) then
-                    if (i < n_tokens) then
-                        if (.not. looks_like_option(tokens(i + 1)) .or. &
-                            is_integer_literal(tokens(i + 1))) then
-                            value = trim(tokens(i + 1))
-                            i = i + 1
-                        else
-                            missing_value = .true.
-                        end if
+            if (trim(kind) /= 'bool' .and. .not. has_equal) then
+                if (i < n_tokens) then
+                    if (.not. looks_like_option(tokens(i + 1)) .or. &
+                        is_integer_literal(tokens(i + 1))) then
+                        value = trim(tokens(i + 1))
+                        i = i + 1
                     else
                         missing_value = .true.
                     end if
+                else
+                    missing_value = .true.
                 end if
-            else if (.not. has_equal) then
+            else if (trim(kind) == 'bool' .and. .not. has_equal) then
                 value = 'true'
             end if
 
-            if (trim(raw) == 'lane_id' .or. trim(raw) == 'session_id' .or. &
-                trim(raw) == 'case_id' .or. trim(raw) == 'generation_id' .or. &
-                trim(raw) == 'wait_until') then
-                if (missing_value) value = ''
-                call add_string_field(trim(raw), trim(value), keys, values, n_fields)
-            else if (trim(kind) == 'bool') then
+            seen(row) = .true.
+            call json_key(jb, trim(GREMLIN_OPTIONS(row)%key))
+            if (missing_value) value = ''
+            if (trim(kind) == 'bool') then
                 if (missing_value) then
-                    call append_field(trim(raw), '""', keys, values, n_fields)
+                    call json_value_string(jb, '')
+                else if (trim(value) == 'true' .or. trim(value) == 'false') then
+                    call json_value_bool(jb, trim(value) == 'true')
                 else
-                    call append_field(trim(raw), boolean_or_string(trim(value)), &
-                        keys, values, n_fields)
+                    call json_value_string(jb, trim(value))
                 end if
+            else if (trim(kind) == 'int' .and. is_integer_literal(trim(value))) then
+                call json_value_raw(jb, trim(value))
             else
-                if (missing_value) value = ''
-                if (trim(kind) == 'int' .and. is_integer_literal(trim(value))) then
-                    call append_field(trim(raw), trim(value), keys, values, n_fields)
-                else
-                    escaped = json_string(trim(value))
-                    call append_field(trim(raw), escaped, keys, values, n_fields)
-                end if
+                call json_value_string(jb, trim(value))
             end if
             i = i + 1
         end do
 
-        do list = 1, 4
-            if (n_items(list) == 0) cycle
-            raw = '['
-            do j = 1, n_items(list)
-                if (j > 1) raw = trim(raw)//','
-                escaped = json_string(trim(items(j, list)))
-                raw = trim(raw)//trim(escaped)
+        do row = 1, N_GREMLIN_OPTIONS
+            if (.not. allocated(lists(row)%s)) cycle
+            call json_key(jb, trim(GREMLIN_OPTIONS(row)%key))
+            call json_array_start(jb)
+            j = 1
+            do
+                eq = index(lists(row)%s(j:), char(0))
+                if (eq == 0) then
+                    call json_value_string(jb, lists(row)%s(j:))
+                    exit
+                end if
+                call json_value_string(jb, lists(row)%s(j:j + eq - 2))
+                j = j + eq
             end do
-            raw = trim(raw)//']'
-            call append_field(trim(list_key(list)), trim(raw), keys, values, n_fields)
+            call json_array_end(jb)
         end do
-
-        if ((trim(action) == 'status' .or. trim(action) == 'wait') .and. &
-            .not. field_present(keys, n_fields, 'detail')) then
-            call add_string_field('detail', 'summary', keys, values, n_fields)
-        end if
-
-        request_json = '{'
-        do j = 1, n_fields
-            if (j > 1) request_json = request_json//','
-            request_json = request_json//'"'//trim(keys(j))//'":'//trim(values(j))
-        end do
-        request_json = request_json//'}'
+        call json_object_end(jb)
+        request_json = json_to_string(jb)
+        call gremlin_apply_adapter_defaults(action, request_json)
     end subroutine parse_cli
-
-    integer function list_index(key) result(list)
-        !! Repeatable array options: targets, labels, exclude_labels, layers.
-        character(len=*), intent(in) :: key
-
-        select case (trim(key))
-        case ('targets')
-            list = 1
-        case ('labels')
-            list = 2
-        case ('exclude_labels')
-            list = 3
-        case ('layers')
-            list = 4
-        case default
-            list = 0
-        end select
-    end function list_index
-
-    function list_key(list) result(key)
-        integer, intent(in) :: list
-        character(len=14) :: key
-
-        select case (list)
-        case (1)
-            key = 'targets'
-        case (2)
-            key = 'labels'
-        case (3)
-            key = 'exclude_labels'
-        case default
-            key = 'layers'
-        end select
-    end function list_key
-
-    subroutine option_spec(option, key, kind, needs_value, recognized)
-        character(len=*), intent(in) :: option
-        character(len=*), intent(out) :: key, kind
-        logical, intent(out) :: needs_value, recognized
-
-        key = ''
-        kind = 'int'
-        needs_value = .false.
-        recognized = .true.
-        select case (trim(option))
-        case ('--lane')
-            key = 'lane_id'
-            kind = 'string'
-            needs_value = .true.
-        case ('--session')
-            key = 'session_id'
-            kind = 'string'
-            needs_value = .true.
-        case ('--target')
-            key = 'targets'
-            kind = 'string'
-            needs_value = .true.
-        case ('-L', '--label')
-            key = 'labels'
-            kind = 'string'
-            needs_value = .true.
-        case ('-LE', '--exclude-label')
-            key = 'exclude_labels'
-            kind = 'string'
-            needs_value = .true.
-        case ('--layer')
-            key = 'layers'
-            kind = 'string'
-            needs_value = .true.
-        case ('--only-changed')
-            key = 'only_changed'
-            kind = 'bool'
-        case ('--shuffle')
-            key = 'shuffle'
-            kind = 'bool'
-        case ('--random')
-            key = 'random_count'
-            needs_value = .true.
-        case ('--seed')
-            key = 'seed'
-            needs_value = .true.
-        case ('--campaign-seconds')
-            key = 'campaign_seconds'
-            needs_value = .true.
-        case ('--timeout-seconds')
-            key = 'timeout_seconds'
-            needs_value = .true.
-        case ('--jobs')
-            key = 'jobs'
-            needs_value = .true.
-        case ('--cursor')
-            key = 'cursor'
-            needs_value = .true.
-        case ('--lifecycle-cursor')
-            key = 'lifecycle_cursor'
-            needs_value = .true.
-        case ('--max-records')
-            key = 'max_records'
-            needs_value = .true.
-        case ('--max-bytes')
-            key = 'max_bytes'
-            needs_value = .true.
-        case ('--wait-ms')
-            key = 'wait_ms'
-            needs_value = .true.
-        case ('--detail')
-            key = 'detail'
-            kind = 'string'
-            needs_value = .true.
-        case ('--until')
-            key = 'wait_until'
-            kind = 'string'
-            needs_value = .true.
-        case ('--case')
-            key = 'case_id'
-            kind = 'string'
-            needs_value = .true.
-        case ('--generation')
-            key = 'generation_id'
-            kind = 'string'
-            needs_value = .true.
-        case default
-            recognized = .false.
-            kind = 'unknown'
-        end select
-    end subroutine option_spec
-
-    subroutine add_string_field(key, value, keys, values, n_fields)
-        character(len=*), intent(in) :: key, value
-        character(len=*), intent(inout) :: keys(:), values(:)
-        integer, intent(inout) :: n_fields
-        character(len=:), allocatable :: escaped
-
-        escaped = json_string(value)
-        call append_field(key, escaped, keys, values, n_fields)
-    end subroutine add_string_field
-
-    subroutine append_field(key, value, keys, values, n_fields)
-        character(len=*), intent(in) :: key, value
-        character(len=*), intent(inout) :: keys(:), values(:)
-        integer, intent(inout) :: n_fields
-
-        if (n_fields >= size(keys)) return
-        n_fields = n_fields + 1
-        keys(n_fields) = key
-        values(n_fields) = value
-    end subroutine append_field
-
-    function json_string(value) result(encoded)
-        character(len=*), intent(in) :: value
-        character(len=:), allocatable :: encoded
-
-        encoded = '"'//trim(json_escape_string(value))//'"'
-    end function json_string
-
-    function boolean_or_string(value) result(encoded)
-        character(len=*), intent(in) :: value
-        character(len=:), allocatable :: encoded
-
-        if (trim(value) == 'true' .or. trim(value) == 'false') then
-            encoded = trim(value)
-        else
-            encoded = json_string(value)
-        end if
-    end function boolean_or_string
 
     logical function looks_like_option(value)
         character(len=*), intent(in) :: value
@@ -420,20 +243,6 @@ contains
         end do
         is_integer_literal = .true.
     end function is_integer_literal
-
-    logical function field_present(keys, n_fields, field)
-        character(len=*), intent(in) :: keys(:), field
-        integer, intent(in) :: n_fields
-        integer :: i
-
-        field_present = .false.
-        do i = 1, n_fields
-            if (trim(keys(i)) == trim(field)) then
-                field_present = .true.
-                return
-            end if
-        end do
-    end function field_present
 
     subroutine print_gremlin_usage(unit)
         integer, intent(in) :: unit

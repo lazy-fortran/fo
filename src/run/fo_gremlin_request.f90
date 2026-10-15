@@ -1,10 +1,11 @@
 module fo_gremlin_request
     use, intrinsic :: iso_fortran_env, only: int64
     use fo_cache, only: HASH_LEN
+    use fo_json_object, only: json_object_member, json_text_has_control
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
         json_parser_next, JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, &
-        JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_BOOL, &
-        JSON_NULL_VAL, &
+        JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_INTEGER, JSON_BOOL, &
+        JSON_NULL_VAL, JSON_REAL, &
         JSON_ERROR, JSON_END_OF_INPUT, JSON_ERR_TRAILING
     use fx_dag, only: MAX_NODES
     implicit none
@@ -51,10 +52,144 @@ module fo_gremlin_request
         integer :: n_labels = 0, n_exclude_labels = 0, n_layers = 0
     end type gremlin_request_t
 
+    ! Action bits for the option table; GA_OTHER covers unknown action names.
+    integer, parameter, public :: GA_START = 1, GA_STATUS = 2, GA_WAIT = 4, &
+        GA_EVENTS = 8, GA_FAILURES = 16, GA_REPRODUCE = 32, GA_STOP = 64, &
+        GA_OTHER = 128
+    integer, parameter :: GA_ANY = 255, GA_READS = GA_STATUS + GA_WAIT + &
+        GA_EVENTS + GA_FAILURES
+    integer(int64), parameter, public :: GA_UNBOUNDED = huge(0_int64)
+
+    type, public :: gremlin_option_t
+        !! One Gremlin request option: its JSON key, CLI flags, value kind
+        !! ('int', 'string', 'bool' or 'list'), the actions that accept it, its
+        !! integer range and string choices. The single source for CLI parsing,
+        !! request validation and the MCP tool schema.
+        character(len=16) :: key = ''
+        character(len=18) :: flag = ''
+        character(len=18) :: alias = ''
+        character(len=6) :: kind = ''
+        integer :: actions = 0
+        integer(int64) :: lo = -GA_UNBOUNDED, hi = GA_UNBOUNDED
+        character(len=72) :: choices = ''
+        character(len=72) :: note = ''
+    end type gremlin_option_t
+
+    integer, parameter, public :: N_GREMLIN_OPTIONS = 22
+    type(gremlin_option_t), parameter, public :: GREMLIN_OPTIONS(N_GREMLIN_OPTIONS) = [ &
+        gremlin_option_t('lane_id', '--lane', '', 'string', GA_ANY), &
+        gremlin_option_t('session_id', '--session', '', 'string', GA_ANY - GA_START), &
+        gremlin_option_t('case_id', '--case', '', 'string', GA_REPRODUCE), &
+        gremlin_option_t('generation_id', '--generation', '', 'string', GA_REPRODUCE), &
+        gremlin_option_t('targets', '--target', '', 'list', GA_START), &
+        gremlin_option_t('labels', '-L', '--label', 'list', GA_START, &
+            note='gremlin lane scope: fo test -L regexes (AND)'), &
+        gremlin_option_t('exclude_labels', '-LE', '--exclude-label', 'list', GA_START, &
+            note='gremlin lane scope: fo test -LE regexes'), &
+        gremlin_option_t('layers', '--layer', '', 'list', GA_START, &
+            note='gremlin lane scope: layer names (union)'), &
+        gremlin_option_t('only_changed', '--only-changed', '', 'bool', GA_START), &
+        gremlin_option_t('shuffle', '--shuffle', '', 'bool', GA_START), &
+        gremlin_option_t('random_count', '--random', '', 'int', GA_START, 0, 32, &
+            note='additional random cases; 0 quiesces after gate targets pass'), &
+        gremlin_option_t('seed', '--seed', '', 'int', GA_START, &
+            -int(huge(0), int64) - 1_int64, int(huge(0), int64)), &
+        gremlin_option_t('campaign_seconds', '--campaign-seconds', '', 'int', GA_START, 1, 60), &
+        gremlin_option_t('timeout_seconds', '--timeout-seconds', '', 'int', &
+            GA_START + GA_REPRODUCE, 0, 86400), &
+        gremlin_option_t('jobs', '--jobs', '', 'int', GA_START, 1, 1), &
+        gremlin_option_t('cursor', '--cursor', '', 'int', GA_READS, 0, GA_UNBOUNDED), &
+        gremlin_option_t('lifecycle_cursor', '--lifecycle-cursor', '', 'int', GA_READS, &
+            0, GA_UNBOUNDED), &
+        gremlin_option_t('max_records', '--max-records', '', 'int', GA_READS, 1, 128), &
+        gremlin_option_t('max_bytes', '--max-bytes', '', 'int', GA_READS, 1, 262144), &
+        gremlin_option_t('wait_ms', '--wait-ms', '', 'int', GA_WAIT, 0, 30000), &
+        gremlin_option_t('wait_until', '--until', '', 'string', GA_WAIT, &
+            choices='local-gate-green,ordinary-verified,fully-verified,quiescent,failure'), &
+        gremlin_option_t('detail', '--detail', '', 'string', GA_STATUS + GA_WAIT, &
+            choices='summary,full', &
+            note='gremlin_status/gremlin_wait response detail')]
+
     public :: gremlin_request_t, parse_request, is_hex_digest, gremlin_json_text_valid
-    public :: gremlin_json_field
+    public :: gremlin_json_field, gremlin_option_index, gremlin_action_bit
+    public :: gremlin_apply_adapter_defaults
 
 contains
+
+    integer function gremlin_action_bit(action) result(bit)
+        !! Bit of a core or public (gremlin_*) action name; GA_OTHER if unknown.
+        character(len=*), intent(in) :: action
+        character(len=len(action)) :: name
+
+        name = action
+        if (index(name, 'gremlin_') == 1) name = name(9:)
+        select case (trim(name))
+        case ('start', 'run')
+            bit = GA_START
+        case ('status')
+            bit = GA_STATUS
+        case ('wait')
+            bit = GA_WAIT
+        case ('events')
+            bit = GA_EVENTS
+        case ('failures')
+            bit = GA_FAILURES
+        case ('reproduce')
+            bit = GA_REPRODUCE
+        case ('stop')
+            bit = GA_STOP
+        case default
+            bit = GA_OTHER
+        end select
+    end function gremlin_action_bit
+
+    integer function gremlin_option_index(key, action, flag) result(row)
+        !! Row of an option by JSON key (or by CLI flag when `flag` is set),
+        !! restricted to the options `action` accepts when it is present.
+        character(len=*), intent(in) :: key
+        character(len=*), intent(in), optional :: action
+        logical, intent(in), optional :: flag
+        integer :: i
+        logical :: by_flag
+
+        by_flag = .false.
+        if (present(flag)) by_flag = flag
+        row = 0
+        do i = 1, N_GREMLIN_OPTIONS
+            if (by_flag) then
+                if (trim(key) /= trim(GREMLIN_OPTIONS(i)%flag) .and. &
+                    (len_trim(GREMLIN_OPTIONS(i)%alias) == 0 .or. &
+                    trim(key) /= trim(GREMLIN_OPTIONS(i)%alias))) cycle
+            else
+                if (trim(key) /= trim(GREMLIN_OPTIONS(i)%key)) cycle
+            end if
+            if (present(action)) then
+                if (iand(GREMLIN_OPTIONS(i)%actions, gremlin_action_bit(action)) == 0) cycle
+            end if
+            row = i
+            return
+        end do
+    end function gremlin_option_index
+
+    subroutine gremlin_apply_adapter_defaults(action, request_json)
+        !! The one adapter default shared by CLI and MCP: status and wait
+        !! answer in summary detail unless the caller chose a detail level.
+        character(len=*), intent(in) :: action
+        character(len=:), allocatable, intent(inout) :: request_json
+        character(len=:), allocatable :: raw
+        integer :: count, ierr, last
+
+        if (iand(gremlin_action_bit(action), GA_STATUS + GA_WAIT) == 0) return
+        call json_object_member(request_json, 'detail', raw, count, ierr)
+        if (ierr /= 0 .or. count /= 0) return
+        last = len_trim(request_json)
+        if (last < 2) return
+        if (last > 2) then
+            request_json = request_json(:last - 1)//',"detail":"summary"}'
+        else
+            request_json = '{"detail":"summary"}'
+        end if
+    end subroutine gremlin_apply_adapter_defaults
 
     subroutine parse_request(action, json, request, ierr, message)
         character(len=*), intent(in) :: action, json
@@ -65,8 +200,7 @@ contains
         type(json_parser_t) :: parser
         type(json_event_t) :: event, value_event
         character(len=NAME_LEN) :: key
-        character(len=:), allocatable :: raw_value
-        logical :: seen(23)
+        logical :: seen(N_GREMLIN_OPTIONS)
         integer :: field
         logical :: trailing
 
@@ -90,7 +224,6 @@ contains
         seen = .false.
         do
             ierr = 1
-            raw_value = ''
             call json_parser_next(parser, event)
             if (event%event_type == JSON_OBJECT_END) exit
             if (event%event_type /= JSON_KEY .or. .not. allocated(event%string_val)) return
@@ -103,7 +236,7 @@ contains
                 return
             end if
             key = event%string_val
-            field = request_field(action, trim(key))
+            field = gremlin_option_index(trim(key), action)
             if (field == 0) then
                 message = 'unsupported Gremlin request field: '//trim(key)
                 return
@@ -114,20 +247,14 @@ contains
             end if
             seen(field) = .true.
             call json_parser_next(parser, value_event)
-            raw_value = ''
-            if (allocated(value_event%raw_val)) raw_value = value_event%raw_val
             if (value_event%event_type == JSON_ERROR) then
                 message = 'malformed Gremlin request JSON'
                 return
             end if
-            if (field == 10) then
-                call parse_target_events(parser, value_event, request, ierr, message)
-            else if (field >= 21) then
-                call parse_scope_events(parser, value_event, request, field, ierr, &
-                    message)
+            if (GREMLIN_OPTIONS(field)%kind == 'list') then
+                call parse_list_events(parser, value_event, request, field, ierr, message)
             else
-                call set_event_field(request, field, value_event, &
-                    raw_value, ierr, message)
+                call set_event_field(request, field, value_event, ierr, message)
             end if
             if (ierr /= 0) return
         end do
@@ -150,11 +277,6 @@ contains
                 message = 'session_id contains an invalid character'
                 return
             end if
-        end if
-        if (request%n_targets > 0 .and. action /= 'start' .and. &
-            action /= 'run' .and. action /= 'gremlin_start') then
-            message = 'targets are only supported when starting a campaign'
-            return
         end if
         ierr = 0
         message = ''
@@ -182,107 +304,76 @@ contains
         end do
     end function gremlin_json_text_valid
 
-    subroutine gremlin_json_field(text, name, value, last)
+    subroutine gremlin_json_field(text, name, value, last, status)
+        !! Scalar top-level member of a JSON object as text. status: 0 present,
+        !! 1 absent or not a scalar, 2 malformed (invalid JSON, a duplicate key
+        !! unless `last` selects the final one, or a value longer than `value`).
+        !! value is empty unless status is 0.
         character(len=*), intent(in) :: text, name
         character(len=*), intent(out) :: value
         logical, optional, intent(in) :: last
-        type(json_parser_t) :: parser
+        integer, optional, intent(out) :: status
         type(json_event_t) :: event
-        character(len=:), allocatable :: candidate
-        integer :: depth
-        logical :: waiting, found, duplicate, take_last
+        character(len=:), allocatable :: raw, candidate
+        integer :: count, ierr, state
 
         value = ''
-        candidate = ''
-        depth = 0
-        waiting = .false.
-        found = .false.
-        duplicate = .false.
-        take_last = .false.
-        if (present(last)) take_last = last
-        call json_parser_init_strict(parser, text)
-        do
-            call json_parser_next(parser, event)
+        state = 1
+        call json_object_member(text, name, raw, count, ierr, event, last)
+        if (ierr /= 0) then
+            state = 2
+        else if (count > 1 .and. .not. present(last)) then
+            state = 2
+        else if (count > 0) then
             select case (event%event_type)
-            case (JSON_OBJECT_START, JSON_ARRAY_START)
-                if (waiting) waiting = .false.
-                depth = depth + 1
-            case (JSON_OBJECT_END, JSON_ARRAY_END)
-                depth = depth - 1
-            case (JSON_KEY)
-                if (depth /= 1 .or. .not. allocated(event%string_val)) cycle
-                if (len(event%string_val) /= len(name)) cycle
-                if (event%string_val /= name) cycle
-                if (found .or. waiting) then
-                    if (take_last) then
-                        candidate = ''
-                        found = .false.
-                        waiting = .true.
-                    else
-                        duplicate = .true.
-                    end if
-                else
-                    waiting = .true.
-                end if
             case (JSON_STRING)
-                if (.not. waiting) cycle
-                if (allocated(event%string_val)) candidate = event%string_val
-                found = .true.
-                waiting = .false.
+                if (allocated(event%string_val)) then
+                    candidate = event%string_val
+                    state = 0
+                end if
             case (JSON_INTEGER, JSON_REAL, JSON_BOOL, JSON_NULL_VAL)
-                if (.not. waiting) cycle
-                if (allocated(event%raw_val)) candidate = event%raw_val
-                found = .true.
-                waiting = .false.
-            case (JSON_ERROR)
-                return
-            case (JSON_END_OF_INPUT)
-                if (found .and. .not. duplicate .and. len(candidate) <= len(value)) &
-                    value = candidate
-                return
+                candidate = raw
+                state = 0
             end select
-        end do
+            if (state == 0) then
+                if (len(candidate) > len(value)) then
+                    state = 2
+                else
+                    value = candidate
+                end if
+            end if
+        end if
+        if (present(status)) status = state
     end subroutine gremlin_json_field
 
-    subroutine set_event_field(request, field, event, raw_value, ierr, message)
+    subroutine set_event_field(request, field, event, ierr, message)
         type(gremlin_request_t), intent(inout) :: request
         integer, intent(in) :: field
         type(json_event_t), intent(in) :: event
-        character(len=*), intent(in) :: raw_value
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         character(len=PATH_LEN) :: value
         logical :: is_string
 
-        if (field == 3 .or. field == 4 .or. field == 5 .or. field == 6 .or. &
-            field == 7 .or. field == 11 .or. field == 12 .or. field == 13 .or. &
-            field == 14 .or. field == 18) then
+        ierr = 1
+        if (GREMLIN_OPTIONS(field)%kind == 'int') then
             if (event%event_type == JSON_BOOL) then
-                ierr = 1
                 message = 'request field must be a JSON integer'
                 return
             else if (event%event_type /= JSON_INTEGER .and. &
                 event%event_type /= JSON_STRING) then
-                ierr = 1
                 message = 'Gremlin request field has the wrong JSON type'
                 return
             end if
-        end if
-        if (event%event_type == JSON_ERROR) then
-            ierr = 1
-            message = 'malformed Gremlin request JSON'
-            return
         end if
         value = ''
         is_string = event%event_type == JSON_STRING
         if (is_string) then
             if (.not. allocated(event%string_val)) then
-                ierr = 1
                 message = 'invalid Gremlin request string'
                 return
             end if
             if (len(event%string_val) > len(value)) then
-                ierr = 1
                 message = 'Gremlin request string is too long'
                 return
             end if
@@ -290,15 +381,10 @@ contains
         else
             select case (event%event_type)
             case (JSON_INTEGER)
-                value = raw_value
+                value = event%raw_val
             case (JSON_BOOL)
-                if (event%bool_val) then
-                    value = 'true'
-                else
-                    value = 'false'
-                end if
+                value = merge('true ', 'false', event%bool_val)
             case default
-                ierr = 1
                 message = 'Gremlin request field has the wrong JSON type'
                 return
             end select
@@ -306,51 +392,8 @@ contains
         call set_request_field(request, field, trim(value), is_string, ierr, message)
     end subroutine set_event_field
 
-    subroutine parse_target_events(parser, first, request, ierr, message)
-        type(json_parser_t), intent(inout) :: parser
-        type(json_event_t), intent(in) :: first
-        type(gremlin_request_t), intent(inout) :: request
-        integer, intent(out) :: ierr
-        character(len=*), intent(out) :: message
-        type(json_event_t) :: event
-        character(len=NAME_LEN) :: item
-
-        ierr = 1
-        message = 'targets must be an array of strings'
-        if (first%event_type /= JSON_ARRAY_START) return
-        do
-            call json_parser_next(parser, event)
-            if (event%event_type == JSON_ARRAY_END) exit
-            if (event%event_type /= JSON_STRING .or. &
-                .not. allocated(event%string_val)) return
-            if (request%n_targets >= size(request%targets)) then
-                message = 'too many target names'
-                return
-            end if
-            item = ''
-            if (len_trim(event%string_val) == 0 .or. &
-                len(event%string_val) > len(item)) then
-                message = 'target names must be nonempty and at most 1024 characters'
-                return
-            end if
-            item = event%string_val
-            if (has_control_character(item)) then
-                message = 'target names cannot contain control characters'
-                return
-            end if
-            if (any(request%targets(:request%n_targets) == item)) then
-                message = 'duplicate target name: '//trim(item)
-                return
-            end if
-            request%n_targets = request%n_targets + 1
-            request%targets(request%n_targets) = item
-        end do
-        ierr = 0
-        message = ''
-    end subroutine parse_target_events
-
-    subroutine parse_scope_events(parser, first, request, field, ierr, message)
-        !! labels (21), exclude_labels (22) and layers (23): arrays of strings.
+    subroutine parse_list_events(parser, first, request, field, ierr, message)
+        !! targets, labels, exclude_labels and layers: arrays of strings.
         type(json_parser_t), intent(inout) :: parser
         type(json_event_t), intent(in) :: first
         type(gremlin_request_t), intent(inout) :: request
@@ -359,17 +402,11 @@ contains
         character(len=*), intent(out) :: message
         type(json_event_t) :: event
         character(len=NAME_LEN) :: item
-        character(len=NAME_LEN), allocatable :: grown(:)
-        character(len=14) :: key
+        character(len=16) :: key
+        logical :: is_target
 
-        select case (field)
-        case (21)
-            key = 'labels'
-        case (22)
-            key = 'exclude_labels'
-        case default
-            key = 'layers'
-        end select
+        key = GREMLIN_OPTIONS(field)%key
+        is_target = trim(key) == 'targets'
         ierr = 1
         message = trim(key)//' must be an array of strings'
         if (first%event_type /= JSON_ARRAY_START) return
@@ -379,105 +416,63 @@ contains
             if (event%event_type /= JSON_STRING .or. &
                 .not. allocated(event%string_val)) return
             item = ''
+            if (is_target) then
+                if (request%n_targets >= size(request%targets)) then
+                    message = 'too many target names'
+                    return
+                end if
+            end if
             if (len_trim(event%string_val) == 0 .or. &
                 len(event%string_val) > len(item)) then
-                message = trim(key)//' entries must be nonempty and at most 1024 '// &
-                    'characters'
+                if (is_target) then
+                    message = 'target names must be nonempty and at most 1024 characters'
+                else
+                    message = trim(key)//' entries must be nonempty and at most 1024 '// &
+                        'characters'
+                end if
                 return
             end if
             item = event%string_val
-            if (has_control_character(item)) then
-                message = trim(key)//' entries cannot contain control characters'
+            if (json_text_has_control(trim(item))) then
+                if (is_target) then
+                    message = 'target names cannot contain control characters'
+                else
+                    message = trim(key)//' entries cannot contain control characters'
+                end if
                 return
             end if
-            select case (field)
-            case (21)
-                allocate (grown(request%n_labels + 1))
-                grown(:request%n_labels) = request%labels
-                grown(request%n_labels + 1) = item
-                call move_alloc(grown, request%labels)
-                request%n_labels = request%n_labels + 1
-            case (22)
-                allocate (grown(request%n_exclude_labels + 1))
-                grown(:request%n_exclude_labels) = request%exclude_labels
-                grown(request%n_exclude_labels + 1) = item
-                call move_alloc(grown, request%exclude_labels)
-                request%n_exclude_labels = request%n_exclude_labels + 1
+            select case (trim(key))
+            case ('targets')
+                if (any(request%targets(:request%n_targets) == item)) then
+                    message = 'duplicate target name: '//trim(item)
+                    return
+                end if
+                request%n_targets = request%n_targets + 1
+                request%targets(request%n_targets) = item
+            case ('labels')
+                call append_item(request%labels, request%n_labels, item)
+            case ('exclude_labels')
+                call append_item(request%exclude_labels, request%n_exclude_labels, item)
             case default
-                allocate (grown(request%n_layers + 1))
-                grown(:request%n_layers) = request%layers
-                grown(request%n_layers + 1) = item
-                call move_alloc(grown, request%layers)
-                request%n_layers = request%n_layers + 1
+                call append_item(request%layers, request%n_layers, item)
             end select
         end do
         ierr = 0
         message = ''
-    end subroutine parse_scope_events
+    end subroutine parse_list_events
 
-    integer function request_field(action, key)
-        character(len=*), intent(in) :: action, key
+    subroutine append_item(list, n, item)
+        character(len=NAME_LEN), allocatable, intent(inout) :: list(:)
+        integer, intent(inout) :: n
+        character(len=*), intent(in) :: item
+        character(len=NAME_LEN), allocatable :: grown(:)
 
-        request_field = 0
-        if (key == 'lane_id') then
-            request_field = 1
-        else if (action == 'start' .or. action == 'run' .or. &
-                action == 'gremlin_start') then
-            select case (key)
-            case ('random_count')
-                request_field = 3
-            case ('seed')
-                request_field = 4
-            case ('campaign_seconds')
-                request_field = 5
-            case ('timeout_seconds')
-                request_field = 6
-            case ('jobs')
-                request_field = 7
-            case ('only_changed')
-                request_field = 8
-            case ('shuffle')
-                request_field = 9
-            case ('targets')
-                request_field = 10
-            case ('labels')
-                request_field = 21
-            case ('exclude_labels')
-                request_field = 22
-            case ('layers')
-                request_field = 23
-            end select
-        else if (key == 'session_id') then
-            request_field = 2
-        else
-            select case (key)
-            case ('timeout_seconds')
-                if (action == 'reproduce') request_field = 6
-            case ('cursor')
-                if (action == 'status' .or. action == 'events' .or. &
-                    action == 'wait' .or. action == 'failures') request_field = 11
-            case ('max_records')
-                if (action == 'status' .or. action == 'events' .or. &
-                    action == 'wait' .or. action == 'failures') request_field = 12
-            case ('max_bytes')
-                if (action == 'status' .or. action == 'events' .or. &
-                    action == 'wait' .or. action == 'failures') request_field = 13
-            case ('lifecycle_cursor')
-                if (action == 'status' .or. action == 'events' .or. &
-                    action == 'wait' .or. action == 'failures') request_field = 18
-            case ('wait_ms')
-                if (action == 'wait') request_field = 14
-            case ('wait_until')
-                if (action == 'wait') request_field = 19
-            case ('detail')
-                if (action == 'status' .or. action == 'wait') request_field = 20
-            case ('case_id')
-                if (action == 'reproduce') request_field = 16
-            case ('generation_id')
-                if (action == 'reproduce') request_field = 17
-            end select
-        end if
-    end function request_field
+        allocate (grown(n + 1))
+        grown(:n) = list
+        grown(n + 1) = item
+        call move_alloc(grown, list)
+        n = n + 1
+    end subroutine append_item
 
     subroutine set_request_field(request, field, value, is_string, ierr, message)
         type(gremlin_request_t), intent(inout) :: request
@@ -487,197 +482,176 @@ contains
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
 
-        integer :: ios, parsed
+        type(gremlin_option_t) :: option
+        character(len=16) :: key
+        integer :: ios
         integer(int64) :: wide
-        ierr = 0
+
+        option = GREMLIN_OPTIONS(field)
+        key = option%key
+        ierr = 1
         message = ''
-        select case (field)
-        case (1, 2, 16, 17, 19, 20)
+        select case (trim(option%kind))
+        case ('string')
             if (.not. is_string) then
-                ierr = 1
                 message = 'string request field has the wrong JSON type'
                 return
             end if
-            if (has_control_character(value)) then
-                ierr = 1
+            if (json_text_has_control(trim(value))) then
                 message = 'string request field contains a control character'
                 return
             end if
-            select case (field)
-            case (1)
+            if (len_trim(option%choices) > 0) then
+                if (.not. in_choices(value, option%choices)) then
+                    message = trim(key)//' must be '//choice_phrase(option%choices)
+                    return
+                end if
+            end if
+            select case (trim(key))
+            case ('lane_id')
                 if (len_trim(value) > MAX_LANE_LEN) then
-                    ierr = 1
                     message = 'lane_id is too long'
                     return
                 end if
-            case (2)
+                request%lane_id = value
+            case ('session_id')
                 if (len_trim(value) > len(request%session_id)) then
-                    ierr = 1
                     message = 'session_id is too long'
                     return
                 end if
-            case (16)
+                request%session_id = value
+            case ('case_id')
                 if (len_trim(value) == 0 .or. len_trim(value) > len(request%case_id)) then
-                    ierr = 1
                     message = 'case_id must be nonempty and at most 1024 characters'
                     return
                 end if
-            case (17)
+                request%case_id = value
+            case ('generation_id')
                 if (len_trim(value) /= HASH_LEN) then
-                    ierr = 1
                     message = 'generation_id must contain exactly 64 characters'
                     return
                 end if
                 if (.not. is_hex_digest(value)) then
-                    ierr = 1
                     message = 'generation_id must be a hexadecimal digest'
                     return
                 end if
-            case (19)
-                if (.not. valid_wait_until(value)) then
-                    ierr = 1
-                    message = 'wait_until must be local-gate-green, ordinary-verified, '// &
-                        'fully-verified, quiescent, or failure'
-                    return
-                end if
-            case (20)
-                if (value /= 'summary' .and. value /= 'full') then
-                    ierr = 1
-                    message = 'detail must be summary or full'
-                    return
-                end if
-            end select
-            select case (field)
-            case (1)
-                request%lane_id = value
-            case (2)
-                request%session_id = value
-            case (16)
-                request%case_id = value
-            case (17)
                 request%generation_id = value
-            case (19)
+            case ('wait_until')
                 request%wait_until = value
-            case (20)
+            case ('detail')
                 request%detail = value
             end select
-        case (8, 9)
+        case ('bool')
             if (is_string) then
-                ierr = 1
                 message = 'boolean request field has the wrong JSON type'
                 return
             end if
             if (trim(value) /= 'true' .and. trim(value) /= 'false') then
-                ierr = 1
                 message = 'boolean request field must be true or false'
                 return
             end if
-            select case (field)
-            case (8)
+            if (trim(key) == 'only_changed') then
                 request%only_changed = trim(value) == 'true'
-            case (9)
+            else
                 request%shuffle = trim(value) == 'true'
-            end select
+            end if
         case default
             if (is_string) then
-                ierr = 1
                 message = 'integer request field has the wrong JSON type'
                 return
             end if
-            if (field == 11 .or. field == 13 .or. field == 18) then
-                read (value, *, iostat=ios) wide
-            else
-                read (value, *, iostat=ios) parsed
-            end if
+            read (value, *, iostat=ios) wide
             if (ios /= 0) then
-                ierr = 1
                 message = 'integer request field is outside its supported range'
                 return
             end if
-            if (field == 11) request%cursor = wide
-            if (field == 18) request%lifecycle_cursor = wide
-            if (field == 13) request%max_bytes = wide
-            if (field == 3) request%random_count = parsed
-            if (field == 4) request%seed = parsed
-            if (field == 5) request%campaign_seconds = parsed
-            if (field == 6) request%timeout_seconds = parsed
-            if (field == 7) request%jobs = parsed
-            if (field == 12) request%max_records = parsed
-            if (field == 14) request%wait_ms = parsed
-        end select
-        select case (field)
-        case (3)
-            if (request%random_count < 0 .or. request%random_count > DEFAULT_RANDOM) then
-                ierr = 1
-                message = 'random_count must be between 0 and 32'
-            end if
-        case (5)
-            if (request%campaign_seconds < 1 .or. request%campaign_seconds > DEFAULT_CAMPAIGN) then
-                ierr = 1
-                message = 'campaign_seconds must be between 1 and 60'
-            end if
-        case (6)
-            if (request%timeout_seconds < 0 .or. request%timeout_seconds > MAX_CASE_TIMEOUT) then
-                ierr = 1
-                message = 'timeout_seconds must be between 0 and 86400'
-            end if
-        case (7)
-            if (request%jobs /= 1) then
-                ierr = 1
-                message = 'this bootstrap Gremlin engine supports jobs=1 only'
-            end if
-        case (11)
-            if (request%cursor < 0_int64) then
-                ierr = 1
-                message = 'cursor must be nonnegative'
-            end if
-        case (18)
-            if (request%lifecycle_cursor < 0_int64) then
-                ierr = 1
-                message = 'lifecycle_cursor must be nonnegative'
-            end if
-        case (12)
-            if (request%max_records < 1 .or. request%max_records > 128) then
-                ierr = 1
-                message = 'max_records must be between 1 and 128'
-            end if
-        case (13)
-            if (request%max_bytes < 1_int64 .or. request%max_bytes > 262144_int64) then
-                ierr = 1
-                message = 'max_bytes must be between 1 and 262144'
-            end if
-        case (14)
-            if (request%wait_ms < 0 .or. request%wait_ms > 30000) then
-                ierr = 1
-                message = 'wait_ms must be between 0 and 30000'
-            end if
-        end select
-    end subroutine set_request_field
-
-    logical function valid_wait_until(value)
-        character(len=*), intent(in) :: value
-
-        select case (trim(value))
-        case ('local-gate-green', 'ordinary-verified', 'fully-verified', &
-                'quiescent', 'failure')
-            valid_wait_until = .true.
-        case default
-            valid_wait_until = .false.
-        end select
-    end function valid_wait_until
-
-    logical function has_control_character(text)
-        character(len=*), intent(in) :: text
-        integer :: i
-
-        has_control_character = .false.
-        do i = 1, len_trim(text)
-            if (iachar(text(i:i)) < 32 .or. iachar(text(i:i)) == 127) then
-                has_control_character = .true.
+            if (wide < option%lo .or. wide > option%hi) then
+                if (option%lo == option%hi) then
+                    message = trim(key)//' must be '//int_text(option%lo)
+                else if (option%hi == GA_UNBOUNDED .and. option%lo == 0) then
+                    message = trim(key)//' must be nonnegative'
+                else
+                    message = trim(key)//' must be between '//int_text(option%lo)// &
+                        ' and '//int_text(option%hi)
+                end if
                 return
             end if
+            select case (trim(key))
+            case ('random_count')
+                request%random_count = int(wide)
+            case ('seed')
+                request%seed = int(wide)
+            case ('campaign_seconds')
+                request%campaign_seconds = int(wide)
+            case ('timeout_seconds')
+                request%timeout_seconds = int(wide)
+            case ('jobs')
+                request%jobs = int(wide)
+            case ('cursor')
+                request%cursor = wide
+            case ('lifecycle_cursor')
+                request%lifecycle_cursor = wide
+            case ('max_records')
+                request%max_records = int(wide)
+            case ('max_bytes')
+                request%max_bytes = wide
+            case ('wait_ms')
+                request%wait_ms = int(wide)
+            end select
+        end select
+        ierr = 0
+    end subroutine set_request_field
+
+    function int_text(value) result(text)
+        integer(int64), intent(in) :: value
+        character(len=:), allocatable :: text
+        character(len=20) :: buffer
+
+        write (buffer, '(i0)') value
+        text = trim(buffer)
+    end function int_text
+
+    logical function in_choices(value, choices)
+        character(len=*), intent(in) :: value, choices
+        integer :: start, comma
+
+        in_choices = .false.
+        start = 1
+        do
+            comma = index(choices(start:), ',')
+            if (comma == 0) then
+                in_choices = trim(value) == trim(choices(start:))
+                return
+            end if
+            if (trim(value) == choices(start:start + comma - 2)) then
+                in_choices = .true.
+                return
+            end if
+            start = start + comma
         end do
-    end function has_control_character
+    end function in_choices
+
+    function choice_phrase(choices) result(text)
+        !! "a or b" for two choices, "a, b, or c" for more.
+        character(len=*), intent(in) :: choices
+        character(len=:), allocatable :: text
+        integer :: i, last
+
+        text = ''
+        do i = 1, len_trim(choices)
+            if (choices(i:i) == ',') then
+                text = text//', '
+            else
+                text = text//choices(i:i)
+            end if
+        end do
+        last = index(text, ', ', back=.true.)
+        if (count([(choices(i:i) == ',', i=1, len_trim(choices))]) == 1) then
+            text = text(:last - 1)//' or '//text(last + 2:)
+        else
+            text = text(:last + 1)//'or '//text(last + 2:)
+        end if
+    end function choice_phrase
 
     logical function is_hex_digest(text)
         character(len=*), intent(in) :: text

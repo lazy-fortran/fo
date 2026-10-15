@@ -2,12 +2,12 @@ program fo_main
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit, real64
     use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_PATH
-    use fx_dag, only: dag_t, dag_topo_sort, dag_to_dot, MAX_NODES
+    use fx_dag, only: dag_t, dag_topo_sort, MAX_NODES
     use fo_dag_bridge, only: build_dag_from_units
     use fo_build_backend, only: backend_t, detect_backend, backend_build, &
         backend_test, backend_test_names, BACKEND_NONE, &
         BACKEND_NATIVE, BACKEND_CMAKE, profile_flags, backend_profile
-    use fo_check, only: check_result_t, fo_check_run, fo_changed_modules, &
+    use fo_check, only: fo_changed_modules, &
         collect_failed_test_names, should_report_frontend_diagnostics
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, &
         array_temporary_warnings_from_log, frontend_diagnostics_from_file, &
@@ -15,8 +15,6 @@ program fo_main
     use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds
     use fo_fs, only: fs_stat
     use fo_build_tree, only: native_output_dir
-    use fo_check_output, only: check_result_compact_json, &
-        check_result_full_json
     use fo_test_results, only: test_result_entry_t, &
         parse_test_results, format_test_results_text, format_test_results_json
     use fo_test_random, only: select_random_tests
@@ -28,21 +26,21 @@ program fo_main
         project_run_cases, project_list_text, project_list_json, &
         project_select, project_run_affected, &
         project_load, project_inventory_cases, project_build_cases
-    use fo_capabilities, only: capabilities_t, detect_capabilities, &
-        capabilities_json
     use fo_fmt, only: fmt_sources, FMT_SELECT_ALL, FMT_SELECT_FILES, FMT_SELECT_CHANGED, &
         write_git_changed_source_list
     use fo_process, only: process_exit, process_run_argv_logged, argv_push, &
         process_configure_openmp, process_export_self_driver
     use fo_ffc_cli, only: ffc_cmd_build, ffc_cmd_run, ffc_native_requested
     use fo_gremlin_cli, only: gremlin_cli_run
+    use fo_commands, only: command_graph, command_info, command_changed, &
+        command_clean, command_install, command_check, command_lint, &
+        failed_tests_text
     use fo_exec_target, only: resolve_exec_target, exec_target_is_app, &
         exec_args_t, parse_exec_args, exec_uses_cmake_model, resolve_cmake_exec
     use fo_build_tree, only: native_other_builds
     use fo_cover, only: fo_cover_run
     use fo_lock, only: lock_write
     use fo_scaffold, only: scaffold_project
-    use fo_install, only: install_native_executables
     use fo_version_info, only: FO_VERSION
     implicit none
 
@@ -558,11 +556,8 @@ contains
     end subroutine print_exec_usage
 
     subroutine cmd_check()
-        type(check_result_t) :: res
-        type(capabilities_t) :: cap
-        character(len=2048) :: cap_json
-        integer :: output_mode, mode_ierr
-        logical :: frontend_had_error
+        character(len=:), allocatable :: text, err_text
+        integer :: output_mode, mode_ierr, exitcode
 
         if (has_arg('--help') .or. has_arg('-h')) then
             write (output_unit, '(a)') &
@@ -575,138 +570,17 @@ contains
                 'fo check: unknown option (use --help for supported options)'
             call process_exit(1)
         end if
-
-        cap_json = ''
-        if (output_mode == 2) then
-            call detect_capabilities(cap)
-            call capabilities_json(cap, cap_json)
-        end if
-
-        call fo_check_run('.', res)
-
-        ! The configured compiler is authoritative. FortFront has deliberately
-        ! narrower language coverage, especially for legacy fixed-form code,
-        ! so use it only to enrich a compiler build failure. It must never
-        ! override a successful build or obscure a missing-backend diagnostic.
-        frontend_had_error = .false.
-        if (should_report_frontend_diagnostics(res)) then
-            call report_frontend_diagnostics('.', frontend_had_error)
-        end if
-
-        select case (output_mode)
-        case (1)
-            write (output_unit, '(a)') trim(check_result_compact_json(res))
-            if (.not. (res%build_ok .and. res%tests_ok) .or. &
-                frontend_had_error) call process_exit(1)
-            return
-        case (2)
-            write (output_unit, '(a)') trim(check_result_full_json(res, cap_json))
-            if (.not. (res%build_ok .and. res%tests_ok) .or. &
-                frontend_had_error) call process_exit(1)
-            return
-        end select
-
-        if (frontend_had_error) then
-            write (output_unit, '(a)') 'Frontend: FAIL'
-            call process_exit(1)
-        else if (res%build_ok .and. res%tests_ok) then
-            write (output_unit, '(a,i0,a,i0,a,i0,a,i0,a,f0.1,a)') &
-                'Build: OK (', res%n_modules, ' modules, ', &
-                res%n_cached, ' cached, ', res%n_changed, &
-                ' changed, ', res%n_affected, &
-                ' affected) Tests: pass (', res%elapsed, 's)'
-            if (res%n_in_cycle > 0) then
-                write (error_unit, '(a,i0,a,i0,a)') &
-                    'Warning: ', res%n_in_cycle, ' of ', res%n_modules, &
-                    ' modules in possible cycle'
-            end if
-        else if (.not. res%build_ok) then
-            write (output_unit, '(a,a)') 'Build: FAIL ', trim(res%error_msg)
-            call process_exit(1)
-        else
-            write (output_unit, '(a,i0,a,i0,a,i0,a,a)') &
-                'Build: OK (', res%n_cached, ' cached, ', res%n_changed, &
-                ' changed, ', res%n_affected, &
-                ' affected) Tests: FAIL ', trim(res%error_msg)
-            call report_failed_tests(res%failed_tests, res%n_failed_tests)
-            call process_exit(1)
-        end if
+        ! The configured compiler is authoritative. FortFront only enriches a
+        ! compiler build failure; it never overrides a successful build.
+        call command_check('.', output_mode, .false., text, err_text, exitcode)
+        call emit_command(text, err_text, exitcode)
     end subroutine cmd_check
 
-    subroutine report_frontend_diagnostics(dir, had_error)
-        !! Run FortFront's structured frontend over every source file in the
-        !! project after its compiler has already rejected the build, and
-        !! report mapped parser diagnostics. Only parser diagnostics are
-        !! surfaced: per-file semantic
-        !! analysis cannot resolve cross-file interfaces and declarations, so
-        !! it would report false positives on valid code. Parser errors set
-        !! had_error; warnings are printed and ignored for exit status,
-        !! matching fo's warning policy. The compiler failure remains the
-        !! authoritative reason that cmd_check fails.
-        !! Distinct FortFront and gfortran diagnostics are never deduplicated:
-        !! each frontend diagnostic is reported verbatim.
-        character(len=*), intent(in) :: dir
-        logical, intent(out) :: had_error
-
-        type(scan_unit_t), allocatable :: units(:)
-        type(diagnostic_t), allocatable :: diags(:)
-        integer :: n_units, n_diags, i, j, ierr
-        logical :: file_error
-        character(len=64) :: loc
-
-        had_error = .false.
-        allocate (units(MAX_UNITS))
-        call scan_dir(dir, units, n_units, ierr)
-        if (ierr /= 0 .or. n_units < 1) then
-            deallocate (units)
-            return
-        end if
-
-        allocate (diags(64))
-        do i = 1, n_units
-            if (len_trim(units(i)%filename) == 0) cycle
-            call frontend_diagnostics_from_file(trim(units(i)%filename), &
-                diags, n_diags, file_error, with_semantics=.false.)
-            if (file_error) had_error = .true.
-            do j = 1, n_diags
-                write (loc, '(i0,a,i0)') diags(j)%line, ':', diags(j)%column
-                if (diags(j)%severity == FO_DIAG_SEVERITY_ERROR) then
-                    write (error_unit, '(a,a,a,a,a)') &
-                        'fo: frontend error: ', trim(diags(j)%file), &
-                        ':', trim(loc), ': '//trim(diags(j)%message)
-                else
-                    write (error_unit, '(a,a,a,a,a)') &
-                        'fo: frontend warning: ', trim(diags(j)%file), &
-                        ':', trim(loc), ': '//trim(diags(j)%message)
-                end if
-            end do
-        end do
-        deallocate (diags)
-        deallocate (units)
-    end subroutine report_frontend_diagnostics
-
     subroutine report_failed_tests(failed, n_failed)
-        !! List every failing test, not just the first. A single reported
-        !! failure hides the rest and pushes the user to run raw build/fo/bin
-        !! binaries to find them -- which serves stale artifacts when sources
-        !! changed since the last fo run. The full list keeps everything inside
-        !! fo, where the content-addressed cache guarantees fresh binaries.
         character(len=*), intent(in) :: failed(:)
         integer, intent(in) :: n_failed
-        integer :: i
 
-        if (n_failed < 1) return
-        if (n_failed == 1) then
-            write (error_unit, '(a)') 'fo: 1 test failed:'
-        else
-            write (error_unit, '(a,i0,a)') 'fo: ', n_failed, ' tests failed:'
-        end if
-        do i = 1, n_failed
-            write (error_unit, '(a,a)') '  - ', trim(failed(i))
-        end do
-        write (error_unit, '(a)') &
-            'fo: rerun one with: fo test <name>  (never run build/fo/bin/* '// &
-            'directly; that can be stale)'
+        write (error_unit, '(a)', advance='no') failed_tests_text(failed, n_failed)
     end subroutine report_failed_tests
 
     subroutine cmd_exec()
@@ -921,54 +795,11 @@ contains
     end function has_arg
 
     subroutine cmd_changed()
-        type(dag_t) :: dag
-        integer :: changed_ids(MAX_NODES), n_changed
-        integer :: affected_ids(MAX_NODES), n_affected
-        integer :: n_cached, ierr, i, n_tests
-        character(len=MAX_PATH) :: filenames(MAX_NODES)
-        logical :: is_test_arr(MAX_NODES)
+        character(len=:), allocatable :: text, err_text
+        integer :: exitcode
 
-        call fo_changed_modules('.', dag, changed_ids, n_changed, &
-            affected_ids, n_affected, n_cached, ierr, &
-            filenames=filenames)
-        if (ierr /= 0) then
-            write (error_unit, '(a)') 'fo: scan or dag failed'
-            stop 1
-        end if
-
-        if (n_changed == 0) then
-            write (output_unit, '(a,i0,a)') 'all ', n_cached, ' modules cached'
-            return
-        end if
-
-        write (output_unit, '(a,i0,a)') 'changed (', n_changed, '):'
-        do i = 1, n_changed
-            write (output_unit, '(a,a,a,a)') '  ', &
-                trim(dag%nodes(changed_ids(i))%label), &
-                '  ', trim(filenames(changed_ids(i)))
-        end do
-
-        write (output_unit, '(a,i0,a)') 'affected (', n_affected, '):'
-        do i = 1, n_affected
-            write (output_unit, '(a,a,a,a)') '  ', &
-                trim(dag%nodes(affected_ids(i))%label), &
-                '  ', trim(filenames(affected_ids(i)))
-        end do
-
-        n_tests = 0
-        do i = 1, n_affected
-            if (is_test_arr(affected_ids(i))) n_tests = n_tests + 1
-        end do
-        if (n_tests > 0) then
-            write (output_unit, '(a,i0,a)') 'affected tests (', n_tests, '):'
-            do i = 1, n_affected
-                if (is_test_arr(affected_ids(i))) then
-                    write (output_unit, '(a,a,a,a)') '  ', &
-                        trim(dag%nodes(affected_ids(i))%label), &
-                        '  ', trim(filenames(affected_ids(i)))
-                end if
-            end do
-        end if
+        call command_changed('.', text, err_text, exitcode)
+        call emit_command(text, err_text, exitcode)
     end subroutine cmd_changed
 
     subroutine cmd_build()
@@ -1707,49 +1538,15 @@ contains
     end subroutine report_test_result
 
     subroutine cmd_graph()
-        type(scan_unit_t), allocatable :: units(:)
-        type(dag_t) :: dag
-        type(backend_t) :: b
-        character(len=512) :: scan_root
-        integer :: n_units, ierr, i, j
-        logical :: dot_mode
-        character(len=:), allocatable :: dot_output
+        character(len=:), allocatable :: text, err_text
+        integer :: exitcode
 
         if (has_arg('--layers')) then
             call graph_layers()
             return
         end if
-        allocate (units(MAX_UNITS))
-        b = detect_backend('.')
-        scan_root = '.'
-        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-        dot_mode = has_arg('--dot')
-
-        call scan_dir(trim(scan_root), units, n_units, ierr)
-        if (ierr /= 0) then
-            write (error_unit, '(a)') 'fo: scan failed'
-            stop 1
-        end if
-
-        call build_dag_from_units(units, n_units, dag)
-
-        if (dot_mode) then
-            call dag_to_dot(dag, dot_output)
-            write (output_unit, '(a)') trim(dot_output)
-        else
-            do i = 1, dag%n_nodes
-                if (dag%nodes(i)%n_edges == 0) then
-                    write (output_unit, '(a)') trim(dag%nodes(i)%label)
-                else
-                    do j = 1, dag%nodes(i)%n_edges
-                        write (output_unit, '(a,a,a)') &
-                            trim(dag%nodes(i)%label), &
-                            ' -> ', &
-                            trim(dag%nodes(dag%nodes(i)%edges(j))%label)
-                    end do
-                end if
-            end do
-        end if
+        call command_graph('.', has_arg('--dot'), text, err_text, exitcode)
+        call emit_command(text, err_text, exitcode)
     end subroutine cmd_graph
 
     subroutine graph_layers()
@@ -1796,33 +1593,20 @@ contains
     end subroutine graph_layers
 
     subroutine cmd_lint()
-        use fo_lint, only: lint_finding_t, lint_warning_t, &
-            lint_files, lint_compiler, lint_dedup_warnings, collect_fortran_sources, &
-            lint_all_json, lint_fix_dir, MAX_FINDINGS, MAX_WARNINGS
-        use fo_lint_deep, only: lint_deep_run, lint_deep_print
+        use fo_lint_deep, only: lint_deep_print
         use fo_process, only: process_getcwd
         use fo_fs, only: fs_realpath
         use fx_path, only: path_normalize, path_is_absolute
-        type(backend_t) :: b
-        type(lint_finding_t), allocatable :: findings(:)
-        type(lint_warning_t), allocatable :: warnings(:)
-        character(len=512), allocatable :: files(:), selected(:)
-        logical, allocatable :: wanted(:)
-        integer :: n_findings, n_warnings, i, j, n_files, n_selected, arg_length
-        integer :: n_removed, n_remaining, status, deep_count, deep_status
-        character(len=512) :: scan_root, argument, candidate
-        character(len=4096) :: resolved
-        logical :: ok
-        character(len=4096) :: cwd
-        character(len=:), allocatable :: deep_json, deep_error, normalized
-        logical :: deep, json_mode, matched
-
-        allocate (findings(MAX_FINDINGS), warnings(MAX_WARNINGS))
-        b = detect_backend('.')
-        scan_root = '.'
-        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
+        character(len=512), allocatable :: selected(:)
+        integer :: i, n_selected, arg_length, status
+        character(len=512) :: argument
+        character(len=4096) :: resolved, cwd
+        character(len=:), allocatable :: text, deep_report, tail, err_text, normalized
+        integer :: exitcode
+        logical :: ok, deep, fix, json_mode
 
         deep = has_arg('--deep')
+        fix = has_arg('--fix')
         json_mode = has_arg('--json') .or. has_arg('--json=compact') .or. &
             has_arg('--json=full')
         allocate (selected(max(0, nargs - 1)))
@@ -1869,110 +1653,17 @@ contains
             end select
         end do
 
-        if (has_arg('--fix')) then
-            if (deep .or. n_selected > 0) then
-                write (error_unit, '(a)') &
-                    'fo lint: --fix cannot combine with --deep or selected sources'
-                call process_exit(2)
-            end if
-            call lint_fix_dir(trim(scan_root), n_removed, n_remaining)
-            write (output_unit, '(i0,a)') n_removed, ' unused import(s) removed'
-            if (n_remaining > 0) write (output_unit, '(i0,a)') &
-                n_remaining, ' unused import(s) remaining (not auto-removable)'
-            if (n_remaining > 0) call process_exit(1)
-            return
+        if (fix .and. (deep .or. n_selected > 0)) then
+            write (error_unit, '(a)') &
+                'fo lint: --fix cannot combine with --deep or selected sources'
+            call process_exit(2)
         end if
-
-        call collect_fortran_sources(trim(scan_root), files, n_files)
-        allocate (wanted(n_files))
-        wanted = n_selected == 0
-        do i = 1, n_selected
-            matched = .false.
-            do j = 1, n_files
-                candidate = files(j)
-                if (.not. path_is_absolute(trim(candidate))) &
-                    candidate = path_normalize(trim(cwd)//'/'//trim(candidate))
-                candidate = path_normalize(trim(candidate))
-                if (candidate == selected(i)) then
-                    wanted(j) = .true.
-                    matched = .true.
-                else if (len_trim(candidate) > len_trim(selected(i))) then
-                    if (index(candidate, trim(selected(i))//'/') == 1) then
-                        wanted(j) = .true.
-                        matched = .true.
-                    end if
-                end if
-            end do
-            if (.not. matched) then
-                write (error_unit, '(a)') &
-                    'fo lint: no supported source matches '//trim(selected(i))
-                call process_exit(2)
-            end if
-        end do
-        selected = pack(files(:n_files), wanted)
-        n_selected = size(selected)
-        call lint_files(trim(scan_root), selected, n_selected, findings, n_findings)
-        call lint_compiler(trim(scan_root), warnings, n_warnings, selected)
-        call lint_dedup_warnings(warnings, n_warnings)
-        deep_count = 0
-        deep_status = 0
-        deep_json = '[]'
-        deep_error = ''
-        if (deep) call lint_deep_run(trim(scan_root), selected, n_selected, &
-            deep_json, deep_count, deep_status, deep_error)
-
-        if (json_mode) then
-            if (deep) then
-                write (output_unit, '(a)') lint_all_json(findings, n_findings, &
-                    warnings, n_warnings, deep_json, deep_count, deep_error)
-            else
-                write (output_unit, '(a)') &
-                    lint_all_json(findings, n_findings, warnings, n_warnings)
-            end if
-        else if (n_findings + n_warnings + deep_count == 0 .and. deep_status == 0) then
-            write (output_unit, '(a)') 'no issues found'
-        else
-            do i = 1, n_findings
-                write (output_unit, '(a,a,i0,a,a,a,a)') &
-                    trim(findings(i)%file), ':', findings(i)%line, &
-                    ': unused import ', trim(findings(i)%symbol), &
-                    ' from ', trim(findings(i)%module_name)
-            end do
-            do i = 1, n_warnings
-                write (output_unit, '(a,a,i0,a,i0,a,a)') &
-                    trim(warnings(i)%file), ':', warnings(i)%line, &
-                    ':', warnings(i)%column, ': ', &
-                    trim(warnings(i)%message)
-            end do
-            if (deep_count > 0) call lint_deep_print(deep_json)
-            if (len(deep_error) > 0) write (error_unit, '(a)') deep_error
-            if (any_unused_dummy(warnings, n_warnings)) &
-                write (output_unit, '(a)') &
-                'hint: an intentionally unused dummy argument (e.g. an interface'// &
-                '-mandated callback parameter) can be silenced with'// &
-                ' `associate (unused => arg); end associate`'
-            write (output_unit, '(i0,a,i0,a)') &
-                n_findings, ' unused import(s), ', &
-                n_warnings, ' compiler warning(s)'
-            if (deep) write (output_unit, '(i0,a)') deep_count, ' deep diagnostic(s)'
-        end if
-        if (deep_status > 1) call process_exit(2)
-        if (n_findings + n_warnings > 0 .or. deep_status == 1) call process_exit(1)
+        call command_lint('.', selected(:n_selected), deep, fix, json_mode, text, &
+            deep_report, tail, err_text, exitcode)
+        if (len(text) > 0) write (output_unit, '(a)', advance='no') text
+        if (len(deep_report) > 0) call lint_deep_print(deep_report)
+        call emit_command(tail, err_text, exitcode)
     end subroutine cmd_lint
-
-    logical function any_unused_dummy(warnings, n)
-        use fo_lint, only: lint_warning_t
-        type(lint_warning_t), intent(in) :: warnings(:)
-        integer, intent(in) :: n
-        integer :: i
-        any_unused_dummy = .false.
-        do i = 1, n
-            if (index(warnings(i)%message, 'Unused dummy argument') > 0) then
-                any_unused_dummy = .true.
-                return
-            end if
-        end do
-    end function any_unused_dummy
 
     subroutine cmd_fmt()
         integer :: exitcode, selection
@@ -2076,10 +1767,9 @@ contains
     end subroutine cmd_fmt
 
     subroutine cmd_install()
-        type(backend_t) :: b
         character(len=256) :: prefix
-        character(len=512) :: home, error_message
-        character(len=2048) :: message
+        character(len=512) :: error_message
+        character(len=:), allocatable :: text, err_text
         integer :: exitcode, status
 
         call parse_install_args(prefix, error_message, status)
@@ -2089,18 +1779,8 @@ contains
             call process_exit(2)
         end if
 
-        b = detect_backend('.')
-        if (b%kind == BACKEND_NONE) then
-            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
-            call process_exit(1)
-        end if
-
-        call install_native_executables(b, trim(prefix), message, exitcode)
-        if (exitcode /= 0) then
-            write (error_unit, '(a)') trim(message)
-            call process_exit(1)
-        end if
-        write (output_unit, '(a)') trim(message)
+        call command_install('.', trim(prefix), text, err_text, exitcode)
+        call emit_command(text, err_text, exitcode)
     end subroutine cmd_install
 
     subroutine parse_install_args(prefix, error_message, exitcode)
@@ -2162,14 +1842,13 @@ contains
     end subroutine parse_install_args
 
     subroutine cmd_clean()
-        use fo_cache, only: cache_store_root
-        use fo_build_backend, only: backend_clean
         use fo_clean_stale, only: clean_stale_run, CLEAN_STALE_DEFAULT_KEEP
         type(backend_t) :: b
-        character(len=512) :: store_root, arg
-        integer :: i, n_removed, keep
+        character(len=512) :: arg
+        integer :: i, n_removed, exitcode, keep
         integer(8) :: freed_bytes
-        logical :: purge_store, stale_only, build_removed, store_removed
+        logical :: purge_store, stale_only
+        character(len=:), allocatable :: text
         logical :: want_help
 
         ! `--help` must never reach the destructive path below. The flag loop
@@ -2238,18 +1917,8 @@ contains
             return
         end if
 
-        call cache_store_root(store_root)
-        b = detect_backend('.')
-        call backend_clean(trim(b%project_dir), purge_store, build_removed, &
-            store_removed)
-        if (build_removed) write (output_unit, '(a,a)') 'build tree cleared: ', &
-            trim(b%project_dir)//'/build'
-        if (store_removed) then
-            write (output_unit, '(a,a)') 'cache cleared: ', trim(store_root)
-        else
-            write (output_unit, '(a)') &
-                'cache kept (shared store); use `fo clean --cache` to purge it'
-        end if
+        call command_clean('.', purge_store, text, exitcode)
+        call emit_command(text, '', exitcode)
     end subroutine cmd_clean
 
     subroutine cmd_update()
@@ -2275,56 +1944,22 @@ contains
     end subroutine cmd_update
 
     subroutine cmd_info()
-        use fo_capabilities, only: capabilities_t, detect_capabilities, &
-            capabilities_text, capabilities_json
-        use fo_cache, only: cache_schema, cache_store_root
-        type(scan_unit_t), allocatable :: units(:)
-        type(dag_t) :: dag
-        type(backend_t) :: b
-        character(len=512) :: scan_root
-        integer :: n_units, ierr
-        logical :: show_caps
-        type(capabilities_t) :: cap
-        character(len=512) :: cache_text
+        character(len=:), allocatable :: text
+        integer :: exitcode
 
-        allocate (units(MAX_UNITS))
-        b = detect_backend('.')
-        scan_root = '.'
-        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-
-        show_caps = has_arg('--capabilities')
-
-        if (show_caps) then
-            call detect_capabilities(cap)
-            block
-                character(len=2048) :: text
-                call capabilities_text(cap, text)
-                write (output_unit, '(a)') trim(text)
-            end block
-            return
-        end if
-
-        select case (b%kind)
-        case (BACKEND_NATIVE)
-            write (output_unit, '(a)') 'backend: native'
-        case (BACKEND_CMAKE)
-            write (output_unit, '(a)') 'backend: cmake'
-        case default
-            write (output_unit, '(a)') 'backend: none'
-        end select
-        call cache_schema(cache_text)
-        write (output_unit, '(a,a)') 'cache-schema: ', trim(cache_text)
-        call cache_store_root(cache_text)
-        write (output_unit, '(a,a)') 'cache-root: ', trim(cache_text)
-        write (output_unit, '(a)') 'cache-shards: 256'
-
-        call scan_dir(trim(scan_root), units, n_units, ierr)
-        if (ierr == 0) then
-            call build_dag_from_units(units, n_units, dag)
-            write (output_unit, '(a,i0)') 'files: ', n_units
-            write (output_unit, '(a,i0)') 'modules: ', dag%n_nodes
-        end if
+        call command_info('.', has_arg('--capabilities'), text, exitcode)
+        call emit_command(text, '', exitcode)
     end subroutine cmd_info
+
+    subroutine emit_command(text, err_text, exitcode)
+        !! Print a command's stdout and stderr texts and apply its exit code.
+        character(len=*), intent(in) :: text, err_text
+        integer, intent(in) :: exitcode
+
+        if (len(text) > 0) write (output_unit, '(a)', advance='no') text
+        if (len(err_text) > 0) write (error_unit, '(a)', advance='no') err_text
+        if (exitcode /= 0) call process_exit(exitcode)
+    end subroutine emit_command
 
     subroutine cmd_watch()
         use fo_watch, only: watch_loop

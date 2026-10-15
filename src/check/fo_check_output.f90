@@ -1,7 +1,10 @@
 module fo_check_output
-    use fo_util, only: json_bool, json_int
-    use fx_json_build, only: json_escape_string
     use fo_check, only: check_result_t
+    use fo_json_object, only: json_value_raw
+    use fx_json_build, only: json_builder_t, json_new, json_object_start, &
+        json_object_end, json_array_start, json_array_end, json_key, &
+        json_value_string, json_key_string, json_key_int, json_key_bool, &
+        json_to_string
     implicit none
     private
     public :: check_result_text
@@ -55,119 +58,93 @@ contains
         end if
     end function check_result_text
 
-    function failed_tests_json(res) result(s)
-        !! Every failing test target by name, so an agent sees the full set in
-        !! one call instead of only the primary diagnostic.
+    subroutine compact_members(jb, res)
+        !! The members of the compact object, inside an open object.
+        type(json_builder_t), intent(inout) :: jb
         type(check_result_t), intent(in) :: res
-        character(len=:), allocatable :: s
+        character(len=32) :: elapsed
         integer :: i
 
-        if (res%n_failed_tests == 0) then
-            s = ''
-            return
+        write (elapsed, '(f12.3)') res%elapsed
+        call json_key_bool(jb, 'ok', res%build_ok .and. res%tests_ok)
+        call json_key_string(jb, 'stage', trim(res%stage))
+        call json_key_string(jb, 'target', trim(res%target))
+        call json_key_string(jb, 'summary', trim(agent_summary(res)))
+        call json_key_string(jb, 'hint', trim(res%hint))
+        call json_key_string(jb, 'rerun', trim(res%rerun))
+        call json_key_string(jb, 'log_path', trim(res%log_path))
+        call json_key(jb, 'elapsed_s')
+        call json_value_raw(jb, trim(adjustl(elapsed)))
+        call json_key_int(jb, 'modules', res%n_modules)
+        call json_key_int(jb, 'cached', res%n_cached)
+        call json_key_int(jb, 'changed', res%n_changed)
+        ! Every test and every failing test by name, so an agent sees the full
+        ! set in one call instead of only the primary diagnostic.
+        if (res%n_test_results > 0) then
+            call json_key(jb, 'tests')
+            call json_array_start(jb)
+            do i = 1, res%n_test_results
+                call json_object_start(jb)
+                call json_key_string(jb, 'name', trim(res%test_results(i)%name))
+                call json_key_string(jb, 'status', trim(res%test_results(i)%status))
+                call json_key_int(jb, 'pass', res%test_results(i)%n_pass)
+                call json_key_int(jb, 'fail', res%test_results(i)%n_fail)
+                call json_object_end(jb)
+            end do
+            call json_array_end(jb)
         end if
-        s = ',"failed_tests":['
-        do i = 1, res%n_failed_tests
-            if (i > 1) s = trim(s)//','
-            s = trim(s)//'"'//trim(json_escape_string(res%failed_tests(i)))//'"'
-        end do
-        s = trim(s)//']'
-    end function failed_tests_json
-
-    function test_results_json(res) result(s)
-        type(check_result_t), intent(in) :: res
-        character(len=:), allocatable :: s
-
-        integer :: i
-
-        if (res%n_test_results == 0) then
-            s = ''
-            return
+        if (res%n_failed_tests > 0) then
+            call json_key(jb, 'failed_tests')
+            call json_array_start(jb)
+            do i = 1, res%n_failed_tests
+                call json_value_string(jb, trim(res%failed_tests(i)))
+            end do
+            call json_array_end(jb)
         end if
-        s = ',"tests":['
-        do i = 1, res%n_test_results
-            if (i > 1) s = trim(s)//','
-            s = trim(s)//'{"name":"'// &
-                trim(json_escape_string(res%test_results(i)%name))//'"'
-            s = trim(s)//',"status":"'// &
-                trim(res%test_results(i)%status)//'"'
-            s = trim(s)//',"pass":'//trim(json_int(res%test_results(i)%n_pass))
-            s = trim(s)//',"fail":'//trim(json_int(res%test_results(i)%n_fail))
-            s = trim(s)//'}'
-        end do
-        s = trim(s)//']'
-    end function test_results_json
+    end subroutine compact_members
 
     function check_result_compact_json(res) result(line)
         type(check_result_t), intent(in) :: res
         character(len=:), allocatable :: line
+        type(json_builder_t) :: jb
 
-        character(len=:), allocatable :: base
-
-        base = make_agent_json(res)
-        line = base(1:len_trim(base) - 1)
-        line = trim(line)//trim(test_results_json(res))// &
-            trim(failed_tests_json(res))//'}'
+        jb = json_new()
+        call json_object_start(jb)
+        call compact_members(jb, res)
+        call json_object_end(jb)
+        line = json_to_string(jb)
     end function check_result_compact_json
 
     function check_result_full_json(res, cap_json_str) result(line)
         type(check_result_t), intent(in) :: res
         character(len=*), intent(in) :: cap_json_str
         character(len=:), allocatable :: line
+        type(json_builder_t) :: jb
 
-        character(len=:), allocatable :: base
-
-        base = check_result_compact_json(res)
-        line = base(1:len_trim(base) - 1)
-        if (res%build_ok .and. res%tests_ok) then
-            line = trim(line)//',"diagnostics":[]'
-        else
-            line = trim(line)//',"diagnostics":[{"kind":"'// &
-                trim(json_escape_string(res%stage))//'"'
-            if (len_trim(res%diag_file) > 0) then
-                line = trim(line)//',"file":"'// &
-                    trim(json_escape_string(res%diag_file))//'"'
-            else
-                line = trim(line)//',"file":""'
-            end if
-            line = trim(line)//',"line":'//trim(json_int(res%diag_line))
-            line = trim(line)//',"column":'//trim(json_int(res%diag_column))
-            line = trim(line)//',"target":"'//trim(json_escape_string(res%target))//'"'
-            line = trim(line)//',"message":"'// &
-                trim(json_escape_string(agent_summary(res)))//'"'
-            line = trim(line)//',"hint":"'//trim(json_escape_string(res%hint))//'"'
-            line = trim(line)//',"rerun":"'//trim(json_escape_string(res%rerun))//'"}]'
+        jb = json_new()
+        call json_object_start(jb)
+        call compact_members(jb, res)
+        call json_key(jb, 'diagnostics')
+        call json_array_start(jb)
+        if (.not. (res%build_ok .and. res%tests_ok)) then
+            call json_object_start(jb)
+            call json_key_string(jb, 'kind', trim(res%stage))
+            call json_key_string(jb, 'file', trim(res%diag_file))
+            call json_key_int(jb, 'line', res%diag_line)
+            call json_key_int(jb, 'column', res%diag_column)
+            call json_key_string(jb, 'target', trim(res%target))
+            call json_key_string(jb, 'message', trim(agent_summary(res)))
+            call json_key_string(jb, 'hint', trim(res%hint))
+            call json_key_string(jb, 'rerun', trim(res%rerun))
+            call json_object_end(jb)
         end if
+        call json_array_end(jb)
         if (len_trim(cap_json_str) > 0) then
-            line = trim(line)//',"capabilities":'//trim(cap_json_str)//'}'
-        else
-            line = trim(line)//'}'
+            call json_key(jb, 'capabilities')
+            call json_value_raw(jb, trim(cap_json_str))
         end if
+        call json_object_end(jb)
+        line = json_to_string(jb)
     end function check_result_full_json
-
-    function make_agent_json(res) result(line)
-        type(check_result_t), intent(in) :: res
-        character(len=:), allocatable :: line
-
-        character(len=32) :: elapsed
-        logical :: ok
-
-        ok = res%build_ok .and. res%tests_ok
-        write (elapsed, '(f12.3)') res%elapsed
-
-        line = '{'
-        line = trim(line)//'"ok":'//trim(json_bool(ok))
-        line = trim(line)//',"stage":"'//trim(json_escape_string(res%stage))//'"'
-        line = trim(line)//',"target":"'//trim(json_escape_string(res%target))//'"'
-        line = trim(line)//',"summary":"'//trim(json_escape_string(agent_summary(res)))//'"'
-        line = trim(line)//',"hint":"'//trim(json_escape_string(res%hint))//'"'
-        line = trim(line)//',"rerun":"'//trim(json_escape_string(res%rerun))//'"'
-        line = trim(line)//',"log_path":"'//trim(json_escape_string(res%log_path))//'"'
-        line = trim(line)//',"elapsed_s":'//trim(adjustl(elapsed))
-        line = trim(line)//',"modules":'//trim(json_int(res%n_modules))
-        line = trim(line)//',"cached":'//trim(json_int(res%n_cached))
-        line = trim(line)//',"changed":'//trim(json_int(res%n_changed))
-        line = trim(line)//'}'
-    end function make_agent_json
 
 end module fo_check_output
