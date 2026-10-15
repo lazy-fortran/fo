@@ -10,8 +10,9 @@ module fo_generation_manifest
         immutable_store_root_set, immutable_store_reason_release, &
         immutable_store_lease_release, &
         immutable_store_materialize_blob, &
-        immutable_store_materialize_blob_ephemeral, IMMUTABLE_MATERIALIZE_COPY, &
-        IMMUTABLE_OK
+        immutable_store_materialize_blob_ephemeral, IMMUTABLE_MATERIALIZE_AUTO, &
+        IMMUTABLE_MATERIALIZE_COPY, immutable_store_verify_blob, IMMUTABLE_OK
+    use fx_immutable_owned, only: owned_hash_fd
     use fx_immutable_tree, only: immutable_store_put_tree
     use fx_immutable_manifest, only: immutable_entries_canonical, &
         immutable_manifest_serialize
@@ -46,6 +47,10 @@ module fo_generation_manifest
     public :: generation_manifest_materialize
     public :: generation_manifest_execution_identity
     public :: generation_manifest_release
+    public :: generation_manifest_materialize_stats
+
+    ! Bundle blobs shared by block clone versus byte-copied since the last reset.
+    integer, save :: cloned_blobs = 0, copied_blobs = 0
 
     interface
         integer(c_int) function fo_c_generation_create_link(path, target, relative) &
@@ -62,6 +67,20 @@ module fo_generation_manifest
             character(kind=c_char), intent(in) :: destination(*)
             integer(c_long_long), value :: expected_device, expected_inode
         end function fo_c_generation_capture_file
+
+        integer(c_int) function fo_c_generation_open_input(root, relative, &
+                expected_device, expected_inode) &
+                bind(C, name='fo_c_generation_open_input')
+            import :: c_char, c_int, c_long_long
+            character(kind=c_char), intent(in) :: root(*), relative(*)
+            integer(c_long_long), value :: expected_device, expected_inode
+        end function fo_c_generation_open_input
+
+        integer(c_int) function fo_c_generation_close_fd(fd) &
+                bind(C, name='fo_c_generation_close_fd')
+            import :: c_int
+            integer(c_int), value :: fd
+        end function fo_c_generation_close_fd
     end interface
 
 contains
@@ -88,7 +107,7 @@ contains
         character(len=:), allocatable :: tree_manifest
         character(len=PATH_LEN) :: manifest_path, source_path, temp_payload
         integer :: status, i, j, n_ids, lease_status, root_index
-        logical :: seen
+        logical :: seen, already_stored, input_changed
         integer(c_int) :: capture_status
 
         manifest_id = ''
@@ -216,6 +235,18 @@ contains
             call inventory_source_path(inventory, inventory%entries(i), &
                 root_index, source_path, status, message)
             if (status /= 0) exit
+            ! Hash through the same descriptor-rooted open first: a blob the
+            ! store already holds needs no temporary payload copy.
+            call input_blob_present(store, inventory, i, root_index, &
+                already_stored, input_changed)
+            if (input_changed) then
+                status = 1
+                message = 'input changed while its content blob was captured: '// &
+                    trim(inventory%entries(i)%root_alias)//':'// &
+                    trim(inventory%entries(i)%relative_path)
+                exit
+            end if
+            if (already_stored) cycle
             call make_tmpfile('fo-generation-payload', temp_payload)
             capture_status = fo_c_generation_capture_file( &
                 trim(inventory%roots(root_index)%physical_path)//c_null_char, &
@@ -287,6 +318,39 @@ contains
         end if
         ierr = 0
     end subroutine generation_manifest_capture
+
+    !! Present means the descriptor-rooted bytes hash to the inventory digest and
+    !! the store already holds a verified blob of that id. A digest mismatch is
+    !! reported as changed; an unreadable input falls back to the copying path,
+    !! which reports the capture failure.
+    subroutine input_blob_present(store, inventory, entry_index, root_index, &
+            present, changed)
+        type(immutable_store_t), intent(in) :: store
+        type(input_inventory_t), intent(in) :: inventory
+        integer, intent(in) :: entry_index, root_index
+        logical, intent(out) :: present, changed
+        character(len=HASH_LEN) :: digest
+        integer(c_int) :: fd
+        integer :: hash_status, verify_status
+
+        present = .false.
+        changed = .false.
+        fd = fo_c_generation_open_input( &
+            trim(inventory%roots(root_index)%physical_path)//c_null_char, &
+            trim(inventory%entries(entry_index)%relative_path)//c_null_char, &
+            inventory%roots(root_index)%device, &
+            inventory%roots(root_index)%inode)
+        if (fd < 0) return
+        call owned_hash_fd(fd, digest, hash_status)
+        if (fo_c_generation_close_fd(fd) /= 0) return
+        if (hash_status /= IMMUTABLE_OK) return
+        if (digest /= inventory%entries(entry_index)%content_digest) then
+            changed = .true.
+            return
+        end if
+        call immutable_store_verify_blob(store, digest, verify_status)
+        present = verify_status == IMMUTABLE_OK
+    end subroutine input_blob_present
 
     subroutine generation_manifest_release(store_root, generation_id, root_owner, &
             ierr)
@@ -853,7 +917,14 @@ contains
                     call immutable_store_materialize_blob_ephemeral(store, &
                         trim(inventory%entries(i)%content_digest), &
                         trim(destination), inventory%entries(i)%mode, &
-                        IMMUTABLE_MATERIALIZE_COPY, used_clone, status)
+                        IMMUTABLE_MATERIALIZE_AUTO, used_clone, status)
+                    if (status == IMMUTABLE_OK) then
+                        if (used_clone) then
+                            cloned_blobs = cloned_blobs + 1
+                        else
+                            copied_blobs = copied_blobs + 1
+                        end if
+                    end if
                     if (status /= IMMUTABLE_OK) then
                         message = 'cannot materialize generation input blob: '// &
                             trim(inventory%entries(i)%root_alias)//':'// &
@@ -880,6 +951,20 @@ contains
         end do
         ierr = 0
     end subroutine generation_manifest_materialize
+
+    !! Native oracle for warm-generation cost: how many bundle blobs the
+    !! materializer shared by clone and how many it had to byte-copy.
+    subroutine generation_manifest_materialize_stats(reset, cloned, copied)
+        logical, intent(in) :: reset
+        integer, intent(out) :: cloned, copied
+
+        cloned = cloned_blobs
+        copied = copied_blobs
+        if (reset) then
+            cloned_blobs = 0
+            copied_blobs = 0
+        end if
+    end subroutine generation_manifest_materialize_stats
 
     subroutine split_fields(line, fields, count)
         character(len=*), intent(in) :: line

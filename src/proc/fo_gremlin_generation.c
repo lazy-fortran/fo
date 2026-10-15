@@ -7,6 +7,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#if defined(__APPLE__)
+#include <sys/clonefile.h>
+#elif defined(__linux__)
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#endif
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -24,6 +30,21 @@ static atomic_ulong generation_copy_sync_count;
 unsigned long fo_c_generation_copy_sync_count(int reset) {
     if (reset) return atomic_exchange(&generation_copy_sync_count, 0);
     return atomic_load(&generation_copy_sync_count);
+}
+
+/* Bytes physically written by read/write copies and files shared by block
+ * clone; the clone path writes no data. Native oracles for warm-view cost. */
+static atomic_ulong generation_copy_bytes;
+static atomic_ulong generation_clone_count;
+
+unsigned long fo_c_generation_copy_bytes(int reset) {
+    if (reset) return atomic_exchange(&generation_copy_bytes, 0);
+    return atomic_load(&generation_copy_bytes);
+}
+
+unsigned long fo_c_generation_clone_count(int reset) {
+    if (reset) return atomic_exchange(&generation_clone_count, 0);
+    return atomic_load(&generation_clone_count);
 }
 
 #define FO_GENERATION_FORTRAN_PATH_LEN 4096
@@ -351,6 +372,31 @@ static int list_names(int dir_fd, struct name_list *names) {
     return 0;
 }
 
+/* Share the source's data blocks (APFS clonefile, Linux FICLONE) instead of
+ * writing them. Returns 0 with the target created, or -1 with nothing left
+ * behind so the caller falls back to a byte copy. The new file is private:
+ * later writes to either side are copy-on-write. */
+static int clone_regular_file(int input, const char *target) {
+#if defined(__APPLE__)
+    return fclonefileat(input, AT_FDCWD, target, CLONE_NOOWNERCOPY);
+#elif defined(__linux__) && defined(FICLONE)
+    int output = open(target, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (output < 0) return -1;
+    if (ioctl(output, FICLONE, input) != 0) {
+        int saved = errno;
+        close(output);
+        unlink(target);
+        errno = saved;
+        return -1;
+    }
+    return close(output);
+#else
+    (void)input;
+    (void)target;
+    return -1;
+#endif
+}
+
 static int copy_regular_file(int input, const char *target,
                              const struct stat *before, mode_t output_mode,
                              int sync_output) {
@@ -358,10 +404,27 @@ static int copy_regular_file(int input, const char *target,
     char buffer[65536];
     ssize_t n;
     struct stat after;
+    /* Rebuildable copies (no durability request) share blocks when possible. */
+    if (!sync_output && clone_regular_file(input, target) == 0) {
+        if (fstat(input, &after) != 0 ||
+            before->st_size != after.st_size ||
+            before->st_mtime != after.st_mtime ||
+            before->st_ctime != after.st_ctime ||
+            before->st_ino != after.st_ino || before->st_dev != after.st_dev ||
+            chmod(target, output_mode & 0777) != 0) {
+            int saved = errno == 0 ? EAGAIN : errno;
+            unlink(target);
+            errno = saved;
+            return -1;
+        }
+        atomic_fetch_add(&generation_clone_count, 1);
+        return 0;
+    }
     output = open(target, O_WRONLY | O_CREAT | O_EXCL, output_mode & 0777);
     if (output < 0) return -1;
     while ((n = read(input, buffer, sizeof(buffer))) > 0) {
         ssize_t at = 0;
+        atomic_fetch_add(&generation_copy_bytes, (unsigned long)n);
         while (at < n) {
             ssize_t written = write(output, buffer + at, (size_t)(n - at));
             if (written < 0 && errno == EINTR) continue;
@@ -618,24 +681,27 @@ int fo_c_generation_copy_declared_file(const char *source, const char *dest,
     return 0;
 }
 
-/* Capture one inventoried file through its physical root without following
+/* Open one inventoried file through its physical root without following
  * directory or leaf symlinks. The inventory's root identity also guards ABA. */
-int fo_c_generation_capture_file(const char *root, const char *relative,
-                                 const char *destination, long long device,
-                                 long long inode) {
+static int open_inventoried_input(const char *root, const char *relative,
+                                  long long device, long long inode,
+                                  struct stat *before) {
     char copy[8192];
     char *part, *next;
-    int root_fd = -1, dir_fd = -1, input_fd = -1, rc = -1, saved;
-    struct stat root_st, before;
-    if (root == NULL || relative == NULL || destination == NULL ||
+    int root_fd = -1, dir_fd = -1, input_fd = -1, result = -1, saved;
+    struct stat root_st;
+    if (root == NULL || relative == NULL ||
         root[0] == '\0' || relative[0] == '\0' || relative[0] == '/' ||
         strlen(relative) >= sizeof(copy)) {
         errno = EINVAL;
-        return errno;
+        return -1;
     }
     strcpy(copy, relative);
 #if defined(_WIN32) && !defined(__CYGWIN__)
-    if (strchr(relative, '\\') || strchr(relative, ':')) return EINVAL;
+    if (strchr(relative, '\\') || strchr(relative, ':')) {
+        errno = EINVAL;
+        return -1;
+    }
 #endif
     for (part = copy; *part != '\0';) {
         next = strchr(part, '/');
@@ -643,7 +709,7 @@ int fo_c_generation_capture_file(const char *root, const char *relative,
         if (*part == '\0' || strcmp(part, ".") == 0 ||
             strcmp(part, "..") == 0) {
             errno = EINVAL;
-            return errno;
+            return -1;
         }
         if (next == NULL) break;
         *next = '/';
@@ -675,17 +741,50 @@ int fo_c_generation_capture_file(const char *root, const char *relative,
     }
     input_fd = openat(dir_fd, part, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (input_fd < 0) goto done;
-    if (fstat(input_fd, &before) != 0 || !S_ISREG(before.st_mode)) {
+    if (fstat(input_fd, before) != 0 || !S_ISREG(before->st_mode)) {
         errno = EINVAL;
         goto done;
     }
-    rc = copy_regular_file(input_fd, destination, &before,
-                           before.st_mode & 0777, 0);
+    result = input_fd;
+    input_fd = -1;
 done:
     saved = errno;
     if (input_fd >= 0) close(input_fd);
     if (dir_fd >= 0) close(dir_fd);
     if (root_fd >= 0) close(root_fd);
+    errno = saved;
+    return result;
+}
+
+/* Descriptor for hashing an inventoried file in place; release it with
+ * fo_c_generation_close_fd. Returns the descriptor or a negative errno. */
+int fo_c_generation_open_input(const char *root, const char *relative,
+                               long long device, long long inode) {
+    struct stat before;
+    int fd = open_inventoried_input(root, relative, device, inode, &before);
+    return fd >= 0 ? fd : -(errno == 0 ? 1 : errno);
+}
+
+int fo_c_generation_close_fd(int fd) {
+    return close(fd);
+}
+
+/* Capture one inventoried file into a private temporary file. */
+int fo_c_generation_capture_file(const char *root, const char *relative,
+                                 const char *destination, long long device,
+                                 long long inode) {
+    struct stat before;
+    int input_fd, rc, saved;
+    if (destination == NULL) {
+        errno = EINVAL;
+        return errno;
+    }
+    input_fd = open_inventoried_input(root, relative, device, inode, &before);
+    if (input_fd < 0) return errno == 0 ? 1 : errno;
+    rc = copy_regular_file(input_fd, destination, &before,
+                           before.st_mode & 0777, 0);
+    saved = errno;
+    close(input_fd);
     if (rc != 0) unlink(destination);
     errno = saved;
     return rc == 0 ? 0 : (errno == 0 ? 1 : errno);
