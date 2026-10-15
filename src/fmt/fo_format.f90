@@ -292,6 +292,7 @@ contains
 
         low = to_lower(masked)
         call rstrip(low)
+        call strip_construct_name(low)
         n = len_trim(low)
         if (n == 0) return
 
@@ -446,6 +447,32 @@ contains
             opens = 1; return
         end if
     end subroutine classify_line
+
+    ! Remove a leading construct name ("outer: if (...) then") so the block
+    ! keyword is classified as if it were unnamed. A "::" is not a construct
+    ! name separator, and neither is a colon inside parentheses.
+    subroutine strip_construct_name(low)
+        character(len=*), intent(inout) :: low
+        integer :: i, n, c
+
+        n = len_trim(low)
+        i = 1
+        do while (i <= n)
+            c = iachar(low(i:i))
+            if (.not. ((c >= 97 .and. c <= 122) .or. c == 95 .or. &
+                (i > 1 .and. c >= 48 .and. c <= 57))) exit
+            i = i + 1
+        end do
+        if (i == 1) return
+        do while (i <= n)
+            if (low(i:i) /= ' ') exit
+            i = i + 1
+        end do
+        if (i >= n) return
+        if (low(i:i) /= ':') return
+        if (low(i + 1:i + 1) == ':') return
+        low = adjustl(low(i + 1:))
+    end subroutine strip_construct_name
 
     ! Apply indent to content and comment, write result to out_line.
     subroutine apply_indent(content, comment, level, indent_width, out_line)

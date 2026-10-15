@@ -25,6 +25,7 @@ program test_fmt
     call test_procedure_words_in_assignments()
     call test_procedure_keyword_after_embedded_suffix()
     call test_continued_character_literals()
+    call test_named_constructs()
 
     write (output_unit, '(a,i0,a,i0,a)') 'fmt: ', n_pass, ' pass, ', n_fail, ' fail'
     if (n_fail > 0) stop 1
@@ -298,6 +299,44 @@ contains
         call assert(trim(out(9)) == '    y = 3', 'mlif: no drift after end if')
         call assert(trim(out(10)) == 'end subroutine s', 'mlif: end subroutine at 0')
     end subroutine test_multiline_if_then
+
+    subroutine test_named_constructs()
+        character(len=MAX_LINE_LEN) :: out(18)
+        integer :: n_out
+        character(len=64) :: inp(18)
+        inp(1) = 'subroutine s(n, x)'
+        inp(2) = 'outer: if (n > 0) then'
+        inp(3) = 'inner: do i = 1, n'
+        inp(4) = 'if (x(i) > 2) cycle inner'
+        inp(5) = 'end do inner'
+        inp(6) = 'else if (n < 0) then outer'
+        inp(7) = 'x = 1'
+        inp(8) = 'else outer'
+        inp(9) = 'x = 2'
+        inp(10) = 'end if outer'
+        inp(11) = 'sel: select case (n)'
+        inp(12) = 'case (1) sel'
+        inp(13) = 'x(1) = 0'
+        inp(14) = 'end select sel'
+        inp(15) = 'integer :: a, b'
+        inp(16) = 'y(1:2) = 0'
+        inp(17) = 'end subroutine s'
+        inp(18) = ''
+        call fmt(inp, 18, out, n_out)
+        call assert(trim(out(3)) == '        inner: do i = 1, n', 'named: do in named if')
+        call assert(trim(out(4)) == '            if (x(i) > 2) cycle inner', 'named: do body')
+        call assert(trim(out(5)) == '        end do inner', 'named: end do name')
+        call assert(trim(out(6)) == '    else if (n < 0) then outer', 'named: else if')
+        call assert(trim(out(7)) == '        x = 1', 'named: else if body')
+        call assert(trim(out(10)) == '    end if outer', 'named: end if aligned')
+        call assert(trim(out(11)) == '    sel: select case (n)', 'named: no drift')
+        call assert(trim(out(12)) == '    case (1) sel', 'named: case at select level')
+        call assert(trim(out(13)) == '        x(1) = 0', 'named: case body')
+        call assert(trim(out(14)) == '    end select sel', 'named: end select')
+        call assert(trim(out(15)) == '    integer :: a, b', 'named: double colon unaffected')
+        call assert(trim(out(16)) == '    y(1:2) = 0', 'named: section colon unaffected')
+        call assert(trim(out(17)) == 'end subroutine s', 'named: back to level 0')
+    end subroutine test_named_constructs
 
     subroutine test_comment_only_line()
         character(len=MAX_LINE_LEN) :: out(6)
