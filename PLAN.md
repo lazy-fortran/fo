@@ -1,336 +1,202 @@
 # Fo delivery goals
 
-Updated 2026-10-09; current development-support delivery and retained backlog.
-Issues define observable success; this plan orders delivery.
-Apply [goals and architectural freedom](doc/GOAL_DRIVEN_DEVELOPMENT.md), choose
-the smallest complete change, and preserve supported behavior and independent
+Updated 2026-10-15 from a full audit of every open issue at main `342da71`.
+Issues define observable success and this plan orders delivery. Apply
+[goals and architectural freedom](doc/GOAL_DRIVEN_DEVELOPMENT.md), choose the
+smallest complete change, and preserve supported behaviour and independent
 failure detection. The workspace master plan, when present, owns delivery order.
 
-## Current delivery
+## Destination
 
-The 2026-10-15 project-model integration delivers scoped Gremlin lanes
-(`-L`, `-LE`, `--layer`) and lane-local PASS receipt reuse keyed by each case's
-input closure. The combined scoped-edit regression failed before the integration
-repair and passes on immutable driver
-`2e6392ba836aabf9489c85dec6971f77247429536521121e9b69b47532e37333`:
-`test_gremlin_case_reuse` passes all FPM, CMake and scoped-CMake scenarios in
-24.90 seconds. The repair intersects model-wide impact with the lane inventory.
-Saved G3/A2 focused evidence remains valid for unchanged paths; no full suite
-was run or is required for this increment. Receipt reuse is lane-local, bounded
-by journal retention, conservative for global inputs, and unavailable without
-complete inventory/toolchain identity. Existing-generation epochs still rerun
-cases. CI uses named focused model/selection/layering/scoped correctness gates.
+Fo is the simplest, fastest and most trustworthy Fortran build and test tool
+for people and AI agents. Gremlin is its centre.
 
-Populated FetchContent sources consumed without `add_subdirectory` are now
-captured from the target inputs reported by CMake. The expanded native CMake
-resident oracle fails on the prior driver and passes on candidate
-`8121b4c6a695604664fb298ae2ea545747bf956e77954215e1cf0c2d1da3121c`;
-named CMake and input-inventory gates also pass on Linux. The original KIN6D
-consumer now builds its frozen view and passes its selected analytic GS gate.
-This is focused capture verification, not a full platform qualification.
+- **One model, any manifest.** `fpm.toml` and CMake/CTest projects enter one
+  backend-neutral project model (targets, layers, cases, labels). Selection,
+  planning, layering, impact, caching, receipts and Gremlin are implemented once.
+  Only adapters and the `build(targets)`/`run(cases)` primitives differ.
+- **Fine-grained, auto-discovered cases.** The case is the unit of selection,
+  execution, verdict, timing and cache, down to individual cases inside a test
+  executable (#217). FLAKY and SLOW are first-class verdicts, never disguised PASS.
+- **Never a false green.** A result is reused only on an exact input-closure
+  digest match (Go/Bazel rule), never because a build was cached. Unknown or
+  unclassified inputs widen selection or report incompleteness.
+- **Fast.** Interface-hash cutoff, so a body-only edit recompiles one file; one
+  build per generation; parallel cases within shared admission (#216); a warm
+  shared cache without whole-tree copies (#165).
+- **Gremlin.** A resident lane that is always correct: exact generations,
+  last-compilable retention, reproducers first, then affected, then finite
+  background coverage, then write-free quiescence until a relevant edit. Live
+  scoping by label, layer or name; cancellation of only owned work; many agents
+  and worktrees attach without interfering.
+- **AI-native and context-economical.** CLI and MCP are equal adapters over one
+  service. Output is a one-line verdict first, deltas since the last observation,
+  bounded failure excerpts with lossless paging, compact stable JSON, and typed
+  waits that return the answer (#218).
+- **Small and elegant.** No dead code, no parallel implementations, no silent
+  capacity caps (#215). Every module earns its lines (#205).
 
-The user's final instruction is to conclude/push qualified work, deploy Fo from
-main on mailuefterl, faepmac1 and faepkub4, tidy task branches/issues/plans, then
-stop and report. Broader issue implementation is suspended by that shutdown
-scope. Each host admits one heavy campaign during final verification.
+The product boundary in `CLAUDE.md` still holds: no hermetic environments,
+Nix/Spack replacement, CI/promotion engine or agent orchestrator.
 
-Deployment builds use published Fo `1c104b7`, Fx `7282d45` and FortFront
-`8eced2d`. Fx `9ec49fb` changes only a hash fixture, preserving production source
-and manifest identity. Fo-owned fixtures and orchestration have no Python/JavaScript runtime;
-the offline qualification image contains neither interpreter. Native protocol,
-process, recovery, DWARF, slow-impact and frozen-CMake oracles replace the removed
-fixtures. Resident increments completed 23/23, 13/13 and 12/12 required cases on
-their own recorded immutable generations. Canonical input capture, dependency
-C-header planning and duplicate artifact/test cleanup are delivered.
+## Current state (main `342da71`)
 
-Final main release gates pass on all three requested hosts: four scoped Linux
-cases and three each on Darwin and faepkub4, plus native C/Fortran smoke tests.
-Faepkub4 also passes warm/edit/reject/restore with zero warm project actions;
-existing per-process compiler capability probes are reported separately.
-Readonly driver/controller records and installed checks are under
-`/var/tmp/fo-complete-20261009/output`; its `FINAL-REPORT.md` records exact
-prefixes/digests and final retirement. No unqualified combined source is deployed.
+The 2026-10-15 [backend-neutral project model](doc/CMAKE_GREMLIN_PLAN.md#backend-neutral-project-model-decision-2026-10-15)
+landed in about 30 commits (`3df99aa`..`342da71`), and all four phases have code
+on main:
 
-The first faepkub4 attempts used the experimental 422-source bootstrap and failed
-at archive-object availability and allocator corruption. Both remain recorded
-RED. The newly qualified published-main Linux driver builds the native main
-release successfully; these experimental faults are not current-main evidence.
+- **P1:** model core; CMake File API and `ctest --show-only` adapter; `fo exec`
+  and `fo test` (globs, `-L`/`-LE`, `--layer`, `--list`, `--no-build`) select on
+  the model; CMake builds plan targets and runs exact cases in ctest batches.
+- **P2:** Gremlin loads the model once per generation, builds once
+  (`fo build --tests`), runs cases with `fo test --no-build`, scopes lanes by
+  label or layer, and reuses a case PASS while its input-closure digest is unchanged.
+- **P3:** `[extra.fo.layers]`, `test-groups` and `test-defaults` for fpm;
+  `fo graph --layers` on both backends.
+- **P4:** `--only-changed` against Git HEAD on both backends; CLI and MCP share it.
+- **Oracle:** a Fortran-generated twin fpm/CMake fixture checks identical
+  selections, plans and layering through `fo test` and Gremlin; CI runs the
+  bounded project-model gates.
 
-Administrative cleanup archives and removes 78 inactive local worktrees and
-390 delivery-owned local refs. Unknown/user refs, unrelated PR128, warm caches,
-unique evidence, the FFC primary edit and Windows VM/TPX remain intact. Unfinished
-draft PR212 is archived/closed and its branch removed. Task containers are
-stopped/removed; final task-owned residents are stopped before handoff.
+The model was added next to the paths it replaces. Production code is 66,082
+physical lines (+36.7% over the `8a0197d` baseline), and the remaining
+duplicates have already drifted into bugs B3 and B4 below. The interface-hash
+cutoff exists in the native build (`get_interface_key`, `fo_gfortran_build.f90`)
+but has no independent oracle yet.
 
-Archive reuse validates actual bytes, modes, object vectors and tool keys.
-`0aacb44` makes Darwin archive timestamps deterministic in the archiver child.
-`af872bb` repairs partial preparation falsely certifying stale test executables;
-Linux's four focused gates and Darwin's retained warm-cache change/reject/restore
-oracle pass. Fx `38c4591` repairs publication from paths longer than 512 bytes;
-its parent selects the wrong prefix file and the independent fixed oracle passes.
-Promotion receipts and exact driver identities are under
-`/var/tmp/fo-complete-20261009/output`.
+## Stage 1: fix every known bug
 
-`51249a6` declares the native C fixture directory and the actual headers used
-by its runtime provider. Both frozen-view portability/watch gates pass on Linux
-and Darwin. The prior Darwin full milestone retains 125 PASS, three FAIL, one
-TIMEOUT, one INFRA_ERROR, one CANCELLED and eleven UNKNOWN on its exact source;
-these outcomes remain distinct from the focused repair.
+Each repair starts with an independent negative oracle that fails on `342da71`.
+False greens and data loss come first.
 
-`32dea8e` repairs the reproduced Darwin parallel generation stack failure.
-Four local manifest configurations use the existing heap allocator. The
-unchanged generation test passes on Darwin with ordinary stack/time budgets;
-Linux generation, input-inventory and both registry gates pass. Fx `b669f31`
-repairs hashing the long Windows driver-pin path; its independent native hash
-oracle passes 127/127 and the focused Linux hash gate passes. Native MCP now
-advances past pinning; the next image-launch path repair is under qualification.
+| # | Defect | Owner |
+|---|---|---|
+| B1 | `fo fmt` truncates lines over 512 characters and deletes lines past 50,000 when rewriting | #214 |
+| B2 | CMake: edits to unclassified project files (test scripts, data, `*.in`, `.fypp`, `.pf`) select nothing and the old PASS is reused | #197 |
+| B3 | `fo check` and the `fo` pipeline treat "changed" as a compile-cache miss and report green after a warm build | #189 |
+| B4 | Module closure skips `use` statements of submodules and external units in linked libraries, so impact and digests miss them | #189 |
+| B5 | `--only-changed` misses edits in fpm path dependencies outside the project root | #189 |
+| B6 | Gremlin's first `--only-changed` generation uses cache misses (fpm) or all cases (CMake) instead of the model delta | #189 |
+| B7 | Source scanner skips `dependencies`, `_deps`, `venv` and other directories at any depth, and `build*`/`SRC` at the root, unlike FPM | #186 |
+| B8 | Silent truncation: Fx DAG 2,048 nodes, 8,192 scanned units, 512-character scan paths, 4,096-character `-I` list, manifest arrays and flags | #215 |
+| B9 | MCP lint and output buffers (16,384/8,192 characters) cut JSON | #185, #215 |
+| B10 | Bare fpm `fo test` and unnamed MCP `test` ignore `[extra.fo.test-defaults] exclude` | #167 |
+| B11 | CTest names with spaces lose them in the regex (`trim(regex)//ch`) | #194 |
+| B12 | Unknown top-level `fpm.toml` sections are silently ignored | #201 |
+| B13 | `gremlin reproduce` waits for its build without a time bound or stop check while holding the heavy-work slot | #139 |
+| B14 | Journal compaction to 512 records discards reusable PASS receipts in projects with more than about 512 cases | #140 |
+| B15 | A CMake header listed by a target the consumer does not link reaches only that target's cases | #197 |
+| B16 | Malformed MCP/Gremlin cursor values silently become 0 | #150 |
+| B17 | `fo_scaffold`/`fo_doc` shell out with unquoted paths | #163 |
+| B18 | An idle lane with a wait ticket writes 16 bytes every 100 ms | #155 |
+| B19 | The slow rule is name-based in coverage and the CLI but a label in the model, so CMake `slow` cases are counted differently | #167 |
 
-`4ce66c2` repairs two native fixture preconditions: the program-name provider
-declares its explicit interface, and stat-memo's optional alias padding respects
-the actual path capacity. Native FPM/compiler controls and the preserved
-long-root worker establish the parent faults. Both public cases pass on Linux
-and Darwin with unchanged stress counts and time budgets. These focused results
-do not combine the historical partial suite into a full fixed-version green.
+## Stage 2: one service, no duplication (#205, #167, #185, #149)
 
-The combined candidate's durable retained-TMP repair passes all five Linux and
-five Darwin view/state/reproduction/readiness/portability gates; its parent
-restart oracle loses both failed journals. This source remains unpromoted and
-archived. Owning Fx `7282d45` repairs impact's measured hash bottleneck: three
-owning cases, an explicit OpenMP hash case and the original three Fo
-check/impact/receipt cases pass. Impact passes its unchanged 10-second CPU
-budget in 13.85 seconds wall. Darwin caught a giant compile-time fixture
-constant; fixture-only `9ec49fb` preserves the independent 16 MiB + 1 byte SHA
-oracle through runtime allocation, and the original OpenMP hash case passes.
+The ranked survey of 2026-10-15 finds about 2,600 removable lines that need no
+scope decision. In order of value:
 
-The native Windows candidate now builds Fo through its pinned image with the ordinary
-2 MiB stack. The combined repair uses measured heap buffers, binary archive
-extraction, owned response files for the actual 512-object command and bounded
-PE resource validation. C/Fortran execution and the independent stale-test
-change/reject/restore oracle pass. The independent native process-group fixture
-passes, including Unicode argv, long image paths, exact peer identity and owned
-cleanup. Original MCP advances to guardian ownership readiness, then fails with
-`cannot configure exact process ownership: 5`; this is not established as Win32
-AccessDenied. The replay was cancelled during final shutdown; its complete
-source and closed fixture archive are preserved. Component and focused receipts
-retain their exact scope.
+1. One select→plan→run service on the project model, called by `cmd_test`,
+   MCP `test` and Gremlin's `discover_campaign`. It removes the random/fallback
+   paths, `backend_test`/`backend_test_names`, the cache-miss selection and
+   name-based slow checks (fixes B3, B6, B10 and B19 at the root).
+2. Delete the test-running half of `compile_and_run_tests`, which only tests
+   reach, and merge `gfortran_test`/`gfortran_test_names`.
+3. Make each MCP command (`changed`, `check`, `lint`, `graph`, `info`, `clean`,
+   `install`) a thin adapter over the CLI routine; one Gremlin option table drives
+   the CLI, the request parser and the MCP schema.
+4. Validate receipts with Fx JSON instead of the hand-written C parser. Share
+   one C helper set for write-all, fsync, atomic publish, mkdir, rm-rf, lock,
+   FNV and process identity.
+5. Replace private lowercase/path/list/table/comment helpers with Fx string,
+   path and the existing manifest parsers; route lint and fmt through `fo_lint_lex`.
+6. Remove about 215 lines with no caller, and move test-only C hooks to `test-support`.
+7. Build JSON through the Fx builder so every output is valid by construction.
 
-Current source candidates cover shared ordinary/Gremlin test execution and
-accepted execution receipts, safe retention and pressure reporting, canonical
-executable publication, native manifest arrays, cleanup history, deep lint with
-the owning Fluff repair, process environment vectors and finite native CMake
-profiles. Each needs its combined behavioral gate before publication. These
-task sources are archived for a future resumption and excluded from the main
-deployment. Full platform, standalone FPM, deep-lint and scientific profile
-matrices remain open.
+Supervisor responsibilities (`run_owner` is 617 lines) split into campaign,
+model and receipt services as these duplicates disappear (#149).
 
-The earlier development deployment remains recorded below for its exact scope.
+## Stage 3: Gremlin and tests that are a joy to use
 
-Fo source `2ac0121` and Fx `090acb4` are published on main. The Fx repair makes
-manifest encoding length metadata caller-owned: an independent Linux ASAN/OpenMP
-oracle changes from ten parse failures to zero across 20000 varied-length calls.
-The focused immutable-store test passes with eight jobs/OpenMP. The original
-Fo parallel library-include consumer passes with eight jobs on the rebuilt
-combined driver. This repairs the reproduced parser race; broader Fx #57
-warm-cache qualification remains open.
+Ideas taken from Go test caching, cargo-nextest, Bazel/Buck2, Vitest/Jest,
+pytest-testmon, ccache and ninja, mapped onto fo:
 
-Fo `2ac0121` exposes Darwin temporary-directory declarations in the benchmark
-helper; the parent fails its C compile check and the fixed source passes.
-Rebuilt release drivers are installed at `/opt/homebrew/bin/fo` locally and
-`/home/ert/.local/bin/fo` on mailuefterl. Their SHA256 digests are respectively
-`0a30bed211446db2e18b5e8253cc9b5440f86e2703d5ae09ffbb34323406f972` and
-`65e15c374cab0c92e526a77d82f9c05cc9f057b6b57ccde5e5247ff27ab66559`.
-Each build pins Fx `090acb4` in its disposable manifest; no consumer manifest
-change is committed. Original manifests, build logs and deployment receipts are
-under `/var/tmp/fo-finish-development-20261009` on each host.
+1. **Interface cutoff oracle.** A body-only edit recompiles one file and relinks;
+   an interface edit recompiles exactly its dependents.
+2. **Parallel Gremlin cases** within `FO_JOBS`, OpenMP share and heavy-lane
+   admission, with prompt supersession (#216).
+3. **Case-level discovery** inside executables; FLAKY with configurable retries
+   and a strict mode; a SLOW warning, then termination (#217).
+4. **One PASS cache** keyed by input closure for one-shot `fo test`, MCP and
+   Gremlin, replayed as `reused`, with a `--rerun` opt-out (#138, #189). It is
+   indexed by case and not limited by journal length (B14).
+5. **No undeclared-input blind spots.** Unclassified files widen or are digested;
+   compiler, flag and environment changes widen (#175, #189, #197).
+6. **One filter expression** shared by CLI, MCP and Gremlin (name, label, layer,
+   affected, failed), changeable on a live lane.
+7. **Context-economical output** (#218): summary line, deltas, bounded failures,
+   compact JSON, typed waits.
+8. **Visible progress:** completed peers appear while slow cases run; wall and
+   CPU time are attributed correctly (#130).
+9. **Cheap warm generations:** no temp copy of existing blobs, clone/reflink
+   materialisation, no second whole-tree build view (#165); retention visible in
+   CLI/MCP (#168); write-free quiescence with one end-to-end oracle (#155).
+10. **Isolation for ordinary runs:** per-test scratch and TMPDIR in one-shot
+    `fo test`, as Gremlin already has (#170, #166).
+11. **Truthful CTest evidence:** import `--output-junit` instead of scraping the
+    console; distinguish fixture-blocked cases (#195); FIXTURES, DEPENDS,
+    RESOURCE_LOCK, Unicode and duplicate-name fixtures (#194).
+12. **Optional machine outputs** for users' own CI: `--junit PATH` and
+    deterministic `--partition k/n`. No scheduler.
 
-KIN6D's registered mapped-P2 finite-forms test passes through the new Darwin
-driver. Its lint JSON exactly matches the prior verified result, with 53 existing
-findings. The Darwin immutable-store parent and fixed versions have the same
-59 existing watcher/process-fixture failures; the new concurrency regression
-passes. These focused checks do not establish full-platform green.
+Coverage-based selection (testmon style) remains an opt-in audit experiment, never default.
 
-Fourteen abandoned task-owned Linux residents and eighteen local fixture
-residents were stopped with identity checks; previous local abandoned MCP
-cleanup is retained in the deployment receipts.
-Live unrelated development/MCP sessions remain. Completed task worktrees were
-removed after preserving source bundles, patches and diagnostics. Preservation
-archives are under `worktree-preservation` and `final-worktree-preservation` in
-the evidence root; the Linux stop receipt is
-`/var/tmp/fo-deploy-20261009-linux/stopped-background-20261009.json`,
-with the final Linux and local stop receipts in the current evidence root.
+## Pending decisions
 
-Main also contains the native Win32 provider, complete multi-module cache
-artifacts, private resident scratch, absolute FPM path capture, declared
-executable directories, an opt-in native CMake slice and opt-in deep lint.
-The prior handoff baseline Fo `de85cf9`, Fx `f55e30d` and Fluff `9076ff6`
-remains available for historical reproduction. Worker assignments and old
-driver paths do not identify an active task lane.
+- **Standalone CMake destination.** The native interpreter is frozen and File
+  API is the authority. Recommendation: delete the frozen `fo_cmake_native*`
+  slice, its branches and test (about 2,000 lines) and close #192 as not planned
+  for the CMake-absent part, while keeping delegated parity under #193–#198.
+- **Product boundary of side commands.** `fo bench` (belongs under `bench/` and
+  #190), `fo doc`, `fo cover` and the FFC native route (about 1,150 lines with tests).
+- **POSIX `sh` in tests.** Accept it as a test prerequisite, or port the
+  fake-tool scripts for Windows qualification (#163).
 
-For Linux and Windows testing, SSH to **mailuefterl** (`ssh mailuefterl`).
-The source checkouts on that host are:
+## Issue map
 
-- Fo: `/home/ert/code/lazy-fortran/fo` (published `main`).
-- Fx: `/home/ert/code/lazy-fortran/fx` (published `main`).
-- FortFront: `/home/ert/code/lazy-fortran/fortfront`.
-- FFC: `/home/ert/code/lazy-fortran/ffc`; preserve its unrelated local edit.
-- Fluff: `/var/tmp/fo-fluff-reference-20261008` (published `main`).
+| Area | Issues |
+|---|---|
+| Bugs (stage 1) | #214, #215, #189, #197, #186, #167, #194, #201, #139, #140, #150, #163, #155, #185 |
+| Less code, one service | #205, #167, #185, #149, #150, #186, #184 |
+| Inputs, affected selection, PASS cache | #175, #189, #138, #197 |
+| Gremlin execution and lifecycle | #216, #155, #139, #142, #140, #166 |
+| Case-level tests and evidence | #217, #131, #130, #195, #194 |
+| Agent-facing output | #218, #185 |
+| Storage and isolation | #165, #168, #170 |
+| CMake configuration and profiles | #192, #193, #196, #198; optional #199 |
+| fpm manifest coverage | #201 |
+| Stale artifact cleanup | #129 |
+| Optional audits (never gates) | #145 (also the real-Fluff deep-lint run), #190 |
 
-Run Linux checks on mailuefterl. Its running Windows VM is `tpx-win2025`;
-use the existing authenticated WinRM helper
-`/var/tmp/fo-windows-20261008/run_winrm.py` through `127.0.0.1:15985` on that
-host. Windows scripts, source archives and receipts are under
-`/var/tmp/fo-windows-20261008`; native guest task files are under
-`C:\fo-windows-20261008`, with the isolated UCRT64 toolchain at
-`C:\fo\msys64\ucrt64`. Rebuild from the current source checkouts: earlier
-Windows archives and pinned executables precede the final combined main.
+Closed by this audit: #161 (native fixtures delivered), #211 (store-root guard
+delivered) and #59 (deep lint delivered; the real-Fluff run moved to #145).
+Every open issue has a 2026-10-15 audit comment stating what is delivered, what
+remains and the confirmed defects.
 
-The excluded allocator proposal and recovery-barrier experiment were preserved
-as bundles and patches before their task worktrees were removed. They are not
-published fixes; the parser repair above supplies the demonstrated Linux fix.
+## Working rules
 
-Remaining qualification includes resident scratch/dependency/install behavior,
-Windows handle/permission/full-suite checks, deep lint with repaired Fluff,
-native CMake against GORILLA and maintained ITpPlasma profiles, and a corrected
-recovery-barrier oracle. Existing focused receipts retain their exact scope.
-None of these broader gates is claimed complete by the development deployment.
+Only actual consumer blockers gate the next task. Publish exact locally green
+increments promptly, without waiting for GitHub CI, benchmarks or unrelated full
+coverage. Use pinned candidate copies, warm caches and a task-private TMPDIR;
+stop and remove completed task-owned lanes and worktrees after verifying
+ownership. Benchmarks and acquired-project audits are opt-in and advisory.
 
-Local evidence remains in `/var/tmp/fo-platform-controller-20261008/resumed`,
-`/var/tmp/fo-linux-compile-flags-evidence-20261008`,
-`/var/tmp/fo-deep-lint-20261008-transfer/final-worker-handoff.json`, and
-`/var/tmp/fo-windows-20261008/windows-stopped-handoff.json`. Existing source
-branches retain earlier task commits. FPM's verified include-path repair is
-[upstream PR #1339](https://github.com/fortran-lang/fpm/pull/1339).
+Linux and Windows testing runs on **mailuefterl** (`ssh mailuefterl`). Source
+checkouts: `/home/ert/code/lazy-fortran/{fo,fx,fortfront,ffc}`; preserve FFC's
+unrelated local edit. The Windows VM `tpx-win2025` is reached through
+`/var/tmp/fo-windows-20261008/run_winrm.py` via `127.0.0.1:15985`, with
+UCRT64 at `C:\fo\msys64\ucrt64`. Rebuild from current sources.
 
-## Delivered slices and remaining evidence
-
-The 2026-10-08 GitHub audit finds **36 open issues**. Unsaved-buffer LSP #56,
-formatting #117, test-only projects #188, path/Git closures #202, local registry
-#203 and initial resident dogfooding #200 are closed. Their delivered behavior
-remains available; standalone FPM manifest coverage #201 is still open.
-
-Published increments include declared-header capture/edit/frozen replay,
-PURE/ELEMENTAL submodule companion restoration, complete per-source module
-artifact vectors, native Windows adapters, private execution scratch and
-absolute FPM dependency capture. Earlier Linux/Darwin focused gates passed on
-recorded exact sources. The original Darwin Fluff submodule consumer recheck,
-broader combined-source runtime gates and full platform suites remain open.
-Historical 129/130-case counts and mixed-generation receipts do not establish
-the current inventory or complete green.
-
-Fx #57 remains open for broader warm-cache behavior. The reproduced Linux
-manifest-parser race is repaired by `090acb4` and rechecked above. The earlier
-deferred-character restoration race was repaired in Fx `63f010f`: the independent
-varied-path oracle passed 640 cold/warm pairs,
-and the original instrumented Fo parallel consumer passed with eight jobs.
-Older allocator aborts remain unattributed. That completed repair must stay
-distinct from the failed flags-preparation proposal in the current handoff.
-
-#211 remains open for the unidentified historical invalid-store-root caller.
-Fx `f9a3f76` rejects invalid roots before metadata writes; owning checks and
-focused Fo bootstrap/manifest source-cleanliness checks passed. Continued
-resident coverage and caller attribution remain necessary.
-
-FPM path-cache/archive reports [#1334](https://github.com/fortran-lang/fpm/issues/1334)
-and [#1335](https://github.com/fortran-lang/fpm/issues/1335) remain open; their
-historical Linux/Darwin warm-runtime checks passed without clearing caches.
-The separate include-directory repair is submitted as open upstream PR #1339.
-Fo's native build path remains the delivery authority.
-
-Detailed earlier source/driver identities, test selections and evidence paths
-are preserved in [the audited handoff plan](https://github.com/lazy-fortran/fo/blob/de85cf9cdb8710fab414cfae7184476c311d3b89/PLAN.md)
-and the evidence roots above. Current focused rechecks are recorded above; older
-runtime claims retain their original scope. GitHub issue states were not changed
-by this handoff.
-
-## Delivery order
-
-1. Sustain resident Fo dogfooding; repair concrete workflow blockers.
-2. Reduce duplicated maintained code through #205 alongside useful delivery.
-3. Keep FFC's FPM project and shared dispatcher usable in Gremlin. This initial
-   handoff and the three-current-compiler-defect pilot are delivered; full FFC
-   coverage and the separately owned complex SIN case remain open.
-4. Finish standalone FPM compatibility on unchanged supported manifests.
-5. Finish native CMake/CTest compatibility for the maintained ITpPlasma profiles.
-6. Build the [backend-neutral project model](doc/CMAKE_GREMLIN_PLAN.md#backend-neutral-project-model-decision-2026-10-15)
-   in phases: P1 model, CMake adapter, `fo test`/`fo exec` labels and
-   target-only builds (#193, #194); P2 Gremlin on the model (#196, #195);
-   P3 fpm `[extra.fo]` adapter and layering lint; P4 affected selection (#189,
-   #197). KIN6D is the first consumer and is an actual blocker, so this runs
-   ahead of item 5's standalone destination, which it defers.
-
-Only actual consumer blockers gate the next consumer task. Publish exact
-locally green increments promptly, without waiting for GitHub CI or unrelated
-full coverage. Use pinned candidate copies, warm caches and task-private TMPDIR;
-stop and remove completed task-owned lanes/worktrees after verifying ownership.
-
-## Product goals
-
-- The fastest practical local build/test feedback, particularly for agents and
-  worktree swarms, with serial and parallel development supported externally.
-- One-shot commands stay bounded. Gremlin provides resident edit feedback,
-  last-compilable retention, current-generation evidence, finite coverage and
-  quiescence with reliable wakeup.
-- CLI and MCP have equivalent first-class capabilities and truthful errors.
-- Correct shared reuse and inexpensive warm operation; no stale results or
-  duplicated maintenance machinery merely to share an interface.
-- Fortran-owned implementation/tests/orchestration with small C OS shims;
-  consumer/reference tools retain their own legitimate prerequisites.
-
-## Active goal owners
-
-| Outcome | Issues |
-| --- | --- |
-| Substantially less maintained code across the affected stack | #205 |
-| Resident lifecycle and exact driver behavior | #139, #142 |
-| Relevant edits and quiet completion | #155 |
-| Reliable process/session lifetimes, CLI/MCP and Darwin support | #139, #142 |
-| Durable receipts | #140 |
-| Trustworthy inputs and affected-first finite testing | #175, #189, #138 |
-| Correct shared dispatcher routing | #131 |
-| Independent writable execution and artifact coverage | #166, #170 |
-| Reusable stable generations with less storage/I/O | #165, #168 |
-| Less duplicated build, source, protocol and scheduling behavior | #149, #150, #167, #185, #186 |
-| Smaller useful native tests and no Fo-owned script runtime | #161, #163, #184 |
-| Safe cleanup, useful progress and correct timeout attribution | #129, #130 |
-| Source-clean store metadata and invalid-root rejection | #211 |
-| Remaining native FPM manifests and dependency forms | #201 |
-| Faithful native ITpPlasma profiles | #192–#198; optional reuse #199 |
-| Independent optional project/performance evidence | #145, #190 |
-| Explicit deep-lint behavior | #59 |
-
-These are goal owners, not a prescribed service/module decomposition or one
-serial dependency chain. Existing delivered behavior should be reused. Resolve
-an actual correctness defect before adding mechanisms around it.
-
-## Compatibility destinations
-
-Standalone FPM means the supported manifest, dependency, build/test/run/install
-semantics execute without installed FPM. Verify behavior against a pinned
-independent reference, including execution with FPM absent. The initial Fo/FFC
-subset and path/Git/registry/executable-install issues do not claim full parity;
-remaining required forms need explicit supported behavior or diagnostics.
-
-Standalone CMake/CTest means the required ITpPlasma profiles execute without
-CMake/CTest while preserving their project configuration, generated inputs,
-dependencies, test/fixture/resource/verdict rules and scientific options.
-[The profile goals](doc/CMAKE_GREMLIN_PLAN.md) define this finite destination.
-Delegated execution remains identified interim support. SIMPLE/NEO-2 reviews,
-golden-record requirements and production-host restrictions remain unchanged.
-
-## Evidence and maintenance
-
-Use independent public behavior and the smallest relevant focused checks on the
-exact integrated candidate. A cached compilation is not a cached test PASS.
-Build failure preserves last-compilable testing; old-generation evidence cannot
-fabricate current full green. Full fixed-version verification remains a
-completion/milestone claim, not a per-edit wait.
-
-Benchmarks and acquired-project audits are opt-in workloads outside ordinary
-coverage/quiescence. Measure real byte edits and report raw identity/timing/work
-counts. Correctness defects discovered there receive focused reproducers;
-slow measurements remain advisory.
-
-Earlier details and historical evidence remain at
-[the exact prior plan](https://github.com/lazy-fortran/fo/blob/95490c97f73e53b2b9c70a61b287bd3aa36b8d38/PLAN.md).
-They explain earlier decisions; active goals and current accepted contracts
-govern new work. Keep this plan short and update the owning issue when work moves.
+Deployment history, evidence roots, exact driver digests and earlier
+qualification records are in [the prior plan](https://github.com/lazy-fortran/fo/blob/342da71/PLAN.md).
+Keep this plan short and update the owning issue when work moves.
