@@ -393,6 +393,7 @@ contains
         type(model_layering_t) :: report
         type(model_unit_t), allocatable :: units(:)
         type(string_t), allocatable :: sources(:), uses(:)
+        type(string_t) :: base_sources(1)
         integer(int64) :: start, finish, rate
         integer :: i, k, u, ierr
         character(len=24) :: id
@@ -404,9 +405,9 @@ contains
         units(1)%path = 'src/base.f90'
         allocate(units(1)%provides(1), units(1)%uses(0))
         units(1)%provides(1)%s = 'm_base'
-        sources = [(string_t('x'), k=1, per_layer)]
         uses(1)%s = 'base'
-        call model_add_layer(m, 'base', sources=[string_t('src/base.f90')])
+        base_sources(1)%s = 'src/base.f90'
+        call model_add_layer(m, 'base', sources=base_sources)
         u = 1
         do i = 1, n_layers
             write (id, '(i0)') i
@@ -430,6 +431,12 @@ contains
         call system_clock(finish)
         seconds = real(finish - start)/real(rate)
         n_violations = size(report%violations)
+        if (n_violations == 1) then
+            call assert(report%violations(1)%source == 'src/l1_a.f90', &
+                'layering scale: planted source is reported')
+            call assert(report%violations(1)%module == 'm_2_a', &
+                'layering scale: planted module is reported')
+        end if
         call assert(report%checked == size(units), 'layering scale: every source checked')
         write (output_unit, '(a,i0,a,f7.3,a)') 'layering scale: ', n_layers, &
             ' layers ', seconds, ' s'

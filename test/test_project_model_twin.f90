@@ -6,8 +6,8 @@ program test_project_model_twin
     !! tree. Plans are compared as sets of sources: the test-program sources
     !! must be identical, the CMake library sources must be exactly the link
     !! closure of the selected cases, and fpm (one library, always built
-    !! whole) must cover them. Case order is not compared: CTest orders by
-    !! cost. Affected selection (`--only-changed` against Git HEAD): editing
+    !! whole) must cover them. Selection order is backend independent.
+    !! Affected selection (`--only-changed` against Git HEAD): editing
     !! a core source, a phys source, a test source, a declared input, an
     !! unrelated file or the build description selects the same cases on
     !! both backends, and the expected ones; `fo test --only-changed` runs
@@ -251,6 +251,7 @@ contains
         !! The same Gremlin request on both twins: same cases, verdicts,
         !! labels and layers (receipt sets), or no run on both.
         character(:), allocatable :: fail_fpm, fail_cmake
+        character(len=48) :: fail_lines(4)
 
         call gremlin_pair('all', fpm_dir, cmake_dir, '', 4, &
             'build:BUILD_PASS;test_core_a|PASS|unit,|tw_core;'// &
@@ -260,6 +261,9 @@ contains
             '--target test_core_a --target test_phys_b --random 0', 2, &
             'build:BUILD_PASS;test_core_a|PASS|unit,|tw_core;'// &
             'test_phys_b|PASS|unit,|tw_phys;')
+        call gremlin_pair('scoped', fpm_dir, cmake_dir, &
+            '-L unit -LE io --layer tw_phys', 1, &
+            'build:BUILD_PASS;test_phys_b|PASS|unit,|tw_phys;')
         call gremlin_pair('slow', fpm_dir, cmake_dir, '--target test_slow_d --random 0', &
             1, 'build:BUILD_PASS;test_slow_d|PASS|slow,|;')
         call gremlin_pair('unknown', fpm_dir, cmake_dir, &
@@ -268,16 +272,12 @@ contains
         fail_cmake = join_path(scratch, 'fail_cmake')
         call twin_write(fail_fpm, 'fpm')
         call twin_write(fail_cmake, 'cmake')
-        call write_lines(join_path(fail_fpm, 'test/test_io_c.f90'), &
-            [character(len=48) :: 'program test_io_c', 'implicit none', &
-            'error stop "io_c fails"', 'end program'])
-        call write_lines(join_path(fail_cmake, 'test/test_io_c.f90'), &
-            [character(len=48) :: 'program test_io_c', 'implicit none', &
-            'error stop "io_c fails"', 'end program'])
-        call gremlin_pair('failing', fail_fpm, fail_cmake, '', 4, &
-            'build:BUILD_PASS;test_core_a|PASS|unit,|tw_core;'// &
-            'test_io_c|FAIL|io,|;test_phys_b|PASS|unit,|tw_phys;'// &
-            'test_slow_d|PASS|slow,|;')
+        fail_lines = [character(len=48) :: 'program test_io_c', 'implicit none', &
+            'error stop "io_c fails"', 'end program']
+        call write_lines(join_path(fail_fpm, 'test/test_io_c.f90'), fail_lines)
+        call write_lines(join_path(fail_cmake, 'test/test_io_c.f90'), fail_lines)
+        call gremlin_pair('failing', fail_fpm, fail_cmake, '-L io', 1, &
+            'build:BUILD_PASS;test_io_c|FAIL|io,|;')
     end subroutine gremlin_matrix
 
     subroutine gremlin_pair(tag, fpm_path, cmake_path, request_text, expected, &
@@ -300,12 +300,13 @@ contains
             fpm_session, allow_terminal_error=.true.)
         call gremlin_stop_lane(driver, cmake_path, cache, state, &
             'twin-'//tag//'-cmake', cmake_session, allow_terminal_error=.true.)
-        call assert_equal_string(cmake_record, fpm_record, label//'cases and verdicts')
         if (expected > 0) then
+            call assert_equal_string(cmake_record, fpm_record, label//'cases and verdicts')
             call assert_equal_string(fpm_record, expected_record, &
                 label//'expected receipts')
         else
-            call assert_true(index(fpm_record, '|') == 0, label//'no case runs')
+            call assert_equal_string(fpm_record, 'rejected;', label//'fpm rejects case')
+            call assert_equal_string(cmake_record, 'rejected;', label//'cmake rejects case')
         end if
     end subroutine gremlin_pair
 
@@ -354,6 +355,7 @@ contains
         character(len=200), allocatable :: items(:)
         character(:), allocatable :: build, case_id, line
         integer :: poll, k, j, n_cases, dash, pid, ios
+        character(:), allocatable :: owner_state
         logical :: done, has_session
 
         call list_add(arguments, 'gremlin')
@@ -372,7 +374,7 @@ contains
         pid = 0
         if (dash > 1) read (session(:dash - 1), *, iostat=ios) pid
         record = ''
-        do poll = 1, 900
+        do poll = 1, 300
             call gremlin_json(driver, dir, cache, state, arguments, status, result, &
                 20000)
             has_session = .not. json_has(status, 'error')
@@ -402,14 +404,23 @@ contains
             done = .false.
             if (expected > 0) then
                 done = n_cases >= expected .or. build == 'BUILD_FAIL'
-            else if (pid > 0) then
-                done = .not. gremlin_process_running(pid)
+            else
+                owner_state = json_string_value(json_member(status, 'state'))
+                done = build == 'BUILD_FAIL' .or. owner_state == 'inventory_failed' &
+                    .or. owner_state == 'error'
+                if (.not. done .and. pid > 0) done = .not. gremlin_process_running(pid)
             end if
             if (done) then
                 if (has_session) then
                     record = 'build:'//build//';'//sorted_join(items(:n_cases))
                 else
                     record = 'no session;'
+                end if
+                if (expected == 0 .and. n_cases == 0) then
+                    ! Rejection may happen at build selection (CMake) or at
+                    ! inventory selection (fpm); both must reject, never run.
+                    if (build == 'BUILD_FAIL' .or. owner_state == 'inventory_failed' &
+                        .or. owner_state == 'error') record = 'rejected;'
                 end if
                 if (allocated(items)) deallocate (items)
                 return

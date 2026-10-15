@@ -42,6 +42,7 @@ contains
         logical :: broken
         character(len=64) :: used(n_cases)
         character(len=64) :: lines(4)
+        character(len=48) :: aux_lines(5)
         integer :: i
 
         broken = .false.
@@ -55,9 +56,10 @@ contains
             aux_layer = 'tw_aux = { source = ["src/tw_aux.f90"] }'
             phys_link = '# tw_phys no longer links tw_core'
             aux_library = 'add_library(tw_aux STATIC src/tw_aux.f90)'
-            call write_lines(join_path(dir, 'src/tw_aux.f90'), [character(len=48) :: &
-                'module tw_aux', 'use tw_core, only: core_value', &
-                'use tw_phys, only: phys_value', 'implicit none', 'end module'])
+            aux_lines = [character(len=48) :: 'module tw_aux', &
+                'use tw_core, only: core_value', 'use tw_phys, only: phys_value', &
+                'implicit none', 'end module']
+            call write_lines(join_path(dir, 'src/tw_aux.f90'), aux_lines)
         end if
         used = [character(len=64) :: 'use tw_core, only: core_value', &
             'use tw_phys, only: phys_value', '', '']
