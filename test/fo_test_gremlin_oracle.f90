@@ -204,7 +204,8 @@ contains
         type(process_result_t) :: status_result
         type(json_value_t) :: status
         character(:), allocatable :: message
-        integer :: i, attempt
+        integer, parameter :: max_pre_admission = 1200
+        integer :: i, attempt, pre_admission
         logical :: valid
 
         if (.not. allocated(arguments%items)) return
@@ -219,12 +220,22 @@ contains
             call list_add(status_arguments, arguments%items(i)%value)
             call list_add(status_arguments, arguments%items(i + 1)%value)
         end do
+        pre_admission = 0
         do attempt = 1, 36000
             call gremlin_run(driver, cwd, cache, state, status_arguments, status_result)
             if (status_result%exit_code /= 0) return
             call json_parse(status_result%stdout, status, valid, message)
             if (.not. valid) return
-            if (gremlin_field(status, 'diagnostic') /= waiting) return
+            if (gremlin_field(status, 'diagnostic') /= waiting) then
+                ! The owner publishes `waiting` only after capturing the candidate
+                ! and finding the slot busy; until then it is still `starting`
+                ! and may yet queue, so returning now races the admission wait.
+                if (gremlin_field(status, 'state') /= 'starting') return
+                pre_admission = pre_admission + 1
+                if (pre_admission > max_pre_admission) return
+            else
+                pre_admission = 0
+            end if
             call gremlin_wait_ms(100)
         end do
     end subroutine await_admission
