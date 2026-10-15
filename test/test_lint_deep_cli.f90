@@ -13,7 +13,8 @@ program test_lint_deep_cli
                             json_element
     use fo_test_json, only: json_string_value
     use fo_lint, only: lint_warning_t, lint_finding_t, lint_all_json
-    use fo_fs, only: fs_copy_exec, fs_find_executable, fs_collect_files, fs_sleep_ms
+    use fo_fs, only: fs_copy_exec, fs_find_executable, fs_collect_files, fs_sleep_ms, &
+                      fs_realpath
     use fo_process, only: process_exit
     implicit none
 
@@ -222,6 +223,8 @@ contains
 
     subroutine test_cmake_without_manifest()
         character(:), allocatable :: root, test_source, parse_error
+        character(len=4096) :: canonical_source
+        logical :: resolved
         type(string_list_t) :: selected
         type(process_result_t) :: child
         type(json_value_t) :: output, warnings, warning, value
@@ -261,7 +264,9 @@ contains
             call assert_contains(json_string_value(value), 'cannot fail the build', &
                 'CMake lint reaches actual Fortran failure-path analysis')
             value = json_member(warning, 'file')
-            call assert_equal_string(json_string_value(value), test_source, &
+            call fs_realpath(test_source, canonical_source, resolved)
+            call assert_true(resolved, 'test source resolves')
+            call assert_equal_string(json_string_value(value), trim(canonical_source), &
                 'CMake lint identifies the defective test source')
         end if
         call assert_not_contains(child%stderr, &

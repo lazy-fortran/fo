@@ -93,7 +93,7 @@ contains
         call write_lines(join_path(project, 'check.cmake'), &
             [character(len=40) :: 'message(STATUS ok)'])
         call write_lines(join_path(project, 'CMakePresets.json'), &
-            [character(len=200) :: '{"version":3,"configurePresets":[{"name":"c",'// &
+            [character(len=256) :: '{"version":3,"configurePresets":[{"name":"c",'// &
             '"generator":"Ninja","binaryDir":"'//build//'"}],"testPresets":'// &
             '[{"name":"t","configurePreset":"c","filter":{"exclude":'// &
             '{"label":"perf"}}}]}'])
