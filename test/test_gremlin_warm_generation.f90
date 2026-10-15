@@ -15,6 +15,7 @@ program test_gremlin_warm_generation
     use fo_gremlin_execution_view, only: execution_view_t, &
         execution_view_create, execution_view_release
     use fo_process, only: process_getpid
+    use fo_test_harness, only: tree_remove => remove_tree
     implicit none
 
     integer, parameter :: FILE_COUNT = 200, PAYLOAD_LEN = 4000
@@ -131,7 +132,7 @@ program test_gremlin_warm_generation
     call require(file_has(trim(view%cwd)//'/src/f008.f90', 'a'), &
         'view holds unchanged file content')
     call execution_view_release(view, .false., ierr, message)
-    ierr = remove_tree(trim(root)//c_null_char)
+    call tree_remove(trim(root))
     write (*, '(a)') 'test_gremlin_warm_generation: PASS'
 
 contains

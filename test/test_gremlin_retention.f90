@@ -14,6 +14,7 @@ program test_gremlin_retention
         gremlin_generation_register_lease_at, gremlin_lease_t, &
         gremlin_lease_release
     use fo_process, only: process_getpid
+    use fo_test_harness, only: tree_remove => remove_tree
     implicit none
 
     interface
@@ -106,7 +107,7 @@ program test_gremlin_retention
         'the small view walk finished inside its budget')
 
     call gremlin_generation_pin_at(trim(first%root), .false., ierr, message)
-    ierr = remove_tree(trim(root)//c_null_char)
+    call tree_remove(trim(root))
     write (*, '(a)') 'test_gremlin_retention: PASS'
 
 contains
