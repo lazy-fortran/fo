@@ -1,5 +1,6 @@
 module fo_gremlin_supervisor
     use, intrinsic :: iso_fortran_env, only: int64, error_unit, dp => real64
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_size_t, c_null_char
     use fo_build_backend, only: BACKEND_NATIVE, BACKEND_CMAKE, backend_t, &
         detect_backend, cmake_configure
     use fo_cmake_generation, only: cmake_registered_names
@@ -105,6 +106,22 @@ module fo_gremlin_supervisor
         ! case input closure digest is reused (see case_reuse_source).
         logical :: reused = .false.
     end type child_t
+
+    type :: case_index_entry_t
+        !! Latest campaign receipt and latest PASS of one case.
+        character(len=HASH_LEN) :: last_digest = '', last_generation = ''
+        character(len=16) :: last_status = ''
+        character(len=HASH_LEN) :: pass_digest = '', pass_generation = ''
+    end type case_index_entry_t
+
+    interface
+        integer(c_int) function c_publish_file(path, data, data_len) &
+                bind(C, name='fo_c_gremlin_coverage_publish')
+            import :: c_char, c_int, c_size_t
+            character(kind=c_char), intent(in) :: path(*), data(*)
+            integer(c_size_t), value :: data_len
+        end function c_publish_file
+    end interface
 
     public :: gremlin_handle, runner_case_outcome
 
@@ -1139,7 +1156,7 @@ contains
         integer :: n_build_args, build_pid, build_exit
         integer :: reproduction_timeout, work_release_error, scope_restore_error
         character(len=128) :: view_owner
-        logical :: retain_view, have_reproduction_work_lease, stop_requested
+        logical :: retain_view, have_reproduction_work_lease, stop_requested, build_stopped
         logical :: have_reproduction_lease, executable_ok, is_live
 
         exitcode = 0
@@ -1332,6 +1349,7 @@ contains
                 end if
             end if
         end if
+        build_stopped = .false.
         build_exit = 0
         if (ierr == 0) then
             ! Build the generation once here; the case child never builds, so
@@ -1353,8 +1371,19 @@ contains
                 ierr = 1
                 message = 'cannot start the generation build'
             else
-                call process_wait_bounded(build_pid, huge(0), build_exit)
-                if (build_exit /= 0) then
+                call process_wait_bounded(build_pid, reproduction_timeout, &
+                    build_exit, session, build_stopped)
+                if (build_exit == 124) then
+                    call gremlin_retain_build_log(build_log)
+                    ierr = 1
+                    write (message, '(a,i0,a,a)') &
+                        'TIMEOUT: generation build exceeded ', reproduction_timeout, &
+                        ' seconds and was cancelled; diagnostic: ', trim(build_log)
+                else if (build_stopped) then
+                    call gremlin_retain_build_log(build_log)
+                    ierr = 1
+                    message = 'CANCELLED: generation build cancelled by a stop request'
+                else if (build_exit /= 0) then
                     call gremlin_retain_build_log(build_log)
                     ierr = 1
                     message = 'generation build failed; diagnostic: '//trim(build_log)
@@ -1879,8 +1908,8 @@ contains
                 build_child, candidate_lease, have_candidate_lease, heavy_work_lease, &
                 have_heavy_work_lease, stop_requested, capture_debounce_ms, &
                 change_watch, sequence, completed, selected_count, campaign_seed, &
-                current_test_name(selected, selected_count), capture_failed, ierr, message, &
-                provider_quiet)
+                current_test_name(selected, selected_count), state_name, capture_failed, &
+                ierr, message, provider_quiet)
             if (ierr /= 0) then
                 fatal_message = trim(message)
                 fatal_error = .true.
@@ -2211,8 +2240,8 @@ contains
             have_active, have_candidate, last_failed, build_child, candidate_lease, &
             have_candidate_lease, heavy_work_lease, have_heavy_work_lease, &
             stop_requested, capture_debounce_ms, change_watch, sequence, &
-            completed, selected_count, seed, current_case, capture_failed, ierr, message, &
-            provider_quiet)
+            completed, selected_count, seed, current_case, resume_state, capture_failed, &
+            ierr, message, provider_quiet)
         character(len=*), intent(in) :: project_dir
         type(gremlin_session_t), intent(in) :: session
         type(driver_pin_t), intent(in) :: driver_pin
@@ -2232,7 +2261,7 @@ contains
         type(change_watch_t), intent(inout) :: change_watch
         integer, intent(inout) :: sequence
         integer, intent(in) :: completed, selected_count, seed
-        character(len=*), intent(in) :: current_case
+        character(len=*), intent(in) :: current_case, resume_state
         logical, intent(out) :: capture_failed, provider_quiet
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
@@ -2244,6 +2273,7 @@ contains
         integer(int64) :: now_ms
         integer :: spawn_error, journal_error, release_error, event_type, watch_error
         integer :: state_error
+        character(len=16) :: resumed
         character(len=PATH_LEN) :: state_message
 
         ierr = 0
@@ -2315,7 +2345,11 @@ contains
                     return
                 end if
                 request%input_changed = .false.
-                call publish_state(session, request, 'testing', active, current, &
+                ! The edit left the generation unchanged: resume the state the
+                ! lane slept in instead of waking it into an endless testing phase.
+                resumed = 'testing'
+                if (trim(resume_state) == 'quiescent') resumed = 'quiescent'
+                call publish_state(session, request, trim(resumed), active, current, &
                     current_case, completed, selected_count, seed, 'NONE', 0, ierr, message)
                 return
             end if
@@ -3877,6 +3911,7 @@ contains
         if (credit) receipt_identity = ',"evidence_kind":"campaign"'
         ! Case receipts carry the case input closure digest (reuse key) and
         ! whether the case ran or reused an earlier PASS.
+        closure = ''
         reuse_identity = ''
         if (case_name /= '<build>') then
             closure = generation_case_digest(generation, case_name)
@@ -3924,11 +3959,29 @@ contains
         ! The lane ledger is the selection source of truth and is written first.
         ! A restart can therefore never advance coverage from an unreceipted case.
         if (credit .and. coverage_outcome(outcome)) then
+            ! A non-PASS receipt is indexed first (a crash then only loses a
+            ! reuse); a PASS only once it is in the journal.
+            if (trim(outcome) /= 'PASS') then
+                call case_index_record(session, case_name, generation%identity, &
+                    closure, trim(outcome), status, message)
+                if (status /= 0) then
+                    ierr = status
+                    return
+                end if
+            end if
             call journal_append(trim(session%state_dir)//'/campaign-journal.jsonl', &
                 trim(completion_id), trim(record), status, message)
             if (status /= JOURNAL_OK) then
                 ierr = status
                 return
+            end if
+            if (trim(outcome) == 'PASS') then
+                call case_index_record(session, case_name, generation%identity, &
+                    closure, trim(outcome), status, message)
+                if (status /= 0) then
+                    ierr = status
+                    return
+                end if
             end if
             coverage_path = trim(session%state_dir)//'/coverage-'// &
                 generation%identity//'.state'
@@ -4241,41 +4294,37 @@ contains
         end if
     end subroutine publish_lifecycle_transition
 
-    subroutine case_reuse_source(session, generation, case_name, source, ierr, &
-            message)
-        !! The earlier generation whose PASS this case may reuse: the latest
-        !! lane campaign receipt of the case with the same input closure
-        !! digest is a PASS, and the case has no receipt in this generation
-        !! yet (a later campaign epoch runs it again). '' = run the case.
-        type(gremlin_session_t), intent(in) :: session
-        type(generation_t), intent(in) :: generation
-        character(len=*), intent(in) :: case_name
-        character(len=HASH_LEN), intent(out) :: source
+    subroutine case_history(journal_path, case_name, generation, digest, in_generation, &
+            other_pass, match_verdict, match_generation, ierr, message)
+        !! One pass over a receipt journal for a case: whether it has a receipt
+        !! in `generation`, whether another generation holds a PASS, and the
+        !! latest verdict and generation among receipts of closure `digest`
+        !! outside `generation`.
+        character(len=*), intent(in) :: journal_path, case_name, generation, digest
+        logical, intent(out) :: in_generation, other_pass
+        character(len=*), intent(out) :: match_verdict
+        character(len=HASH_LEN), intent(out) :: match_generation
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
         type(journal_record_t), allocatable :: records(:)
-        character(len=HASH_LEN) :: digest, receipt_generation, receipt_digest
-        character(len=HASH_LEN) :: last_generation
+        character(len=HASH_LEN) :: receipt_generation, receipt_digest
         character(len=NAME_LEN) :: receipt_case
-        character(len=32) :: verdict, last_verdict
-        character(len=PATH_LEN) :: journal_path
+        character(len=32) :: verdict
         integer(int64) :: cursor, next_cursor
         integer :: i
         logical :: exists
 
-        source = ''
+        in_generation = .false.
+        other_pass = .false.
+        match_verdict = ''
+        match_generation = ''
         ierr = 0
         message = ''
-        digest = generation_case_digest(generation, case_name)
-        if (len_trim(digest) /= HASH_LEN) return
-        journal_path = trim(session%state_dir)//'/campaign-journal.jsonl'
-        inquire (file=trim(journal_path), exist=exists)
+        inquire (file=journal_path, exist=exists)
         if (.not. exists) return
-        last_verdict = ''
-        last_generation = ''
         cursor = 0_int64
         do
-            call journal_read_page(trim(journal_path), cursor, 64, &
+            call journal_read_page(journal_path, cursor, 64, &
                 int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, next_cursor, &
                 ierr, message)
             if (ierr /= JOURNAL_OK) return
@@ -4285,24 +4334,156 @@ contains
                 if (trim(receipt_case) /= trim(case_name)) cycle
                 call gremlin_json_field(records(i)%json, 'generation', &
                     receipt_generation)
-                ! Already verified (or run) in this generation: run again.
-                if (receipt_generation == generation%identity) return
+                if (receipt_generation == generation) then
+                    in_generation = .true.
+                    cycle
+                end if
+                call gremlin_json_field(records(i)%json, 'status', verdict)
+                if (len_trim(receipt_generation) == HASH_LEN .and. &
+                    trim(verdict) == 'PASS') other_pass = .true.
                 call gremlin_json_field(records(i)%json, 'closure_digest', &
                     receipt_digest)
                 if (receipt_digest /= digest) cycle
-                call gremlin_json_field(records(i)%json, 'status', verdict)
-                last_verdict = verdict
-                last_generation = receipt_generation
+                match_verdict = verdict
+                match_generation = receipt_generation
             end do
             if (next_cursor <= cursor) then
                 ierr = JOURNAL_INVALID
-                message = 'journal cursor did not advance during receipt reuse'
+                message = 'journal cursor did not advance during receipt history scan'
                 return
             end if
             cursor = next_cursor
         end do
         ierr = 0
-        if (trim(last_verdict) == 'PASS') source = last_generation
+    end subroutine case_history
+
+    subroutine case_index_path(session, case_name, path)
+        !! One small file per case, so a receipt costs one atomic publish
+        !! whatever the number of cases; the set is bounded by the cases.
+        type(gremlin_session_t), intent(in) :: session
+        character(len=*), intent(in) :: case_name
+        character(len=*), intent(out) :: path
+        character(len=max(1, len_trim(case_name))), allocatable :: parts(:)
+
+        allocate (parts(1))
+        parts(1) = trim(case_name)
+        path = trim(session%state_dir)//'/case-index/'//cache_digest(parts, 1)
+    end subroutine case_index_path
+
+    subroutine case_index_read(session, case_name, entry, found)
+        !! entry: latest receipt (digest, status, generation) and latest PASS
+        !! (digest, generation) of the case, independent of journal compaction.
+        type(gremlin_session_t), intent(in) :: session
+        character(len=*), intent(in) :: case_name
+        type(case_index_entry_t), intent(out) :: entry
+        logical, intent(out) :: found
+        character(len=PATH_LEN) :: path
+        character(len=NAME_LEN + 8*HASH_LEN) :: line
+        integer :: unit, ios, bar(5), k, at
+
+        found = .false.
+        call case_index_path(session, case_name, path)
+        open (newunit=unit, file=trim(path), status='old', action='read', iostat=ios)
+        if (ios /= 0) return
+        read (unit, '(a)', iostat=ios) line
+        close (unit)
+        if (ios /= 0) return
+        at = 0
+        do k = 1, 5
+            bar(k) = index(line(at + 1:), '|')
+            if (bar(k) == 0) return
+            bar(k) = bar(k) + at
+            at = bar(k)
+        end do
+        if (line(bar(5) + 1:len_trim(line)) /= trim(case_name)) return
+        entry%last_digest = line(1:bar(1) - 1)
+        entry%last_status = line(bar(1) + 1:bar(2) - 1)
+        entry%last_generation = line(bar(2) + 1:bar(3) - 1)
+        entry%pass_digest = line(bar(3) + 1:bar(4) - 1)
+        entry%pass_generation = line(bar(4) + 1:bar(5) - 1)
+        found = .true.
+    end subroutine case_index_read
+
+    subroutine case_index_record(session, case_name, generation, digest, status, ierr, &
+            message)
+        type(gremlin_session_t), intent(in) :: session
+        character(len=*), intent(in) :: case_name, generation, digest, status
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(case_index_entry_t) :: entry
+        character(len=PATH_LEN) :: path
+        character(len=:), allocatable :: text
+        character(kind=c_char), allocatable :: bytes(:)
+        integer :: k
+        logical :: found
+
+        ierr = 0
+        message = ''
+        if (len_trim(digest) /= HASH_LEN) return
+        call case_index_read(session, case_name, entry, found)
+        if (.not. found) entry = case_index_entry_t()
+        entry%last_digest = digest
+        entry%last_status = status
+        entry%last_generation = generation
+        if (trim(status) == 'PASS') then
+            entry%pass_digest = digest
+            entry%pass_generation = generation
+        end if
+        text = trim(entry%last_digest)//'|'//trim(entry%last_status)//'|'// &
+            trim(entry%last_generation)//'|'//trim(entry%pass_digest)//'|'// &
+            trim(entry%pass_generation)//'|'//trim(case_name)//achar(10)
+        allocate (bytes(len(text)))
+        do k = 1, len(text)
+            bytes(k) = text(k:k)
+        end do
+        call fs_make_dir(trim(session%state_dir)//'/case-index')
+        call case_index_path(session, case_name, path)
+        if (c_publish_file(trim(path)//c_null_char, bytes, &
+                int(size(bytes), c_size_t)) /= 0) then
+            ierr = 1
+            message = 'cannot publish the case receipt index'
+        end if
+    end subroutine case_index_record
+
+    subroutine case_reuse_source(session, generation, case_name, source, ierr, &
+            message)
+        !! The earlier generation whose PASS this case may reuse: the latest
+        !! campaign receipt of the case with the same input closure digest is
+        !! a PASS, and the case has no receipt in this generation yet (a later
+        !! campaign epoch runs it again). '' = run the case. The case index
+        !! answers without reading the journal; a case missing from it (state
+        !! of an older lane) falls back to the retained journal tail.
+        type(gremlin_session_t), intent(in) :: session
+        type(generation_t), intent(in) :: generation
+        character(len=*), intent(in) :: case_name
+        character(len=HASH_LEN), intent(out) :: source
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(case_index_entry_t) :: entry
+        character(len=HASH_LEN) :: digest, match_generation
+        character(len=32) :: match_verdict
+        logical :: found, in_generation, other_pass
+
+        source = ''
+        ierr = 0
+        message = ''
+        digest = generation_case_digest(generation, case_name)
+        if (len_trim(digest) /= HASH_LEN) return
+        call case_index_read(session, case_name, entry, found)
+        if (found) then
+            if (entry%last_generation == generation%identity) return
+            if (entry%pass_digest /= digest) return
+            if (entry%last_digest == digest .and. trim(entry%last_status) /= 'PASS') &
+                return
+            source = entry%pass_generation
+            return
+        end if
+        call case_history(trim(session%state_dir)//'/campaign-journal.jsonl', &
+            case_name, generation%identity, digest, in_generation, other_pass, &
+            match_verdict, match_generation, ierr, message)
+        if (ierr /= JOURNAL_OK .or. in_generation) return
+        ierr = 0
+        if (trim(match_verdict) == 'PASS') source = match_generation
     end subroutine case_reuse_source
 
     subroutine prior_generation_case_passed(session, generation, case_name, passed, &
@@ -4312,16 +4493,12 @@ contains
         logical, intent(out) :: passed
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
-        type(journal_record_t), allocatable :: records(:)
-        character(len=HASH_LEN) :: receipt_generation
-        character(len=NAME_LEN) :: receipt_case
-        character(len=32) :: verdict
+        character(len=HASH_LEN) :: match_generation
+        character(len=32) :: match_verdict
         character(len=PATH_LEN) :: journal_path
-        integer(int64) :: cursor, next_cursor
-        integer :: i
+        logical :: in_generation
 
         passed = .false.
-        cursor = 0_int64
         if (.not. allocated(session%project_key) .or. &
             .not. allocated(session%lane_id) .or. &
             .not. allocated(session%session_id)) then
@@ -4332,30 +4509,8 @@ contains
         call gremlin_get_session_journal_path(trim(session%project_key), &
             trim(session%lane_id), trim(session%session_id), journal_path, ierr, message)
         if (ierr /= 0) return
-        do
-            call journal_read_page(trim(journal_path), cursor, 64, &
-                int(JOURNAL_MAX_RECORD_BYTES, int64)*64_int64, records, next_cursor, &
-                ierr, message)
-            if (ierr /= JOURNAL_OK) return
-            if (size(records) == 0) return
-            do i = 1, size(records)
-                call gremlin_json_field(records(i)%json, 'generation', receipt_generation)
-                call gremlin_json_field(records(i)%json, 'case_id', receipt_case)
-                call gremlin_json_field(records(i)%json, 'status', verdict)
-                if (len_trim(receipt_generation) /= HASH_LEN) cycle
-                if (receipt_generation == generation) cycle
-                if (trim(receipt_case) /= trim(case_name)) cycle
-                if (trim(verdict) /= 'PASS') cycle
-                passed = .true.
-                return
-            end do
-            if (next_cursor <= cursor) then
-                ierr = JOURNAL_INVALID
-                message = 'journal cursor did not advance during regression confirmation'
-                return
-            end if
-            cursor = next_cursor
-        end do
+        call case_history(trim(journal_path), case_name, generation, '', &
+            in_generation, passed, match_verdict, match_generation, ierr, message)
     end subroutine prior_generation_case_passed
 
     subroutine read_last_lifecycle_event(path, event, found, ierr, message)
@@ -4971,18 +5126,37 @@ contains
         seconds = test_wall_cap_seconds(config, budget) + 5
     end function case_wall_timeout
 
-    subroutine process_wait_bounded(pid, timeout_seconds, exitcode)
+    subroutine process_wait_bounded(pid, timeout_seconds, exitcode, session, stopped)
+        !! Wait for pid at most timeout_seconds. With a session, a stop request
+        !! cancels the owned process (exitcode 130, stopped = .true.).
         integer, intent(in) :: pid, timeout_seconds
         integer, intent(out) :: exitcode
+        type(gremlin_session_t), intent(in), optional :: session
+        logical, intent(out), optional :: stopped
 
-        integer :: cancel_status
-        logical :: done
+        integer :: cancel_status, stop_error, polls
+        logical :: done, stop_now
         real(dp) :: started
+        character(len=PATH_LEN) :: stop_message
 
+        if (present(stopped)) stopped = .false.
+        polls = 0
         call clock_seconds(started)
         do
             call process_poll_pid(pid, done, exitcode)
             if (done) return
+            polls = polls + 1
+            if (present(session) .and. mod(polls, 4) == 0) then
+                call gremlin_session_stop_requested(session, stop_now, stop_error, &
+                    stop_message)
+                if (stop_error == 0 .and. stop_now) then
+                    call cancel_owned_process(pid, cancel_status)
+                    exitcode = 130
+                    if (cancel_status /= 0) exitcode = 125
+                    if (present(stopped)) stopped = .true.
+                    return
+                end if
+            end if
             if (elapsed_seconds(started) >= real(timeout_seconds, dp)) then
                 call cancel_owned_process(pid, cancel_status)
                 if (cancel_status == 0) then

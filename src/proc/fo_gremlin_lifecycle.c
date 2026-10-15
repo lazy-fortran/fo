@@ -67,7 +67,7 @@ int fo_c_gremlin_lifecycle_append(const char *path, const char *event_id,
 int fo_c_gremlin_freshness_update(const char *path, int operation, int64_t *ticket) {
     uint64_t counters[2] = {0, 0};
     struct stat st;
-    int fd, result = 0;
+    int fd, result = 0, changed = 0;
     if (!path || !*path || !ticket || operation < 0 || operation > 3) return EINVAL;
     fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (fd < 0) return errno;
@@ -85,15 +85,19 @@ int fo_c_gremlin_freshness_update(const char *path, int operation, int64_t *tick
     if (operation == 1) {
         if (counters[0] == INT64_MAX) { result = EOVERFLOW; goto done; }
         *ticket = (int64_t)++counters[0];
+        changed = 1;
     } else if (operation == 2) {
         if (*ticket < 0 || (uint64_t)*ticket > counters[0]) {
             result = EINVAL; goto done;
         }
-        if ((uint64_t)*ticket > counters[1]) counters[1] = (uint64_t)*ticket;
+        if ((uint64_t)*ticket > counters[1]) {
+            counters[1] = (uint64_t)*ticket;
+            changed = 1;
+        }
     } else {
         *ticket = (int64_t)counters[operation == 3 ? 1 : 0];
     }
-    if ((operation == 1 || operation == 2) &&
+    if (changed &&
         pwrite(fd, counters, sizeof(counters), 0) != sizeof(counters)) result = EIO;
 done:
     close(fd);

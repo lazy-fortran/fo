@@ -247,7 +247,17 @@ contains
         type(string_list_t), intent(in) :: command
         character(len=*), intent(in) :: context
         type(process_result_t) :: child
-        call run_process(command, root, child, timeout_ms=30000)
+        type(string_list_t) :: identity
+
+        ! The fixture repository carries its own identity and ignores host git
+        ! configuration, so the commit does not depend on the runner's setup.
+        call list_add(identity, 'GIT_AUTHOR_NAME=Fo Boundary Test')
+        call list_add(identity, 'GIT_AUTHOR_EMAIL=fo-boundary@example.invalid')
+        call list_add(identity, 'GIT_COMMITTER_NAME=Fo Boundary Test')
+        call list_add(identity, 'GIT_COMMITTER_EMAIL=fo-boundary@example.invalid')
+        call list_add(identity, 'GIT_CONFIG_NOSYSTEM=1')
+        call list_add(identity, 'GIT_CONFIG_GLOBAL=/dev/null')
+        call run_process(command, root, child, identity, timeout_ms=30000)
         call assert_equal_integer(child%exit_code, 0, context)
         if (child%exit_code /= 0) write (*, '(a)') trim(child%stderr)
     end subroutine run_fixture_git
