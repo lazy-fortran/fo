@@ -1,7 +1,8 @@
 module fo_cmake_context
     use, intrinsic :: iso_fortran_env, only: int64
     use, intrinsic :: iso_c_binding, only: c_long_long
-    use fo_fs, only: fs_make_dir, fs_collect_files, fs_write_text, fs_identity
+    use fo_fs, only: fs_make_dir, fs_collect_files, fs_write_text, fs_identity, &
+        fs_realpath
     use fx_json_parse, only: json_parser_t, json_event_t, &
         json_parser_init_strict, json_parser_next, JSON_OBJECT_START, &
         JSON_OBJECT_END, JSON_ARRAY_START, JSON_ARRAY_END, JSON_KEY, &
@@ -56,9 +57,14 @@ contains
         integer :: i, env_length, env_status
         integer(int64) :: clock_tick
         character(len=40) :: token_text
+        character(len=4096) :: physical
+        logical :: resolved
 
         context%profile = ''
         context%source_root = trim(source_root)
+        ! CMake reports physical paths (/private/var on Darwin), so match them.
+        call fs_realpath(source_root, physical, resolved)
+        if (resolved) context%source_root = trim(physical)
         context%build_root = 'build'
         context%build_root_hint = present(build_root)
         if (present(build_root)) context%build_root = trim(build_root)
