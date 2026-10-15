@@ -6,7 +6,7 @@ module fo_gfortran_build
     use fo_scan, only: scan_provides_name, scan_unit_t, scan_dir, scan_dir_regex, &
         scan_dir_cached, &
         source_defines_module, is_slow_test, &
-        MAX_UNITS, MAX_NAME, MAX_PATH
+        MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units, dag_find_source_provider
     use fo_dep_update, only: dep_acquire_sources
     use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
@@ -1497,7 +1497,8 @@ contains
         call remove_shadow_mods(project_dir, dag)
         call make_includes_flag(mod_dir, dep_includes, n_dep_includes, includes_flag)
         call package_source_flags(filenames, flags, config, deps, n_deps_resolved, &
-            source_flags)
+            source_flags, exitcode)
+        if (exitcode /= 0) return
         if (present(declared_flags)) then
             do i = 1, n_order
                 node_id = topo_order(i)
@@ -2910,6 +2911,7 @@ contains
         logical :: in_lib
         type(resolved_src_t) :: devsrcs(MAX_RESOLVED)
         character(len=4096), allocatable :: helper_flags(:)
+        character(len=:), allocatable :: merged_flags
         integer :: n_dev, d, nud
         type(scan_unit_t), allocatable :: udev(:)
         type(fpm_config_t), allocatable :: manifest_config
@@ -3024,10 +3026,15 @@ contains
         ! their objects into the link line.
         allocate (helper_objs(MAX_SRC_OBJS), helper_flags(MAX_NODES))
         call package_source_flags(filenames, test_flags, manifest_config, &
-            devsrcs, n_dev, helper_flags)
+            devsrcs, n_dev, helper_flags, exitcode)
+        if (exitcode /= 0) return
         do i = 1, size(helper_flags)
-            helper_flags(i) = with_user_flags(helper_includes, &
-                helper_flags(i))
+            merged_flags = with_user_flags(helper_includes, helper_flags(i))
+            if (len(merged_flags) > len(helper_flags(i))) then
+                call flags_too_long(filenames(i), len(helper_flags(i)), exitcode)
+                return
+            end if
+            helper_flags(i) = merged_flags
         end do
         call compile_test_helpers(project_dir, obj_dir, dag, filenames, is_prog, &
             topo_order, n_order, run_nodes, n_run, incl_flag, log_file, &
@@ -4152,7 +4159,6 @@ contains
         allocate (all_units(n_units))
         if (ierr == 0) then
             do i = 1, n_units
-                if (n_all >= MAX_UNITS) exit
                 n_all = n_all + 1
                 all_units(n_all) = units(i)
             end do
@@ -5348,7 +5354,7 @@ contains
         if (ios == 0) close (u)
     end subroutine truncate_file
 
-    subroutine package_source_flags(sources, flags, root_config, deps, n_deps, out)
+    subroutine package_source_flags(sources, flags, root_config, deps, n_deps, out, ierr)
         !! Manifest compile choices belong to the package defining a source.
         !! Profile/user flags stay shared; root manifest choices must not leak.
         character(len=*), intent(in) :: sources(:), flags
@@ -5356,12 +5362,18 @@ contains
         type(resolved_src_t), intent(in) :: deps(:)
         integer, intent(in) :: n_deps
         character(len=*), intent(out) :: out(:)
+        integer, intent(out) :: ierr
         type(fpm_config_t), allocatable :: dep_config
         type(compiler_dialect_t) :: dialect
-        character(len=:), allocatable :: shared, package_flags, prefix
-        integer :: i, d, k, ierr, n
+        character(len=:), allocatable :: shared, package_flags, prefix, flag_text
+        integer :: i, d, k, parse_ierr, n
         integer, allocatable :: owner_lengths(:)
 
+        ierr = 0
+        if (len_trim(flags) > len(out)) then
+            call flags_too_long('(shared flags)', len(out), ierr)
+            return
+        end if
         allocate (owner_lengths(size(sources)))
         owner_lengths = 0
         out = flags
@@ -5376,8 +5388,8 @@ contains
         end do
         call fpm_config_allocate(dep_config)
         do d = 1, n_deps
-            call fpm_config_parse(trim(deps(d)%dir), dep_config, ierr)
-            if (ierr /= 0) cycle
+            call fpm_config_parse(trim(deps(d)%dir), dep_config, parse_ierr)
+            if (parse_ierr /= 0) cycle
             package_flags = manifest_compile_flags(dep_config, dialect)
             prefix = trim(deps(d)%src_dir)//'/'
             n = len(prefix)
@@ -5386,10 +5398,25 @@ contains
                 if (sources(i)(:n) /= prefix) cycle
                 if (n <= owner_lengths(i)) cycle
                 owner_lengths(i) = n
-                out(i) = trim(adjustl(package_flags))//' '//trim(shared)
+                flag_text = trim(adjustl(package_flags))//' '//trim(shared)
+                if (len_trim(flag_text) > len(out(i))) then
+                    call flags_too_long(sources(i), len(out(i)), ierr)
+                    return
+                end if
+                out(i) = flag_text
             end do
         end do
     end subroutine package_source_flags
+
+    subroutine flags_too_long(source, limit, ierr)
+        character(len=*), intent(in) :: source
+        integer, intent(in) :: limit
+        integer, intent(out) :: ierr
+
+        write (error_unit, '(a,i0,a)') 'fo: compile flags for '//trim(source)// &
+            ' exceed ', limit, ' characters'
+        ierr = 1
+    end subroutine flags_too_long
 
     function manifest_compile_flags(config, dialect) result(flags)
         type(fpm_config_t), intent(in) :: config
