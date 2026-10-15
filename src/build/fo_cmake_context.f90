@@ -23,6 +23,8 @@ module fo_cmake_context
         character(:), allocatable :: extra_args(:)
         character(:), allocatable :: build_targets(:)
         character(:), allocatable :: reported_generator
+        !! Path of the File API index file read by cmake_context_read_reply.
+        character(:), allocatable :: reply_index
         logical :: multi_config = .false.
         logical :: has_codemodel = .false.
         logical :: has_cache = .false.
@@ -36,6 +38,7 @@ module fo_cmake_context
 
     public :: cmake_context_init, cmake_context_query, cmake_context_read_reply
     public :: cmake_context_build_path, cmake_context_validate_hint
+    public :: cmake_context_read_file
 
 contains
 
@@ -112,12 +115,12 @@ contains
         end if
         context%valid = .not. allocated(context%error)
         if (len_trim(context%source_root) == 0 .or. &
-                len_trim(context%build_root) == 0) then
+            len_trim(context%build_root) == 0) then
             context%valid = .false.
             context%error = 'CMake source and build directories must be non-empty'
         end if
         if (len_trim(context%configure_preset) > 0 .and. &
-                len_trim(context%generator) > 0) then
+            len_trim(context%generator) > 0) then
             context%valid = .false.
             context%error = 'FO_CMAKE_GENERATOR cannot override a configure preset'
         end if
@@ -188,6 +191,7 @@ contains
         integer :: n_paths
 
         context%reported_generator = ''
+        context%reply_index = ''
         context%multi_config = .false.
         context%has_codemodel = .false.
         context%has_cache = .false.
@@ -197,7 +201,8 @@ contains
             '/.cmake/api/v1/reply', 'index-', '.json', &
             '', paths, n_paths, recursive=.false.)
         if (n_paths < 1) return
-        call read_file(trim(paths(n_paths)), input)
+        context%reply_index = trim(paths(n_paths))
+        call cmake_context_read_file(trim(paths(n_paths)), input)
         if (allocated(input)) call parse_reply(context, input)
     end subroutine cmake_context_read_reply
 
@@ -263,11 +268,11 @@ contains
                     end select
                 end if
                 if (depth == 5 .and. key == 'fo_request' .and. &
-                        trim(path(2)) == 'reply' .and. &
-                        trim(path(3)) == 'client-fo' .and. &
-                        trim(path(4)) == 'query.json' .and. &
-                        trim(path(5)) == 'client' .and. &
-                        event%string_val == context%request_token) then
+                    trim(path(2)) == 'reply' .and. &
+                    trim(path(3)) == 'client-fo' .and. &
+                    trim(path(4)) == 'query.json' .and. &
+                    trim(path(5)) == 'client' .and. &
+                    event%string_val == context%request_token) then
                     context%request_seen = .true.
                 end if
                 key = ''
@@ -315,7 +320,7 @@ contains
         call fs_identity(context%source_root, source_device, source_inode, &
             source_exists)
         if (.not. home_exists .or. .not. source_exists .or. &
-                home_device /= source_device .or. home_inode /= source_inode) then
+            home_device /= source_device .or. home_inode /= source_inode) then
             context%error = 'preset build-root hint points at a different source'
             return
         end if
@@ -325,14 +330,14 @@ contains
             return
         end if
         if (len_trim(cache_generator) == 0 .or. &
-                trim(cache_generator) /= trim(context%reported_generator)) then
+            trim(cache_generator) /= trim(context%reported_generator)) then
             context%error = 'preset build-root hint generator differs from File API'
             return
         end if
         valid = .true.
     end subroutine cmake_context_validate_hint
 
-    subroutine read_file(path, text)
+    subroutine cmake_context_read_file(path, text)
         character(len=*), intent(in) :: path
         character(:), allocatable, intent(out) :: text
         integer :: unit, ios, file_size
@@ -349,7 +354,7 @@ contains
         read (unit, iostat=ios) text
         close (unit)
         if (ios /= 0) deallocate (text)
-    end subroutine read_file
+    end subroutine cmake_context_read_file
 
     subroutine env_value(name, value)
         character(len=*), intent(in) :: name

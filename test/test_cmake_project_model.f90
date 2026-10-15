@@ -1,0 +1,170 @@
+program test_cmake_project_model
+    !! CMake File API -> project model: targets, link dependencies, artifact
+    !! paths, layers and origin marking on a generated project
+    !! (core <- model <- exe) with one target from a separate source root.
+    use fo_fs, only: fs_realpath
+    use fo_test_harness, only: string_list_t, process_result_t, make_scratch, &
+        join_path, write_lines, list_add, remove_tree, run_process, &
+        assert_process_ok, assert_true, assert_equal_string, &
+        assert_equal_integer, finish_assertions
+    use fo_cmake_context, only: cmake_context_t, cmake_context_init, &
+        cmake_context_query
+    use fo_cmake_model, only: cmake_model_load, cmake_model_target_origin
+    use fo_project_model, only: project_model_t, model_find_target, &
+        model_find_layer, TARGET_LIBRARY, TARGET_EXECUTABLE, ORIGIN_PROJECT, &
+        ORIGIN_DEPENDENCY
+    implicit none
+    character(len=4096) :: resolved
+    character(:), allocatable :: scratch, root, project, dependency, build
+    character(:), allocatable :: message
+    type(cmake_context_t) :: context
+    type(project_model_t) :: model
+    type(string_list_t) :: arguments
+    type(process_result_t) :: result
+    integer :: ierr
+    logical :: ok
+
+    call make_scratch('fo-cmake-model', scratch)
+    call fs_realpath(scratch, resolved, ok)
+    root = trim(resolved)
+    project = join_path(root, 'project')
+    dependency = join_path(root, 'dependency')
+    build = join_path(root, 'build')
+    call write_fixture()
+
+    ! No reply yet: explicit error, not an empty model.
+    call cmake_context_init(context, project, build_root=build)
+    call cmake_model_load(context, model, ierr, message)
+    call assert_true(ierr /= 0 .and. len(message) > 0, 'missing reply is an error')
+    call assert_true(.not. model%complete, 'missing reply leaves model incomplete')
+
+    call cmake_context_query(context)
+    call configure()
+    call cmake_model_load(context, model, ierr, message, input_digest='d1')
+    call assert_equal_integer(ierr, 0, 'load ok: '//message)
+    call assert_true(model%complete, 'complete is set')
+    call assert_true(model%finalized, 'model is finalized')
+    call assert_equal_string(model%backend, 'cmake', 'backend')
+    call assert_equal_integer(model%n_targets, 4, 'four targets')
+    call check_targets()
+    call check_layers()
+
+    ! A new request token without a re-run of CMake is a stale reply.
+    call cmake_context_init(context, project, build_root=build)
+    call cmake_model_load(context, model, ierr, message)
+    call assert_true(ierr /= 0 .and. index(message, 'stale') > 0, &
+        'stale reply is an error: '//message)
+
+    call assert_equal_integer(cmake_model_target_origin('/s/a', '/s', '/s/build'), &
+        ORIGIN_PROJECT, 'origin: inside source')
+    call assert_equal_integer(cmake_model_target_origin('/s/build/_deps/x-src', &
+        '/s', '/s/build'), ORIGIN_DEPENDENCY, 'origin: FetchContent in build dir')
+    call assert_equal_integer(cmake_model_target_origin('/other', '/s', '/s/build'), &
+        ORIGIN_DEPENDENCY, 'origin: outside source')
+    call assert_equal_integer(cmake_model_target_origin('/sx', '/s', '/s/build'), &
+        ORIGIN_DEPENDENCY, 'origin: sibling prefix')
+
+    call remove_tree(root)
+    call finish_assertions()
+    print '(a)', 'CMake project model PASS'
+contains
+    subroutine write_fixture()
+        call write_lines(join_path(project, 'CMakeLists.txt'), [character(len=160) :: &
+            'cmake_minimum_required(VERSION 3.20)', &
+            'project(pm Fortran)', &
+            'add_subdirectory("'//dependency//'" dep_build)', &
+            'add_subdirectory(core)', &
+            'add_subdirectory(model)', &
+            'add_executable(exe main.f90)', &
+            'target_link_libraries(exe PRIVATE model)'])
+        call write_lines(join_path(project, 'core/CMakeLists.txt'), &
+            [character(len=160) :: 'add_library(core STATIC core.f90)', &
+            'target_link_libraries(core PUBLIC ext)'])
+        call write_lines(join_path(project, 'core/core.f90'), [character(len=80) :: &
+            'module core', 'contains', 'subroutine c()', 'end subroutine', &
+            'end module'])
+        call write_lines(join_path(project, 'model/CMakeLists.txt'), &
+            [character(len=160) :: 'add_library(model STATIC model.f90)', &
+            'target_link_libraries(model PUBLIC core)'])
+        call write_lines(join_path(project, 'model/model.f90'), [character(len=80) :: &
+            'module model', 'contains', 'subroutine m()', 'end subroutine', &
+            'end module'])
+        call write_lines(join_path(project, 'main.f90'), [character(len=80) :: &
+            'program main', 'end program'])
+        call write_lines(join_path(dependency, 'CMakeLists.txt'), &
+            [character(len=160) :: 'add_library(ext STATIC ext.f90)'])
+        call write_lines(join_path(dependency, 'ext.f90'), [character(len=80) :: &
+            'module ext', 'contains', 'subroutine e()', 'end subroutine', &
+            'end module'])
+    end subroutine write_fixture
+
+    subroutine configure()
+        call list_add(arguments, 'cmake')
+        call list_add(arguments, '-S')
+        call list_add(arguments, project)
+        call list_add(arguments, '-B')
+        call list_add(arguments, build)
+        call run_process(arguments, root, result)
+        call assert_process_ok(result, 'configure generated project')
+    end subroutine configure
+
+    subroutine check_targets()
+        integer :: core, mdl, exe, ext
+
+        core = model_find_target(model, 'core')
+        mdl = model_find_target(model, 'model')
+        exe = model_find_target(model, 'exe')
+        ext = model_find_target(model, 'ext')
+        call assert_true(min(core, mdl, exe, ext) > 0, 'all targets found')
+        if (min(core, mdl, exe, ext) < 1) return
+        call assert_equal_integer(model%targets(core)%kind, TARGET_LIBRARY, 'core lib')
+        call assert_equal_integer(model%targets(mdl)%kind, TARGET_LIBRARY, 'model lib')
+        call assert_equal_integer(model%targets(exe)%kind, TARGET_EXECUTABLE, &
+            'exe kind')
+        call assert_equal_integer(model%targets(core)%origin, ORIGIN_PROJECT, &
+            'core is project')
+        call assert_equal_integer(model%targets(exe)%origin, ORIGIN_PROJECT, &
+            'exe is project')
+        call assert_equal_integer(model%targets(ext)%origin, ORIGIN_DEPENDENCY, &
+            'ext in a separate source root is a dependency')
+        call assert_equal_string(model%targets(core)%artifact, &
+            join_path(build, 'core/libcore.a'), 'core artifact')
+        call assert_equal_string(model%targets(exe)%artifact, join_path(build, 'exe'), &
+            'exe artifact')
+        ! CMake reports the transitive link closure as target dependencies.
+        call assert_true(has_dep(exe, mdl) .and. has_dep(exe, core) .and. &
+            has_dep(exe, ext), 'exe -> model, core, ext')
+        call assert_true(has_dep(mdl, core) .and. has_dep(mdl, ext), &
+            'model -> core, ext')
+        call assert_true(has_dep(core, ext) .and. .not. has_dep(core, exe) .and. &
+            .not. has_dep(core, mdl), 'core -> ext only')
+        call assert_equal_integer(size(model%targets(ext)%link_deps), 0, 'ext leaf')
+        call assert_equal_integer(size(model%targets(core)%sources), 1, 'core sources')
+        call assert_equal_string(model%targets(core)%sources(1)%s, &
+            join_path(project, 'core/core.f90'), 'core source is absolute')
+        call assert_equal_integer(model_find_target(model, 'nosuch'), 0, 'unknown')
+    end subroutine check_targets
+
+    logical function has_dep(from, to)
+        integer, intent(in) :: from, to
+
+        has_dep = any(model%targets(from)%link_deps == to)
+    end function has_dep
+
+    subroutine check_layers()
+        integer :: core, mdl
+
+        core = model_find_layer(model, 'core')
+        mdl = model_find_layer(model, 'model')
+        call assert_true(core > 0 .and. mdl > 0, 'library layers exist')
+        call assert_equal_integer(model_find_layer(model, 'exe'), 0, 'exe is no layer')
+        call assert_equal_integer(model_find_layer(model, 'ext'), 0, &
+            'dependency is no layer')
+        if (min(core, mdl) < 1) return
+        call assert_equal_integer(size(model%layers(core)%uses), 0, &
+            'core layer does not use the dependency')
+        call assert_equal_integer(size(model%layers(mdl)%uses), 1, 'model uses one')
+        call assert_equal_integer(model%layers(mdl)%uses(1), core, 'model uses core')
+        call assert_equal_integer(size(model%layers(mdl)%targets), 1, 'layer target')
+    end subroutine check_layers
+end program test_cmake_project_model
