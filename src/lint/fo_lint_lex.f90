@@ -8,7 +8,8 @@ module fo_lint_lex
     !! rules so they cannot drift apart.
     implicit none
     private
-    public :: lex_read_logical_line, mask_code, is_ident_char, lower_ch
+    public :: lex_read_logical_line, mask_code, is_ident_char, lower_ch, &
+        boundary_before
     public :: word_pos, next_token, prev_token, skip_blanks
 
     integer, parameter :: MAXLEN = 4096

@@ -19,7 +19,8 @@ module fo_generation_manifest
     use fo_cache, only: HASH_LEN, cache_digest
     use fo_input_inventory, only: input_inventory_t, input_root_t, &
         input_entry_t, input_declaration_t, INPUT_FILE, INPUT_DIRECTORY, &
-        INPUT_SYMLINK, input_inventory_revalidate
+        INPUT_SYMLINK, input_inventory_revalidate, alias_root, hex_value, &
+        safe_relative_path
     use fo_fs, only: fs_make_dir
     use fo_util, only: make_tmpfile, delete_tmpfile
     implicit none
@@ -940,21 +941,6 @@ contains
         ierr = 0
     end subroutine hex_decode
 
-    integer function hex_value(character_value)
-        character(len=1), intent(in) :: character_value
-        integer :: value
-
-        value = iachar(character_value)
-        hex_value = -1
-        if (value >= iachar('0') .and. value <= iachar('9')) then
-            hex_value = value - iachar('0')
-        else if (value >= iachar('a') .and. value <= iachar('f')) then
-            hex_value = value - iachar('a') + 10
-        else if (value >= iachar('A') .and. value <= iachar('F')) then
-            hex_value = value - iachar('A') + 10
-        end if
-    end function hex_value
-
     subroutine append_loaded_alias(root, encoded_alias, encoded_path, &
             encoded_canonical, ierr, message)
         type(input_root_t), intent(inout) :: root
@@ -1210,7 +1196,7 @@ contains
         duplicate = .false.
         ierr = 0
         message = ''
-        current_root = manifest_alias_root(inventory, &
+        current_root = alias_root(inventory, &
             trim(inventory%entries(current)%root_alias))
         if (current_root == 0) then
             ierr = 1
@@ -1220,7 +1206,7 @@ contains
         current_path = join_path(trim(bundle_path), &
             trim(inventory%entries(current)%relative_path))
         do i = 1, current - 1
-            prior_root = manifest_alias_root(inventory, &
+            prior_root = alias_root(inventory, &
                 trim(inventory%entries(i)%root_alias))
             if (prior_root == 0) then
                 ierr = 1
@@ -1249,21 +1235,6 @@ contains
             end do
         end do
     end subroutine duplicate_materialized_entry
-
-    integer function manifest_alias_root(inventory, alias)
-        type(input_inventory_t), intent(in) :: inventory
-        character(len=*), intent(in) :: alias
-        integer :: i, j
-
-        manifest_alias_root = 0
-        do i = 1, inventory%root_count
-            do j = 1, inventory%roots(i)%alias_count
-                if (trim(inventory%roots(i)%aliases(j)) /= trim(alias)) cycle
-                manifest_alias_root = i
-                return
-            end do
-        end do
-    end function manifest_alias_root
 
     subroutine validate_loaded_aliases(inventory, ierr, message)
         type(input_inventory_t), intent(in) :: inventory
@@ -1352,38 +1323,6 @@ contains
 
         safe_entry_path = safe_relative_path(path, .false.)
     end function safe_entry_path
-
-    logical function safe_relative_path(path, allow_dot)
-        character(len=*), intent(in) :: path
-        logical, intent(in) :: allow_dot
-        integer :: start, finish, n
-
-        safe_relative_path = .false.
-        n = len_trim(path)
-        if (n == 0) return
-        if (index(path, achar(0)) /= 0) return
-        if (path(1:1) == '/') return
-        if (allow_dot .and. trim(path) == '.') then
-            safe_relative_path = .true.
-            return
-        end if
-        start = 1
-        do
-            finish = index(path(start:n), '/')
-            if (finish == 0) then
-                finish = n + 1
-            else
-                finish = start + finish - 1
-            end if
-            if (finish == start) return
-            if (path(start:finish - 1) == '.' .or. &
-                path(start:finish - 1) == '..') return
-            if (finish > n) exit
-            start = finish + 1
-            if (start > n) return
-        end do
-        safe_relative_path = .true.
-    end function safe_relative_path
 
     logical function safe_symlink_target(relative, target)
         character(len=*), intent(in) :: relative, target

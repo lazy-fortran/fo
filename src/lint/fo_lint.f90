@@ -11,6 +11,7 @@ module fo_lint
     use fo_compiler_flags, only: ARRAY_TEMPORARY_WARNING_FLAG
     use fx_json_build, only: json_escape_string
     use fx_string, only: to_lower
+    use fo_lint_lex, only: is_ident_char
     implicit none
     private
     public :: lint_finding_t, lint_file, lint_files, lint_dir
@@ -75,31 +76,17 @@ contains
 
         character(len=1024), allocatable :: lines(:), lowered(:)
         character(len=256), allocatable :: seen(:)
-        integer :: n_lines, n_main, u, iostat, i, n_seen
+        integer :: n_lines, n_main, i, n_seen
 
         allocate (lines(MAX_LINT_LINES), lowered(MAX_LINT_LINES), seen(2048))
         n_seen = 0
 
         n_lines = 0
-        open (newunit=u, file=filename, status='old', iostat=iostat)
-        if (iostat /= 0) then
+        call append_file_body(filename, lines, n_lines)
+        if (n_lines == 0) then
             deallocate (lines, lowered, seen)
             return
         end if
-
-        do
-            n_lines = n_lines + 1
-            if (n_lines > MAX_LINT_LINES) then
-                n_lines = n_lines - 1
-                exit
-            end if
-            read (u, '(a)', iostat=iostat) lines(n_lines)
-            if (iostat /= 0) then
-                n_lines = n_lines - 1
-                exit
-            end if
-        end do
-        close (u)
 
         ! Append the bodies of any `include 'file'` so a symbol used only inside
         ! an included fragment is not mis-reported as an unused import. Usage
@@ -174,8 +161,8 @@ contains
 
         character(len=1024) :: line, incpath, dir, search_dir
         character(len=:), allocatable :: incname
-        integer :: i, slash, parent_slash, u, iostat, k
-        logical :: dup
+        integer :: i, slash, parent_slash, k
+        logical :: dup, found
 
         slash = index(filename, '/', back=.true.)
         dir = ''
@@ -209,11 +196,11 @@ contains
             end if
 
             search_dir = dir
-            iostat = 1
+            found = .false.
             do while (len_trim(search_dir) > 0)
                 incpath = trim(search_dir)//trim(incname)
-                open (newunit=u, file=trim(incpath), status='old', iostat=iostat)
-                if (iostat == 0) exit
+                inquire (file=trim(incpath), exist=found)
+                if (found) exit
                 parent_slash = 0
                 if (len_trim(search_dir) > 1) then
                     parent_slash = index( &
@@ -222,21 +209,11 @@ contains
                 if (parent_slash == 0) exit
                 search_dir = search_dir(1:parent_slash)
             end do
-            if (iostat /= 0) then
-                open (newunit=u, file=trim(incname), status='old', iostat=iostat)
-                if (iostat /= 0) then
-                    i = i + 1
-                    cycle
-                end if
+            if (.not. found) then
+                incpath = incname
+                inquire (file=trim(incpath), exist=found)
             end if
-            do
-                if (n_lines >= size(lines)) exit
-                read (u, '(a)', iostat=iostat) line
-                if (iostat /= 0) exit
-                n_lines = n_lines + 1
-                lines(n_lines) = line
-            end do
-            close (u)
+            if (found) call append_file_body(trim(incpath), lines, n_lines)
             i = i + 1
         end do
     end subroutine append_include_bodies
@@ -1170,17 +1147,6 @@ contains
         starts_with = .false.
         if (len_trim(str) >= len(prefix)) starts_with = (str(1:len(prefix)) == prefix)
     end function starts_with
-
-    pure logical function is_ident_char(c)
-        character(len=1), intent(in) :: c
-        integer :: ic
-
-        ic = iachar(c)
-        is_ident_char = (ic >= iachar('a') .and. ic <= iachar('z')) .or. &
-            (ic >= iachar('A') .and. ic <= iachar('Z')) .or. &
-            (ic >= iachar('0') .and. ic <= iachar('9')) .or. &
-            c == '_'
-    end function is_ident_char
 
     pure logical function is_symbol_boundary_before(line, pos)
         character(len=*), intent(in) :: line

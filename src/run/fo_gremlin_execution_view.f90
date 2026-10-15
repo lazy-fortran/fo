@@ -4,7 +4,7 @@ module fo_gremlin_execution_view
     use fo_fs, only: fs_collect_files, fs_copy_exec, fs_make_dir, &
         fs_mkdir_excl, fs_remove_tree, fs_rename, fs_write_text
     use fo_input_inventory, only: input_entry_t, input_inventory_t, INPUT_FILE, &
-        INPUT_DIRECTORY
+        INPUT_DIRECTORY, safe_relative_path
     use fo_process, only: process_getpid
     use fo_util, only: make_tmpfile, delete_tmpfile, temporary_root
     implicit none
@@ -545,26 +545,6 @@ contains
             end if
         end do
     end function find_root
-
-    logical function safe_relative_path(path) result(safe)
-        character(len=*), intent(in) :: path
-        integer :: i, start, n
-
-        safe = .false.
-        n = len_trim(path)
-        if (n == 0) return
-        if (path(1:1) == '/') return
-        start = 1
-        do i = 1, n + 1
-            if (i <= n) then
-                if (path(i:i) /= '/') cycle
-            end if
-            if (i == start) return
-            if (path(start:i - 1) == '.' .or. path(start:i - 1) == '..') return
-            start = i + 1
-        end do
-        safe = .true.
-    end function safe_relative_path
 
     subroutine make_parent_directory(path)
         character(len=*), intent(in) :: path

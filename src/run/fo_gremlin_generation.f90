@@ -8,7 +8,8 @@ module fo_gremlin_generation
     use fx_immutable_store, only: immutable_store_t, immutable_store_init, &
         IMMUTABLE_OK
     use fo_input_inventory, only: input_inventory_t, input_inventory_revalidate, &
-        input_inventory_rediscover, input_entry_t, INPUT_FILE, INPUT_DIRECTORY
+        input_inventory_rediscover, input_entry_t, INPUT_FILE, INPUT_DIRECTORY, &
+        alias_root
     use fo_generation_manifest, only: generation_manifest_metadata_t, &
         generation_manifest_capture, generation_manifest_load, &
         generation_manifest_materialize, generation_manifest_execution_identity, &
@@ -614,7 +615,7 @@ contains
         end do
         if (matches /= total_alias_count(observed)) return
         do i = 1, expected%entry_count
-            expected_root = root_with_alias(expected, &
+            expected_root = alias_root(expected, &
                 trim(expected%entries(i)%root_alias))
             if (expected_root == 0) return
             do j = 1, expected%roots(expected_root)%alias_count
@@ -622,7 +623,7 @@ contains
                 do k = 1, observed%entry_count
                     if (.not. matching_materialized_entry( &
                             expected%entries(i), observed%entries(k))) cycle
-                    observed_root = root_with_alias(observed, &
+                    observed_root = alias_root(observed, &
                         trim(observed%entries(k)%root_alias))
                     if (observed_root == 0) return
                     do l = 1, observed%roots(observed_root)%alias_count
@@ -644,14 +645,14 @@ contains
             end do
         end do
         do i = 1, observed%entry_count
-            observed_root = root_with_alias(observed, &
+            observed_root = alias_root(observed, &
                 trim(observed%entries(i)%root_alias))
             if (observed_root == 0) return
             found = .false.
             do k = 1, expected%entry_count
                 if (.not. matching_materialized_entry( &
                         expected%entries(k), observed%entries(i))) cycle
-                expected_root = root_with_alias(expected, &
+                expected_root = alias_root(expected, &
                     trim(expected%entries(k)%root_alias))
                 if (expected_root == 0) return
                 do j = 1, expected%roots(expected_root)%alias_count
@@ -704,21 +705,6 @@ contains
         if (observed%mode /= expected_mode) return
         matching_materialized_entry = .true.
     end function matching_materialized_entry
-
-    integer function root_with_alias(inventory, alias)
-        type(input_inventory_t), intent(in) :: inventory
-        character(len=*), intent(in) :: alias
-        integer :: i, j
-
-        root_with_alias = 0
-        do i = 1, inventory%root_count
-            do j = 1, inventory%roots(i)%alias_count
-                if (trim(inventory%roots(i)%aliases(j)) /= trim(alias)) cycle
-                root_with_alias = i
-                return
-            end do
-        end do
-    end function root_with_alias
 
     integer function total_alias_count(inventory)
         type(input_inventory_t), intent(in) :: inventory
@@ -839,7 +825,6 @@ contains
     subroutine write_manifest_store(path, store_root, ierr)
         character(len=*), intent(in) :: path, store_root
         integer, intent(out) :: ierr
-        integer :: unit, ios
 
         ierr = 1
         if (len_trim(store_root) == 0 .or. len_trim(store_root) >= PATH_LEN .or. &
@@ -847,13 +832,7 @@ contains
         if (index(store_root, achar(0)) /= 0 .or. &
             index(store_root, achar(10)) /= 0 .or. &
             index(store_root, achar(13)) /= 0) return
-        open (newunit=unit, file=trim(path), status='new', action='write', &
-            iostat=ios)
-        if (ios /= 0) return
-        write (unit, '(a)', iostat=ios) trim(store_root)
-        if (ios == 0) flush (unit, iostat=ios)
-        close (unit, iostat=ierr)
-        if (ios /= 0) ierr = ios
+        call write_identity(path, trim(store_root), ierr)
     end subroutine write_manifest_store
 
     subroutine read_manifest_id(path, manifest_id, ierr, message)
@@ -889,17 +868,10 @@ contains
     subroutine write_manifest_id(path, manifest_id, ierr)
         character(len=*), intent(in) :: path, manifest_id
         integer, intent(out) :: ierr
-        integer :: unit, ios
 
         ierr = 1
         if (.not. valid_driver_digest(manifest_id)) return
-        open (newunit=unit, file=trim(path), status='new', action='write', &
-            iostat=ios)
-        if (ios /= 0) return
-        write (unit, '(a)', iostat=ios) trim(manifest_id)
-        if (ios == 0) flush (unit, iostat=ios)
-        close (unit, iostat=ierr)
-        if (ios /= 0) ierr = ios
+        call write_identity(path, trim(manifest_id), ierr)
     end subroutine write_manifest_id
 
     subroutine write_manifest_identity(path, metadata, ierr)

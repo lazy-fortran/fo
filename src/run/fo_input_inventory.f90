@@ -73,6 +73,7 @@ module fo_input_inventory
     public :: input_inventory_discover, input_inventory_declarations_from_config
     public :: input_inventory_revalidate, input_inventory_discover_cmake
     public :: input_inventory_rediscover
+    public :: alias_root, hex_value, safe_relative_path
 
     interface
         integer(c_int) function c_list_input_tree(root, manifest, &
@@ -1425,11 +1426,46 @@ contains
         ierr = 0
     end subroutine decode_link_record
 
-    integer function hex_value(character) result(value)
-        character(len=1), intent(in) :: character
+    logical function safe_relative_path(path, allow_dot)
+        character(len=*), intent(in) :: path
+        logical, intent(in), optional :: allow_dot
+        integer :: start, finish, n
+        logical :: dots
+
+        safe_relative_path = .false.
+        dots = .false.
+        if (present(allow_dot)) dots = allow_dot
+        n = len_trim(path)
+        if (n == 0) return
+        if (index(path, achar(0)) /= 0) return
+        if (path(1:1) == '/') return
+        if (dots .and. trim(path) == '.') then
+            safe_relative_path = .true.
+            return
+        end if
+        start = 1
+        do
+            finish = index(path(start:n), '/')
+            if (finish == 0) then
+                finish = n + 1
+            else
+                finish = start + finish - 1
+            end if
+            if (finish == start) return
+            if (path(start:finish - 1) == '.' .or. &
+                path(start:finish - 1) == '..') return
+            if (finish > n) exit
+            start = finish + 1
+            if (start > n) return
+        end do
+        safe_relative_path = .true.
+    end function safe_relative_path
+
+    integer function hex_value(character_value) result(value)
+        character(len=1), intent(in) :: character_value
         integer :: code
 
-        code = iachar(character)
+        code = iachar(character_value)
         select case (code)
         case (iachar('0'):iachar('9'))
             value = code - iachar('0')

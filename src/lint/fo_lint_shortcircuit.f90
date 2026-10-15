@@ -7,7 +7,7 @@ module fo_lint_shortcircuit
     !! depending on the compiler. The detector is deliberately scoped: it fires
     !! only when the guard and the protected access name the SAME variable, so
     !! `len(a) > 0 .and. n < size(b)` (independent operands) is left alone.
-    use fo_lint_lex, only: lex_read_logical_line, is_ident_char
+    use fo_lint_lex, only: lex_read_logical_line, is_ident_char, boundary_before
     implicit none
     private
     public :: shortcircuit_scan_file
@@ -606,15 +606,6 @@ contains
             if (code(j - 3:j) == '.or.') op_ends_at = 4
         end if
     end function op_ends_at
-
-    logical function boundary_before(expr, pos)
-        character(len=*), intent(in) :: expr
-        integer, intent(in) :: pos
-
-        boundary_before = .true.
-        if (pos <= 1) return
-        boundary_before = .not. is_ident_char(expr(pos - 1:pos - 1))
-    end function boundary_before
 
     pure logical function is_expr_char(c)
         !! Identifier char or '%', so a derived-type index like p%pos is read as
