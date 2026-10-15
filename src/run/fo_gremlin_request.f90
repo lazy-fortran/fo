@@ -46,6 +46,9 @@ module fo_gremlin_request
         integer :: gate_required_count = 0
         character(len=NAME_LEN), allocatable :: targets(:)
         integer :: n_targets = 0
+        ! Lane scope (`fo test` -L, -LE, --layer semantics); empty = no scope.
+        character(len=NAME_LEN), allocatable :: labels(:), exclude_labels(:), layers(:)
+        integer :: n_labels = 0, n_exclude_labels = 0, n_layers = 0
     end type gremlin_request_t
 
     public :: gremlin_request_t, parse_request, is_hex_digest, gremlin_json_text_valid
@@ -63,7 +66,7 @@ contains
         type(json_event_t) :: event, value_event
         character(len=NAME_LEN) :: key
         character(len=:), allocatable :: raw_value
-        logical :: seen(20)
+        logical :: seen(23)
         integer :: field
         logical :: trailing
 
@@ -83,6 +86,7 @@ contains
         allocate (request%gate_cases(MAX_NODES), request%targets(MAX_NODES))
         request%gate_cases = ''
         request%targets = ''
+        allocate (request%labels(0), request%exclude_labels(0), request%layers(0))
         seen = .false.
         do
             ierr = 1
@@ -118,6 +122,9 @@ contains
             end if
             if (field == 10) then
                 call parse_target_events(parser, value_event, request, ierr, message)
+            else if (field >= 21) then
+                call parse_scope_events(parser, value_event, request, field, ierr, &
+                    message)
             else
                 call set_event_field(request, field, value_event, &
                     raw_value, ierr, message)
@@ -342,6 +349,72 @@ contains
         message = ''
     end subroutine parse_target_events
 
+    subroutine parse_scope_events(parser, first, request, field, ierr, message)
+        !! labels (21), exclude_labels (22) and layers (23): arrays of strings.
+        type(json_parser_t), intent(inout) :: parser
+        type(json_event_t), intent(in) :: first
+        type(gremlin_request_t), intent(inout) :: request
+        integer, intent(in) :: field
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(json_event_t) :: event
+        character(len=NAME_LEN) :: item
+        character(len=NAME_LEN), allocatable :: grown(:)
+        character(len=14) :: key
+
+        select case (field)
+        case (21)
+            key = 'labels'
+        case (22)
+            key = 'exclude_labels'
+        case default
+            key = 'layers'
+        end select
+        ierr = 1
+        message = trim(key)//' must be an array of strings'
+        if (first%event_type /= JSON_ARRAY_START) return
+        do
+            call json_parser_next(parser, event)
+            if (event%event_type == JSON_ARRAY_END) exit
+            if (event%event_type /= JSON_STRING .or. &
+                .not. allocated(event%string_val)) return
+            item = ''
+            if (len_trim(event%string_val) == 0 .or. &
+                len(event%string_val) > len(item)) then
+                message = trim(key)//' entries must be nonempty and at most 1024 '// &
+                    'characters'
+                return
+            end if
+            item = event%string_val
+            if (has_control_character(item)) then
+                message = trim(key)//' entries cannot contain control characters'
+                return
+            end if
+            select case (field)
+            case (21)
+                allocate (grown(request%n_labels + 1))
+                grown(:request%n_labels) = request%labels
+                grown(request%n_labels + 1) = item
+                call move_alloc(grown, request%labels)
+                request%n_labels = request%n_labels + 1
+            case (22)
+                allocate (grown(request%n_exclude_labels + 1))
+                grown(:request%n_exclude_labels) = request%exclude_labels
+                grown(request%n_exclude_labels + 1) = item
+                call move_alloc(grown, request%exclude_labels)
+                request%n_exclude_labels = request%n_exclude_labels + 1
+            case default
+                allocate (grown(request%n_layers + 1))
+                grown(:request%n_layers) = request%layers
+                grown(request%n_layers + 1) = item
+                call move_alloc(grown, request%layers)
+                request%n_layers = request%n_layers + 1
+            end select
+        end do
+        ierr = 0
+        message = ''
+    end subroutine parse_scope_events
+
     integer function request_field(action, key)
         character(len=*), intent(in) :: action, key
 
@@ -367,6 +440,12 @@ contains
                 request_field = 9
             case ('targets')
                 request_field = 10
+            case ('labels')
+                request_field = 21
+            case ('exclude_labels')
+                request_field = 22
+            case ('layers')
+                request_field = 23
             end select
         else if (key == 'session_id') then
             request_field = 2

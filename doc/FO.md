@@ -211,11 +211,22 @@ fo test --list [--json] [same selection]
   fpm builds its test programs, CMake builds the plan targets of the model's
   cases (cases a test preset filters out excluded), with the widening rule
   above, so an `EXCLUDE_FROM_ALL` test executable is built. `--case NAME`
-  (repeatable) builds only what the named cases need.
+  (repeatable) builds only what the named cases need; `-L`, `-LE` and
+  `--layer` build the plan targets of that `fo test` selection (CMake; fpm
+  builds every test program).
   Gremlin builds each generation once this way (a campaign with explicit
   targets and no random cases, and `reproduce`, pass their cases); its case runs and `reproduce`
   use `fo test --no-build` on that build, and a failed build is reported once
   for the generation without running any case.
+- A Gremlin lane takes `-L/--label RE`, `-LE/--exclude-label RE` and
+  `--layer NAME` (MCP `labels`, `exclude_labels`, `layers`), selected by the
+  generation's model with the `fo test` semantics. The lane's campaigns run
+  only the scope's cases (not preset-filtered, not explicit-only) and its
+  generation builds the scope's plan targets. A scope selecting no case, an
+  unknown layer or an invalid pattern is an inventory error. The scope is part
+  of the lane policy: a start with another scope on a live lane is refused.
+  A `reproduce` of a case outside the lane's build builds that case's targets
+  in its own view before running it.
 - Gremlin loads the project model once per built generation and takes its
   campaign cases from it. A later generation reuses the model when the content
   of its manifests, locks, CMake scripts, presets and caches, test and program

@@ -49,21 +49,21 @@ contains
         logical, intent(out) :: show_help
 
         character(len=KEY_LEN), allocatable :: keys(:)
-        character(len=ARG_LEN), allocatable :: values(:), targets(:)
+        character(len=ARG_LEN), allocatable :: values(:), items(:, :)
         character(len=ARG_LEN) :: arg, name, value, raw
         character(len=:), allocatable :: escaped
-        integer :: first, i, n_fields, n_targets, eq, j
+        integer :: first, i, n_fields, n_items(4), eq, j, list
         logical :: recognized, needs_value, has_equal, missing_value
         character(len=8) :: kind
 
         allocate (keys(max(1, n_tokens)))
         allocate (values(max(1, n_tokens)))
-        allocate (targets(max(1, n_tokens)))
+        allocate (items(max(1, n_tokens), 4))
         keys = ''
         values = ''
-        targets = ''
+        items = ''
         n_fields = 0
-        n_targets = 0
+        n_items = 0
         action = 'start'
         project_dir = '.'
         first = 1
@@ -138,7 +138,8 @@ contains
                 cycle
             end if
 
-            if (recognized .and. trim(raw) == 'targets') then
+            list = list_index(raw)
+            if (recognized .and. list > 0) then
                 if (.not. has_equal .and. i < n_tokens) then
                     if (.not. looks_like_option(tokens(i + 1))) then
                         value = trim(tokens(i + 1))
@@ -149,8 +150,8 @@ contains
                 else
                     value = ''
                 end if
-                n_targets = n_targets + 1
-                targets(n_targets) = value
+                n_items(list) = n_items(list) + 1
+                items(n_items(list), list) = value
                 i = i + 1
                 cycle
             end if
@@ -204,16 +205,17 @@ contains
             i = i + 1
         end do
 
-        if (n_targets > 0) then
+        do list = 1, 4
+            if (n_items(list) == 0) cycle
             raw = '['
-            do j = 1, n_targets
+            do j = 1, n_items(list)
                 if (j > 1) raw = trim(raw)//','
-                escaped = json_string(trim(targets(j)))
+                escaped = json_string(trim(items(j, list)))
                 raw = trim(raw)//trim(escaped)
             end do
             raw = trim(raw)//']'
-            call append_field('targets', trim(raw), keys, values, n_fields)
-        end if
+            call append_field(trim(list_key(list)), trim(raw), keys, values, n_fields)
+        end do
 
         if ((trim(action) == 'status' .or. trim(action) == 'wait') .and. &
             .not. field_present(keys, n_fields, 'detail')) then
@@ -227,6 +229,40 @@ contains
         end do
         request_json = request_json//'}'
     end subroutine parse_cli
+
+    integer function list_index(key) result(list)
+        !! Repeatable array options: targets, labels, exclude_labels, layers.
+        character(len=*), intent(in) :: key
+
+        select case (trim(key))
+        case ('targets')
+            list = 1
+        case ('labels')
+            list = 2
+        case ('exclude_labels')
+            list = 3
+        case ('layers')
+            list = 4
+        case default
+            list = 0
+        end select
+    end function list_index
+
+    function list_key(list) result(key)
+        integer, intent(in) :: list
+        character(len=14) :: key
+
+        select case (list)
+        case (1)
+            key = 'targets'
+        case (2)
+            key = 'labels'
+        case (3)
+            key = 'exclude_labels'
+        case default
+            key = 'layers'
+        end select
+    end function list_key
 
     subroutine option_spec(option, key, kind, needs_value, recognized)
         character(len=*), intent(in) :: option
@@ -248,6 +284,18 @@ contains
             needs_value = .true.
         case ('--target')
             key = 'targets'
+            kind = 'string'
+            needs_value = .true.
+        case ('-L', '--label')
+            key = 'labels'
+            kind = 'string'
+            needs_value = .true.
+        case ('-LE', '--exclude-label')
+            key = 'exclude_labels'
+            kind = 'string'
+            needs_value = .true.
+        case ('--layer')
+            key = 'layers'
             kind = 'string'
             needs_value = .true.
         case ('--only-changed')
@@ -394,6 +442,7 @@ contains
         write (unit, '(a)') '  start: --dir DIR --lane ID --target NAME --random N --seed N'
         write (unit, '(a)') '         --random 0 quiesces after required targets pass'
         write (unit, '(a)') '         --only-changed --shuffle --campaign-seconds N --timeout-seconds N'
+        write (unit, '(a)') '         -L|--label RE -LE|--exclude-label RE --layer NAME'
         write (unit, '(a)') '  reads: --session ID --cursor N --lifecycle-cursor N'
         write (unit, '(a)') '         --max-records N --max-bytes N'
         write (unit, '(a)') '  reads: --detail summary|full (status/wait default: summary)'

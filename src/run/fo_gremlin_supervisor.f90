@@ -22,7 +22,8 @@ module fo_gremlin_supervisor
         generation_model_key
     use fo_project_load, only: project_has_model, project_load_configured, &
         project_inventory_cases
-    use fo_project_model, only: model_find_case
+    use fo_project_model, only: model_find_case, model_select, model_request_t, &
+        model_selection_t, SELECT_OK, SELECT_EMPTY
     use fo_gremlin_log_text, only: gremlin_retain_build_log, gremlin_log_tail
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release
@@ -300,6 +301,7 @@ contains
             call argv_push(packed, n_args, '--target')
             call argv_push(packed, n_args, trim(request%targets(i)))
         end do
+        call push_scope_args(packed, n_args, request)
         call process_start_argv_logged(project_dir, packed, n_args, log_file, &
             pid, spawn_exit, 'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0')
         if (spawn_exit /= 0) then
@@ -2406,6 +2408,8 @@ contains
                 call argv_push(packed, n_args, trim(request%targets(i)))
             end do
         end if
+        ! A scoped lane builds the plan targets of its scope only.
+        call push_scope_args(packed, n_args, request)
         call process_start_argv_logged(trim(child%execution_view%cwd), packed, &
             n_args, trim(child%log_file), child%pid, spawn_exit, &
             'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
@@ -2898,7 +2902,9 @@ contains
         logical, allocatable :: is_test_arr(:)
         logical :: reproduce_only, focused_targets
         integer, allocatable :: model_cases(:)
-        integer :: capacity, kept
+        integer :: capacity, kept, n_model
+        type(model_request_t) :: scope_request
+        type(model_selection_t) :: scope_selection
 
         project_dir = campaign_project(generation)
         generation_id = generation%identity
@@ -2933,7 +2939,31 @@ contains
         n_all = 0
         n_affected = 0
         if (allocated(generation%model)) then
-            do i = 1, size(model_cases)
+            n_model = size(model_cases)
+            if (request_scoped(request)) then
+                ! Lane scope: the model's `fo test` selection of -L/-LE/--layer.
+                call scope_model_request(request, scope_request)
+                call model_select(generation%model, scope_request, scope_selection)
+                if (scope_selection%status /= SELECT_OK .and. &
+                    scope_selection%status /= SELECT_EMPTY) then
+                    ierr = 2
+                    message = 'invalid lane scope: '//scope_selection%message
+                    return
+                end if
+                kept = 0
+                do i = 1, n_model
+                    if (.not. any(scope_selection%cases == model_cases(i))) cycle
+                    kept = kept + 1
+                    model_cases(kept) = model_cases(i)
+                end do
+                n_model = kept
+                if (kept == 0) then
+                    ierr = 2
+                    message = 'the lane scope selects no test case'
+                    return
+                end if
+            end if
+            do i = 1, n_model
                 associate (name => generation%model%cases(model_cases(i))%name)
                     if (len(name) > len(all_names)) then
                         ierr = 1
@@ -4400,8 +4430,69 @@ contains
             canonical = canonical//'|target:'//trim(number)//':'// &
                 trim(request%targets(i))
         end do
+        do i = 1, request%n_labels
+            canonical = canonical//'|label:'//trim(int_text(len_trim(request%labels(i))))// &
+                ':'//trim(request%labels(i))
+        end do
+        do i = 1, request%n_exclude_labels
+            canonical = canonical//'|exclude:'// &
+                trim(int_text(len_trim(request%exclude_labels(i))))//':'// &
+                trim(request%exclude_labels(i))
+        end do
+        do i = 1, request%n_layers
+            canonical = canonical//'|layer:'//trim(int_text(len_trim(request%layers(i))))// &
+                ':'//trim(request%layers(i))
+        end do
         key = text_digest(canonical)
     end function request_policy_key
+
+    logical function request_scoped(request)
+        type(gremlin_request_t), intent(in) :: request
+
+        request_scoped = request%n_labels + request%n_exclude_labels + &
+            request%n_layers > 0
+    end function request_scoped
+
+    subroutine push_scope_args(packed, n_args, request)
+        !! -L/-LE/--layer arguments of the lane scope, in `fo test` spelling.
+        character(len=:), allocatable, intent(inout) :: packed
+        integer, intent(inout) :: n_args
+        type(gremlin_request_t), intent(in) :: request
+        integer :: i
+
+        do i = 1, request%n_labels
+            call argv_push(packed, n_args, '-L')
+            call argv_push(packed, n_args, trim(request%labels(i)))
+        end do
+        do i = 1, request%n_exclude_labels
+            call argv_push(packed, n_args, '-LE')
+            call argv_push(packed, n_args, trim(request%exclude_labels(i)))
+        end do
+        do i = 1, request%n_layers
+            call argv_push(packed, n_args, '--layer')
+            call argv_push(packed, n_args, trim(request%layers(i)))
+        end do
+    end subroutine push_scope_args
+
+    subroutine scope_model_request(request, model_request)
+        type(gremlin_request_t), intent(in) :: request
+        type(model_request_t), intent(out) :: model_request
+        integer :: i
+
+        allocate (model_request%names(0))
+        allocate (model_request%include_labels(request%n_labels))
+        allocate (model_request%exclude_labels(request%n_exclude_labels))
+        allocate (model_request%layers(request%n_layers))
+        do i = 1, request%n_labels
+            model_request%include_labels(i)%s = trim(request%labels(i))
+        end do
+        do i = 1, request%n_exclude_labels
+            model_request%exclude_labels(i)%s = trim(request%exclude_labels(i))
+        end do
+        do i = 1, request%n_layers
+            model_request%layers(i)%s = trim(request%layers(i))
+        end do
+    end subroutine scope_model_request
 
     function text_digest(text) result(digest)
         character(len=*), intent(in) :: text

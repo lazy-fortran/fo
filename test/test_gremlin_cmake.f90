@@ -189,6 +189,7 @@ program test_gremlin_cmake
         'the generation build reaches cmake --build through the trap')
     rc = c_unlink(child_runs//c_null_char)
     rc = c_unlink(generation_builds//c_null_char)
+    call scoped_lane_phase()
     call write_marker(.true.)
     call wait_result(previous, 'BUILD_FAIL', generation)
     call assert_equal_string(generation, previous, &
@@ -293,6 +294,113 @@ contains
         rc = c_setenv('PATH'//c_null_char, shadow//':'//trim(path_value)//c_null_char, &
             1_c_int)
     end subroutine install_tool_trap
+
+    subroutine scoped_lane_phase()
+        !! A lane scoped by -L probe: the generation builds the scope's plan
+        !! targets only, only scoped cases run, and a request naming a case
+        !! outside that build is served by building its targets.
+        character(len=*), parameter :: scope_lane = 'scope'
+        type(string_list_t) :: scoped, ask
+        type(json_value_t) :: started, status, events, receipt, answer
+        type(process_result_t) :: observed
+        character(:), allocatable :: scope_owner, active, builds
+        integer :: k, attempt, probe_receipts, other_receipts
+
+        call list_add(scoped, 'gremlin')
+        call list_add(scoped, 'start')
+        call list_add(scoped, '--dir')
+        call list_add(scoped, project)
+        call list_add(scoped, '--lane')
+        call list_add(scoped, scope_lane)
+        call list_add(scoped, '-L')
+        call list_add(scoped, 'probe')
+        call list_add(scoped, '-LE')
+        call list_add(scoped, 'nothing_has_this_label')
+        call list_add(scoped, '--random')
+        call list_add(scoped, '4')
+        call list_add(scoped, '--campaign-seconds')
+        call list_add(scoped, '60')
+        call list_add(scoped, '--timeout-seconds')
+        call list_add(scoped, '10')
+        call gremlin_json(driver, project, cache, state, scoped, started, observed, &
+            30000)
+        scope_owner = gremlin_field(started, 'session_id')
+        call assert_true(observed%exit_code == 0 .and. len(scope_owner) > 0, &
+            'a lane scoped by -L and -LE starts')
+        if (len(scope_owner) == 0) return
+        probe_receipts = 0
+        other_receipts = 0
+        active = ''
+        do attempt = 1, 3000
+            ask = string_list_t()
+            call list_add(ask, 'gremlin')
+            call list_add(ask, 'status')
+            call list_add(ask, '--detail')
+            call list_add(ask, 'full')
+            call list_add(ask, '--dir')
+            call list_add(ask, project)
+            call list_add(ask, '--lane')
+            call list_add(ask, scope_lane)
+            call list_add(ask, '--session')
+            call list_add(ask, scope_owner)
+            call list_add(ask, '--max-records')
+            call list_add(ask, '128')
+            call gremlin_json(driver, project, cache, state, ask, status, observed, &
+                10000)
+            active = gremlin_field(status, 'active_generation')
+            events = json_member(status, 'events')
+            probe_receipts = 0
+            other_receipts = 0
+            do k = 1, json_size(events)
+                receipt = json_element(events, k)
+                if (json_string_value(json_member(receipt, 'case_id')) == &
+                    'excluded_probe') then
+                    probe_receipts = probe_receipts + 1
+                else if (len(json_string_value(json_member(receipt, 'case_id'))) > 0 &
+                    .and. json_string_value(json_member(receipt, 'case_id')) /= &
+                    '<build>') then
+                    other_receipts = other_receipts + 1
+                end if
+            end do
+            if (probe_receipts >= 1) exit
+            call gremlin_wait_ms(50)
+        end do
+        call assert_true(probe_receipts >= 1, 'the scoped lane runs its scoped case')
+        call assert_equal_integer(other_receipts, 0, &
+            'the scoped lane runs no case outside its scope')
+        builds = ''
+        if (file_present(generation_builds)) builds = read_text(generation_builds)
+        call assert_true(index(builds, 'probe') > 0, &
+            'the scoped generation builds the scope target')
+        call assert_true(index(builds, 'marker') == 0, &
+            'the scoped generation does not build targets outside its scope')
+        call assert_true(.not. file_present(child_builds), &
+            'scoped case children never invoke cmake --build')
+        ! A case outside the scope: reproduce builds its own target first.
+        ask = string_list_t()
+        call list_add(ask, 'gremlin')
+        call list_add(ask, 'reproduce')
+        call list_add(ask, 'registered_marker')
+        call list_add(ask, '--dir')
+        call list_add(ask, project)
+        call list_add(ask, '--lane')
+        call list_add(ask, scope_lane)
+        call list_add(ask, '--session')
+        call list_add(ask, scope_owner)
+        call list_add(ask, '--generation')
+        call list_add(ask, active)
+        call gremlin_json(driver, project, cache, state, ask, answer, observed, &
+            180000)
+        call assert_equal_integer(observed%exit_code, 0, &
+            'a request outside the scoped build builds its targets and runs')
+        call assert_equal_string(gremlin_field(answer, 'state'), 'PASS', &
+            'the out-of-scope case passes after its targets are built')
+        call gremlin_stop_lane(driver, project, cache, state, scope_lane, &
+            scope_owner, allow_terminal_error=.true.)
+        rc = c_unlink(generation_builds//c_null_char)
+        rc = c_unlink(child_builds//c_null_char)
+        rc = c_unlink(child_runs//c_null_char)
+    end subroutine scoped_lane_phase
 
     integer function line_count(path)
         character(len=*), intent(in) :: path

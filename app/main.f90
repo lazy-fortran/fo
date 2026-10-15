@@ -24,7 +24,8 @@ program fo_main
     use fo_gfortran_build, only: gfortran_selected_test_names
     use fx_string, only: string_t
     use fo_project_model, only: model_request_t, model_selection_t, &
-        project_model_t, model_find_case, SELECT_EMPTY, CASE_SELECTED
+        project_model_t, model_find_case, model_select, SELECT_EMPTY, SELECT_OK, &
+        CASE_SELECTED
     use fo_project_load, only: project_has_model, project_resolve, &
         project_run_cases, project_list_text, project_list_json, &
         project_affected, project_changed_files, project_run_affected, &
@@ -1050,32 +1051,75 @@ contains
     end subroutine cmd_build
 
     subroutine build_case_indices(model, cases)
-        !! Cases named by `fo build --tests --case NAME` (repeatable), or every
-        !! inventory case. An unknown name is an error.
+        !! Cases named by `fo build --tests --case NAME` (repeatable) or
+        !! scoped by -L/-LE/--layer (the `fo test` semantics), else every
+        !! inventory case. An unknown name or layer is an error.
         type(project_model_t), intent(in) :: model
         integer, allocatable, intent(out) :: cases(:)
+        type(model_request_t) :: request
+        type(model_selection_t) :: selection
         character(len=1024) :: arg
         integer :: i, k, n
-        integer, allocatable :: named(:)
+        integer, allocatable :: named(:), inventory(:), picked(:)
+        logical :: scoped
 
         allocate (named(command_argument_count()))
+        allocate (request%names(0), request%include_labels(0), &
+            request%exclude_labels(0), request%layers(0))
         n = 0
         do i = 2, command_argument_count() - 1
             call get_command_argument(i, arg)
-            if (trim(arg) /= '--case') cycle
-            call get_command_argument(i + 1, arg)
-            k = model_find_case(model, trim(arg))
-            if (k == 0) then
-                write (error_unit, '(a)') 'fo: unknown test case: '//trim(arg)
-                call process_exit(1)
-            end if
-            n = n + 1
-            named(n) = k
+            select case (trim(arg))
+            case ('--case')
+                call get_command_argument(i + 1, arg)
+                k = model_find_case(model, trim(arg))
+                if (k == 0) then
+                    write (error_unit, '(a)') 'fo: unknown test case: '//trim(arg)
+                    call process_exit(1)
+                end if
+                n = n + 1
+                named(n) = k
+                call append_request_string(request%names, arg)
+            case ('-L', '--label')
+                call get_command_argument(i + 1, arg)
+                call append_request_string(request%include_labels, arg)
+            case ('-LE', '--exclude-label')
+                call get_command_argument(i + 1, arg)
+                call append_request_string(request%exclude_labels, arg)
+            case ('--layer')
+                call get_command_argument(i + 1, arg)
+                call append_request_string(request%layers, arg)
+            end select
         end do
+        scoped = size(request%include_labels) + size(request%exclude_labels) + &
+            size(request%layers) > 0
+        if (.not. scoped) then
+            if (n == 0) then
+                call project_inventory_cases(model, cases)
+            else
+                cases = named(:n)
+            end if
+            return
+        end if
+        call model_select(model, request, selection)
+        if (selection%status /= SELECT_OK .and. selection%status /= SELECT_EMPTY) then
+            write (error_unit, '(a)') 'fo: '//selection%message
+            call process_exit(1)
+        end if
+        ! Cases the campaign may run: not preset-filtered, not explicit-only.
+        call project_inventory_cases(model, inventory)
+        allocate (picked(size(selection%cases)))
+        n = 0
+        do i = 1, size(selection%cases)
+            if (.not. any(inventory == selection%cases(i))) cycle
+            n = n + 1
+            picked(n) = selection%cases(i)
+        end do
+        allocate (cases(n))
+        cases = picked(:n)
         if (n == 0) then
-            call project_inventory_cases(model, cases)
-        else
-            cases = named(:n)
+            write (error_unit, '(a)') 'fo: the scope selects no test case'
+            call process_exit(1)
         end if
     end subroutine build_case_indices
 

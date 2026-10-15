@@ -1565,6 +1565,12 @@ contains
             '"lane_id":{"type":"string"},'// &
             '"session_id":{"type":"string"},'// &
             '"targets":{"type":"array","items":{"type":"string"}},'// &
+            '"labels":{"type":"array","items":{"type":"string"},'// &
+            '"description":"gremlin lane scope: fo test -L regexes (AND)"},'// &
+            '"exclude_labels":{"type":"array","items":{"type":"string"},'// &
+            '"description":"gremlin lane scope: fo test -LE regexes"},'// &
+            '"layers":{"type":"array","items":{"type":"string"},'// &
+            '"description":"gremlin lane scope: layer names (union)"},'// &
             '"only_changed":{"type":"boolean"},'// &
             '"shuffle":{"type":"boolean"},'// &
             '"random_count":{"type":"integer","minimum":0,"maximum":32,'// &
