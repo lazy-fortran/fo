@@ -32,7 +32,6 @@ module fo_fpm_config
     integer, parameter :: MAX_LINK_LIBS = 64
     integer, parameter :: MAX_EXTERNAL_MODULES = 64
     integer, parameter :: MAX_FLAGS = 64
-    integer, parameter :: MAX_EXES = 64
     integer, parameter :: MAX_TEST_ARG_SETS = 128
     integer, parameter :: MAX_FO_INPUTS = 256
 
@@ -138,11 +137,11 @@ module fo_fpm_config
         integer :: n_flags = 0
         character(len=128) :: flags(MAX_FLAGS)
         integer :: n_exes = 0
-        type(fpm_exe_t) :: exes(MAX_EXES)
+        type(fpm_exe_t), allocatable :: exes(:)
         integer :: n_tests = 0
-        type(fpm_exe_t) :: tests(MAX_EXES)
+        type(fpm_exe_t), allocatable :: tests(:)
         integer :: n_examples = 0
-        type(fpm_exe_t) :: examples(MAX_EXES)
+        type(fpm_exe_t), allocatable :: examples(:)
         integer :: n_test_arg_sets = 0
         type(fpm_test_args_t) :: test_arg_sets(MAX_TEST_ARG_SETS)
         integer :: n_fo_inputs = 0
@@ -205,6 +204,23 @@ module fo_fpm_config
     end type fpm_config_t
 
 contains
+
+    subroutine grow_exes(list, n, item)
+        !! Append item to list(1:n), doubling the allocation when it is full.
+        type(fpm_exe_t), allocatable, intent(inout) :: list(:)
+        integer, intent(inout) :: n
+        type(fpm_exe_t), intent(in) :: item
+        type(fpm_exe_t), allocatable :: bigger(:)
+
+        if (.not. allocated(list)) allocate (list(0))
+        if (n >= size(list)) then
+            allocate (bigger(max(16, 2*size(list))))
+            bigger(1:n) = list(1:n)
+            call move_alloc(bigger, list)
+        end if
+        n = n + 1
+        list(n) = item
+    end subroutine grow_exes
 
     pure function dep_kind(dep) result(kind)
         !! Classify a parsed dependency by which source field the manifest set.
@@ -307,17 +323,10 @@ contains
         c%n_flags = 0
         c%flags = ''
         c%n_exes = 0
-        do i = 1, MAX_EXES
-            c%exes(i)%name = ''
-            c%exes(i)%main = 'main.f90'
-            c%exes(i)%source_dir = 'app'
-            c%tests(i)%name = ''
-            c%tests(i)%main = 'main.f90'
-            c%tests(i)%source_dir = 'app'
-            c%examples(i)%name = ''
-            c%examples(i)%main = 'main.f90'
-            c%examples(i)%source_dir = 'app'
-        end do
+        if (allocated(c%exes)) deallocate (c%exes)
+        if (allocated(c%tests)) deallocate (c%tests)
+        if (allocated(c%examples)) deallocate (c%examples)
+        allocate (c%exes(0), c%tests(0), c%examples(0))
         c%n_tests = 0
         c%n_examples = 0
         c%n_test_arg_sets = 0
@@ -478,36 +487,14 @@ contains
 
             if (line(1:1) == '[') then
                 call get_section(line, section)
-                select case (trim(section))
-                case ('executable')
-                    if (config%n_exes >= MAX_EXES) write ( &
-                        config%manifest_parse_error, '(a,i0,a)') &
-                        '[[executable]] exceeds supported limit ', MAX_EXES, &
-                        ' declarations'
-                case ('test')
-                    if (config%n_tests >= MAX_EXES) write ( &
-                        config%manifest_parse_error, '(a,i0,a)') &
-                        '[[test]] exceeds supported limit ', MAX_EXES, ' declarations'
-                case ('example')
-                    if (config%n_examples >= MAX_EXES) write ( &
-                        config%manifest_parse_error, '(a,i0,a)') &
-                        '[[example]] exceeds supported limit ', MAX_EXES, &
-                        ' declarations'
-                end select
-                if (len_trim(config%manifest_parse_error) > 0) cycle
-                if (trim(section) == 'executable' .and. &
-                    config%n_exes < MAX_EXES) then
-                    config%n_exes = config%n_exes + 1
-                    config%exes(config%n_exes) = fpm_exe_t()
-                else if (trim(section) == 'test' .and. &
-                        config%n_tests < MAX_EXES) then
-                    config%n_tests = config%n_tests + 1
-                    config%tests(config%n_tests) = fpm_exe_t(source_dir='test')
-                else if (trim(section) == 'example' .and. &
-                        config%n_examples < MAX_EXES) then
-                    config%n_examples = config%n_examples + 1
-                    config%examples(config%n_examples) = &
-                        fpm_exe_t(source_dir='example')
+                if (trim(section) == 'executable') then
+                    call grow_exes(config%exes, config%n_exes, fpm_exe_t())
+                else if (trim(section) == 'test') then
+                    call grow_exes(config%tests, config%n_tests, &
+                        fpm_exe_t(source_dir='test'))
+                else if (trim(section) == 'example') then
+                    call grow_exes(config%examples, config%n_examples, &
+                        fpm_exe_t(source_dir='example'))
                 else if (trim(section) == 'extra.fo.inputs') then
                     if (config%n_fo_inputs >= MAX_FO_INPUTS) then
                         write (config%manifest_parse_error, '(a,i0,a)') &

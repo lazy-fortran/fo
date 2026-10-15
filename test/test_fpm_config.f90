@@ -342,7 +342,7 @@ contains
         call assert(status == 0, 'manifest capacity fixture created')
         if (status /= 0) return
         do kind = 1, 3
-            do count = 64, 65
+            do count = 64, 200, 68
                 open (newunit=unit, file=trim(dir)//'/fpm.toml', status='replace')
                 write (unit, '(a)') 'name = "capacity"'
                 do i = 1, count
@@ -352,18 +352,23 @@ contains
                 end do
                 close (unit)
                 call fpm_config_parse(trim(dir), config, ierr)
-                if (count == 64) then
-                    call assert(ierr == 0, trim(sections(kind))// &
-                        ': all 64 declared targets are supported')
-                else
-                    call assert(ierr /= 0, trim(sections(kind))// &
-                        ': oversized manifest fails instead of overwriting target 64')
-                    call assert(index(config%manifest_parse_error, &
-                        '[['//trim(sections(kind))//']]') > 0, &
-                        'target capacity error identifies declaration kind')
-                    call assert(index(config%manifest_parse_error, '64') > 0, &
-                        'target capacity error states the supported boundary')
-                end if
+                call assert(ierr == 0, trim(sections(kind))// &
+                    ': declarations beyond 64 are supported')
+                write (number, '(i0)') count
+                select case (kind)
+                case (1)
+                    call assert(config%n_exes == count, 'all executables retained')
+                    call assert(trim(config%exes(count)%name) == &
+                        'entry_'//trim(number), 'last executable keeps its name')
+                case (2)
+                    call assert(config%n_tests == count, 'all tests retained')
+                    call assert(trim(config%tests(count)%name) == &
+                        'entry_'//trim(number), 'last test keeps its name')
+                case (3)
+                    call assert(config%n_examples == count, 'all examples retained')
+                    call assert(trim(config%examples(count)%name) == &
+                        'entry_'//trim(number), 'last example keeps its name')
+                end select
             end do
         end do
         do count = 128, 129
