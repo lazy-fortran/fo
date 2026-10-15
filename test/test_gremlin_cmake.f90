@@ -1,15 +1,19 @@
 program test_gremlin_cmake
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
+    use, intrinsic :: iso_fortran_env, only: int64
     use fo_test_harness, only: string_list_t, process_result_t, list_add, &
               make_directory, write_text, read_text, assert_true, assert_equal_string, &
+                               assert_equal_integer, &
                                finish_assertions, run_process, assert_process_ok
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, &
                    gremlin_start_args, gremlin_wait_ms, gremlin_field, gremlin_stop_lane
-    use fo_test_json, only: json_value_t, json_member, json_boolean_value, json_string_value
+    use fo_test_json, only: json_value_t, json_member, json_boolean_value, &
+        json_string_value, json_size, json_element, json_number_value
     implicit none
     character(:), allocatable :: driver, scratch, project, cache, state
     character(:), allocatable :: owner, generation, previous, dependency
     character(:), allocatable :: provider, provider_source, revision, raw_archive
+    character(:), allocatable :: child_builds, generation_builds, child_runs
     type(string_list_t) :: args
     type(process_result_t) :: process
     type(json_value_t) :: reply
@@ -138,6 +142,7 @@ program test_gremlin_cmake
         new_line('a')//'endif()'//new_line('a')// &
         'file(TOUCH "${OUTPUT}")'//new_line('a'))
     call initialize_project_git()
+    call install_tool_trap()
     rc = c_setenv('FO_CMAKE_CONFIGURE_PRESET'//c_null_char, 'cpu'//c_null_char, 1_c_int)
     rc = c_setenv('FO_CMAKE_BUILD_PRESET'//c_null_char, 'cpu'//c_null_char, 1_c_int)
     rc = c_setenv('FO_CMAKE_BUILD_TARGETS'//c_null_char, 'marker'//c_null_char, 1_c_int)
@@ -159,10 +164,21 @@ program test_gremlin_cmake
         call finish_assertions()
     end if
     previous = generation
+    call assert_true(file_present(child_runs), 'case children run the CTest case')
+    call assert_true(file_present(generation_builds), &
+        'the generation build reaches cmake --build through the trap')
+    rc = c_unlink(child_runs//c_null_char)
+    rc = c_unlink(generation_builds//c_null_char)
     call write_marker(.true.)
     call wait_result(previous, 'BUILD_FAIL', generation)
     call assert_equal_string(generation, previous, &
                          'invalid candidate retains the last compiled CMake generation')
+    call gremlin_wait_ms(1000)
+    call assert_build_failure_once()
+    call assert_equal_integer(line_count(generation_builds), 1, &
+        'the failed candidate is built once by the supervisor')
+    call assert_true(.not. file_present(child_runs), &
+        'no case child runs for the unbuilt candidate')
     call write_marker(.false.)
     call write_dependency(9)
     call wait_result(previous, 'FAIL', generation)
@@ -189,10 +205,137 @@ program test_gremlin_cmake
     call wait_result(previous, 'CAPTURE_FAIL', generation)
     call assert_equal_string(generation, previous, &
                             'unsupported referenced input retains active generation')
+    call assert_true(.not. file_present(child_builds), &
+        'case children never invoke cmake --build')
     call gremlin_stop_lane(driver, project, cache, state, 'cmake', owner, &
                            allow_terminal_error=.true.)
     call finish_assertions()
 contains
+    subroutine install_tool_trap()
+        !! cmake and ctest on PATH log each call and exec the real tool. Case
+        !! children carry FO_GREMLIN_EXECUTION_CWD; the generation build not.
+        type(string_list_t) :: command
+        type(process_result_t) :: observed
+        character(:), allocatable :: shadow
+        character(len=4096) :: path_value
+        integer :: k
+        character(len=5), parameter :: tools(2) = ['cmake', 'ctest']
+        character(:), allocatable :: real_tool, body
+        shadow = scratch//'/shadow'
+        child_builds = scratch//'/child-cmake-build.log'
+        generation_builds = scratch//'/generation-cmake-build.log'
+        child_runs = scratch//'/child-ctest.log'
+        call make_directory(shadow)
+        do k = 1, 2
+            command = string_list_t()
+            call list_add(command, 'sh')
+            call list_add(command, '-c')
+            call list_add(command, 'command -v '//trim(tools(k)))
+            call run_process(command, project, observed)
+            call assert_process_ok(observed, 'real '//trim(tools(k))//' is on PATH')
+            real_tool = trim(observed%stdout)
+            if (index(real_tool, new_line('a')) > 0) &
+                real_tool = real_tool(:index(real_tool, new_line('a')) - 1)
+            if (k == 1) then
+                body = 'if [ "$1" = "--build" ]; then'//new_line('a')// &
+                    '  if [ -n "$FO_GREMLIN_EXECUTION_CWD" ]; then'//new_line('a')// &
+                    '    echo "$*" >> "'//child_builds//'"'//new_line('a')// &
+                    '  else'//new_line('a')// &
+                    '    echo "$*" >> "'//generation_builds//'"'//new_line('a')// &
+                    '  fi'//new_line('a')//'fi'//new_line('a')
+            else
+                body = 'if [ -n "$FO_GREMLIN_EXECUTION_CWD" ]; then'//new_line('a')// &
+                    '  echo "$*" >> "'//child_runs//'"'//new_line('a')// &
+                    'fi'//new_line('a')
+            end if
+            call write_text(shadow//'/'//trim(tools(k)), '#!/bin/sh'//new_line('a')// &
+                body//'exec "'//real_tool//'" "$@"'//new_line('a'))
+            command = string_list_t()
+            call list_add(command, 'chmod')
+            call list_add(command, '+x')
+            call list_add(command, shadow//'/'//trim(tools(k)))
+            call run_process(command, project, observed)
+            call assert_process_ok(observed, 'tool trap is executable')
+        end do
+        call get_environment_variable('PATH', path_value)
+        rc = c_setenv('PATH'//c_null_char, shadow//':'//trim(path_value)//c_null_char, &
+            1_c_int)
+    end subroutine install_tool_trap
+
+    integer function line_count(path)
+        character(len=*), intent(in) :: path
+        character(:), allocatable :: text
+        integer :: k
+        line_count = 0
+        if (.not. file_present(path)) return
+        text = read_text(path)
+        do k = 1, len(text)
+            if (text(k:k) == new_line('a')) line_count = line_count + 1
+        end do
+    end function line_count
+
+    subroutine assert_build_failure_once()
+        !! The failed candidate has exactly one BUILD_FAIL receipt and no case
+        !! receipt: its build failure never reaches a case child.
+        type(string_list_t) :: query
+        type(json_value_t) :: status, events, receipt
+        type(process_result_t) :: observed
+        character(:), allocatable :: failed, cursor
+        type(string_list_t) :: generations, cases, outcomes
+        character(len=32) :: number
+        integer :: k, n_failures, n_cases, n_rows, page
+        cursor = '0'
+        do page = 1, 1000
+            query = string_list_t()
+            call list_add(query, 'gremlin')
+            call list_add(query, 'status')
+            call list_add(query, '--detail')
+            call list_add(query, 'full')
+            call list_add(query, '--dir')
+            call list_add(query, project)
+            call list_add(query, '--lane')
+            call list_add(query, 'cmake')
+            call list_add(query, '--session')
+            call list_add(query, owner)
+            call list_add(query, '--cursor')
+            call list_add(query, cursor)
+            call list_add(query, '--max-records')
+            call list_add(query, '128')
+            call gremlin_json(driver, project, cache, state, query, status, observed, &
+                10000)
+            events = json_member(status, 'events')
+            do k = 1, json_size(events)
+                receipt = json_element(events, k)
+                call list_add(generations, &
+                    json_string_value(json_member(receipt, 'generation')))
+                call list_add(cases, json_string_value(json_member(receipt, 'case_id')))
+                call list_add(outcomes, json_string_value(json_member(receipt, 'status')))
+            end do
+            if (.not. json_boolean_value(json_member(status, 'has_more'))) exit
+            write (number, '(i0)') int(json_number_value(json_member(status, &
+                'next_cursor')), int64)
+            cursor = trim(number)
+        end do
+        n_rows = 0
+        if (allocated(outcomes%items)) n_rows = size(outcomes%items)
+        failed = ''
+        n_failures = 0
+        do k = 1, n_rows
+            if (outcomes%items(k)%value /= 'BUILD_FAIL') cycle
+            n_failures = n_failures + 1
+            failed = generations%items(k)%value
+        end do
+        call assert_equal_integer(n_failures, 1, 'the build failure is reported once')
+        n_cases = 0
+        do k = 1, n_rows
+            if (generations%items(k)%value /= failed) cycle
+            if (cases%items(k)%value == '<build>') cycle
+            n_cases = n_cases + 1
+        end do
+        call assert_equal_integer(n_cases, 0, &
+            'no case of the failed candidate is attempted')
+    end subroutine assert_build_failure_once
+
     subroutine make_populate_only_dependency()
         type(string_list_t) :: command
         type(process_result_t) :: observed

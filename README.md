@@ -40,6 +40,7 @@ fpm install --profile release --prefix ~/.local
 fo                         start or attach to resident Gremlin
 fo verify                  static checks, build, tests, lint, format check
 fo build [--profile NAME]  build applications and examples
+fo build --tests           also build test programs (then fo test --no-build)
 fo test [NAME ...]         build and run tests
 fo test --only-changed     run tests affected by changed modules
 fo test --random 12        reproducible sample without replacement

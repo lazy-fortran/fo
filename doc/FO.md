@@ -206,6 +206,11 @@ fo test --list [--json] [same selection]
   for the run. No label is excluded except through the default exclusions above.
 - `--no-build` runs the selected cases without building (CMake: whatever is
   built; a missing executable fails the case).
+- `fo build --tests` also builds the fpm test programs, slow ones included
+  (CMake builds its configured target set, scoped by `FO_CMAKE_BUILD_TARGETS`).
+  Gremlin builds each generation once this way; its case runs and `reproduce`
+  use `fo test --no-build` on that build, and a failed build is reported once
+  for the generation without running any case.
 
 MCP `test` uses the same selection for its names. `--list`, labels and layers
 are not available with `--random`, `--only-changed` or `FO_CMAKE_NATIVE`.

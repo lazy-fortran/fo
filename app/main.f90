@@ -363,6 +363,8 @@ contains
         write (output_unit, '(a)') '  verify     static -> build -> test -> lint -> fmt hint'
         write (output_unit, '(a)') '  build      build only (--flag "-O0")'
         write (output_unit, '(a)') &
+            '  build --tests   also build test programs'
+        write (output_unit, '(a)') &
             '  build --debug   add -g -O0 -fcheck=all -fbacktrace'
         write (output_unit, '(a)') &
             '  build --asan    debug flags plus -fsanitize=address,undefined'
@@ -1027,11 +1029,11 @@ contains
             end if
         end if
         call make_tmpfile('fo-build', build_log)
-        if (len_trim(all_flags) > 0) then
-            call backend_build(b, exitcode, all_flags, build_log)
-        else
-            call backend_build(b, exitcode, log_file=build_log)
-        end if
+        ! --tests also builds the fpm test programs, slow ones included
+        ! (CMake: the configured target set), so `fo test --no-build` can run
+        ! any of them afterwards.
+        call backend_build(b, exitcode, trim(all_flags), build_log, &
+            with_tests=has_arg('--tests'), include_slow=.true.)
         if (exitcode /= 0) then
             call report_build_result(build_log)
             call process_exit(1)

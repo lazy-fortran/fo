@@ -1112,9 +1112,11 @@ contains
         character(len=16) :: outcome
         character(len=GREMLIN_STATE_TEXT_MAX) :: status_text
         character(len=128) :: build_view_owner
-        character(len=:), allocatable :: packed, execution_env
+        character(len=:), allocatable :: packed, execution_env, build_packed
+        character(len=PATH_LEN) :: build_log
         integer :: owner_pid, ierr, n_selected, mandatory_count, seed
         integer :: n_args, spawn_exit, test_exit, sequence, release_error
+        integer :: n_build_args, build_pid, build_exit
         integer :: reproduction_timeout, work_release_error, scope_restore_error
         character(len=128) :: view_owner
         logical :: retain_view, have_reproduction_work_lease, stop_requested
@@ -1231,6 +1233,7 @@ contains
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'test')
+        call argv_push(packed, n_args, '--no-build')
         call argv_push(packed, n_args, '--json')
         if (is_slow_test(trim(request%case_id))) then
             call argv_push(packed, n_args, '--all')
@@ -1319,6 +1322,33 @@ contains
                 end if
             end if
         end if
+        build_exit = 0
+        if (ierr == 0) then
+            ! Build the generation once here; the case child never builds, so
+            ! a build failure is reported once and no case runs.
+            call log_path(session, 'reproduce-'//trim(reproduction_id)// &
+                '-build.log', build_log)
+            n_build_args = 0
+            call argv_push(build_packed, n_build_args, trim(executable))
+            call argv_push(build_packed, n_build_args, 'build')
+            call argv_push(build_packed, n_build_args, '--tests')
+            call process_start_argv_logged(trim(build_view%cwd), build_packed, &
+                n_build_args, trim(build_log), build_pid, spawn_exit, &
+                'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
+                'FO_GREMLIN_FROZEN_ROOT='//trim(build_view%cwd)//';TMPDIR='// &
+                trim(build_view%tmpdir))
+            if (spawn_exit /= 0) then
+                ierr = 1
+                message = 'cannot start the generation build'
+            else
+                call process_wait_bounded(build_pid, huge(0), build_exit)
+                if (build_exit /= 0) then
+                    call gremlin_retain_build_log(build_log)
+                    ierr = 1
+                    message = 'generation build failed; diagnostic: '//trim(build_log)
+                end if
+            end if
+        end if
         if (ierr /= 0) then
             call release_heavy_work_slot(reproduction_work_lease, &
                 have_reproduction_work_lease, work_release_error, &
@@ -1333,6 +1363,7 @@ contains
             call release_if_owner(session, release_error, cleanup_message)
             call error_response('reproduce', trim(message), response)
             exitcode = 2
+            if (build_exit /= 0) exitcode = 1
             return
         end if
         execution_env = 'FO_BIN='//trim(executable)//';FO='//trim(executable)//';'// &
@@ -2359,6 +2390,7 @@ contains
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'build')
+        call argv_push(packed, n_args, '--tests')
         call process_start_argv_logged(trim(child%execution_view%cwd), packed, &
             n_args, trim(child%log_file), child%pid, spawn_exit, &
             'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
@@ -3301,7 +3333,9 @@ contains
             'TMPDIR='//trim(child%execution_view%tmpdir)
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
+        ! The generation was built once by start_build; a case never builds.
         call argv_push(packed, n_args, 'test')
+        call argv_push(packed, n_args, '--no-build')
         call argv_push(packed, n_args, '--json')
         if (is_slow_test(trim(selected(index_case)))) then
             call argv_push(packed, n_args, '--all')

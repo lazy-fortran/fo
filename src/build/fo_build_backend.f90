@@ -217,9 +217,10 @@ contains
     end function detect_jobs
 
     subroutine backend_build(self, exitcode, flags, log_file, with_tests, use_cache, &
-            configured)
+            configured, include_slow)
         !! configured: the CMake tree was configured by this command already
         !! (its model is loaded), so the build does not configure again.
+        !! include_slow: with_tests also builds the slow fpm tests.
         type(backend_t), intent(inout) :: self
         integer, intent(out) :: exitcode
         character(len=*), intent(in), optional :: flags
@@ -227,6 +228,7 @@ contains
         logical, intent(in), optional :: with_tests
         logical, intent(in), optional :: use_cache
         logical, intent(in), optional :: configured
+        logical, intent(in), optional :: include_slow
 
         character(len=512) :: log_path, flag_text, lock_dir
         integer :: lock_ierr
@@ -265,7 +267,8 @@ contains
                     return
                 end if
                 call gfortran_test(self%project_dir, log_path, exitcode, &
-                    flags=flag_text, build_only=.true., use_cache=use_cache)
+                    include_slow=include_slow, flags=flag_text, build_only=.true., &
+                    use_cache=use_cache)
             else
                 call gfortran_build(self%project_dir, log_path, exitcode, &
                     flags=flag_text, use_cache=use_cache)
