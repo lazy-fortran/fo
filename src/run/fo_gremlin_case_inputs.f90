@@ -13,7 +13,7 @@ module fo_gremlin_case_inputs
     use fo_input_inventory, only: input_inventory_t, input_entry_t
     use fo_gremlin_generation, only: generation_t
     use fo_project_model, only: name_index_t, index_insert, index_lookup, &
-        model_case_digests, model_find_case
+        model_case_digests, model_find_case, model_layering_sources
     use fo_project_load, only: project_model_units
     implicit none
     private
@@ -42,13 +42,10 @@ contains
 
         subroutine add(path)
             character(len=*), intent(in) :: path
-            character(len=4096) :: physical
-            logical :: ok
 
             if (len_trim(path) == 0) return
             call push(trim(path))
-            call fs_realpath(trim(path), physical, ok)
-            if (ok) call push(trim(physical))
+            call push(resolve_existing(trim(path)))
         end subroutine add
 
         subroutine push(path)
@@ -82,8 +79,67 @@ contains
             allocate (extra(0))
         end if
         call project_model_units(generation%model, extra, generation%units, &
-            trim(generation%model_root), trim(project))
+            model_source_root(generation, extra), trim(project))
     end subroutine generation_units_ensure
+
+    function model_source_root(generation, extra) result(root)
+        !! The spelling of the model root that the model's sources use: the
+        !! root as loaded, or its resolved path (the CMake File API reports
+        !! resolved source paths, e.g. /private/var for /var on Darwin).
+        !! A wrong spelling leaves a reused model's sources pointing into
+        !! the earlier generation's removed tree, unscanned.
+        type(generation_t), intent(in) :: generation
+        type(string_t), intent(in) :: extra(:)
+        character(len=:), allocatable :: root
+        type(string_t), allocatable :: paths(:)
+        character(len=:), allocatable :: resolved
+        integer :: k
+
+        root = trim(generation%model_root)
+        if (len(root) == 0) return
+        resolved = resolve_existing(root)
+        if (resolved == root) return
+        call model_layering_sources(generation%model, extra, paths)
+        do k = 1, size(paths)
+            if (below(paths(k)%s, root)) return
+        end do
+        do k = 1, size(paths)
+            if (below(paths(k)%s, resolved)) then
+                root = resolved
+                return
+            end if
+        end do
+    end function model_source_root
+
+    function resolve_existing(path) result(resolved)
+        !! path with its longest existing prefix resolved (the tree itself
+        !! may be removed already).
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: resolved
+        character(len=4096) :: physical
+        integer :: cut
+        logical :: ok
+
+        resolved = path
+        cut = len(path)
+        do while (cut > 1)
+            call fs_realpath(path(1:cut), physical, ok)
+            if (ok) then
+                resolved = trim(physical)//path(cut + 1:)
+                return
+            end if
+            cut = index(path(1:cut - 1), '/', back=.true.) - 1
+            if (cut < 1) exit
+        end do
+    end function resolve_existing
+
+    logical function below(path, root)
+        character(len=*), intent(in) :: path, root
+
+        below = .false.
+        if (len(path) <= len(root) + 1) return
+        below = path(1:len(root) + 1) == root//'/'
+    end function below
 
     subroutine generation_case_digests_ensure(generation, project)
         !! Input closure digest of every model case (model_case_digests over
