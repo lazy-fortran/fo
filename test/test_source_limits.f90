@@ -54,8 +54,6 @@ contains
             'module in_node_modules'//nl//'end module in_node_modules'//nl)
         call write_text(join_path(root, 'src/_deps/d.f90'), &
             'module in_underscore_deps'//nl//'end module in_underscore_deps'//nl)
-        call write_text(join_path(root, 'build-release/b.f90'), &
-            'module in_build_release'//nl//'end module in_build_release'//nl)
         call write_text(join_path(root, 'build/skipped.f90'), &
             'module in_build'//nl//'end module in_build'//nl)
         call write_text(join_path(root, '.hidden/skipped.f90'), &
@@ -70,8 +68,6 @@ contains
             'src/node_modules is a source directory')
         call assert_true(listed(units, n, 'src/_deps/d.f90'), &
             'src/_deps is a source directory')
-        call assert_true(listed(units, n, 'build-release/b.f90'), &
-            'only the project build directory is excluded at the root')
         call assert_true(.not. listed(units, n, 'build/skipped.f90'), &
             'the project build directory is excluded')
         call assert_true(.not. listed(units, n, '.hidden/'), &

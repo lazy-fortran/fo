@@ -1064,7 +1064,13 @@ static int directory_seen(struct windows_scan *scan, const wchar_t *path) {
 }
 static int skip_windows_directory(const wchar_t *name, int project, int depth) {
     if (name[0] == L'.') return 1;
-    return project && depth == 0 && !wcscmp(name, L"build");
+    /* Same policy as skip_dir_name: FPM projects skip vendored trees only
+       directly under the project root. */
+    if (project && depth != 0) return 0;
+    static const wchar_t *excluded[] = {L"__pycache__", L"site-packages", L"_deps",
+        L"dependencies", L"deps-src", NULL};
+    for (int i = 0; excluded[i]; ++i) if (!wcscmp(name, excluded[i])) return 1;
+    return project && (!wcsncmp(name, L"build", 5) || !wcscmp(name, L"SRC"));
 }
 static wchar_t *join_windows_path(const wchar_t *base, const wchar_t *name) {
     size_t length = wcslen(base) + wcslen(name) + 2;

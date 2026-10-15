@@ -260,10 +260,22 @@ static int skip_dir_name(const char *name, int is_proj_root, int depth) {
        matches the ripgrep/fd default and avoids descending into vendored
        Python virtualenvs whose dependencies ship .f90 fixtures. */
     if (name[0] == '.') return 1;
-    /* FPM scans every non-hidden source subdirectory, so names such as
-       "dependencies" or "venv" below src/ are real source trees.  Only the
-       project's own build output is excluded, at the project root. */
-    if (is_proj_root && depth == 0 && strcmp(name, "build") == 0) return 1;
+    /* Vendored and generated trees.  FPM scans only the configured source
+       directories, so below them a directory named "dependencies" or "venv"
+       is an ordinary source tree.  In an FPM project these names, the build
+       trees and SRC are therefore skipped only directly under the project
+       root; a root without fpm.toml has no such policy, so they stay skipped
+       at any depth. */
+    if (is_proj_root && depth != 0) return 0;
+    if (strcmp(name, "node_modules") == 0) return 1;
+    if (strcmp(name, "venv") == 0) return 1;
+    if (strcmp(name, "__pycache__") == 0) return 1;
+    if (strcmp(name, "site-packages") == 0) return 1;
+    if (strcmp(name, "_deps") == 0) return 1;
+    if (strcmp(name, "dependencies") == 0) return 1;
+    if (strcmp(name, "deps-src") == 0) return 1;
+    if (is_proj_root && strncmp(name, "build", 5) == 0) return 1;
+    if (is_proj_root && strcmp(name, "SRC") == 0) return 1;
     return 0;
 }
 
