@@ -147,8 +147,47 @@ contains
             ierr)
         call assert_true(ierr /= 0, 'a misspelled table is an error')
         call parse_manifest('name = "p"'//nl//'[features]'//nl//'a = 1'//nl, ierr)
-        call assert_true(ierr /= 0, 'an unknown table is an error')
+        call assert_true(ierr == 0, '[features] may be accepted by fpm: warn only')
+        call parse_manifest('name = "p"'//nl//'[feature]'//nl//'a = 1'//nl, ierr)
+        call assert_true(ierr /= 0, 'a misspelled feature table is an error')
+        call test_dependency_subtables()
     end subroutine test_manifest_tables
+
+    subroutine test_dependency_subtables()
+        type(fpm_config_t) :: inline_form, table_form
+        character(:), allocatable :: root
+        integer :: ierr
+
+        root = join_path(scratch, 'subtables')
+        call write_text(join_path(root, 'fpm.toml'), 'name = "p"'//nl// &
+            '[dependencies]'//nl// &
+            'bar = { git = "https://example.invalid/bar.git", tag = "v1" }'//nl// &
+            '[dev-dependencies]'//nl//'loc = { path = "../loc" }'//nl)
+        call fpm_config_parse(root, inline_form, ierr)
+        call assert_true(ierr == 0, 'inline dependencies parse')
+        call write_text(join_path(root, 'fpm.toml'), 'name = "p"'//nl// &
+            '[dependencies.bar]'//nl// &
+            'git = "https://example.invalid/bar.git"'//nl//'tag = "v1"'//nl// &
+            '[dev-dependencies.loc]'//nl//'path = "../loc"'//nl)
+        call fpm_config_parse(root, table_form, ierr)
+        call assert_true(ierr == 0, 'dependency tables parse')
+        call assert_true(table_form%n_deps == 1 .and. inline_form%n_deps == 1, &
+            'one dependency in each spelling')
+        call assert_true(table_form%n_dev_deps == 1 .and. inline_form%n_dev_deps == 1, &
+            'one dev dependency in each spelling')
+        if (table_form%n_deps == 1 .and. inline_form%n_deps == 1) then
+            call assert_true(trim(table_form%deps(1)%name) == trim(inline_form%deps(1)%name) &
+                .and. trim(table_form%deps(1)%git) == trim(inline_form%deps(1)%git) &
+                .and. trim(table_form%deps(1)%tag) == trim(inline_form%deps(1)%tag) &
+                .and. trim(table_form%deps(1)%git) == 'https://example.invalid/bar.git', &
+                'table and inline spellings give the same git dependency')
+        end if
+        if (table_form%n_dev_deps == 1 .and. inline_form%n_dev_deps == 1) then
+            call assert_true(trim(table_form%dev_deps(1)%name) == 'loc' &
+                .and. trim(table_form%dev_deps(1)%path) == &
+                trim(inline_form%dev_deps(1)%path), 'same dev path dependency')
+        end if
+    end subroutine test_dependency_subtables
 
     subroutine test_manifest_flag_and_library_limits()
         character(:), allocatable :: flags, libs

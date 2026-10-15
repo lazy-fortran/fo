@@ -575,6 +575,8 @@ contains
                 call parse_library(key, val, config)
             case ('fortran')
                 call parse_fortran(key, val, config)
+            case default
+                call parse_dependency_subtable(section, key, val, config)
             end select
         end do
 
@@ -2299,6 +2301,27 @@ contains
         end do
     end subroutine strip_comment
 
+    subroutine parse_dependency_subtable(section, key, val, config)
+        !! [dependencies.NAME] with key = value lines is the same dependency as
+        !! NAME = { key = value }; route it through the dotted-key form.
+        character(len=*), intent(in) :: section, key, val
+        type(fpm_config_t), intent(inout) :: config
+
+        if (index(section, 'dependencies.') == 1) then
+            call parse_dependency_entry(trim(section(14:))//'.'//trim(key), val, config)
+        else if (index(section, 'dev-dependencies.') == 1) then
+            call parse_dep_entry(trim(section(18:))//'.'//trim(key), val, &
+                config%dev_deps, config%n_dev_deps, config%manifest_parse_error)
+        else if (index(section, 'test.dependencies.') == 1) then
+            call parse_dep_entry(trim(section(19:))//'.'//trim(key), val, &
+                config%dev_deps, config%n_dev_deps, config%manifest_parse_error)
+        else if (index(section, 'executable.dependencies.') == 1 .or. &
+                 index(section, 'example.dependencies.') == 1) then
+            config%manifest_parse_error = 'unsupported ['//trim(section)// &
+                '] dependency declaration; move dependencies to [dependencies]'
+        end if
+    end subroutine parse_dependency_subtable
+
     subroutine check_section(section, config)
         !! Reject tables fo does not read.  fpm rejects unknown manifest keys,
         !! and a typo such as [librery] would otherwise change the build
@@ -2312,16 +2335,27 @@ contains
               'executable.dependencies', 'example.dependencies', 'executable', 'test', &
               'example', 'preprocess', 'preprocess.cpp', 'library', 'fortran', 'extra')
             return
-        case ('profiles', 'metapackages')
+        case ('profiles', 'features', 'metapackages')
             write (error_unit, '(a)') 'fo: warning: fpm.toml ['//trim(section)// &
                 '] is accepted by fpm but not applied by fo'
             return
         end select
         if (index(section, 'extra.') == 1) return
+        if (index(section, 'dependencies.') == 1 .or. &
+            index(section, 'dev-dependencies.') == 1 .or. &
+            index(section, 'test.dependencies.') == 1 .or. &
+            index(section, 'executable.dependencies.') == 1 .or. &
+            index(section, 'example.dependencies.') == 1) return
+        if (index(section, 'profiles.') == 1 .or. index(section, 'features.') == 1 &
+            .or. index(section, 'metapackages.') == 1) then
+            write (error_unit, '(a)') 'fo: warning: fpm.toml ['//trim(section)// &
+                '] is accepted by fpm but not applied by fo'
+            return
+        end if
         write (config%manifest_parse_error, '(a)') 'unknown table ['//trim(section)// &
             ']; fpm accepts build, install, fortran, library, executable, test, '// &
             'example, dependencies, dev-dependencies, preprocess, extra, profiles '// &
-            'and metapackages'
+            'and features'
     end subroutine check_section
 
     subroutine get_section(line, section)

@@ -19,7 +19,8 @@ contains
         logical, optional, intent(out) :: is_prog_arr(MAX_NODES)
         integer, optional, intent(out) :: ierr
         !! Nonzero when a unit cannot be given a node.  Without ierr the
-        !! program stops: a silently dropped unit is never built or tested.
+        !! diagnostic is still written and the graph is left incomplete; the
+        !! process is never stopped.
 
         integer :: i, j, node_id, dep_id
         integer :: unit_nodes(n_units)
@@ -89,8 +90,7 @@ contains
 
         write (error_unit, '(a,i0,a)') 'fo: dependency graph is full at ', &
             MAX_NODES, ' units; cannot add '//trim(filename)
-        if (.not. present(ierr)) error stop 1
-        ierr = 1
+        if (present(ierr)) ierr = 1
     end subroutine report_node_limit
 
     integer function dag_find_source_provider(units, n_units, dag, name) result(node)
