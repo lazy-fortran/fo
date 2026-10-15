@@ -5,7 +5,7 @@ module fo_gfortran_build
         DEP_PATH, DEP_REGISTRY, valid_manifest_module_name
     use fo_scan, only: scan_provides_name, scan_unit_t, scan_dir, scan_dir_regex, &
         scan_dir_cached, &
-        source_defines_module, &
+        source_defines_module, is_slow_test, &
         MAX_UNITS, MAX_NAME, MAX_PATH
     use fo_dag_bridge, only: build_dag_from_units, dag_find_source_provider
     use fo_dep_update, only: dep_acquire_sources
@@ -1126,7 +1126,7 @@ contains
                 units(i)%filename)
             if (len_trim(name) == 0) cycle
             if (trim(name) == trim(config%dispatcher)) cycle
-            if (.not. include_slow .and. is_slow_name(name)) cycle
+            if (.not. include_slow .and. is_slow_test(name)) cycle
             if (selected_test(name, names, n_names)) cycle
             if (n_names >= size(names)) exit
             if (present(selected_node_ids)) then
@@ -1175,7 +1175,7 @@ contains
             if (len_trim(config%dispatcher) > 0 .and. &
                 trim(name) == trim(config%dispatcher) .and. &
                 .not. selected_test(name, selected_names, n_selected)) cycle
-            if (.not. include_slow .and. is_slow_name(name)) cycle
+            if (.not. include_slow .and. is_slow_test(name)) cycle
             if (n_selected > 0) then
                 if (.not. selected_test(name, selected_names, n_selected)) cycle
             end if
@@ -1236,13 +1236,13 @@ contains
             team_width = max(1, min(n_tests, native_jobs()/4))
             n_shardable = 0
             do i = 1, n_tests
-                ! `is_slow_name` matches only names containing `_slow_`, and no
+                ! `is_slow_test` matches only names containing `_slow_`, and no
                 ! conformance walker is named that - so with that predicate
                 ! alone n_shardable stayed 0, the variable was never set, and
                 ! the suite wall stayed at the floor set by the longest single
                 ! test (test_conformance_gauntlet_smoke, ~145 s). The walkers
                 ! are the long ones, so they are what gets the leftover cores.
-                if (is_slow_name(tests(i)%name) .or. &
+                if (is_slow_test(tests(i)%name) .or. &
                     index(tests(i)%name, 'conformance') > 0) &
                     n_shardable = n_shardable + 1
             end do
@@ -1287,7 +1287,7 @@ contains
         if (test%exit == 0 .or. test%exit == 124) return
         call make_tmpfile('fo_test_rerun', rerun_log)
         call run_test_binary(execution_cwd, test%bin, test%args, &
-            rerun_log, config, is_slow_name(test%name), test%rerun_exit)
+            rerun_log, config, is_slow_test(test%name), test%rerun_exit)
         call delete_tmpfile(rerun_log)
         if (test%rerun_exit == 0) then
             test%flaky = .true.
@@ -1307,7 +1307,7 @@ contains
 
         call system_clock(clk0, clk_rate)
         call run_test_binary(execution_cwd, test%bin, test%args, &
-            test%log, config, is_slow_name(test%name), test%exit, test%cpu_secs)
+            test%log, config, is_slow_test(test%name), test%exit, test%cpu_secs)
         call system_clock(clk1, clk_rate)
         test%ran = .true.
         if (clk_rate > 0) test%secs = real(clk1 - clk0) / real(clk_rate)
@@ -1375,7 +1375,7 @@ contains
         integer :: u, ios
         character(len=:), allocatable :: unit_text
 
-        if (is_slow_name(name)) return
+        if (is_slow_test(name)) return
         unit_text = 's'
         if (is_cpu) unit_text = 's CPU'
         write (error_unit, '(a,f0.1,a)') 'fo: slow test '//trim(name)//' took ', &
@@ -3114,7 +3114,7 @@ contains
             tname = gfortran_test_source_name(manifest_config, test_dir, &
                 filenames(node_id))
             if (len_trim(tname) == 0) cycle
-            if (.not. include_slow .and. is_slow_name(tname)) cycle
+            if (.not. include_slow .and. is_slow_test(tname)) cycle
             if (trim(tname) == trim(manifest_config%dispatcher)) then
                 if (.not. selected_test(tname, selected_names, n_selected)) cycle
             end if
@@ -3321,7 +3321,7 @@ contains
                 ! behaves the same under the CLI and under the MCP server.
                 call run_test_binary(execution_cwd, bin_path, &
                     run_args(i), log_local, &
-                    manifest_config, is_slow_name(run_names(i)), run_exits(i), &
+                    manifest_config, is_slow_test(run_names(i)), run_exits(i), &
                     run_cpu(i))
                 call system_clock(clk1)
                 if (clk_rate > 0) run_secs(i) = real(clk1 - clk0) / real(clk_rate)
@@ -3347,7 +3347,7 @@ contains
                 bin_path = run_bins(i)
                 call make_tmpfile('fo_test_rerun', rerun_log)
                 call run_test_binary(execution_cwd, bin_path, &
-                    run_args(i), rerun_log, manifest_config, is_slow_name(tname), &
+                    run_args(i), rerun_log, manifest_config, is_slow_test(tname), &
                     run_exits(i))
                 call delete_tmpfile(rerun_log)
                 if (run_exits(i) == 0) flaky(i) = .true.
@@ -4335,21 +4335,6 @@ contains
             end if
         end do
     end function selected_test
-
-    logical function is_slow_name(name) result(slow)
-        character(len=*), intent(in) :: name
-        character(len=MAX_NAME) :: lower_name
-        integer :: i, n
-
-        lower_name = name
-        do i = 1, len_trim(lower_name)
-            if (lower_name(i:i) >= 'A' .and. lower_name(i:i) <= 'Z') &
-                lower_name(i:i) = achar(iachar(lower_name(i:i)) + 32)
-        end do
-        n = len_trim(lower_name)
-        slow = n >= 5 .and. lower_name(n - 4:n) == '_slow'
-        if (.not. slow) slow = index(trim(lower_name), '_slow_') > 0
-    end function is_slow_name
 
     subroutine collect_current_lib_objs(project_dir, config, obj_dir, dep_includes, &
             n_dep_includes, dep_objs, n_dep_objs, lib_objs, n_lib_objs)
