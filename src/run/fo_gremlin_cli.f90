@@ -2,6 +2,7 @@ module fo_gremlin_cli
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_gremlin_request, only: GREMLIN_OPTIONS, N_GREMLIN_OPTIONS, &
         gremlin_option_index, gremlin_apply_adapter_defaults
+    use fo_fs, only: fs_canonical_path
     use fo_gremlin_supervisor, only: gremlin_handle
     use fo_json_object, only: json_value_raw
     use fo_process, only: process_exit
@@ -39,8 +40,8 @@ contains
             return
         end if
 
-        call gremlin_handle(trim(action), trim(project_dir), trim(request_json), &
-            response_json, exitcode)
+        call gremlin_handle(trim(action), fs_canonical_path(trim(project_dir)), &
+            trim(request_json), response_json, exitcode)
         if (len_trim(response_json) == 0) response_json = '{}'
         write (output_unit, '(a)') response_json
         if (exitcode /= 0) call process_exit(exitcode)

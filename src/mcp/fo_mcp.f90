@@ -26,7 +26,7 @@ module fo_mcp
     use fo_version_info, only: FO_VERSION
     use fo_run_queue, only: run_queue_t, RUN_IDLE, RUN_RUNNING
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
-    use fo_fs, only: fs_sleep_ms
+    use fo_fs, only: fs_sleep_ms, fs_canonical_path
     use fo_gremlin_supervisor, only: gremlin_handle
     implicit none
     private
@@ -304,7 +304,8 @@ contains
                 call rpc_error(id_str, -32602, 'dir must be a valid string', response)
                 return
             end if
-            if (len_trim(dir_event%string_val) > 0) dir = trim(dir_event%string_val)
+            if (len_trim(dir_event%string_val) > 0) &
+                dir = fs_canonical_path(trim(dir_event%string_val))
         end if
         select case (trim(action))
         case ('lint')
@@ -394,7 +395,7 @@ contains
             return
         end if
 
-        call gremlin_handle(trim(core_action), trim(project_dir), &
+        call gremlin_handle(trim(core_action), fs_canonical_path(trim(project_dir)), &
             trim(request_json), result_json, exitcode)
         call make_tool_text_response(id_str, result_json, exitcode, response)
     end subroutine handle_gremlin_action

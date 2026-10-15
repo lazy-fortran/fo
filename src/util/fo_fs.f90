@@ -13,7 +13,7 @@ module fo_fs
     public :: fs_mkdir_excl, fs_sleep_ms, fs_pid_alive
     public :: fs_copy_exec, fs_rename, fs_stat, fs_identity
     public :: fs_tree_fingerprint
-    public :: fs_realpath, fs_find_executable
+    public :: fs_realpath, fs_find_executable, fs_canonical_path
     public :: fs_collect_git_checkouts
     public :: fs_is_windows, fs_native_path, fs_path_root_len
     public :: fs_path_is_absolute, fs_path_has_drive, fs_parent_path
@@ -473,6 +473,23 @@ contains
         nul = index(resolved, achar(0))
         if (nul > 0) resolved(nul:) = ' '
     end subroutine fs_realpath
+
+    function fs_canonical_path(path) result(canonical)
+        !! The physical spelling of path (symlinks such as /var -> /private/var
+        !! resolved), or path itself when it cannot be resolved. Entry points
+        !! use it once so every downstream path agrees on one spelling.
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: canonical
+        character(len=4096) :: resolved
+        logical :: ok
+
+        call fs_realpath(path, resolved, ok)
+        if (ok .and. len_trim(resolved) > 0) then
+            canonical = trim(resolved)
+        else
+            canonical = path
+        end if
+    end function fs_canonical_path
 
     subroutine fs_find_executable(command, path, ok)
         character(len=*), intent(in) :: command

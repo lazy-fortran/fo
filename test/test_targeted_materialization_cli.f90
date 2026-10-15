@@ -113,7 +113,7 @@ program test_targeted_materialization_cli
     call list_add(probe_environment, 'FO_FC=')
     call list_add(probe_environment, 'FO_TEST_COMPILER_PROBE_LOG=' // probe_log)
 
-    call rejects_unknown_option('--list')
+    call rejects_unknown_option('--lists')
     call rejects_unknown_option('--verbsoe')
 
     call run_named(names(1), end_options=.true.)

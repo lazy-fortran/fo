@@ -13,7 +13,7 @@ program fo_main
         array_temporary_warnings_from_log, frontend_diagnostics_from_file, &
         FO_DIAG_SEVERITY_ERROR
     use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds
-    use fo_fs, only: fs_stat
+    use fo_fs, only: fs_stat, fs_canonical_path
     use fo_build_tree, only: native_output_dir
     use fo_test_results, only: test_result_entry_t, &
         parse_test_results, format_test_results_text, format_test_results_json
@@ -153,7 +153,7 @@ contains
 
         t0 = wall_time_seconds()
 
-        b = detect_backend('.')
+        b = detect_backend(fs_canonical_path('.'))
         if (b%kind == BACKEND_NONE) then
             write (output_unit, '(a)') 'fo: no Fortran project detected'
             return
@@ -620,7 +620,7 @@ contains
             call print_exec_usage(error_unit)
             stop 1
         end if
-        b = detect_backend('.')
+        b = detect_backend(fs_canonical_path('.'))
         if (b%kind == BACKEND_NONE) then
             write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             stop 1
@@ -812,7 +812,7 @@ contains
         character(len=64) :: profile
         character(len=1024) :: all_flags
 
-        b = detect_backend('.')
+        b = detect_backend(fs_canonical_path('.'))
         if (b%kind == BACKEND_NONE) then
             write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             stop 1
@@ -991,7 +991,7 @@ contains
         character(len=64) :: profile
         character(len=1024) :: all_flags
 
-        b = detect_backend('.')
+        b = detect_backend(fs_canonical_path('.'))
         if (b%kind == BACKEND_NONE) then
             write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             stop 1
@@ -1226,7 +1226,7 @@ contains
             end select
         end do
 
-        b = detect_backend('.')
+        b = detect_backend(fs_canonical_path('.'))
         if (b%kind == BACKEND_NONE) then
             write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             stop 1
@@ -1563,7 +1563,7 @@ contains
         character(len=:), allocatable :: message, text
         integer :: ierr
 
-        b = detect_backend('.')
+        b = detect_backend(fs_canonical_path('.'))
         if (b%kind == BACKEND_NONE) then
             write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
             call process_exit(2)
@@ -1908,7 +1908,7 @@ contains
         ! tree can never revisit. ffc carried 6.5 GB of unreachable link archives
         ! and stale compiler profile dirs this way.
         if (stale_only) then
-            b = detect_backend('.')
+            b = detect_backend(fs_canonical_path('.'))
             call clean_stale_run(trim(b%project_dir), keep, n_removed, freed_bytes)
             write (output_unit, '(a,i0,a,f0.1,a,i0,a)') &
                 'stale artifacts removed: ', n_removed, ' entries, ', &
@@ -1928,7 +1928,7 @@ contains
         integer :: n_deps
         logical :: refreshed
 
-        b = detect_backend('.')
+        b = detect_backend(fs_canonical_path('.'))
         call dep_update_run(trim(b%project_dir), n_deps, refreshed, update_error)
         if (len_trim(update_error) > 0) then
             write (error_unit, '(a)') 'fo update: '//trim(update_error)

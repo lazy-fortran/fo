@@ -1,20 +1,23 @@
 program test_test_result_exit_cli
     use fo_test_harness, only: process_result_t, string_list_t, list_add, &
                      make_scratch, join_path, write_text, make_directory, run_process, &
+                     make_symlink, resolve_test_executable, environment_value, &
+                     current_directory, &
                  assert_true, assert_equal_integer, assert_process_ok, finish_assertions
     use fo_fs, only: fs_find_executable
     use fo_test_cli, only: resolve_driver, run_fo, parse_json_report
     use fo_test_json, only: json_value_t, json_member, json_number_value
     implicit none
-    character(:), allocatable :: driver, scratch
+    character(:), allocatable :: driver, scratch, fake_source
     character(len=16384) :: original_path
     character(len=4096) :: real_ctest
     logical :: found
-    type(string_list_t) :: arguments, environment, cc_args
+    type(string_list_t) :: arguments, environment
     type(process_result_t) :: observed
     type(json_value_t) :: report, field
     integer :: status
 
+    call fake_ctest_entry()
     call resolve_driver(driver)
     call fs_find_executable('ctest', real_ctest, found)
     if (.not. found) error stop 'test result oracle requires CTest'
@@ -26,28 +29,13 @@ program test_test_result_exit_cli
                     'cmake_minimum_required(VERSION 3.22)'//new_line('a')// &
                     'project(result_exit NONE)'//new_line('a')// &
                     'enable_testing()'//new_line('a')// &
-                    'add_test(NAME selected COMMAND "${CMAKE_COMMAND}" -E true)')
-    call write_text(join_path(scratch, 'fake_ctest.c'), &
-                    '#include <stdio.h>'//new_line('a')// &
-                    '#include <stdlib.h>'//new_line('a')// &
-                    '#include <string.h>'//new_line('a')// &
-                    '#include <unistd.h>'//new_line('a')// &
-                    'int main(int argc, char **argv) {'//new_line('a')// &
-               ' const char *mode = getenv("FO_FIXTURE_CTEST_MODE");'//new_line('a')// &
-                    ' (void)argc;'//new_line('a')// &
-                    ' if (mode && !strcmp(mode,"malformed")) {'//new_line('a')// &
-                  '  puts("1/1 Test #1: selected ........ UnknownStatus 0.00 sec");'// &
-                    new_line('a')//'  return 0;'//new_line('a')//' }'//new_line('a')// &
-                    ' if (mode && !strcmp(mode,"empty")) return 0;'//new_line('a')// &
-                    ' const char *real = getenv("FO_FIXTURE_REAL_CTEST");'// &
-                    new_line('a')//' if (!real) return 127;'//new_line('a')// &
-                    ' execv(real,argv); return 127;'//new_line('a')//'}')
-    call list_add(cc_args, 'cc')
-    call list_add(cc_args, join_path(scratch, 'fake_ctest.c'))
-    call list_add(cc_args, '-o')
-    call list_add(cc_args, join_path(scratch, 'bin/ctest'))
-    call run_process(cc_args, scratch, observed)
-    call assert_process_ok(observed, 'independent CTest response shim compiles')
+                    'add_test(NAME selected COMMAND "${CMAKE_COMMAND}" -E true)'// &
+                    new_line('a')// &
+                    'set_tests_properties(selected PROPERTIES '// &
+                    'TIMEOUT_AFTER_MATCH "30;never")')
+    call resolve_test_executable(fake_source, found)
+    if (.not. found) error stop 'cannot resolve the test executable'
+    call make_symlink(fake_source, join_path(scratch, 'bin/ctest'))
     call list_add(environment, 'FO_BACKEND=cmake')
     call list_add(environment, &
                   'PATH='//join_path(scratch, 'bin')//':'//trim(original_path))
@@ -89,4 +77,48 @@ program test_test_result_exit_cli
     call assert_true(int(json_number_value(field)) /= 0, &
                      'failed compile JSON preserves nonzero verdict')
     call finish_assertions()
+
+contains
+
+    subroutine fake_ctest_entry()
+        !! This test binary, symlinked as bin/ctest, answers as a fake CTest
+        !! when FO_FIXTURE_CTEST_MODE is set (only in the fo child environment).
+        !! Model queries (--show-only, --version) always go to the real ctest;
+        !! the test run itself is faked in the malformed and empty modes.
+        character(:), allocatable :: mode, real, cwd, argument
+        character(len=4096) :: buffer
+        type(string_list_t) :: forwarded
+        type(process_result_t) :: delegated
+        integer :: i, length
+        logical :: is_query
+
+        mode = environment_value('FO_FIXTURE_CTEST_MODE')
+        if (len(mode) == 0) return
+        real = environment_value('FO_FIXTURE_REAL_CTEST')
+        if (len(real) == 0) call exit(127)
+        call list_add(forwarded, real)
+        is_query = .false.
+        do i = 1, command_argument_count()
+            call get_command_argument(i, buffer, length)
+            argument = buffer(:length)
+            call list_add(forwarded, argument)
+            if (index(argument, '--show-only') == 1 .or. argument == '--version') &
+                is_query = .true.
+        end do
+        if (.not. is_query) then
+            if (mode == 'malformed') then
+                write (*, '(a)') &
+                    '1/1 Test #1: selected ........ UnknownStatus 0.00 sec'
+                call exit(0)
+            else if (mode == 'empty') then
+                call exit(0)
+            end if
+        end if
+        call current_directory(cwd)
+        call run_process(forwarded, cwd, delegated)
+        write (*, '(a)', advance='no') delegated%stdout
+        write (0, '(a)', advance='no') delegated%stderr
+        if (delegated%exit_code /= 0) call exit(delegated%exit_code)
+        call exit(0)
+    end subroutine fake_ctest_entry
 end program test_test_result_exit_cli
