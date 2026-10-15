@@ -27,6 +27,7 @@ module fo_gremlin_supervisor
     use fo_project_model, only: model_find_case, model_select, model_request_t, &
         model_selection_t, SELECT_OK, SELECT_EMPTY
     use fo_gremlin_log_text, only: gremlin_retain_build_log, gremlin_log_tail
+    use fo_gremlin_retention, only: gremlin_retention_json
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release
     use fo_driver, only: driver_pin_t, driver_pin_current, driver_pin_existing
@@ -4183,6 +4184,7 @@ contains
         character(len=PATH_LEN) :: coverage_path
         integer :: status
         character(len=PATH_LEN) :: active_project, candidate_project
+        character(len=PATH_LEN) :: retention_root
         logical :: have_coverage
 
         active_project = ''
@@ -4191,7 +4193,9 @@ contains
         if (present(diagnostic)) diagnostic_text = diagnostic
         if (len_trim(active%identity) > 0) active_project = trim(active%project_root)
         if (len_trim(candidate%identity) > 0) candidate_project = trim(candidate%project_root)
-        status_text = '{"protocol":1,"session_id":"'// &
+        retention_root = trim(active%root)
+        if (len_trim(retention_root) == 0) retention_root = trim(candidate%root)
+        status_text ='{"protocol":1,"session_id":"'// &
             trim(json_escape_string(session%session_id))//'","lane_id":"'// &
             trim(json_escape_string(request%lane_id))//'","policy_key":"'// &
             request_policy_key(request)//'","state":"'//trim(state)// &
@@ -4222,6 +4226,8 @@ contains
             ',"requirement_digest":"'//request%requirement_digest// &
             '","event_epoch":'//trim(json_int(request%event_epoch))// &
             ',"input_changed":'//trim(json_bool(request%input_changed))// &
+            ',"retention":'//gremlin_retention_json(retention_root, &
+            trim(session%state_dir)//'/views')// &
             ',"diagnostic":"'//trim(json_escape_string(trim(diagnostic_text)))//'"}'
         ! Record the lifecycle transition before publishing the state, so any
         ! reader that observes a state also finds its lifecycle event.
