@@ -54,7 +54,8 @@ module fo_cmake_model
     use fo_cmake_context, only: cmake_context_t, cmake_context_read_reply, &
         cmake_context_read_file, cmake_context_build_path
     use fo_project_model, only: project_model_t, model_init, model_add_target, &
-        model_add_layer, model_add_case, model_find_artifact, model_find_case, &
+        model_add_layer, model_add_case, model_find_artifact, model_find_layer, &
+        model_find_target, model_find_case, &
         model_attr_t, model_finalize, MAP_EXACT, TARGET_OTHER, TARGET_LIBRARY, &
         TARGET_EXECUTABLE, ORIGIN_PROJECT, ORIGIN_DEPENDENCY
     use, intrinsic :: iso_fortran_env, only: int64, real64
@@ -224,10 +225,64 @@ contains
 
         call cmake_model_load_cases(context, model, ierr, message)
         if (ierr /= 0) return
+        call assign_case_layers(model)
         model%complete = .true.
         call model_finalize(model, ierr, message)
         if (ierr /= 0) model%complete = .false.
     end subroutine cmake_model_load
+
+    subroutine assign_case_layers(model)
+        !! Layer of a case, as in the fpm adapter: the highest-rank layer
+        !! (rank 0 without `uses`, else 1 + the highest rank used; ties go to
+        !! the layer declared first) among the project libraries in the link
+        !! closure of the case's command target. Runs before finalize.
+        type(project_model_t), intent(inout) :: model
+        integer, allocatable :: rank(:), stack(:)
+        logical, allocatable :: seen(:)
+        integer :: i, j, k, l, u, top, best, t, changed
+
+        if (model%n_layers == 0) return
+        allocate (rank(model%n_layers))
+        rank = 0
+        do changed = 1, model%n_layers
+            do l = 1, model%n_layers
+                do k = 1, size(model%layers(l)%use_names)
+                    u = model_find_layer(model, model%layers(l)%use_names(k)%s)
+                    if (u > 0) rank(l) = max(rank(l), rank(u) + 1)
+                end do
+            end do
+        end do
+        allocate (seen(model%n_targets), stack(model%n_targets))
+        do i = 1, model%n_cases
+            if (model%cases(i)%command_target == 0) cycle
+            seen = .false.
+            top = 1
+            stack(1) = model%cases(i)%command_target
+            seen(stack(1)) = .true.
+            best = 0
+            do while (top > 0)
+                t = stack(top)
+                top = top - 1
+                l = model_find_layer(model, model%targets(t)%name)
+                if (l > 0) then
+                    if (best == 0) then
+                        best = l
+                    else if (rank(l) > rank(best)) then
+                        best = l
+                    end if
+                end if
+                do j = 1, size(model%targets(t)%link_dep_names)
+                    u = model_find_target(model, model%targets(t)%link_dep_names(j)%s)
+                    if (u == 0) cycle
+                    if (seen(u)) cycle
+                    seen(u) = .true.
+                    top = top + 1
+                    stack(top) = u
+                end do
+            end do
+            model%cases(i)%layer = best
+        end do
+    end subroutine assign_case_layers
 
     subroutine cmake_model_load_cases(context, model, ierr, message)
         !! Add the registered CTest cases to a model that is not finalized.

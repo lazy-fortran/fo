@@ -182,7 +182,10 @@ fo test --list [--json] [same selection]
   all match. `-LE, --exclude-label RE` drops cases whose labels match every
   repeated RE; it also wins over `--all`. Regexes use the CTest subset documented
   in `src/util/fo_pattern.f90`.
-- `--layer NAME` keeps cases of a layer; repeated options form a union.
+- `--layer NAME` keeps cases of a layer; repeated options form a union. A
+  case's layer is the highest-rank layer reached from it: fpm, through the
+  module uses of its source; CMake (layers are project libraries), through the
+  link closure of its command target.
 - Default exclusions: the `slow` label (fpm: `test-defaults.exclude` when set;
   CMake with a test preset: the cases the preset filters out). `--all` lifts
   them; `-L slow` lifts the matching label. A default-excluded case named
