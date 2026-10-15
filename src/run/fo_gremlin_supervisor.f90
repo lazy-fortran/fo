@@ -4431,8 +4431,9 @@ contains
                 trim(request%targets(i))
         end do
         do i = 1, request%n_labels
-            canonical = canonical//'|label:'//trim(int_text(len_trim(request%labels(i))))// &
-                ':'//trim(request%labels(i))
+            canonical = canonical//'|label:'// &
+                trim(int_text(len_trim(request%labels(i))))//':'// &
+                trim(request%labels(i))
         end do
         do i = 1, request%n_exclude_labels
             canonical = canonical//'|exclude:'// &
@@ -4440,8 +4441,9 @@ contains
                 trim(request%exclude_labels(i))
         end do
         do i = 1, request%n_layers
-            canonical = canonical//'|layer:'//trim(int_text(len_trim(request%layers(i))))// &
-                ':'//trim(request%layers(i))
+            canonical = canonical//'|layer:'// &
+                trim(int_text(len_trim(request%layers(i))))//':'// &
+                trim(request%layers(i))
         end do
         key = text_digest(canonical)
     end function request_policy_key
