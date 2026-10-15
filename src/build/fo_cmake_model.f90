@@ -237,7 +237,7 @@ contains
         !! the layer declared first) among the project libraries in the link
         !! closure of the case's command target. Runs before finalize.
         type(project_model_t), intent(inout) :: model
-        integer, allocatable :: rank(:), stack(:)
+        integer, allocatable :: rank(:), stack(:), target_layer(:)
         logical, allocatable :: seen(:)
         integer :: i, j, k, l, u, top, best, t, changed
 
@@ -253,8 +253,14 @@ contains
             end do
         end do
         allocate (seen(model%n_targets), stack(model%n_targets))
+        allocate (target_layer(model%n_targets))
+        target_layer = -1
         do i = 1, model%n_cases
             if (model%cases(i)%command_target == 0) cycle
+            if (target_layer(model%cases(i)%command_target) >= 0) then
+                model%cases(i)%layer = target_layer(model%cases(i)%command_target)
+                cycle
+            end if
             seen = .false.
             top = 1
             stack(1) = model%cases(i)%command_target
@@ -269,6 +275,8 @@ contains
                         best = l
                     else if (rank(l) > rank(best)) then
                         best = l
+                    else if (rank(l) == rank(best) .and. l < best) then
+                        best = l
                     end if
                 end if
                 do j = 1, size(model%targets(t)%link_dep_names)
@@ -280,6 +288,7 @@ contains
                     stack(top) = u
                 end do
             end do
+            target_layer(model%cases(i)%command_target) = best
             model%cases(i)%layer = best
         end do
     end subroutine assign_case_layers
