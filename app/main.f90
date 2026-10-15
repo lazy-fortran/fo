@@ -1055,9 +1055,11 @@ contains
         type(project_model_t), intent(in) :: model
         integer, allocatable, intent(out) :: cases(:)
         character(len=1024) :: arg
-        integer :: i, k
+        integer :: i, k, n
+        integer, allocatable :: named(:)
 
-        allocate (cases(0))
+        allocate (named(command_argument_count()))
+        n = 0
         do i = 2, command_argument_count() - 1
             call get_command_argument(i, arg)
             if (trim(arg) /= '--case') cycle
@@ -1067,9 +1069,14 @@ contains
                 write (error_unit, '(a)') 'fo: unknown test case: '//trim(arg)
                 call process_exit(1)
             end if
-            cases = [cases, k]
+            n = n + 1
+            named(n) = k
         end do
-        if (size(cases) == 0) cases = project_inventory_cases(model)
+        if (n == 0) then
+            call project_inventory_cases(model, cases)
+        else
+            cases = named(:n)
+        end if
     end subroutine build_case_indices
 
     subroutine report_private_fo_driver(b, request_flags)

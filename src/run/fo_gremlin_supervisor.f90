@@ -22,7 +22,7 @@ module fo_gremlin_supervisor
         generation_model_key
     use fo_project_load, only: project_has_model, project_load_configured, &
         project_inventory_cases
-    use fo_project_model, only: project_model_t, model_find_case
+    use fo_project_model, only: model_find_case
     use fo_gremlin_log_text, only: gremlin_retain_build_log, gremlin_log_tail
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release
@@ -2908,7 +2908,7 @@ contains
         if (ierr /= 0) return
         capacity = MAX_NODES
         if (allocated(generation%model)) then
-            model_cases = project_inventory_cases(generation%model)
+            call project_inventory_cases(generation%model, model_cases)
             capacity = max(capacity, size(model_cases))
         end if
         allocate (changed_ids(MAX_NODES), affected_ids(MAX_NODES), &

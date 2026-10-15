@@ -134,24 +134,36 @@ contains
         if (ierr /= 0) message = 'CMake project model unavailable: '//message
     end subroutine project_load_configured
 
-    function project_inventory_cases(model) result(cases)
+    subroutine project_inventory_cases(model, cases)
         !! The cases a continuous campaign may run: every case except those a
         !! test preset filters out and explicit-only cases (the dispatcher).
         !! Label exclusions (slow) stay in; their runs pass --all.
         type(project_model_t), intent(in) :: model
-        integer, allocatable :: cases(:)
+        integer, allocatable, intent(out) :: cases(:)
         integer :: k, n
 
-        allocate (cases(model%n_cases))
         n = 0
         do k = 1, model%n_cases
-            if (model%cases(k)%default_excluded) cycle
-            if (model%cases(k)%explicit_only) cycle
+            if (included(k)) n = n + 1
+        end do
+        allocate (cases(n))
+        n = 0
+        do k = 1, model%n_cases
+            if (.not. included(k)) cycle
             n = n + 1
             cases(n) = k
         end do
-        cases = cases(:n)
-    end function project_inventory_cases
+
+    contains
+
+        logical function included(i)
+            integer, intent(in) :: i
+
+            included = .not. (model%cases(i)%default_excluded .or. &
+                model%cases(i)%explicit_only)
+        end function included
+
+    end subroutine project_inventory_cases
 
     subroutine project_build_cases(b, model, cases, flags, log_file, exitcode)
         !! Build what the cases need without running them. The model is
