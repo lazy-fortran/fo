@@ -1507,7 +1507,7 @@
         call execute_command_line('git -C "'//trim(dependency_dir)// &
             '" -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src')
         call execute_command_line('git -C "'//trim(dependency_dir)// &
-            '" -c user.email=fo@example.invalid -c user.name=fo commit -q -m init')
+            '" -c user.email=fo@example.invalid -c user.name=fo -c commit.gpgsign=false commit -q -m init')
     end subroutine commit_local_dependency
 
     subroutine compile_fpm_command_fixture(executable, compiler, source_root, &
@@ -1564,7 +1564,7 @@
         call execute_command_line('git -C "'//trim(libdir)// &
             '" -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src')
         call execute_command_line('git -C "'//trim(libdir)// &
-            '" -c user.email=fo@example.invalid -c user.name=fo commit -q -m init')
+            '" -c user.email=fo@example.invalid -c user.name=fo -c commit.gpgsign=false commit -q -m init')
 
         open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "depapp"'
@@ -1689,7 +1689,7 @@
         call execute_command_line('git -C '//trim(gitdep)// &
             ' -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src')
         call execute_command_line('git -C '//trim(gitdep)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo commit -q -m init')
+            ' -c user.email=fo@example.invalid -c user.name=fo -c commit.gpgsign=false commit -q -m init')
     end subroutine make_external_git_dependency
 
     subroutine make_transitive_path_dependency(pathdep, gitdep)
@@ -1785,7 +1785,7 @@
         call execute_command_line('git -C '//trim(libdir)// &
             ' -c user.email=fo@example.invalid -c user.name=fo add fpm.toml src')
         call execute_command_line('git -C '//trim(libdir)// &
-            ' -c user.email=fo@example.invalid -c user.name=fo commit -q -m init')
+            ' -c user.email=fo@example.invalid -c user.name=fo -c commit.gpgsign=false commit -q -m init')
 
         open (newunit=u, file=trim(appdir)//'/fpm.toml', status='replace')
         write (u, '(a)') 'name = "depapp"'

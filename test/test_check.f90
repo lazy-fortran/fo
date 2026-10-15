@@ -892,7 +892,7 @@ contains
         call execute_command_line('git -C '//trim(project_dir)// &
             ' add fpm.toml src/good.f90 src/bad.f90', wait=.true.)
         call execute_command_line('git -C '//trim(project_dir)// &
-            ' commit -m init >/dev/null', wait=.true.)
+            ' -c commit.gpgsign=false commit -m init >/dev/null', wait=.true.)
 
         open (newunit=u, file=trim(src_dir)//'/good.f90', status='replace')
         write (u, '(a)') 'module good'
