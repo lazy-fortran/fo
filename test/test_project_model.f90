@@ -372,14 +372,14 @@ contains
         !! directory), cases without a command target, widening, ignored
         !! files, and unselected cases staying unselected.
         type(project_model_t) :: m
-        type(model_unit_t) :: units(6)
+        type(model_unit_t) :: units(7)
         type(model_attr_t) :: required(1), input(1)
         integer :: ierr, t1, t2, t3
         character(len=:), allocatable :: message
 
         call model_init(m, 'unit', 'digest')
-        call add_target(m, 'lib_a', TARGET_LIBRARY, '/p/src/a.f90 /p/src/ext.f90', &
-            '', '')
+        call add_target(m, 'lib_a', TARGET_LIBRARY, &
+            '/p/src/a.f90 /p/src/ext.f90 /p/src/mixed.f90', '', '')
         call add_target(m, 'lib_b', TARGET_LIBRARY, '/p/src/b.f90', 'lib_a', '')
         call add_target(m, 't1', TARGET_EXECUTABLE, '/p/test/t1.f90', 'lib_a', &
             '/p/build/t1', index=t1)
@@ -397,16 +397,22 @@ contains
         call assert(ierr == 0, 'affected model finalizes: '//message)
         call set_unit(units(1), '/p/src/a.f90', 'ma', '')
         call set_unit(units(2), '/p/src/ext.f90', 'ext', '')
-        call set_unit(units(3), '/p/src/b.f90', 'mb', 'ma')
+        call set_unit(units(3), '/p/src/b.f90', 'mb', 'ma mm')
         call set_unit(units(4), '/p/test/t1.f90', '', 'ma')
         call set_unit(units(5), '/p/test/t2.f90', '', 'mb')
         call set_unit(units(6), '/p/test/t3.f90', '', '')
+        ! A used module plus external procedures in one file: the procedures
+        ! link into every case linking lib_a, also one that never uses mm.
+        call set_unit(units(7), '/p/src/mixed.f90', 'mm', '')
+        units(7)%other_units = .true.
 
         call expect_affected(m, units, '', 'src/b.f90', 'c2 c4', .false., 'used module')
         call expect_affected(m, units, '', 'src/a.f90', 'c1 c2 c4', .false., &
             'base module')
         call expect_affected(m, units, '', 'src/ext.f90', 'c1 c2 c4', .false., &
             'external procedure in a linked library')
+        call expect_affected(m, units, '', 'src/mixed.f90', 'c1 c2 c4', .false., &
+            'used module with external procedures in a linked library')
         call expect_affected(m, units, '', 'test/t3.f90', 'c3 c4', .false., &
             'test program')
         call expect_affected(m, units, '', 'ref/y.dat', 'c3 c4', .false., &

@@ -161,6 +161,7 @@ contains
         ! primary module for dependency edges, but also expose the program so
         ! test inventory and executable planning see the runnable source.
         selected_unit = program_units(primary)
+        unit_info%has_other_units = mixes_module_and_other_units(program_units)
         unit_kind = ''
         if (allocated(selected_unit%unit_kind)) &
             unit_kind = selected_unit%unit_kind
@@ -279,6 +280,31 @@ contains
         end do
         ierr = 0
     end subroutine scan_file_ast
+
+    logical function mixes_module_and_other_units(program_units) result(mixed)
+        !! A file with a module or submodule next to a program, procedure or
+        !! block data outside it: its non-module units link without a use edge.
+        type(program_unit_query_t), intent(in) :: program_units(:)
+        character(len=MAX_NAME) :: unit_kind
+        logical :: has_module, has_other
+        integer :: i
+
+        has_module = .false.
+        has_other = .false.
+        do i = 1, size(program_units)
+            if (.not. program_units(i)%found) cycle
+            if (.not. allocated(program_units(i)%unit_kind)) cycle
+            unit_kind = program_units(i)%unit_kind
+            call to_lower(unit_kind)
+            select case (trim(unit_kind))
+            case ('module', 'submodule')
+                has_module = .true.
+            case ('program', 'function', 'subroutine', 'block_data')
+                has_other = .true.
+            end select
+        end do
+        mixed = has_module .and. has_other
+    end function mixes_module_and_other_units
 
     subroutine scan_file_regex(filename, unit_info, ierr)
         character(len=*), intent(in) :: filename

@@ -207,24 +207,35 @@ contains
         ! MCP test with only_changed runs the same cases.
         messages = mcp_encode(mcp_request(1, 'initialize', &
             '{"protocolVersion":"2025-11-25","capabilities":{}}'), .false.)
+        messages = messages//mcp_encode(mcp_call(4, '{"action":"changed","dir":'// &
+            mcp_quote(dir)//'}'), .false.)
         messages = messages//mcp_encode(mcp_call(2, '{"action":"test","dir":'// &
             mcp_quote(dir)//',"only_changed":true,"json":"full"}'), .false.)
         messages = messages//mcp_encode(mcp_request(3, 'shutdown'), .false.)
         call mcp_exchange(driver, dir, cache, messages, .false., responses, result)
         call revert(dir)
         call assert_equal_integer(result%exit_code, 0, tag//' MCP exits cleanly')
-        if (size(responses) < 2) then
+        if (size(responses) < 3) then
             call assert_true(.false., tag//' MCP answers the test call')
             return
         end if
-        field = json_member(json_member(responses(2), 'result'), 'isError')
+        field = json_member(json_member(responses(3), 'result'), 'isError')
         call assert_true(.not. json_boolean_value(field), &
             tag//' MCP affected run passes')
-        field = json_member(json_element(json_member(json_member(responses(2), &
+        field = json_member(json_element(json_member(json_member(responses(3), &
             'result'), 'content'), 1), 'text')
         text = json_string_value(field)
         call assert_contains(text, 'test_phys_b', tag//' MCP runs test_phys_b')
         call assert_not_contains(text, 'test_core_a', tag//' MCP skips test_core_a')
+        ! The changed action lists model cases: a cold cache counts every
+        ! source as changed, so it names the default selection, the same on
+        ! both backends (no slow case, no per-program duplicates).
+        field = json_member(json_element(json_member(json_member(responses(2), &
+            'result'), 'content'), 1), 'text')
+        text = json_string_value(field)
+        call assert_contains(text, 'affected tests (3):'//new_line('a')// &
+            '  test_core_a'//new_line('a')//'  test_io_c'//new_line('a')// &
+            '  test_phys_b', tag//' MCP changed lists the affected model cases')
     end subroutine run_affected
 
     function case_names(report) result(text)

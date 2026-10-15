@@ -220,34 +220,21 @@ contains
         open (newunit=u, file=trim(base)//'/build/subdir/demo.x', status='replace')
         close (u)
 
+        ! CMake executables resolve from the project model (resolve_cmake_exec,
+        ! covered by test_cmake_external_exec_cli). resolve_exec_target never
+        ! guesses a CMake artifact from files in the build tree, however unique
+        ! or canonical the candidate looks.
         b = detect_backend(base)
         call resolve_exec_target(b, 'demo.x', bin_path, found)
-        call assert(found, 'CMake executable resolves by unique basename')
-        call assert(trim(bin_path) == trim(base)//'/build/subdir/demo.x', &
-            'CMake executable resolves to its nested build path')
+        call assert(.not. found, 'CMake executable is not guessed by basename')
         call resolve_exec_target(b, 'subdir/demo.x', bin_path, found)
-        call assert(found, 'CMake executable resolves by build-relative path')
+        call assert(.not. found, 'CMake executable is not guessed by build path')
 
-        call make_dir(trim(base)//'/build/other')
-        open (newunit=u, file=trim(base)//'/build/other/demo.x', status='replace')
-        close (u)
-        call resolve_exec_target(b, 'demo.x', bin_path, found)
-        call assert(.not. found, 'ambiguous CMake executable name is rejected')
-
-        ! A project built with both CMake and fpm holds the same executable at
-        ! build/bin and under the fpm compiler-hash tree. The canonical CMake
-        ! path wins instead of the duplicate making the target unresolvable.
         call make_dir(trim(base)//'/build/bin')
-        call make_dir(trim(base)//'/build/gfortran_DEADBEEF/app')
         open (newunit=u, file=trim(base)//'/build/bin/dual.x', status='replace')
         close (u)
-        open (newunit=u, file=trim(base)//'/build/gfortran_DEADBEEF/app/dual.x', &
-            status='replace')
-        close (u)
         call resolve_exec_target(b, 'dual.x', bin_path, found)
-        call assert(found, 'canonical CMake bin wins over a stale fpm copy')
-        call assert(trim(bin_path) == trim(base)//'/build/bin/dual.x', &
-            'resolution picks build/bin over the fpm tree')
+        call assert(.not. found, 'CMake build/bin file is not a resolved target')
 
         call remove_tree(base)
     end subroutine test_cmake_exec_target_resolution

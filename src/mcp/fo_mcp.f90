@@ -1016,6 +1016,11 @@ contains
         use fo_check, only: fo_changed_modules
         use fx_dag, only: dag_t, MAX_NODES
         use fo_scan, only: MAX_PATH
+        use fo_build_backend, only: backend_t, detect_backend
+        use fo_project_model, only: model_request_t, model_selection_t, &
+            project_model_t, SELECT_OK
+        use fo_project_load, only: project_has_model, project_affected
+        use fx_string, only: string_t
         character(len=*), intent(in) :: id_str, dir
         character(len=*), intent(out) :: output_text
         integer, intent(out) :: exitcode
@@ -1024,12 +1029,16 @@ contains
         type(dag_t) :: dag
         integer :: changed_ids(MAX_NODES), n_changed
         integer :: affected_ids(MAX_NODES), n_affected
-        integer :: n_cached, ierr, i, n_tests
+        integer :: n_cached, ierr, i
         character(len=MAX_PATH) :: filenames(MAX_NODES)
-        logical :: is_test_arr(MAX_NODES)
+        type(backend_t) :: b
+        type(model_request_t) :: request
+        type(model_selection_t) :: selection
+        type(project_model_t) :: model
+        type(string_t), allocatable :: changed(:), widen_reasons(:)
+        character(len=:), allocatable :: message
         call fo_changed_modules(trim(dir), dag, changed_ids, n_changed, &
-            affected_ids, n_affected, n_cached, ierr, &
-            filenames=filenames, is_test_arr=is_test_arr)
+            affected_ids, n_affected, n_cached, ierr, filenames=filenames)
         if (ierr /= 0) then
             output_text = 'fo: scan or dag failed'
             exitcode = 1
@@ -1056,21 +1065,36 @@ contains
                 trim(dag%nodes(affected_ids(i))%label)//'  '// &
                 trim(filenames(affected_ids(i)))
         end do
-        n_tests = 0
-        do i = 1, n_affected
-            if (is_test_arr(affected_ids(i))) n_tests = n_tests + 1
-        end do
-        if (n_tests > 0) then
-            output_text = trim(output_text)//achar(10)
-            write (output_text(len_trim(output_text) + 1:), '(a,i0,a)') &
-                'affected tests (', n_tests, '):'
-            do i = 1, n_affected
-                if (is_test_arr(affected_ids(i))) then
-                    output_text = trim(output_text)//achar(10)//'  '// &
-                        trim(dag%nodes(affected_ids(i))%label)//'  '// &
-                        trim(filenames(affected_ids(i)))
-                end if
+        ! Affected tests come from the project model, as in fo test
+        ! --only-changed and fo check.
+        b = detect_backend(trim(dir))
+        if (project_has_model(b)) then
+            allocate (changed(n_changed))
+            do i = 1, n_changed
+                changed(i)%s = trim(filenames(changed_ids(i)))
             end do
+            allocate (request%names(0), request%include_labels(0), &
+                request%exclude_labels(0), request%layers(0))
+            call project_affected(b, '', request, changed, model, selection, &
+                widen_reasons, ierr, message)
+            output_text = trim(output_text)//achar(10)
+            if (ierr /= 0) then
+                output_text = trim(output_text)//'affected tests unavailable: '// &
+                    message
+            else if (selection%status /= SELECT_OK) then
+                output_text = trim(output_text)//'affected tests (0):'
+            else
+                write (output_text(len_trim(output_text) + 1:), '(a,i0,a)') &
+                    'affected tests (', size(selection%cases), '):'
+                do i = 1, size(selection%cases)
+                    output_text = trim(output_text)//achar(10)//'  '// &
+                        trim(model%cases(selection%cases(i))%name)
+                end do
+                do i = 1, size(widen_reasons)
+                    output_text = trim(output_text)//achar(10)// &
+                        'affected selection widened: '//widen_reasons(i)%s
+                end do
+            end if
         end if
         call make_tool_text_response(id_str, output_text, exitcode, response)
     end subroutine handle_changed

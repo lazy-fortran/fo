@@ -416,6 +416,7 @@ contains
             end if
             n = n + 1
             all(n)%path = paths(k)%s
+            all(n)%other_units = scanned%has_other_units
             n_extra = 0
             if (allocated(scanned%additional_modules)) &
                 n_extra = size(scanned%additional_modules)

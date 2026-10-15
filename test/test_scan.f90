@@ -27,6 +27,7 @@ program test_scan
     call test_scan_ast_submodule_spans()
     call test_scan_parse_diagnostic_and_fallback()
     call test_scan_module_def()
+    call test_scan_mixed_units()
     call test_scan_module_name_containing_procedure()
     call test_scan_submodule_def()
     call test_scan_external_subroutine_def()
@@ -77,6 +78,37 @@ contains
         end do
         close (u)
     end subroutine write_file
+
+    subroutine test_scan_mixed_units()
+        type(scan_unit_t) :: info
+        integer :: ierr
+        character(len=512) :: path
+        character(len=80) :: lines(9)
+
+        lines(1) = 'module mixed_mod'
+        lines(2) = '    implicit none'
+        lines(3) = 'contains'
+        lines(4) = '    subroutine inner()'
+        lines(5) = '    end subroutine inner'
+        lines(6) = 'end module mixed_mod'
+        lines(7) = 'subroutine outer_proc()'
+        lines(8) = 'end subroutine outer_proc'
+        lines(9) = ''
+        call make_tmp_path('fo_test_mixed', path, '.f90')
+        call write_file(path, lines, 9)
+        call scan_file(path, info, ierr)
+        call assert(ierr == 0, 'scan_mixed: no error')
+        call assert(info%has_other_units, &
+            'scan_mixed: module plus external procedure is flagged')
+        lines(7) = ''
+        lines(8) = ''
+        call write_file(path, lines, 9)
+        call scan_file(path, info, ierr)
+        call assert(ierr == 0, 'scan_module_only: no error')
+        call assert(.not. info%has_other_units, &
+            'scan_module_only: contained procedures are not other units')
+        call execute_command_line('rm -f '//trim(path))
+    end subroutine test_scan_mixed_units
 
     subroutine test_scan_use_statements()
         type(scan_unit_t) :: info

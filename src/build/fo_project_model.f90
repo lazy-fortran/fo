@@ -193,6 +193,10 @@ module fo_project_model
         character(len=:), allocatable :: path
         type(string_t), allocatable :: provides(:)
         type(string_t), allocatable :: uses(:)
+        !! The file also holds program units outside its modules (external
+        !! procedures, a program): it links like a source no unit uses as a
+        !! module even when another unit uses one of its modules.
+        logical :: other_units = .false.
     end type model_unit_t
 
     type, public :: model_violation_t
@@ -1208,7 +1212,8 @@ subroutine model_affected(model, units, roots, changed, selection, widen_reasons
     !!  * a source of a target in the link closure of those targets that is
     !!    not reached through modules: a source providing no module that any
     !!    unit uses (programs, submodules, external procedures, unscanned
-    !!    C sources), which the case links without a `use` edge.
+    !!    C sources), which the case links without a `use` edge; a file with
+    !!    a used module and also such units counts the same (other_units).
     !! A case without a known command target is affected by every relevant
     !! change. Every selected case is affected (widened) when a build
     !! description (fpm.toml, CMakeLists.txt, *.cmake, CMake presets)
@@ -1270,6 +1275,7 @@ subroutine model_affected(model, units, roots, changed, selection, widen_reasons
             m = index_lookup(module_index, lower_text(units(u)%provides(k)%s))
             if (module_used(m)) plain_unit(u) = .false.
         end do
+        if (units(u)%other_units) plain_unit(u) = .true.
     end do
 
     ! Target sources by relative path -> owning targets.
