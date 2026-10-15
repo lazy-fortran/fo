@@ -376,7 +376,10 @@
             'CMake-built CXX executable runs and creates its runtime sentinel')
 
         call backend_build(b, exitcode, log_file=log_file)
-        call assert(exitcode == 0 .and. file_contains(log_file, 'no work to do'), &
+        ! Ninja reports `no work to do`; fo's native build compiles nothing.
+        call assert(exitcode == 0 .and. &
+            (file_contains(log_file, 'no work to do') .or. &
+             file_contains(log_file, 'native CMake compiled 0 source file(s)')), &
             'a repeated CMake build leaves the up-to-date CXX target alone')
         call write_cpp_runtime(source_file, 'edited')
         call backend_build(b, exitcode, log_file=log_file)

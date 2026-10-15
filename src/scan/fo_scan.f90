@@ -1,7 +1,7 @@
 module fo_scan
     use, intrinsic :: iso_fortran_env, only: error_unit
     use fo_util, only: make_tmpfile, delete_tmpfile
-    use fo_process, only: process_scan_sources
+    use fo_process, only: process_scan_sources, process_run_argv_logged, argv_push
     use fo_scan_types, only: scan_unit_t, MAX_NAME, MAX_PATH, MAX_UNITS, MAX_DEPS
     use fo_scan_cache, only: scan_cache_load, scan_cache_load_trusted, &
         scan_cache_save
@@ -14,6 +14,7 @@ module fo_scan
     private
 
     public :: scan_unit_t, scan_file, scan_file_regex, scan_dir, scan_dir_regex, &
+        scan_file_preprocessed, &
         scan_dir_cached
     public :: is_slow_test, source_defines_module, scan_provides_name
     public :: MAX_NAME, MAX_PATH, MAX_UNITS
@@ -109,6 +110,64 @@ contains
             diagnostic = trim(ast_diagnostic)//'; regex fallback failed'
         end if
     end subroutine scan_file
+
+    subroutine scan_file_preprocessed(filename, unit_info, ierr, preprocessor, &
+            n_args)
+        !! Scan the source as the compiler sees it: a file with preprocessor
+        !! directives is run through `preprocessor` (a packed argv prefix such
+        !! as `gfortran -E -cpp -P -DNAME -Iinc`; this routine appends
+        !! `-o <temporary> <filename>`) so a `use` or module definition in an
+        !! inactive branch is not reported. A file without directives is
+        !! scanned as is. unit_info%filename stays the original path.
+        character(len=*), intent(in) :: filename, preprocessor
+        integer, intent(in) :: n_args
+        type(scan_unit_t), intent(out) :: unit_info
+        integer, intent(out) :: ierr
+        character(len=:), allocatable :: packed
+        character(len=MAX_PATH) :: scratch, log
+        character(len=512) :: line
+        integer :: funit, ios, count, exitcode, first
+        logical :: directives
+
+        directives = .false.
+        open (newunit=funit, file=filename, status='old', iostat=ios)
+        if (ios == 0) then
+            do
+                read (funit, '(a)', iostat=ios) line
+                if (ios /= 0) exit
+                first = verify(line, ' '//achar(9))
+                if (first > 0) then
+                    if (line(first:first) == '#') then
+                        directives = .true.
+                        exit
+                    end if
+                end if
+            end do
+            close (funit)
+        end if
+        if (.not. directives .or. n_args < 1) then
+            call scan_file(filename, unit_info, ierr)
+            return
+        end if
+        call make_tmpfile('fo_cpp', scratch)
+        call make_tmpfile('fo_cpp_log', log)
+        packed = preprocessor
+        count = n_args
+        call argv_push(packed, count, '-o')
+        call argv_push(packed, count, scratch)
+        call argv_push(packed, count, filename)
+        call process_run_argv_logged('', packed, count, log, .false., 120, exitcode)
+        call delete_tmpfile(log)
+        if (exitcode /= 0) then
+            call delete_tmpfile(scratch)
+            call reset_scan_unit(filename, unit_info)
+            ierr = 1
+            return
+        end if
+        call scan_file(scratch, unit_info, ierr)
+        call delete_tmpfile(scratch)
+        unit_info%filename = filename
+    end subroutine scan_file_preprocessed
 
     subroutine scan_file_ast(filename, unit_info, ierr, diagnostic)
         character(len=*), intent(in) :: filename

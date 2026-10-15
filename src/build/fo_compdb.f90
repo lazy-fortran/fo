@@ -1,9 +1,10 @@
 module fo_compdb
     use fo_process, only: argv_push, argv_push_split, argv_push_split_nl
+    use fx_string, only: string_t
     implicit none
     private
 
-    public :: compdb_write
+    public :: compdb_write, compdb_write_commands
 
 contains
 
@@ -55,6 +56,38 @@ contains
         write (u, '(a)') ']'
         close (u)
     end subroutine compdb_write
+
+    subroutine compdb_write_commands(output_path, directory, files, commands)
+        !! One entry per file; each command is the complete argv as
+        !! newline-separated tokens (compiler first).
+        character(len=*), intent(in) :: output_path, directory
+        type(string_t), intent(in) :: files(:), commands(:)
+        integer :: u, ios, i, n_args
+        character(len=:), allocatable :: packed
+
+        open (newunit=u, file=trim(output_path), status='replace', action='write', &
+            iostat=ios)
+        if (ios /= 0) return
+        write (u, '(a)') '['
+        do i = 1, size(files)
+            n_args = 0
+            if (allocated(packed)) deallocate (packed)
+            call argv_push_split_nl(packed, n_args, commands(i)%s)
+            write (u, '(a)', advance='no') '  {"directory": '
+            call write_json_string(u, directory)
+            write (u, '(a)', advance='no') ', "file": '
+            call write_json_string(u, files(i)%s)
+            write (u, '(a)', advance='no') ', "arguments": '
+            call write_json_argv(u, packed)
+            if (i < size(files)) then
+                write (u, '(a)') '},'
+            else
+                write (u, '(a)') '}'
+            end if
+        end do
+        write (u, '(a)') ']'
+        close (u)
+    end subroutine compdb_write_commands
 
     subroutine write_json_argv(u, packed)
         integer, intent(in) :: u

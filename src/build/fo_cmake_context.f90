@@ -146,7 +146,8 @@ contains
         call fs_write_text(query_dir//'/query.json', &
             '{"requests":[{"kind":"codemodel","version":2},'// &
             '{"kind":"cache","version":2},'// &
-            '{"kind":"toolchains","version":1}],"client":'// &
+            '{"kind":"toolchains","version":1},'// &
+            '{"kind":"cmakeFiles","version":1}],"client":'// &
             '{"fo_request":"'//context%request_token//'"}}')
     end subroutine cmake_context_query
 

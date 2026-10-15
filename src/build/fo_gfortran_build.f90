@@ -94,6 +94,7 @@ module fo_gfortran_build
     public :: source_has_marker, dispatch_target
     public :: gfortran_selected_test_names
     public :: native_compile_units, native_link_target, native_archive_target
+    public :: native_compile_actions, native_link_exact
     public :: native_run_test, write_test_result_line
     public :: make_obj_path
 
@@ -110,6 +111,22 @@ module fo_gfortran_build
         character(len=MAX_NAME), allocatable :: modules(:)
         character(len=2 * MAX_NAME + 1), allocatable :: submodules(:)
     end type source_interfaces_t
+
+    type, public :: native_action_t
+        !! One declared compile action: language ('Fortran', 'C', 'CXX'), the
+        !! compiler executable, the newline-separated tokens placed after `-c`,
+        !! the Fortran module output directory and the newline-separated
+        !! module search directories (empty for C and C++).
+        character(len=:), allocatable :: language, compiler, argv, mod_dir, search
+    end type native_action_t
+
+    type :: node_text_t
+        character(len=:), allocatable :: s
+    end type node_text_t
+
+    type :: node_dirs_t
+        character(len=512), allocatable :: d(:)
+    end type node_dirs_t
 
 contains
 
@@ -207,6 +224,324 @@ contains
         exitcode = fs_rename(trim(archive), output)
         call remove_ephemeral_link_artifact(archive)
     end subroutine native_archive_target
+
+    subroutine native_compile_actions(project_dir, units, actions, obj_dir, &
+            log_file, exitcode, n_compiled)
+        !! Compile declared sources, each with its own compiler, command
+        !! tokens, module output directory and module search directories. The
+        !! action cache, the module-interface cutoff and the parallel level
+        !! scheduler are those of native_compile_units.
+        character(len=*), intent(in) :: project_dir, obj_dir, log_file
+        type(scan_unit_t), intent(in) :: units(:)
+        type(native_action_t), intent(in) :: actions(:)
+        integer, intent(out) :: exitcode, n_compiled
+        type(fpm_config_t), allocatable :: config
+        character(len=512), allocatable :: objects(:), dep_objects(:), dirs(:)
+        character(len=4096), allocatable :: flags(:)
+        logical, allocatable :: programs(:)
+        integer :: n_objects
+
+        exitcode = 1
+        n_compiled = 0
+        if (size(units) /= size(actions)) return
+        call fpm_config_allocate(config)
+        allocate (objects(MAX_SRC_OBJS), dep_objects(MAX_DEP_OBJS), &
+            dirs(MAX_DEP_DIRS), programs(MAX_SRC_OBJS), flags(size(units)))
+        dirs = ''
+        dep_objects = ''
+        flags = ''
+        call cache_set_file_hash_hook(memo_hash_file)
+        call fs_make_dir(obj_dir)
+        call compile_sources(project_dir, '.fo-no-scan', '.fo-no-scan', &
+            '.fo-no-scan', .false., obj_dir, obj_dir, dirs, 0, dep_objects, 0, &
+            log_file, objects, n_objects, programs, exitcode, n_compiled, '', &
+            'native-cmake', .true., config, declared_units=units, &
+            declared_flags=flags, declared_actions=actions)
+        call memo_save()
+    end subroutine native_compile_actions
+
+    subroutine native_link_exact(cwd, compiler, argv, inputs, output, log_file, &
+            exitcode)
+        !! Link with the exact compiler driver and argv tokens (newline
+        !! separated, without `-o <output>`). The link is an action keyed by
+        !! the tokens and the content of the `inputs` files (newline
+        !! separated); an output that is already that action's result stays.
+        character(len=*), intent(in) :: cwd, compiler, argv, inputs, output
+        character(len=*), intent(in) :: log_file
+        integer, intent(out) :: exitcode
+        character(len=:), allocatable :: packed
+        character(len=HASH_LEN), allocatable :: parts(:)
+        character(len=HASH_LEN) :: action_id
+        character(len=1024) :: stage_dir, staged_output
+        type(cache_t) :: cache
+        integer :: n_args, n, start, i, cache_ierr, reserve_rc, store_ierr
+        logical :: restored, valid_image, do_cache
+
+        exitcode = 1
+        call cache_init(cache, cache_ierr)
+        do_cache = cache_ierr == 0
+        if (do_cache) then
+            n = 0
+            allocate (parts(3 + count_char(inputs, achar(10)) + 1))
+            parts(1) = memo_tool_key(compiler)
+            call text_digest(argv, parts(2))
+            parts(3) = 'fo-cmake-link-1'
+            n = 3
+            start = 1
+            do i = 1, len(inputs) + 1
+                if (i <= len(inputs)) then
+                    if (inputs(i:i) /= achar(10)) cycle
+                end if
+                if (i > start) then
+                    n = n + 1
+                    call cache_file_digest(inputs(start:i - 1), parts(n))
+                end if
+                start = i + 1
+            end do
+            action_id = cache_digest(parts, n)
+            call cache_binary_matches(cache, action_id, output, restored)
+            if (restored) then
+                call native_image_valid(output, valid_image)
+                if (valid_image) then
+                    exitcode = 0
+                    return
+                end if
+            end if
+        end if
+        call reserve_link_stage(output, stage_dir, staged_output, reserve_rc)
+        if (reserve_rc /= 0) then
+            call append_artifact_error(log_file, &
+                'fo: could not reserve executable staging directory')
+            return
+        end if
+        n_args = 0
+        call argv_push(packed, n_args, compiler)
+        call argv_push_split_nl(packed, n_args, argv)
+        call argv_push(packed, n_args, '-o')
+        call argv_push(packed, n_args, staged_output)
+        call process_run_argv_logged(cwd, packed, n_args, log_file, .true., &
+            build_timeout_seconds(), exitcode)
+        if (exitcode == 124) call append_build_hang_hint(log_file, &
+            'link of '//trim(output), build_timeout_seconds())
+        if (exitcode == 0) then
+            call native_image_valid(staged_output, valid_image)
+            if (.not. valid_image) then
+                call append_artifact_error(log_file, &
+                    'fo: linker output is not a valid executable image')
+                exitcode = 1
+            end if
+        end if
+        if (exitcode == 0) then
+            if (do_cache) call cache_store_binary(cache, action_id, staged_output, &
+                store_ierr)
+            if (fs_rename(trim(staged_output), trim(output)) /= 0) then
+                call append_artifact_error(log_file, &
+                    'fo: could not atomically publish executable')
+                exitcode = 1
+            end if
+        end if
+        call fs_remove_tree(trim(stage_dir))
+    end subroutine native_link_exact
+
+    integer function count_char(text, ch) result(n)
+        character(len=*), intent(in) :: text
+        character(len=1), intent(in) :: ch
+        integer :: i
+
+        n = 0
+        do i = 1, len(text)
+            if (text(i:i) == ch) n = n + 1
+        end do
+    end function count_char
+
+    subroutine text_digest(text, key)
+        !! Content digest of text of any length (newlines and blanks kept).
+        character(len=*), intent(in) :: text
+        character(len=HASH_LEN), intent(out) :: key
+        character(len=256), allocatable :: parts(:)
+        integer :: n, i, j
+
+        n = max(1, (len(text) + 255)/256)
+        allocate (parts(n))
+        parts = ''
+        do i = 1, n
+            parts(i) = text((i - 1)*256 + 1:min(len(text), i*256))
+            do j = 1, len(parts(i))
+                if (parts(i)(j:j) == ' ') parts(i)(j:j) = achar(1)
+            end do
+        end do
+        key = cache_digest(parts, n)
+    end subroutine text_digest
+
+    function memo_tool_key(command) result(key)
+        character(len=*), intent(in) :: command
+        character(len=HASH_LEN) :: key
+        character(len=512), save :: known(16) = ''
+        character(len=HASH_LEN), save :: keys(16) = ''
+        integer, save :: n_known = 0
+        integer :: i
+
+        do i = 1, n_known
+            if (trim(known(i)) /= command) cycle
+            key = keys(i)
+            return
+        end do
+        key = compiler_tool_key(command)
+        if (n_known >= size(known)) return
+        n_known = n_known + 1
+        known(n_known) = command
+        keys(n_known) = key
+    end function memo_tool_key
+
+    subroutine prepare_action_node(act, source, obj_path, obj_dir, tokens, &
+            compiler, key_text, depfile, dirs, mod_dir, is_fortran, ierr)
+        !! Command tokens, cache identity and module directories of one
+        !! declared action. C, C++ and preprocessed Fortran also write a
+        !! dependency file whose headers are part of the cache key.
+        type(native_action_t), intent(in) :: act
+        character(len=*), intent(in) :: source, obj_path, obj_dir
+        character(len=:), allocatable, intent(inout) :: tokens, compiler
+        character(len=:), allocatable, intent(inout) :: key_text, depfile, mod_dir
+        character(len=512), allocatable, intent(inout) :: dirs(:)
+        logical, intent(out) :: is_fortran
+        integer, intent(out) :: ierr
+        character(len=1), parameter :: nl = achar(10)
+        character(len=HASH_LEN) :: digest
+        character(len=:), allocatable :: extension
+        integer :: dot, n, start, i
+        logical :: preprocessed
+
+        ierr = 1
+        is_fortran = act%language == 'Fortran'
+        compiler = act%compiler
+        mod_dir = obj_dir
+        if (is_fortran) mod_dir = act%mod_dir
+        if (len(compiler) == 0 .or. len(mod_dir) == 0) return
+        tokens = act%argv
+        depfile = ''
+        extension = ''
+        dot = index(source, '.', back=.true.)
+        if (dot > 0) extension = source(dot + 1:)
+        preprocessed = .false.
+        if (is_fortran) then
+            preprocessed = index(nl//act%argv//nl, nl//'-cpp'//nl) > 0
+            if (len(extension) > 0) preprocessed = preprocessed .or. &
+                extension(1:1) == 'F'
+        end if
+        if (.not. is_fortran .or. preprocessed) then
+            depfile = trim(obj_path)//'.d'
+            tokens = tokens//nl//'-MD'//nl//'-MF'//nl//depfile//nl//'-MT'//nl// &
+                trim(obj_path)
+        end if
+        call text_digest(act%language//nl//memo_tool_key(compiler)//nl//act%argv, &
+            digest)
+        key_text = 'native-cmake-v1 '//digest
+        n = 0
+        if (len(act%search) > 0) n = count_char(act%search, nl) + 1
+        if (allocated(dirs)) deallocate (dirs)
+        allocate (dirs(n))
+        n = 0
+        start = 1
+        do i = 1, len(act%search) + 1
+            if (i <= len(act%search)) then
+                if (act%search(i:i) /= nl) cycle
+            end if
+            if (i > start) then
+                if (i - start > 512) return
+                n = n + 1
+                dirs(n) = act%search(start:i - 1)
+            end if
+            start = i + 1
+        end do
+        if (n < size(dirs)) dirs = dirs(1:n)
+        ierr = 0
+    end subroutine prepare_action_node
+
+    subroutine depfile_digest(depfile, digest)
+        !! Digest over the content of the files a compiler dependency file
+        !! lists, or a marker when it does not exist yet.
+        character(len=*), intent(in) :: depfile
+        character(len=HASH_LEN), intent(out) :: digest
+        character(len=:), allocatable :: text, word
+        character(len=HASH_LEN), allocatable :: hashes(:)
+        integer :: unit, ios, file_size, i, n
+        logical :: first_word
+        character(len=1) :: ch
+
+        digest = 'no-depfile'
+        inquire (file=depfile, size=file_size, iostat=ios)
+        if (ios /= 0 .or. file_size < 1) return
+        allocate (character(len=file_size) :: text)
+        open (newunit=unit, file=depfile, status='old', action='read', &
+            access='stream', form='unformatted', iostat=ios)
+        if (ios /= 0) return
+        read (unit, iostat=ios) text
+        close (unit)
+        if (ios /= 0) return
+        allocate (hashes(16))
+        n = 0
+        word = ''
+        first_word = .true.
+        i = 1
+        do while (i <= len(text) + 1)
+            ch = achar(10)
+            if (i <= len(text)) ch = text(i:i)
+            if (ch == achar(92) .and. i < len(text)) then
+                if (text(i + 1:i + 1) == ' ') then
+                    word = word//' '
+                    i = i + 2
+                    cycle
+                else if (text(i + 1:i + 1) == achar(10)) then
+                    ch = ' '
+                    i = i + 1
+                end if
+            end if
+            if (ch == ' ' .or. ch == achar(10) .or. ch == achar(9) .or. &
+                ch == achar(13)) then
+                if (len(word) > 0) then
+                    if (first_word) then
+                        first_word = .false.
+                    else
+                        if (n == size(hashes)) hashes = [hashes, hashes]
+                        n = n + 1
+                        call cache_file_digest(word, hashes(n))
+                    end if
+                    word = ''
+                end if
+            else
+                word = word//ch
+            end if
+            i = i + 1
+        end do
+        digest = cache_digest(hashes, max(n, 0))
+    end subroutine depfile_digest
+
+    subroutine unit_cache_key(units, n_units, dag, filename, mod_keys, dirs, &
+            compiler, key_text, depfile, key, complete)
+        !! Action key of one source: its content (and Fortran includes), the
+        !! compiler and flags identity, the interface keys of the modules it
+        !! uses and, when a dependency file is declared, its header content.
+        type(scan_unit_t), intent(in) :: units(:)
+        integer, intent(in) :: n_units
+        type(dag_t), intent(in) :: dag
+        character(len=*), intent(in) :: filename, compiler, key_text, depfile
+        character(len=HASH_LEN), intent(in) :: mod_keys(MAX_NODES)
+        character(len=512), intent(in) :: dirs(:)
+        character(len=HASH_LEN), intent(out) :: key
+        logical, intent(out) :: complete
+        character(len=HASH_LEN), allocatable :: dep_keys(:)
+        character(len=HASH_LEN) :: headers
+        integer :: n_dep
+
+        key = ''
+        call collect_dep_keys_source_order(units, n_units, dag, filename, &
+            mod_keys, dirs, size(dirs), dep_keys, n_dep, complete)
+        if (.not. complete) return
+        headers = ''
+        if (len(depfile) > 0) call depfile_digest(depfile, headers)
+        key = cache_key_for(filename, compiler, trim(key_text)//headers, &
+            dep_keys, n_dep, include_dirs=dirs)
+    end subroutine unit_cache_key
 
     logical function gremlin_execution_view_requested() result(requested)
         character(len=MAX_PATH) :: execution_cwd
@@ -1367,7 +1702,7 @@ contains
             dep_includes, n_dep_includes, dep_objs, n_dep_objs, log_file, &
             src_objs, n_src_objs, is_prog_arr, exitcode, &
             n_compiled, flags, compiler, include_apps, config, use_cache, &
-            declared_units, declared_flags, compile_database)
+            declared_units, declared_flags, compile_database, declared_actions)
         character(len=*), intent(in) :: project_dir, src_dir, app_dir, example_dir
         logical, intent(in) :: include_examples
         character(len=*), intent(in) :: mod_dir, obj_dir, log_file
@@ -1387,7 +1722,19 @@ contains
         type(scan_unit_t), intent(in), optional :: declared_units(:)
         character(len=*), intent(in), optional :: declared_flags(:)
         character(len=*), intent(in), optional :: compile_database
+        !! Per declared unit the exact compiler, command tokens, module output
+        !! directory and module search directories (CMake File API builds).
+        type(native_action_t), intent(in), optional :: declared_actions(:)
 
+        type(node_text_t), allocatable :: node_tokens(:), node_compiler(:)
+        type(node_text_t), allocatable :: node_key_text(:), node_depfile(:)
+        type(node_text_t), allocatable :: node_mod_dir(:)
+        type(node_dirs_t), allocatable :: node_dirs(:)
+        logical, allocatable :: node_fortran(:)
+        integer, allocatable :: node_decl(:)
+        character(len=HASH_LEN) :: post_key
+        integer :: action_index
+        logical :: post_complete, with_actions
         type(scan_unit_t), allocatable :: units_a(:), units_b(:), units_c(:)
         type(scan_unit_t), allocatable :: all_units(:)
         integer :: na, nb, nc, n_all, i, ii, ierr, node_id, declared_index
@@ -1499,15 +1846,31 @@ contains
         call package_source_flags(filenames, flags, config, deps, n_deps_resolved, &
             source_flags, exitcode)
         if (exitcode /= 0) return
+        with_actions = present(declared_actions)
+        allocate (node_tokens(MAX_NODES), node_compiler(MAX_NODES))
+        allocate (node_key_text(MAX_NODES))
+        allocate (node_mod_dir(MAX_NODES), node_depfile(MAX_NODES))
+        allocate (node_dirs(MAX_NODES), node_fortran(MAX_NODES), node_decl(MAX_NODES))
+        node_fortran = .true.
+        node_decl = 0
         if (present(declared_flags)) then
             do i = 1, n_order
                 node_id = topo_order(i)
-                do declared_index = 1, n_all
+                declared_index = node_id
+                if (declared_index > n_all) declared_index = 0
+                if (declared_index > 0) then
                     if (trim(all_units(declared_index)%filename) /= &
-                        trim(filenames(node_id))) cycle
-                    source_flags(node_id) = declared_flags(declared_index)
-                    exit
-                end do
+                        trim(filenames(node_id))) declared_index = 0
+                end if
+                if (declared_index == 0) then
+                    do declared_index = 1, n_all
+                        if (trim(all_units(declared_index)%filename) == &
+                            trim(filenames(node_id))) exit
+                    end do
+                end if
+                if (declared_index > n_all) cycle
+                node_decl(node_id) = declared_index
+                source_flags(node_id) = declared_flags(declared_index)
             end do
         end if
 
@@ -1532,10 +1895,36 @@ contains
                 project_dir, example_dir)) cycle
             if (is_prog(node_id) .and. .not. app_program_selected( &
                 filenames(node_id), project_dir, app_dir, config)) cycle
-            call source_module_names(all_units, n_all, filenames(node_id), &
-                interfaces(node_id)%modules)
-            call source_smod_names(filenames(node_id), &
-                interfaces(node_id)%submodules, smod_cacheable(node_id))
+            call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
+            node_tokens(node_id)%s = with_user_flags(includes_flag, &
+                source_flags(node_id))
+            node_compiler(node_id)%s = ''
+            node_mod_dir(node_id)%s = mod_dir
+            node_depfile(node_id)%s = ''
+            if (with_actions .and. node_decl(node_id) > 0) then
+                action_index = node_decl(node_id)
+                call prepare_action_node(declared_actions(action_index), &
+                    filenames(node_id), obj_path, obj_dir, node_tokens(node_id)%s, &
+                    node_compiler(node_id)%s, node_key_text(node_id)%s, &
+                    node_depfile(node_id)%s, node_dirs(node_id)%d, &
+                    node_mod_dir(node_id)%s, node_fortran(node_id), exitcode)
+                if (exitcode /= 0) then
+                    write (error_unit, '(a)') &
+                        'native CMake: unusable compile action for '// &
+                        trim(filenames(node_id))
+                    return
+                end if
+                call fs_make_dir(node_mod_dir(node_id)%s)
+            end if
+            if (node_fortran(node_id)) then
+                call source_module_names(all_units, n_all, filenames(node_id), &
+                    interfaces(node_id)%modules)
+                call source_smod_names(filenames(node_id), &
+                    interfaces(node_id)%submodules, smod_cacheable(node_id))
+            else
+                allocate (interfaces(node_id)%modules(0), &
+                    interfaces(node_id)%submodules(0))
+            end if
             total_source = total_source + 1
             n_compdb = n_compdb + 1
             compdb_sources(n_compdb) = filenames(node_id)
@@ -1590,29 +1979,35 @@ contains
                     level_keys(i) = ''
                     level_hit = .false.
 
-                    call collect_dep_keys_source_order(all_units, n_all, dag, &
-                        filenames(node_id), &
-                        new_mod_keys, dep_includes, n_dep_includes, &
-                        level_dep_keys, level_dep_count, level_complete)
+                    if (allocated(node_dirs(node_id)%d)) then
+                        call unit_cache_key(all_units, n_all, dag, &
+                            filenames(node_id), new_mod_keys, &
+                            node_dirs(node_id)%d, compiler, &
+                            node_key_text(node_id)%s, node_depfile(node_id)%s, &
+                            level_source_key, level_complete)
+                    else
+                        call unit_cache_key(all_units, n_all, dag, &
+                            filenames(node_id), new_mod_keys, &
+                            dep_includes(:n_dep_includes), compiler, &
+                            trim(source_key_flags(node_id)), '', &
+                            level_source_key, level_complete)
+                    end if
                     if (.not. level_complete) then
                         level_restored(i) = .false.
                         cycle
                     end if
-                    level_source_key = cache_key_for(filenames(node_id), compiler, &
-                        source_key_flags(node_id), level_dep_keys, level_dep_count, &
-                        include_dirs=dep_includes(:n_dep_includes))
                     level_keys(i) = level_source_key
 
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, &
                         level_obj_path)
                     if (cache_ierr == 0 .and. smod_cacheable(node_id)) then
                         call cache_restore_action(c, level_source_key, &
-                            level_obj_path, mod_dir, level_hit, &
+                            level_obj_path, node_mod_dir(node_id)%s, level_hit, &
                             required_mod_names=interfaces(node_id)%modules, &
                             required_smod_names=interfaces(node_id)%submodules)
                         if (level_hit) then
-                            call get_interface_key(interfaces(node_id), mod_dir, &
-                                new_mod_keys(node_id))
+                            call get_interface_key(interfaces(node_id), &
+                                node_mod_dir(node_id)%s, new_mod_keys(node_id))
                             call progress_step()
                         end if
                     end if
@@ -1640,13 +2035,13 @@ contains
                     per_log_local = per_logs(ii)
                     call make_obj_path(fname_local, project_dir, obj_dir, obj_path)
                     do smod_index = 1, size(interfaces(node_id)%submodules)
-                        call fs_remove_file(trim(mod_dir)//'/'// &
+                        call fs_remove_file(trim(node_mod_dir(node_id)%s)//'/'// &
                             trim(interfaces(node_id)%submodules(smod_index))//'.smod')
                     end do
                     call compile_f90(project_dir, fname_local, obj_path, &
-                        with_user_flags(includes_flag, source_flags(node_id)), &
-                        per_log_local, compile_exits(ii), &
-                        exact_flags=present(declared_flags))
+                        node_tokens(node_id)%s, per_log_local, compile_exits(ii), &
+                        exact_flags=present(declared_flags), &
+                        compiler=node_compiler(node_id)%s)
                     call progress_step()
                 end do
                 !$omp end parallel do
@@ -1663,9 +2058,9 @@ contains
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, &
                         obj_path)
                     call compile_f90(project_dir, filenames(node_id), obj_path, &
-                        with_user_flags(includes_flag, source_flags(node_id)), &
-                        per_logs(ii), compile_exits(ii), &
-                        exact_flags=present(declared_flags))
+                        node_tokens(node_id)%s, per_logs(ii), compile_exits(ii), &
+                        exact_flags=present(declared_flags), &
+                        compiler=node_compiler(node_id)%s)
                 end do
 
                 do ii = 1, n_compile
@@ -1682,12 +2077,23 @@ contains
                     node_id = compile_nodes(ii)
                     call make_obj_path(filenames(node_id), project_dir, obj_dir, &
                         obj_path)
-                    call get_interface_key(interfaces(node_id), mod_dir, &
-                        new_mod_keys(node_id))
+                    call get_interface_key(interfaces(node_id), &
+                        node_mod_dir(node_id)%s, new_mod_keys(node_id))
+                    if (len(node_depfile(node_id)%s) > 0 .and. &
+                        len_trim(compile_keys(ii)) > 0) then
+                        ! The compiler just wrote the headers this source
+                        ! includes; the action is keyed by their content.
+                        call unit_cache_key(all_units, n_all, dag, &
+                            filenames(node_id), new_mod_keys, &
+                            node_dirs(node_id)%d, compiler, &
+                            node_key_text(node_id)%s, node_depfile(node_id)%s, &
+                            post_key, post_complete)
+                        if (post_complete) compile_keys(ii) = post_key
+                    end if
                     if (len_trim(compile_keys(ii)) > 0 .and. &
                         smod_cacheable(node_id)) then
                         call cache_store_action(c, compile_keys(ii), obj_path, &
-                            mod_dir, &
+                            node_mod_dir(node_id)%s, &
                             interfaces(node_id)%modules, output_id, cache_ierr, &
                             smod_names=interfaces(node_id)%submodules)
                     end if
@@ -1702,7 +2108,11 @@ contains
                 end if
                 n_compiled = n_compiled + n_compile
             end do
-            call save_mod_keys(mod_dir, dag, n_order, topo_order, new_mod_keys)
+            if (with_actions) then
+                call save_mod_keys(obj_dir, dag, n_order, topo_order, new_mod_keys)
+            else
+                call save_mod_keys(mod_dir, dag, n_order, topo_order, new_mod_keys)
+            end if
         else
             do i = 1, n_order
                 node_id = topo_order(i)
@@ -1716,8 +2126,9 @@ contains
                     filenames(node_id), project_dir, app_dir, config)) cycle
                 call make_obj_path(filenames(node_id), project_dir, obj_dir, obj_path)
                 call compile_f90(project_dir, filenames(node_id), obj_path, &
-                    with_user_flags(includes_flag, source_flags(node_id)), log_file, &
-                    exitcode, exact_flags=present(declared_flags))
+                    node_tokens(node_id)%s, log_file, exitcode, &
+                    exact_flags=present(declared_flags), &
+                    compiler=node_compiler(node_id)%s)
                 if (exitcode /= 0) then
                     call progress_end()
                     return
@@ -2147,7 +2558,7 @@ contains
         character(len=*), intent(in) :: source_path
         type(dag_t), intent(in) :: dag
         character(len=HASH_LEN), intent(in) :: mod_keys(MAX_NODES)
-        character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
+        character(len=512), intent(in) :: dep_includes(:)
         character(len=HASH_LEN), allocatable, intent(out) :: dep_keys(:)
         integer, intent(out) :: n_dep
         logical, intent(out) :: complete
@@ -2189,7 +2600,7 @@ contains
     subroutine find_dep_mod_file(modname, dep_includes, n_dep_includes, modpath, &
             found)
         character(len=*), intent(in) :: modname
-        character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
+        character(len=512), intent(in) :: dep_includes(:)
         integer, intent(in) :: n_dep_includes
         character(len=*), intent(out) :: modpath
         logical, intent(out) :: found
@@ -4464,11 +4875,12 @@ contains
     end function compiler_tool_key
 
     recursive subroutine compile_f90(project_dir, source, objfile, includes_flag, log_file, &
-            exitcode, exact_flags)
+            exitcode, exact_flags, compiler)
         character(len=*), intent(in) :: project_dir, source, objfile, includes_flag
         character(len=*), intent(in) :: log_file
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: exact_flags
+        character(len=*), intent(in), optional :: compiler
         character(len=:), allocatable :: packed
         integer :: n_args, n_removed
 
@@ -4478,7 +4890,15 @@ contains
         ! corrupts libgomp, and it is quote-proof, unlike a shell command line.
         !$omp critical (fo_compile_command)
         n_args = 0
-        call append_fc_command(packed, n_args)
+        if (present(compiler)) then
+            if (len(compiler) > 0) then
+                call argv_push(packed, n_args, compiler)
+            else
+                call append_fc_command(packed, n_args)
+            end if
+        else
+            call append_fc_command(packed, n_args)
+        end if
         call argv_push(packed, n_args, '-c')
         if (present(exact_flags)) then
             if (.not. exact_flags) call argv_push_split(packed, n_args, fc_base_flags())

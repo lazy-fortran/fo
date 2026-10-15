@@ -65,6 +65,8 @@ module fo_cmake_model
     integer, parameter :: dp = real64
 
     public :: cmake_model_load, cmake_model_load_cases, cmake_model_target_origin
+    public :: cmake_plan_load, cmake_plan_t, cmake_target_t, cmake_group_t
+    public :: cmake_split_fragment
 
     type :: walker_t
         !! Tracks the JSON path ('configurations/#/targets/#/name').
@@ -76,12 +78,38 @@ module fo_cmake_model
         logical :: pop_pending = .false.
     end type walker_t
 
-    type :: target_rec_t
+    type :: cmake_group_t
+        !! One codemodel compile group: the compile command fragments,
+        !! include directories, defines and language shared by some sources.
+        character(len=:), allocatable :: language
+        type(string_t), allocatable :: fragments(:), includes(:), defines(:)
+        logical, allocatable :: include_system(:)
+        integer :: n_fragments = 0, n_includes = 0, n_defines = 0
+    end type cmake_group_t
+
+    type :: cmake_target_t
         character(len=:), allocatable :: id, name, json_file, type
         character(len=:), allocatable :: source_dir, artifact
         type(string_t), allocatable :: sources(:), dep_ids(:)
         integer :: n_sources = 0, n_deps = 0
-    end type target_rec_t
+        !! Native-build facts: per source its compile group (0 = not compiled)
+        !! and generated flag, link/archive fragments with their roles.
+        character(len=:), allocatable :: build_dir, link_language
+        integer, allocatable :: src_group(:)
+        logical, allocatable :: src_generated(:)
+        type(cmake_group_t), allocatable :: groups(:)
+        integer :: n_groups = 0
+        type(string_t), allocatable :: link_fragments(:), link_roles(:)
+        type(string_t), allocatable :: archive_fragments(:), dep_names(:)
+        integer :: n_link = 0, n_archive = 0
+    end type cmake_target_t
+
+    type :: cmake_plan_t
+        !! The configured tree as the native builder needs it.
+        character(len=:), allocatable :: source_root, build_root
+        type(cmake_target_t), allocatable :: targets(:)
+        type(string_t), allocatable :: tool_languages(:), tool_compilers(:)
+    end type cmake_plan_t
 
 contains
 
@@ -92,12 +120,11 @@ contains
         integer, intent(out) :: ierr
         character(len=:), allocatable, intent(out) :: message
         character(len=*), intent(in), optional :: input_digest
-        character(len=:), allocatable :: reply_dir, codemodel_file, text
+        character(len=:), allocatable :: toolchains_file
         character(len=:), allocatable :: top_source, top_build, digest
-        type(target_rec_t), allocatable :: recs(:)
-        integer :: n, i, k, j, slot, last_slash, ntab
+        type(cmake_target_t), allocatable :: recs(:)
+        integer :: n, i, k, j, slot, ntab
         integer, allocatable :: table(:)
-        logical :: ok
         type(string_t), allocatable :: deps(:), uses(:), names(:)
         integer :: origin, kind, nd, nu
         integer, allocatable :: origins(:), kinds(:)
@@ -110,59 +137,9 @@ contains
             build_dir=cmake_context_build_path(context), &
             preset=trim(context%configure_preset), &
             configuration=trim(context%configuration))
-        call cmake_context_read_reply(context)
-        if (.not. allocated(context%reply_index)) then
-            message = 'CMake File API reply is missing; configure the tree first'
-            return
-        end if
-        if (len(context%reply_index) == 0 .or. .not. context%has_codemodel) then
-            message = 'CMake File API reply has no codemodel; configure the tree first'
-            return
-        end if
-        if (.not. context%request_seen) then
-            message = 'CMake File API reply is stale (CMake has not re-run since '// &
-                'the fo query was written); reconfigure the tree'
-            return
-        end if
-        last_slash = index(context%reply_index, '/', back=.true.)
-        reply_dir = context%reply_index(1:last_slash - 1)
-
-        call cmake_context_read_file(context%reply_index, text)
-        if (.not. allocated(text)) then
-            message = 'cannot read CMake File API index '//context%reply_index
-            return
-        end if
-        call parse_index(text, codemodel_file, ok)
-        if (.not. ok) then
-            message = 'CMake File API index has no codemodel-v2 object'
-            return
-        end if
-        call cmake_context_read_file(reply_dir//'/'//codemodel_file, text)
-        if (.not. allocated(text)) then
-            message = 'cannot read CMake codemodel '//codemodel_file
-            return
-        end if
-        call parse_codemodel(text, context%configuration, top_source, top_build, &
-            recs, n, ok)
-        if (.not. ok) then
-            message = 'CMake codemodel '//codemodel_file//' is malformed'
-            return
-        end if
-        top_source = strip_slash(top_source)
-        top_build = strip_slash(top_build)
-
-        do i = 1, n
-            call cmake_context_read_file(reply_dir//'/'//recs(i)%json_file, text)
-            if (.not. allocated(text)) then
-                message = 'cannot read CMake target file '//recs(i)%json_file
-                return
-            end if
-            call parse_target(text, top_source, top_build, recs(i), ok)
-            if (.not. ok) then
-                message = 'CMake target file '//recs(i)%json_file//' is malformed'
-                return
-            end if
-        end do
+        call read_records(context, recs, n, top_source, top_build, &
+            toolchains_file, message)
+        if (len(message) > 0) return
 
         ! id -> record index (open addressing; ids are unique in a codemodel).
         ntab = 64
@@ -230,6 +207,209 @@ contains
         call model_finalize(model, ierr, message)
         if (ierr /= 0) model%complete = .false.
     end subroutine cmake_model_load
+
+    subroutine read_records(context, recs, n, top_source, top_build, &
+            toolchains_file, message)
+        !! The codemodel target records of the current configuration, fully
+        !! parsed. A non-empty message says why the reply is unusable.
+        type(cmake_context_t), intent(inout) :: context
+        type(cmake_target_t), allocatable, intent(out) :: recs(:)
+        integer, intent(out) :: n
+        character(len=:), allocatable, intent(out) :: top_source, top_build
+        character(len=:), allocatable, intent(out) :: toolchains_file, message
+        character(len=:), allocatable :: reply_dir, codemodel_file, text
+        integer :: i
+        logical :: ok
+
+        message = ''
+        n = 0
+        call cmake_context_read_reply(context)
+        if (.not. allocated(context%reply_index)) then
+            message = 'CMake File API reply is missing; configure the tree first'
+            return
+        end if
+        if (len(context%reply_index) == 0 .or. .not. context%has_codemodel) then
+            message = 'CMake File API reply has no codemodel; configure the tree first'
+            return
+        end if
+        if (.not. context%request_seen) then
+            message = 'CMake File API reply is stale (CMake has not re-run since '// &
+                'the fo query was written); reconfigure the tree'
+            return
+        end if
+        reply_dir = context%reply_index(1:index(context%reply_index, '/', &
+            back=.true.) - 1)
+
+        call cmake_context_read_file(context%reply_index, text)
+        if (.not. allocated(text)) then
+            message = 'cannot read CMake File API index '//context%reply_index
+            return
+        end if
+        call parse_index(text, codemodel_file, toolchains_file, ok)
+        if (.not. ok) then
+            message = 'CMake File API index has no codemodel-v2 object'
+            return
+        end if
+        toolchains_file = reply_dir//'/'//toolchains_file
+        call cmake_context_read_file(reply_dir//'/'//codemodel_file, text)
+        if (.not. allocated(text)) then
+            message = 'cannot read CMake codemodel '//codemodel_file
+            return
+        end if
+        call parse_codemodel(text, context%configuration, top_source, top_build, &
+            recs, n, ok)
+        if (.not. ok) then
+            message = 'CMake codemodel '//codemodel_file//' is malformed'
+            return
+        end if
+        top_source = strip_slash(top_source)
+        top_build = strip_slash(top_build)
+
+        do i = 1, n
+            call cmake_context_read_file(reply_dir//'/'//recs(i)%json_file, text)
+            if (.not. allocated(text)) then
+                message = 'cannot read CMake target file '//recs(i)%json_file
+                return
+            end if
+            call parse_target(text, top_source, top_build, recs(i), ok)
+            if (.not. ok) then
+                message = 'CMake target file '//recs(i)%json_file//' is malformed'
+                return
+            end if
+        end do
+    end subroutine read_records
+
+    subroutine cmake_plan_load(context, plan, message)
+        !! Targets with compile groups and link fragments plus the toolchain
+        !! compilers, for building natively. message is empty on success.
+        type(cmake_context_t), intent(inout) :: context
+        type(cmake_plan_t), intent(out) :: plan
+        character(len=:), allocatable, intent(out) :: message
+        character(len=:), allocatable :: top_source, top_build, toolchains_file, text
+        integer :: n, i, j, k
+        type(string_t), allocatable :: names(:)
+
+        call read_records(context, plan%targets, n, top_source, top_build, &
+            toolchains_file, message)
+        if (len(message) > 0) return
+        plan%source_root = top_source
+        plan%build_root = top_build
+        plan%targets = plan%targets(1:n)
+        allocate (plan%tool_languages(0), plan%tool_compilers(0))
+        call cmake_context_read_file(toolchains_file, text)
+        if (allocated(text)) call parse_toolchains(text, plan%tool_languages, &
+            plan%tool_compilers)
+        do i = 1, n
+            allocate (names(plan%targets(i)%n_deps))
+            k = 0
+            do j = 1, plan%targets(i)%n_deps
+                do k = 1, n
+                    if (plan%targets(k)%id == plan%targets(i)%dep_ids(j)%s) exit
+                end do
+                names(j)%s = ''
+                if (k <= n) names(j)%s = plan%targets(k)%name
+            end do
+            call move_alloc(names, plan%targets(i)%dep_names)
+        end do
+    end subroutine cmake_plan_load
+
+    subroutine parse_toolchains(text, languages, compilers)
+        character(len=*), intent(in) :: text
+        type(string_t), allocatable, intent(inout) :: languages(:), compilers(:)
+        type(json_parser_t) :: parser
+        type(json_event_t) :: event
+        type(walker_t) :: w
+        character(len=:), allocatable :: path, language, compiler
+        integer :: n
+
+        n = 0
+        language = ''
+        compiler = ''
+        call json_parser_init_strict(parser, text)
+        do
+            call json_parser_next(parser, event)
+            if (event%event_type == JSON_END_OF_INPUT) exit
+            if (event%event_type == JSON_ERROR) return
+            call walker_step(w, event, path)
+            select case (event%event_type)
+            case (JSON_OBJECT_START)
+                if (path == 'toolchains/#') then
+                    language = ''
+                    compiler = ''
+                end if
+            case (JSON_STRING)
+                if (path == 'toolchains/#/language') language = event%string_val
+                if (path == 'toolchains/#/compiler/path') compiler = event%string_val
+            case (JSON_OBJECT_END)
+                if (path == 'toolchains/#' .and. len(language) > 0 .and. &
+                    len(compiler) > 0) then
+                    call push_string(compilers, n, compiler)
+                    n = n - 1
+                    call push_string(languages, n, language)
+                end if
+            end select
+        end do
+        languages = copy_strings(languages, n)
+        compilers = copy_strings(compilers, n)
+    end subroutine parse_toolchains
+
+    function copy_strings(items, n) result(copy)
+        type(string_t), intent(in) :: items(:)
+        integer, intent(in) :: n
+        type(string_t), allocatable :: copy(:)
+        integer :: i
+
+        allocate (copy(n))
+        do i = 1, n
+            copy(i)%s = items(i)%s
+        end do
+    end function copy_strings
+
+    subroutine cmake_split_fragment(text, tokens, n)
+        !! Split a compile or link command fragment into argv words, honouring
+        !! the double quotes and backslash escapes CMake writes into it.
+        character(len=*), intent(in) :: text
+        type(string_t), allocatable, intent(out) :: tokens(:)
+        integer, intent(out) :: n
+        character(len=:), allocatable :: word
+        character(len=1) :: ch, quote
+        logical :: escaped, in_word
+        integer :: i
+
+        n = 0
+        allocate (tokens(8))
+        word = ''
+        quote = ' '
+        escaped = .false.
+        in_word = .false.
+        do i = 1, len(text) + 1
+            ch = ' '
+            if (i <= len(text)) ch = text(i:i)
+            if (escaped) then
+                word = word//ch
+                escaped = .false.
+            else if (ch == achar(92) .and. i <= len(text)) then
+                escaped = .true.
+                in_word = .true.
+            else if (quote /= ' ') then
+                if (ch == quote) then
+                    quote = ' '
+                else
+                    word = word//ch
+                end if
+            else if (ch == '"' .or. ch == "'") then
+                quote = ch
+                in_word = .true.
+            else if (ch == ' ' .or. ch == achar(9) .or. ch == achar(10)) then
+                if (in_word) call push_string(tokens, n, word)
+                word = ''
+                in_word = .false.
+            else
+                word = word//ch
+                in_word = .true.
+            end if
+        end do
+    end subroutine cmake_split_fragment
 
     subroutine assign_case_layers(model)
         !! Layer of a case, as in the fpm adapter: the highest-rank layer
@@ -821,7 +1001,7 @@ contains
     integer function id_slot(table, recs, id) result(slot)
         !! Slot holding id, or the empty slot where it belongs.
         integer, intent(in) :: table(:)
-        type(target_rec_t), intent(in) :: recs(:)
+        type(cmake_target_t), intent(in) :: recs(:)
         character(len=*), intent(in) :: id
         integer :: mask
 
@@ -905,9 +1085,9 @@ contains
         end if
     end function join
 
-    subroutine parse_index(text, codemodel_file, ok)
+    subroutine parse_index(text, codemodel_file, toolchains_file, ok)
         character(len=*), intent(in) :: text
-        character(len=:), allocatable, intent(out) :: codemodel_file
+        character(len=:), allocatable, intent(out) :: codemodel_file, toolchains_file
         logical, intent(out) :: ok
         type(json_parser_t) :: parser
         type(json_event_t) :: event
@@ -916,6 +1096,7 @@ contains
 
         ok = .false.
         codemodel_file = ''
+        toolchains_file = ''
         kind = ''
         file = ''
         call json_parser_init_strict(parser, text)
@@ -939,6 +1120,8 @@ contains
                     codemodel_file = file
                     ok = .true.
                 end if
+                if (path == 'objects/#' .and. kind == 'toolchains' .and. &
+                    len(file) > 0) toolchains_file = file
             end select
         end do
     end subroutine parse_index
@@ -949,16 +1132,16 @@ contains
         !! when it is empty or unknown, as in single-config trees).
         character(len=*), intent(in) :: text, configuration
         character(len=:), allocatable, intent(out) :: top_source, top_build
-        type(target_rec_t), allocatable, intent(out) :: recs(:)
+        type(cmake_target_t), allocatable, intent(out) :: recs(:)
         integer, intent(out) :: n
         logical, intent(out) :: ok
         type(json_parser_t) :: parser
         type(json_event_t) :: event
         type(walker_t) :: w
         character(len=:), allocatable :: path, cfg_name
-        type(target_rec_t), allocatable :: cur(:), best(:)
+        type(cmake_target_t), allocatable :: cur(:), best(:)
         integer :: n_cur, n_best, config_index
-        type(target_rec_t) :: rec
+        type(cmake_target_t) :: rec
 
         ok = .false.
         top_source = ''
@@ -982,7 +1165,7 @@ contains
                     n_cur = 0
                     cfg_name = ''
                 else if (path == 'configurations/#/targets/#') then
-                    rec = target_rec_t()
+                    rec = cmake_target_t()
                     rec%id = ''
                     rec%name = ''
                     rec%json_file = ''
@@ -1026,10 +1209,10 @@ contains
     end subroutine parse_codemodel
 
     subroutine push_rec(arr, n, rec)
-        type(target_rec_t), allocatable, intent(inout) :: arr(:)
+        type(cmake_target_t), allocatable, intent(inout) :: arr(:)
         integer, intent(inout) :: n
-        type(target_rec_t), intent(in) :: rec
-        type(target_rec_t), allocatable :: grown(:)
+        type(cmake_target_t), intent(in) :: rec
+        type(cmake_target_t), allocatable :: grown(:)
 
         if (n + 1 > size(arr)) then
             allocate (grown(2*size(arr)))
@@ -1058,47 +1241,123 @@ contains
 
     subroutine parse_target(text, top_source, top_build, rec, ok)
         character(len=*), intent(in) :: text, top_source, top_build
-        type(target_rec_t), intent(inout) :: rec
+        type(cmake_target_t), intent(inout) :: rec
         logical, intent(out) :: ok
         type(json_parser_t) :: parser
         type(json_event_t) :: event
         type(walker_t) :: w
-        character(len=:), allocatable :: path, rel_source
+        character(len=:), allocatable :: path, rel_source, rel_build, fragment
+        type(cmake_group_t), allocatable :: grown(:)
+        integer :: pending_group, g
+        logical :: pending_generated, pending_system
 
         ok = .false.
         rec%type = ''
         rec%artifact = ''
+        rec%link_language = ''
         rel_source = '.'
+        rel_build = '.'
+        fragment = ''
+        pending_group = 0
+        pending_generated = .false.
+        pending_system = .false.
         rec%n_sources = 0
         rec%n_deps = 0
+        rec%n_groups = 0
+        rec%n_link = 0
+        rec%n_archive = 0
         if (allocated(rec%sources)) deallocate (rec%sources)
         if (allocated(rec%dep_ids)) deallocate (rec%dep_ids)
+        if (allocated(rec%groups)) deallocate (rec%groups)
+        allocate (rec%groups(4), rec%src_group(0), rec%src_generated(0))
         call json_parser_init_strict(parser, text)
         do
             call json_parser_next(parser, event)
             if (event%event_type == JSON_END_OF_INPUT) exit
             if (event%event_type == JSON_ERROR) return
             call walker_step(w, event, path)
-            if (event%event_type /= JSON_STRING) cycle
-            select case (path)
-            case ('type')
-                rec%type = event%string_val
-            case ('paths/source')
-                rel_source = event%string_val
-            case ('artifacts/#/path')
-                if (len(rec%artifact) == 0) &
-                    rec%artifact = absolute_path(event%string_val, top_build)
-            case ('sources/#/path')
-                call push_string(rec%sources, rec%n_sources, &
-                    absolute_path(event%string_val, top_source))
-            case ('dependencies/#/id')
-                call push_string(rec%dep_ids, rec%n_deps, event%string_val)
+            g = rec%n_groups
+            select case (event%event_type)
+            case (JSON_OBJECT_START)
+                select case (path)
+                case ('sources/#')
+                    pending_group = 0
+                    pending_generated = .false.
+                case ('compileGroups/#')
+                    if (g + 1 > size(rec%groups)) then
+                        allocate (grown(2*size(rec%groups)))
+                        grown(1:g) = rec%groups(1:g)
+                        call move_alloc(grown, rec%groups)
+                    end if
+                    rec%n_groups = g + 1
+                    rec%groups(g + 1)%language = ''
+                case ('compileGroups/#/includes/#')
+                    pending_system = .false.
+                case ('link/commandFragments/#')
+                    fragment = ''
+                end select
+            case (JSON_BOOL)
+                select case (path)
+                case ('sources/#/isGenerated')
+                    pending_generated = event%bool_val
+                case ('compileGroups/#/includes/#/isSystem')
+                    pending_system = event%bool_val
+                end select
+            case (JSON_INTEGER)
+                if (path == 'sources/#/compileGroupIndex') &
+                    pending_group = event%int_val + 1
+            case (JSON_STRING)
+                select case (path)
+                case ('type')
+                    rec%type = event%string_val
+                case ('paths/source')
+                    rel_source = event%string_val
+                case ('paths/build')
+                    rel_build = event%string_val
+                case ('artifacts/#/path')
+                    if (len(rec%artifact) == 0) &
+                        rec%artifact = absolute_path(event%string_val, top_build)
+                case ('sources/#/path')
+                    call push_string(rec%sources, rec%n_sources, &
+                        absolute_path(event%string_val, top_source))
+                    rec%src_group = [rec%src_group, pending_group]
+                    rec%src_generated = [rec%src_generated, pending_generated]
+                case ('dependencies/#/id')
+                    call push_string(rec%dep_ids, rec%n_deps, event%string_val)
+                case ('compileGroups/#/language')
+                    rec%groups(g)%language = event%string_val
+                case ('compileGroups/#/compileCommandFragments/#/fragment')
+                    call push_string(rec%groups(g)%fragments, &
+                        rec%groups(g)%n_fragments, event%string_val)
+                case ('compileGroups/#/defines/#/define')
+                    call push_string(rec%groups(g)%defines, &
+                        rec%groups(g)%n_defines, event%string_val)
+                case ('compileGroups/#/includes/#/path')
+                    call push_string(rec%groups(g)%includes, &
+                        rec%groups(g)%n_includes, event%string_val)
+                    if (.not. allocated(rec%groups(g)%include_system)) &
+                        allocate (rec%groups(g)%include_system(0))
+                    rec%groups(g)%include_system = &
+                        [rec%groups(g)%include_system, pending_system]
+                case ('link/language')
+                    rec%link_language = event%string_val
+                case ('link/commandFragments/#/fragment')
+                    fragment = event%string_val
+                case ('link/commandFragments/#/role')
+                    call push_string(rec%link_fragments, rec%n_link, fragment)
+                    rec%n_link = rec%n_link - 1
+                    call push_string(rec%link_roles, rec%n_link, event%string_val)
+                case ('archive/commandFragments/#/fragment')
+                    call push_string(rec%archive_fragments, rec%n_archive, &
+                        event%string_val)
+                end select
             end select
         end do
         if (len(rec%type) == 0) return
         if (.not. allocated(rec%sources)) allocate (rec%sources(0))
         if (.not. allocated(rec%dep_ids)) allocate (rec%dep_ids(0))
         rec%source_dir = absolute_path(rel_source, top_source)
+        rec%build_dir = absolute_path(rel_build, top_build)
         ok = .true.
     end subroutine parse_target
 

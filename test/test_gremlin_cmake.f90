@@ -151,6 +151,9 @@ program test_gremlin_cmake
         'file(TOUCH "${OUTPUT}")'//new_line('a'))
     call initialize_project_git()
     call install_tool_trap()
+    ! The build counts below observe the delegated `cmake --build` through the
+    ! trap; the native route (fo_cmake_build) never invokes it.
+    rc = c_setenv('FO_CMAKE_DELEGATE_BUILD'//c_null_char, '1'//c_null_char, 1_c_int)
     rc = c_setenv('FO_CMAKE_CONFIGURE_PRESET'//c_null_char, 'cpu'//c_null_char, 1_c_int)
     rc = c_setenv('FO_CMAKE_BUILD_PRESET'//c_null_char, 'cpu'//c_null_char, 1_c_int)
     ! No FO_CMAKE_BUILD_TARGETS: the generation build plans the targets of the

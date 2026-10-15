@@ -19,6 +19,7 @@ module fo_build_backend
     use fo_cmake_native_config, only: native_cmake_selected, native_cmake_configure
     use fo_cmake_native_model, only: cm_plan_t
     use fo_cmake_native, only: native_cmake_build, native_cmake_test
+    use fo_cmake_build, only: cmake_route_t, cmake_build_route, cmake_build_native
     implicit none
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
@@ -871,9 +872,9 @@ contains
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: configured
         logical :: skip_configure
-        character(len=:), allocatable :: packed
-        character(len=32) :: jobs_text
-        integer :: n_args, i
+        type(cmake_route_t) :: route
+        character(len=:), allocatable :: saved_targets(:)
+        integer :: i, width
 
         if (native_cmake_selected(context%source_root)) then
             if (len_trim(flags) > 0) then
@@ -899,6 +900,41 @@ contains
         exitcode = 0
         if (.not. skip_configure) call cmake_configure(context, flags, log_file, exitcode)
         if (exitcode /= 0) return
+        ! CMake only configured. Fo builds the targets it can compile itself;
+        ! targets with custom commands or generated sources, which must run
+        ! first, are the only ones left to `cmake --build --target`.
+        call cmake_build_route(context, route, log_file)
+        if (.not. route%usable) then
+            call cmake_delegate_build(context, log_file, exitcode)
+            return
+        end if
+        if (route%n_delegated > 0) then
+            call move_alloc(context%build_targets, saved_targets)
+            width = 1
+            do i = 1, route%n_delegated
+                width = max(width, len(route%delegated(i)%s))
+            end do
+            allocate (character(len=width) :: &
+                context%build_targets(route%n_delegated))
+            do i = 1, route%n_delegated
+                context%build_targets(i) = route%delegated(i)%s
+            end do
+            call cmake_delegate_build(context, log_file, exitcode)
+            call move_alloc(saved_targets, context%build_targets)
+            if (exitcode /= 0) return
+        end if
+        call cmake_build_native(route, log_file, exitcode)
+    end subroutine cmake_build
+
+    subroutine cmake_delegate_build(context, log_file, exitcode)
+        !! `cmake --build` for the context's build targets (all when none).
+        type(cmake_context_t), intent(inout) :: context
+        character(len=*), intent(in) :: log_file
+        integer, intent(out) :: exitcode
+        character(len=:), allocatable :: packed
+        character(len=32) :: jobs_text
+        integer :: n_args, i
+
         write (jobs_text, '(i0)') detect_jobs()
         n_args = 0
         call argv_push(packed, n_args, 'cmake')
@@ -933,7 +969,7 @@ contains
         call process_run_argv_logged(context%source_root, packed, n_args, &
             log_file, .true., environment_timeout('FO_BUILD_TIMEOUT', 300), &
             exitcode)
-    end subroutine cmake_build
+    end subroutine cmake_delegate_build
 
     subroutine cmake_test(context, regex, lift_preset_filter, exclude_slow, &
             log_file, append, exitcode)

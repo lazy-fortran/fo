@@ -99,6 +99,19 @@ captured configuration and frozen Gremlin replay. Presets, multi-configuration
 generators, explicit toolchains and broader CTest semantics remain unsupported
 or outside this slice. The default route still delegates to CMake/CTest.
 
+Split route (stage 1, `src/build/fo_cmake_build.f90`): after configure, fo
+reads the File API codemodel and toolchains, compiles C, C++ and Fortran
+sources on its own cached scheduler (per-source compiler, fragments, includes,
+defines and module directory; Fortran scanned after the compiler's
+preprocessor; C/C++ headers part of the action key) and archives and links
+with CMake's own fragments. Single-configuration Ninja trees only. Targets
+that are not executables or static libraries, or have generated sources,
+custom or PRE_LINK/POST_BUILD commands, a source built differently by two
+targets or a module defined twice, go to `cmake --build --target T` before the
+native targets; `build/.fo-native-cmake/route.log` records every decision.
+`FO_CMAKE_DELEGATE_BUILD=1` forces the previous all-CMake build.
+`test_cmake_native_build_cli` is the oracle.
+
 `test_native_cmake_cli` contains a numerical reference oracle, cold/warm/edit
 and restore checks, frozen Release flags and traps for delegated tool use.
 Their presence does not establish current combined-source green. Recheck the
