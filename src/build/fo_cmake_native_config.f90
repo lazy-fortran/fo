@@ -6,6 +6,7 @@ module fo_cmake_native_config
                                      cm_expand, cm_next
     use fo_cmake_context, only: cmake_context_t, cmake_context_build_path
     use fo_cmake_native_snapshot, only: native_snapshot_read
+    use fo_cmake_native_provider, only: native_find_package
     use fo_compiler_dialect, only: compiler_dialect_t, compiler_dialect, &
                                    selected_compiler_command, COMPILER_GFORTRAN
     use fo_util, only: read_text_file_alloc, make_tmpfile, delete_tmpfile
@@ -321,7 +322,7 @@ contains
                 end select
             end do
         case ('find_package')
-            call find_provider(plan, words)
+            call native_find_package(plan, words)
         case ('add_subdirectory')
             if (count < 1 .or. count > 2) then
                 plan%error = 'native CMake: unsupported add_subdirectory arguments'
@@ -469,59 +470,6 @@ contains
                 plan%error = 'native CMake: per-target authored includes unsupported'
             end do
         end if
-    end subroutine
-
-    subroutine find_provider(plan, words)
-        type(cm_plan_t), intent(inout) :: plan
-        type(cm_word_t), intent(in) :: words(:)
-        character(:), allocatable :: package, module, packed, value
-        character(len=512) :: log
-        integer :: count, exitcode, i
-        type(cm_word_t), allocatable :: flags(:)
-        if (size(words) < 1) then
-            plan%error = 'native CMake: package name is missing'
-            return
-        end if
-        package = words(1)%text
-        module = cm_lower(package)
-        if (module /= 'blas' .and. module /= 'lapack' .and. module /= 'netcdf') then
-            plan%error = 'native CMake: unsupported package provider '//package
-            return
-        end if
-        if (size(words) > 2) then
-            plan%error = 'native CMake: package options/components unsupported'
-            return
-        end if
-        if (size(words) == 2) then
-            if (words(2)%text /= 'REQUIRED') then
-                plan%error = 'native CMake: package options/components unsupported'
-                return
-            end if
-        end if
-        call make_tmpfile('fo-native-cmake-provider', log)
-        count = 0
-        call argv_push(packed, count, 'pkg-config')
-        call argv_push(packed, count, '--cflags-only-I')
-        call argv_push(packed, count, module)
-        call process_run_argv_logged('', packed, count, log, .false., 10, exitcode)
-        if (exitcode /= 0) then
-            plan%error = 'native CMake: unavailable pkg-config provider '//package
-            call delete_tmpfile(log)
-            return
-        end if
-        call read_text_file_alloc(log, value, exitcode)
-        if (exitcode /= 0) then
-            plan%error = 'native CMake: unreadable package provider receipt '//package
-            call delete_tmpfile(log)
-            return
-        end if
-        flags = cm_words(value)
-        do i = 1, size(flags)
-            if (index(flags(i)%text, '-I') /= 1) cycle
-            call cm_add(plan%includes, flags(i)%text(3:))
-        end do
-        call cm_set(plan, package//'_FOUND', 'TRUE')
-        call delete_tmpfile(log)
     end subroutine
 
     subroutine host_variables(plan)

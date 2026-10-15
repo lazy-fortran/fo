@@ -1,5 +1,5 @@
 module fo_cmake_native
-    use, intrinsic :: iso_fortran_env, only: error_unit, int64
+    use, intrinsic :: iso_fortran_env, only: error_unit, output_unit, int64
     use fo_cmake_native_model, only: cm_plan_t, cm_target_t, cm_get, cm_lower
     use fo_cmake_native_config, only: native_cmake_configure, target_index
     use fo_cmake_context, only: cmake_context_t
@@ -21,6 +21,7 @@ contains
         character(len=512), allocatable :: includes(:), objects(:)
         character(len=128), allocatable :: libraries(:)
         character(:), allocatable :: module_dir, obj_dir, source, compile_flags
+        character(len=1024) :: scan_diagnostic
         integer, allocatable :: selected(:)
         integer :: i, j, k, n, compiled, at, io_status
         logical :: duplicate
@@ -102,9 +103,11 @@ contains
                     exit
                 end if
                 units = [units, scan_unit_t()]
-                call scan_file(source, units(size(units)), io_status)
+                call scan_file(source, units(size(units)), io_status, &
+                               allow_regex_fallback=.true., diagnostic=scan_diagnostic)
                 if (io_status /= 0) then
-               plan%error = 'native CMake: cannot scan declared Fortran source '//source
+                    plan%error = 'native CMake: cannot scan declared Fortran source '// &
+                                 source//': '//trim(scan_diagnostic)
                     exit
                 end if
                 if (plan%targets(i)%kind == 'EXECUTABLE' .and. &
@@ -175,6 +178,12 @@ contains
                 if (failed(plan, log_file)) return
             end if
         end do
+        if (size(plan%tests) == 0 .and. size(names) == 0) then
+            ! Same verdict as the delegated route: no registered tests is not a failure.
+            write (output_unit, '(a)') 'fo: project registers no tests'
+            exitcode = 0
+            return
+        end if
         if (.not. any(selected)) then
             plan%error = 'native CMake: selected scope contains no registered tests'
             if (failed(plan, log_file)) return
