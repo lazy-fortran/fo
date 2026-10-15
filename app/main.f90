@@ -1871,7 +1871,7 @@ contains
         character(len=512) :: arg
         integer :: i, n_removed, exitcode, keep
         integer(8) :: freed_bytes
-        logical :: purge_store, stale_only
+        logical :: purge_store, stale_only, stale_blocked
         character(len=:), allocatable :: text
         logical :: want_help
 
@@ -1933,7 +1933,13 @@ contains
         ! and stale compiler profile dirs this way.
         if (stale_only) then
             b = detect_backend(fs_canonical_path('.'))
-            call clean_stale_run(trim(b%project_dir), keep, n_removed, freed_bytes)
+            call clean_stale_run(trim(b%project_dir), keep, n_removed, &
+                freed_bytes, verbose=.true., blocked=stale_blocked)
+            if (stale_blocked) then
+                write (error_unit, '(a)') 'fo clean --stale: a build holds the '// &
+                    'project lock; nothing removed'
+                return
+            end if
             write (output_unit, '(a,i0,a,f0.1,a,i0,a)') &
                 'stale artifacts removed: ', n_removed, ' entries, ', &
                 real(freed_bytes)/1024.0/1024.0, ' MiB (kept the newest ', keep, &

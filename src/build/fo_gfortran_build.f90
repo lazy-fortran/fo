@@ -14,6 +14,7 @@ module fo_gfortran_build
         merge_dep_link_libs
     use fo_registry, only: registry_config_path
     use fo_stat_memo, only: memo_save, memo_hash_file
+    use fo_link_graph, only: link_graph_record
     use fo_build_tree, only: native_output_dir, native_profiles_dir, &
         native_record_profile
     use fo_gremlin_execution_view, only: execution_view_copy_app_outputs
@@ -2837,7 +2838,8 @@ contains
         character(len=*), intent(in), optional :: flags
         logical, intent(in), optional :: use_cache
 
-        integer :: i, n_lib, n_link_inputs, copy_rc
+        integer :: i, n_lib, n_link_inputs, copy_rc, n_recorded
+        character(len=512) :: recorded(MAX_SRC_OBJS)
         character(len=512), allocatable :: lib_objs(:)
         character(len=512) :: prog_obj, bin_path, app_bin_path
         character(len=512) :: archive_path, link_inputs(1)
@@ -2914,8 +2916,19 @@ contains
                 return
             end if
         end do
-        if (len_trim(base_digest) == 0 .and. len_trim(archive_path) > 0) &
+        if (len_trim(base_digest) == 0 .and. len_trim(archive_path) > 0) then
             call remove_ephemeral_link_artifact(archive_path)
+        else if (n_link_inputs > 0) then
+            n_recorded = 0
+            do i = 1, n_src_objs
+                if (.not. is_prog_arr(i)) cycle
+                n_recorded = n_recorded + 1
+                recorded(n_recorded) = trim(bin_dir)//'/'// &
+                    trim(app_binary_name(config, src_objs(i)))
+            end do
+            call link_graph_record(project_dir, recorded, n_recorded, &
+                link_inputs, n_link_inputs)
+        end if
     end subroutine link_app_binaries
 
     subroutine publish_app_copy(source, final_path, copy_rc)
@@ -3602,8 +3615,13 @@ contains
             call progress_step()
         end do
         call progress_end()
-        if (len_trim(link_base) == 0 .and. len_trim(archive_path) > 0) &
+        if (len_trim(link_base) == 0 .and. len_trim(archive_path) > 0) then
             call remove_ephemeral_link_artifact(archive_path)
+        else if (n_link_inputs > 0 .and. n_run > 0) then
+            call link_graph_record(project_dir, &
+                pack(run_bins(1:n_run), run_exits(1:n_run) == 0), &
+                count(run_exits(1:n_run) == 0), link_inputs, n_link_inputs)
+        end if
 
 
         do i = 1, n_run
