@@ -18,6 +18,7 @@ program test_project_model
         CASE_LABEL_EXCLUDED, CASE_SELECTED, CASE_DEPENDENCY
     use fo_project_model, only: model_unit_t, model_affected, CASE_NOT_AFFECTED
     use fo_project_model, only: model_case_digests
+    use fo_project_model, only: model_layering_t, model_layering
     implicit none
 
     integer :: n_pass, n_fail
@@ -36,6 +37,7 @@ program test_project_model
     call test_plan()
     call test_finalize_errors()
     call test_scale()
+    call test_layering_scale()
     call test_affected()
 
     write (output_unit, '(a,i0,a,i0,a)') 'project model: ', n_pass, ' pass, ', &
@@ -366,6 +368,72 @@ contains
         seconds = real(finish - start)/real(rate)
         call assert(seconds < 1.0, 'scale: load, select and plan under a second')
     end subroutine test_scale
+
+    subroutine test_layering_scale()
+        !! model_layering on thousands of layers and tens of thousands of
+        !! sources: no fixed limits and exactly one planted violation found.
+        !! Timings are diagnostic, never a correctness gate.
+        real :: seconds
+        integer :: found
+
+        call layering_run(12000, 3, seconds, found)
+        call assert(found == 1, &
+            'layering scale: exactly the planted violation is reported')
+    end subroutine test_layering_scale
+
+    subroutine layering_run(n_layers, per_layer, seconds, n_violations)
+        !! Layer `base` and layers lay_<i> using base, each with per_layer
+        !! sources. Source i,k defines m_<i>_<k> and uses base's module and
+        !! its own layer's m_<i>_1; source 1,1 also uses the module of
+        !! lay_2, which lay_1 does not reach (the one violation).
+        integer, intent(in) :: n_layers, per_layer
+        real, intent(out) :: seconds
+        integer, intent(out) :: n_violations
+        type(project_model_t) :: m
+        type(model_layering_t) :: report
+        type(model_unit_t), allocatable :: units(:)
+        type(string_t), allocatable :: sources(:), uses(:)
+        integer(int64) :: start, finish, rate
+        integer :: i, k, u, ierr
+        character(len=24) :: id
+        character(len=:), allocatable :: message
+
+        call system_clock(start, rate)
+        call model_init(m, 'test', 'layering-scale')
+        allocate(units(1 + n_layers*per_layer), sources(per_layer), uses(1))
+        units(1)%path = 'src/base.f90'
+        allocate(units(1)%provides(1), units(1)%uses(0))
+        units(1)%provides(1)%s = 'm_base'
+        sources = [(string_t('x'), k=1, per_layer)]
+        uses(1)%s = 'base'
+        call model_add_layer(m, 'base', sources=[string_t('src/base.f90')])
+        u = 1
+        do i = 1, n_layers
+            write (id, '(i0)') i
+            do k = 1, per_layer
+                u = u + 1
+                units(u)%path = 'src/l'//trim(id)//'_'//char(ichar('a') + k - 1)// &
+                    '.f90'
+                sources(k)%s = units(u)%path
+                allocate(units(u)%provides(1), units(u)%uses(2 + merge(1, 0, &
+                    i == 1 .and. k == 1)))
+                units(u)%provides(1)%s = 'm_'//trim(id)//'_'//char(ichar('a') + k - 1)
+                units(u)%uses(1)%s = 'M_BASE'
+                units(u)%uses(2)%s = 'm_'//trim(id)//'_a'
+                if (i == 1 .and. k == 1) units(u)%uses(3)%s = 'm_2_a'
+            end do
+            call model_add_layer(m, 'lay_'//trim(id), uses=uses, sources=sources)
+        end do
+        call model_finalize(m, ierr, message)
+        call assert(ierr == 0, 'layering scale: finalize '//message)
+        call model_layering(m, units, report)
+        call system_clock(finish)
+        seconds = real(finish - start)/real(rate)
+        n_violations = size(report%violations)
+        call assert(report%checked == size(units), 'layering scale: every source checked')
+        write (output_unit, '(a,i0,a,f7.3,a)') 'layering scale: ', n_layers, &
+            ' layers ', seconds, ' s'
+    end subroutine layering_run
 
     subroutine test_affected()
         !! model_affected: module closure, link closure for sources no unit

@@ -7,7 +7,10 @@ module fo_test_twin
     !! default). Layers tw_core and tw_phys (uses tw_core): CMake libraries,
     !! fpm source layers of the same names. Declared input data/io_ref.dat
     !! of test_io_c: an `[[extra.fo.inputs]]` row in the io group (fpm), the
-    !! CTest REQUIRED_FILES property (CMake).
+    !! CTest REQUIRED_FILES property (CMake). With `violation` the layering is
+    !! broken the same way in both: tw_phys does not use tw_core and a third
+    !! layer tw_aux (src/tw_aux.f90, uses both modules) uses nothing, so the
+    !! check reports three violations.
     use fo_test_harness, only: join_path, write_lines
     implicit none
     private
@@ -30,13 +33,32 @@ contains
         name = case_names(i)
     end function twin_case_name
 
-    subroutine twin_write(dir, backend)
+    subroutine twin_write(dir, backend, violation)
         !! backend is 'fpm' or 'cmake'.
         character(len=*), intent(in) :: dir, backend
+        logical, intent(in), optional :: violation
+        character(len=80) :: phys_layer, aux_layer
+        character(len=96) :: phys_link, aux_library
+        logical :: broken
         character(len=64) :: used(n_cases)
         character(len=64) :: lines(4)
         integer :: i
 
+        broken = .false.
+        if (present(violation)) broken = violation
+        phys_layer = 'tw_phys = { source = ["src/tw_phys.f90"], uses = ["tw_core"] }'
+        aux_layer = '# no third layer'
+        phys_link = 'target_link_libraries(tw_phys tw_core)'
+        aux_library = '# no third library'
+        if (broken) then
+            phys_layer = 'tw_phys = { source = ["src/tw_phys.f90"] }'
+            aux_layer = 'tw_aux = { source = ["src/tw_aux.f90"] }'
+            phys_link = '# tw_phys no longer links tw_core'
+            aux_library = 'add_library(tw_aux STATIC src/tw_aux.f90)'
+            call write_lines(join_path(dir, 'src/tw_aux.f90'), [character(len=48) :: &
+                'module tw_aux', 'use tw_core, only: core_value', &
+                'use tw_phys, only: phys_value', 'implicit none', 'end module'])
+        end if
         used = [character(len=64) :: 'use tw_core, only: core_value', &
             'use tw_phys, only: phys_value', '', '']
         call write_lines(join_path(dir, 'src/tw_core.f90'), [character(len=48) :: &
@@ -61,7 +83,7 @@ contains
             call write_lines(join_path(dir, 'fpm.toml'), [character(len=80) :: &
                 'name = "tw"', '[extra.fo.layers]', &
                 'tw_core = { source = ["src/tw_core.f90"] }', &
-                'tw_phys = { source = ["src/tw_phys.f90"], uses = ["tw_core"] }', &
+                trim(phys_layer), trim(aux_layer), &
                 '[extra.fo.test-groups]', &
                 'unit = { tests = ["test/test_core_a*", "test/test_phys_b*"] }', &
                 'io = { tests = ["test/test_io_c*"], inputs = ["data/io_ref.dat"] }', &
@@ -75,7 +97,7 @@ contains
                 'enable_testing()', &
                 'add_library(tw_core STATIC src/tw_core.f90)', &
                 'add_library(tw_phys STATIC src/tw_phys.f90)', &
-                'target_link_libraries(tw_phys tw_core)', &
+                trim(phys_link), trim(aux_library), &
                 'foreach(t core_a phys_b io_c slow_d)', &
                 '  add_executable(test_${t} test/test_${t}.f90)', &
                 '  add_test(NAME test_${t} COMMAND test_${t})', 'endforeach()', &

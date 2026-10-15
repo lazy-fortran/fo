@@ -11,15 +11,25 @@ program test_project_model_twin
     !! a core source, a phys source, a test source, a declared input, an
     !! unrelated file or the build description selects the same cases on
     !! both backends, and the expected ones; `fo test --only-changed` runs
-    !! exactly them. Runs the driver named by FO.
+    !! exactly them. Gremlin lanes started on both twins with the same
+    !! request (all cases, named cases, an explicit slow case, an unknown
+    !! case, a failing case) run the same cases with the same verdicts,
+    !! labels and layers. `fo graph --layers --json` gives the same verdict
+    !! and the same violation set (compared as a set) on the clean twin and on
+    !! a twin with a broken layering, also for a project reached through a
+    !! symlinked root and a symlinked source directory, whose paths stay
+    !! project-relative. Runs the driver named by FO.
     use fo_test_harness, only: process_result_t, string_list_t, list_add
-    use fo_test_harness, only: make_scratch, join_path, remove_tree, append_text
+    use fo_test_harness, only: join_path, remove_tree, append_text
     use fo_test_harness, only: write_lines, assert_contains, assert_not_contains
     use fo_test_harness, only: assert_equal_integer, assert_equal_string
     use fo_test_harness, only: assert_true, finish_assertions
-    use fo_test_cli, only: resolve_driver, run_fo, run_external
+    use fo_test_cli, only: run_fo, run_external
     use fo_test_json, only: json_value_t, json_parse, json_member, json_element
     use fo_test_json, only: json_size, json_string_value, json_boolean_value
+    use fo_test_json, only: json_number_value
+    use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, gremlin_wait_ms
+    use fo_test_gremlin_oracle, only: gremlin_stop_lane, gremlin_process_running
     use fo_test_twin, only: twin_write
     use fo_test_mcp, only: mcp_encode, mcp_request, mcp_call, mcp_quote, mcp_exchange
     implicit none
@@ -37,12 +47,11 @@ program test_project_model_twin
         'test_slow_d', 'no_such_test', '--layer no_such_layer', &
         'test_core_a no_such_test', 'test_phys_b -L slow --layer tw_core']
     character(:), allocatable :: driver, scratch, fpm_dir, cmake_dir, cache
+    character(:), allocatable :: project, state
     type(string_list_t) :: cmake_env, fpm_env
     integer :: pass
 
-    call resolve_driver(driver)
-    call make_scratch('fo-project-model-twin', scratch)
-    cache = join_path(scratch, 'cache')
+    call gremlin_setup(driver, scratch, project, cache, state)
     fpm_dir = join_path(scratch, 'fpm')
     cmake_dir = join_path(scratch, 'cmake')
     call list_add(cmake_env, 'FO_BACKEND=cmake')
@@ -55,6 +64,8 @@ program test_project_model_twin
         call compare_matrix(merge('unbuilt', 'built  ', pass == 1))
         if (pass == 1) call build_both()
     end do
+    call layering_matrix()
+    call gremlin_matrix()
     call affected_matrix()
 
     call remove_tree(scratch)
@@ -62,6 +73,362 @@ program test_project_model_twin
     write (*, '(a)') 'project-model-twin: fpm and CMake selections and plans agree'
 
 contains
+
+    subroutine layering_matrix()
+        !! `fo graph --layers --json`: same verdict on the clean twins, on
+        !! twins with a broken layering and on the broken twins reached through
+        !! a symlinked root with a symlinked source directory.
+        character(:), allocatable :: viol_fpm, viol_cmake, link_fpm, link_cmake
+        character(:), allocatable :: fpm_record, cmake_record, expected
+
+        call compare_layering('clean', fpm_dir, cmake_dir, 0, fpm_record, cmake_record)
+        call assert_equal_string(fpm_record, 'ok=T checked=2 layers=tw_core:;'// &
+            'tw_phys:tw_core,; violations= unlayered=test/test_core_a.f90;'// &
+            'test/test_io_c.f90;test/test_phys_b.f90;test/test_slow_d.f90; '// &
+            'unscanned=', 'clean twin layering')
+        viol_fpm = join_path(scratch, 'viol_fpm')
+        viol_cmake = join_path(scratch, 'viol_cmake')
+        call twin_write(viol_fpm, 'fpm', violation=.true.)
+        call twin_write(viol_cmake, 'cmake', violation=.true.)
+        call compare_layering('broken', viol_fpm, viol_cmake, 1, fpm_record, &
+            cmake_record)
+        expected = 'src/tw_aux.f90|tw_core|tw_aux|src/tw_core.f90|tw_core|'// &
+            'tw_aux -> tw_core;src/tw_aux.f90|tw_phys|tw_aux|src/tw_phys.f90|'// &
+            'tw_phys|tw_aux -> tw_phys;src/tw_phys.f90|tw_core|tw_phys|'// &
+            'src/tw_core.f90|tw_core|tw_phys -> tw_core;'
+        call assert_true(index(fpm_record, 'violations='//expected) > 0, &
+            'broken twin reports the three violations')
+        ! A symlinked source directory under a symlinked project root.
+        call symlink_project(viol_fpm, 'fpm', link_fpm)
+        call symlink_project(viol_cmake, 'cmake', link_cmake)
+        call compare_layering('symlinked', link_fpm, link_cmake, 1, fpm_record, &
+            cmake_record)
+        call assert_true(index(fpm_record, 'violations='//expected) > 0, &
+            'symlinked twin reports project-relative violation paths')
+        call assert_true(index(fpm_record, scratch) == 0 .and. &
+            index(cmake_record, scratch) == 0, 'no path leaves the project')
+        call assert_text_relative(link_fpm, fpm_env, 'fpm')
+        call assert_text_relative(link_cmake, cmake_env, 'cmake')
+    end subroutine layering_matrix
+
+    subroutine symlink_project(dir, backend, link)
+        !! A copy of dir whose src is a symlink to a directory outside it,
+        !! reached through a symlink to the project root.
+        character(len=*), intent(in) :: dir, backend
+        character(:), allocatable, intent(out) :: link
+        character(:), allocatable :: copy, outside
+        type(process_result_t) :: result
+
+        copy = join_path(scratch, 'sym_'//backend)
+        outside = join_path(scratch, 'outside_'//backend)
+        link = join_path(scratch, 'root_'//backend)
+        call run_external('cp', split_words('-r '//dir//' '//copy), scratch, result)
+        call assert_equal_integer(result%exit_code, 0, 'copies the twin: '//result%stderr)
+        call run_external('rm', split_words('-rf '//join_path(copy, 'build')), scratch, &
+            result)
+        call run_external('mv', split_words(join_path(copy, 'src')//' '//outside), &
+            scratch, result)
+        call assert_equal_integer(result%exit_code, 0, 'moves src out: '//result%stderr)
+        call run_external('ln', split_words('-s '//outside//' '//join_path(copy, 'src')), &
+            scratch, result)
+        call assert_equal_integer(result%exit_code, 0, 'links src: '//result%stderr)
+        call run_external('ln', split_words('-s '//copy//' '//link), scratch, result)
+        call assert_equal_integer(result%exit_code, 0, 'links the root: '//result%stderr)
+    end subroutine symlink_project
+
+    subroutine assert_text_relative(dir, env, tag)
+        !! The text report names project-relative paths only.
+        character(len=*), intent(in) :: dir, tag
+        type(string_list_t), intent(in) :: env
+        type(process_result_t) :: result
+
+        call run_fo(driver, split_words('graph --layers'), dir, cache, result, env)
+        call assert_equal_integer(result%exit_code, 1, tag//' text layering exits 1')
+        call assert_contains(result%stdout, 'violation: src/tw_phys.f90 (layer '// &
+            'tw_phys) uses module tw_core from src/tw_core.f90', &
+            tag//' text paths are project-relative')
+        call assert_not_contains(result%stdout, scratch, &
+            tag//' text report has no absolute path')
+    end subroutine assert_text_relative
+
+    subroutine compare_layering(tag, fpm_path, cmake_path, code, fpm_record, &
+            cmake_record)
+        character(len=*), intent(in) :: tag, fpm_path, cmake_path
+        integer, intent(in) :: code
+        character(:), allocatable, intent(out) :: fpm_record, cmake_record
+        type(process_result_t) :: fpm_result, cmake_result
+        type(json_value_t) :: fpm_report, cmake_report
+        character(:), allocatable :: label
+
+        label = 'layering ['//tag//'] '
+        call run_fo(driver, split_words('graph --layers --json'), fpm_path, cache, &
+            fpm_result, fpm_env)
+        call run_fo(driver, split_words('graph --layers --json'), cmake_path, cache, &
+            cmake_result, cmake_env)
+        fpm_record = ''
+        cmake_record = ''
+        call assert_equal_integer(fpm_result%exit_code, code, label//'fpm exit: '// &
+            fpm_result%stderr)
+        call assert_equal_integer(cmake_result%exit_code, code, label//'cmake exit: '// &
+            cmake_result%stderr)
+        if (.not. parsed(fpm_result%stdout, fpm_report, label//'fpm')) return
+        if (.not. parsed(cmake_result%stdout, cmake_report, label//'cmake')) return
+        call assert_equal_string(json_string_value(json_member(fpm_report, 'backend')), &
+            'fpm', label//'fpm backend')
+        call assert_equal_string(json_string_value(json_member(cmake_report, &
+            'backend')), 'cmake', label//'cmake backend')
+        fpm_record = layering_record(fpm_report)
+        cmake_record = layering_record(cmake_report)
+        call assert_equal_string(cmake_record, fpm_record, label//'verdict and violations')
+    end subroutine compare_layering
+
+    function layering_record(report) result(text)
+        !! Verdict, checked count, layers, the violation set, the unlayered
+        !! and unscanned sources: everything but the backend name, with the
+        !! lists sorted (violation order is each backend's own).
+        type(json_value_t), intent(in) :: report
+        character(:), allocatable :: text
+        type(json_value_t) :: layers, layer, uses, violations, v
+        character(len=300), allocatable :: items(:), layer_items(:)
+        integer :: i, j
+
+        text = 'ok='//merge('T', 'F', json_boolean_value(json_member(report, 'ok')))// &
+            ' checked='
+        text = text//number_text(json_number_value(json_member(report, 'checked')))// &
+            ' layers='
+        layers = json_member(report, 'layers')
+        allocate (layer_items(json_size(layers)))
+        do i = 1, json_size(layers)
+            layer = json_element(layers, i)
+            layer_items(i) = json_string_value(json_member(layer, 'name'))//':'
+            uses = json_member(layer, 'uses')
+            do j = 1, json_size(uses)
+                layer_items(i) = trim(layer_items(i))// &
+                    json_string_value(json_element(uses, j))//','
+            end do
+        end do
+        text = text//sorted_join(layer_items)
+        violations = json_member(report, 'violations')
+        allocate (items(json_size(violations)))
+        do i = 1, size(items)
+            v = json_element(violations, i)
+            items(i) = json_string_value(json_member(v, 'source'))//'|'// &
+                json_string_value(json_member(v, 'module'))//'|'// &
+                json_string_value(json_member(v, 'layer'))//'|'// &
+                json_string_value(json_member(v, 'provider'))//'|'// &
+                json_string_value(json_member(v, 'provider_layer'))//'|'// &
+                json_string_value(json_member(v, 'missing_edge'))
+        end do
+        text = text//' violations='//sorted_join(items)
+        text = text//' unlayered='//sorted_strings(json_member(report, 'unlayered'))// &
+            ' unscanned='//sorted_strings(json_member(report, 'unscanned'))
+    end function layering_record
+
+    function sorted_strings(list) result(text)
+        type(json_value_t), intent(in) :: list
+        character(:), allocatable :: text
+        character(len=300), allocatable :: items(:)
+        integer :: i
+
+        allocate (items(json_size(list)))
+        do i = 1, size(items)
+            items(i) = json_string_value(json_element(list, i))
+        end do
+        text = sorted_join(items)
+    end function sorted_strings
+
+    function number_text(value) result(text)
+        use, intrinsic :: iso_fortran_env, only: real64
+        real(real64), intent(in) :: value
+        character(:), allocatable :: text
+        character(len=24) :: buffer
+
+        write (buffer, '(i0)') nint(value)
+        text = trim(buffer)
+    end function number_text
+
+    subroutine gremlin_matrix()
+        !! The same Gremlin request on both twins: same cases, verdicts,
+        !! labels and layers (receipt sets), or no run on both.
+        character(:), allocatable :: fail_fpm, fail_cmake
+
+        call gremlin_pair('all', fpm_dir, cmake_dir, '', 4, &
+            'build:BUILD_PASS;test_core_a|PASS|unit,|tw_core;'// &
+            'test_io_c|PASS|io,|;test_phys_b|PASS|unit,|tw_phys;'// &
+            'test_slow_d|PASS|slow,|;')
+        call gremlin_pair('named', fpm_dir, cmake_dir, &
+            '--target test_core_a --target test_phys_b --random 0', 2, &
+            'build:BUILD_PASS;test_core_a|PASS|unit,|tw_core;'// &
+            'test_phys_b|PASS|unit,|tw_phys;')
+        call gremlin_pair('slow', fpm_dir, cmake_dir, '--target test_slow_d --random 0', &
+            1, 'build:BUILD_PASS;test_slow_d|PASS|slow,|;')
+        call gremlin_pair('unknown', fpm_dir, cmake_dir, &
+            '--target no_such_test --random 0', 0, '')
+        fail_fpm = join_path(scratch, 'fail_fpm')
+        fail_cmake = join_path(scratch, 'fail_cmake')
+        call twin_write(fail_fpm, 'fpm')
+        call twin_write(fail_cmake, 'cmake')
+        call write_lines(join_path(fail_fpm, 'test/test_io_c.f90'), &
+            [character(len=48) :: 'program test_io_c', 'implicit none', &
+            'error stop "io_c fails"', 'end program'])
+        call write_lines(join_path(fail_cmake, 'test/test_io_c.f90'), &
+            [character(len=48) :: 'program test_io_c', 'implicit none', &
+            'error stop "io_c fails"', 'end program'])
+        call gremlin_pair('failing', fail_fpm, fail_cmake, '', 4, &
+            'build:BUILD_PASS;test_core_a|PASS|unit,|tw_core;'// &
+            'test_io_c|FAIL|io,|;test_phys_b|PASS|unit,|tw_phys;'// &
+            'test_slow_d|PASS|slow,|;')
+    end subroutine gremlin_matrix
+
+    subroutine gremlin_pair(tag, fpm_path, cmake_path, request_text, expected, &
+            expected_record)
+        character(len=*), intent(in) :: tag, fpm_path, cmake_path, request_text
+        character(len=*), intent(in) :: expected_record
+        integer, intent(in) :: expected
+        character(:), allocatable :: fpm_session, cmake_session
+        character(:), allocatable :: fpm_record, cmake_record, label
+
+        label = 'gremlin ['//tag//'] '
+        call gremlin_start(fpm_path, 'twin-'//tag//'-fpm', request_text, fpm_session)
+        call gremlin_start(cmake_path, 'twin-'//tag//'-cmake', request_text, &
+            cmake_session)
+        call gremlin_record(fpm_path, 'twin-'//tag//'-fpm', fpm_session, expected, &
+            fpm_record)
+        call gremlin_record(cmake_path, 'twin-'//tag//'-cmake', cmake_session, &
+            expected, cmake_record)
+        call gremlin_stop_lane(driver, fpm_path, cache, state, 'twin-'//tag//'-fpm', &
+            fpm_session, allow_terminal_error=.true.)
+        call gremlin_stop_lane(driver, cmake_path, cache, state, &
+            'twin-'//tag//'-cmake', cmake_session, allow_terminal_error=.true.)
+        call assert_equal_string(cmake_record, fpm_record, label//'cases and verdicts')
+        if (expected > 0) then
+            call assert_equal_string(fpm_record, expected_record, &
+                label//'expected receipts')
+        else
+            call assert_true(index(fpm_record, '|') == 0, label//'no case runs')
+        end if
+    end subroutine gremlin_pair
+
+    subroutine gremlin_start(dir, lane, request_text, session)
+        character(len=*), intent(in) :: dir, lane, request_text
+        character(:), allocatable, intent(out) :: session
+        type(string_list_t) :: arguments
+        type(process_result_t) :: result
+        type(json_value_t) :: reply
+        type(string_list_t) :: words
+        integer :: i
+
+        call list_add(arguments, 'gremlin')
+        call list_add(arguments, 'start')
+        call list_add(arguments, '--dir')
+        call list_add(arguments, dir)
+        call list_add(arguments, '--lane')
+        call list_add(arguments, lane)
+        words = split_words(request_text)
+        if (allocated(words%items)) then
+            do i = 1, size(words%items)
+                call list_add(arguments, words%items(i)%value)
+            end do
+        end if
+        call list_add(arguments, '--campaign-seconds')
+        call list_add(arguments, '60')
+        call list_add(arguments, '--timeout-seconds')
+        call list_add(arguments, '20')
+        call gremlin_json(driver, dir, cache, state, arguments, reply, result, 60000)
+        session = json_string_value(json_member(reply, 'session_id'))
+        call assert_true(result%exit_code == 0 .and. len(session) > 0, &
+            lane//' starts: '//result%stderr)
+    end subroutine gremlin_start
+
+    subroutine gremlin_record(dir, lane, session, expected, record)
+        !! Receipts of the lane once `expected` case receipts exist (a build
+        !! failure ends the wait), or, for expected == 0, once the owner has
+        !! exited: the sorted case|status|labels|layer set behind the build
+        !! verdict, or 'no session;' when the owner never published one.
+        character(len=*), intent(in) :: dir, lane, session
+        integer, intent(in) :: expected
+        character(:), allocatable, intent(out) :: record
+        type(string_list_t) :: arguments
+        type(process_result_t) :: result
+        type(json_value_t) :: status, events, receipt, labels
+        character(len=200), allocatable :: items(:)
+        character(:), allocatable :: build, case_id, line
+        integer :: poll, k, j, n_cases, dash, pid, ios
+        logical :: done, has_session
+
+        call list_add(arguments, 'gremlin')
+        call list_add(arguments, 'status')
+        call list_add(arguments, '--detail')
+        call list_add(arguments, 'full')
+        call list_add(arguments, '--dir')
+        call list_add(arguments, dir)
+        call list_add(arguments, '--lane')
+        call list_add(arguments, lane)
+        call list_add(arguments, '--session')
+        call list_add(arguments, session)
+        call list_add(arguments, '--max-records')
+        call list_add(arguments, '100')
+        dash = index(session, '-')
+        pid = 0
+        if (dash > 1) read (session(:dash - 1), *, iostat=ios) pid
+        record = ''
+        do poll = 1, 900
+            call gremlin_json(driver, dir, cache, state, arguments, status, result, &
+                20000)
+            has_session = .not. json_has(status, 'error')
+            events = json_member(status, 'events')
+            build = ''
+            n_cases = 0
+            if (has_session) then
+                allocate (items(max(1, json_size(events))))
+                do k = 1, json_size(events)
+                    receipt = json_element(events, k)
+                    case_id = json_string_value(json_member(receipt, 'case_id'))
+                    if (case_id == '<build>') then
+                        build = json_string_value(json_member(receipt, 'status'))
+                        cycle
+                    end if
+                    n_cases = n_cases + 1
+                    labels = json_member(receipt, 'labels')
+                    line = case_id//'|'//json_string_value(json_member(receipt, &
+                        'status'))//'|'
+                    do j = 1, json_size(labels)
+                        line = line//json_string_value(json_element(labels, j))//','
+                    end do
+                    items(n_cases) = line//'|'//json_string_value(json_member(receipt, &
+                        'layer'))
+                end do
+            end if
+            done = .false.
+            if (expected > 0) then
+                done = n_cases >= expected .or. build == 'BUILD_FAIL'
+            else if (pid > 0) then
+                done = .not. gremlin_process_running(pid)
+            end if
+            if (done) then
+                if (has_session) then
+                    record = 'build:'//build//';'//sorted_join(items(:n_cases))
+                else
+                    record = 'no session;'
+                end if
+                if (allocated(items)) deallocate (items)
+                return
+            end if
+            if (allocated(items)) deallocate (items)
+            call gremlin_wait_ms(200)
+        end do
+        record = 'timeout;'
+        call assert_true(.false., lane//' reaches its expected receipts')
+    end subroutine gremlin_record
+
+    logical function json_has(value, key) result(has)
+        type(json_value_t), intent(in) :: value
+        character(len=*), intent(in) :: key
+        type(json_value_t) :: member
+
+        member = json_member(value, key)
+        has = len(json_string_value(member)) > 0
+    end function json_has
 
     subroutine build_both()
         type(process_result_t) :: result
