@@ -82,6 +82,28 @@ module fo_fpm_config
         logical :: writable_seen = .false.
     end type fpm_input_t
 
+    !> Deferred-length string, so manifest lists carry no length or count cap.
+    type, public :: fpm_string_t
+        character(len=:), allocatable :: s
+    end type fpm_string_t
+
+    !> One `[extra.fo.layers]` tier: members are named by `source` globs or by
+    !> `modules`, never both; `uses` lists the layers it may depend on.
+    type, public :: fpm_layer_t
+        character(len=:), allocatable :: name
+        type(fpm_string_t), allocatable :: source(:)
+        type(fpm_string_t), allocatable :: modules(:)
+        type(fpm_string_t), allocatable :: uses(:)
+    end type fpm_layer_t
+
+    !> One `[extra.fo.test-groups]` entry: the group name is a test label,
+    !> `tests` are globs, `inputs` are paths of `[[extra.fo.inputs]]` rows.
+    type, public :: fpm_test_group_t
+        character(len=:), allocatable :: name
+        type(fpm_string_t), allocatable :: tests(:)
+        type(fpm_string_t), allocatable :: inputs(:)
+    end type fpm_test_group_t
+
     type :: fpm_config_t
         character(len=1024) :: name = ''
         character(len=32)  :: version = ''
@@ -126,6 +148,15 @@ module fo_fpm_config
         integer :: n_fo_inputs = 0
         type(fpm_input_t) :: fo_inputs(MAX_FO_INPUTS)
         character(len=512) :: fo_input_parse_error = ''
+        ! [extra.fo.layers], [extra.fo.test-groups], [extra.fo.test-defaults]
+        ! as written; validated at parse time, mapped into the project model
+        ! elsewhere.
+        integer :: n_layers = 0
+        type(fpm_layer_t), allocatable :: layers(:)
+        integer :: n_test_groups = 0
+        type(fpm_test_group_t), allocatable :: test_groups(:)
+        logical :: default_exclude_seen = .false.
+        type(fpm_string_t), allocatable :: default_exclude(:)
         character(len=512) :: dependency_parse_error = ''
         character(len=512) :: manifest_parse_error = ''
         ! [extra.fo] test budgets in seconds; 0 leaves fo's default. The
@@ -309,6 +340,12 @@ contains
             c%fo_inputs(i)%writable_seen = .false.
         end do
         c%fo_input_parse_error = ''
+        c%n_layers = 0
+        if (allocated(c%layers)) deallocate (c%layers)
+        c%n_test_groups = 0
+        if (allocated(c%test_groups)) deallocate (c%test_groups)
+        c%default_exclude_seen = .false.
+        if (allocated(c%default_exclude)) deallocate (c%default_exclude)
         c%dependency_parse_error = ''
         c%manifest_parse_error = ''
         c%test_timeout = 0
@@ -329,6 +366,9 @@ contains
         character(len=1024) :: key, val, section
         ! accumulated value for multi-line arrays (flags = [\n  "...",\n])
         character(len=4096) :: accum
+        ! [extra.fo] model sections are read without any length cap
+        character(len=:), allocatable :: raw, fo_key, fo_val, fo_accum
+        integer :: eq
         logical :: in_array
         character(len=1024) :: pending_key
         integer :: u, ios, i
@@ -363,15 +403,42 @@ contains
                 close (u)
                 return
             end if
-            read (u, '(a)', iostat=ios) line
+            call read_line_unbounded(u, raw, ios)
             if (ios /= 0) exit
-            if (len_trim(line) == len(line)) then
+            if (is_fo_model_section(section) .and. &
+                    .not. is_header_line(raw)) then
+                call strip_comment(raw)
+                raw = trim(adjustl(raw))
+                if (len(raw) == 0) cycle
+                if (in_array) then
+                    fo_accum = fo_accum//raw
+                    if (index(raw, ']') > 0) then
+                        in_array = .false.
+                        call dispatch_fo_model(section, pending_key, fo_accum, config)
+                    end if
+                    cycle
+                end if
+                eq = index(raw, '=')
+                if (eq < 2) cycle
+                fo_key = trim(adjustl(raw(1:eq - 1)))
+                fo_val = trim(adjustl(raw(eq + 1:)))
+                if (index(fo_val, '[') > 0 .and. index(fo_val, ']') == 0) then
+                    in_array = .true.
+                    fo_accum = fo_val
+                    pending_key = fo_key
+                    cycle
+                end if
+                call dispatch_fo_model(section, fo_key, fo_val, config)
+                cycle
+            end if
+            if (len_trim(raw) >= len(line)) then
                 write (error_unit, '(a)') &
                     'fo: fpm.toml line exceeds 1024 characters'
                 ierr = 1
                 close (u)
                 return
             end if
+            line = raw
             call strip_comment(line)
             line = adjustl(line)
             if (len_trim(line) == 0) cycle
@@ -491,15 +558,15 @@ contains
             case ('executable')
                 if (config%n_exes > 0) &
                     call parse_exe(key, val, config%exes(config%n_exes), &
-                        config%manifest_parse_error)
+                    config%manifest_parse_error)
             case ('test')
                 if (config%n_tests > 0) &
                     call parse_exe(key, val, config%tests(config%n_tests), &
-                        config%manifest_parse_error)
+                    config%manifest_parse_error)
             case ('example')
                 if (config%n_examples > 0) &
                     call parse_exe(key, val, config%examples(config%n_examples), &
-                        config%manifest_parse_error)
+                    config%manifest_parse_error)
             case ('preprocess', 'preprocess.cpp')
                 call parse_preprocess(key, val, config)
             case ('extra.fo.test-args')
@@ -520,6 +587,13 @@ contains
 
         close (u)
         if (len_trim(config%fo_input_parse_error) > 0) then
+            ierr = 1
+            return
+        end if
+        call validate_extra_fo(config)
+        if (len_trim(config%manifest_parse_error) > 0) then
+            write (error_unit, '(a)') 'fo: fpm.toml: '// &
+                trim(config%manifest_parse_error)
             ierr = 1
             return
         end if
@@ -1002,7 +1076,7 @@ contains
             position = position + 1
         end do
         return
-900     config%manifest_parse_error = &
+        900     config%manifest_parse_error = &
             '[library] include-dir requires a quoted path or list of quoted paths'
     end subroutine parse_include_directories
 
@@ -1444,7 +1518,7 @@ contains
             case default
                 write (error_unit, '(a)') 'fo: warning: ignoring [extra.fo] '// &
                     'debug-info = '//trim(val)// &
-                ' (expected g0, line-tables, or full)'
+                    ' (expected g0, line-tables, or full)'
             end select
         case ('pic')
             ! Position-independent code is not a style preference here: it is
@@ -1460,6 +1534,9 @@ contains
                 write (error_unit, '(a)') 'fo: warning: ignoring [extra.fo] '// &
                     'pic = '//trim(val)//' (expected true or false)'
             end select
+        case ('layers', 'test-groups', 'test-defaults')
+            config%manifest_parse_error = '[extra.fo] '//trim(key)// &
+                ' must be declared as its own [extra.fo.'//trim(key)//'] table'
         case ('link')
             ! `shared` folds the library once into a .so and lets every test
             ! executable link against it, instead of relinking the whole static
@@ -1478,6 +1555,510 @@ contains
         case default
         end select
     end subroutine parse_extra_fo
+
+    subroutine read_line_unbounded(u, text, ios)
+        !! One line of any length (no fixed buffer).
+        integer, intent(in) :: u
+        character(len=:), allocatable, intent(out) :: text
+        integer, intent(out) :: ios
+
+        character(len=512) :: buf
+        integer :: n
+
+        text = ''
+        do
+            read (u, '(a)', advance='no', iostat=ios, size=n) buf
+            if (n > 0) text = text//buf(1:n)
+            if (is_iostat_eor(ios)) then
+                ios = 0
+                return
+            end if
+            if (ios /= 0) then
+                if (is_iostat_end(ios) .and. len(text) > 0) ios = 0
+                return
+            end if
+        end do
+    end subroutine read_line_unbounded
+
+    pure logical function is_header_line(text)
+        character(len=*), intent(in) :: text
+        integer :: i
+
+        is_header_line = .false.
+        do i = 1, len(text)
+            if (text(i:i) == ' ' .or. text(i:i) == achar(9)) cycle
+            is_header_line = text(i:i) == '['
+            return
+        end do
+    end function is_header_line
+
+    pure logical function is_fo_model_section(section)
+        character(len=*), intent(in) :: section
+
+        select case (trim(section))
+        case ('extra.fo.layers', 'extra.fo.test-groups', 'extra.fo.test-defaults')
+            is_fo_model_section = .true.
+        case default
+            is_fo_model_section = .false.
+        end select
+    end function is_fo_model_section
+
+    subroutine dispatch_fo_model(section, key, val, config)
+        character(len=*), intent(in) :: section, key, val
+        type(fpm_config_t), intent(inout) :: config
+
+        select case (trim(section))
+        case ('extra.fo.layers')
+            call parse_fo_layer(key, val, config)
+        case ('extra.fo.test-groups')
+            call parse_fo_test_group(key, val, config)
+        case ('extra.fo.test-defaults')
+            call parse_fo_test_defaults(key, val, config)
+        end select
+    end subroutine dispatch_fo_model
+
+    subroutine parse_fo_layer(name, val, config)
+        !! `name = { source = [globs] | modules = [names], uses = [layers] }`
+        character(len=*), intent(in) :: name, val
+        type(fpm_config_t), intent(inout) :: config
+
+        type(fpm_layer_t) :: layer
+        type(fpm_string_t), allocatable :: keys(:), items(:)
+        character(len=512) :: err
+        integer :: i, n
+        logical :: seen_source, seen_modules, seen_uses
+
+        err = ''
+        if (.not. valid_fo_name(name)) then
+            config%manifest_parse_error = 'invalid [extra.fo.layers] name: '//name
+            return
+        end if
+        call split_fo_table(val, keys, items, n, err)
+        if (len_trim(err) > 0) then
+            config%manifest_parse_error = '[extra.fo.layers] '//name//': '//trim(err)
+            return
+        end if
+        layer%name = name
+        allocate (layer%source(0), layer%modules(0), layer%uses(0))
+        seen_source = .false.
+        seen_modules = .false.
+        seen_uses = .false.
+        do i = 1, n
+            select case (keys(i)%s)
+            case ('source')
+                if (seen_source) err = 'duplicate key source'
+                seen_source = .true.
+                if (len_trim(err) == 0) call parse_string_list(items(i)%s, layer%source, err)
+            case ('modules')
+                if (seen_modules) err = 'duplicate key modules'
+                seen_modules = .true.
+                if (len_trim(err) == 0) &
+                    call parse_string_list(items(i)%s, layer%modules, err)
+            case ('uses')
+                if (seen_uses) err = 'duplicate key uses'
+                seen_uses = .true.
+                if (len_trim(err) == 0) call parse_string_list(items(i)%s, layer%uses, err)
+            case default
+                err = 'unknown key '//keys(i)%s//' (expected source, modules, uses)'
+            end select
+            if (len_trim(err) > 0) then
+                config%manifest_parse_error = '[extra.fo.layers] '//name//': '// &
+                    trim(err)
+                return
+            end if
+        end do
+        call append_layer(config, layer)
+    end subroutine parse_fo_layer
+
+    subroutine parse_fo_test_group(name, val, config)
+        !! `name = { tests = [globs], inputs = [paths] }`
+        character(len=*), intent(in) :: name, val
+        type(fpm_config_t), intent(inout) :: config
+
+        type(fpm_test_group_t) :: group
+        type(fpm_string_t), allocatable :: keys(:), items(:)
+        character(len=512) :: err
+        integer :: i, n
+        logical :: seen_tests, seen_inputs
+
+        err = ''
+        if (.not. valid_fo_name(name)) then
+            config%manifest_parse_error = &
+                'invalid [extra.fo.test-groups] name: '//name
+            return
+        end if
+        call split_fo_table(val, keys, items, n, err)
+        if (len_trim(err) > 0) then
+            config%manifest_parse_error = '[extra.fo.test-groups] '//name// &
+                ': '//trim(err)
+            return
+        end if
+        group%name = name
+        allocate (group%tests(0), group%inputs(0))
+        seen_tests = .false.
+        seen_inputs = .false.
+        do i = 1, n
+            select case (keys(i)%s)
+            case ('tests')
+                if (seen_tests) err = 'duplicate key tests'
+                seen_tests = .true.
+                if (len_trim(err) == 0) &
+                    call parse_string_list(items(i)%s, group%tests, err)
+            case ('inputs')
+                if (seen_inputs) err = 'duplicate key inputs'
+                seen_inputs = .true.
+                if (len_trim(err) == 0) &
+                    call parse_string_list(items(i)%s, group%inputs, err)
+            case default
+                err = 'unknown key '//keys(i)%s//' (expected tests, inputs)'
+            end select
+            if (len_trim(err) > 0) then
+                config%manifest_parse_error = '[extra.fo.test-groups] '// &
+                    name//': '//trim(err)
+                return
+            end if
+        end do
+        call append_group(config, group)
+    end subroutine parse_fo_test_group
+
+    subroutine parse_fo_test_defaults(key, val, config)
+        character(len=*), intent(in) :: key, val
+        type(fpm_config_t), intent(inout) :: config
+
+        character(len=512) :: err
+
+        err = ''
+        if (key /= 'exclude') then
+            config%manifest_parse_error = 'unknown [extra.fo.test-defaults] key: '// &
+                key//' (expected exclude)'
+            return
+        end if
+        if (config%default_exclude_seen) then
+            config%manifest_parse_error = 'duplicate [extra.fo.test-defaults] exclude'
+            return
+        end if
+        config%default_exclude_seen = .true.
+        allocate (config%default_exclude(0))
+        call parse_string_list(val, config%default_exclude, err)
+        if (len_trim(err) > 0) config%manifest_parse_error = &
+            '[extra.fo.test-defaults] exclude: '//trim(err)
+    end subroutine parse_fo_test_defaults
+
+    pure logical function valid_fo_name(name)
+        !! TOML bare key: the name doubles as a label or layer identifier.
+        character(len=*), intent(in) :: name
+        integer :: i
+
+        valid_fo_name = len(name) > 0
+        do i = 1, len(name)
+            select case (name(i:i))
+            case ('a':'z', 'A':'Z', '0':'9', '_', '-')
+            case default
+                valid_fo_name = .false.
+                return
+            end select
+        end do
+    end function valid_fo_name
+
+    subroutine split_top_level(text, parts, n, err)
+        !! Split on commas outside quotes and brackets; blank pieces (a trailing
+        !! comma) are dropped. No cap on the number or length of pieces.
+        character(len=*), intent(in) :: text
+        type(fpm_string_t), allocatable, intent(out) :: parts(:)
+        integer, intent(out) :: n
+        character(len=*), intent(inout) :: err
+
+        integer, allocatable :: first(:), last(:)
+        integer :: i, start, depth, m
+        character :: quote
+
+        allocate (first(16), last(16))
+        m = 0
+        start = 1
+        depth = 0
+        quote = ' '
+        do i = 1, len(text) + 1
+            if (i <= len(text)) then
+                if (quote /= ' ') then
+                    if (text(i:i) == quote) quote = ' '
+                    cycle
+                end if
+                select case (text(i:i))
+                case ('"', "'")
+                    quote = text(i:i)
+                    cycle
+                case ('[', '{')
+                    depth = depth + 1
+                    cycle
+                case (']', '}')
+                    depth = depth - 1
+                    cycle
+                case (',')
+                    if (depth /= 0) cycle
+                case default
+                    cycle
+                end select
+            end if
+            if (len_trim(text(start:i - 1)) > 0) then
+                if (m == size(first)) call grow(first, last)
+                m = m + 1
+                first(m) = start
+                last(m) = i - 1
+            end if
+            start = i + 1
+        end do
+        n = m
+        allocate (parts(n))
+        if (quote /= ' ' .or. depth /= 0) then
+            err = 'unbalanced quotes or brackets'
+            return
+        end if
+        do i = 1, n
+            parts(i)%s = trim(adjustl(text(first(i):last(i))))
+        end do
+    contains
+        subroutine grow(a, b)
+            integer, allocatable, intent(inout) :: a(:), b(:)
+            integer, allocatable :: t(:)
+
+            allocate (t(2*size(a)))
+            t(:size(a)) = a
+            call move_alloc(t, a)
+            allocate (t(2*size(b)))
+            t(:size(b)) = b
+            call move_alloc(t, b)
+        end subroutine grow
+    end subroutine split_top_level
+
+    subroutine split_fo_table(val, keys, items, n, err)
+        !! Inline table `{ k = v, ... }` whose values may be arrays.
+        character(len=*), intent(in) :: val
+        type(fpm_string_t), allocatable, intent(out) :: keys(:), items(:)
+        integer, intent(out) :: n
+        character(len=*), intent(inout) :: err
+
+        type(fpm_string_t), allocatable :: parts(:)
+        character(len=:), allocatable :: text
+        integer :: i, eq, m
+
+        n = 0
+        allocate (keys(0), items(0))
+        text = trim(adjustl(val))
+        if (len(text) < 2) then
+            err = 'expected an inline table { ... }'
+            return
+        end if
+        if (text(1:1) /= '{' .or. text(len(text):len(text)) /= '}') then
+            err = 'expected an inline table { ... }'
+            return
+        end if
+        call split_top_level(text(2:len(text) - 1), parts, m, err)
+        if (len_trim(err) > 0) return
+        deallocate (keys, items)
+        allocate (keys(m), items(m))
+        do i = 1, m
+            eq = index(parts(i)%s, '=')
+            if (eq < 2) then
+                err = 'expected key = value'
+                return
+            end if
+            n = n + 1
+            keys(n)%s = trim(adjustl(parts(i)%s(1:eq - 1)))
+            items(n)%s = trim(adjustl(parts(i)%s(eq + 1:)))
+            if (len(items(n)%s) == 0) then
+                err = 'missing value for '//keys(n)%s
+                return
+            end if
+        end do
+    end subroutine split_fo_table
+
+    subroutine parse_string_list(val, list, err)
+        !! Strict `["a", 'b']` array of non-empty strings.
+        character(len=*), intent(in) :: val
+        type(fpm_string_t), allocatable, intent(inout) :: list(:)
+        character(len=*), intent(inout) :: err
+
+        type(fpm_string_t), allocatable :: parts(:)
+        character(len=:), allocatable :: text
+        integer :: i, n, q
+
+        text = trim(adjustl(val))
+        if (len(text) < 2) then
+            err = 'expected an array of strings'
+            return
+        end if
+        if (text(1:1) /= '[' .or. text(len(text):len(text)) /= ']') then
+            err = 'expected an array of strings'
+            return
+        end if
+        call split_top_level(text(2:len(text) - 1), parts, n, err)
+        if (len_trim(err) > 0) return
+        if (allocated(list)) deallocate (list)
+        allocate (list(n))
+        do i = 1, n
+            q = len(parts(i)%s)
+            if (q < 3) then
+                err = 'array elements must be non-empty quoted strings'
+                return
+            end if
+            if ((parts(i)%s(1:1) /= '"' .and. parts(i)%s(1:1) /= "'") .or. &
+                parts(i)%s(q:q) /= parts(i)%s(1:1)) then
+                err = 'array elements must be non-empty quoted strings'
+                return
+            end if
+            list(i)%s = parts(i)%s(2:q - 1)
+        end do
+    end subroutine parse_string_list
+
+    subroutine append_layer(config, layer)
+        type(fpm_config_t), intent(inout) :: config
+        type(fpm_layer_t), intent(inout) :: layer
+        type(fpm_layer_t), allocatable :: grown(:)
+        integer :: i, cap
+
+        if (.not. allocated(config%layers)) allocate (config%layers(8))
+        if (config%n_layers == size(config%layers)) then
+            cap = 2*size(config%layers)
+            allocate (grown(cap))
+            do i = 1, config%n_layers
+                call move_layer(config%layers(i), grown(i))
+            end do
+            call move_alloc(grown, config%layers)
+        end if
+        config%n_layers = config%n_layers + 1
+        call move_layer(layer, config%layers(config%n_layers))
+    end subroutine append_layer
+
+    subroutine move_layer(from, to)
+        type(fpm_layer_t), intent(inout) :: from, to
+
+        call move_alloc(from%name, to%name)
+        call move_alloc(from%source, to%source)
+        call move_alloc(from%modules, to%modules)
+        call move_alloc(from%uses, to%uses)
+    end subroutine move_layer
+
+    subroutine append_group(config, group)
+        type(fpm_config_t), intent(inout) :: config
+        type(fpm_test_group_t), intent(inout) :: group
+        type(fpm_test_group_t), allocatable :: grown(:)
+        integer :: i, cap
+
+        if (.not. allocated(config%test_groups)) allocate (config%test_groups(8))
+        if (config%n_test_groups == size(config%test_groups)) then
+            cap = 2*size(config%test_groups)
+            allocate (grown(cap))
+            do i = 1, config%n_test_groups
+                call move_alloc(config%test_groups(i)%name, grown(i)%name)
+                call move_alloc(config%test_groups(i)%tests, grown(i)%tests)
+                call move_alloc(config%test_groups(i)%inputs, grown(i)%inputs)
+            end do
+            call move_alloc(grown, config%test_groups)
+        end if
+        config%n_test_groups = config%n_test_groups + 1
+        call move_alloc(group%name, config%test_groups(config%n_test_groups)%name)
+        call move_alloc(group%tests, config%test_groups(config%n_test_groups)%tests)
+        call move_alloc(group%inputs, config%test_groups(config%n_test_groups)%inputs)
+    end subroutine append_group
+
+    subroutine validate_extra_fo(config)
+        !! Whole-manifest checks: duplicate names, dangling `uses`/`inputs`
+        !! references, layer membership form and layer cycles.
+        type(fpm_config_t), intent(inout) :: config
+
+        integer, allocatable :: state(:)
+        integer :: i, j, k
+        logical :: found
+        character(len=512) :: err
+
+        err = ''
+        do i = 1, config%n_layers
+            do j = 1, i - 1
+                if (config%layers(i)%name == config%layers(j)%name) then
+                    config%manifest_parse_error = 'duplicate layer '// &
+                        config%layers(i)%name
+                    return
+                end if
+            end do
+            if ((size(config%layers(i)%source) > 0) .eqv. &
+                (size(config%layers(i)%modules) > 0)) then
+                config%manifest_parse_error = 'layer '//config%layers(i)%name// &
+                    ' must declare exactly one of source or modules'
+                return
+            end if
+            do k = 1, size(config%layers(i)%uses)
+                found = .false.
+                do j = 1, config%n_layers
+                    if (config%layers(j)%name == config%layers(i)%uses(k)%s) &
+                        found = .true.
+                end do
+                if (.not. found) then
+                    config%manifest_parse_error = 'layer '// &
+                        config%layers(i)%name//' uses unknown layer '// &
+                        config%layers(i)%uses(k)%s
+                    return
+                end if
+            end do
+        end do
+        allocate (state(config%n_layers))
+        state = 0
+        do i = 1, config%n_layers
+            if (state(i) == 0) call visit(i, config%layers(i)%name)
+            if (len_trim(err) > 0) then
+                config%manifest_parse_error = err
+                return
+            end if
+        end do
+        do i = 1, config%n_test_groups
+            do j = 1, i - 1
+                if (config%test_groups(i)%name == config%test_groups(j)%name) then
+                    config%manifest_parse_error = 'duplicate test group '// &
+                        config%test_groups(i)%name
+                    return
+                end if
+            end do
+            if (size(config%test_groups(i)%tests) == 0) then
+                config%manifest_parse_error = 'test group '// &
+                    config%test_groups(i)%name//' requires a tests array'
+                return
+            end if
+            do k = 1, size(config%test_groups(i)%inputs)
+                found = .false.
+                do j = 1, config%n_fo_inputs
+                    if (trim(config%fo_inputs(j)%path) == &
+                        config%test_groups(i)%inputs(k)%s) found = .true.
+                end do
+                if (.not. found) then
+                    config%manifest_parse_error = 'test group '// &
+                        config%test_groups(i)%name// &
+                        ' names input not declared in [[extra.fo.inputs]]: '// &
+                        config%test_groups(i)%inputs(k)%s
+                    return
+                end if
+            end do
+        end do
+    contains
+        recursive subroutine visit(idx, trail)
+            integer, intent(in) :: idx
+            character(len=*), intent(in) :: trail
+            integer :: a, b
+
+            state(idx) = 1
+            do a = 1, size(config%layers(idx)%uses)
+                do b = 1, config%n_layers
+                    if (config%layers(b)%name /= &
+                        config%layers(idx)%uses(a)%s) cycle
+                    if (state(b) == 1) then
+                        err = 'layer cycle: '//trail//' -> '//config%layers(b)%name
+                    else if (state(b) == 0) then
+                        call visit(b, trail//' -> '//config%layers(b)%name)
+                    end if
+                    if (len_trim(err) > 0) return
+                end do
+            end do
+            state(idx) = 2
+        end subroutine visit
+    end subroutine validate_extra_fo
 
     subroutine parse_fo_input(key, val, config)
         character(len=*), intent(in) :: key, val

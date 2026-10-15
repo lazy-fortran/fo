@@ -98,6 +98,30 @@ kind = "directory"
 role = "test-fixture"
 ```
 
+A manifest can also declare library tiers, test groups and default test
+exclusions. fo parses and validates them; selection, `--layer` and `-L` consume
+them in later stages. Plain fpm ignores the whole `[extra]` namespace:
+
+```toml
+[extra.fo.layers]
+base = { source = ["src/base/**"] }
+physics = { modules = ["physics_mod"], uses = ["base"] }
+
+[extra.fo.test-groups]
+slow = { tests = ["test/*_slow*"], inputs = ["data/reference.dat"] }
+
+[extra.fo.test-defaults]
+exclude = ["slow"]
+```
+
+A layer names its members by `source` globs or by `modules`, exactly one of the
+two, and lists the layers it may use in `uses`. A group name is a test label;
+`tests` are globs and every `inputs` entry must be the `path` of an
+`[[extra.fo.inputs]]` row. `test-defaults.exclude` lists the labels left out of
+a default run. The only accepted keys are the ones shown. fo rejects the
+manifest for an unknown key, a `uses` or `inputs` reference that does not
+resolve, a duplicate name or a layer cycle (the diagnostic names the cycle).
+
 Consolidated tests can opt into one dispatcher executable:
 
 ```toml
