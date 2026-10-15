@@ -24,7 +24,7 @@ module fo_gremlin_request
         integer :: seed = 0
         integer :: campaign_seconds = DEFAULT_CAMPAIGN
         integer :: timeout_seconds = DEFAULT_CASE_TIMEOUT
-        integer :: jobs = 1
+        integer :: jobs = 0  !! 0: derive from the host job budget
         integer(int64) :: cursor = 0_int64
         integer(int64) :: lifecycle_cursor = 0_int64
         integer :: wait_ms = 5000
@@ -97,7 +97,8 @@ module fo_gremlin_request
         gremlin_option_t('campaign_seconds', '--campaign-seconds', '', 'int', GA_START, 1, 60), &
         gremlin_option_t('timeout_seconds', '--timeout-seconds', '', 'int', &
             GA_START + GA_REPRODUCE, 0, 86400), &
-        gremlin_option_t('jobs', '--jobs', '', 'int', GA_START, 1, 1), &
+        gremlin_option_t('jobs', '--jobs', '', 'int', GA_START, 1, 16, &
+            note='case children run in parallel (default: host weight)'), &
         gremlin_option_t('cursor', '--cursor', '', 'int', GA_READS, 0, GA_UNBOUNDED), &
         gremlin_option_t('lifecycle_cursor', '--lifecycle-cursor', '', 'int', GA_READS, &
             0, GA_UNBOUNDED), &
