@@ -10,8 +10,73 @@ This is the fifth delivery priority in [PLAN.md](../PLAN.md). It follows useful
 Fo/FFC Gremlin development and standalone FPM, with only actual consumer
 dependencies blocking each increment.
 [Architectural freedom](GOAL_DRIVEN_DEVELOPMENT.md) applies:
-agents choose the implementation as requirements become concrete. No File API,
-slot-pool, launcher, parser representation or module list is mandatory.
+agents choose the implementation as requirements become concrete. The project
+model decision below fixes the File API/CTest JSON as the current CMake
+authority; slot pools, launchers and module lists remain open.
+
+## Backend-neutral project model (decision 2026-10-15)
+
+Selection, planning, layering and impact are implemented once, on one project
+model; only adapters and two execution primitives differ per backend. This
+replaces the per-backend branches in `fo_build_backend`, `app/main.f90`
+`cmd_test`, the MCP test handler and the Gremlin case list (#167, #205).
+
+- **Model.** Targets (library/executable, sources, link dependencies,
+  artifact path), layers (named library tiers with allowed `uses`), cases
+  (public name, command target, labels, derived layer, adapter attributes
+  carried opaquely), default excluded labels, and an identity digest over the
+  adapter inputs. Fo's module graph (`fo_scan`, `fo_dag_bridge`) attaches to
+  target sources on both backends.
+- **CMake adapter.** CMake is the authority; CMakeLists are not parsed.
+  Targets, sources, link dependencies and artifacts come from File API
+  `codemodel-v2` (already queried by `fo_cmake_context`); cases with command,
+  `LABELS`, `FIXTURES_*`, `PROCESSORS`, `RESOURCE_LOCK` and
+  `WORKING_DIRECTORY` come from `ctest --show-only=json-v1` (already run by
+  `cmake_registered_names`). Layers are library targets. Default exclusions are
+  the cases the selected test preset filters out: `ctest --preset P
+  --show-only=json-v1` applies the preset filter (checked with CMake 4.4.4), so
+  presets JSON is not parsed. File API has no Fortran module directory; fo does
+  not need one because CMake builds. A case whose command is not a known
+  artifact maps to all targets (widened plan, reported).
+- **fpm adapter.** `fpm.toml` plus `[extra.fo.layers]`
+  (`name = { source = [...], uses = [...] }`), `[extra.fo.test-groups]`
+  (`name = { tests = [globs], inputs = [...] }`, the group name is a label) and
+  `[extra.fo.test-defaults] exclude = [...]`. Group `inputs` name rows of the
+  existing `[[extra.fo.inputs]]`; there is no second input declaration form.
+  The `*_slow` naming rule becomes the label `slow`. A test's layer is derived
+  from its module-use closure; only tiers are declared.
+- **Shared operations.** Selection (exact names/globs, `-L`/`-LE`,
+  `--layer`, default exclusions, later affected via #189); planning (selected
+  cases to the closure of required targets); layering lint (a source must not
+  use a module provided by a layer outside its declared `uses` closure; on CMake
+  the declared closure is the target link graph, which CMake itself does not
+  enforce for Fortran module use); impact mapping (`test_impact_select`
+  consumes model cases).
+- **Primitives.** `build(targets)`: CMake `cmake --build --target ...`; fpm the
+  native builder restricted to the selected executables (the library remains
+  one unit until a layer-subset build is needed). `run(cases)`: CMake always
+  through `ctest` with exact anchored names and the project's preset or `-C`,
+  so CTest keeps fixture/resource/verdict semantics (#194); fpm the fo runner.
+- **Gremlin.** The same service path as `fo test` (#167): the cached model is
+  reused per generation unless manifest, CMake, preset or cache inputs change;
+  selection is computed once; one build per generation (#196) and case
+  children run the `run` primitive only (today each child's `fo test <case>`
+  rebuilds, on CMake a full `cmake --build`); CMake impact stops being
+  "all registered cases" once cases map to targets (#197); lanes are scoped by `-L`/`--layer` (affected first, the rest of
+  the scope as background coverage). Case-result reuse keyed by the case input
+  closure belongs to #189/#140 (#199 is compiler-result reuse).
+- **Public surfaces.** `fo test --list [--json]` reports selection and build
+  plan without building; `fo graph --layers [--json]` reports layers and
+  violations. CLI and MCP share the selection call.
+- **Oracle.** A Fortran-generated twin fixture (an fpm and a CMake manifest for
+  the same sources, layers, labels and tests) must give identical selections,
+  plans and layering verdicts through both backends in `fo test` and Gremlin.
+
+**Native interpreter.** `fo_cmake_native*` (opt-in `FO_CMAKE_NATIVE=1`; only
+`test_native_cmake_cli`, `fo_exec_target` and backend/generation branches
+depend on it) is frozen: no new features, File API is the authority. This
+defers the standalone (CMake-absent) destination below and in #192/#193/#194;
+deleting the slice (#205) needs an explicit decision on that destination.
 
 ## Current implementation
 

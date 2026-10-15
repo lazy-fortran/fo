@@ -238,6 +238,12 @@ by this handoff.
    coverage and the separately owned complex SIN case remain open.
 4. Finish standalone FPM compatibility on unchanged supported manifests.
 5. Finish native CMake/CTest compatibility for the maintained ITpPlasma profiles.
+6. Build the [backend-neutral project model](doc/CMAKE_GREMLIN_PLAN.md#backend-neutral-project-model-decision-2026-10-15)
+   in phases: P1 model, CMake adapter, `fo test`/`fo exec` labels and
+   target-only builds (#193, #194); P2 Gremlin on the model (#196, #195);
+   P3 fpm `[extra.fo]` adapter and layering lint; P4 affected selection (#189,
+   #197). KIN6D is the first consumer and is an actual blocker, so this runs
+   ahead of item 5's standalone destination, which it defers.
 
 Only actual consumer blockers gate the next consumer task. Publish exact
 locally green increments promptly, without waiting for GitHub CI or unrelated
