@@ -1,4 +1,5 @@
 module fo_dag_bridge
+    use, intrinsic :: iso_fortran_env, only: error_unit
     use fx_dag, only: dag_t, dag_init, dag_add_node, dag_find_node, &
         dag_add_edge, MAX_NODES
     use fo_scan, only: scan_unit_t, MAX_PATH, scan_provides_name
@@ -9,19 +10,23 @@ module fo_dag_bridge
 contains
 
     subroutine build_dag_from_units(units, n_units, dag, filenames, &
-            is_test_arr, is_prog_arr)
+            is_test_arr, is_prog_arr, ierr)
         type(scan_unit_t), intent(in) :: units(:)
         integer, intent(in) :: n_units
         type(dag_t), intent(out) :: dag
         character(len=MAX_PATH), optional, intent(out) :: filenames(MAX_NODES)
         logical, optional, intent(out) :: is_test_arr(MAX_NODES)
         logical, optional, intent(out) :: is_prog_arr(MAX_NODES)
+        integer, optional, intent(out) :: ierr
+        !! Nonzero when a unit cannot be given a node.  Without ierr the
+        !! program stops: a silently dropped unit is never built or tested.
 
         integer :: i, j, node_id, dep_id
         integer :: unit_nodes(n_units)
         character(len=256) :: program_label
         character(len=32) :: suffix
 
+        if (present(ierr)) ierr = 0
         call dag_init(dag, MAX_NODES)
         if (present(filenames)) filenames = ''
         if (present(is_test_arr)) is_test_arr = .false.
@@ -31,6 +36,10 @@ contains
         do i = 1, n_units
             if (len_trim(units(i)%module_name) > 0) then
                 node_id = dag_add_node(dag, trim(units(i)%module_name))
+                if (node_id == 0) then
+                    call report_node_limit(units(i)%filename, ierr)
+                    return
+                end if
                 if (node_id > 0) then
                     unit_nodes(i) = node_id
                     if (present(filenames)) filenames(node_id) = units(i)%filename
@@ -49,6 +58,10 @@ contains
                     program_label = trim(program_label)//'#program'//trim(suffix)
                 end if
                 node_id = dag_add_node(dag, trim(program_label))
+                if (node_id == 0) then
+                    call report_node_limit(units(i)%filename, ierr)
+                    return
+                end if
                 if (node_id > 0) then
                     unit_nodes(i) = node_id
                     if (present(filenames)) filenames(node_id) = units(i)%filename
@@ -69,6 +82,16 @@ contains
             end do
         end do
     end subroutine build_dag_from_units
+
+    subroutine report_node_limit(filename, ierr)
+        character(len=*), intent(in) :: filename
+        integer, intent(out), optional :: ierr
+
+        write (error_unit, '(a,i0,a)') 'fo: dependency graph is full at ', &
+            MAX_NODES, ' units; cannot add '//trim(filename)
+        if (.not. present(ierr)) error stop 1
+        ierr = 1
+    end subroutine report_node_limit
 
     integer function dag_find_source_provider(units, n_units, dag, name) result(node)
         type(scan_unit_t), intent(in) :: units(:)

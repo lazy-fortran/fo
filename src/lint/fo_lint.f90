@@ -1,4 +1,5 @@
 module fo_lint
+    use, intrinsic :: iso_fortran_env, only: error_unit
     use fo_util, only: json_int, make_tmpfile, delete_tmpfile, &
         clean_root_build_artifacts
     use fo_fs, only: fs_make_dir, fs_remove_tree, fs_collect_files, &
@@ -25,7 +26,9 @@ module fo_lint
     ! nondeterministic). Per-file passes use the smaller MAX_FILE_WARN buffer.
     integer, parameter :: MAX_WARNINGS = 16384
     integer, parameter :: MAX_FILE_WARN = 512
-    integer, parameter :: MAX_SYMS = 64
+    ! A use line holds at most 1024 characters, so 512 symbols never overflow.
+    integer, parameter :: MAX_SYMS = 512
+    logical :: findings_truncated = .false.
     integer, parameter :: MAX_SYM_LEN = 128
     ! Usage-scan buffer. Sized for a module plus all of its submodule bodies and
     ! their includes appended together (see lint_file_ex).
@@ -331,6 +334,12 @@ contains
                     findings(n_findings)%line = line_no
                     findings(n_findings)%module_name = mod_name
                     findings(n_findings)%symbol = syms(i)
+                else if (.not. findings_truncated) then
+                    findings_truncated = .true.
+                    write (error_unit, '(a,i0,a)') 'fo: lint: more than ', &
+                        MAX_FINDINGS, ' unused imports in one pass; later '// &
+                        'findings are not reported (first dropped in '// &
+                        trim(filename)//')'
                 end if
             end if
         end do

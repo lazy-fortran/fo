@@ -260,18 +260,10 @@ static int skip_dir_name(const char *name, int is_proj_root, int depth) {
        matches the ripgrep/fd default and avoids descending into vendored
        Python virtualenvs whose dependencies ship .f90 fixtures. */
     if (name[0] == '.') return 1;
-    /* Non-hidden vendored / environment trees. */
-    if (strcmp(name, "node_modules") == 0) return 1;
-    if (strcmp(name, "venv") == 0) return 1;
-    if (strcmp(name, "__pycache__") == 0) return 1;
-    if (strcmp(name, "site-packages") == 0) return 1;
-    /* Build/output trees are never source roots for the current project. */
-    if (strcmp(name, "_deps") == 0) return 1;
-    if (strcmp(name, "dependencies") == 0) return 1;
-    if (strcmp(name, "deps-src") == 0) return 1;
+    /* FPM scans every non-hidden source subdirectory, so names such as
+       "dependencies" or "venv" below src/ are real source trees.  Only the
+       project's own build output is excluded, at the project root. */
     if (is_proj_root && depth == 0 && strcmp(name, "build") == 0) return 1;
-    if (is_proj_root && depth == 0 && strncmp(name, "build", 5) == 0) return 1;
-    if (is_proj_root && depth == 0 && strcmp(name, "SRC") == 0) return 1;
     return 0;
 }
 

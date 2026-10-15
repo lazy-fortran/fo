@@ -1504,7 +1504,7 @@ contains
         logical :: has_cycle
         logical :: allow_cache
         character(len=512) :: obj_path
-        character(len=4096) :: includes_flag
+        character(len=:), allocatable :: includes_flag
         character(len=512) :: c_line
         character(len=512), allocatable :: cfiles(:)
         character(len=MAX_PATH), allocatable :: compdb_sources(:)
@@ -2997,7 +2997,7 @@ contains
         logical :: has_cycle, restored, bonly
         logical :: allow_cache
         character(len=512) :: obj_path, bin_path
-        character(len=4096) :: incl_flag, helper_includes
+        character(len=:), allocatable :: incl_flag, helper_includes
         character(len=MAX_PATH) :: tname
         character(len=MAX_PATH) :: fname_local
         character(len=512) :: log_local, rerun_log
@@ -4625,7 +4625,7 @@ contains
         character(len=*), intent(in) :: mod_dir
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
         integer, intent(in) :: n_dep_includes
-        character(len=*), intent(out) :: flag
+        character(len=:), allocatable, intent(out) :: flag
 
         integer :: i
         type(compiler_dialect_t) :: dialect

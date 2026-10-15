@@ -1,4 +1,4 @@
-/* Native Windows process authority. Included only by fo_process.c on _WIN32.
+    return project && depth == 0 && !wcscmp(name, L"build");/* Native Windows process authority. Included only by fo_process.c on _WIN32.
    Windows 10 / Server 2016 or later supplies atomic job assignment at spawn. */
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0a00
@@ -1064,10 +1064,7 @@ static int directory_seen(struct windows_scan *scan, const wchar_t *path) {
 }
 static int skip_windows_directory(const wchar_t *name, int project, int depth) {
     if (name[0] == L'.') return 1;
-    static const wchar_t *excluded[] = {L"__pycache__", L"site-packages", L"_deps",
-        L"dependencies", L"deps-src", NULL};
-    for (int i = 0; excluded[i]; ++i) if (!wcscmp(name, excluded[i])) return 1;
-    return project && depth == 0 && (!wcsncmp(name, L"build", 5) || !wcscmp(name, L"SRC"));
+    return project && depth == 0 && !wcscmp(name, L"build");
 }
 static wchar_t *join_windows_path(const wchar_t *base, const wchar_t *name) {
     size_t length = wcslen(base) + wcslen(name) + 2;

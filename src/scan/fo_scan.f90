@@ -405,7 +405,9 @@ contains
         logical, intent(in) :: regex_only
 
         character(len=512), allocatable :: paths(:)
-        character(len=512) :: tmpfile, line, diagnostic
+        character(len=512) :: tmpfile, diagnostic
+        ! The native scanner allows paths up to 4096 characters.
+        character(len=4096) :: line
         integer :: funit, iostat, sub_ierr, n_files, i
         logical :: cache_hit
 
@@ -435,13 +437,25 @@ contains
             if (iostat /= 0) exit
             if (len_trim(line) == 0) cycle
             n_files = n_files + 1
-            if (n_files > MAX_UNITS) then
-                write (error_unit, '(a,i0)') &
-                    'fo: too many source files, max ', MAX_UNITS
-                n_files = MAX_UNITS
-                exit
+            if (len_trim(line) > MAX_PATH) then
+                write (error_unit, '(a,i0,a)') 'fo: source path exceeds ', &
+                    MAX_PATH, ' characters: '//line(1:80)//'...'
+                ierr = 1
             end if
         end do
+        if (n_files > MAX_UNITS) then
+            write (error_unit, '(a,i0,a,i0,a)') 'fo: ', n_files, &
+                ' source files exceed the supported maximum of ', MAX_UNITS, &
+                ' under '//trim(dirname)
+            ierr = 1
+        end if
+        if (ierr /= 0) then
+            close (funit)
+            call delete_tmpfile(tmpfile)
+            n_files = 0
+            allocate (units(0))
+            return
+        end if
 
         allocate (units(n_files), paths(n_files))
         rewind (funit)

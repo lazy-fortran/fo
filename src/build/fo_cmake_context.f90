@@ -207,9 +207,9 @@ contains
 
     subroutine cmake_context_read_reply(context)
         type(cmake_context_t), intent(inout) :: context
-        character(len=4096) :: paths(64)
+        character(len=4096), allocatable :: paths(:)
         character(:), allocatable :: input
-        integer :: n_paths
+        integer :: n_paths, collect_status, capacity
 
         context%reported_generator = ''
         context%reply_index = ''
@@ -218,9 +218,18 @@ contains
         context%has_cache = .false.
         context%has_toolchains = .false.
         context%request_seen = .false.
-        call fs_collect_files(cmake_context_build_path(context)// &
-            '/.cmake/api/v1/reply', 'index-', '.json', &
-            '', paths, n_paths, recursive=.false.)
+        allocate (paths(64))
+        do
+            call fs_collect_files(cmake_context_build_path(context)// &
+                '/.cmake/api/v1/reply', 'index-', '.json', &
+                '', paths, n_paths, recursive=.false., ierr=collect_status)
+            ! Every reconfigure leaves an index file; the newest sorts last, so
+            ! a truncated listing would select a stale reply.
+            if (collect_status /= 1 .or. size(paths) >= 65536) exit
+            capacity = 2*size(paths)
+            deallocate (paths)
+            allocate (paths(capacity))
+        end do
         if (n_paths < 1) return
         context%reply_index = trim(paths(n_paths))
         call cmake_context_read_file(trim(paths(n_paths)), input)

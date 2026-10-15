@@ -374,7 +374,7 @@ contains
         character(len=1025) :: line
         character(len=1024) :: key, val, section
         ! accumulated value for multi-line arrays (flags = [\n  "...",\n])
-        character(len=4096) :: accum
+        character(len=:), allocatable :: accum
         ! [extra.fo] model sections are read without any length cap
         character(len=:), allocatable :: raw, fo_key, fo_val, fo_accum
         integer :: eq
@@ -454,10 +454,15 @@ contains
 
             ! while accumulating a multi-line array, append each line until ']'
             if (in_array) then
-                accum = trim(accum)//trim(line)
+                accum = accum//trim(line)
                 if (index(line, ']') > 0) then
                     in_array = .false.
-                    val = trim(accum)
+                    if (len(accum) > len(val)) then
+                        write (config%manifest_parse_error, '(a,i0,a)') 'array value of '// &
+                            trim(pending_key)//' is longer than ', len(val), ' characters'
+                        cycle
+                    end if
+                    val = accum
                     select case (trim(section))
                     case ('build')
                         call parse_build(pending_key, val, config)
@@ -487,6 +492,7 @@ contains
 
             if (line(1:1) == '[') then
                 call get_section(line, section)
+                call check_section(section, config)
                 if (trim(section) == 'executable') then
                     call grow_exes(config%exes, config%n_exes, fpm_exe_t())
                 else if (trim(section) == 'test') then
@@ -1099,10 +1105,28 @@ contains
         do i = 1, config%n_flags
             if (trim(config%flags(i)) == trim(flag)) return
         end do
-        if (config%n_flags >= MAX_FLAGS) return
+        call push_config_flag(flag, config)
+    end subroutine append_config_flag
+
+    subroutine push_config_flag(flag, config)
+        !! Store one compiler flag or fail the manifest: a dropped flag would
+        !! silently change the build.
+        character(len=*), intent(in) :: flag
+        type(fpm_config_t), intent(inout) :: config
+
+        if (config%n_flags >= MAX_FLAGS) then
+            write (config%manifest_parse_error, '(a,i0,a)') 'more than ', &
+                MAX_FLAGS, ' compiler flags and macros are not supported'
+            return
+        end if
+        if (len_trim(flag) > len(config%flags)) then
+            write (config%manifest_parse_error, '(a,i0,a)') 'compiler flag ', &
+                len(config%flags), ' characters or longer is not supported'
+            return
+        end if
         config%n_flags = config%n_flags + 1
         config%flags(config%n_flags) = trim(flag)
-    end subroutine append_config_flag
+    end subroutine push_config_flag
 
     subroutine parse_exe(key, val, exe, error)
         character(len=*), intent(in) :: key, val
@@ -1376,17 +1400,34 @@ contains
         do i = 1, config%n_link_libs
             if (trim(config%link_libs(i)) == trim(lib)) return
         end do
-        if (config%n_link_libs >= MAX_LINK_LIBS) return
+        call push_link_lib(config, lib)
+    end subroutine add_link_lib
+
+    subroutine push_link_lib(config, lib)
+        !! Store one link library (repeats allowed: static link order) or fail
+        !! the manifest instead of dropping it.
+        type(fpm_config_t), intent(inout) :: config
+        character(len=*), intent(in) :: lib
+
+        if (config%n_link_libs >= MAX_LINK_LIBS) then
+            write (config%manifest_parse_error, '(a,i0,a)') 'more than ', &
+                MAX_LINK_LIBS, ' link libraries are not supported'
+            return
+        end if
+        if (len_trim(lib) > len(config%link_libs)) then
+            write (config%manifest_parse_error, '(a,i0,a)') 'link library ', &
+                len(config%link_libs), ' characters or longer is not supported'
+            return
+        end if
         config%n_link_libs = config%n_link_libs + 1
         config%link_libs(config%n_link_libs) = trim(lib)
-    end subroutine add_link_lib
+    end subroutine push_link_lib
 
     subroutine parse_link_libs(val, config)
         character(len=*), intent(in) :: val
         type(fpm_config_t), intent(inout) :: config
 
         integer :: pos, start, n
-        character(len=128) :: lib
         logical :: in_str
 
         pos = 1
@@ -1400,12 +1441,8 @@ contains
                     start = pos + 1
                 else
                     in_str = .false.
-                    lib = val(start:pos - 1)
-                    if (len_trim(lib) > 0 .and. &
-                        config%n_link_libs < MAX_LINK_LIBS) then
-                        config%n_link_libs = config%n_link_libs + 1
-                        config%link_libs(config%n_link_libs) = trim(lib)
-                    end if
+                    if (len_trim(val(start:pos - 1)) > 0) &
+                        call push_link_lib(config, val(start:pos - 1))
                 end if
             end if
             pos = pos + 1
@@ -1449,7 +1486,6 @@ contains
         type(fpm_config_t), intent(inout) :: config
 
         integer :: pos, start, n
-        character(len=128) :: flag
         logical :: in_str
 
         pos = 1
@@ -1463,12 +1499,8 @@ contains
                     start = pos + 1
                 else
                     in_str = .false.
-                    flag = val(start:pos - 1)
-                    if (len_trim(flag) > 0 .and. &
-                        config%n_flags < MAX_FLAGS) then
-                        config%n_flags = config%n_flags + 1
-                        config%flags(config%n_flags) = trim(flag)
-                    end if
+                    if (len_trim(val(start:pos - 1)) > 0) &
+                        call push_config_flag(val(start:pos - 1), config)
                 end if
             end if
             pos = pos + 1
@@ -2207,10 +2239,7 @@ contains
         pos = 1
         n = len_trim(val)
         in_str = .false.
-        if (index(val, '"') > 0 .and. config%n_flags < MAX_FLAGS) then
-            config%n_flags = config%n_flags + 1
-            config%flags(config%n_flags) = '-cpp'
-        end if
+        if (index(val, '"') > 0) call push_config_flag('-cpp', config)
         do while (pos <= n)
             if (val(pos:pos) == '"') then
                 if (.not. in_str) then
@@ -2235,10 +2264,8 @@ contains
                             'preprocessor macro exceeds supported flag length'
                         return
                     end if
-                    if (len_trim(macro) > 0 .and. config%n_flags < MAX_FLAGS) then
-                        config%n_flags = config%n_flags + 1
-                        config%flags(config%n_flags) = '-D'//trim(macro)
-                    end if
+                    if (len_trim(macro) > 0) &
+                        call push_config_flag('-D'//trim(macro), config)
                 end if
             end if
             pos = pos + 1
@@ -2271,6 +2298,31 @@ contains
             i = i + 1
         end do
     end subroutine strip_comment
+
+    subroutine check_section(section, config)
+        !! Reject tables fo does not read.  fpm rejects unknown manifest keys,
+        !! and a typo such as [librery] would otherwise change the build
+        !! without any message.  Tables fpm accepts but fo does not honour
+        !! get a warning because their effect would be silently lost.
+        character(len=*), intent(in) :: section
+        type(fpm_config_t), intent(inout) :: config
+
+        select case (trim(section))
+        case ('build', 'install', 'dependencies', 'dev-dependencies', 'test.dependencies', &
+              'executable.dependencies', 'example.dependencies', 'executable', 'test', &
+              'example', 'preprocess', 'preprocess.cpp', 'library', 'fortran', 'extra')
+            return
+        case ('profiles', 'metapackages')
+            write (error_unit, '(a)') 'fo: warning: fpm.toml ['//trim(section)// &
+                '] is accepted by fpm but not applied by fo'
+            return
+        end select
+        if (index(section, 'extra.') == 1) return
+        write (config%manifest_parse_error, '(a)') 'unknown table ['//trim(section)// &
+            ']; fpm accepts build, install, fortran, library, executable, test, '// &
+            'example, dependencies, dev-dependencies, preprocess, extra, profiles '// &
+            'and metapackages'
+    end subroutine check_section
 
     subroutine get_section(line, section)
         character(len=*), intent(in) :: line
