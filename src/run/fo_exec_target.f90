@@ -1,12 +1,13 @@
 module fo_exec_target
-    use fo_build_backend, only: backend_t, BACKEND_CMAKE, BACKEND_NATIVE
+    use fo_build_backend, only: backend_t, BACKEND_CMAKE, BACKEND_NATIVE, &
+        cmake_configure
     use fo_build_tree, only: native_output_dir
-    use fo_cmake_context, only: cmake_context_t, cmake_context_init, &
-        cmake_context_build_path
+    use fo_cmake_context, only: cmake_context_t
+    use fo_cmake_model, only: cmake_model_load
     use fo_cmake_native, only: native_cmake_resolve
     use fo_cmake_native_config, only: native_cmake_selected
-    use fo_fs, only: fs_collect_files
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
+    use fo_project_model, only: project_model_t, model_find_target, TARGET_EXECUTABLE
     use fo_gfortran_build, only: gfortran_app_source_name, gfortran_test_source_name, &
         scan_project_app_units
     use fo_scan, only: scan_unit_t, scan_dir
@@ -14,6 +15,7 @@ module fo_exec_target
     private
 
     public :: resolve_exec_target, exec_target_is_app
+    public :: exec_uses_cmake_model, resolve_cmake_exec
     public :: exec_args_t, parse_exec_args
 
     type :: exec_args_t
@@ -205,20 +207,25 @@ contains
         end do
     end function source_dir_has_target
 
+    logical function exec_uses_cmake_model(b) result(uses)
+        !! CMake projects resolve `fo exec` targets from the File API project
+        !! model. FO_CMAKE_NATIVE keeps its own resolver.
+        type(backend_t), intent(in) :: b
+
+        uses = b%kind == BACKEND_CMAKE
+        if (uses) uses = .not. native_cmake_selected(b%project_dir)
+    end function exec_uses_cmake_model
+
     subroutine resolve_exec_target(b, target, bin_path, found, flags)
-        !! Locate the built executable for target. For the native backend the
-        !! requested flags select the build tree (see fo_build_tree): a binary
-        !! built with other flags is never substituted.
+        !! Locate the built executable for target of a fpm or native CMake
+        !! backend. The requested flags select the build tree (see fo_build_tree):
+        !! a binary built with other flags is never substituted. Non-native CMake
+        !! targets are resolved by resolve_cmake_exec instead.
         type(backend_t), intent(in) :: b
         character(len=*), intent(in) :: target
         character(len=*), intent(out) :: bin_path
         logical, intent(out) :: found
         character(len=*), intent(in), optional :: flags
-
-        character(len=1024) :: candidates(64)
-        character(:), allocatable :: build_root
-        type(cmake_context_t) :: context
-        integer :: i, last_slash, n_candidates, n_exact
 
         if (b%kind /= BACKEND_CMAKE) then
             if (present(flags)) then
@@ -233,41 +240,125 @@ contains
 
         found = .false.
         bin_path = ''
-        if (native_cmake_selected(b%project_dir)) then
+        if (native_cmake_selected(b%project_dir)) &
             call native_cmake_resolve(b%cmake, target, bin_path, found)
+    end subroutine resolve_exec_target
+
+    subroutine resolve_cmake_exec(context, target, flags, log_file, bin_path, &
+            found, configured, message)
+        !! Configure the CMake project (File API query included), then resolve
+        !! target from the project model. bin_path is the target's own artifact,
+        !! so the build is never searched for a same-named file. configured is
+        !! false when CMake failed (details in log_file). found is false with
+        !! message set for an unknown or non-executable target. The artifact is
+        !! not checked for existence: the caller builds the target first.
+        type(cmake_context_t), intent(inout) :: context
+        character(len=*), intent(in) :: target, flags, log_file
+        character(len=*), intent(out) :: bin_path
+        logical, intent(out) :: found, configured
+        character(:), allocatable, intent(out) :: message
+
+        type(project_model_t) :: model
+        character(:), allocatable :: load_message
+        integer :: exitcode, ierr, target_index
+
+        found = .false.
+        configured = .false.
+        bin_path = ''
+        message = ''
+        call cmake_configure(context, flags, log_file, exitcode)
+        if (exitcode /= 0) return
+        configured = .true.
+
+        call cmake_model_load(context, model, ierr, load_message)
+        if (ierr /= 0) then
+            message = 'CMake project model unavailable: '//load_message
             return
         end if
-        call cmake_context_init(context, b%project_dir)
-        if (.not. context%valid) return
-        build_root = cmake_context_build_path(context)
-        bin_path = build_root//'/'//trim(target)
-        inquire (file=trim(bin_path), exist=found)
-        if (found) return
+        target_index = model_find_target(model, trim(target))
+        if (target_index == 0) then
+            message = 'no such target: '//trim(target)//executable_hints(model, target)
+            return
+        end if
+        if (model%targets(target_index)%kind /= TARGET_EXECUTABLE .or. &
+            .not. allocated(model%targets(target_index)%artifact)) then
+            message = 'not an executable target: '//trim(target)// &
+                executable_hints(model, target)
+            return
+        end if
+        if (len(model%targets(target_index)%artifact) > len(bin_path)) then
+            message = 'executable path too long: '//model%targets(target_index)%artifact
+            return
+        end if
+        bin_path = model%targets(target_index)%artifact
+        found = .true.
+    end subroutine resolve_cmake_exec
 
-        ! CMake's conventional output directory, checked before the recursive
-        ! scan below. A project that has also been built with fpm keeps a
-        ! second copy under build/<compiler-hash>/app, and the scan rejects
-        ! anything it finds twice. Without this probe a target that is present
-        ! at the canonical path is reported as missing purely because a stale
-        ! sibling build tree exists.
-        bin_path = build_root//'/bin/'//trim(target)
-        inquire (file=trim(bin_path), exist=found)
-        if (found) return
+    function executable_hints(model, target) result(text)
+        !! Executable targets whose names resemble target, or all executable
+        !! targets when none do. Empty when the project has no executables.
+        type(project_model_t), intent(in) :: model
+        character(len=*), intent(in) :: target
+        character(:), allocatable :: text
+        integer :: i, n_listed, n_exec
+        logical :: near_only
 
-        last_slash = index(trim(target), '/', back=.true.)
-        if (last_slash > 0) return
-
-        call fs_collect_files(build_root, '', trim(target), '', &
-            candidates, n_candidates)
-        n_exact = 0
-        do i = 1, n_candidates
-            last_slash = index(trim(candidates(i)), '/', back=.true.)
-            if (trim(candidates(i)(last_slash + 1:)) /= trim(target)) cycle
-            n_exact = n_exact + 1
-            bin_path = candidates(i)
+        n_exec = 0
+        near_only = .false.
+        do i = 1, model%n_targets
+            if (model%targets(i)%kind /= TARGET_EXECUTABLE) cycle
+            n_exec = n_exec + 1
+            if (near_name(model%targets(i)%name, target)) near_only = .true.
         end do
-        found = n_exact == 1
-        if (.not. found) bin_path = ''
-    end subroutine resolve_exec_target
+        text = ''
+        if (n_exec == 0) then
+            text = ' (the project defines no executable targets)'
+            return
+        end if
+        n_listed = 0
+        text = ' (executable targets'
+        if (near_only) text = ' (similar executable targets'
+        text = text//': '
+        do i = 1, model%n_targets
+            if (model%targets(i)%kind /= TARGET_EXECUTABLE) cycle
+            if (near_only .and. .not. near_name(model%targets(i)%name, target)) cycle
+            if (n_listed >= 12) exit
+            if (n_listed > 0) text = text//', '
+            text = text//model%targets(i)%name
+            n_listed = n_listed + 1
+        end do
+        text = text//')'
+    end function executable_hints
+
+    logical function near_name(name, target) result(near)
+        character(len=*), intent(in) :: name, target
+
+        near = index(name, trim(target)) > 0 .or. index(trim(target), name) > 0
+        if (.not. near) near = edit_distance(name, trim(target)) <= &
+            max(2, len_trim(target) / 3)
+    end function near_name
+
+    integer function edit_distance(a, b) result(distance)
+        !! Levenshtein distance between two short names.
+        character(len=*), intent(in) :: a, b
+        integer, allocatable :: previous(:), current(:)
+        integer :: i, j, cost
+
+        allocate (previous(0:len(b)), current(0:len(b)))
+        do j = 0, len(b)
+            previous(j) = j
+        end do
+        do i = 1, len(a)
+            current(0) = i
+            do j = 1, len(b)
+                cost = 1
+                if (a(i:i) == b(j:j)) cost = 0
+                current(j) = min(previous(j) + 1, current(j - 1) + 1, &
+                    previous(j - 1) + cost)
+            end do
+            previous = current
+        end do
+        distance = previous(len(b))
+    end function edit_distance
 
 end module fo_exec_target

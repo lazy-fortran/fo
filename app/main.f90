@@ -35,7 +35,7 @@ program fo_main
     use fo_ffc_cli, only: ffc_cmd_build, ffc_cmd_run, ffc_native_requested
     use fo_gremlin_cli, only: gremlin_cli_run
     use fo_exec_target, only: resolve_exec_target, exec_target_is_app, &
-        exec_args_t, parse_exec_args
+        exec_args_t, parse_exec_args, exec_uses_cmake_model, resolve_cmake_exec
     use fo_build_tree, only: native_other_builds
     use fo_cover, only: fo_cover_run
     use fo_lock, only: lock_write
@@ -736,11 +736,11 @@ contains
         type(exec_args_t) :: parsed
         integer :: exitcode, i, n_words
         character(len=4096), allocatable :: words(:)
-        character(len=512) :: build_log, bin_path
+        character(len=512) :: build_log, configure_log, bin_path
         character(len=1024) :: all_flags
-        character(len=:), allocatable :: packed
+        character(len=:), allocatable :: packed, message
         integer :: n_args
-        logical :: exists
+        logical :: exists, configured, uses_model
 
         n_words = max(0, command_argument_count() - 1)
         allocate (words(n_words))
@@ -781,6 +781,31 @@ contains
             end if
         end if
 
+        uses_model = exec_uses_cmake_model(b)
+        if (uses_model) then
+            ! The target is validated against the configured project model
+            ! before anything is built, so an unknown name is reported as such.
+            call make_tmpfile('fo-exec-configure', configure_log)
+            call resolve_cmake_exec(b%cmake, parsed%target, all_flags, &
+                configure_log, bin_path, exists, configured, message)
+            if (.not. configured) then
+                write (error_unit, '(a)') 'fo exec: CMake configure failed'
+                call report_build_result(configure_log)
+                call process_exit(1)
+            end if
+            call delete_tmpfile(configure_log)
+            if (.not. exists) then
+                write (error_unit, '(a)') 'fo exec: '//message
+                call process_exit(1)
+            end if
+            ! Build only the requested target; the preset and configuration
+            ! selected above are kept.
+            if (allocated(b%cmake%build_targets)) deallocate (b%cmake%build_targets)
+            allocate (character(len=len_trim(parsed%target)) :: &
+                b%cmake%build_targets(1))
+            b%cmake%build_targets(1) = trim(parsed%target)
+        end if
+
         if (.not. parsed%skip_build) then
             call make_tmpfile('fo-exec-build', build_log)
             if (trim(action) == 'run') then
@@ -798,11 +823,22 @@ contains
             call delete_tmpfile(build_log)
         end if
 
-        call resolve_exec_target(b, parsed%target, bin_path, exists, flags=all_flags)
+        if (uses_model) then
+            inquire (file=trim(bin_path), exist=exists)
+        else
+            call resolve_exec_target(b, parsed%target, bin_path, exists, &
+                flags=all_flags)
+        end if
         if (b%kind == BACKEND_NATIVE .and. parsed%skip_build) &
             call report_other_builds(b%project_dir, all_flags, parsed%target, exists)
         if (.not. exists) then
-            write (error_unit, '(a)') 'fo exec: no such target: '//trim(parsed%target)
+            if (uses_model) then
+                write (error_unit, '(a)') 'fo exec: executable not built: '// &
+                    trim(bin_path)
+            else
+                write (error_unit, '(a)') &
+                    'fo exec: no such target: '//trim(parsed%target)
+            end if
             call process_exit(1)
         end if
 
