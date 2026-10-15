@@ -395,8 +395,10 @@ contains
 
     subroutine backend_test_names(self, names, n_names, exitcode, include_slow, &
             log_file, flags, use_cache, no_build)
-        !! Named fpm tests and CMake cases without a project selection.
-        use fo_scan, only: is_slow_test
+        !! Exact named fpm tests (the model's selection, run by
+        !! project_run_cases) and the registered cases of the frozen
+        !! FO_CMAKE_NATIVE route, which has no project model. Slow handling
+        !! belongs to the model's `slow` label, not to this runner.
         type(backend_t), intent(inout) :: self
         character(len=*), intent(in) :: names(:)
         integer, intent(in) :: n_names
@@ -407,10 +409,8 @@ contains
         logical, intent(in), optional :: use_cache
         logical, intent(in), optional :: no_build
 
-        integer :: i, lock_ierr
-        character(len=:), allocatable :: fast_names(:)
+        integer :: lock_ierr
         logical :: slow, skip_build
-        integer :: n_fast
         character(len=512) :: log_path, lock_dir, flag_text
         character(len=:), allocatable :: regex
 
@@ -423,17 +423,7 @@ contains
         if (present(log_file)) log_path = log_file
         flag_text = ''
         if (present(flags)) flag_text = flags
-
-        allocate (character(len=len(names)) :: fast_names(n_names))
-        n_fast = 0
-        do i = 1, n_names
-            if (.not. slow .and. self%kind /= BACKEND_CMAKE) then
-                if (is_slow_test(names(i))) cycle
-            end if
-            n_fast = n_fast + 1
-            fast_names(n_fast) = names(i)
-        end do
-        if (n_fast == 0) return
+        if (n_names == 0) return
 
         if (self%kind == BACKEND_NONE) then
             exitcode = 1
@@ -448,7 +438,7 @@ contains
             end if
             select case (self%kind)
             case (BACKEND_NATIVE)
-                call gfortran_test_names(self%project_dir, fast_names, n_fast, &
+                call gfortran_test_names(self%project_dir, names, n_names, &
                     log_path, exitcode, include_slow=slow, flags=flag_text, &
                     use_cache=use_cache, build_only=.true.)
             case (BACKEND_CMAKE)
@@ -461,13 +451,13 @@ contains
         select case (self%kind)
         case (BACKEND_NATIVE)
             call gfortran_run_tests(self%project_dir, log_path, exitcode, slow, &
-                fast_names, n_fast, flags=flag_text)
+                names, n_names, flags=flag_text)
         case (BACKEND_CMAKE)
             if (native_cmake_selected(self%project_dir)) then
-                call native_cmake_test(self%cmake, fast_names(:n_fast), &
+                call native_cmake_test(self%cmake, names(:n_names), &
                     log_path, exitcode)
             else
-                call names_to_ctest_regex(fast_names, n_fast, regex)
+                call names_to_ctest_regex(names, n_names, regex)
                 call cmake_test(self%cmake, regex, .false., .false., log_path, &
                     .false., exitcode)
             end if
@@ -1075,10 +1065,10 @@ contains
 
         regex = '^('
         do i = 1, n_names
-            if (i > 1) regex = trim(regex)//'|'
+            if (i > 1) regex = regex//"|"
             call append_ctest_regex_name(regex, names(i))
         end do
-        regex = trim(regex)//')$'
+        regex = regex//")$"
     end subroutine names_to_ctest_regex
 
     subroutine append_ctest_regex_name(regex, name)
@@ -1092,11 +1082,11 @@ contains
             ch = name(i:i)
             select case (ch)
             case ('.', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|')
-                regex = trim(regex)//achar(92)//ch
+                regex = regex//achar(92)//ch
             case (achar(92))
-                regex = trim(regex)//achar(92)//achar(92)
+                regex = regex//achar(92)//achar(92)
             case default
-                regex = trim(regex)//ch
+                regex = regex//ch
             end select
         end do
     end subroutine append_ctest_regex_name

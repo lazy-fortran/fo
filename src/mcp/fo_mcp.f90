@@ -705,12 +705,11 @@ contains
 
     subroutine handle_backend_test_named(line, id_str, dir, tmpfile, response)
         use fo_build_backend, only: backend_t, detect_backend, backend_test, &
-            backend_test_names, BACKEND_NONE, BACKEND_CMAKE
-        use fo_scan, only: is_slow_test
+            backend_test_names, BACKEND_NONE
         use fo_project_model, only: model_request_t, model_selection_t, &
             project_model_t, SELECT_EMPTY
-        use fo_project_load, only: project_has_model, project_resolve, &
-            project_run_cases, project_affected, project_changed_files
+        use fo_project_load, only: project_has_model, project_select, &
+            project_run_cases
         use fx_string, only: string_t
         use fo_test_results, only: test_result_entry_t, parse_test_results, &
             format_test_results_text, format_test_results_json
@@ -728,9 +727,9 @@ contains
         type(model_request_t) :: request
         type(model_selection_t) :: selection
         type(project_model_t) :: model
-        character(len=:), allocatable :: message, reason
-        type(string_t), allocatable :: changed(:), widen_reasons(:)
-        logical :: only_changed, git_ok
+        character(len=:), allocatable :: message
+        type(string_t), allocatable :: widen_reasons(:)
+        logical :: only_changed
         integer :: changed_count, changed_error
 
         b = detect_backend(trim(dir))
@@ -776,62 +775,47 @@ contains
             return
         end if
 
-        if (n_names > 0 .or. only_changed .or. &
-            (b%kind == BACKEND_CMAKE .and. project_has_model(b))) then
+        if (.not. project_has_model(b)) then
+            ! Frozen FO_CMAKE_NATIVE route: the CTest registry is
+            ! authoritative.
+            if (n_names > 0) then
+                call backend_test_names(b, test_names(1:n_names), n_names, &
+                    exitcode, .true., tmpfile)
+            else
+                call backend_test(b, exitcode, log_file=tmpfile)
+            end if
+        else
+            ! Same selection as `fo test`: the project model decides.
             allocate (request%names(n_names), request%include_labels(0), &
                 request%exclude_labels(0), request%layers(0))
             do i = 1, n_names
                 request%names(i)%s = trim(test_names(i))
             end do
-            if (project_has_model(b)) then
-                ! Same selection as `fo test`: the project model decides.
+            call project_select(b, '', request, only_changed, model, selection, &
+                widen_reasons, ierr, message)
+            if (ierr == 0 .and. selection%status == SELECT_EMPTY) then
                 if (only_changed) then
-                    call project_changed_files(trim(b%project_dir), changed, &
-                        git_ok, reason)
-                    if (git_ok) then
-                        call project_affected(b, '', request, changed, model, &
-                            selection, widen_reasons, ierr, message)
-                    else
-                        call project_affected(b, '', request, changed, model, &
-                            selection, widen_reasons, ierr, message, &
-                            force_reason=reason)
-                    end if
-                    if (ierr == 0 .and. selection%status == SELECT_EMPTY) then
-                        call delete_tmpfile(tmpfile)
-                        call make_tool_text_response(id_str, 'no affected tests', &
-                            0, response)
-                        return
-                    end if
+                    output_text = 'no affected tests'
+                else if (model%n_cases == 0 .and. n_names == 0) then
+                    output_text = 'fo: project registers no tests'
                 else
-                    call project_resolve(b, '', request, model, selection, ierr, &
-                        message)
-                end if
-                if (ierr == 0 .and. selection%status == SELECT_EMPTY) then
                     ierr = 1
                     message = selection%message
                 end if
-                if (ierr /= 0) then
-                    output_text = 'fo: '//message
+                if (ierr == 0) then
                     call delete_tmpfile(tmpfile)
-                    call make_tool_text_response(id_str, output_text, 1, response)
+                    call make_tool_text_response(id_str, output_text, 0, response)
                     return
                 end if
-                call project_run_cases(b, model, selection%cases, '', .false., &
-                    tmpfile, exitcode)
-            else
-                do i = 1, n_names
-                    if (.not. is_slow_test(test_names(i))) cycle
-                    output_text = 'fo: slow test '//trim(test_names(i))// &
-                        ' requires --all'
-                    call delete_tmpfile(tmpfile)
-                    call make_tool_text_response(id_str, output_text, 1, response)
-                    return
-                end do
-                call backend_test_names(b, test_names(1:n_names), n_names, exitcode, &
-                    .true., tmpfile)
             end if
-        else
-            call backend_test(b, exitcode, log_file=tmpfile)
+            if (ierr /= 0) then
+                output_text = 'fo: '//message
+                call delete_tmpfile(tmpfile)
+                call make_tool_text_response(id_str, output_text, 1, response)
+                return
+            end if
+            call project_run_cases(b, model, selection%cases, '', .false., &
+                tmpfile, exitcode)
         end if
 
         call parse_test_results(tmpfile, entries, n_entries, ierr)

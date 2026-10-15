@@ -425,14 +425,10 @@ contains
         character(len=512) :: build_log, test_log
         character(len=512) :: no_project
         character(len=512) :: project_dir
-        integer :: i, n_run
-        logical :: is_test_arr(MAX_NODES)
-        character(len=MAX_PATH), allocatable :: filenames(:)
-        type(string_t), allocatable :: changed(:)
+        integer :: n_run
         type(backend_t) :: b
 
         t0 = wall_time_seconds()
-        allocate (filenames(MAX_NODES))
 
         b = detect_backend(dir)
         project_dir = b%project_dir
@@ -449,8 +445,7 @@ contains
 
         call fo_changed_modules(trim(project_dir), dag, changed_ids, &
             n_changed, affected_ids, n_affected, n_cached, &
-            ierr, res%n_in_cycle, &
-            filenames=filenames, is_test_arr=is_test_arr)
+            ierr, res%n_in_cycle)
         if (ierr /= 0) then
             call set_failure(res, 'scan', '', 'scan or dag failed', &
                 'check source parsing and module cycles', &
@@ -465,23 +460,6 @@ contains
         res%n_changed = n_changed
         res%n_affected = n_affected
 
-        if (n_changed == 0) then
-            call make_tmpfile('fo-build', build_log)
-            call backend_build(b, exitcode, log_file=build_log)
-            if (exitcode /= 0) then
-                call summarize_backend_failure('build', build_log, 'fo build', res)
-                t1 = wall_time_seconds()
-                res%elapsed = real(t1 - t0)
-                return
-            end if
-            call delete_tmpfile(build_log)
-            res%build_ok = .true.
-            res%tests_ok = .true.
-            t1 = wall_time_seconds()
-            res%elapsed = real(t1 - t0)
-            return
-        end if
-
         call make_tmpfile('fo-build', build_log)
         call backend_build(b, exitcode, log_file=build_log)
         if (exitcode /= 0) then
@@ -493,14 +471,10 @@ contains
         call delete_tmpfile(build_log)
         res%build_ok = .true.
 
-        ! The project model maps the changed sources to the affected cases.
-        allocate (changed(n_changed))
-        do i = 1, n_changed
-            changed(i)%s = trim(filenames(changed_ids(i)))
-        end do
+        ! The project model maps the Git delta (the selection of
+        ! `fo test --only-changed`) to the affected cases.
         call make_tmpfile('fo-test', test_log)
-        call project_run_affected(b, '', changed, .false., test_log, exitcode, &
-            n_run)
+        call project_run_affected(b, '', .false., test_log, exitcode, n_run)
         if (n_run == 0 .and. exitcode == 0) then
             call delete_tmpfile(test_log)
             res%tests_ok = .true.

@@ -8,7 +8,6 @@ module fo_gremlin_supervisor
         action_result_store_init, action_result_maintenance_tick, ACTION_RESULT_OK
     use fx_immutable_root_compact, only: immutable_store_compact_generation_roots
     use fx_immutable_store, only: IMMUTABLE_OK
-    use fo_check, only: fo_changed_modules
     use fo_gremlin_context, only: capture_candidate, generation_inventory_restore, &
         common_generation_cas_root
     use fo_gremlin_request, only: gremlin_request_t, parse_request, is_hex_digest, &
@@ -23,7 +22,7 @@ module fo_gremlin_supervisor
     use fo_gremlin_generation, only: generation_t, generation_driver_identity, &
         generation_model_key
     use fo_project_load, only: project_has_model, project_load_configured, &
-        project_inventory_cases, project_affected_cases
+        project_inventory_cases, project_affected_cases, project_changed_files
     use fo_project_model, only: model_find_case, model_select, model_request_t, &
         model_selection_t, SELECT_OK, SELECT_EMPTY
     use fo_gremlin_log_text, only: gremlin_retain_build_log, gremlin_log_tail
@@ -64,7 +63,6 @@ module fo_gremlin_supervisor
         gremlin_generation_lease_acquire_at, gremlin_generation_pin_at, &
         gremlin_generation_prune_inactive, &
         GREMLIN_STATE_TEXT_MAX
-    use fo_gfortran_build, only: gfortran_selected_test_names
     use fo_scan, only: is_slow_test
     use fo_test_budget, only: test_budget_seconds, test_wall_cap_seconds
     use fo_fpm_config, only: fpm_config_t, fpm_config_parse
@@ -74,7 +72,7 @@ module fo_gremlin_supervisor
         process_scope_t, process_scope_begin, process_scope_end
     use fo_scan_types, only: MAX_PATH
     use fo_util, only: json_bool, json_int
-    use fx_dag, only: dag_t, MAX_NODES
+    use fx_dag, only: MAX_NODES
     use fx_json_build, only: json_escape_string
     use fo_fs, only: fs_make_dir, fs_sleep_ms, fs_remove_tree
     use fo_gremlin_session, only: gremlin_resolve_read_session, &
@@ -1732,7 +1730,7 @@ contains
             if (build_child%pid > 0) then
                 call process_poll_pid(build_child%pid, build_done, build_exit)
                 if (build_done) then
-                    call complete_build(session, owner_request, candidate_generation, &
+                    call complete_build(project_dir, session, owner_request, candidate_generation, &
                         build_child, build_exit, active_generation, have_active, &
                         test_child, active_lease, candidate_lease, &
                         have_active_lease, have_candidate_lease, active_pinned, &
@@ -2441,11 +2439,15 @@ contains
         message = ''
     end subroutine start_build
 
-    subroutine complete_build(session, request, candidate, build_child, build_exit, &
+    subroutine complete_build(live_dir, session, request, candidate, build_child, &
+            build_exit, &
             active, have_active, test_child, active_lease, candidate_lease, &
             have_active_lease, have_candidate_lease, active_pinned, candidate_pinned, &
             selected, selected_count, seed, completed, state_name, last_failed, &
             sequence, ierr, message)
+        !! live_dir: the project directory the lane watches (the source of
+        !! the first generation's delta; the generation holds a frozen copy).
+        character(len=*), intent(in) :: live_dir
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(inout) :: request
         type(generation_t), intent(inout) :: candidate, active
@@ -2620,7 +2622,7 @@ contains
         selection_request%seed = seed
         call discover_campaign(active, session, &
             selection_request, selected, selected_count, mandatory_count, seed, &
-            inventory_status, message)
+            inventory_status, message, live_dir=live_dir)
         request%requirement_digest = selection_request%requirement_digest
         request%gate_cases = selection_request%gate_cases
         request%gate_required_count = selection_request%gate_required_count
@@ -2876,9 +2878,11 @@ contains
 
     subroutine discover_campaign(generation, session, request, &
             selected, n_selected, &
-            n_mandatory_selected, seed, ierr, message, bypass_coverage)
+            n_mandatory_selected, seed, ierr, message, bypass_coverage, live_dir)
         !! Select a campaign from the cases of the generation's project model
         !! (loaded once per generation, see generation_model_ensure).
+        !! live_dir: the watched project directory, whose working-tree delta
+        !! an only-changed first generation owes (absent: no baseline).
         type(generation_t), intent(inout) :: generation
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(inout) :: request
@@ -2886,22 +2890,19 @@ contains
         integer, intent(out) :: n_selected, n_mandatory_selected, seed, ierr
         character(len=*), intent(out) :: message
         logical, intent(in), optional :: bypass_coverage
+        character(len=*), intent(in), optional :: live_dir
 
         type(backend_t) :: backend
-        type(dag_t) :: dag
-        integer, allocatable :: changed_ids(:), affected_ids(:)
-        integer :: n_changed, n_affected, n_cached, i, n_all, n_impacted
+        integer :: i, n_all, n_impacted
         integer :: n_history, n_debt, cursor_seed, n_priorities, limit
         integer :: n_selected_priorities
         integer :: shuffle_status, coverage_status
-        character(len=MAX_PATH), allocatable :: filenames(:)
         character(len=NAME_LEN), allocatable :: all_names(:), impacted(:)
         character(len=NAME_LEN), allocatable :: history(:), debt(:), priorities(:)
         type(coverage_epoch_t) :: coverage
         character(len=PATH_LEN) :: coverage_path
-        character(len=PATH_LEN) :: project_dir
+        character(len=PATH_LEN) :: project_dir, live
         character(len=HASH_LEN) :: generation_id
-        logical, allocatable :: is_test_arr(:)
         logical :: reproduce_only, focused_targets
         integer, allocatable :: model_cases(:)
         integer :: capacity, kept, n_model
@@ -2920,10 +2921,8 @@ contains
             call project_inventory_cases(generation%model, model_cases)
             capacity = max(capacity, size(model_cases))
         end if
-        allocate (changed_ids(MAX_NODES), affected_ids(MAX_NODES), &
-            filenames(MAX_NODES), &
-            all_names(capacity), impacted(capacity), history(capacity), &
-            debt(capacity), priorities(capacity), is_test_arr(MAX_NODES))
+        allocate (all_names(capacity), impacted(capacity), history(capacity), &
+            debt(capacity), priorities(capacity))
         selected = ''
         impacted = ''
         n_selected = 0
@@ -2940,7 +2939,6 @@ contains
             return
         end if
         n_all = 0
-        n_affected = 0
         if (allocated(generation%model)) then
             n_model = size(model_cases)
             if (request_scoped(request)) then
@@ -2982,17 +2980,6 @@ contains
             call cmake_registered_names(backend, all_names, n_all, ierr, message)
             if (ierr /= 0) return
         end if
-        if (backend%kind == BACKEND_NATIVE .and. request%only_changed .and. &
-            .not. request%has_previous_generation) then
-            ! First-generation affected tests of the working-tree change.
-            call fo_changed_modules(project_dir, dag, changed_ids, n_changed, &
-                affected_ids, n_affected, n_cached, ierr, filenames=filenames, &
-                is_test_arr=is_test_arr)
-            if (ierr /= 0) then
-                message = 'cannot scan frozen project test inventory'
-                return
-            end if
-        end if
         call read_campaign_history(session, all_names, n_all, history, n_history, &
             debt, n_debt, cursor_seed, ierr, message)
         if (ierr /= 0) return
@@ -3005,19 +2992,18 @@ contains
                     call append_priority_names(request%impact_cases, &
                         request%n_impact_cases, impacted, n_impacted)
             end if
-        else if (request%only_changed .and. backend%kind == BACKEND_CMAKE) then
-            call append_priority_names(all_names, n_all, impacted, n_impacted)
         else if (request%only_changed) then
-            call gfortran_selected_test_names(project_dir, filenames, affected_ids, &
-                n_affected, .false., impacted, n_impacted)
-            ! Affected names outside the model inventory are not campaign cases.
-            kept = 0
-            do i = 1, n_impacted
-                if (.not. any(all_names(:n_all) == impacted(i))) cycle
-                kept = kept + 1
-                impacted(kept) = impacted(i)
-            end do
-            n_impacted = kept
+            ! First generation: the cases the working-tree delta affects on
+            ! the generation's model, as `fo test --only-changed`; without a
+            ! model (frozen FO_CMAKE_NATIVE) every case.
+            if (allocated(generation%model)) then
+                live = ''
+                if (present(live_dir)) live = live_dir
+                call first_generation_impact(generation, project_dir, trim(live), &
+                    model_cases(:n_model), impacted, n_impacted)
+            else
+                call append_priority_names(all_names, n_all, impacted, n_impacted)
+            end if
         end if
         ! Impact is computed over the complete generation model. A scoped
         ! lane owes only the affected cases within its eligible inventory.
@@ -3132,6 +3118,45 @@ contains
             end if
         end if
     end subroutine discover_campaign
+
+    subroutine first_generation_impact(generation, project_dir, live_dir, cases, &
+            impacted, n_impacted)
+        !! Names of the cases (model indices) that the working-tree delta of
+        !! live_dir affects: the selection of `fo test --only-changed` on the
+        !! generation's model (project_dir spells its sources). Without a
+        !! delta baseline every case.
+        type(generation_t), intent(inout) :: generation
+        character(len=*), intent(in) :: project_dir, live_dir
+        integer, intent(in) :: cases(:)
+        character(len=NAME_LEN), intent(inout) :: impacted(:)
+        integer, intent(inout) :: n_impacted
+        type(string_t), allocatable :: changed(:), roots(:), widen_reasons(:)
+        integer, allocatable :: affected(:)
+        character(len=:), allocatable :: reason
+        logical :: baseline
+        integer :: i
+
+        call generation_units_ensure(generation, trim(project_dir))
+        call generation_model_roots(generation, trim(project_dir), roots)
+        if (len(live_dir) > 0) then
+            call project_changed_files(live_dir, changed, baseline, reason)
+        else
+            allocate (changed(0))
+            baseline = .false.
+            reason = 'no working tree to compare against'
+        end if
+        if (baseline) then
+            call project_affected_cases(generation%model, generation%units, roots, &
+                cases, changed, affected, widen_reasons)
+        else
+            call project_affected_cases(generation%model, generation%units, roots, &
+                cases, changed, affected, widen_reasons, force_reason=reason)
+        end if
+        do i = 1, size(affected)
+            n_impacted = n_impacted + 1
+            impacted(n_impacted) = generation%model%cases(affected(i))%name
+        end do
+    end subroutine first_generation_impact
 
     subroutine select_missing_gate_cases(session, generation, request, limit, &
             selected, n_selected, n_mandatory, ierr, message)

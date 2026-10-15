@@ -1,8 +1,7 @@
 program fo_main
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit, real64
     use, intrinsic :: iso_c_binding, only: c_long_long
-    use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_PATH, &
-        is_slow_test
+    use fo_scan, only: scan_unit_t, scan_dir, MAX_UNITS, MAX_PATH
     use fx_dag, only: dag_t, dag_topo_sort, dag_to_dot, MAX_NODES
     use fo_dag_bridge, only: build_dag_from_units
     use fo_build_backend, only: backend_t, detect_backend, backend_build, &
@@ -21,14 +20,13 @@ program fo_main
     use fo_test_results, only: test_result_entry_t, &
         parse_test_results, format_test_results_text, format_test_results_json
     use fo_test_random, only: select_random_tests
-    use fo_gfortran_build, only: gfortran_selected_test_names
     use fx_string, only: string_t
     use fo_project_model, only: model_request_t, model_selection_t, &
         project_model_t, model_find_case, model_select, SELECT_EMPTY, SELECT_OK, &
         CASE_SELECTED
-    use fo_project_load, only: project_has_model, project_resolve, &
+    use fo_project_load, only: project_has_model, &
         project_run_cases, project_list_text, project_list_json, &
-        project_affected, project_changed_files, project_run_affected, &
+        project_select, project_run_affected, &
         project_load, project_inventory_cases, project_build_cases
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
@@ -148,11 +146,10 @@ contains
         integer :: n_cached, i, n_test_names
         real(real64) :: t0, t1
         character(len=MAX_PATH), allocatable :: filenames(:), changed_files(:)
-        type(string_t), allocatable :: changed(:)
         character(len=512) :: build_log, test_log
         character(len=:), allocatable :: failed_tests(:)
         integer :: n_failed_tests
-        logical :: is_test_arr(MAX_NODES), has_cycle
+        logical :: has_cycle
 
         allocate (units(MAX_UNITS), filenames(MAX_NODES), changed_files(MAX_NODES))
 
@@ -185,7 +182,7 @@ contains
         ! compute changed modules (rebuilds dag internally)
         call fo_changed_modules(trim(b%project_dir), dag, changed_ids, n_changed, &
             affected_ids, n_affected, n_cached, ierr, &
-            filenames=filenames, is_test_arr=is_test_arr)
+            filenames=filenames)
         if (ierr /= 0) then
             write (error_unit, '(a)') 'Static: FAIL scan or dag error'
             stop 1
@@ -207,35 +204,26 @@ contains
         call delete_tmpfile(build_log)
         write (output_unit, '(a)') 'Build: OK'
 
-        ! 3. test: skip if nothing changed, otherwise run affected tests only
-        if (n_changed == 0) then
+        ! 3. test: the cases the Git delta affects (the selection of
+        ! `fo test --only-changed`; the default selection, slow excluded)
+        call make_tmpfile('fo-test', test_log)
+        call project_run_affected(b, '', .false., test_log, exitcode, &
+            n_test_names)
+        if (n_test_names == 0 .and. exitcode == 0) then
+            call delete_tmpfile(test_log)
             t1 = wall_time_seconds()
             write (output_unit, '(a,f0.1,a)') &
-                'Tests: skipped, all cached (', t1 - t0, 's)'
+                'Tests: skipped, no affected tests (', t1 - t0, 's)'
         else
-            ! The project model maps the changed sources to the affected
-            ! cases (default selection, slow excluded).
-            allocate (changed(n_changed))
-            do i = 1, n_changed
-                changed(i)%s = trim(filenames(changed_ids(i)))
-            end do
-            call make_tmpfile('fo-test', test_log)
-            call project_run_affected(b, '', changed, .false., test_log, exitcode, &
-                n_test_names)
-            if (n_test_names == 0 .and. exitcode == 0) then
-                call delete_tmpfile(test_log)
-                write (output_unit, '(a)') 'Tests: skipped, no affected tests'
-            else
-                if (exitcode /= 0) then
-                    call collect_failed_test_names(test_log, failed_tests, &
-                        n_failed_tests)
-                    write (error_unit, '(a)') 'Tests: FAIL'
-                    call report_failed_tests(failed_tests, n_failed_tests)
-                    call process_exit(1)
-                end if
-                call delete_tmpfile(test_log)
-                write (output_unit, '(a)') 'Tests: OK'
+            if (exitcode /= 0) then
+                call collect_failed_test_names(test_log, failed_tests, &
+                    n_failed_tests)
+                write (error_unit, '(a)') 'Tests: FAIL'
+                call report_failed_tests(failed_tests, n_failed_tests)
+                call process_exit(1)
             end if
+            call delete_tmpfile(test_log)
+            write (output_unit, '(a)') 'Tests: OK'
         end if
 
         ! 4. lint: unused imports (skip compiler warnings in pipeline)
@@ -942,7 +930,7 @@ contains
 
         call fo_changed_modules('.', dag, changed_ids, n_changed, &
             affected_ids, n_affected, n_cached, ierr, &
-            filenames=filenames, is_test_arr=is_test_arr)
+            filenames=filenames)
         if (ierr /= 0) then
             write (error_unit, '(a)') 'fo: scan or dag failed'
             stop 1
@@ -1262,33 +1250,23 @@ contains
 
     subroutine cmd_test()
         type(backend_t) :: b
-        type(dag_t) :: dag
-        integer :: exitcode
-        integer :: changed_ids(MAX_NODES), n_changed
-        integer :: affected_ids(MAX_NODES), n_affected
-        integer :: n_cached, ierr, i, n_test_names, n_arg_names
+        integer :: exitcode, ierr, i, n_arg_names
         integer :: random_count, random_seed, clock_count
         integer :: argument_status, eq
         logical :: only_changed, include_all, verbose, use_json, skip_next
-        logical :: end_options, flags_seen, list_mode, filtered, use_model
-        logical :: no_build, cmake_model, git_ok
-        type(string_t), allocatable :: changed(:), widen_reasons(:)
+        logical :: end_options, flags_seen, list_mode, filtered, no_build
+        type(string_t), allocatable :: widen_reasons(:)
         type(model_request_t) :: request
         type(model_selection_t) :: selection
         type(project_model_t) :: model
-        integer, allocatable :: run_cases(:)
         character(len=:), allocatable :: text, message
         character(len=1024) :: arg
         character(len=1024), allocatable :: test_names(:), random_candidates(:)
         character(len=512) :: test_log, flags
         character(len=64) :: profile
         character(len=1024) :: all_flags
-        logical :: is_test_arr(MAX_NODES)
-        character(len=MAX_PATH), allocatable :: filenames(:)
-        integer :: candidate_ids(MAX_NODES)
 
-        allocate (test_names(MAX_NODES), random_candidates(MAX_NODES), &
-            filenames(MAX_NODES))
+        allocate (test_names(MAX_NODES), random_candidates(MAX_NODES))
         only_changed = .false.
         include_all = .false.
         verbose = .false.
@@ -1438,82 +1416,76 @@ contains
 
         filtered = size(request%include_labels) > 0 .or. &
             size(request%exclude_labels) > 0 .or. size(request%layers) > 0
-        if (filtered .or. list_mode .or. only_changed) then
-            if (random_count > 0) then
+        if (random_count > 0) then
+            if (filtered .or. list_mode .or. only_changed) then
                 write (error_unit, '(a)') 'fo test: --random conflicts with '// &
                     '-L, -LE, --layer, --list and --only-changed'
                 stop 1
             end if
-            if (.not. project_has_model(b)) then
-                write (error_unit, '(a)') 'fo test: -L, -LE, --layer, --list and '// &
-                    '--only-changed need the project model (unsupported with '// &
-                    'FO_CMAKE_NATIVE)'
-                stop 1
-            end if
-        end if
-        ! CMake always runs through the model: select, plan, build the plan
-        ! targets, run the exact cases. fpm uses it for names, filters and
-        ! the affected selection.
-        cmake_model = b%kind == BACKEND_CMAKE .and. project_has_model(b)
-        use_model = (filtered .or. list_mode .or. n_arg_names > 0 .or. &
-            cmake_model .or. only_changed) .and. random_count == 0
-        if (use_model) use_model = project_has_model(b)
-
-        if (random_count > 0) then
-            if (n_arg_names > 0 .or. only_changed) then
+            if (n_arg_names > 0) then
                 write (error_unit, '(a)') &
                     'fo test: --random conflicts with names or --only-changed'
                 stop 1
             end if
-            call fo_changed_modules('.', dag, changed_ids, n_changed, &
-                affected_ids, n_affected, n_cached, ierr, &
-                filenames=filenames, is_test_arr=is_test_arr)
-            if (ierr /= 0) then
-                write (error_unit, '(a)') 'fo: scan or dag failed'
+        end if
+
+        if (.not. project_has_model(b)) then
+            ! Frozen FO_CMAKE_NATIVE route: no project model, the CTest
+            ! registry is authoritative and a no-match is rejected by the run.
+            if (filtered .or. list_mode .or. only_changed .or. random_count > 0) then
+                write (error_unit, '(a)') 'fo test: -L, -LE, --layer, --list, '// &
+                    '--random and --only-changed need the project model '// &
+                    '(unsupported with FO_CMAKE_NATIVE)'
                 stop 1
             end if
-            n_test_names = 0
-            if (cmake_model) then
-                ! Candidates are the model's default selection.
-                allocate (request%names(0))
-                request%all = include_all
-                call project_resolve(b, all_flags, request, model, selection, &
-                    ierr, message)
-                if (ierr /= 0) then
-                    write (error_unit, '(a)') 'fo: '//message
-                    stop 1
-                end if
-                n_test_names = size(selection%cases)
-                if (n_test_names > size(random_candidates)) then
-                    deallocate (random_candidates)
-                    allocate (random_candidates(n_test_names))
-                end if
-                do i = 1, n_test_names
-                    random_candidates(i) = model%cases(selection%cases(i))%name
-                end do
-            else if (b%kind == BACKEND_NATIVE) then
-                do i = 1, dag%n_nodes
-                    candidate_ids(i) = i
-                end do
-                call gfortran_selected_test_names(b%project_dir, filenames, &
-                    candidate_ids, dag%n_nodes, include_all, random_candidates, &
-                    n_test_names)
+            call make_tmpfile('fo-test', test_log)
+            if (n_arg_names > 0) then
+                call backend_test_names(b, test_names, n_arg_names, exitcode, &
+                    include_all, test_log, flags=all_flags, no_build=no_build)
             else
-                do i = 1, dag%n_nodes
-                    if (.not. is_test_arr(i)) cycle
-                    if (.not. include_all .and. &
-                        is_slow_test(dag%nodes(i)%label)) cycle
-                    n_test_names = n_test_names + 1
-                    random_candidates(n_test_names) = dag%nodes(i)%label
-                end do
+                call backend_test(b, exitcode, include_all, test_log, &
+                    flags=all_flags, no_build=no_build)
             end if
+            call report_test_result(exitcode, test_log, &
+                n_arg_names == 0 .and. .not. verbose, use_json, &
+                require_results=n_arg_names > 0)
+            call delete_tmpfile(test_log)
+            return
+        end if
+
+        ! One selection path for every backend, CLI and MCP: load the project
+        ! model (CMake is configured, nothing is built), select, run the exact
+        ! cases. The model applies the default exclusions and --all.
+        allocate (request%names(n_arg_names))
+        do i = 1, n_arg_names
+            request%names(i)%s = trim(test_names(i))
+        end do
+        request%all = include_all
+        call project_select(b, all_flags, request, only_changed, model, selection, &
+            widen_reasons, ierr, message)
+        if (ierr /= 0) then
+            write (error_unit, '(a)') 'fo: '//message
+            stop 1
+        end if
+        do i = 1, size(widen_reasons)
+            write (error_unit, '(a)') 'fo: affected selection widened: '// &
+                widen_reasons(i)%s
+        end do
+        if (random_count > 0) then
+            ! Candidates are the model's default selection.
+            if (size(selection%cases) > size(random_candidates)) then
+                deallocate (random_candidates)
+                allocate (random_candidates(size(selection%cases)))
+            end if
+            do i = 1, size(selection%cases)
+                random_candidates(i) = model%cases(selection%cases(i))%name
+            end do
             if (random_seed == 0) then
                 call system_clock(clock_count)
                 random_seed = clock_count
             end if
-            call select_random_tests( &
-                random_candidates, n_test_names, random_count, random_seed, &
-                test_names, n_arg_names)
+            call select_random_tests(random_candidates, size(selection%cases), &
+                random_count, random_seed, test_names, n_arg_names)
             if (n_arg_names == 0) then
                 write (error_unit, '(a)') 'fo: no eligible tests for --random'
                 if (.not. include_all) then
@@ -1524,110 +1496,38 @@ contains
             write (error_unit, '(a,i0,a,i0,a)') &
                 'fo: random seed ', random_seed, ' selected ', n_arg_names, &
                 ' test(s)'
-            call make_tmpfile('fo-test', test_log)
-            if (cmake_model) then
-                allocate (run_cases(n_arg_names))
-                do i = 1, n_arg_names
-                    run_cases(i) = model_find_case(model, trim(test_names(i)))
-                end do
-                call project_run_cases(b, model, run_cases, all_flags, no_build, &
-                    test_log, exitcode)
+            selection%cases = [(model_find_case(model, trim(test_names(i))), &
+                i=1, n_arg_names)]
+        end if
+        if (list_mode) then
+            if (use_json) then
+                call project_list_json(model, selection, text)
             else
-                call backend_test_names(b, test_names, n_arg_names, exitcode, &
-                    include_all, test_log, flags=all_flags, no_build=no_build)
+                call project_list_text(model, selection, text)
             end if
-            call report_test_result(exitcode, test_log, .false., use_json, &
-                require_results=.true.)
-            call delete_tmpfile(test_log)
-        else if (use_model) then
-            ! One selection path for CLI and MCP: load the project model of
-            ! the backend (CMake is configured, nothing is built) and select.
-            allocate (request%names(n_arg_names))
-            do i = 1, n_arg_names
-                request%names(i)%s = trim(test_names(i))
-            end do
-            request%all = include_all
+            write (output_unit, '(a)') text
+            return
+        end if
+        if (selection%status == SELECT_EMPTY) then
             if (only_changed) then
-                ! Changed files against Git HEAD; without a baseline every
-                ! selected case is affected.
-                call project_changed_files(trim(b%project_dir), changed, &
-                    git_ok, message)
-                if (git_ok) then
-                    call project_affected(b, all_flags, request, changed, model, &
-                        selection, widen_reasons, ierr, message)
-                else
-                    call project_affected(b, all_flags, request, changed, model, &
-                        selection, widen_reasons, ierr, text, force_reason=message)
-                    message = text
-                end if
-            else
-                call project_resolve(b, all_flags, request, model, selection, &
-                    ierr, message)
-            end if
-            if (ierr /= 0) then
-                write (error_unit, '(a)') 'fo: '//message
-                stop 1
-            end if
-            if (only_changed) then
-                do i = 1, size(widen_reasons)
-                    write (error_unit, '(a)') 'fo: affected selection widened: '// &
-                        widen_reasons(i)%s
-                end do
-            end if
-            if (list_mode) then
-                if (use_json) then
-                    call project_list_json(model, selection, text)
-                else
-                    call project_list_text(model, selection, text)
-                end if
-                write (output_unit, '(a)') text
+                write (output_unit, '(a)') 'no affected tests'
                 return
             end if
-            if (selection%status == SELECT_EMPTY) then
-                if (only_changed) then
-                    write (output_unit, '(a)') 'no affected tests'
-                    return
-                end if
-                if (model%n_cases == 0 .and. n_arg_names == 0 .and. .not. filtered) then
-                    write (output_unit, '(a)') 'fo: project registers no tests'
-                    return
-                end if
-                write (error_unit, '(a)') 'fo: '//selection%message
-                stop 1
+            if (model%n_cases == 0 .and. n_arg_names == 0 .and. .not. filtered) then
+                write (output_unit, '(a)') 'fo: project registers no tests'
+                return
             end if
-            call make_tmpfile('fo-test', test_log)
-            ! The model already applied the default exclusions and --all.
-            call project_run_cases(b, model, selection%cases, all_flags, no_build, &
-                test_log, exitcode)
-            call report_test_result(exitcode, test_log, &
-                (n_arg_names == 0 .and. .not. filtered .and. .not. verbose .and. &
-                .not. only_changed), use_json, require_results=.true.)
-            call delete_tmpfile(test_log)
-        else if (n_arg_names > 0) then
-            ! FO_CMAKE_NATIVE has no project model: the CTest registry is
-            ! authoritative and no-match is rejected by the run.
-            if (.not. include_all) then
-                do i = 1, n_arg_names
-                    if (.not. is_slow_test(test_names(i))) cycle
-                    write (error_unit, '(a)') 'fo: slow test '// &
-                        trim(test_names(i))//' requires --all'
-                    stop 1
-                end do
-            end if
-            call make_tmpfile('fo-test', test_log)
-            call backend_test_names(b, test_names, n_arg_names, exitcode, &
-                include_all, test_log, flags=all_flags, no_build=no_build)
-            call report_test_result(exitcode, test_log, .false., use_json, &
-                require_results=.true.)
-            call delete_tmpfile(test_log)
-        else
-            call make_tmpfile('fo-test', test_log)
-            call backend_test(b, exitcode, include_all, test_log, flags=all_flags, &
-                no_build=no_build)
-            call report_test_result(exitcode, test_log, &
-                (n_arg_names == 0 .and. .not. verbose), use_json)
-            call delete_tmpfile(test_log)
+            write (error_unit, '(a)') 'fo: '//selection%message
+            stop 1
         end if
+        call make_tmpfile('fo-test', test_log)
+        call project_run_cases(b, model, selection%cases, all_flags, no_build, &
+            test_log, exitcode)
+        call report_test_result(exitcode, test_log, &
+            random_count == 0 .and. n_arg_names == 0 .and. .not. filtered .and. &
+            .not. verbose .and. .not. only_changed, use_json, &
+            require_results=.true.)
+        call delete_tmpfile(test_log)
     end subroutine cmd_test
 
     subroutine test_option_value(i, message, value)

@@ -11,7 +11,9 @@ module fo_project_load
         json_value_string, json_key_string, json_key_bool, &
         json_to_string
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file_alloc
-    use fo_scan, only: is_slow_test
+    use fo_dep_resolve, only: resolved_src_t, resolve_dep_srcs, &
+        resolve_dev_dep_srcs, MAX_RESOLVED
+    use fo_fpm_config, only: DEP_PATH
     use fo_build_backend, only: backend_t, BACKEND_NATIVE, BACKEND_CMAKE, &
         cmake_configure, backend_test_names, backend_test_cases, backend_test, &
         backend_set_build_targets, backend_build
@@ -36,6 +38,7 @@ module fo_project_load
 
     public :: project_has_model, project_load, project_resolve, project_run_cases
     public :: project_affected, project_changed_files, project_run_affected
+    public :: project_select
     public :: project_load_configured, project_inventory_cases, project_build_cases
     public :: project_model_units, project_affected_cases
     public :: project_list_text, project_list_json
@@ -228,12 +231,12 @@ contains
         case (SELECT_NAMED_EXCLUDED)
             ierr = 1
             message = selection%message
-            ! Keep the established wording for the slow-name rule.
+            ! Keep the established wording for the `slow` label rule.
             do i = 1, size(request%names)
                 k = model_find_case(model, request%names(i)%s)
                 if (k == 0) cycle
                 if (selection%disposition(k) /= CASE_DEFAULT_EXCLUDED) cycle
-                if (is_slow_test(request%names(i)%s)) message = 'slow test '// &
+                if (has_label(model, k, 'slow')) message = 'slow test '// &
                     request%names(i)%s//' requires --all'
                 exit
             end do
@@ -242,6 +245,52 @@ contains
             message = selection%message
         end select
     end subroutine resolve_loaded
+
+    logical function has_label(model, k, label) result(found)
+        type(project_model_t), intent(in) :: model
+        integer, intent(in) :: k
+        character(len=*), intent(in) :: label
+        integer :: j
+
+        found = .false.
+        do j = 1, size(model%cases(k)%labels)
+            if (model%cases(k)%labels(j)%s == label) found = .true.
+        end do
+    end function has_label
+
+    subroutine project_select(b, flags, request, only_changed, model, selection, &
+            widen_reasons, ierr, message)
+        !! The one selection entry of `fo test`, `fo test --list`, the MCP test
+        !! tool and `fo check`: project_resolve, or with only_changed the
+        !! cases the Git delta of the project and its path dependencies
+        !! affects (no baseline widens to the whole selection).
+        type(backend_t), intent(inout) :: b
+        character(len=*), intent(in) :: flags
+        type(model_request_t), intent(in) :: request
+        logical, intent(in) :: only_changed
+        type(project_model_t), intent(out) :: model
+        type(model_selection_t), intent(out) :: selection
+        type(string_t), allocatable, intent(out) :: widen_reasons(:)
+        integer, intent(out) :: ierr
+        character(len=:), allocatable, intent(out) :: message
+        type(string_t), allocatable :: changed(:)
+        character(len=:), allocatable :: reason
+        logical :: git_ok
+
+        if (.not. only_changed) then
+            allocate (widen_reasons(0))
+            call project_resolve(b, flags, request, model, selection, ierr, message)
+            return
+        end if
+        call project_changed_files(trim(b%project_dir), changed, git_ok, reason)
+        if (git_ok) then
+            call project_affected(b, flags, request, changed, model, selection, &
+                widen_reasons, ierr, message)
+        else
+            call project_affected(b, flags, request, changed, model, selection, &
+                widen_reasons, ierr, message, force_reason=reason)
+        end if
+    end subroutine project_select
 
     subroutine project_affected(b, flags, request, changed, model, selection, &
             widen_reasons, ierr, message, force_reason)
@@ -359,18 +408,17 @@ contains
         affected = selection%cases
     end subroutine project_affected_cases
 
-    subroutine project_run_affected(b, flags, changed, include_all, log_file, &
-            exitcode, n_run)
-        !! Build and run the cases the changed files affect (the default
+    subroutine project_run_affected(b, flags, include_all, log_file, exitcode, &
+            n_run)
+        !! Build and run the cases the Git delta affects (the default
         !! selection; include_all lifts default exclusions), for `fo check`
-        !! and the `fo` pipeline. changed: paths below the project root,
-        !! absolute or relative. Without a project model (FO_CMAKE_NATIVE)
-        !! every registered test runs (n_run = -1). n_run = 0: no case is
-        !! affected and nothing ran. A model that cannot be loaded fails
-        !! (exitcode 1) with the diagnostic appended to log_file.
+        !! and the `fo` pipeline: the selection of `fo test --only-changed`.
+        !! Without a project model (FO_CMAKE_NATIVE) every registered test
+        !! runs (n_run = -1). n_run = 0: no case is affected and nothing ran.
+        !! A model that cannot be loaded fails (exitcode 1) with the
+        !! diagnostic appended to log_file.
         type(backend_t), intent(inout) :: b
         character(len=*), intent(in) :: flags
-        type(string_t), intent(in) :: changed(:)
         logical, intent(in) :: include_all
         character(len=*), intent(in) :: log_file
         integer, intent(out) :: exitcode, n_run
@@ -391,7 +439,7 @@ contains
         allocate (request%names(0), request%include_labels(0), &
             request%exclude_labels(0), request%layers(0))
         request%all = include_all
-        call project_affected(b, flags, request, changed, model, selection, &
+        call project_select(b, flags, request, .true., model, selection, &
             widen_reasons, ierr, message)
         if (ierr /= 0) then
             exitcode = 1
@@ -410,6 +458,67 @@ contains
     end subroutine project_run_affected
 
     subroutine project_changed_files(project_dir, changed, ok, reason)
+        !! Files that differ from the Git HEAD of the repository holding
+        !! project_dir (see git_changed_files), relative to project_dir, plus
+        !! those of every fpm path dependency outside project_dir, spelled
+        !! absolute: each dependency is compared against its own repository.
+        !! ok = .false. with reason when a baseline is missing for the
+        !! project or for such a dependency (the selection then widens).
+        character(len=*), intent(in) :: project_dir
+        type(string_t), allocatable, intent(out) :: changed(:)
+        logical, intent(out) :: ok
+        character(len=:), allocatable, intent(out) :: reason
+        type(resolved_src_t), allocatable :: deps(:), devs(:)
+        type(resolved_src_t) :: dep
+        type(string_t), allocatable :: roots(:)
+        type(string_t), allocatable :: more(:)
+        character(len=4096) :: physical
+        logical :: resolved, dep_ok
+        character(len=:), allocatable :: dep_reason
+        integer :: n_deps, n_devs, n_unresolved, ierr, k
+
+        call git_changed_files(project_dir, changed, ok, reason)
+        if (.not. ok) return
+        inquire (file=trim(project_dir)//'/fpm.toml', exist=resolved)
+        if (.not. resolved) return
+        allocate (deps(MAX_RESOLVED), devs(MAX_RESOLVED))
+        call resolve_dep_srcs(project_dir, deps, n_deps, n_unresolved, ierr)
+        if (ierr /= 0) n_deps = 0
+        call resolve_dev_dep_srcs(project_dir, devs, n_devs, ierr)
+        if (ierr /= 0) n_devs = 0
+        call fs_realpath(project_dir, physical, resolved)
+        if (.not. resolved) physical = project_dir
+        roots = [string_t(project_dir), string_t(trim(physical))]
+        do k = 1, n_deps + n_devs
+            if (k <= n_deps) then
+                dep = deps(k)
+            else
+                dep = devs(k - n_deps)
+            end if
+            if (dep%kind /= DEP_PATH) cycle
+            if (below_any(trim(dep%dir)//'/', roots)) cycle
+            call git_changed_files(trim(dep%dir), more, dep_ok, dep_reason)
+            if (.not. dep_ok) then
+                ok = .false.
+                reason = 'path dependency '//trim(dep%name)//': '//dep_reason
+                return
+            end if
+            call add_prefixed(changed, trim(dep%dir)//'/', more)
+        end do
+    end subroutine project_changed_files
+
+    subroutine add_prefixed(changed, prefix, more)
+        type(string_t), allocatable, intent(inout) :: changed(:)
+        character(len=*), intent(in) :: prefix
+        type(string_t), intent(in) :: more(:)
+        integer :: k
+
+        do k = 1, size(more)
+            call push_text(changed, prefix//more(k)%s)
+        end do
+    end subroutine add_prefixed
+
+    subroutine git_changed_files(project_dir, changed, ok, reason)
         !! Files that differ from the Git HEAD of the repository holding
         !! project_dir: tracked changes (staged or not, deletions included)
         !! and untracked files that are not ignored, relative to project_dir
@@ -483,7 +592,7 @@ contains
         end if
         call split_nul(text, changed)
         ok = .true.
-    end subroutine project_changed_files
+    end subroutine git_changed_files
 
     subroutine split_nul(text, items)
         !! NUL-terminated items of text, each once.

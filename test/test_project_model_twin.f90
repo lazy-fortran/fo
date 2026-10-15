@@ -468,7 +468,62 @@ contains
             'test_core_a;test_io_c;test_phys_b;')
         call run_affected(fpm_dir, fpm_env, 'fpm')
         call run_affected(cmake_dir, cmake_env, 'cmake')
+        call gremlin_only_changed()
     end subroutine affected_matrix
+
+    subroutine gremlin_only_changed()
+        !! The first Gremlin generation of an only-changed lane owes exactly
+        !! the cases the model delta affects (not every case, not the
+        !! compile-cache misses), on fresh twins without campaign history.
+        character(:), allocatable :: fpm_path, cmake_path
+
+        fpm_path = join_path(scratch, 'delta_fpm')
+        cmake_path = join_path(scratch, 'delta_cmake')
+        call twin_write(fpm_path, 'fpm')
+        call twin_write(cmake_path, 'cmake')
+        call git_baseline(fpm_path)
+        call git_baseline(cmake_path)
+        call edit(fpm_path, 'src/tw_phys.f90')
+        call edit(cmake_path, 'src/tw_phys.f90')
+        call gremlin_pair('only-changed', fpm_path, cmake_path, &
+            '--only-changed --random 0', 1, &
+            'build:BUILD_PASS;test_phys_b|PASS|unit,|tw_phys;')
+        call assert_owed('fpm', fpm_path)
+        call assert_owed('cmake', cmake_path)
+    end subroutine gremlin_only_changed
+
+    subroutine assert_owed(tag, dir)
+        !! The lane is quiescent after owing exactly one case.
+        character(len=*), intent(in) :: tag, dir
+        character(:), allocatable :: session, lane
+        type(string_list_t) :: arguments
+        type(process_result_t) :: result
+        type(json_value_t) :: status
+        integer :: poll
+
+        lane = 'owed-'//tag
+        call gremlin_start(dir, lane, '--only-changed --random 0', session)
+        call list_add(arguments, 'gremlin')
+        call list_add(arguments, 'status')
+        call list_add(arguments, '--dir')
+        call list_add(arguments, dir)
+        call list_add(arguments, '--lane')
+        call list_add(arguments, lane)
+        call list_add(arguments, '--session')
+        call list_add(arguments, session)
+        do poll = 1, 300
+            call gremlin_json(driver, dir, cache, state, arguments, status, result, &
+                20000)
+            if (json_string_value(json_member(status, 'state')) == 'quiescent') exit
+            call gremlin_wait_ms(200)
+        end do
+        call assert_equal_string(json_string_value(json_member(status, 'state')), &
+            'quiescent', tag//' only-changed lane settles')
+        call assert_equal_integer(nint(json_number_value(json_member(status, &
+            'gate_required'))), 1, tag//' only-changed lane owes only the affected case')
+        call gremlin_stop_lane(driver, dir, cache, state, lane, session, &
+            allow_terminal_error=.true.)
+    end subroutine assert_owed
 
     subroutine git_baseline(dir)
         character(len=*), intent(in) :: dir
