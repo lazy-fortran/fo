@@ -219,7 +219,7 @@ contains
         call twin_write(delegated_dir, 'cmake')
         call list_add(args, 'test')
         call list_add(args, '--all')
-        call list_add(args, '--json')
+        call list_add(args, '--json=full')
         call run_fo(driver, args, native_dir, cache, native, fo_environment(.false., .false.))
         call run_fo(driver, args, delegated_dir, cache, delegated, &
             fo_environment(.true., .false.))
