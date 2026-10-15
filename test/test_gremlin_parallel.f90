@@ -235,7 +235,7 @@ contains
         !! once (or a deadline), recording the peak it saw.
         character(len=*), intent(in) :: dir, name, marks, names(:)
         logical, intent(in) :: block
-        character(:), allocatable :: list, wait_condition
+        character(:), allocatable :: list, wait_condition, deadline, guard
         integer :: i
 
         list = ''
@@ -243,7 +243,14 @@ contains
             if (i > 1) list = list//', '
             list = list//"'"//trim(names(i))//"'"
         end do
+        ! A blocked case never passes without the release: it holds far longer
+        ! than any candidate build and fails if its deadline is ever reached.
+        deadline = '4'
+        guard = ''
         if (block) then
+            deadline = '90'
+            guard = 'inquire (file=dir//"/release", exist=e1)'//nl// &
+                'if (.not. e1) error stop 7'//nl
             wait_condition = '        inquire (file=dir//"/release", exist=e1)'//nl// &
                 '        if (e1) exit'//nl
         else
@@ -276,8 +283,9 @@ contains
             'do'//nl// &
             wait_condition// &
             '        call system_clock(c1)'//nl// &
-            '        if (c1 - c0 > 4*rate) exit'//nl// &
+            '        if (c1 - c0 > '//deadline//'*rate) exit'//nl// &
             'end do'//nl// &
+            guard// &
             'open (newunit=u, file=dir//"/'//trim(name)//'.peak", status="replace")'//nl// &
             'write (u, "(i0)") peak'//nl// &
             'close (u)'//nl// &
