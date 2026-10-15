@@ -88,7 +88,9 @@ module fo_gfortran_build
     public :: gfortran_build, gfortran_test, gfortran_test_names
     public :: gfortran_run_tests
     public :: gfortran_app_source_name, gfortran_test_source_name
-    public :: scan_project_app_units
+    public :: scan_project_app_units, scan_project_test_units
+    public :: test_source_eligible, scanned_dispatcher_available
+    public :: unit_has_dispatcher_marker
     public :: source_has_marker, dispatch_target
     public :: gfortran_selected_test_names, gfortran_named_test_exists
     public :: native_compile_units, native_link_target, native_archive_target

@@ -1,0 +1,200 @@
+program test_fpm_project_model
+    !! fpm adapter baseline: a generated project with fast, slow, dispatched
+    !! and module-only dispatched tests, an app, a library and a dependency.
+    !! Case names must equal the native `fo test` inventory, which is
+    !! computed here by the production selection function.
+    use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
+    use fx_dag, only: dag_t, MAX_NODES
+    use fo_util, only: temporary_root
+    use fo_fs, only: fs_make_dir, fs_write_text, fs_remove_tree
+    use fo_scan, only: MAX_PATH
+    use fo_check, only: fo_changed_modules
+    use fo_gfortran_build, only: gfortran_selected_test_names
+    use fx_string, only: string_t
+    use fo_fpm_model, only: fpm_model_load
+    use fo_project_model, only: project_model_t, model_request_t, &
+        model_selection_t, model_plan_t, model_select, model_plan, &
+        model_selected_names, model_find_case, model_find_target, &
+        model_find_artifact, TARGET_LIBRARY, TARGET_EXECUTABLE, &
+        ORIGIN_DEPENDENCY, MAP_EXACT, SELECT_OK, SELECT_NAMED_EXCLUDED
+    implicit none
+
+    integer :: n_pass, n_fail
+    character(len=512) :: root
+
+    n_pass = 0
+    n_fail = 0
+    root = trim(temporary_root())//'/fo_fpm_project_model_probe'
+    call fs_remove_tree(root)
+    call write_project()
+    call test_model()
+    call test_inventory()
+    call fs_remove_tree(root)
+
+    write (output_unit, '(a,i0,a,i0,a)') 'fpm project model: ', n_pass, &
+        ' pass, ', n_fail, ' fail'
+    if (n_fail > 0) stop 1
+
+contains
+
+    subroutine check(cond, name)
+        logical, intent(in) :: cond
+        character(len=*), intent(in) :: name
+
+        if (cond) then
+            n_pass = n_pass + 1
+        else
+            n_fail = n_fail + 1
+            write (error_unit, '(a,a)') 'FAIL: ', name
+        end if
+    end subroutine check
+
+    subroutine put(path, text)
+        character(len=*), intent(in) :: path, text
+
+        call fs_write_text(trim(root)//'/'//path, text//new_line('a'))
+    end subroutine put
+
+    subroutine write_project()
+        call fs_make_dir(trim(root))
+        call fs_make_dir(trim(root)//'/src')
+        call fs_make_dir(trim(root)//'/app')
+        call fs_make_dir(trim(root)//'/test')
+        call put('fpm.toml', 'name = "m5probe"'//new_line('a')// &
+            '[extra.fo]'//new_line('a')//'dispatcher = "m5_suite"')
+        call put('src/m5lib.f90', 'module m5lib'//new_line('a')// &
+            'implicit none'//new_line('a')//'end module m5lib')
+        call put('app/main.f90', 'program m5app'//new_line('a')// &
+            'end program m5app')
+        call put('test/test_fast.f90', 'program test_fast'//new_line('a')// &
+            'end program test_fast')
+        call put('test/test_m5_slow_case.f90', 'program test_m5_slow_case'// &
+            new_line('a')//'end program test_m5_slow_case')
+        call put('test/m5_suite.f90', 'program m5_suite'//new_line('a')// &
+            'end program m5_suite')
+        call put('test/test_routed.f90', '! fo: dispatcher'//new_line('a')// &
+            'program test_routed'//new_line('a')//'end program test_routed')
+        call put('test/test_routed_mod.f90', '! fo: dispatcher'//new_line('a')// &
+            'module test_routed_mod'//new_line('a')// &
+            'implicit none'//new_line('a')//'end module test_routed_mod')
+        call put('test/m5_helper.f90', 'module m5_helper'//new_line('a')// &
+            'implicit none'//new_line('a')//'end module m5_helper')
+    end subroutine write_project
+
+    subroutine test_model()
+        type(project_model_t) :: model
+        type(model_request_t) :: request
+        type(model_selection_t) :: selection
+        type(model_plan_t) :: plan
+        type(string_t), allocatable :: names(:)
+        character(len=:), allocatable :: message
+        integer :: ierr, c, t
+
+        call fpm_model_load(trim(root), model, ierr, message)
+        call check(ierr == 0, 'model loads: '//message)
+        if (ierr /= 0) return
+        call check(model%complete, 'model is complete')
+        call check(model%backend == 'fpm', 'backend is fpm')
+        call check(size(model%default_exclude) == 1, 'one default exclusion')
+        call check(model%default_exclude(1)%s == 'slow', 'default exclusion is slow')
+
+        t = model_find_target(model, 'libm5probe')
+        call check(t > 0, 'library target')
+        if (t > 0) call check(model%targets(t)%kind == TARGET_LIBRARY, &
+            'library kind')
+        t = model_find_target(model, 'm5probe')
+        call check(t > 0, 'app executable target')
+        if (t > 0) call check(model%targets(t)%kind == TARGET_EXECUTABLE, &
+            'app executable kind')
+        call check(model_find_target(model, 'test_fast') > 0, 'fast test exe')
+        call check(model_find_target(model, 'm5_suite') > 0, 'dispatcher exe')
+        call check(model_find_target(model, 'test_routed') == 0, &
+            'routed program has no executable of its own')
+        call check(model_find_artifact(model, &
+            trim(root)//'/build/fo/bin/test_fast') > 0, 'artifact lookup')
+
+        c = model_find_case(model, 'test_fast')
+        call check(c > 0, 'fast case')
+        if (c > 0) then
+            call check(model%cases(c)%mapping == MAP_EXACT, 'fast case maps exactly')
+            call check(model%targets(model%cases(c)%command_target)%name == &
+                'test_fast', 'fast case runs its exe')
+            call check(size(model%cases(c)%labels) == 0, 'fast case is unlabelled')
+        end if
+        c = model_find_case(model, 'test_m5_slow_case')
+        call check(c > 0, 'slow case')
+        if (c > 0) then
+            call check(size(model%cases(c)%labels) == 1, 'slow case has a label')
+            if (size(model%cases(c)%labels) == 1) call check( &
+                model%cases(c)%labels(1)%s == 'slow', 'label is slow')
+        end if
+        call check(model_find_case(model, 'm5_suite') == 0, &
+            'dispatcher is not a case')
+        call check(model_find_case(model, 'm5_helper') == 0, &
+            'helper module is not a case')
+        do c = 1, model%n_cases
+            if (model%cases(c)%name /= 'test_routed' .and. &
+                model%cases(c)%name /= 'test_routed_mod') cycle
+            call check(model%targets(model%cases(c)%command_target)%name == &
+                'm5_suite', trim(model%cases(c)%name)//' maps to dispatcher')
+        end do
+
+        ! Default selection drops the slow case; naming it needs --all.
+        call model_select(model, request, selection)
+        call check(selection%status == SELECT_OK, 'default selection ok')
+        call model_selected_names(model, selection, names)
+        call check(size(names) == 3, 'default selection has three fast cases')
+        call model_plan(model, selection%cases, plan)
+        call check(.not. plan%widened, 'complete model does not widen')
+        call check(has_target(model, plan, 'm5_suite'), 'plan builds dispatcher')
+        call check(.not. has_target(model, plan, 'm5probe'), 'plan skips the app')
+        allocate (request%names(1))
+        request%names(1)%s = 'test_m5_slow_case'
+        call model_select(model, request, selection)
+        call check(selection%status == SELECT_NAMED_EXCLUDED, &
+            'named slow case requires --all')
+    end subroutine test_model
+
+    logical function has_target(model, plan, name) result(found)
+        type(project_model_t), intent(in) :: model
+        type(model_plan_t), intent(in) :: plan
+        character(len=*), intent(in) :: name
+        integer :: i
+
+        found = .false.
+        do i = 1, size(plan%targets)
+            if (model%targets(plan%targets(i))%name == name) found = .true.
+        end do
+    end function has_target
+
+    subroutine test_inventory()
+        !! The model's case names are exactly the native inventory, slow
+        !! tests included.
+        type(project_model_t) :: model
+        type(dag_t) :: dag
+        character(len=MAX_PATH), allocatable :: filenames(:), inventory(:)
+        integer, allocatable :: changed(:), affected(:), ids(:)
+        integer :: n_changed, n_affected, n_cached, ierr, n_inventory, i
+        character(len=:), allocatable :: message
+
+        allocate (filenames(MAX_NODES), changed(MAX_NODES), affected(MAX_NODES))
+        allocate (ids(MAX_NODES), inventory(MAX_NODES))
+        call fo_changed_modules(trim(root), dag, changed, n_changed, affected, &
+            n_affected, n_cached, ierr, filenames=filenames)
+        call check(ierr == 0, 'native scan succeeds')
+        do i = 1, dag%n_nodes
+            ids(i) = i
+        end do
+        call gfortran_selected_test_names(trim(root), filenames, ids, &
+            dag%n_nodes, .true., inventory, n_inventory)
+        call fpm_model_load(trim(root), model, ierr, message)
+        call check(ierr == 0, 'model loads for inventory')
+        call check(n_inventory == 4, 'inventory has four cases')
+        call check(model%n_cases == n_inventory, 'model has the inventory size')
+        do i = 1, n_inventory
+            call check(model_find_case(model, trim(inventory(i))) > 0, &
+                'model has inventory case '//trim(inventory(i)))
+        end do
+    end subroutine test_inventory
+
+end program test_fpm_project_model
