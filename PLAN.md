@@ -8,6 +8,19 @@ failure detection. The workspace master plan, when present, owns delivery order.
 
 ## Current delivery
 
+The 2026-10-15 project-model integration delivers scoped Gremlin lanes
+(`-L`, `-LE`, `--layer`) and lane-local PASS receipt reuse keyed by each case's
+input closure. The combined scoped-edit regression failed before the integration
+repair and passes on immutable driver
+`2e6392ba836aabf9489c85dec6971f77247429536521121e9b69b47532e37333`:
+`test_gremlin_case_reuse` passes all FPM, CMake and scoped-CMake scenarios in
+24.90 seconds. The repair intersects model-wide impact with the lane inventory.
+Saved G3/A2 focused evidence remains valid for unchanged paths; no full suite
+was run or is required for this increment. Receipt reuse is lane-local, bounded
+by journal retention, conservative for global inputs, and unavailable without
+complete inventory/toolchain identity. Existing-generation epochs still rerun
+cases. CI uses named focused model/selection/layering/scoped correctness gates.
+
 Populated FetchContent sources consumed without `add_subdirectory` are now
 captured from the target inputs reported by CMake. The expanded native CMake
 resident oracle fails on the prior driver and passes on candidate

@@ -3019,6 +3019,15 @@ contains
             end do
             n_impacted = kept
         end if
+        ! Impact is computed over the complete generation model. A scoped
+        ! lane owes only the affected cases within its eligible inventory.
+        kept = 0
+        do i = 1, n_impacted
+            if (.not. any(all_names(:n_all) == impacted(i))) cycle
+            kept = kept + 1
+            impacted(kept) = impacted(i)
+        end do
+        n_impacted = kept
         n_priorities = 0
         ! Zero-random campaigns keep their explicit gate across source edits.
         focused_targets = request%n_targets > 0 .and. request%random_count == 0

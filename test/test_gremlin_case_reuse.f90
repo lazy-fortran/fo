@@ -3,7 +3,8 @@ program test_gremlin_case_reuse
     !! input closure is unchanged (#189, #140): after an edit of beta.f90,
     !! test_alpha (closure: alpha.f90 and its test) reuses the PASS of the
     !! previous generation without running, and test_beta (closure contains
-    !! beta.f90) runs again. The same on fpm and CMake.
+    !! beta.f90) runs again. The same on fpm and CMake, including a
+    !! scoped lane whose excluded case alone is affected by the edit.
     use, intrinsic :: iso_fortran_env, only: int64
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: write_text, make_directory, assert_true
@@ -20,15 +21,16 @@ program test_gremlin_case_reuse
     character, parameter :: nl = new_line('a')
 
     call gremlin_setup(driver, scratch, project, cache, state)
-    call scenario('fpm', scratch//'/fpm-project', .false.)
-    call scenario('cmake', scratch//'/cmake-project', .true.)
+    call scenario('fpm', scratch//'/fpm-project', .false., .false.)
+    call scenario('cmake', scratch//'/cmake-project', .true., .false.)
+    call scenario('scope', scratch//'/scoped-project', .true., .true.)
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
 
-    subroutine scenario(lane, dir, cmake)
+    subroutine scenario(lane, dir, cmake, scoped)
         character(len=*), intent(in) :: lane, dir
-        logical, intent(in) :: cmake
+        logical, intent(in) :: cmake, scoped
         type(string_list_t) :: args
         type(process_result_t) :: process
         type(json_value_t) :: reply
@@ -50,7 +52,8 @@ contains
                 'add_test(NAME test_alpha COMMAND test_alpha)'//nl// &
                 'add_executable(test_beta test/test_beta.f90)'//nl// &
                 'target_link_libraries(test_beta PRIVATE core)'//nl// &
-                'add_test(NAME test_beta COMMAND test_beta)'//nl)
+                'add_test(NAME test_beta COMMAND test_beta)'//nl// &
+                'set_tests_properties(test_alpha PROPERTIES LABELS focused)'//nl)
         else
             call write_text(dir//'/fpm.toml', 'name = "case_reuse"'//nl)
         end if
@@ -62,30 +65,41 @@ contains
         call arguments(lane, dir, 'start', args)
         call list_add(args, '--target')
         call list_add(args, 'test_alpha')
-        call list_add(args, '--target')
-        call list_add(args, 'test_beta')
+        if (scoped) then
+            call list_add(args, '-L')
+            call list_add(args, 'focused')
+        else
+            call list_add(args, '--target')
+            call list_add(args, 'test_beta')
+        end if
         call list_add(args, '--random')
-        call list_add(args, '0')
+        if (scoped) then
+            call list_add(args, '1')
+        else
+            call list_add(args, '0')
+        end if
         call gremlin_json(driver, dir, cache, state, args, reply, process, 30000)
         session = gremlin_field(reply, 'session_id')
         call assert_true(process%exit_code == 0 .and. len(session) > 0, &
-            lane//': starts a two-case gate campaign')
+            lane//': starts its selected gate campaign')
         if (len(session) == 0) call finish_assertions(retain_failed_scratch=.true.)
 
         call wait_for_gate(lane, dir, session, '', first, ready)
-        call assert_true(ready, lane//': first generation passes both cases')
+        call assert_true(ready, lane//': first generation passes selected cases')
         if (ready) then
             call expect_receipt(lane, dir, session, first, 'test_alpha', 'run', '')
-            call expect_receipt(lane, dir, session, first, 'test_beta', 'run', '')
+            call expect_receipt(lane, dir, session, first, 'test_beta', &
+                'run', '', absent=scoped)
             ! Outside test_alpha's closure, inside test_beta's.
             call write_module(dir, 'beta', 2)
             call wait_for_gate(lane, dir, session, first, second, ready)
-            call assert_true(ready, lane//': edited generation passes both cases')
+            call assert_true(ready, lane//': edited generation passes selected cases')
         end if
         if (ready) then
             call expect_receipt(lane, dir, session, second, 'test_alpha', &
                 'reused', first)
-            call expect_receipt(lane, dir, session, second, 'test_beta', 'run', '')
+            call expect_receipt(lane, dir, session, second, 'test_beta', &
+                'run', '', absent=scoped)
         end if
         call gremlin_stop_lane(driver, dir, cache, state, lane, session, &
             allow_terminal_error=.true.)
@@ -156,11 +170,12 @@ contains
     end subroutine wait_for_gate
 
     subroutine expect_receipt(lane, dir, session, generation, case_id, &
-            disposition, reused_from)
+            disposition, reused_from, absent)
         !! The case's receipt in the generation passed with this disposition
         !! (reused: from that earlier generation).
         character(len=*), intent(in) :: lane, dir, session, generation, case_id
         character(len=*), intent(in) :: disposition, reused_from
+        logical, intent(in), optional :: absent
         type(string_list_t) :: query
         type(json_value_t) :: status, events, receipt
         type(process_result_t) :: observed
@@ -201,6 +216,13 @@ contains
                 'next_cursor')), int64)
             cursor = trim(number)
         end do
+        if (present(absent)) then
+            if (absent) then
+                call assert_true(.not. found, lane//': out-of-scope '//case_id// &
+                    ' has no receipt')
+                return
+            end if
+        end if
         call assert_true(found, lane//': '//case_id//' has a receipt')
         if (.not. found) return
         call assert_equal_string(got_status, 'PASS', lane//': '//case_id//' passes')
