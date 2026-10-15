@@ -8,12 +8,10 @@ module fo_fmt
     use fo_process, only: process_run_argv_logged, argv_push
     implicit none
     private
-    public :: fo_fmt_run, fo_fmt_files, fo_fmt_changed_run
-    public :: fo_fmt_check_run, fo_fmt_check_files
-    public :: fo_fmt_check_changed_run
+    public :: fmt_sources, FMT_SELECT_ALL, FMT_SELECT_FILES, FMT_SELECT_CHANGED
     public :: write_git_changed_source_list
-    public :: fo_fmt_deep_run, fo_fmt_deep_files, fo_fmt_deep_changed_run
-    public :: fo_fmt_deep_check_run, fo_fmt_deep_check_files
+
+    integer, parameter :: FMT_SELECT_ALL = 1, FMT_SELECT_FILES = 2, FMT_SELECT_CHANGED = 3
 
 contains
 
@@ -104,71 +102,62 @@ contains
         skip_generated_source = .false.
     end function skip_generated_source
 
-    subroutine fo_fmt_run(dir, exitcode)
+    subroutine fmt_sources(dir, selection, check, deep, files, n_files, output, exitcode)
+        !! Format or check Fortran sources. `selection` picks all project sources,
+        !! the listed `files`, or the dirty changed sources. With `check`, nothing
+        !! is modified and `output` reports differences; for FMT_SELECT_CHANGED the listed
+        !! `files` are the fallback when there is no worktree. `deep` uses fluff.
         character(len=*), intent(in) :: dir
-        integer, intent(out) :: exitcode
-
-        type(backend_t) :: b
-        character(len=512) :: scan_root, list_file, config_file
-
-        b = detect_backend(trim(dir))
-        scan_root = trim(dir)
-        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-        call find_fprettify_config(scan_root, config_file)
-
-        exitcode = 0
-        call make_tmpfile('fo_fmt_files', list_file)
-        call write_source_list(scan_root, list_file)
-
-        call fo_fmt_list(config_file, list_file, exitcode)
-        call delete_tmpfile(list_file)
-    end subroutine fo_fmt_run
-
-    subroutine fo_fmt_files(dir, files, n_files, exitcode)
-        character(len=*), intent(in) :: dir
+        integer, intent(in) :: selection
+        logical, intent(in) :: check, deep
         character(len=*), intent(in) :: files(:)
         integer, intent(in) :: n_files
+        character(len=*), intent(out) :: output
         integer, intent(out) :: exitcode
 
         type(backend_t) :: b
         character(len=512) :: scan_root, list_file, config_file
+        integer :: n_changed
+        logical :: changed_ok
 
+        output = ''
+        exitcode = 0
         b = detect_backend(trim(dir))
         scan_root = trim(dir)
         if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-        call find_fprettify_config(scan_root, config_file)
+        config_file = ''
+        if (.not. deep) call find_fprettify_config(scan_root, config_file)
 
         call make_tmpfile('fo_fmt_files', list_file)
-        call write_explicit_source_list(scan_root, files, n_files, list_file)
-        call fo_fmt_list(config_file, list_file, exitcode)
-        call delete_tmpfile(list_file)
-    end subroutine fo_fmt_files
+        select case (selection)
+        case (FMT_SELECT_FILES)
+            call write_explicit_source_list(scan_root, files, n_files, list_file)
+        case (FMT_SELECT_CHANGED)
+            call write_git_changed_source_list(scan_root, list_file, changed_ok, &
+                n_changed)
+            if (.not. changed_ok) then
+                if (.not. check) then
+                    exitcode = 1
+                    call delete_tmpfile(list_file)
+                    return
+                end if
+                call write_explicit_source_list(scan_root, files, n_files, list_file)
+            end if
+        case default
+            call write_source_list(scan_root, list_file)
+        end select
 
-    subroutine fo_fmt_changed_run(dir, exitcode)
-        character(len=*), intent(in) :: dir
-        integer, intent(out) :: exitcode
-
-        type(backend_t) :: b
-        character(len=512) :: scan_root, list_file, config_file
-        integer :: n_git
-        logical :: git_ok
-
-        b = detect_backend(trim(dir))
-        scan_root = trim(dir)
-        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-        call find_fprettify_config(scan_root, config_file)
-
-        call make_tmpfile('fo_fmt_files', list_file)
-        call write_git_changed_source_list(scan_root, list_file, git_ok, n_git)
-        if (.not. git_ok) then
-            exitcode = 1
-            call delete_tmpfile(list_file)
-            return
+        if (check .and. deep) then
+            call fo_fmt_deep_check_list(list_file, output, exitcode)
+        else if (check) then
+            call fo_fmt_check_list(config_file, list_file, output, exitcode)
+        else if (deep) then
+            call fo_fmt_deep_list(list_file, exitcode)
+        else
+            call fo_fmt_list(config_file, list_file, exitcode)
         end if
-
-        call fo_fmt_list(config_file, list_file, exitcode)
         call delete_tmpfile(list_file)
-    end subroutine fo_fmt_changed_run
+    end subroutine fmt_sources
 
     subroutine fo_fmt_list(config_file, list_file, exitcode)
         character(len=*), intent(in) :: config_file, list_file
@@ -189,65 +178,6 @@ contains
         end do
         close (u)
     end subroutine fo_fmt_list
-
-    subroutine fo_fmt_check_run(dir, output, exitcode)
-        character(len=*), intent(in) :: dir
-        character(len=*), intent(out) :: output
-        integer, intent(out) :: exitcode
-
-        type(backend_t) :: b
-        character(len=512) :: scan_root, list_file, config_file
-
-        b = detect_backend(trim(dir))
-        scan_root = trim(dir)
-        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-        call find_fprettify_config(scan_root, config_file)
-
-        call make_tmpfile('fo_fmt_files', list_file)
-        call write_source_list(scan_root, list_file)
-        call fo_fmt_check_list(config_file, list_file, output, exitcode)
-        call delete_tmpfile(list_file)
-    end subroutine fo_fmt_check_run
-
-    subroutine fo_fmt_check_files(project_dir, files, n_files, output, exitcode)
-        character(len=*), intent(in) :: project_dir
-        character(len=*), intent(in) :: files(:)
-        integer, intent(in) :: n_files
-        character(len=*), intent(out) :: output
-        integer, intent(out) :: exitcode
-
-        character(len=512) :: list_file, config_file
-
-        call find_fprettify_config(project_dir, config_file)
-        call make_tmpfile('fo_fmt_files', list_file)
-        call write_explicit_source_list(project_dir, files, n_files, list_file)
-        call fo_fmt_check_list(config_file, list_file, output, exitcode)
-        call delete_tmpfile(list_file)
-    end subroutine fo_fmt_check_files
-
-    subroutine fo_fmt_check_changed_run(project_dir, fallback_files, n_files, &
-            output, exitcode)
-        character(len=*), intent(in) :: project_dir
-        character(len=*), intent(in) :: fallback_files(:)
-        integer, intent(in) :: n_files
-        character(len=*), intent(out) :: output
-        integer, intent(out) :: exitcode
-
-        character(len=512) :: list_file, config_file
-        integer :: n_git
-        logical :: git_ok
-
-        call find_fprettify_config(project_dir, config_file)
-        call make_tmpfile('fo_fmt_files', list_file)
-        call write_git_changed_source_list(project_dir, list_file, git_ok, n_git)
-        if (.not. git_ok) then
-            call write_explicit_source_list(project_dir, fallback_files, n_files, &
-                list_file)
-        end if
-
-        call fo_fmt_check_list(config_file, list_file, output, exitcode)
-        call delete_tmpfile(list_file)
-    end subroutine fo_fmt_check_changed_run
 
     subroutine write_explicit_source_list(project_dir, files, n_files, list_file)
         character(len=*), intent(in) :: project_dir
@@ -674,63 +604,6 @@ contains
         end if
     end function dirname
 
-    subroutine fo_fmt_deep_run(dir, exitcode)
-        character(len=*), intent(in) :: dir
-        integer, intent(out) :: exitcode
-
-        type(backend_t) :: b
-        character(len=512) :: scan_root, list_file
-
-        b = detect_backend(trim(dir))
-        scan_root = trim(dir)
-        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-
-        exitcode = 0
-        call make_tmpfile('fo_fmt_deep_files', list_file)
-        call write_source_list(scan_root, list_file)
-        call fo_fmt_deep_list(list_file, exitcode)
-        call delete_tmpfile(list_file)
-    end subroutine fo_fmt_deep_run
-
-    subroutine fo_fmt_deep_files(dir, files, n_files, exitcode)
-        character(len=*), intent(in) :: dir
-        character(len=*), intent(in) :: files(:)
-        integer, intent(in) :: n_files
-        integer, intent(out) :: exitcode
-
-        character(len=512) :: list_file
-
-        call make_tmpfile('fo_fmt_deep_files', list_file)
-        call write_explicit_source_list(dir, files, n_files, list_file)
-        call fo_fmt_deep_list(list_file, exitcode)
-        call delete_tmpfile(list_file)
-    end subroutine fo_fmt_deep_files
-
-    subroutine fo_fmt_deep_changed_run(dir, exitcode)
-        character(len=*), intent(in) :: dir
-        integer, intent(out) :: exitcode
-
-        type(backend_t) :: b
-        character(len=512) :: scan_root, list_file
-        integer :: n_git
-        logical :: git_ok
-
-        b = detect_backend(trim(dir))
-        scan_root = trim(dir)
-        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-
-        call make_tmpfile('fo_fmt_deep_files', list_file)
-        call write_git_changed_source_list(scan_root, list_file, git_ok, n_git)
-        if (.not. git_ok) then
-            exitcode = 1
-            call delete_tmpfile(list_file)
-            return
-        end if
-
-        call fo_fmt_deep_list(list_file, exitcode)
-        call delete_tmpfile(list_file)
-    end subroutine fo_fmt_deep_changed_run
-
     subroutine fo_fmt_deep_list(list_file, exitcode)
         character(len=*), intent(in) :: list_file
         integer, intent(out) :: exitcode
@@ -761,39 +634,6 @@ contains
         end do
         close (u)
     end subroutine fo_fmt_deep_list
-
-    subroutine fo_fmt_deep_check_run(dir, output, exitcode)
-        character(len=*), intent(in) :: dir
-        character(len=*), intent(out) :: output
-        integer, intent(out) :: exitcode
-
-        type(backend_t) :: b
-        character(len=512) :: scan_root, list_file
-
-        b = detect_backend(trim(dir))
-        scan_root = trim(dir)
-        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-
-        call make_tmpfile('fo_fmt_deep_files', list_file)
-        call write_source_list(scan_root, list_file)
-        call fo_fmt_deep_check_list(list_file, output, exitcode)
-        call delete_tmpfile(list_file)
-    end subroutine fo_fmt_deep_check_run
-
-    subroutine fo_fmt_deep_check_files(project_dir, files, n_files, output, exitcode)
-        character(len=*), intent(in) :: project_dir
-        character(len=*), intent(in) :: files(:)
-        integer, intent(in) :: n_files
-        character(len=*), intent(out) :: output
-        integer, intent(out) :: exitcode
-
-        character(len=512) :: list_file
-
-        call make_tmpfile('fo_fmt_deep_files', list_file)
-        call write_explicit_source_list(project_dir, files, n_files, list_file)
-        call fo_fmt_deep_check_list(list_file, output, exitcode)
-        call delete_tmpfile(list_file)
-    end subroutine fo_fmt_deep_check_files
 
     subroutine fo_fmt_deep_check_list(list_file, output, exitcode)
         character(len=*), intent(in) :: list_file

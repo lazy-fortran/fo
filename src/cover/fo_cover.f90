@@ -9,7 +9,7 @@ module fo_cover
     implicit none
     private
 
-    public :: fo_cover_run, coverage_total_percent
+    public :: fo_cover_run, coverage_total_percent, coverage_gcov_command
 
     character(len=*), parameter :: COVER_FLAGS = '--coverage'
 
@@ -157,7 +157,8 @@ contains
         character(len=*), intent(out) :: command
         character(len=128) :: override, version, major, candidate
         character(len=512) :: tmpfile, line
-        integer :: status, unit, ios, dot
+        character(len=:), allocatable :: packed
+        integer :: status, unit, ios, dot, n_args
 
         command = 'gcov'
         call get_environment_variable('FO_GCOV', override, status=status)
@@ -167,8 +168,12 @@ contains
         end if
 
         call make_tmpfile('fo-gfortran-version', tmpfile)
-        call execute_command_line('gfortran -dumpversion > '//trim(tmpfile), &
-            exitstat=status)
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, 'gfortran')
+        call argv_push(packed, n_args, '-dumpversion')
+        call process_run_argv_logged('', packed, n_args, trim(tmpfile), .false., &
+            30, status)
         if (status /= 0) then
             call delete_tmpfile(tmpfile)
             return
@@ -194,8 +199,12 @@ contains
         if (len_trim(major) == 0) return
 
         candidate = 'gcov-'//trim(major)
-        call execute_command_line(trim(candidate)//' --version >/dev/null 2>&1', &
-            exitstat=status)
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, trim(candidate))
+        call argv_push(packed, n_args, '--version')
+        call process_run_argv_logged('', packed, n_args, '/dev/null', .false., &
+            30, status)
         if (status == 0) command = trim(candidate)
     end subroutine coverage_gcov_command
 

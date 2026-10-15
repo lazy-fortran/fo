@@ -1,5 +1,6 @@
 module fo_scaffold
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
+    use fo_fs, only: fs_make_dir, fs_dir_entry_count
     implicit none
     private
     public :: scaffold_project
@@ -31,15 +32,14 @@ contains
         test_dir = trim(path)//'/test'
 
         if (.not. is_library) then
-            call execute_command_line('mkdir -p '//trim(app_dir), wait=.true., &
-                exitstat=ierr)
+            call fs_make_dir(trim(app_dir), ierr)
             if (ierr /= 0) return
         end if
 
-        call execute_command_line('mkdir -p '//trim(src_dir), wait=.true., exitstat=ierr)
+        call fs_make_dir(trim(src_dir), ierr)
         if (ierr /= 0) return
 
-        call execute_command_line('mkdir -p '//trim(test_dir), wait=.true., exitstat=ierr)
+        call fs_make_dir(trim(test_dir), ierr)
         if (ierr /= 0) return
 
         toml_file = trim(path)//'/fpm.toml'
@@ -74,23 +74,8 @@ contains
 
     logical function is_empty_dir(path)
         character(len=*), intent(in) :: path
-        integer :: unit, ios, n_items
-        character(len=512) :: cmd, tmpfile
 
-        tmpfile = '/tmp/fo_empty_check.tmp'
-        write (cmd, '(a)') 'find '//trim(path)// &
-            ' -mindepth 1 -maxdepth 1 2>/dev/null | wc -l > '//trim(tmpfile)
-
-        call execute_command_line(trim(cmd), wait=.true.)
-
-        open (newunit=unit, file=trim(tmpfile), status='old', iostat=ios)
-        if (ios == 0) then
-            read (unit, *, iostat=ios) n_items
-            close (unit, status='delete')
-            is_empty_dir = (n_items == 0)
-        else
-            is_empty_dir = .true.
-        end if
+        is_empty_dir = fs_dir_entry_count(path) <= 0
     end function is_empty_dir
 
     subroutine write_fpm_toml(path, name, ierr)

@@ -14,7 +14,7 @@ module fo_mcp
     use fo_check, only: check_result_t, fo_check_run
     use fo_check_output, only: check_result_compact_json, &
         check_result_full_json
-    use fo_fmt, only: fo_fmt_run
+    use fo_fmt, only: fmt_sources, FMT_SELECT_ALL
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
     use fo_process, only: process_start_fo_check, process_poll_pid, &
@@ -258,7 +258,8 @@ contains
         case ('lint')
             call handle_lint(arguments, id_str, dir, output_text, exitcode, response)
         case ('fmt')
-            call fo_fmt_run(trim(dir), exitcode)
+            call fmt_sources(trim(dir), FMT_SELECT_ALL, .false., .false., &
+                [character(len=1) ::], 0, output_text, exitcode)
             if (exitcode == 0) then
                 output_text = 'formatted'
             else

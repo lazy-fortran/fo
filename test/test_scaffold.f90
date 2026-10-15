@@ -1,6 +1,7 @@
 program test_scaffold
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_scaffold, only: scaffold_project
+    use fo_fs, only: fs_remove_tree
     implicit none
     integer :: n_pass, n_fail
 
@@ -9,6 +10,7 @@ program test_scaffold
 
     call test_new_exe_project()
     call test_new_lib_project()
+    call test_new_path_with_shell_metacharacters()
     call test_scaffold_builds()
 
     write (output_unit, '(a,i0,a,i0,a)') 'scaffold: ', n_pass, ' pass, ', &
@@ -86,6 +88,26 @@ contains
 
         call execute_command_line('rm -rf '//trim(tmpdir), wait=.true.)
     end subroutine test_new_lib_project
+
+    subroutine test_new_path_with_shell_metacharacters()
+        character(len=512) :: base, tmpdir
+        integer :: ierr
+        logical :: exists
+
+        call make_tmp_path('fo scaffold space', base)
+        tmpdir = trim(base)//'/a b;touch fo_scaffold_pwn $(echo x)'
+
+        call scaffold_project(trim(tmpdir), 'demo_meta', .false., ierr)
+        call assert(ierr == 0, 'scaffold_project accepts spaces and shell metacharacters')
+        inquire (file=trim(tmpdir)//'/app/main.f90', exist=exists)
+        call assert(exists, 'app/main.f90 created inside the literal path')
+        inquire (file=trim(tmpdir)//'/test/test_demo_meta.f90', exist=exists)
+        call assert(exists, 'test file created inside the literal path')
+        inquire (file='fo_scaffold_pwn', exist=exists)
+        call assert(.not. exists, 'path text is never interpreted by a shell')
+
+        call fs_remove_tree(trim(base))
+    end subroutine test_new_path_with_shell_metacharacters
 
     subroutine test_scaffold_builds()
         character(len=512) :: tmpdir, name

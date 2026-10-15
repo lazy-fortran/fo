@@ -10,14 +10,15 @@ program test_check
         RUN_RERUN_PENDING, RUN_FINISHED
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_text, capabilities_json
-    use fo_fmt, only: fo_fmt_files, fo_fmt_check_run, fo_fmt_check_files, &
-        fo_fmt_check_changed_run
+    use fo_fmt, only: fmt_sources, FMT_SELECT_ALL, FMT_SELECT_FILES, &
+        FMT_SELECT_CHANGED
     use fo_cache, only: cache_store_root
     use fo_util, only: make_tmpfile
     use fo_test_results, only: test_result_entry_t, parse_test_results, &
         format_test_results_text, MAX_TEST_RESULTS_ENTRIES
     implicit none
 
+    character(len=1), parameter :: no_files(0) = [character(len=1) ::]
     integer :: n_pass, n_fail
 
     n_pass = 0
@@ -659,9 +660,11 @@ contains
         close (u)
 
         before_count = count_fmt_markers()
-        call fo_fmt_check_run(project_dir, output, exitcode)
+        call fmt_sources(project_dir, FMT_SELECT_ALL, .true., .false., no_files, 0, &
+            output, exitcode)
         after_first = count_fmt_markers()
-        call fo_fmt_check_run(project_dir, output, exitcode)
+        call fmt_sources(project_dir, FMT_SELECT_ALL, .true., .false., no_files, 0, &
+            output, exitcode)
         after_second = count_fmt_markers()
 
         call assert(exitcode == 0, 'format cache fixture is formatted')
@@ -692,7 +695,8 @@ contains
         write (u, '(a)') 'end module generated'
         close (u)
 
-        call fo_fmt_check_run(project_dir, output, exitcode)
+        call fmt_sources(project_dir, FMT_SELECT_ALL, .true., .false., no_files, 0, &
+            output, exitcode)
 
         call assert(exitcode == 0, 'format check skips _skbuild trees')
         call assert(len_trim(output) == 0, &
@@ -730,7 +734,8 @@ contains
         write (u, '(a)') 'end module lib'
         close (u)
 
-        call fo_fmt_check_run(project_dir, output, exitcode)
+        call fmt_sources(project_dir, FMT_SELECT_ALL, .true., .false., no_files, 0, &
+            output, exitcode)
 
         call assert(exitcode == 0, 'format check honors .fprettify')
         call assert(len_trim(output) == 0, &
@@ -771,18 +776,21 @@ contains
         close (u)
 
         files(1) = trim(src_dir)//'/good.f90'
-        call fo_fmt_check_files(project_dir, files, 1, output, exitcode)
+        call fmt_sources(project_dir, FMT_SELECT_FILES, .true., .false., files, 1, &
+            output, exitcode)
         call assert(exitcode == 0, 'format file list ignores unlisted files')
         call assert(len_trim(output) == 0, &
             'format file list keeps clean output for selected files')
 
-        call fo_fmt_check_run(project_dir, output, exitcode)
+        call fmt_sources(project_dir, FMT_SELECT_ALL, .true., .false., no_files, 0, &
+            output, exitcode)
         call assert(exitcode /= 0, 'full format check still scans project')
         call assert(index(output, 'bad.f90') > 0, &
             'full format check reports the unformatted file')
 
         files(1) = trim(src_dir)//'/bad.f90'
-        call fo_fmt_check_files(project_dir, files, 1, output, exitcode)
+        call fmt_sources(project_dir, FMT_SELECT_FILES, .true., .false., files, 1, &
+            output, exitcode)
         call assert(exitcode /= 0, 'format check of a listed unformatted file fails')
         call assert(index(output, 'bad.f90:2: needs formatting') > 0, &
             'format check names the file and first differing line')
@@ -825,15 +833,18 @@ contains
         close (u)
 
         files(1) = trim(src_dir)//'/selected.f90'
-        call fo_fmt_files(project_dir, files, 1, exitcode)
+        call fmt_sources(project_dir, FMT_SELECT_FILES, .false., .false., files, 1, &
+            output, exitcode)
         call assert(exitcode == 0, 'format file list formats selected file')
 
-        call fo_fmt_check_files(project_dir, files, 1, output, exitcode)
+        call fmt_sources(project_dir, FMT_SELECT_FILES, .true., .false., files, 1, &
+            output, exitcode)
         call assert(exitcode == 0, 'format file list leaves selected file clean')
         call assert(len_trim(output) == 0, &
             'format file list reports no selected file changes')
 
-        call fo_fmt_check_run(project_dir, output, exitcode)
+        call fmt_sources(project_dir, FMT_SELECT_ALL, .true., .false., no_files, 0, &
+            output, exitcode)
         call assert(exitcode /= 0, 'full format check still scans unlisted files')
         call assert(index(output, 'unlisted.f90') > 0, &
             'full format check reports unlisted unformatted file')
@@ -895,13 +906,14 @@ contains
         close (u)
 
         fallback_files(1) = trim(src_dir)//'/bad.f90'
-        call fo_fmt_check_changed_run(project_dir, fallback_files, 1, output, &
-            exitcode)
+        call fmt_sources(project_dir, FMT_SELECT_CHANGED, .true., .false., &
+            fallback_files, 1, output, exitcode)
         call assert(exitcode == 0, 'changed format check uses git dirty files')
         call assert(len_trim(output) == 0, &
             'changed format check ignores clean unformatted baseline files')
 
-        call fo_fmt_check_run(project_dir, output, exitcode)
+        call fmt_sources(project_dir, FMT_SELECT_ALL, .true., .false., no_files, 0, &
+            output, exitcode)
         call assert(exitcode /= 0, 'full format check still sees baseline file')
 
         call execute_command_line('rm -rf '//trim(project_dir), wait=.true.)

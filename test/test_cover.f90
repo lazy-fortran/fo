@@ -1,6 +1,6 @@
 program test_cover
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
-    use fo_cover, only: coverage_total_percent
+    use fo_cover, only: coverage_total_percent, coverage_gcov_command
     use fo_util, only: make_tmpfile, delete_tmpfile
     implicit none
 
@@ -10,6 +10,7 @@ program test_cover
     n_fail = 0
 
     call test_total_percent_from_markdown()
+    call test_gcov_command_matches_compiler()
     call report()
 
 contains
@@ -41,6 +42,15 @@ contains
         call assert(trim(total) == '70.0%', 'extracts TOTAL coverage percent')
         call delete_tmpfile(path)
     end subroutine test_total_percent_from_markdown
+
+    subroutine test_gcov_command_matches_compiler()
+        character(len=128) :: command, override
+        integer :: status
+
+        call get_environment_variable('FO_GCOV', override, status=status)
+        call coverage_gcov_command(command)
+        call assert(index(command, 'gcov') > 0 .or. status == 0, 'gcov command resolved without a shell')
+    end subroutine test_gcov_command_matches_compiler
 
     subroutine report()
         write (output_unit, '(a,i0,a,i0)') 'cover: pass=', n_pass, &

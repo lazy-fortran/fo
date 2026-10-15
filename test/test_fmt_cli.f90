@@ -121,6 +121,8 @@ program test_fmt_cli
             cases(row)%name // ': formatter is byte-idempotent')
     end do
 
+    call exercise_lossless()
+
     call remove_tree(scratch)
     call finish_assertions()
     write(*, '(a)') 'fmt-cli: executable outputs, scope placement and byte idempotence pass for 41 programs'
@@ -153,6 +155,50 @@ contains
 
         call run_fo(driver, arguments, directory, join_path(scratch, '.fo-cache'), child)
     end subroutine invoke
+
+    subroutine exercise_lossless()
+        integer, parameter :: n_filler = 60000, long_length = 3000
+        character(:), allocatable :: long_project, long_path, before, after, filler
+        character(len=long_length) :: long_text
+        type(string_list_t) :: command
+        type(process_result_t) :: child
+        integer :: k
+
+        long_project = join_path(scratch, 'lossless')
+        long_path = join_path(long_project, 'app/long.f90')
+        call write_text(join_path(long_project, 'fpm.toml'), 'name = "lossless"' // new_line('a'))
+        do k = 1, long_length
+            long_text(k:k) = achar(97 + mod(k, 26))
+        end do
+        allocate (character(len=10*n_filler) :: filler)
+        do k = 1, n_filler
+            write (filler(10*k - 9:10*k), '(a1,i8.8,a1)') '!', k, new_line('a')
+        end do
+        before = 'program long' // new_line('a') // 'implicit none' // new_line('a') // '! ' // long_text // &
+            new_line('a') // "print '(a)', '" // long_text // "'" // new_line('a') // filler // &
+            'end program long' // new_line('a')
+        call write_text(long_path, before)
+        command = words([character(len=16) :: 'fmt', 'app/long.f90'])
+        call run_fo(driver, command, long_project, join_path(scratch, '.fo-cache'), child)
+        call assert_process_ok(child, 'format file with a long line and many lines')
+        after = read_text(long_path)
+        call assert_equal_string(strip_blanks(after), strip_blanks(before), 'long lines and line count survive formatting')
+    end subroutine exercise_lossless
+
+    function strip_blanks(text) result(stripped)
+        character(len=*), intent(in) :: text
+        character(:), allocatable :: stripped
+        integer :: k, n
+
+        allocate (character(len=len(text)) :: stripped)
+        n = 0
+        do k = 1, len(text)
+            if (text(k:k) == ' ' .or. text(k:k) == new_line('a')) cycle
+            n = n + 1
+            stripped(n:n) = text(k:k)
+        end do
+        stripped = stripped(1:n)
+    end function strip_blanks
 
     subroutine exercise_program(test_case)
         type(source_case_t), intent(in) :: test_case

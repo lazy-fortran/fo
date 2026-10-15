@@ -183,6 +183,25 @@ int fo_c_mkdir_p(const char *path) {
 #endif
 }
 
+/* Number of directory entries excluding . and .., or -1 when path cannot be
+   opened as a directory. */
+int fo_c_dir_entry_count(const char *path) {
+    DIR *dir;
+    struct dirent *ent;
+    int count = 0;
+
+    if (!fo_has(path)) return -1;
+    dir = opendir(path);
+    if (dir == NULL) return -1;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+            continue;
+        count++;
+    }
+    closedir(dir);
+    return count;
+}
+
 /* Delete every regular file under root whose name ends with suffix. When
    recursive is nonzero, descends subdirectories (replacing find -name -delete).
    Returns the number of files removed, or -1 on a hard error. */

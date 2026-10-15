@@ -7,7 +7,7 @@ module fo_fs
     implicit none
     private
 
-    public :: fs_remove_tree, fs_remove_file, fs_make_dir
+    public :: fs_remove_tree, fs_remove_file, fs_make_dir, fs_dir_entry_count
     public :: fs_delete_suffix, fs_append_file, fs_write_text
     public :: fs_collect_files, fs_collect_mod_dirs
     public :: fs_mkdir_excl, fs_sleep_ms, fs_pid_alive
@@ -45,6 +45,12 @@ module fo_fs
             import :: c_char, c_int
             character(kind=c_char), intent(in) :: path(*)
         end function fo_c_mkdir_p
+
+        integer(c_int) function fo_c_dir_entry_count(path) &
+                bind(C, name='fo_c_dir_entry_count')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: path(*)
+        end function fo_c_dir_entry_count
 
         integer(c_int) function fo_c_delete_suffix(root, suffix, recursive) &
                 bind(C, name='fo_c_delete_suffix')
@@ -261,13 +267,22 @@ contains
         rc = fo_c_rm_file(trim(path)//c_null_char)
     end subroutine fs_remove_file
 
-    subroutine fs_make_dir(path)
+    subroutine fs_make_dir(path, ierr)
         !! Create path and missing parents (mkdir -p).
         character(len=*), intent(in) :: path
+        integer, intent(out), optional :: ierr
         integer(c_int) :: rc
+        if (present(ierr)) ierr = 0
         if (len_trim(path) == 0) return
         rc = fo_c_mkdir_p(trim(path)//c_null_char)
+        if (present(ierr)) ierr = int(rc)
     end subroutine fs_make_dir
+
+    integer function fs_dir_entry_count(path) result(count)
+        !! Entries in directory path excluding . and .., or -1 if unreadable.
+        character(len=*), intent(in) :: path
+        count = int(fo_c_dir_entry_count(trim(path)//c_null_char))
+    end function fs_dir_entry_count
 
     subroutine fs_delete_suffix(root, suffix, recursive)
         !! Delete files under root whose name ends with suffix (find -delete).

@@ -3,9 +3,16 @@ module fo_format
     private
     public :: format_lines, format_file, format_file_with_indent, MAX_LINE_LEN
 
+    ! Width of the fixed-length buffers taken by format_lines. File formatting
+    ! uses per-line allocatable strings and has no line length or count limit.
     integer, parameter :: MAX_LINE_LEN = 512
     integer, parameter :: INDENT_WIDTH = 4
-    integer, parameter :: MAX_LINES = 50000
+    integer, parameter :: MAX_INDENT_SPACES = 1024
+    integer, parameter :: READ_CHUNK = 4096
+
+    type :: line_t
+        character(len=:), allocatable :: text
+    end type line_t
 
 contains
 
@@ -17,22 +24,30 @@ contains
         character(len=MAX_LINE_LEN), intent(out) :: output(n_input)
         integer, intent(out) :: n_output
 
-        call format_lines_with_indent(lines, n_input, output, n_output, &
-            INDENT_WIDTH)
+        type(line_t), allocatable :: in_lines(:), out_lines(:)
+        integer :: i
+
+        allocate (in_lines(n_input), out_lines(n_input))
+        do i = 1, n_input
+            in_lines(i)%text = trim(lines(i))
+        end do
+        call format_line_list(in_lines, n_input, out_lines, n_output, INDENT_WIDTH)
+        do i = 1, n_input
+            output(i) = ''
+            if (i <= n_output) output(i) = out_lines(i)%text
+        end do
     end subroutine format_lines
 
-    subroutine format_lines_with_indent(lines, n_input, output, n_output, &
-            indent_width)
-        character(len=MAX_LINE_LEN), intent(in) :: lines(n_input)
+    subroutine format_line_list(lines, n_input, output, n_output, indent_width)
+        type(line_t), intent(in) :: lines(:)
         integer, intent(in) :: n_input
-        character(len=MAX_LINE_LEN), intent(out) :: output(n_input)
+        type(line_t), intent(inout) :: output(:)
         integer, intent(out) :: n_output
         integer, intent(in) :: indent_width
 
-        character(len=MAX_LINE_LEN) :: content, comment, masked
-        character(len=MAX_LINE_LEN) :: prev_content, stmt_head
+        character(len=:), allocatable :: prev_content, stmt_head
         character(len=1) :: quote_state, quote_before
-        integer :: i, indent_level, opens, closes, is_both, width
+        integer :: i, indent_level, opens, closes, is_both, width, wl
         logical :: in_continuation
 
         n_output = n_input
@@ -45,71 +60,82 @@ contains
         if (indent_width > 0) width = indent_width
 
         do i = 1, n_input
-            ! Blank, comment and directive lines preserve a pending continuation.
-            quote_before = quote_state
-            call split_line(lines(i), content, comment, quote_state)
+            wl = len_trim(lines(i)%text) + 1
+            block
+                character(len=:), allocatable :: content, comment, masked, out_line
 
-            ! Preprocessor directives: pass through unchanged. content is a
-            ! fixed-length buffer, so content(1:1) is always in range and is '#'
-            ! only when the line is non-blank.
-            if (content(1:1) == '#') then
-                output(i) = lines(i)
-                cycle
-            end if
+                allocate (character(len=wl) :: content, comment, masked)
+                allocate (character(len=wl + MAX_INDENT_SPACES + 1) :: out_line)
 
-            ! Truly empty line: preserve as blank.
-            if (len_trim(content) == 0 .and. len_trim(comment) == 0) then
-                output(i) = ''
-                cycle
-            end if
+                ! Blank, comment and directive lines preserve a pending
+                ! continuation.
+                quote_before = quote_state
+                call split_line(lines(i)%text, content, comment, quote_state)
 
-            ! Comment-only line: apply current indent to the comment.
-            if (len_trim(content) == 0 .and. len_trim(comment) > 0) then
-                call apply_indent('', comment, indent_level, width, output(i))
-                cycle
-            end if
-
-            call mask_strings(content, masked, quote_before)
-
-            ! Classify this line using the masked content.
-            call classify_line(masked, opens, closes, is_both)
-
-            ! Detect continuation: previous (non-empty) content ended with &
-            in_continuation = continuation_pending(prev_content)
-
-            ! Decrease indent before emitting close keywords.
-            if (closes > 0 .and. .not. in_continuation) then
-                indent_level = max(0, indent_level - closes)
-            end if
-
-            ! Emit with current indent.
-            if (in_continuation) then
-                call apply_indent(content, comment, indent_level + 1, width, output(i))
-            else
-                call apply_indent(content, comment, indent_level, width, output(i))
-            end if
-
-            ! Increase indent after emitting open keywords.
-            if (opens > 0 .and. .not. in_continuation) then
-                indent_level = indent_level + opens
-            end if
-
-            ! A block-if whose `then` is pushed onto a continuation line: the
-            ! head line (ending in '&') had no `then`, so classify_line scored
-            ! opens=0. Open the block when the final continuation line ends in
-            ! `then` and the statement head is a plain `if (` (an `else if`
-            ! head already opened, so it is excluded).
-            if (in_continuation .and. .not. continuation_pending(content)) then
-                if (has_keyword_then(to_lower(masked)) .and. &
-                    head_opens_block_if(stmt_head)) then
-                    indent_level = indent_level + 1
+                ! Preprocessor directives pass through unchanged. content has
+                ! at least one character and is '#' only for a non-blank line.
+                if (content(1:1) == '#') then
+                    output(i)%text = lines(i)%text
+                    cycle
                 end if
-            end if
 
-            if (.not. in_continuation) stmt_head = masked
-            prev_content = content
+                ! Truly empty line: preserve as blank.
+                if (len_trim(content) == 0 .and. len_trim(comment) == 0) then
+                    output(i)%text = ''
+                    cycle
+                end if
+
+                ! Comment-only line: apply current indent to the comment.
+                if (len_trim(content) == 0 .and. len_trim(comment) > 0) then
+                    call apply_indent('', comment, indent_level, width, out_line)
+                    output(i)%text = trim(out_line)
+                    cycle
+                end if
+
+                call mask_strings(content, masked, quote_before)
+
+                ! Classify this line using the masked content.
+                call classify_line(masked, opens, closes, is_both)
+
+                ! Detect continuation: previous (non-empty) content ended with &
+                in_continuation = continuation_pending(prev_content)
+
+                ! Decrease indent before emitting close keywords.
+                if (closes > 0 .and. .not. in_continuation) then
+                    indent_level = max(0, indent_level - closes)
+                end if
+
+                ! Emit with current indent.
+                if (in_continuation) then
+                    call apply_indent(content, comment, indent_level + 1, width, &
+                        out_line)
+                else
+                    call apply_indent(content, comment, indent_level, width, out_line)
+                end if
+                output(i)%text = trim(out_line)
+
+                ! Increase indent after emitting open keywords.
+                if (opens > 0 .and. .not. in_continuation) then
+                    indent_level = indent_level + opens
+                end if
+
+                ! A block-if whose `then` is pushed onto a continuation line: the
+                ! head line (ending in '&') had no `then`, so classify_line scored
+                ! opens=0. Open the block when the final continuation line ends in
+                ! `then` and the statement head is a plain `if (` (an `else if`
+                ! head already opened, so it is excluded).
+                if (in_continuation .and. .not. continuation_pending(content)) then
+                    if (has_keyword_then(to_lower(masked)) .and. &
+                        head_opens_block_if(stmt_head)) then
+                        indent_level = indent_level + 1
+                    end if
+                end if
+
+                if (.not. in_continuation) stmt_head = trim(masked)
+                prev_content = trim(content)
+            end block
         end do
-    end subroutine format_lines_with_indent
+    end subroutine format_line_list
 
     ! Format a file in place. Returns exitcode 0 on success, 1 on I/O error.
     subroutine format_file(filepath, exitcode)
@@ -119,38 +145,38 @@ contains
         call format_file_with_indent(filepath, exitcode, INDENT_WIDTH)
     end subroutine format_file
 
+    ! The file is left untouched when it cannot be read completely.
     subroutine format_file_with_indent(filepath, exitcode, indent_width)
         character(len=*), intent(in) :: filepath
         integer, intent(out) :: exitcode
         integer, intent(in) :: indent_width
 
-        character(len=MAX_LINE_LEN), allocatable :: lines(:), output(:)
-        integer :: n_lines, n_output, u, ios, i, width
+        type(line_t), allocatable :: lines(:), output(:)
+        integer :: n_lines, n_output, u, ios, i
 
         exitcode = 0
-        allocate (lines(MAX_LINES), output(MAX_LINES))
-        width = INDENT_WIDTH
-        if (indent_width > 0) width = indent_width
-
-        n_lines = 0
         open (newunit=u, file=trim(filepath), status='old', &
             action='read', iostat=ios)
         if (ios /= 0) then
             exitcode = 1
             return
         end if
+        allocate (lines(1024))
+        n_lines = 0
         do
-            if (n_lines >= MAX_LINES) exit
+            if (n_lines == size(lines)) call grow_lines(lines)
+            call read_line(u, lines(n_lines + 1)%text, ios)
+            if (ios /= 0) exit
             n_lines = n_lines + 1
-            read (u, '(a)', iostat=ios) lines(n_lines)
-            if (ios /= 0) then
-                n_lines = n_lines - 1
-                exit
-            end if
         end do
         close (u)
+        if (.not. is_iostat_end(ios)) then
+            exitcode = 1
+            return
+        end if
 
-        call format_lines_with_indent(lines, n_lines, output, n_output, width)
+        allocate (output(max(n_lines, 1)))
+        call format_line_list(lines, n_lines, output, n_output, indent_width)
 
         open (newunit=u, file=trim(filepath), status='replace', &
             action='write', iostat=ios)
@@ -159,10 +185,50 @@ contains
             return
         end if
         do i = 1, n_output
-            write (u, '(a)') trim(output(i))
+            write (u, '(a)') trim(output(i)%text)
         end do
         close (u)
     end subroutine format_file_with_indent
+
+    subroutine grow_lines(lines)
+        type(line_t), allocatable, intent(inout) :: lines(:)
+
+        type(line_t), allocatable :: bigger(:)
+        integer :: i
+
+        allocate (bigger(2*size(lines)))
+        do i = 1, size(lines)
+            call move_alloc(lines(i)%text, bigger(i)%text)
+        end do
+        call move_alloc(bigger, lines)
+    end subroutine grow_lines
+
+    ! Read one record of any length. ios is 0, iostat_end at end of file, or
+    ! another nonzero value on a read error.
+    subroutine read_line(u, line, ios)
+        integer, intent(in) :: u
+        character(len=:), allocatable, intent(out) :: line
+        integer, intent(out) :: ios
+
+        character(len=READ_CHUNK) :: chunk
+        integer :: got
+
+        line = ''
+        do
+            got = 0
+            read (u, '(a)', advance='no', size=got, iostat=ios) chunk
+            if (got > 0) line = line//chunk(1:got)
+            if (is_iostat_eor(ios)) then
+                ios = 0
+                return
+            end if
+            if (ios /= 0) then
+                ! A final record without newline arrives with its end condition.
+                if (is_iostat_end(ios) .and. len(line) > 0) ios = 0
+                return
+            end if
+        end do
+    end subroutine read_line
 
     ! Split a source line into content (stripped of leading whitespace) and
     ! the trailing comment (starting with '!', including the '!').

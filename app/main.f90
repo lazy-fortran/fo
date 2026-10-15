@@ -32,10 +32,7 @@ program fo_main
         project_load, project_inventory_cases, project_build_cases
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
-    use fo_fmt, only: fo_fmt_run, fo_fmt_files, fo_fmt_changed_run, &
-        fo_fmt_check_run, fo_fmt_check_files, fo_fmt_check_changed_run, &
-        fo_fmt_deep_run, fo_fmt_deep_files, fo_fmt_deep_changed_run, &
-        fo_fmt_deep_check_run, fo_fmt_deep_check_files, &
+    use fo_fmt, only: fmt_sources, FMT_SELECT_ALL, FMT_SELECT_FILES, FMT_SELECT_CHANGED, &
         write_git_changed_source_list
     use fo_process, only: process_exit, process_run_argv_logged, argv_push, &
         process_configure_openmp, process_export_self_driver
@@ -48,8 +45,6 @@ program fo_main
     use fo_lock, only: lock_write
     use fo_scaffold, only: scaffold_project
     use fo_install, only: install_native_executables
-    use fo_bench, only: bench_result_t, fo_bench_run
-    use fo_doc, only: fo_doc_run
     use fo_version_info, only: FO_VERSION
     implicit none
 
@@ -82,8 +77,6 @@ program fo_main
         call cmd_changed()
     case ('graph')
         call cmd_graph()
-    case ('doc')
-        call cmd_doc()
     case ('build')
         if (ffc_native_requested()) then
             call ffc_cmd_build()
@@ -97,8 +90,6 @@ program fo_main
         call cmd_verify()
     case ('gremlin')
         call gremlin_cli_run()
-    case ('bench')
-        call cmd_bench()
     case ('cover')
         call fo_cover_run()
     case ('exec')
@@ -333,8 +324,8 @@ contains
             do i = 1, n_changed
                 changed_files(i) = filenames(changed_ids(i))
             end do
-            call fo_fmt_check_changed_run(trim(b%project_dir), changed_files, &
-                n_changed, fmt_out, fmt_exit)
+            call fmt_sources(trim(b%project_dir), FMT_SELECT_CHANGED, .true., .false., &
+                changed_files, n_changed, fmt_out, fmt_exit)
             if (len_trim(fmt_out) > 0) write (error_unit, '(a)') trim(fmt_out)
             if (fmt_exit /= 0) write (error_unit, '(a)') 'Fmt: WARN'
         end block
@@ -1815,40 +1806,6 @@ contains
         if (exitcode /= 0) call process_exit(1)
     end subroutine report_test_result
 
-    subroutine cmd_bench()
-        type(bench_result_t), allocatable :: results(:)
-        logical :: use_json
-        integer :: n_runs, n_results, exitcode, i
-        character(len=256) :: arg
-
-        n_runs = 5
-        use_json = .false.
-
-        do i = 2, command_argument_count()
-            call get_command_argument(i, arg)
-            if (trim(arg) == '--json') then
-                use_json = .true.
-            else if (trim(arg) == '--runs' .and. i < command_argument_count()) then
-                call get_command_argument(i + 1, arg)
-                read (arg, *, iostat=exitcode) n_runs
-                if (exitcode /= 0 .or. n_runs < 1 .or. n_runs > 1000) then
-                    write (error_unit, '(a)') 'fo bench: invalid --runs value'
-                    stop 1
-                end if
-            else if (index(trim(arg), '--runs=') == 1) then
-                read (arg(8:), *, iostat=exitcode) n_runs
-                if (exitcode /= 0 .or. n_runs < 1 .or. n_runs > 1000) then
-                    write (error_unit, '(a)') 'fo bench: invalid --runs value'
-                    stop 1
-                end if
-            end if
-        end do
-
-        allocate (results(128))
-        call fo_bench_run('.', results, n_results, use_json, n_runs, exitcode)
-        if (exitcode /= 0) call process_exit(1)
-    end subroutine cmd_bench
-
     subroutine cmd_graph()
         type(scan_unit_t), allocatable :: units(:)
         type(dag_t) :: dag
@@ -1937,19 +1894,6 @@ contains
         write (output_unit, '(a)') text
         if (size(report%violations) > 0) call process_exit(1)
     end subroutine graph_layers
-
-    subroutine cmd_doc()
-        type(backend_t) :: b
-        character(len=512) :: scan_root
-        integer :: exitcode
-
-        b = detect_backend('.')
-        scan_root = '.'
-        if (b%kind /= BACKEND_NONE) scan_root = b%project_dir
-
-        call fo_doc_run(trim(scan_root), has_arg('--json'), exitcode)
-        if (exitcode /= 0) stop 1
-    end subroutine cmd_doc
 
     subroutine cmd_lint()
         use fo_lint, only: lint_finding_t, lint_warning_t, &
@@ -2126,12 +2070,12 @@ contains
     end function any_unused_dummy
 
     subroutine cmd_fmt()
-        type(backend_t) :: b
-        integer :: exitcode
+        integer :: exitcode, selection
         integer :: i, n_fmt_files
-        character(len=MAX_PATH) :: arg, project_dir
+        character(len=MAX_PATH) :: arg
         character(len=MAX_PATH) :: fmt_files(MAX_NODES)
         character(len=8192) :: fmt_output
+        character(len=16) :: suffix, deep_flag
         logical :: check_mode, changed_mode, deep_mode
 
         if (has_arg('--help') .or. has_arg('-h')) then
@@ -2183,90 +2127,47 @@ contains
             end if
         end if
 
-        if (deep_mode) then
-            if (check_mode) then
-                if (n_fmt_files > 0) then
-                    b = detect_backend('.')
-                    project_dir = '.'
-                    if (b%kind /= BACKEND_NONE) project_dir = b%project_dir
-                    call fo_fmt_deep_check_files(trim(project_dir), fmt_files, &
-                        n_fmt_files, fmt_output, exitcode)
-                else
-                    call fo_fmt_deep_check_run('.', fmt_output, exitcode)
-                end if
-                if (len_trim(fmt_output) > 0) &
-                    write (error_unit, '(a)') trim(fmt_output)
-                if (exitcode /= 0) call process_exit(1)
-                return
-            end if
-
-            if (changed_mode) then
-                call fo_fmt_deep_changed_run('.', exitcode)
-                if (exitcode /= 0) then
-                    write (error_unit, '(a)') 'fo fmt --deep --changed: no Git worktree'
-                    call process_exit(1)
-                end if
-                write (output_unit, '(a)') 'formatted changed sources (deep)'
-                return
-            end if
-
-            if (n_fmt_files > 0) then
-                call fo_fmt_deep_files('.', fmt_files, n_fmt_files, exitcode)
-            else
-                call fo_fmt_deep_run('.', exitcode)
-            end if
-            if (exitcode /= 0) then
-                write (error_unit, '(a)') 'fo fmt --deep: formatting failed'
-                call process_exit(1)
-            end if
-            if (n_fmt_files > 0) then
-                write (output_unit, '(a)') 'formatted selected sources (deep)'
-            else
-                write (output_unit, '(a)') 'formatted (deep)'
-            end if
-            return
+        if (changed_mode) then
+            selection = FMT_SELECT_CHANGED
+        else if (n_fmt_files > 0) then
+            selection = FMT_SELECT_FILES
+        else
+            selection = FMT_SELECT_ALL
         end if
+        call fmt_sources('.', selection, check_mode, deep_mode, fmt_files, n_fmt_files, &
+            fmt_output, exitcode)
 
         if (check_mode) then
-            if (n_fmt_files > 0) then
-                b = detect_backend('.')
-                project_dir = '.'
-                if (b%kind /= BACKEND_NONE) project_dir = b%project_dir
-                call fo_fmt_check_files(trim(project_dir), fmt_files, n_fmt_files, &
-                    fmt_output, exitcode)
-            else
-                call fo_fmt_check_run('.', fmt_output, exitcode)
-            end if
             if (len_trim(fmt_output) > 0) &
                 write (error_unit, '(a)') trim(fmt_output)
             if (exitcode /= 0) call process_exit(1)
             return
         end if
 
-        if (changed_mode) then
-            call fo_fmt_changed_run('.', exitcode)
-            if (exitcode /= 0) then
-                write (error_unit, '(a)') 'fo fmt --changed: no Git worktree'
-                call process_exit(1)
-            end if
-            write (output_unit, '(a)') 'formatted changed sources'
-            return
-        end if
-
-        if (n_fmt_files > 0) then
-            call fo_fmt_files('.', fmt_files, n_fmt_files, exitcode)
-        else
-            call fo_fmt_run('.', exitcode)
+        suffix = ''
+        deep_flag = ''
+        if (deep_mode) then
+            suffix = ' (deep)'
+            deep_flag = ' --deep'
         end if
         if (exitcode /= 0) then
-            write (error_unit, '(a)') 'fo fmt: formatting failed'
+            if (changed_mode) then
+                write (error_unit, '(a)') 'fo fmt'//trim(deep_flag)// &
+                    ' --changed: no Git worktree'
+            else
+                write (error_unit, '(a)') 'fo fmt'//trim(deep_flag)// &
+                    ': formatting failed'
+            end if
             call process_exit(1)
         end if
-        if (n_fmt_files > 0) then
-            write (output_unit, '(a)') 'formatted selected sources'
-        else
-            write (output_unit, '(a)') 'formatted'
-        end if
+        select case (selection)
+        case (FMT_SELECT_CHANGED)
+            write (output_unit, '(a)') 'formatted changed sources'//trim(suffix)
+        case (FMT_SELECT_FILES)
+            write (output_unit, '(a)') 'formatted selected sources'//trim(suffix)
+        case default
+            write (output_unit, '(a)') 'formatted'//trim(suffix)
+        end select
     end subroutine cmd_fmt
 
     subroutine cmd_install()
