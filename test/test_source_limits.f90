@@ -18,7 +18,7 @@ program test_source_limits
     call test_fpm_source_scan_exclusions()
     call test_too_many_sources_fail()
     call test_overlong_source_path_fails()
-    call test_dag_node_limit_fails()
+    call test_dag_grows_past_initial_capacity()
     call test_manifest_tables()
     call test_manifest_flag_and_library_limits()
     call test_use_only_symbol_limit()
@@ -108,7 +108,7 @@ contains
         call assert_true(ierr /= 0, 'a source path beyond the unit path length is an error')
     end subroutine test_overlong_source_path_fails
 
-    subroutine test_dag_node_limit_fails()
+    subroutine test_dag_grows_past_initial_capacity()
         type(scan_unit_t), allocatable :: units(:)
         type(dag_t) :: dag
         character(len=24) :: name
@@ -123,8 +123,9 @@ contains
             allocate (units(i)%deps(0))
         end do
         call build_dag_from_units(units, n, dag, ierr=ierr)
-        call assert_true(ierr /= 0, 'units beyond the graph capacity are an error')
-    end subroutine test_dag_node_limit_fails
+        call assert_true(ierr == 0 .and. dag%n_nodes == n, &
+            'units beyond the initial graph capacity are all kept')
+    end subroutine test_dag_grows_past_initial_capacity
 
     subroutine parse_manifest(text, ierr)
         character(len=*), intent(in) :: text
