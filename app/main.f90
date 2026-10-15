@@ -1801,6 +1801,7 @@ contains
             lint_all_json, lint_fix_dir, MAX_FINDINGS, MAX_WARNINGS
         use fo_lint_deep, only: lint_deep_run, lint_deep_print
         use fo_process, only: process_getcwd
+        use fo_fs, only: fs_realpath
         use fx_path, only: path_normalize, path_is_absolute
         type(backend_t) :: b
         type(lint_finding_t), allocatable :: findings(:)
@@ -1810,6 +1811,8 @@ contains
         integer :: n_findings, n_warnings, i, j, n_files, n_selected, arg_length
         integer :: n_removed, n_remaining, status, deep_count, deep_status
         character(len=512) :: scan_root, argument, candidate
+        character(len=4096) :: resolved
+        logical :: ok
         character(len=4096) :: cwd
         character(len=:), allocatable :: deep_json, deep_error, normalized
         logical :: deep, json_mode, matched
@@ -1855,6 +1858,8 @@ contains
                 else
                     normalized = path_normalize(trim(cwd)//'/'//trim(argument))
                 end if
+                call fs_realpath(normalized, resolved, ok)
+                if (ok) normalized = trim(resolved)
                 if (len(normalized) > len(argument)) then
                     write (error_unit, '(a)') &
                         'fo lint: normalized source path exceeds 512 characters'
