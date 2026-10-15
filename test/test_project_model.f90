@@ -167,7 +167,7 @@ contains
 
         call build_model(m, 'slow', '')
         call expect(m, '', SELECT_OK, &
-            'test_core test_phys script_case declared_case', 'default selection')
+            'declared_case script_case test_core test_phys', 'default selection')
         call run(m, '', sel)
         call assert(sel%disposition(model_find_case(m, 'test_phys_slow')) &
             == CASE_DEFAULT_EXCLUDED, 'slow label is default-excluded')
@@ -175,8 +175,8 @@ contains
             == CASE_DEFAULT_EXCLUDED, 'adapter flag is default-excluded')
         call model_selected_names(m, sel, names)
         call assert(size(names) == 4, 'backend receives exact names')
-        call expect(m, 'all', SELECT_OK, 'test_core test_phys test_phys_slow '// &
-            'script_case preset_off declared_case', '--all')
+        call expect(m, 'all', SELECT_OK, 'declared_case preset_off script_case test_core '// &
+            'test_phys test_phys_slow', '--all')
         call expect(m, 'n=test_core', SELECT_OK, 'test_core', 'exact name')
         call expect(m, 'n=test_phys*', SELECT_OK, 'test_phys', &
             'glob keeps default exclusion')
@@ -208,14 +208,14 @@ contains
             '-L repeated is AND')
         call expect(m, 'L=^unit$', SELECT_OK, 'test_core test_phys', &
             '-L anchored regex')
-        call expect(m, 'E=unit', SELECT_OK, 'script_case declared_case', '-LE')
+        call expect(m, 'E=unit', SELECT_OK, 'declared_case script_case', '-LE')
         call expect(m, 'E=physics E=unit', SELECT_OK, &
-            'test_core script_case declared_case', '-LE repeated is AND')
+            'declared_case script_case test_core', '-LE repeated is AND')
         call expect(m, 'E=unit|regression|integration', SELECT_EMPTY, '', &
             '-LE alternation')
         call expect(m, 'L=physics E=phys', SELECT_EMPTY, '', '-LE wins over -L')
         call expect(m, 'E=slow all', SELECT_OK, &
-            'test_core test_phys script_case preset_off declared_case', &
+            'declared_case preset_off script_case test_core test_phys', &
             '-LE applies under --all')
         call run(m, 'n=test_phys E=unit', sel)
         call assert(sel%status == SELECT_EMPTY, 'exact name filtered by -LE')

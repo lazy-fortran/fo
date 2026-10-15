@@ -686,6 +686,7 @@ contains
             n_selected = n_selected + 1
             selection%cases(n_selected) = i
         end do
+        call sort_by_name(selection%cases)
 
         if (size(selection%unknown) > 0) then
             selection%status = SELECT_UNKNOWN_NAME
@@ -706,6 +707,47 @@ contains
         end if
 
     contains
+
+        subroutine sort_by_name(idx)
+            !! Bottom-up merge sort of case indices by name: O(n log n), stable.
+            integer, intent(inout) :: idx(:)
+            integer, allocatable :: tmp(:)
+            integer :: n, width, lo, mid, hi, a, b, o
+
+            n = size(idx)
+            allocate(tmp(n))
+            width = 1
+            do while (width < n)
+                lo = 1
+                do while (lo <= n)
+                    mid = min(lo + width - 1, n)
+                    hi = min(lo + 2*width - 1, n)
+                    a = lo
+                    b = mid + 1
+                    o = lo
+                    do while (a <= mid .or. b <= hi)
+                        if (b > hi) then
+                            tmp(o) = idx(a)
+                            a = a + 1
+                        else if (a > mid) then
+                            tmp(o) = idx(b)
+                            b = b + 1
+                        else if (model%cases(idx(b))%name < &
+                                model%cases(idx(a))%name) then
+                            tmp(o) = idx(b)
+                            b = b + 1
+                        else
+                            tmp(o) = idx(a)
+                            a = a + 1
+                        end if
+                        o = o + 1
+                    end do
+                    lo = lo + 2*width
+                end do
+                idx = tmp
+                width = 2*width
+            end do
+        end subroutine sort_by_name
 
         subroutine mark(case_index, disposition, text)
             integer, intent(in) :: case_index, disposition

@@ -174,7 +174,7 @@ contains
     end function parsed
 
     function case_records(report) result(text)
-        !! name|labels|layer|reason of every selected case, sorted.
+        !! name|labels|layer|reason of every selected case, in list order.
         type(json_value_t), intent(in) :: report
         character(:), allocatable :: text
         character(len=200), allocatable :: items(:)
@@ -194,7 +194,10 @@ contains
             items(i) = line//'|'//json_string_value(json_member(c, 'layer'))//'|'// &
                 json_string_value(json_member(c, 'reason'))
         end do
-        text = sorted_join(items)
+        text = ''
+        do i = 1, size(items)
+            text = text//trim(items(i))//';'
+        end do
     end function case_records
 
     subroutine plan_sources(report, is_fpm, tests, lib)

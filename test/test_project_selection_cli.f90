@@ -214,7 +214,7 @@ contains
         call assert_file_absent(join_path(cmake_dir, 'build/unit_a'), &
             'unbuilt -L io run builds only its own targets')
         call assert_equal_string(listing(cmake_dir, cmake_env, &
-            [character(len=48) :: '--all'], result), 'unit_a;unit_b;perf_c;', &
+            [character(len=48) :: '--all'], result), 'perf_c;unit_a;unit_b;', &
             'cmake --all adds the slow label')
         call assert_equal_string(listing(cmake_dir, cmake_env, &
             [character(len=48) :: '-L', 'io'], result), 'unit_b;', 'cmake -L')
