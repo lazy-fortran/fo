@@ -3,8 +3,8 @@ module fo_project_load
     !! selection on it. This is the one selection path shared by `fo test`,
     !! `fo test --list` and the MCP test tool (#167, #193): backend detection
     !! -> adapter (fpm manifest + scan, or CMake configure + File API + CTest)
-    !! -> project_model_t -> model_select. Backends then receive exact case
-    !! names (model_selected_names).
+    !! -> project_model_t -> model_select. Backends then receive exact
+    !! case indices, which project_run_cases builds and runs.
     use fx_string, only: string_t
     use fx_json_build, only: json_builder_t, json_new, json_object_start, &
         json_object_end, json_array_start, json_array_end, json_key, &
@@ -13,13 +13,14 @@ module fo_project_load
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file_alloc
     use fo_scan, only: is_slow_test
     use fo_build_backend, only: backend_t, BACKEND_NATIVE, BACKEND_CMAKE, &
-        cmake_configure
+        cmake_configure, backend_test_names, backend_test_cases, &
+        backend_set_build_targets
     use fo_cmake_native_config, only: native_cmake_selected
     use fo_cmake_model, only: cmake_model_load
     use fo_fpm_model, only: fpm_model_load
     use fo_project_model, only: project_model_t, model_request_t, &
         model_selection_t, model_plan_t, model_select, model_plan, &
-        model_find_case, model_selected_names, SELECT_OK, &
+        model_find_case, SELECT_OK, &
         SELECT_UNKNOWN_NAME, SELECT_EMPTY, SELECT_NAMED_EXCLUDED, &
         CASE_DEFAULT_EXCLUDED
     use fo_project_model, only: model_unit_t, model_layering_t, model_layering, &
@@ -30,7 +31,7 @@ module fo_project_load
     implicit none
     private
 
-    public :: project_has_model, project_load, project_resolve, project_run_names
+    public :: project_has_model, project_load, project_resolve, project_run_cases
     public :: project_list_text, project_list_json
     public :: project_layering, project_layering_text, project_layering_json
 
@@ -89,12 +90,10 @@ contains
         if (ierr /= 0) message = 'CMake project model unavailable: '//message
     end subroutine project_load
 
-    subroutine project_resolve(b, flags, request, model, selection, ierr, message, &
-            extra)
+    subroutine project_resolve(b, flags, request, model, selection, ierr, message)
         !! Load the model and select. ierr = 0: the selection is usable (an
         !! empty selection has selection%status = SELECT_EMPTY and the caller
         !! decides). ierr /= 0: message is the diagnostic, without prefix.
-        !! extra: always empty; kept for callers that still pass it.
         type(backend_t), intent(inout) :: b
         character(len=*), intent(in) :: flags
         type(model_request_t), intent(in) :: request
@@ -102,10 +101,8 @@ contains
         type(model_selection_t), intent(out) :: selection
         integer, intent(out) :: ierr
         character(len=:), allocatable, intent(out) :: message
-        type(string_t), allocatable, intent(out), optional :: extra(:)
         integer :: i, k
 
-        if (present(extra)) allocate (extra(0))
         call project_load(b, flags, model, ierr, message)
         if (ierr /= 0) return
         call model_select(model, request, selection)
@@ -129,48 +126,58 @@ contains
             message = selection%message
         end select
         if (ierr /= 0) return
-        ! Explicit slow names stay gated until the backends stop filtering
-        ! by name (CMake names that only look slow, for instance).
-        if (.not. request%all) then
-            do i = 1, size(request%names)
-                if (model_find_case(model, request%names(i)%s) == 0) cycle
-                if (.not. is_slow_test(request%names(i)%s)) cycle
-                ierr = 1
-                message = 'slow test '//request%names(i)%s//' requires --all'
-                return
-            end do
-        end if
     end subroutine project_resolve
 
-    subroutine project_run_names(model, selection, extra, names)
-        !! Exact names handed to the backend: the selected cases (extra is
-        !! ignored; kept for callers that still pass it).
+    subroutine project_run_cases(b, model, cases, flags, no_build, log_file, &
+            exitcode)
+        !! Build what the cases need, then run exactly them. The model is
+        !! already loaded (CMake is configured), so nothing configures again.
+        !! CMake: build the plan targets only, then ctest with exact anchored
+        !! names in batches. fpm: its named-test path. no_build runs without
+        !! building.
+        type(backend_t), intent(inout) :: b
         type(project_model_t), intent(in) :: model
-        type(model_selection_t), intent(in) :: selection
-        type(string_t), intent(in), optional :: extra(:)
-        character(len=:), allocatable, intent(out) :: names(:)
-        type(string_t), allocatable :: selected(:)
+        integer, intent(in) :: cases(:)
+        character(len=*), intent(in) :: flags
+        logical, intent(in) :: no_build
+        character(len=*), intent(in) :: log_file
+        integer, intent(out) :: exitcode
+        character(len=:), allocatable :: names(:)
+        type(model_plan_t) :: plan
+        type(string_t), allocatable :: targets(:)
         integer :: k, width
+        logical :: lift
 
-        call model_selected_names(model, selection, selected)
         width = 1
-        do k = 1, size(selected)
-            width = max(width, len(selected(k)%s))
+        do k = 1, size(cases)
+            width = max(width, len(model%cases(cases(k))%name))
         end do
-        allocate (character(len=width) :: names(size(selected)))
-        do k = 1, size(selected)
-            names(k) = selected(k)%s
+        allocate (character(len=width) :: names(size(cases)))
+        lift = .false.
+        do k = 1, size(cases)
+            names(k) = model%cases(cases(k))%name
+            if (model%cases(cases(k))%default_excluded) lift = .true.
         end do
-    end subroutine project_run_names
+        if (b%kind == BACKEND_CMAKE) then
+            call plan_names(model, cases, plan, targets)
+            call backend_set_build_targets(b, targets, plan%widened)
+            call backend_test_cases(b, names, size(names), exitcode, &
+                log_file=log_file, flags=flags, no_build=no_build, &
+                configured=.true., lift_preset_filter=lift)
+        else
+            call backend_test_names(b, names, size(names), exitcode, .true., &
+                log_file, flags=flags, no_build=no_build)
+        end if
+    end subroutine project_run_cases
 
-    subroutine plan_names(model, selection, plan, names)
+    subroutine plan_names(model, cases, plan, names)
         type(project_model_t), intent(in) :: model
-        type(model_selection_t), intent(in) :: selection
+        integer, intent(in) :: cases(:)
         type(model_plan_t), intent(out) :: plan
         type(string_t), allocatable, intent(out) :: names(:)
         integer :: k
 
-        call model_plan(model, selection%cases, plan)
+        call model_plan(model, cases, plan)
         allocate (names(size(plan%targets)))
         do k = 1, size(plan%targets)
             names(k)%s = model%targets(plan%targets(k))%name
@@ -210,7 +217,7 @@ contains
         character(len=24) :: count
         integer :: k, i
 
-        call plan_names(model, selection, plan, targets)
+        call plan_names(model, selection%cases, plan, targets)
         write (count, '(i0)') size(selection%cases)
         text = 'backend: '//model%backend//nl//'selected: '//trim(count)//nl
         do k = 1, size(selection%cases)
@@ -246,7 +253,7 @@ contains
         type(json_builder_t) :: jb
         integer :: k, j, i
 
-        call plan_names(model, selection, plan, targets)
+        call plan_names(model, selection%cases, plan, targets)
         jb = json_new()
         call json_object_start(jb)
         call json_key_string(jb, 'backend', model%backend)

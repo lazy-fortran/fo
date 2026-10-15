@@ -36,8 +36,12 @@ module fo_cmake_model
     !! test preset the preset listing is authoritative and cases absent from
     !! it (listed via `--test-dir`) are flagged default_excluded with their
     !! labels kept; without a preset the model default_exclude is [slow].
-    !! CTest reports a test command only once its executable exists, so on an
-    !! unbuilt tree command_target stays unknown (the plan widens).
+    !! CTest reports a test command only once its executable exists. For the
+    !! cases without a reported command the generated CTestTestfile.cmake
+    !! files (CTest's own add_test declarations, followed through subdirs()
+    !! and include()) supply the command, so an unbuilt tree maps its cases
+    !! to targets as well. A command that names no target artifact (a script)
+    !! stays unknown, which widens the plan.
     use fx_string, only: string_t
     use fx_hash, only: fnv1a_string
     use fx_json_parse, only: json_parser_t, json_event_t, &
@@ -51,7 +55,7 @@ module fo_cmake_model
         cmake_context_read_file, cmake_context_build_path
     use fo_project_model, only: project_model_t, model_init, model_add_target, &
         model_add_layer, model_add_case, model_find_artifact, model_find_case, &
-        model_attr_t, model_finalize, TARGET_OTHER, TARGET_LIBRARY, &
+        model_attr_t, model_finalize, MAP_EXACT, TARGET_OTHER, TARGET_LIBRARY, &
         TARGET_EXECUTABLE, ORIGIN_PROJECT, ORIGIN_DEPENDENCY
     use, intrinsic :: iso_fortran_env, only: int64, real64
     implicit none
@@ -253,8 +257,239 @@ contains
             allocate (model%default_exclude(1))
             model%default_exclude(1)%s = 'slow'
         end if
+        call map_declared_commands(context, model)
         ierr = 0
     end subroutine cmake_model_load_cases
+
+    subroutine map_declared_commands(context, model)
+        !! Map cases that CTest listed without a command through the
+        !! add_test declarations of the generated CTestTestfile.cmake tree.
+        type(cmake_context_t), intent(in) :: context
+        type(project_model_t), intent(inout) :: model
+        integer :: k
+        logical :: unmapped
+
+        unmapped = .false.
+        do k = 1, model%n_cases
+            if (model%cases(k)%command_target == 0) unmapped = .true.
+        end do
+        if (.not. unmapped) return
+        call scan_testfile(cmake_context_build_path(context)// &
+            '/CTestTestfile.cmake', model)
+    end subroutine map_declared_commands
+
+    recursive subroutine scan_testfile(path, model)
+        !! Walk one CTestTestfile.cmake: add_test maps a case, subdirs() and
+        !! include() are followed. Missing files are skipped silently (an
+        !! include of a not yet generated discovery file).
+        character(len=*), intent(in) :: path
+        type(project_model_t), intent(inout) :: model
+        character(len=:), allocatable :: text, command, dir
+        type(string_t), allocatable :: args(:)
+        integer :: pos, n_args, k, slash, t, target_index
+
+        call cmake_context_read_file(path, text)
+        if (.not. allocated(text)) return
+        slash = index(path, '/', back=.true.)
+        dir = '.'
+        if (slash > 1) dir = path(:slash - 1)
+        pos = 1
+        do
+            call next_command(text, pos, command, args, n_args)
+            if (len(command) == 0) exit
+            select case (command)
+            case ('add_test')
+                if (n_args < 2) cycle
+                k = model_find_case(model, args(1)%s)
+                if (k == 0) cycle
+                if (model%cases(k)%command_target /= 0) cycle
+                do t = 2, n_args
+                    target_index = model_find_artifact(model, args(t)%s)
+                    if (target_index == 0) cycle
+                    model%cases(k)%command_target = target_index
+                    model%cases(k)%mapping = MAP_EXACT
+                    exit
+                end do
+            case ('subdirs')
+                do t = 1, n_args
+                    if (len(args(t)%s) == 0) cycle
+                    if (args(t)%s(1:1) == '/') then
+                        call scan_testfile(args(t)%s//'/CTestTestfile.cmake', model)
+                    else
+                        call scan_testfile(dir//'/'//args(t)%s// &
+                            '/CTestTestfile.cmake', model)
+                    end if
+                end do
+            case ('include')
+                if (n_args < 1) cycle
+                if (len(args(1)%s) == 0) cycle
+                if (args(1)%s(1:1) == '/') then
+                    call scan_testfile(args(1)%s, model)
+                else
+                    call scan_testfile(dir//'/'//args(1)%s, model)
+                end if
+            end select
+        end do
+    end subroutine scan_testfile
+
+    subroutine next_command(text, pos, command, args, n_args)
+        !! Next command invocation of a CMake script: its name (empty at the
+        !! end of the text) and its top-level arguments (quoted, bracket and
+        !! unquoted forms, nested parentheses skipped). pos advances.
+        character(len=*), intent(in) :: text
+        integer, intent(inout) :: pos
+        character(len=:), allocatable, intent(out) :: command
+        type(string_t), allocatable, intent(out) :: args(:)
+        integer, intent(out) :: n_args
+        character(len=:), allocatable :: word, value
+        integer :: n, start, depth, level, close_at
+        character(len=1) :: c
+
+        n = len(text)
+        n_args = 0
+        command = ''
+        do while (pos <= n)
+            c = text(pos:pos)
+            if (c == '#') then
+                call skip_line(text, pos)
+                cycle
+            end if
+            if (.not. is_name_char(c)) then
+                pos = pos + 1
+                cycle
+            end if
+            start = pos
+            do while (pos <= n)
+                if (.not. is_name_char(text(pos:pos))) exit
+                pos = pos + 1
+            end do
+            word = text(start:pos - 1)
+            do while (pos <= n)
+                if (.not. is_space(text(pos:pos))) exit
+                pos = pos + 1
+            end do
+            if (pos > n) return
+            if (text(pos:pos) /= '(') cycle
+            pos = pos + 1
+            depth = 0
+            do while (pos <= n)
+                c = text(pos:pos)
+                if (is_space(c)) then
+                    pos = pos + 1
+                else if (c == '#') then
+                    call skip_line(text, pos)
+                else if (c == '(') then
+                    depth = depth + 1
+                    pos = pos + 1
+                else if (c == ')') then
+                    pos = pos + 1
+                    if (depth == 0) exit
+                    depth = depth - 1
+                else if (c == '"') then
+                    call quoted_argument(text, pos, value)
+                    if (depth == 0) call push_string(args, n_args, value)
+                else if (c == '[' .and. bracket_level(text, pos) >= 0) then
+                    level = bracket_level(text, pos)
+                    close_at = index(text(pos:), ']'//repeat('=', level)//']')
+                    if (close_at == 0) then
+                        pos = n + 1
+                        exit
+                    end if
+                    start = pos + level + 2
+                    if (start <= n) then
+                        if (text(start:start) == new_line('a')) start = start + 1
+                    end if
+                    if (depth == 0) call push_string(args, n_args, &
+                        text(start:pos + close_at - 2))
+                    pos = pos + close_at + level + 1
+                else
+                    start = pos
+                    do while (pos <= n)
+                        c = text(pos:pos)
+                        if (is_space(c) .or. c == '(' .or. c == ')' .or. &
+                            c == '"' .or. c == '#') exit
+                        pos = pos + 1
+                    end do
+                    if (pos == start) then
+                        pos = pos + 1
+                    else if (depth == 0) then
+                        call push_string(args, n_args, text(start:pos - 1))
+                    end if
+                end if
+            end do
+            command = word
+            return
+        end do
+    end subroutine next_command
+
+    subroutine skip_line(text, pos)
+        character(len=*), intent(in) :: text
+        integer, intent(inout) :: pos
+
+        do while (pos <= len(text))
+            if (text(pos:pos) == new_line('a')) return
+            pos = pos + 1
+        end do
+    end subroutine skip_line
+
+    subroutine quoted_argument(text, pos, value)
+        !! Quoted CMake argument starting at the opening quote.
+        character(len=*), intent(in) :: text
+        integer, intent(inout) :: pos
+        character(len=:), allocatable, intent(out) :: value
+        character(len=1) :: c
+        integer :: n
+
+        n = len(text)
+        value = ''
+        pos = pos + 1
+        do while (pos <= n)
+            c = text(pos:pos)
+            if (c == '"') then
+                pos = pos + 1
+                return
+            end if
+            if (c == achar(92) .and. pos < n) then
+                pos = pos + 1
+                c = text(pos:pos)
+                if (c == new_line('a')) then
+                    pos = pos + 1
+                    cycle
+                end if
+                if (c == 'n') c = new_line('a')
+                if (c == 't') c = achar(9)
+            end if
+            value = value//c
+            pos = pos + 1
+        end do
+    end subroutine quoted_argument
+
+    integer function bracket_level(text, pos) result(level)
+        !! Number of '=' of a bracket opening [==[ at pos, -1 if none.
+        character(len=*), intent(in) :: text
+        integer, intent(in) :: pos
+        integer :: k
+
+        level = -1
+        k = pos + 1
+        do while (k <= len(text))
+            if (text(k:k) /= '=') exit
+            k = k + 1
+        end do
+        if (k > len(text)) return
+        if (text(k:k) == '[') level = k - pos - 1
+    end function bracket_level
+
+    logical function is_name_char(c) result(yes)
+        character(len=1), intent(in) :: c
+        yes = (c >= 'a' .and. c <= 'z') .or. (c >= 'A' .and. c <= 'Z') .or. &
+            (c >= '0' .and. c <= '9') .or. c == '_'
+    end function is_name_char
+
+    logical function is_space(c) result(yes)
+        character(len=1), intent(in) :: c
+        yes = c == ' ' .or. c == achar(9) .or. c == new_line('a') .or. c == achar(13)
+    end function is_space
 
     subroutine run_ctest(context, with_preset, text, message)
         !! Output of `ctest --show-only=json-v1` selected by the test preset

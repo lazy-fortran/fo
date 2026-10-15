@@ -69,9 +69,172 @@ program test_cmake_named_cli
 
     call remove_tree(scratch)
     call profile_isolation()
+    call build_only_planned_targets()
+    call preset_filter_execution()
     call finish_assertions()
     write(*, '(a)') 'cmake-named-cli: exact CTest ID ran alone; no-match failed'
 contains
+    function ran(result, name) result(found)
+        type(process_result_t), intent(in) :: result
+        character(*), intent(in) :: name
+        logical :: found
+
+        found = index(result%stdout, '"name":"' // name // '"') > 0
+    end function ran
+
+    function line_count(path) result(n)
+        character(*), intent(in) :: path
+        integer :: n, unit, ios
+        character(len=64) :: line
+
+        n = 0
+        open (newunit=unit, file=path, status='old', action='read', iostat=ios)
+        if (ios /= 0) return
+        do
+            read (unit, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            n = n + 1
+        end do
+        close (unit)
+    end function line_count
+
+    subroutine build_only_planned_targets()
+        !! A broken unrelated target never blocks a selection that does not
+        !! need it, also on an unbuilt tree; regression-labelled cases run by
+        !! default without a preset, slow ones need --all, and a fixture runs
+        !! once per ctest batch.
+        character(:), allocatable :: root, counter
+        type(string_list_t) :: args, env
+        type(process_result_t) :: observed
+
+        call make_scratch('fo-cmake-planned', root)
+        counter = join_path(root, 'build/setup.count')
+        call write_lines(join_path(root, 'CMakeLists.txt'), [character(len=160) :: &
+            'cmake_minimum_required(VERSION 3.20)', &
+            'project(planned Fortran)', &
+            'enable_testing()', &
+            'add_executable(good good.f90)', &
+            'add_executable(broken broken.f90)', &
+            'add_test(NAME good_case COMMAND good)', &
+            'add_test(NAME reg_case COMMAND good)', &
+            'set_tests_properties(reg_case PROPERTIES LABELS regression)', &
+            'add_test(NAME slow_case COMMAND good)', &
+            'set_tests_properties(slow_case PROPERTIES LABELS slow)', &
+            'add_test(NAME fx_setup COMMAND good "${CMAKE_BINARY_DIR}/setup.count")', &
+            'set_tests_properties(fx_setup PROPERTIES FIXTURES_SETUP fx)', &
+            'add_test(NAME need_a COMMAND good)', &
+            'add_test(NAME need_b COMMAND good)', &
+            'set_tests_properties(need_a need_b PROPERTIES FIXTURES_REQUIRED fx)'])
+        call write_lines(join_path(root, 'good.f90'), [character(len=96) :: &
+            'program good', &
+            'character(len=512) :: path', &
+            'integer :: unit', &
+            'if (command_argument_count() > 0) then', &
+            'call get_command_argument(1, path)', &
+            'open (newunit=unit, file=trim(path), position="append")', &
+            'write (unit, "(a)") "setup"', &
+            'close (unit)', &
+            'end if', &
+            'end program'])
+        call write_lines(join_path(root, 'broken.f90'), [character(len=48) :: &
+            'program broken', 'this is not valid fortran (', 'end program'])
+        call list_add(env, 'FO_BACKEND=cmake')
+        call list_add(env, 'FO_JOBS=2')
+
+        call list_add(args, 'test')
+        call list_add(args, 'good_case')
+        call list_add(args, '--json')
+        call run_fo(driver, args, root, join_path(root, 'fo-cache'), observed, env)
+        call assert_process_ok(observed, 'named case builds without the broken target')
+        call assert_true(ran(observed, 'good_case'), 'named case ran')
+        call assert_file_absent(join_path(root, 'build/broken'), &
+            'unrelated broken target was not built')
+
+        args = string_list_t()
+        call list_add(args, 'test')
+        call list_add(args, '--json')
+        call run_fo(driver, args, root, join_path(root, 'fo-cache'), observed, env)
+        call assert_process_ok(observed, 'default run plans only the targets it needs')
+        call assert_true(ran(observed, 'reg_case'), &
+            'regression-labelled case runs by default without a preset')
+        call assert_true(.not. ran(observed, 'slow_case'), 'slow case needs --all')
+        call assert_true(ran(observed, 'good_case'), 'default run keeps plain cases')
+
+        args = string_list_t()
+        call list_add(args, 'test')
+        call list_add(args, '--all')
+        call list_add(args, '--json')
+        call run_fo(driver, args, root, join_path(root, 'fo-cache'), observed, env)
+        call assert_process_ok(observed, '--all runs the slow case')
+        call assert_true(ran(observed, 'slow_case'), '--all includes the slow case')
+
+        call remove_path(counter)
+        args = string_list_t()
+        call list_add(args, 'test')
+        call list_add(args, 'need_a')
+        call list_add(args, 'need_b')
+        call list_add(args, '--json')
+        call run_fo(driver, args, root, join_path(root, 'fo-cache'), observed, env)
+        call assert_process_ok(observed, 'fixture cases run')
+        call assert_equal_integer(line_count(counter), 1, &
+            'fixture setup runs once for the whole batch')
+
+        ! --no-build runs what is there and never compiles.
+        call remove_path(join_path(root, 'build/good'))
+        args = string_list_t()
+        call list_add(args, 'test')
+        call list_add(args, '--no-build')
+        call list_add(args, 'good_case')
+        call list_add(args, '--json')
+        call run_fo(driver, args, root, join_path(root, 'fo-cache'), observed, env)
+        call assert_true(observed%exit_code /= 0, '--no-build does not rebuild')
+        call assert_file_absent(join_path(root, 'build/good'), &
+            '--no-build leaves the executable unbuilt')
+        call remove_tree(root)
+    end subroutine build_only_planned_targets
+
+    subroutine preset_filter_execution()
+        !! A case the test preset filters out is not run by default and is
+        !! run by --all.
+        character(:), allocatable :: root
+        type(string_list_t) :: args, env
+        type(process_result_t) :: observed
+
+        call make_scratch('fo-cmake-preset-run', root)
+        call write_lines(join_path(root, 'CMakeLists.txt'), [character(len=160) :: &
+            'cmake_minimum_required(VERSION 3.20)', &
+            'project(preset_run NONE)', &
+            'enable_testing()', &
+            'add_test(NAME kept COMMAND "${CMAKE_COMMAND}" -E echo kept)', &
+            'add_test(NAME gated COMMAND "${CMAKE_COMMAND}" -E echo gated)', &
+            'set_tests_properties(gated PROPERTIES LABELS gate)'])
+        call write_lines(join_path(root, 'CMakePresets.json'), [character(len=200) :: &
+            '{"version":3,"configurePresets":[{"name":"c","generator":"Ninja",', &
+            '"binaryDir":"${sourceDir}/bld"}],"testPresets":[{"name":"t",', &
+            '"configurePreset":"c","filter":{"exclude":{"label":"gate"}}}]}'])
+        call list_add(env, 'FO_BACKEND=cmake')
+        call list_add(env, 'FO_JOBS=2')
+        call list_add(env, 'FO_CMAKE_CONFIGURE_PRESET=c')
+        call list_add(env, 'FO_CMAKE_TEST_PRESET=t')
+        call list_add(env, 'FO_CMAKE_BUILD_DIR=bld')
+        call list_add(args, 'test')
+        call list_add(args, '--json')
+        call run_fo(driver, args, root, join_path(root, 'fo-cache'), observed, env)
+        call assert_process_ok(observed, 'preset default run')
+        call assert_true(ran(observed, 'kept'), 'preset keeps the unfiltered case')
+        call assert_true(.not. ran(observed, 'gated'), &
+            'preset-excluded case is not run by default')
+
+        args = string_list_t()
+        call list_add(args, 'test')
+        call list_add(args, '--all')
+        call list_add(args, '--json')
+        call run_fo(driver, args, root, join_path(root, 'fo-cache'), observed, env)
+        call assert_process_ok(observed, 'preset --all run')
+        call assert_true(ran(observed, 'gated'), '--all runs the preset-excluded case')
+        call remove_tree(root)
+    end subroutine preset_filter_execution
+
     subroutine profile_isolation()
         character(:), allocatable :: root
         type(string_list_t) :: args, env

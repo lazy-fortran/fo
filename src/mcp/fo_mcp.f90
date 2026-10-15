@@ -704,13 +704,12 @@ contains
 
     subroutine handle_backend_test_named(line, id_str, dir, tmpfile, response)
         use fo_build_backend, only: backend_t, detect_backend, backend_test, &
-            backend_test_names, BACKEND_NONE
+            backend_test_names, BACKEND_NONE, BACKEND_CMAKE
         use fo_scan, only: is_slow_test
-        use fx_string, only: string_t
         use fo_project_model, only: model_request_t, model_selection_t, &
             project_model_t, SELECT_EMPTY
         use fo_project_load, only: project_has_model, project_resolve, &
-            project_run_names
+            project_run_cases
         use fo_test_results, only: test_result_entry_t, parse_test_results, &
             format_test_results_text, format_test_results_json
         character(len=*), intent(in) :: line, id_str, dir, tmpfile
@@ -727,8 +726,7 @@ contains
         type(model_request_t) :: request
         type(model_selection_t) :: selection
         type(project_model_t) :: model
-        type(string_t), allocatable :: extra(:)
-        character(len=:), allocatable :: run_names(:), message
+        character(len=:), allocatable :: message
 
         b = detect_backend(trim(dir))
         if (b%kind == BACKEND_NONE) then
@@ -757,7 +755,7 @@ contains
             return
         end if
 
-        if (n_names > 0) then
+        if (n_names > 0 .or. (b%kind == BACKEND_CMAKE .and. project_has_model(b))) then
             allocate (request%names(n_names), request%include_labels(0), &
                 request%exclude_labels(0), request%layers(0))
             do i = 1, n_names
@@ -766,9 +764,8 @@ contains
             if (project_has_model(b)) then
                 ! Same selection as `fo test`: the project model decides.
                 call project_resolve(b, '', request, model, selection, ierr, &
-                    message, extra)
-                if (ierr == 0 .and. selection%status == SELECT_EMPTY .and. &
-                    size(extra) == 0) then
+                    message)
+                if (ierr == 0 .and. selection%status == SELECT_EMPTY) then
                     ierr = 1
                     message = selection%message
                 end if
@@ -778,7 +775,8 @@ contains
                     call make_tool_text_response(id_str, output_text, 1, response)
                     return
                 end if
-                call project_run_names(model, selection, extra, run_names)
+                call project_run_cases(b, model, selection%cases, '', .false., &
+                    tmpfile, exitcode)
             else
                 do i = 1, n_names
                     if (.not. is_slow_test(test_names(i))) cycle
@@ -788,10 +786,9 @@ contains
                     call make_tool_text_response(id_str, output_text, 1, response)
                     return
                 end do
-                run_names = test_names(1:n_names)
+                call backend_test_names(b, test_names(1:n_names), n_names, exitcode, &
+                    .true., tmpfile)
             end if
-            call backend_test_names(b, run_names, size(run_names), exitcode, &
-                .true., tmpfile)
         else
             call backend_test(b, exitcode, log_file=tmpfile)
         end if

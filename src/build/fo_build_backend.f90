@@ -8,6 +8,7 @@ module fo_build_backend
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names, gfortran_run_tests
     use fo_util, only: read_text_file
+    use fx_string, only: string_t
     use fo_test_budget, only: test_timeout_seconds, test_wall_cap_seconds
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         selected_compiler_command, COMPILER_UNKNOWN
@@ -21,7 +22,8 @@ module fo_build_backend
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
     public :: backend_build, backend_test, backend_test_names
-    public :: backend_test_affected, backend_clean
+    public :: backend_test_affected, backend_test_cases, backend_set_build_targets
+    public :: backend_clean
     public :: profile_flags, backend_profile, cmake_configure
     public :: BACKEND_NONE, BACKEND_NATIVE, BACKEND_CMAKE
 
@@ -214,13 +216,17 @@ contains
         if (iostat /= 0 .or. jobs < 1) jobs = detect_nproc()
     end function detect_jobs
 
-    subroutine backend_build(self, exitcode, flags, log_file, with_tests, use_cache)
+    subroutine backend_build(self, exitcode, flags, log_file, with_tests, use_cache, &
+            configured)
+        !! configured: the CMake tree was configured by this command already
+        !! (its model is loaded), so the build does not configure again.
         type(backend_t), intent(inout) :: self
         integer, intent(out) :: exitcode
         character(len=*), intent(in), optional :: flags
         character(len=*), intent(in), optional :: log_file
         logical, intent(in), optional :: with_tests
         logical, intent(in), optional :: use_cache
+        logical, intent(in), optional :: configured
 
         character(len=512) :: log_path, flag_text, lock_dir
         integer :: lock_ierr
@@ -265,7 +271,7 @@ contains
                     flags=flag_text, use_cache=use_cache)
             end if
         case (BACKEND_CMAKE)
-            call cmake_build(self%cmake, flag_text, log_path, exitcode)
+            call cmake_build(self%cmake, flag_text, log_path, exitcode, configured)
         end select
 
         call release_project_lock(lock_dir)
@@ -310,21 +316,28 @@ contains
         end select
     end subroutine backend_profile
 
-    subroutine backend_test(self, exitcode, include_slow, log_file, flags, use_cache)
+    subroutine backend_test(self, exitcode, include_slow, log_file, flags, use_cache, &
+            no_build)
+        !! Whole-suite run without a project selection (fpm, frozen native
+        !! CMake). Model-free CMake callers get the default `slow` label
+        !! exclusion; `fo test` selects on the model (backend_test_cases).
         type(backend_t), intent(inout) :: self
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
         character(len=*), intent(in), optional :: log_file
         character(len=*), intent(in), optional :: flags
         logical, intent(in), optional :: use_cache
+        logical, intent(in), optional :: no_build
 
         character(len=128) :: no_names(1)
         character(len=512) :: log_path, lock_dir, flag_text
         integer :: lock_ierr
-        logical :: slow
+        logical :: slow, skip_build
 
         slow = .false.
         if (present(include_slow)) slow = include_slow
+        skip_build = .false.
+        if (present(no_build)) skip_build = no_build
         log_path = ''
         if (present(log_file)) log_path = log_file
         flag_text = ''
@@ -336,22 +349,23 @@ contains
             return
         end if
 
-        call acquire_project_lock(self%project_dir, lock_dir, lock_ierr)
-        if (lock_ierr /= 0) then
-            exitcode = 1
-            return
+        exitcode = 0
+        if (.not. skip_build) then
+            call acquire_project_lock(self%project_dir, lock_dir, lock_ierr)
+            if (lock_ierr /= 0) then
+                exitcode = 1
+                return
+            end if
+            select case (self%kind)
+            case (BACKEND_NATIVE)
+                call gfortran_test(self%project_dir, log_path, exitcode, &
+                    include_slow=slow, flags=flag_text, build_only=.true., &
+                    use_cache=use_cache)
+            case (BACKEND_CMAKE)
+                call cmake_build(self%cmake, flag_text, log_path, exitcode)
+            end select
+            call release_project_lock(lock_dir)
         end if
-
-        select case (self%kind)
-        case (BACKEND_NATIVE)
-            call gfortran_test(self%project_dir, log_path, exitcode, &
-                include_slow=slow, flags=flag_text, build_only=.true., &
-                use_cache=use_cache)
-        case (BACKEND_CMAKE)
-            call cmake_build(self%cmake, flag_text, log_path, exitcode)
-        end select
-
-        call release_project_lock(lock_dir)
         if (exitcode == 0) then
             select case (self%kind)
             case (BACKEND_NATIVE)
@@ -363,7 +377,8 @@ contains
                     call native_cmake_test(self%cmake, [character(len=1) ::], &
                         log_path, exitcode)
                 else
-                    call cmake_test(self%cmake, '', slow, log_path, exitcode)
+                    call cmake_test(self%cmake, '', .false., .not. slow, &
+                        log_path, .false., exitcode)
                 end if
             end select
         end if
@@ -376,7 +391,8 @@ contains
     end subroutine backend_test
 
     subroutine backend_test_names(self, names, n_names, exitcode, include_slow, &
-            log_file, flags, use_cache)
+            log_file, flags, use_cache, no_build)
+        !! Named fpm tests and CMake cases without a project selection.
         use fo_scan, only: is_slow_test
         type(backend_t), intent(inout) :: self
         character(len=*), intent(in) :: names(:)
@@ -386,16 +402,19 @@ contains
         character(len=*), intent(in), optional :: log_file
         character(len=*), intent(in), optional :: flags
         logical, intent(in), optional :: use_cache
+        logical, intent(in), optional :: no_build
 
         integer :: i, lock_ierr
         character(len=:), allocatable :: fast_names(:)
-        logical :: slow
+        logical :: slow, skip_build
         integer :: n_fast
         character(len=512) :: log_path, lock_dir, flag_text
         character(len=:), allocatable :: regex
 
         slow = .false.
         if (present(include_slow)) slow = include_slow
+        skip_build = .false.
+        if (present(no_build)) skip_build = no_build
         exitcode = 0
         log_path = ''
         if (present(log_file)) log_path = log_file
@@ -405,7 +424,9 @@ contains
         allocate (character(len=len(names)) :: fast_names(n_names))
         n_fast = 0
         do i = 1, n_names
-            if (.not. slow .and. is_slow_test(names(i))) cycle
+            if (.not. slow .and. self%kind /= BACKEND_CMAKE) then
+                if (is_slow_test(names(i))) cycle
+            end if
             n_fast = n_fast + 1
             fast_names(n_fast) = names(i)
         end do
@@ -416,22 +437,23 @@ contains
             return
         end if
 
-        call acquire_project_lock(self%project_dir, lock_dir, lock_ierr)
-        if (lock_ierr /= 0) then
-            exitcode = 1
-            return
+        if (.not. skip_build) then
+            call acquire_project_lock(self%project_dir, lock_dir, lock_ierr)
+            if (lock_ierr /= 0) then
+                exitcode = 1
+                return
+            end if
+            select case (self%kind)
+            case (BACKEND_NATIVE)
+                call gfortran_test_names(self%project_dir, fast_names, n_fast, &
+                    log_path, exitcode, include_slow=slow, flags=flag_text, &
+                    use_cache=use_cache, build_only=.true.)
+            case (BACKEND_CMAKE)
+                call cmake_build(self%cmake, flag_text, log_path, exitcode)
+            end select
+            call release_project_lock(lock_dir)
+            if (exitcode /= 0) return
         end if
-
-        select case (self%kind)
-        case (BACKEND_NATIVE)
-            call gfortran_test_names(self%project_dir, fast_names, n_fast, &
-                log_path, exitcode, include_slow=slow, flags=flag_text, &
-                use_cache=use_cache, build_only=.true.)
-        case (BACKEND_CMAKE)
-            call cmake_build(self%cmake, flag_text, log_path, exitcode)
-        end select
-        call release_project_lock(lock_dir)
-        if (exitcode /= 0) return
 
         select case (self%kind)
         case (BACKEND_NATIVE)
@@ -443,7 +465,8 @@ contains
                     log_path, exitcode)
             else
                 call names_to_ctest_regex(fast_names, n_fast, regex)
-                call cmake_test(self%cmake, regex, slow, log_path, exitcode)
+                call cmake_test(self%cmake, regex, .false., .false., log_path, &
+                    .false., exitcode)
             end if
         end select
     end subroutine backend_test_names
@@ -467,6 +490,147 @@ contains
                 include_slow, log_file, flags, use_cache)
         end if
     end subroutine backend_test_affected
+
+    subroutine backend_set_build_targets(self, targets, widened)
+        !! CMake build targets of a plan: the planned targets merged with any
+        !! FO_CMAKE_BUILD_TARGETS the user set. A widened plan builds the
+        !! user's targets, or the default target set when there are none.
+        type(backend_t), intent(inout) :: self
+        type(string_t), intent(in) :: targets(:)
+        logical, intent(in) :: widened
+        type(string_t), allocatable :: merged(:)
+        character(len=:), allocatable :: kept(:)
+        integer :: i, j, n
+        logical :: seen
+
+        if (self%kind /= BACKEND_CMAKE) return
+        if (widened) then
+            ! Unknown needs: build the default set, unless the user scoped the
+            ! build with FO_CMAKE_BUILD_TARGETS.
+            if (.not. allocated(self%cmake%build_targets)) &
+                allocate (character(len=1) :: self%cmake%build_targets(0))
+            return
+        end if
+        allocate (merged(size(targets) + size(self%cmake%build_targets)))
+        n = 0
+        do i = 1, size(targets)
+            n = n + 1
+            merged(n)%s = targets(i)%s
+        end do
+        if (allocated(self%cmake%build_targets)) then
+            do i = 1, size(self%cmake%build_targets)
+                seen = .false.
+                do j = 1, n
+                    if (merged(j)%s == trim(self%cmake%build_targets(i))) seen = .true.
+                end do
+                if (seen) cycle
+                n = n + 1
+                merged(n)%s = trim(self%cmake%build_targets(i))
+            end do
+        end if
+        j = 1
+        do i = 1, n
+            j = max(j, len(merged(i)%s))
+        end do
+        allocate (character(len=j) :: kept(n))
+        do i = 1, n
+            kept(i) = merged(i)%s
+        end do
+        call move_alloc(kept, self%cmake%build_targets)
+    end subroutine backend_set_build_targets
+
+    subroutine backend_test_cases(self, names, n_names, exitcode, log_file, &
+            flags, no_build, configured, lift_preset_filter)
+        !! Run exact CTest cases of a configured CMake project: build (the
+        !! caller has set the plan targets, backend_set_build_targets) unless
+        !! no_build, then ctest in batches with exact anchored names. A batch
+        !! is one ctest invocation, so fixtures run once per batch.
+        !! lift_preset_filter: a selected case is excluded by the test preset
+        !! filter; override the preset's label filter for this run.
+        type(backend_t), intent(inout) :: self
+        character(len=*), intent(in) :: names(:)
+        integer, intent(in) :: n_names
+        integer, intent(out) :: exitcode
+        character(len=*), intent(in), optional :: log_file
+        character(len=*), intent(in), optional :: flags
+        logical, intent(in), optional :: no_build, configured, lift_preset_filter
+
+        integer, parameter :: batch_bytes = 32000
+        character(len=512) :: log_path, lock_dir, flag_text
+        character(len=:), allocatable :: regex
+        integer :: lock_ierr, first, last, code
+        logical :: skip_build, lift
+
+        exitcode = 0
+        log_path = ''
+        if (present(log_file)) log_path = log_file
+        flag_text = ''
+        if (present(flags)) flag_text = flags
+        skip_build = .false.
+        if (present(no_build)) skip_build = no_build
+        lift = .false.
+        if (present(lift_preset_filter)) lift = lift_preset_filter
+        if (self%kind /= BACKEND_CMAKE .or. n_names < 1) then
+            exitcode = 1
+            return
+        end if
+
+        if (.not. skip_build) then
+            call acquire_project_lock(self%project_dir, lock_dir, lock_ierr)
+            if (lock_ierr /= 0) then
+                exitcode = 1
+                return
+            end if
+            call cmake_build(self%cmake, flag_text, log_path, exitcode, configured)
+            call release_project_lock(lock_dir)
+            if (exitcode /= 0) then
+                if (exitcode == 124) write (error_unit, '(a)') &
+                    'fo: WARNING: build timed out (FO_BUILD_TIMEOUT exceeded)'
+                return
+            end if
+        end if
+
+        first = 1
+        do while (first <= n_names)
+            last = first
+            call ctest_batch_end(names, n_names, first, batch_bytes, last)
+            call names_to_ctest_regex(names(first:last), last - first + 1, regex)
+            call cmake_test(self%cmake, regex, lift, .false., log_path, first > 1, code)
+            if (code /= 0) exitcode = code
+            first = last + 1
+        end do
+        if (exitcode == 124) then
+            write (error_unit, '(a)') &
+                'fo: WARNING: tests timed out (CPU budget FO_TEST_TIMEOUT or' // &
+                ' wall cap FO_TEST_WALL_TIMEOUT exceeded); raise them or set' // &
+                ' [extra.fo] test-timeout'
+        end if
+    end subroutine backend_test_cases
+
+    subroutine ctest_batch_end(names, n_names, first, limit, last)
+        !! Last name of the batch that starts at first: the escaped regex
+        !! stays below limit bytes, a batch holds at least one name.
+        character(len=*), intent(in) :: names(:)
+        integer, intent(in) :: n_names, first, limit
+        integer, intent(out) :: last
+        integer :: i, k, used, width
+
+        used = 0
+        last = first - 1
+        do i = first, n_names
+            width = len_trim(names(i)) + 1
+            do k = 1, len_trim(names(i))
+                select case (names(i)(k:k))
+                case ('.', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', &
+                        '|', achar(92))
+                    width = width + 1
+                end select
+            end do
+            if (i > first .and. used + width > limit) exit
+            used = used + width
+            last = i
+        end do
+    end subroutine ctest_batch_end
 
     recursive subroutine cmake_configure(context, flags, log_file, exitcode)
         type(cmake_context_t), intent(inout) :: context
@@ -546,8 +710,8 @@ contains
             return
         end if
         if (len_trim(context%configure_preset) > 0 .and. &
-                .not. context%build_root_hint .and. &
-                len_trim(context%build_preset) == 0) then
+            .not. context%build_root_hint .and. &
+            len_trim(context%build_preset) == 0) then
             write (error_unit, '(a)') &
                 'fo: configure preset build root is unknown; supply '// &
                 'FO_CMAKE_BUILD_DIR as a locator hint or select a build preset'
@@ -556,7 +720,7 @@ contains
         end if
 
         if (len_trim(context%configure_preset) == 0 .or. &
-                context%build_root_hint) &
+            context%build_root_hint) &
             call cmake_context_query(context)
         cache_file = cmake_context_build_path(context)//'/CMakeCache.txt'
         inquire (file=cache_file, exist=has_cache)
@@ -580,8 +744,8 @@ contains
             end if
         end if
         if (len_trim(context%configuration) > 0 .and. &
-                .not. context%multi_config .and. &
-                .not. generator_is_multi(context)) then
+            .not. context%multi_config .and. &
+            .not. generator_is_multi(context)) then
             call argv_push(packed, n_args, &
                 '-DCMAKE_BUILD_TYPE='//context%configuration)
         end if
@@ -678,7 +842,7 @@ contains
         found = .false.
         build = ''
         open (newunit=unit, file=log_file, status='old', action='read', &
-              iostat=ios)
+            iostat=ios)
         if (ios /= 0) return
         do
             read (unit, '(a)', iostat=ios) line
@@ -698,10 +862,12 @@ contains
         found = .true.
     end subroutine locate_preset_build
 
-    subroutine cmake_build(context, flags, log_file, exitcode)
+    subroutine cmake_build(context, flags, log_file, exitcode, configured)
         type(cmake_context_t), intent(inout) :: context
         character(len=*), intent(in) :: flags, log_file
         integer, intent(out) :: exitcode
+        logical, intent(in), optional :: configured
+        logical :: skip_configure
         character(len=:), allocatable :: packed
         character(len=32) :: jobs_text
         integer :: n_args, i
@@ -725,7 +891,10 @@ contains
             return
         end if
 
-        call cmake_configure(context, flags, log_file, exitcode)
+        skip_configure = .false.
+        if (present(configured)) skip_configure = configured
+        exitcode = 0
+        if (.not. skip_configure) call cmake_configure(context, flags, log_file, exitcode)
         if (exitcode /= 0) return
         write (jobs_text, '(i0)') detect_jobs()
         n_args = 0
@@ -736,7 +905,7 @@ contains
             call argv_push(packed, n_args, context%build_preset)
         else
             if (len_trim(context%configure_preset) > 0 .and. &
-                    .not. context%build_root_hint) then
+                .not. context%build_root_hint) then
                 write (error_unit, '(a)') &
                     'fo: CMake build needs a preset or build-root hint'
                 exitcode = 1
@@ -763,10 +932,12 @@ contains
             exitcode)
     end subroutine cmake_build
 
-    subroutine cmake_test(context, regex, include_slow, log_file, exitcode)
+    subroutine cmake_test(context, regex, lift_preset_filter, exclude_slow, &
+            log_file, append, exitcode)
+        !! exclude_slow: the model-free default exclusion, label `slow` only.
         type(cmake_context_t), intent(in) :: context
         character(len=*), intent(in) :: regex, log_file
-        logical, intent(in) :: include_slow
+        logical, intent(in) :: lift_preset_filter, exclude_slow, append
         integer, intent(out) :: exitcode
 
         character(len=:), allocatable :: packed
@@ -775,8 +946,8 @@ contains
         integer :: n_args
 
         if (len_trim(context%configure_preset) > 0 .and. &
-                .not. context%build_root_hint .and. &
-                len_trim(context%test_preset) == 0) then
+            .not. context%build_root_hint .and. &
+            len_trim(context%test_preset) == 0) then
             write (error_unit, '(a)') &
                 'fo: CTest root for configure preset is unknown; supply '// &
                 'FO_CMAKE_BUILD_DIR as a locator hint or select a test preset'
@@ -814,10 +985,14 @@ contains
             call argv_push(packed, n_args, '-R')
             call argv_push(packed, n_args, regex)
         end if
-        if (.not. include_slow) then
+        if (exclude_slow) then
             call argv_push(packed, n_args, '-LE')
-            call argv_push(packed, n_args, &
-                'slow|regression|performance|scalability')
+            call argv_push(packed, n_args, '^slow$')
+        else if (lift_preset_filter .and. len_trim(context%test_preset) > 0) then
+            ! A command-line label filter replaces the preset's, and this
+            ! one excludes no label.
+            call argv_push(packed, n_args, '-LE')
+            call argv_push(packed, n_args, '^$')
         end if
         ! FO_TEST_TIMEOUT is a per-test limit. It used to bound the whole ctest
         ! run, so a suite of individually fast tests failed once their sum
@@ -830,7 +1005,7 @@ contains
         call argv_push(packed, n_args, '--timeout')
         call argv_push(packed, n_args, timeout_text)
         call process_run_argv_logged(context%source_root, packed, n_args, log_file, &
-            .false., 86400, exitcode)
+            append, 86400, exitcode)
     end subroutine cmake_test
 
     logical function generator_is_multi(context) result(is_multi)
@@ -842,8 +1017,8 @@ contains
         if (len_trim(context%reported_generator) > 0) &
             generator = context%reported_generator
         if (index(generator, 'Visual Studio') == 1 .or. &
-                trim(generator) == 'Xcode' .or. &
-                trim(generator) == 'Ninja Multi-Config') then
+            trim(generator) == 'Xcode' .or. &
+            trim(generator) == 'Ninja Multi-Config') then
             is_multi = .true.
             return
         end if

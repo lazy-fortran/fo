@@ -4,7 +4,7 @@ program test_project_selection_cli
     !! named by FO (the worktree driver for changed CLI behaviour).
     use fo_test_harness, only: process_result_t, string_list_t, list_add
     use fo_test_harness, only: make_scratch, join_path, write_lines, write_text
-    use fo_test_harness, only: remove_tree
+    use fo_test_harness, only: remove_tree, assert_file_absent
     use fo_test_harness, only: assert_equal_integer, assert_equal_string
     use fo_test_harness, only: assert_contains, assert_not_contains, assert_true
     use fo_test_harness, only: finish_assertions
@@ -191,13 +191,28 @@ contains
         character(:), allocatable :: message
         logical :: valid
 
-        ! Unbuilt tree: CTest has no commands yet, so the plan widens.
+        ! Unbuilt tree: the commands come from the generated CTestTestfile.
         call assert_equal_string(listing(cmake_dir, cmake_env, &
             [character(len=48) :: '--json'], result), 'unit_a;unit_b;', &
             'cmake default selection skips the slow label')
         call json_parse(result%stdout, report, valid, message)
-        call assert_true(json_boolean_value(json_member(report, 'widened')), &
-            'unbuilt tree widens the plan')
+        call assert_true(.not. json_boolean_value(json_member(report, 'widened')), &
+            'unbuilt tree does not widen')
+        call assert_true(.not. json_has(json_member(report, 'targets'), 'perf_c'), &
+            'unbuilt plan omits the slow-labelled target')
+        call assert_equal_string(listing(cmake_dir, cmake_env, &
+            [character(len=48) :: '-L', 'io'], result), 'unit_b;', 'unbuilt -L io')
+        call json_parse(result%stdout, report, valid, message)
+        call assert_true(json_has(json_member(report, 'targets'), 'unit_b'), &
+            'unbuilt -L io plans its target')
+        call assert_true(.not. json_has(json_member(report, 'targets'), 'unit_a'), &
+            'unbuilt -L io plans no other case target')
+        call fo(cmake_dir, cmake_env, [character(len=48) :: 'test', '-L', 'io'], &
+            result)
+        call assert_equal_integer(result%exit_code, 0, 'unbuilt -L io run: ' // &
+            result%stderr)
+        call assert_file_absent(join_path(cmake_dir, 'build/unit_a'), &
+            'unbuilt -L io run builds only its own targets')
         call assert_equal_string(listing(cmake_dir, cmake_env, &
             [character(len=48) :: '--all'], result), 'unit_a;unit_b;perf_c;', &
             'cmake --all adds the slow label')
@@ -307,7 +322,11 @@ contains
         cli = listing(cmake_dir, cmake_env, [character(len=48) :: 'unit_*'], result)
         call mcp_text(cmake_dir, [character(len=48) :: 'unit_*'], text, is_error)
         call assert_true(.not. is_error, 'MCP cmake glob succeeds: ' // text)
-        call assert_equal_string(reported_names(text), cli, &
+        ! CTest orders results by its cost data, so compare the case set.
+        call assert_equal_integer(len(reported_names(text)), len(cli), &
+            'cmake MCP reports as many cases as the list selects')
+        call assert_true(index(reported_names(text), 'unit_a;') > 0 .and. &
+            index(reported_names(text), 'unit_b;') > 0, &
             'cmake MCP agrees on a glob')
 
         call fo(fpm_dir, fpm_env, [character(len=48) :: 'test', 'no_such_test'], result)

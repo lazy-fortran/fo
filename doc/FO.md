@@ -171,7 +171,7 @@ but does not replace CMake's target model.
 manifest and source scan, or CMake targets and CTest cases after configure.
 
 ```text
-fo test [name|glob ...] [-L RE] [-LE RE] [--layer NAME] [--all]
+fo test [name|glob ...] [-L RE] [-LE RE] [--layer NAME] [--all] [--no-build]
 fo test --list [--json] [same selection]
 ```
 
@@ -190,8 +190,19 @@ fo test --list [--json] [same selection]
 - `--list` prints the selected cases (labels, layer, reason), the targets that
   must be built for them, and whether the plan widened to every target with the
   reasons. It configures CMake but builds nothing. `--json` emits the same as
-  one object. On a CMake tree whose test executables are not built yet CTest
-  reports no commands, so the plan widens.
+  one object.
+- Running (CMake, also plain `fo test`): select, plan, build, run. CMake is
+  configured once and the loaded model is reused. Only the plan targets are
+  built (merged with `FO_CMAKE_BUILD_TARGETS`; a case whose command maps to no
+  target, such as a script, widens the plan to the default build unless that
+  variable scopes it). A case's command is taken from CTest, or from the
+  generated `CTestTestfile.cmake` before its executable exists, so an unbuilt
+  tree plans exactly. The cases then run through `ctest -R` with exact
+  anchored names in batches, so a fixture runs once per batch. A case the test
+  preset filters out and `--all` selects overrides the preset's label filter
+  for the run. No label is excluded except through the default exclusions above.
+- `--no-build` runs the selected cases without building (CMake: whatever is
+  built; a missing executable fails the case).
 
 MCP `test` uses the same selection for its names. `--list`, labels and layers
 are not available with `--random`, `--only-changed` or `FO_CMAKE_NATIVE`.

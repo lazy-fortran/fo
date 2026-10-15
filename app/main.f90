@@ -24,10 +24,9 @@ program fo_main
     use fo_gfortran_build, only: gfortran_selected_test_names
     use fx_string, only: string_t
     use fo_project_model, only: model_request_t, model_selection_t, &
-        project_model_t, SELECT_EMPTY
+        project_model_t, model_find_case, SELECT_EMPTY, CASE_SELECTED
     use fo_project_load, only: project_has_model, project_resolve, &
-        project_run_names, &
-        project_list_text, project_list_json
+        project_run_cases, project_list_text, project_list_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
     use fo_fmt, only: fo_fmt_run, fo_fmt_files, fo_fmt_changed_run, &
@@ -532,6 +531,7 @@ contains
         write (out, '(a)') 'options:'
         write (out, '(a)') '  --only-changed  run tests affected by changed modules'
         write (out, '(a)') '  --all           include slow tests'
+        write (out, '(a)') '  --no-build      run the selected tests without building'
         write (out, '(a)') '  -L, --label RE  select cases with a label matching RE (repeat: AND)'
         write (out, '(a)') '  -LE, --exclude-label RE'
         write (out, '(a)') '                  drop cases whose labels match RE (repeat: AND)'
@@ -822,10 +822,12 @@ contains
         if (.not. parsed%skip_build) then
             call make_tmpfile('fo-exec-build', build_log)
             if (trim(action) == 'run') then
-                call backend_build(b, exitcode, flags=all_flags, log_file=build_log)
+                call backend_build(b, exitcode, flags=all_flags, log_file=build_log, &
+                    configured=uses_model)
             else
                 call backend_build(b, exitcode, flags=all_flags, log_file=build_log, &
-                    with_tests=.not. exec_target_is_app(b, parsed%target))
+                    with_tests=.not. exec_target_is_app(b, parsed%target), &
+                    configured=uses_model)
             end if
             if (exitcode /= 0) then
                 write (error_unit, '(a)') 'fo exec: build failed'
@@ -1196,11 +1198,11 @@ contains
         integer :: argument_status, eq
         logical :: only_changed, include_all, verbose, use_json, skip_next
         logical :: end_options, flags_seen, list_mode, filtered, use_model
+        logical :: no_build, cmake_model
         type(model_request_t) :: request
         type(model_selection_t) :: selection
         type(project_model_t) :: model
-        type(string_t), allocatable :: extra(:)
-        character(len=:), allocatable :: run_names(:)
+        integer, allocatable :: run_cases(:)
         character(len=:), allocatable :: text, message
         character(len=1024) :: arg
         character(len=1024), allocatable :: test_names(:), random_candidates(:)
@@ -1226,6 +1228,7 @@ contains
         skip_next = .false.
         end_options = .false.
         list_mode = .false.
+        no_build = .false.
         allocate (request%include_labels(0), request%exclude_labels(0), &
             request%layers(0))
         do i = 2, command_argument_count()
@@ -1313,6 +1316,8 @@ contains
                 skip_next = .true.
             case ('--list')
                 list_mode = .true.
+            case ('--no-build')
+                no_build = .true.
             case ('--only-changed')
                 only_changed = .true.
             case ('--all')
@@ -1371,8 +1376,11 @@ contains
                 stop 1
             end if
         end if
-        use_model = (filtered .or. list_mode .or. n_arg_names > 0) .and. &
-            random_count == 0 .and. .not. only_changed
+        ! CMake always runs through the model: select, plan, build the plan
+        ! targets, run the exact cases. fpm uses it for names and filters.
+        cmake_model = b%kind == BACKEND_CMAKE .and. project_has_model(b)
+        use_model = (filtered .or. list_mode .or. n_arg_names > 0 .or. &
+            cmake_model) .and. random_count == 0 .and. .not. only_changed
         if (use_model) use_model = project_has_model(b)
 
         if (random_count > 0) then
@@ -1389,7 +1397,25 @@ contains
                 stop 1
             end if
             n_test_names = 0
-            if (b%kind == BACKEND_NATIVE) then
+            if (cmake_model) then
+                ! Candidates are the model's default selection.
+                allocate (request%names(0))
+                request%all = include_all
+                call project_resolve(b, all_flags, request, model, selection, &
+                    ierr, message)
+                if (ierr /= 0) then
+                    write (error_unit, '(a)') 'fo: '//message
+                    stop 1
+                end if
+                n_test_names = size(selection%cases)
+                if (n_test_names > size(random_candidates)) then
+                    deallocate (random_candidates)
+                    allocate (random_candidates(n_test_names))
+                end if
+                do i = 1, n_test_names
+                    random_candidates(i) = model%cases(selection%cases(i))%name
+                end do
+            else if (b%kind == BACKEND_NATIVE) then
                 do i = 1, dag%n_nodes
                     candidate_ids(i) = i
                 end do
@@ -1423,8 +1449,17 @@ contains
                 'fo: random seed ', random_seed, ' selected ', n_arg_names, &
                 ' test(s)'
             call make_tmpfile('fo-test', test_log)
-            call backend_test_names(b, test_names, n_arg_names, exitcode, &
-                include_all, test_log, flags=all_flags)
+            if (cmake_model) then
+                allocate (run_cases(n_arg_names))
+                do i = 1, n_arg_names
+                    run_cases(i) = model_find_case(model, trim(test_names(i)))
+                end do
+                call project_run_cases(b, model, run_cases, all_flags, no_build, &
+                    test_log, exitcode)
+            else
+                call backend_test_names(b, test_names, n_arg_names, exitcode, &
+                    include_all, test_log, flags=all_flags, no_build=no_build)
+            end if
             call report_test_result(exitcode, test_log, .false., use_json, &
                 require_results=.true.)
             call delete_tmpfile(test_log)
@@ -1437,7 +1472,7 @@ contains
             end do
             request%all = include_all
             call project_resolve(b, all_flags, request, model, selection, ierr, &
-                message, extra)
+                message)
             if (ierr /= 0) then
                 write (error_unit, '(a)') 'fo: '//message
                 stop 1
@@ -1451,17 +1486,21 @@ contains
                 write (output_unit, '(a)') text
                 return
             end if
-            if (selection%status == SELECT_EMPTY .and. size(extra) == 0) then
+            if (selection%status == SELECT_EMPTY) then
+                if (model%n_cases == 0 .and. n_arg_names == 0 .and. .not. filtered) then
+                    write (output_unit, '(a)') 'fo: project registers no tests'
+                    return
+                end if
                 write (error_unit, '(a)') 'fo: '//selection%message
                 stop 1
             end if
-            call project_run_names(model, selection, extra, run_names)
             call make_tmpfile('fo-test', test_log)
             ! The model already applied the default exclusions and --all.
-            call backend_test_names(b, run_names, size(run_names), exitcode, &
-                .true., test_log, flags=all_flags)
-            call report_test_result(exitcode, test_log, .false., use_json, &
-                require_results=.true.)
+            call project_run_cases(b, model, selection%cases, all_flags, no_build, &
+                test_log, exitcode)
+            call report_test_result(exitcode, test_log, &
+                (n_arg_names == 0 .and. .not. filtered .and. .not. verbose), &
+                use_json, require_results=.true.)
             call delete_tmpfile(test_log)
         else if (n_arg_names > 0) then
             ! FO_CMAKE_NATIVE has no project model: the CTest registry is
@@ -1476,7 +1515,7 @@ contains
             end if
             call make_tmpfile('fo-test', test_log)
             call backend_test_names(b, test_names, n_arg_names, exitcode, &
-                include_all, test_log, flags=all_flags)
+                include_all, test_log, flags=all_flags, no_build=no_build)
             call report_test_result(exitcode, test_log, .false., use_json, &
                 require_results=.true.)
             call delete_tmpfile(test_log)
@@ -1515,14 +1554,42 @@ contains
             end if
 
             call make_tmpfile('fo-test', test_log)
-            call backend_test_names(b, test_names, n_test_names, exitcode, &
-                include_all, test_log, flags=all_flags)
+            if (cmake_model) then
+                ! Affected labels that are cases of the default selection.
+                allocate (request%names(0))
+                request%all = include_all
+                call project_resolve(b, all_flags, request, model, selection, &
+                    ierr, message)
+                if (ierr /= 0) then
+                    write (error_unit, '(a)') 'fo: '//message
+                    stop 1
+                end if
+                allocate (run_cases(n_test_names))
+                n_arg_names = 0
+                do i = 1, n_test_names
+                    n_changed = model_find_case(model, trim(test_names(i)))
+                    if (n_changed == 0) cycle
+                    if (selection%disposition(n_changed) /= CASE_SELECTED) cycle
+                    n_arg_names = n_arg_names + 1
+                    run_cases(n_arg_names) = n_changed
+                end do
+                if (n_arg_names == 0) then
+                    write (output_unit, '(a)') 'no affected tests'
+                    return
+                end if
+                call project_run_cases(b, model, run_cases(:n_arg_names), &
+                    all_flags, no_build, test_log, exitcode)
+            else
+                call backend_test_names(b, test_names, n_test_names, exitcode, &
+                    include_all, test_log, flags=all_flags, no_build=no_build)
+            end if
             call report_test_result(exitcode, test_log, .false., use_json, &
                 require_results=.true.)
             call delete_tmpfile(test_log)
         else
             call make_tmpfile('fo-test', test_log)
-            call backend_test(b, exitcode, include_all, test_log, flags=all_flags)
+            call backend_test(b, exitcode, include_all, test_log, flags=all_flags, &
+                no_build=no_build)
             call report_test_result(exitcode, test_log, &
                 (n_arg_names == 0 .and. .not. verbose), use_json)
             call delete_tmpfile(test_log)
