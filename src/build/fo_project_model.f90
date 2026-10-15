@@ -69,6 +69,9 @@ module fo_project_model
         !! Adapter property carried opaquely (e.g. CTest FIXTURES_REQUIRED).
         character(len=:), allocatable :: key
         character(len=:), allocatable :: value
+        !! The value as list elements, kept apart where value joins them with
+        !! semicolons (CTest list properties; an element may hold one).
+        type(string_t), allocatable :: items(:)
     end type model_attr_t
 
     type, public :: model_target_t
@@ -100,6 +103,8 @@ module fo_project_model
         integer :: origin = ORIGIN_PROJECT
         !! Target whose artifact runs the case; 0 = none known.
         integer :: command_target = 0
+        !! Full argv of the case where the adapter knows one (CTest).
+        type(string_t), allocatable :: command(:)
         integer :: mapping = MAP_UNKNOWN
         !! Explicitly declared required targets (MAP_DECLARED), by name;
         !! resolved into declared_targets.
@@ -349,13 +354,15 @@ contains
     end subroutine model_add_layer
 
     subroutine model_add_case(model, name, command_target, labels, layer, attrs, &
-            default_excluded, declared_targets, mapping, origin, explicit_only, index)
+            default_excluded, declared_targets, mapping, origin, explicit_only, index, &
+            command)
         !! mapping defaults to MAP_DECLARED with declared_targets, else
         !! MAP_EXACT with a command target, else MAP_UNKNOWN.
         type(project_model_t), intent(inout) :: model
         character(len=*), intent(in) :: name
         integer, intent(in), optional :: command_target, layer, mapping, origin
         type(string_t), intent(in), optional :: labels(:), declared_targets(:)
+        type(string_t), intent(in), optional :: command(:)
         type(model_attr_t), intent(in), optional :: attrs(:)
         logical, intent(in), optional :: default_excluded, explicit_only
         integer, intent(out), optional :: index
@@ -379,6 +386,7 @@ contains
             if (present(layer)) c%layer = layer
             call copy_strings(labels, c%labels)
             call copy_strings(declared_targets, c%declared_target_names)
+            call copy_strings(command, c%command)
             if (present(attrs)) then
                 allocate(c%attrs(size(attrs)))
                 c%attrs(:) = attrs
@@ -1880,6 +1888,7 @@ function model_digest(model) result(digest)
             call field(b, int_text(c%layer))
             call field(b, merge('excluded', 'default ', c%default_excluded))
             call list('labels', c%labels)
+            call list('command', c%command)
             call field(b, int_text(size(c%attrs)))
             do k = 1, size(c%attrs)
                 call field(b, c%attrs(k)%key)

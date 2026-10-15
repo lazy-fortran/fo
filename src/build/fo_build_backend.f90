@@ -7,7 +7,8 @@ module fo_build_backend
         process_getcwd, process_run_argv_logged, argv_push
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_run_tests
-    use fo_util, only: read_text_file
+    use fo_util, only: read_text_file, make_tmpfile, delete_tmpfile
+    use fo_ctest_run, only: ctest_import_junit
     use fx_string, only: string_t
     use fo_test_budget, only: test_timeout_seconds, test_wall_cap_seconds
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
@@ -532,13 +533,15 @@ contains
     end subroutine backend_set_build_targets
 
     subroutine backend_test_cases(self, names, n_names, exitcode, log_file, &
-            flags, no_build, configured, lift_preset_filter)
+            flags, no_build, configured, lift_preset_filter, build_only, append_log)
         !! Run exact CTest cases of a configured CMake project: build (the
         !! caller has set the plan targets, backend_set_build_targets) unless
         !! no_build, then ctest in batches with exact anchored names. A batch
         !! is one ctest invocation, so fixtures run once per batch.
         !! lift_preset_filter: a selected case is excluded by the test preset
         !! filter; override the preset's label filter for this run.
+        !! build_only: stop after the build (native CTest execution follows).
+        !! append_log: the log already holds results; ctest appends to it.
         type(backend_t), intent(inout) :: self
         character(len=*), intent(in) :: names(:)
         integer, intent(in) :: n_names
@@ -546,12 +549,13 @@ contains
         character(len=*), intent(in), optional :: log_file
         character(len=*), intent(in), optional :: flags
         logical, intent(in), optional :: no_build, configured, lift_preset_filter
+        logical, intent(in), optional :: build_only, append_log
 
         integer, parameter :: batch_bytes = 32000
         character(len=512) :: log_path, lock_dir, flag_text
         character(len=:), allocatable :: regex
         integer :: lock_ierr, first, last, code
-        logical :: skip_build, lift
+        logical :: skip_build, lift, after_results
 
         exitcode = 0
         log_path = ''
@@ -562,6 +566,8 @@ contains
         if (present(no_build)) skip_build = no_build
         lift = .false.
         if (present(lift_preset_filter)) lift = lift_preset_filter
+        after_results = .false.
+        if (present(append_log)) after_results = append_log
         if (self%kind /= BACKEND_CMAKE .or. n_names < 1) then
             exitcode = 1
             return
@@ -582,12 +588,17 @@ contains
             end if
         end if
 
+        if (present(build_only)) then
+            if (build_only) return
+        end if
+
         first = 1
         do while (first <= n_names)
             last = first
             call ctest_batch_end(names, n_names, first, batch_bytes, last)
             call names_to_ctest_regex(names(first:last), last - first + 1, regex)
-            call cmake_test(self%cmake, regex, lift, .false., log_path, first > 1, code)
+            call cmake_test(self%cmake, regex, lift, .false., log_path, &
+                first > 1 .or. after_results, code)
             if (code /= 0) exitcode = code
             first = last + 1
         end do
@@ -934,6 +945,7 @@ contains
 
         character(len=:), allocatable :: packed
         character(len=32) :: jobs_text, timeout_text
+        character(len=4096) :: junit_file
         logical :: has_tests
         integer :: n_args
 
@@ -996,8 +1008,14 @@ contains
             test_wall_cap_seconds(budget=test_timeout_seconds())
         call argv_push(packed, n_args, '--timeout')
         call argv_push(packed, n_args, timeout_text)
+        ! Verdicts come from the JUnit file; the console stays the fallback.
+        call make_tmpfile('fo-ctest-junit', junit_file)
+        call argv_push(packed, n_args, '--output-junit')
+        call argv_push(packed, n_args, junit_file)
         call process_run_argv_logged(context%source_root, packed, n_args, log_file, &
             append, 86400, exitcode)
+        call ctest_import_junit(trim(junit_file), log_file)
+        call delete_tmpfile(junit_file)
     end subroutine cmake_test
 
     logical function generator_is_multi(context) result(is_multi)

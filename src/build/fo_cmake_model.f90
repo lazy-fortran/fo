@@ -607,8 +607,9 @@ contains
         type(walker_t) :: w
         character(len=:), allocatable :: path, name, prop, value, word
         type(string_t), allocatable :: labels(:)
+        type(string_t), allocatable :: argv(:), items(:)
         type(model_attr_t), allocatable :: attrs(:)
-        integer :: n_labels, n_attrs, command_target, hit, k
+        integer :: n_labels, n_attrs, n_argv, n_items, command_target, hit, k
         logical :: in_value
 
         message = ''
@@ -619,8 +620,10 @@ contains
         in_value = .false.
         n_labels = 0
         n_attrs = 0
+        n_argv = 0
+        n_items = 0
         command_target = 0
-        allocate (labels(0), attrs(0))
+        allocate (labels(0), attrs(0), argv(0), items(0))
         do
             call json_parser_next(parser, event)
             if (event%event_type == JSON_END_OF_INPUT) exit
@@ -635,13 +638,15 @@ contains
                     name = ''
                     n_labels = 0
                     n_attrs = 0
+                    n_argv = 0
                     command_target = 0
-                    deallocate (labels, attrs)
-                    allocate (labels(8), attrs(8))
+                    deallocate (labels, attrs, argv)
+                    allocate (labels(8), attrs(8), argv(8))
                 else if (path == 'tests/#/properties/#') then
                     prop = ''
                     value = ''
                     in_value = .false.
+                    n_items = 0
                 end if
             case (JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_BOOL)
                 word = scalar_text(event)
@@ -649,6 +654,7 @@ contains
                 case ('tests/#/name')
                     name = word
                 case ('tests/#/command/#')
+                    call push_string(argv, n_argv, word)
                     if (command_target == 0) &
                         command_target = model_find_artifact(model, word)
                 case ('tests/#/properties/#/name')
@@ -656,7 +662,10 @@ contains
                 case ('tests/#/properties/#/value')
                     value = word
                     in_value = .true.
+                    n_items = 0
+                    call push_string(items, n_items, word)
                 case ('tests/#/properties/#/value/#')
+                    call push_string(items, n_items, word)
                     if (prop == 'LABELS') then
                         call push_string(labels, n_labels, word)
                     else if (in_value) then
@@ -674,7 +683,7 @@ contains
             case (JSON_OBJECT_END)
                 if (path == 'tests/#/properties/#') then
                     if (len(prop) > 0 .and. prop /= 'LABELS') &
-                        call push_attr(attrs, n_attrs, prop, value)
+                        call push_attr(attrs, n_attrs, prop, value, items(1:n_items))
                     if (prop == 'LABELS' .and. in_value) then
                         ! A scalar LABELS value is a CMake list.
                         k = 1
@@ -696,7 +705,7 @@ contains
                         if (model_find_case(model, name) > 0) cycle
                     end if
                     call model_add_case(model, name, &
-                        command_target=command_target, &
+                        command_target=command_target, command=argv(1:n_argv), &
                         labels=labels(1:n_labels), attrs=attrs(1:n_attrs), &
                         default_excluded=flag_cases)
                 end if
@@ -729,10 +738,11 @@ contains
         end select
     end function scalar_text
 
-    subroutine push_attr(arr, n, key, value)
+    subroutine push_attr(arr, n, key, value, items)
         type(model_attr_t), allocatable, intent(inout) :: arr(:)
         integer, intent(inout) :: n
         character(len=*), intent(in) :: key, value
+        type(string_t), intent(in) :: items(:)
         type(model_attr_t), allocatable :: grown(:)
 
         if (n + 1 > size(arr)) then
@@ -743,6 +753,7 @@ contains
         n = n + 1
         arr(n)%key = key
         arr(n)%value = value
+        arr(n)%items = items
     end subroutine push_attr
 
     function cmake_model_target_origin(source_dir, top_source, top_build) &
@@ -1037,7 +1048,7 @@ contains
 
         if (.not. allocated(arr)) allocate (arr(8))
         if (n + 1 > size(arr)) then
-            allocate (grown(2*size(arr)))
+            allocate (grown(max(8, 2*size(arr))))
             grown(1:n) = arr(1:n)
             call move_alloc(grown, arr)
         end if

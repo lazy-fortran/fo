@@ -33,10 +33,13 @@ contains
         character(len=10) :: status
         character(len=10) :: exit_str
         real :: secs
-        integer :: u, ios, iostat, n_continuations
+        integer :: u, ios, iostat, n_continuations, n_console
+        character(len=:), allocatable :: native_reason
 
         n_entries = 0
         pending_reason = ''
+        native_reason = ''
+        n_console = 0
         ierr = 0
         if (.not. allocated(entries)) allocate (entries(MAX_TEST_RESULTS_ENTRIES))
         open (newunit=u, file=trim(log_file), status='old', iostat=ios)
@@ -52,7 +55,13 @@ contains
                 close (u)
                 return
             end if
-            if (index(line, 'TEST_RESULT ') == 1) then
+            if (index(line, 'TEST_REASON ') == 1) then
+                native_reason = line(13:)
+            else if (line == 'TEST_JUNIT_IMPORT') then
+                ! The verdicts of the console block just read follow exactly.
+                n_entries = n_entries - n_console
+                n_console = 0
+            else if (index(line, 'TEST_RESULT ') == 1) then
                 call parse_test_result_line(line, name, status, exit_str, secs, iostat)
                 if (iostat /= 0) then
                     ierr = 1
@@ -62,7 +71,9 @@ contains
                 if (n_entries >= size(entries)) call grow_entries(entries)
                 n_entries = n_entries + 1
                 entries(n_entries)%name = name
-                entries(n_entries)%reason = ''
+                entries(n_entries)%reason = native_reason
+                native_reason = ''
+                n_console = 0
                 entries(n_entries)%status = status
                 entries(n_entries)%seconds = secs
                 entries(n_entries)%exit_code = 0
@@ -102,6 +113,7 @@ contains
                     end if
                     pending_reason = ''
                     entries(n_entries)%status = status
+                    n_console = n_console + 1
                     entries(n_entries)%seconds = secs
                     entries(n_entries)%exit_code = 0
                     if (trim(status) == 'FAIL' .or. &
@@ -176,7 +188,7 @@ contains
             exit_local, secs_str, iostat)
         if (iostat /= 0) return
         select case (status_local)
-        case ('PASS', 'FAIL', 'TIMEOUT', 'SKIP', 'FLAKY')
+        case ('PASS', 'FAIL', 'TIMEOUT', 'SKIP', 'FLAKY', 'UNTESTED')
         case default
             iostat = 1
             return
@@ -343,12 +355,17 @@ contains
         character(len=:), allocatable, intent(out) :: name
 
         character(len=:), allocatable :: local
-        integer :: padding
+        integer :: last_char
 
-        local = adjustl(text)
-        padding = index(local, '...')
-        if (padding > 0) local = local(:padding - 1)
-        name = trim(local)
+        ! The name is followed by a space and a run of padding dots; a name may
+        ! itself contain or end in dots.
+        local = trim(adjustl(text))
+        last_char = len(local)
+        do while (last_char > 0)
+            if (local(last_char:last_char) /= '.') exit
+            last_char = last_char - 1
+        end do
+        name = trim(local(:last_char))
     end subroutine extract_ctest_name
 
     subroutine parse_test_result_fields(line, name, status, exit_str, &

@@ -30,6 +30,7 @@ module fo_project_load
         model_layering_sources, model_affected, CASE_SELECTED
     use fo_process, only: argv_push, process_run_argv_logged
     use fo_fs, only: fs_realpath
+    use fo_ctest_run, only: ctest_native_select, ctest_native_run, ctest_log_note
     use fo_scan, only: scan_unit_t, scan_file
     use fo_process, only: process_has_fortran_source_ext
     use fx_json_build, only: json_key_int
@@ -743,14 +744,74 @@ contains
         if (b%kind == BACKEND_CMAKE) then
             call plan_names(model, cases, plan, targets)
             call backend_set_build_targets(b, targets, plan%widened)
-            call backend_test_cases(b, names, size(names), exitcode, &
-                log_file=log_file, flags=flags, no_build=no_build, &
-                configured=.true., lift_preset_filter=lift)
+            call run_cmake_cases(b, model, cases, names, flags, no_build, lift, &
+                log_file, exitcode)
         else
             call backend_test_names(b, names, size(names), exitcode, .true., &
                 log_file, flags=flags, no_build=no_build)
         end if
     end subroutine project_run_cases
+
+    subroutine run_cmake_cases(b, model, cases, names, flags, no_build, lift, &
+            log_file, exitcode)
+        !! Build once, run the cases whose CTest properties fo implements
+        !! natively, and delegate the rest to ctest (FO_CTEST_DELEGATE=1
+        !! delegates all). Delegated cases are named in the log.
+        type(backend_t), intent(inout) :: b
+        type(project_model_t), intent(in) :: model
+        integer, intent(in) :: cases(:)
+        character(len=*), intent(in) :: names(:), flags, log_file
+        logical, intent(in) :: no_build, lift
+        integer, intent(out) :: exitcode
+        type(string_t), allocatable :: reasons(:)
+        logical, allocatable :: native(:)
+        character(len=8) :: forced
+        integer :: k, status, code
+
+        allocate (native(size(cases)), reasons(size(cases)))
+        call get_environment_variable('FO_CTEST_DELEGATE', forced, status=status)
+        if (status == 0 .and. len_trim(forced) > 0 .and. forced(1:1) /= '0') then
+            native = .false.
+            do k = 1, size(cases)
+                reasons(k)%s = 'FO_CTEST_DELEGATE is set'
+            end do
+        else
+            call ctest_native_select(model, cases, native, reasons)
+        end if
+        if (.not. any(native)) then
+            call backend_test_cases(b, names, size(names), exitcode, &
+                log_file=log_file, flags=flags, no_build=no_build, &
+                configured=.true., lift_preset_filter=lift)
+            return
+        end if
+        exitcode = 0
+        if (.not. no_build) then
+            call backend_test_cases(b, names, size(names), exitcode, &
+                log_file=log_file, flags=flags, configured=.true., build_only=.true.)
+            if (exitcode /= 0) return
+        end if
+        call ctest_native_run(model, pack(cases, native), log_file, &
+            .not. no_build, exitcode)
+        if (all(native)) return
+        do k = 1, size(cases)
+            if (native(k)) cycle
+            call ctest_log_note(log_file, 'fo: delegated to ctest: '// &
+                trim(names(k))//' ('//reasons(k)%s//')')
+        end do
+        call backend_test_cases(b, pack_names(names, .not. native), &
+            count(.not. native), code, log_file=log_file, flags=flags, &
+            no_build=.true., configured=.true., lift_preset_filter=lift, &
+            append_log=.true.)
+        if (code /= 0) exitcode = code
+    end subroutine run_cmake_cases
+
+    function pack_names(names, keep) result(kept)
+        character(len=*), intent(in) :: names(:)
+        logical, intent(in) :: keep(:)
+        character(len=len(names)) :: kept(count(keep))
+
+        kept = pack(names, keep)
+    end function pack_names
 
     subroutine plan_names(model, cases, plan, names)
         !! Target names of the plan. A widened plan still names the exact
