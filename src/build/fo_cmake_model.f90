@@ -25,25 +25,41 @@ module fo_cmake_model
     !!
     !! Layers: every project library is a layer named like the target, whose
     !! `uses` are its project library dependencies (transitive, as above).
-    !! Layers are only built for project targets. Cases are added by the CTest
-    !! adapter; the model is marked complete when the codemodel was read
-    !! without gaps.
+    !! Layers are only built for project targets. The model is marked complete
+    !! when the codemodel was read without gaps.
+    !!
+    !! Cases (cmake_model_load_cases, `ctest --show-only=json-v1`, no size
+    !! limit): name, LABELS as labels, every other property as an attr (array
+    !! values joined with ';'). command_target is the target whose artifact
+    !! equals a command word (mapping exact); a script or unknown command
+    !! leaves it unknown, which widens the plan. Default exclusions: with a
+    !! test preset the preset listing is authoritative and cases absent from
+    !! it (listed via `--test-dir`) are flagged default_excluded with their
+    !! labels kept; without a preset the model default_exclude is [slow].
+    !! CTest reports a test command only once its executable exists, so on an
+    !! unbuilt tree command_target stays unknown (the plan widens).
     use fx_string, only: string_t
     use fx_hash, only: fnv1a_string
     use fx_json_parse, only: json_parser_t, json_event_t, &
         json_parser_init_strict, json_parser_next, JSON_OBJECT_START, &
         JSON_OBJECT_END, JSON_ARRAY_START, JSON_ARRAY_END, JSON_KEY, &
-        JSON_STRING, JSON_ERROR, JSON_END_OF_INPUT
+        JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_BOOL, JSON_ERROR, &
+        JSON_END_OF_INPUT
+    use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_process, only: argv_push, process_run_argv_logged
     use fo_cmake_context, only: cmake_context_t, cmake_context_read_reply, &
         cmake_context_read_file, cmake_context_build_path
     use fo_project_model, only: project_model_t, model_init, model_add_target, &
-        model_add_layer, model_finalize, TARGET_OTHER, TARGET_LIBRARY, &
+        model_add_layer, model_add_case, model_find_artifact, model_find_case, &
+        model_attr_t, model_finalize, TARGET_OTHER, TARGET_LIBRARY, &
         TARGET_EXECUTABLE, ORIGIN_PROJECT, ORIGIN_DEPENDENCY
-    use, intrinsic :: iso_fortran_env, only: int64
+    use, intrinsic :: iso_fortran_env, only: int64, real64
     implicit none
     private
 
-    public :: cmake_model_load, cmake_model_target_origin
+    integer, parameter :: dp = real64
+
+    public :: cmake_model_load, cmake_model_load_cases, cmake_model_target_origin
 
     type :: walker_t
         !! Tracks the JSON path ('configurations/#/targets/#/name').
@@ -202,10 +218,233 @@ contains
             deallocate (uses, names)
         end do
 
+        call cmake_model_load_cases(context, model, ierr, message)
+        if (ierr /= 0) return
         model%complete = .true.
         call model_finalize(model, ierr, message)
         if (ierr /= 0) model%complete = .false.
     end subroutine cmake_model_load
+
+    subroutine cmake_model_load_cases(context, model, ierr, message)
+        !! Add the registered CTest cases to a model that is not finalized.
+        !! Targets already in the model are used to map command words; with
+        !! none every case is mapped unknown. Needs no File API reply.
+        type(cmake_context_t), intent(in) :: context
+        type(project_model_t), intent(inout) :: model
+        integer, intent(out) :: ierr
+        character(len=:), allocatable, intent(out) :: message
+        character(len=:), allocatable :: text
+        logical :: has_preset
+
+        ierr = 1
+        message = ''
+        has_preset = len_trim(context%test_preset) > 0
+        call run_ctest(context, has_preset, text, message)
+        if (.not. allocated(text)) return
+        call parse_ctest(text, model, .false., .false., message)
+        if (len(message) > 0) return
+        if (has_preset) then
+            call run_ctest(context, .false., text, message)
+            if (.not. allocated(text)) return
+            call parse_ctest(text, model, .true., .true., message)
+            if (len(message) > 0) return
+        else
+            deallocate (model%default_exclude)
+            allocate (model%default_exclude(1))
+            model%default_exclude(1)%s = 'slow'
+        end if
+        ierr = 0
+    end subroutine cmake_model_load_cases
+
+    subroutine run_ctest(context, with_preset, text, message)
+        !! Output of `ctest --show-only=json-v1` selected by the test preset
+        !! or by --test-dir (and -C), unallocated on failure.
+        type(cmake_context_t), intent(in) :: context
+        logical, intent(in) :: with_preset
+        character(len=:), allocatable, intent(out) :: text
+        character(len=:), allocatable, intent(out) :: message
+        character(len=:), allocatable :: packed
+        character(len=4096) :: log_file
+        integer :: n_args, ierr
+
+        message = ''
+        call make_tmpfile('fo-cmake-registered-tests', log_file)
+        packed = ''
+        n_args = 0
+        call argv_push(packed, n_args, 'ctest')
+        if (with_preset) then
+            call argv_push(packed, n_args, '--preset')
+            call argv_push(packed, n_args, trim(context%test_preset))
+        else
+            call argv_push(packed, n_args, '--test-dir')
+            call argv_push(packed, n_args, cmake_context_build_path(context))
+        end if
+        if (len_trim(context%configuration) > 0) then
+            call argv_push(packed, n_args, '-C')
+            call argv_push(packed, n_args, trim(context%configuration))
+        end if
+        call argv_push(packed, n_args, '--show-only=json-v1')
+        call process_run_argv_logged(trim(context%source_root), packed, n_args, &
+            log_file, .false., 30, ierr)
+        if (ierr == 0) call cmake_context_read_file(trim(log_file), text)
+        if (ierr /= 0 .or. .not. allocated(text)) then
+            message = 'cannot query registered CTest inventory: '//trim(log_file)
+            if (allocated(text)) deallocate (text)
+            return
+        end if
+        call delete_tmpfile(log_file)
+    end subroutine run_ctest
+
+    subroutine parse_ctest(text, model, flag_cases, skip_known, message)
+        !! Add the tests of a json-v1 listing. skip_known: ignore names the
+        !! model already has. flag_cases: set default_excluded on added cases.
+        !! message is empty on success.
+        character(len=*), intent(in) :: text
+        type(project_model_t), intent(inout) :: model
+        logical, intent(in) :: flag_cases, skip_known
+        character(len=:), allocatable, intent(out) :: message
+        type(json_parser_t) :: parser
+        type(json_event_t) :: event
+        type(walker_t) :: w
+        character(len=:), allocatable :: path, name, prop, value, word
+        type(string_t), allocatable :: labels(:)
+        type(model_attr_t), allocatable :: attrs(:)
+        integer :: n_labels, n_attrs, command_target, hit, k
+        logical :: in_value
+
+        message = ''
+        call json_parser_init_strict(parser, text)
+        name = ''
+        prop = ''
+        value = ''
+        in_value = .false.
+        n_labels = 0
+        n_attrs = 0
+        command_target = 0
+        allocate (labels(0), attrs(0))
+        do
+            call json_parser_next(parser, event)
+            if (event%event_type == JSON_END_OF_INPUT) exit
+            if (event%event_type == JSON_ERROR) then
+                message = 'invalid CTest registered-test JSON'
+                return
+            end if
+            call walker_step(w, event, path)
+            select case (event%event_type)
+            case (JSON_OBJECT_START)
+                if (path == 'tests/#') then
+                    name = ''
+                    n_labels = 0
+                    n_attrs = 0
+                    command_target = 0
+                    deallocate (labels, attrs)
+                    allocate (labels(8), attrs(8))
+                else if (path == 'tests/#/properties/#') then
+                    prop = ''
+                    value = ''
+                    in_value = .false.
+                end if
+            case (JSON_STRING, JSON_INTEGER, JSON_REAL, JSON_BOOL)
+                word = scalar_text(event)
+                select case (path)
+                case ('tests/#/name')
+                    name = word
+                case ('tests/#/command/#')
+                    if (command_target == 0) &
+                        command_target = model_find_artifact(model, word)
+                case ('tests/#/properties/#/name')
+                    prop = word
+                case ('tests/#/properties/#/value')
+                    value = word
+                    in_value = .true.
+                case ('tests/#/properties/#/value/#')
+                    if (prop == 'LABELS') then
+                        call push_string(labels, n_labels, word)
+                    else if (in_value) then
+                        value = value//';'//word
+                    else
+                        value = word
+                        in_value = .true.
+                    end if
+                end select
+            case (JSON_ARRAY_START)
+                if (path == 'tests/#/properties/#/value') then
+                    value = ''
+                    in_value = .false.
+                end if
+            case (JSON_OBJECT_END)
+                if (path == 'tests/#/properties/#') then
+                    if (len(prop) > 0 .and. prop /= 'LABELS') &
+                        call push_attr(attrs, n_attrs, prop, value)
+                    if (prop == 'LABELS' .and. in_value) then
+                        ! A scalar LABELS value is a CMake list.
+                        k = 1
+                        do while (k <= len(value))
+                            hit = index(value(k:), ';')
+                            if (hit == 0) hit = len(value) - k + 2
+                            if (hit > 1) &
+                                call push_string(labels, n_labels, &
+                                value(k:k + hit - 2))
+                            k = k + hit
+                        end do
+                    end if
+                else if (path == 'tests/#') then
+                    if (len(name) == 0) then
+                        message = 'CTest listing has a test without a name'
+                        return
+                    end if
+                    if (skip_known) then
+                        if (model_find_case(model, name) > 0) cycle
+                    end if
+                    call model_add_case(model, name, &
+                        command_target=command_target, &
+                        labels=labels(1:n_labels), attrs=attrs(1:n_attrs), &
+                        default_excluded=flag_cases)
+                end if
+            end select
+        end do
+    end subroutine parse_ctest
+
+    function scalar_text(event) result(r)
+        type(json_event_t), intent(in) :: event
+        character(len=:), allocatable :: r
+        character(len=64) :: buffer
+
+        select case (event%event_type)
+        case (JSON_INTEGER)
+            write (buffer, '(i0)') event%int_val
+            r = trim(buffer)
+        case (JSON_REAL)
+            if (abs(event%real_val) < 1.0e15_dp .and. &
+                event%real_val == anint(event%real_val)) then
+                write (buffer, '(i0)') nint(event%real_val, int64)
+            else
+                write (buffer, '(g0)') event%real_val
+            end if
+            r = trim(buffer)
+        case (JSON_BOOL)
+            r = merge('true ', 'false', event%bool_val)
+            r = trim(r)
+        case default
+            r = event%string_val
+        end select
+    end function scalar_text
+
+    subroutine push_attr(arr, n, key, value)
+        type(model_attr_t), allocatable, intent(inout) :: arr(:)
+        integer, intent(inout) :: n
+        character(len=*), intent(in) :: key, value
+        type(model_attr_t), allocatable :: grown(:)
+
+        if (n + 1 > size(arr)) then
+            allocate (grown(2*size(arr)))
+            grown(1:n) = arr(1:n)
+            call move_alloc(grown, arr)
+        end if
+        n = n + 1
+        arr(n)%key = key
+        arr(n)%value = value
+    end subroutine push_attr
 
     function cmake_model_target_origin(source_dir, top_source, top_build) &
             result(origin)

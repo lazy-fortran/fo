@@ -11,6 +11,7 @@ program test_cmake_project_model
         cmake_context_query
     use fo_cmake_model, only: cmake_model_load, cmake_model_target_origin
     use fo_project_model, only: project_model_t, model_find_target, &
+        model_find_case, MAP_EXACT, MAP_UNKNOWN, &
         model_find_layer, TARGET_LIBRARY, TARGET_EXECUTABLE, ORIGIN_PROJECT, &
         ORIGIN_DEPENDENCY
     implicit none
@@ -19,7 +20,6 @@ program test_cmake_project_model
     character(:), allocatable :: message
     type(cmake_context_t) :: context
     type(project_model_t) :: model
-    type(string_list_t) :: arguments
     type(process_result_t) :: result
     integer :: ierr
     logical :: ok
@@ -40,6 +40,7 @@ program test_cmake_project_model
 
     call cmake_context_query(context)
     call configure()
+    call build_exe()
     call cmake_model_load(context, model, ierr, message, input_digest='d1')
     call assert_equal_integer(ierr, 0, 'load ok: '//message)
     call assert_true(model%complete, 'complete is set')
@@ -48,6 +49,8 @@ program test_cmake_project_model
     call assert_equal_integer(model%n_targets, 4, 'four targets')
     call check_targets()
     call check_layers()
+    call check_cases()
+    call check_preset_cases()
 
     ! A new request token without a re-run of CMake is a stale reply.
     call cmake_context_init(context, project, build_root=build)
@@ -76,7 +79,24 @@ contains
             'add_subdirectory(core)', &
             'add_subdirectory(model)', &
             'add_executable(exe main.f90)', &
-            'target_link_libraries(exe PRIVATE model)'])
+            'target_link_libraries(exe PRIVATE model)', &
+            'enable_testing()', &
+            'add_test(NAME unit COMMAND exe)', &
+            'set_tests_properties(unit PROPERTIES LABELS "fast" TIMEOUT 30 '// &
+            'FIXTURES_REQUIRED fx)', &
+            'add_test(NAME crunch COMMAND exe)', &
+            'set_tests_properties(crunch PROPERTIES LABELS "slow;perf")', &
+            'add_test(NAME script COMMAND ${CMAKE_COMMAND} -P '// &
+            '${CMAKE_CURRENT_SOURCE_DIR}/check.cmake)', &
+            'set_tests_properties(script PROPERTIES FIXTURES_SETUP fx '// &
+            'FIXTURES_REQUIRED "a;b")'])
+        call write_lines(join_path(project, 'check.cmake'), &
+            [character(len=40) :: 'message(STATUS ok)'])
+        call write_lines(join_path(project, 'CMakePresets.json'), &
+            [character(len=200) :: '{"version":3,"configurePresets":[{"name":"c",'// &
+            '"generator":"Ninja","binaryDir":"'//build//'"}],"testPresets":'// &
+            '[{"name":"t","configurePreset":"c","filter":{"exclude":'// &
+            '{"label":"perf"}}}]}'])
         call write_lines(join_path(project, 'core/CMakeLists.txt'), &
             [character(len=160) :: 'add_library(core STATIC core.f90)', &
             'target_link_libraries(core PUBLIC ext)'])
@@ -99,6 +119,7 @@ contains
     end subroutine write_fixture
 
     subroutine configure()
+        type(string_list_t) :: arguments
         call list_add(arguments, 'cmake')
         call list_add(arguments, '-S')
         call list_add(arguments, project)
@@ -107,6 +128,18 @@ contains
         call run_process(arguments, root, result)
         call assert_process_ok(result, 'configure generated project')
     end subroutine configure
+
+    subroutine build_exe()
+        type(string_list_t) :: arguments
+        ! CTest lists a command only once its executable exists.
+        call list_add(arguments, 'cmake')
+        call list_add(arguments, '--build')
+        call list_add(arguments, build)
+        call list_add(arguments, '--target')
+        call list_add(arguments, 'exe')
+        call run_process(arguments, root, result)
+        call assert_process_ok(result, 'build exe')
+    end subroutine build_exe
 
     subroutine check_targets()
         integer :: core, mdl, exe, ext
@@ -167,4 +200,71 @@ contains
         call assert_equal_integer(model%layers(mdl)%uses(1), core, 'model uses core')
         call assert_equal_integer(size(model%layers(mdl)%targets), 1, 'layer target')
     end subroutine check_layers
+
+    subroutine check_cases()
+        integer :: unit_case, crunch, script, exe
+
+        call assert_equal_integer(model%n_cases, 3, 'three cases')
+        call assert_equal_integer(size(model%default_exclude), 1, 'slow excluded')
+        unit_case = model_find_case(model, 'unit')
+        crunch = model_find_case(model, 'crunch')
+        script = model_find_case(model, 'script')
+        exe = model_find_target(model, 'exe')
+        call assert_true(min(unit_case, crunch, script) > 0, 'all cases found')
+        if (min(unit_case, crunch, script) < 1) return
+        call assert_equal_integer(model%cases(unit_case)%command_target, exe, &
+            'unit runs exe')
+        call assert_equal_integer(model%cases(unit_case)%mapping, MAP_EXACT, &
+            'unit mapping exact')
+        call assert_equal_integer(model%cases(script)%command_target, 0, &
+            'script command has no target')
+        call assert_equal_integer(model%cases(script)%mapping, MAP_UNKNOWN, &
+            'script mapping unknown')
+        call assert_equal_integer(size(model%cases(crunch)%labels), 2, 'two labels')
+        call assert_equal_string(model%cases(crunch)%labels(1)%s, 'perf', 'label 1')
+        call assert_equal_string(model%cases(crunch)%labels(2)%s, 'slow', 'label 2')
+        call assert_equal_string(attr(unit_case, 'FIXTURES_REQUIRED'), 'fx', &
+            'fixture attr')
+        call assert_equal_string(attr(unit_case, 'TIMEOUT'), '30', 'numeric attr')
+        call assert_equal_string(attr(script, 'FIXTURES_REQUIRED'), 'a;b', &
+            'list attr is joined')
+        call assert_equal_string(attr(unit_case, 'LABELS'), '', 'labels are no attr')
+        call assert_true(.not. any(model%cases%default_excluded), 'no flag w/o preset')
+    end subroutine check_cases
+
+    subroutine check_preset_cases()
+        integer :: crunch, unit_case
+
+        call cmake_context_init(context, project, build_root=build, test_preset='t')
+        call cmake_context_query(context)
+        call configure()
+        call cmake_model_load(context, model, ierr, message)
+        call assert_equal_integer(ierr, 0, 'preset load ok: '//message)
+        call assert_equal_integer(model%n_cases, 3, 'preset: three cases')
+        call assert_equal_integer(size(model%default_exclude), 0, &
+            'preset replaces the slow rule')
+        crunch = model_find_case(model, 'crunch')
+        unit_case = model_find_case(model, 'unit')
+        call assert_true(min(crunch, unit_case) > 0, 'preset cases found')
+        if (min(crunch, unit_case) < 1) return
+        call assert_true(model%cases(crunch)%default_excluded, &
+            'preset-filtered case is flagged')
+        call assert_equal_integer(size(model%cases(crunch)%labels), 2, &
+            'filtered case keeps labels')
+        call assert_true(.not. model%cases(unit_case)%default_excluded, &
+            'listed case is not flagged')
+    end subroutine check_preset_cases
+
+    function attr(case_index, key) result(value)
+        integer, intent(in) :: case_index
+        character(len=*), intent(in) :: key
+        character(:), allocatable :: value
+        integer :: i
+
+        value = ''
+        do i = 1, size(model%cases(case_index)%attrs)
+            if (model%cases(case_index)%attrs(i)%key == key) &
+                value = model%cases(case_index)%attrs(i)%value
+        end do
+    end function attr
 end program test_cmake_project_model
