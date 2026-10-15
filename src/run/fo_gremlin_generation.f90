@@ -13,7 +13,8 @@ module fo_gremlin_generation
         generation_manifest_capture, generation_manifest_load, &
         generation_manifest_materialize, generation_manifest_execution_identity, &
         generation_manifest_release
-    use fo_project_model, only: project_model_t
+    use fo_project_model, only: project_model_t, model_unit_t
+    use fx_string, only: string_t
     use fx_hash, only: sha256_string
     implicit none
     private
@@ -57,6 +58,16 @@ module fo_gremlin_generation
         character(len=HASH_LEN) :: model_generation = ''
         ! The model depends on all source content (fpm source layers).
         logical :: model_full_key = .false.
+        ! Tree the model was loaded from (its paths are spelled below it) and
+        ! the adapter's other scanned sources (fpm test helpers).
+        character(len=PATH_LEN) :: model_root = ''
+        type(string_t), allocatable :: model_extra(:)
+        ! This generation's scanned sources and the input closure digest of
+        ! each model case (model_case_digests), computed once per generation.
+        type(model_unit_t), allocatable :: units(:)
+        character(len=HASH_LEN), allocatable :: case_digests(:)
+        ! Digest of the compiler identity, flags and environment.
+        character(len=HASH_LEN) :: toolchain_key = ''
     end type generation_t
 
     public :: generation_capture, generation_driver_identity, &
@@ -245,6 +256,8 @@ contains
         metadata%patch_digest = value_or_empty(context%patch_digest)
         metadata%execution_identity = generation_manifest_execution_identity( &
             metadata, context%input_inventory)
+        generation%toolchain_key = sha256_string('toolchain|'// &
+            metadata%toolchain//'|'//metadata%flags//'|'//metadata%environment)
         call cache_store_root(store_root)
         if (len_trim(store_root) == 0 .or. len_trim(store_root) >= PATH_LEN) then
             message = 'cannot resolve the shared immutable object store'

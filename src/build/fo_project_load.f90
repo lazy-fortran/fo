@@ -25,7 +25,7 @@ module fo_project_load
         SELECT_UNKNOWN_NAME, SELECT_EMPTY, SELECT_NAMED_EXCLUDED, &
         CASE_DEFAULT_EXCLUDED
     use fo_project_model, only: model_unit_t, model_layering_t, model_layering, &
-        model_layering_sources, model_affected
+        model_layering_sources, model_affected, CASE_SELECTED
     use fo_process, only: argv_push, process_run_argv_logged
     use fo_fs, only: fs_realpath
     use fo_scan, only: scan_unit_t, scan_file
@@ -37,6 +37,7 @@ module fo_project_load
     public :: project_has_model, project_load, project_resolve, project_run_cases
     public :: project_affected, project_changed_files, project_run_affected
     public :: project_load_configured, project_inventory_cases, project_build_cases
+    public :: project_model_units, project_affected_cases
     public :: project_list_text, project_list_json
     public :: project_layering, project_layering_text, project_layering_json
 
@@ -100,7 +101,8 @@ contains
         if (ierr /= 0) message = 'CMake project model unavailable: '//message
     end subroutine project_load
 
-    subroutine project_load_configured(b, model, ierr, message, input_digest)
+    subroutine project_load_configured(b, model, ierr, message, input_digest, &
+            scanned)
         !! Load the model of a tree an earlier fo command configured (the
         !! Gremlin generation build, same flags): CMake reads that configure's
         !! File API reply and CTest registry and does not configure again,
@@ -111,6 +113,8 @@ contains
         integer, intent(out) :: ierr
         character(len=:), allocatable, intent(out) :: message
         character(len=*), intent(in), optional :: input_digest
+        !! As for project_load (fpm test helpers); empty on CMake.
+        type(string_t), allocatable, intent(out), optional :: scanned(:)
 
         ierr = 0
         message = ''
@@ -120,9 +124,11 @@ contains
             return
         end if
         if (b%kind == BACKEND_NATIVE) then
-            call fpm_model_load(trim(b%project_dir), model, ierr, message)
+            call fpm_model_load(trim(b%project_dir), model, ierr, message, &
+                scanned=scanned)
             return
         end if
+        if (present(scanned)) allocate (scanned(0))
         if (len_trim(b%cmake%configure_preset) > 0 .and. &
             .not. b%cmake%build_root_hint) then
             ! The preset's build tree is only known from a configure run.
@@ -291,6 +297,67 @@ contains
         call model_affected(model, units, roots, kept(1:n), selection, &
             widen_reasons, force_reason)
     end subroutine project_affected
+
+    subroutine project_model_units(model, extra, units, from_root, to_root)
+        !! Scan the sources of a loaded model (target and layer sources) and
+        !! extra, the adapter's other scanned sources, into model units.
+        !! A path below from_root is read below to_root instead and spelled
+        !! so: the sources of a model loaded from an earlier copy of the
+        !! tree (a reused Gremlin generation model). Unreadable sources are
+        !! left out; model_affected treats them as unscanned.
+        type(project_model_t), intent(in) :: model
+        type(string_t), intent(in) :: extra(:)
+        type(model_unit_t), allocatable, intent(out) :: units(:)
+        character(len=*), intent(in) :: from_root, to_root
+        type(string_t), allocatable :: paths(:), unscanned(:)
+        integer :: k, n
+
+        call model_layering_sources(model, extra, paths)
+        n = len(from_root)
+        if (n > 0 .and. from_root /= to_root) then
+            do k = 1, size(paths)
+                if (len(paths(k)%s) <= n + 1) cycle
+                if (paths(k)%s(1:n + 1) /= from_root//'/') cycle
+                paths(k)%s = to_root//paths(k)%s(n + 1:)
+            end do
+        end if
+        call scan_units(paths, units, unscanned)
+    end subroutine project_model_units
+
+    subroutine project_affected_cases(model, units, roots, cases, changed, &
+            affected, widen_reasons, force_reason)
+        !! model_affected on an already loaded model and scanned units:
+        !! affected = the cases (model indices, in the given order) that the
+        !! changed files (relative to the project root, which roots spell)
+        !! affect. force_reason widens to every case.
+        type(project_model_t), intent(in) :: model
+        type(model_unit_t), intent(in) :: units(:)
+        type(string_t), intent(in) :: roots(:), changed(:)
+        integer, intent(in) :: cases(:)
+        integer, allocatable, intent(out) :: affected(:)
+        type(string_t), allocatable, intent(out) :: widen_reasons(:)
+        character(len=*), intent(in), optional :: force_reason
+        type(model_selection_t) :: selection
+        integer :: k
+
+        selection%status = SELECT_OK
+        selection%message = ''
+        selection%cases = cases
+        allocate (selection%disposition(model%n_cases), &
+            selection%reasons(model%n_cases), selection%unknown(0), &
+            selection%unmatched(0))
+        selection%disposition = CASE_SELECTED
+        do k = 1, model%n_cases
+            selection%reasons(k)%s = ''
+        end do
+        if (size(cases) == 0) then
+            allocate (affected(0), widen_reasons(0))
+            return
+        end if
+        call model_affected(model, units, roots, changed, selection, &
+            widen_reasons, force_reason)
+        affected = selection%cases
+    end subroutine project_affected_cases
 
     subroutine project_run_affected(b, flags, changed, include_all, log_file, &
             exitcode, n_run)

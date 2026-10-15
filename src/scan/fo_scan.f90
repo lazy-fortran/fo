@@ -316,6 +316,9 @@ contains
         integer :: line_number
 
         call reset_scan_unit(filename, unit_info)
+        ! The line scanner does not track program unit nesting: whether the
+        ! file mixes a module with other program units is unknown.
+        unit_info%has_other_units = .true.
         ierr = 0
         line_number = 0
 

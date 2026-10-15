@@ -17,6 +17,7 @@ program test_project_model
         SELECT_UNKNOWN_LAYER, SELECT_BAD_PATTERN, CASE_DEFAULT_EXCLUDED, &
         CASE_LABEL_EXCLUDED, CASE_SELECTED, CASE_DEPENDENCY
     use fo_project_model, only: model_unit_t, model_affected, CASE_NOT_AFFECTED
+    use fo_project_model, only: model_case_digests
     implicit none
 
     integer :: n_pass, n_fail
@@ -428,7 +429,55 @@ contains
             'build description')
         call expect_affected(m, units, 'n=c1', 'src/b.f90', '', .false., &
             'unselected case stays unselected')
+        call expect_digests_follow_affected(m, units)
     end subroutine test_affected
+
+    subroutine expect_digests_follow_affected(m, units)
+        !! Oracle for model_case_digests: editing one file changes the input
+        !! closure digest of exactly the cases model_affected selects for
+        !! that edit (on every case, the files of test_affected).
+        type(project_model_t), intent(in) :: m
+        type(model_unit_t), intent(in) :: units(:)
+        type(string_t), allocatable :: files(:), contents(:), names(:)
+        type(string_t), allocatable :: changed(:), reasons(:)
+        type(string_t) :: roots(1)
+        type(model_selection_t) :: sel
+        character(len=64), allocatable :: base(:), edited(:)
+        integer :: f, k, j
+        logical :: affected
+
+        call split_words('src/a.f90 src/ext.f90 src/mixed.f90 src/b.f90 '// &
+            'test/t1.f90 test/t2.f90 test/t3.f90 ref/x.dat ref/y.dat '// &
+            'data/sub/z.txt README.md src/new.f90 sub/CMakeLists.txt', files)
+        call split_words('c1 c2 c3 c4', names)
+        allocate (contents(size(files)))
+        do f = 1, size(files)
+            contents(f)%s = 'v0'
+        end do
+        roots(1)%s = '/p'
+        call model_case_digests(m, units, roots, names, files, contents, base)
+        do k = 1, size(names)
+            call assert(len_trim(base(k)) == 64, 'digest of '//names(k)%s)
+        end do
+        do f = 1, size(files)
+            contents(f)%s = 'v1'
+            call model_case_digests(m, units, roots, names, files, contents, edited)
+            contents(f)%s = 'v0'
+            call run(m, '', sel)
+            allocate (changed(1))
+            changed(1) = files(f)
+            call model_affected(m, units, roots, changed, sel, reasons)
+            deallocate (changed)
+            do k = 1, size(names)
+                affected = .false.
+                do j = 1, size(sel%cases)
+                    if (m%cases(sel%cases(j))%name == names(k)%s) affected = .true.
+                end do
+                call assert((edited(k) /= base(k)) .eqv. affected, &
+                    'digest of '//names(k)%s//' follows an edit of '//files(f)%s)
+            end do
+        end do
+    end subroutine expect_digests_follow_affected
 
     subroutine set_unit(u, path, provides, uses)
         type(model_unit_t), intent(out) :: u
