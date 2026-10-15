@@ -42,6 +42,7 @@ program fo_main
     use fo_lock, only: lock_write
     use fo_scaffold, only: scaffold_project
     use fo_version_info, only: FO_VERSION
+    use fo_progress, only: progress_suppress
     implicit none
 
     character(len=256) :: action
@@ -511,7 +512,10 @@ contains
         write (out, '(a)') '  --random N      sample N tests without replacement'
         write (out, '(a)') '  --seed S        replay a random sample with seed S'
         write (out, '(a)') '  --verbose       show all tests (default for named runs)'
-        write (out, '(a)') '  --json          output results as JSON'
+        write (out, '(a)') '  --json          compact JSON: verdict, failures with excerpts'
+        write (out, '(a)') '  --json=full     JSON with every case and its complete output'
+        write (out, '(a)') '  --quiet         summary only: no per-case lines while running'
+        write (out, '(a)') '  --summary       same as --quiet'
         write (out, '(a)') '  --profile NAME  use release, debug, or asan flags'
         write (out, '(a)') '  --flag FLAGS    append compiler flags'
         write (out, '(a)') '  -h, --help      show this help'
@@ -1085,6 +1089,7 @@ contains
         integer :: random_count, random_seed, clock_count
         integer :: argument_status, eq
         logical :: only_changed, include_all, verbose, use_json, skip_next
+        logical :: json_full, quiet
         logical :: end_options, flags_seen, list_mode, filtered, no_build
         type(string_t), allocatable :: widen_reasons(:)
         type(model_request_t) :: request
@@ -1102,6 +1107,8 @@ contains
         include_all = .false.
         verbose = .false.
         use_json = .false.
+        json_full = .false.
+        quiet = .false.
         flags = ''
         profile = ''
         flags_seen = .false.
@@ -1207,8 +1214,13 @@ contains
                 include_all = .true.
             case ('--verbose')
                 verbose = .true.
-            case ('--json')
+            case ('--json', '--json=compact')
                 use_json = .true.
+            case ('--json=full')
+                use_json = .true.
+                json_full = .true.
+            case ('--quiet', '--summary')
+                quiet = .true.
             case ('--debug')
                 profile = 'debug'
             case ('--release')
@@ -1225,6 +1237,8 @@ contains
                 test_names(n_arg_names) = trim(arg)
             end select
         end do
+        ! Agent-facing and summary modes get the report only, no live lines.
+        if (use_json .or. quiet) call progress_suppress(.true.)
 
         b = detect_backend(fs_canonical_path('.'))
         if (b%kind == BACKEND_NONE) then
@@ -1278,8 +1292,9 @@ contains
                     flags=all_flags, no_build=no_build)
             end if
             call report_test_result(exitcode, test_log, &
-                n_arg_names == 0 .and. .not. verbose, use_json, &
-                require_results=n_arg_names > 0)
+                (n_arg_names == 0 .and. .not. verbose) .or. quiet, use_json, &
+                require_results=n_arg_names > 0, json_full=json_full, &
+                full_text=verbose)
             call delete_tmpfile(test_log)
             return
         end if
@@ -1355,9 +1370,9 @@ contains
         call project_run_cases(b, model, selection%cases, all_flags, no_build, &
             test_log, exitcode)
         call report_test_result(exitcode, test_log, &
-            random_count == 0 .and. n_arg_names == 0 .and. .not. filtered .and. &
-            .not. verbose .and. .not. only_changed, use_json, &
-            require_results=.true.)
+            (random_count == 0 .and. n_arg_names == 0 .and. .not. filtered .and. &
+            .not. verbose .and. .not. only_changed) .or. quiet, use_json, &
+            require_results=.true., json_full=json_full, full_text=verbose)
         call delete_tmpfile(test_log)
     end subroutine cmd_test
 
@@ -1446,16 +1461,21 @@ contains
         on = length > 0 .and. trim(value) == '1'
     end function env_flag
 
-    subroutine report_test_result(exitcode, test_log, summary_mode, use_json, require_results)
+    subroutine report_test_result(exitcode, test_log, summary_mode, use_json, &
+            require_results, json_full, full_text)
+        !! One report for a run: compact JSON by default for --json, the legacy
+        !! full JSON for --json=full, and human text that ends in the verdict
+        !! line. Failure output is excerpted unless full_text (--verbose).
         integer, intent(inout) :: exitcode
         character(len=*), intent(in) :: test_log
         logical, intent(in) :: summary_mode
         logical, intent(in) :: use_json
-        logical, intent(in), optional :: require_results
+        logical, intent(in), optional :: require_results, json_full, full_text
 
         type(test_result_entry_t), allocatable :: entries(:)
         integer :: n_entries, parse_ierr
         character(len=:), allocatable :: json_output, human_output
+        logical :: compact, bounded
         type(diagnostic_t) :: diag
         character(len=:), allocatable :: failed_tests(:)
         integer :: n_failed_tests, i
@@ -1504,18 +1524,22 @@ contains
         end if
 
         if (use_json) then
+            compact = .true.
+            if (present(json_full)) compact = .not. json_full
             call format_test_results_json(entries, n_entries, exitcode, &
-                json_output, test_log)
-            write (output_unit, '(a)') trim(json_output)
+                json_output, test_log, compact)
+            write (output_unit, '(a)') json_output
         else if (n_entries > 0) then
+            bounded = .true.
+            if (present(full_text)) bounded = .not. full_text
             call format_test_results_text(entries, n_entries, test_log, &
-                summary_mode, human_output)
+                summary_mode, human_output, bounded)
             if (len_trim(human_output) > 0) then
-                write (output_unit, '(a)') trim(human_output)
+                write (output_unit, '(a)') human_output
             end if
         else if (exitcode == 0) then
             if (.not. summary_mode) return
-            write (output_unit, '(a)') 'Tests: 0 passed (0.00s)'
+            write (output_unit, '(a)') '0 pass (0.00s summed)'
             return
         else
             call diagnostic_from_log('test', test_log, 'fo test', diag)

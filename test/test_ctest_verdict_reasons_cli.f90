@@ -40,7 +40,7 @@ contains
         args = string_list_t()
         call list_add(args, 'test')
         call list_add(args, name)
-        call list_add(args, '--json')
+        call list_add(args, '--json=full')
         call run_fo(driver, args, scratch, join_path(scratch, 'cache'), observed, env)
         call assert_true((observed%exit_code == 0) .eqv. success, &
             'process verdict agrees with native CTest for '//name)

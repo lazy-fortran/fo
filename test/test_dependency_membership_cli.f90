@@ -104,7 +104,7 @@ contains
         arguments = string_list_t()
         call list_add(arguments, 'test')
         call list_add(arguments, '--all')
-        call list_add(arguments, '--json')
+        call list_add(arguments, '--json=full')
         call run_fo(driver, arguments, consumer, join_path(scratch, 'fo-cache'), result, environment)
         call assert_process_ok(result, 'dependency test selection')
         call parse_json_report(result, report, 'dependency report')

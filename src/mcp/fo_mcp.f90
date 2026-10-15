@@ -685,10 +685,12 @@ contains
             project_run_cases
         use fx_string, only: string_t
         use fo_test_results, only: test_result_entry_t, parse_test_results, &
-            format_test_results_text, format_test_results_json
+            format_test_results_json
+        use fo_progress, only: progress_suppress
         character(len=*), intent(in) :: line, id_str, dir, tmpfile
         character(len=:), allocatable, intent(out) :: response
 
+        logical :: full_json
         type(backend_t) :: b
         character(len=:), allocatable :: output_text
         character(len=16) :: json_mode
@@ -750,12 +752,14 @@ contains
         if (.not. project_has_model(b)) then
             ! Frozen FO_CMAKE_NATIVE route: the CTest registry is
             ! authoritative.
+            call progress_suppress(.true.)
             if (n_names > 0) then
                 call backend_test_names(b, test_names(1:n_names), n_names, &
                     exitcode, .true., tmpfile)
             else
                 call backend_test(b, exitcode, log_file=tmpfile)
             end if
+            call progress_suppress(.false.)
         else
             ! Same selection as `fo test`: the project model decides.
             allocate (request%names(n_names), request%include_labels(0), &
@@ -786,22 +790,27 @@ contains
                 call make_tool_text_response(id_str, output_text, 1, response)
                 return
             end if
+            call progress_suppress(.true.)
             call project_run_cases(b, model, selection%cases, '', .false., &
                 tmpfile, exitcode)
+            call progress_suppress(.false.)
         end if
 
         call parse_test_results(tmpfile, entries, n_entries, ierr)
+        full_json = mode_error == 0 .and. mode_count == 1 .and. &
+            json_mode == 'full'
         if (ierr /= 0) then
             output_text = 'fo: could not parse test results'
             exitcode = 1
-        else if (&
-                mode_error == 0 .and. mode_count == 1 .and. &
-                (json_mode == 'compact' .or. json_mode == 'full')) then
+        else if (full_json) then
             call format_test_results_json(entries, n_entries, exitcode, &
                 output_text, tmpfile)
-        else if (n_entries > 0) then
-            call format_test_results_text(entries, n_entries, tmpfile, &
-                n_names == 0, output_text)
+        else if (n_entries > 0 .or. (mode_error == 0 .and. mode_count == 1 &
+                .and. json_mode == 'compact')) then
+            ! The default is the compact report: an agent gets the verdict,
+            ! the failures and a handle, not every passing case.
+            call format_test_results_json(entries, n_entries, exitcode, &
+                output_text, tmpfile, compact=.true.)
         else
             call read_text_file_alloc(tmpfile, output_text, ierr)
             if (ierr /= 0) then
@@ -1326,7 +1335,9 @@ contains
         call json_object_start(jb)
         call schema_property(jb, 'action', 'string', 'Action to run', actions)
         call schema_property(jb, 'dir', 'string', 'Project directory (default: cwd)')
-        call schema_property(jb, 'json', 'string', 'check/test: structured JSON result', &
+        call schema_property(jb, 'json', 'string', 'check/test: JSON result; test '// &
+            'defaults to compact (verdict first, failures with excerpts and a '// &
+            'log handle), full lists every case with its whole output', &
             'compact,full')
         call schema_property(jb, 'dot', 'boolean', 'graph: output Graphviz DOT')
         call schema_property(jb, 'cache', 'boolean', &

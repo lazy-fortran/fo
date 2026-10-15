@@ -93,7 +93,7 @@ contains
         args = string_list_t()
         call list_add(args, 'test')
         call list_add(args, selector)
-        call list_add(args, '--json')
+        call list_add(args, '--json=full')
         call run_fo(driver, args, scratch, join_path(scratch, 'fo-cache'), result, env)
         call parse_json_report(result, doc, 'CTest report for '//selector)
         args = string_list_t()

@@ -76,7 +76,7 @@ program test_package_macros_cli
         args = string_list_t()
         call list_add(args, 'test')
         call list_add(args, 'test_macro_ownership')
-        call list_add(args, '--json')
+        call list_add(args, '--json=full')
         call run_fo(driver, args, project, scratch//'/cache', result, environment)
         call assert_process_ok(result, 'compiled package macro ownership and edits')
         call parse_json_report(result, report, 'package macro runtime report')

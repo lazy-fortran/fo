@@ -5,7 +5,7 @@ program test_mcp_test_json
     use fo_test_harness, only: make_scratch, join_path, write_text, remove_tree
     use fo_test_harness, only: assert_true, assert_equal_integer, assert_equal_string
     use fo_test_harness, only: finish_assertions
-    use fo_test_harness, only: make_directory, environment_value
+    use fo_test_harness, only: make_directory, environment_value, read_text
     use fo_test_cli, only: resolve_driver, run_fo
     use fo_test_json, only: json_value_t, json_number, json_parse, json_member, json_element
     use fo_test_json, only: json_size, json_string_value, json_number_value
@@ -221,15 +221,21 @@ program test_mcp_test_json
         first = json_element(content, 1)
         field = json_member(first, 'text')
         body = json_string_value(field)
-        call assert_true(len(body) > 16384, 'human MCP output exceeds former limit')
-        call assert_true(index(body, 'Start recovery...  '//new_line('a')) > 0, &
-            'human MCP output preserves diagnostic Start recovery and trailing spaces')
-        call assert_true(index(body, repeat('z', 24000)//' END-DIAG  ') > 0, &
-            'human MCP output preserves the complete long diagnostic')
-        call assert_true(index(body, trim(names(601))) > 0, &
-            'human MCP output preserves complete long selected name')
-        call assert_true(index(body, 'Summary: 601 passed, 1 failed') > 0, &
-            'human MCP output retains exact late summary')
+        ! The default is the compact report: verdict first, the one failure
+        ! with a bounded excerpt, and a handle to the complete log.
+        call assert_true(len(body) < 4096, 'default MCP test report is bounded')
+        call assert_true(index(body, '{"v":"601 pass, 1 FAIL (') == 1, &
+            'default MCP test report starts with the exact verdict')
+        call json_parse(body, report, valid, error_message)
+        call assert_true(valid, 'default MCP test report is JSON')
+        field = json_member(report, 'log')
+        diagnostic = read_text(json_string_value(field))
+        call assert_true(index(diagnostic, repeat('z', 24000)//' END-DIAG  ') > 0, &
+            'the log handle retains the complete long diagnostic')
+        call assert_true(index(body, repeat('z', 24000)) == 0, &
+            'the report itself carries no complete long diagnostic')
+        call assert_true(index(body, 'late diagnostic') > 0, &
+            'the report carries the first diagnostic lines of the failure')
         result_object = json_member(responses(7), 'error')
         field = json_member(result_object, 'code')
         call assert_equal_integer(int(json_number_value(field)), -32602, &

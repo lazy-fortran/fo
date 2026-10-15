@@ -1424,7 +1424,7 @@ contains
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'test')
         call argv_push(packed, n_args, '--no-build')
-        call argv_push(packed, n_args, '--json')
+        call argv_push(packed, n_args, '--json=full')
         if (case_needs_all(generation, request%case_id)) &
             call argv_push(packed, n_args, '--all')
         call argv_push(packed, n_args, trim(request%case_id))
@@ -3734,7 +3734,7 @@ contains
         ! The generation was built once by start_build; a case never builds.
         call argv_push(packed, n_args, 'test')
         call argv_push(packed, n_args, '--no-build')
-        call argv_push(packed, n_args, '--json')
+        call argv_push(packed, n_args, '--json=full')
         if (case_needs_all(generation, selected(index_case))) then
             call argv_push(packed, n_args, '--all')
         end if

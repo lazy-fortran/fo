@@ -50,7 +50,7 @@ program test_flaky_output_cli
     arguments = string_list_t()
     call list_add(arguments, 'test')
     call list_add(arguments, 'test_flaky_attempt')
-    call list_add(arguments, '--json')
+    call list_add(arguments, '--json=full')
     call run_arguments(driver, arguments, scratch, result, environment, 120000)
     call assert_process_ok(result, 'named flaky test JSON command succeeds on retry')
     call parse_json_report(result, report, 'flaky test JSON report')

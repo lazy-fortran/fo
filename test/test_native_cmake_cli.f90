@@ -96,7 +96,7 @@ program test_native_cmake_cli
         args = string_list_t()
         call list_add(args, 'test')
         call list_add(args, 'numerical_oracle')
-        call list_add(args, '--json')
+        call list_add(args, '--json=full')
         call run_fo(driver, args, project, cache, process, env, 60000)
         if (phase == 3) then
             call assert_true(process%exit_code /= 0, &
@@ -136,7 +136,7 @@ program test_native_cmake_cli
     args = string_list_t()
     call list_add(args, 'test')
     call list_add(args, 'missing_registered_test')
-    call list_add(args, '--json')
+    call list_add(args, '--json=full')
     call run_fo(driver, args, project, cache, process, env, 60000)
     call assert_true(process%exit_code /= 0, 'unknown registered test fails explicitly')
     call write_text(project//'/CMakeLists.txt', cmake_text// &

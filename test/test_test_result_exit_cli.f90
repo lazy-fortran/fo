@@ -43,7 +43,7 @@ program test_test_result_exit_cli
     call list_add(environment, 'FO_FIXTURE_REAL_CTEST='//trim(real_ctest))
     call list_add(arguments, 'test')
     call list_add(arguments, 'selected')
-    call list_add(arguments, '--json')
+    call list_add(arguments, '--json=full')
     call run_fo(driver, arguments, scratch, join_path(scratch, 'cache'), &
                 observed, environment)
     call assert_true(observed%exit_code /= 0, 'malformed verdict makes public CLI fail')

@@ -292,7 +292,7 @@ contains
             'compact success includes stage')
         call assert(index(line, '"target"') > 6, &
             'compact success includes target')
-        call assert(index(line, '"summary":"build and tests passed"') > 5, &
+        call assert(index(line, '"summary":"build and tests passed"') > 0, &
             'compact success includes summary')
         call assert(index(line, '"hint"') > 1, &
             'compact success includes hint key')

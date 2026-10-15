@@ -18,6 +18,7 @@ module fo_progress
     implicit none
     private
     public :: progress_begin, progress_step, progress_end, progress_suppress
+    public :: progress_note
 
     integer :: g_total = 0
     integer :: g_done = 0
@@ -96,6 +97,22 @@ contains
         g_suppressed = disabled
         if (disabled) g_active = .false.
     end subroutine progress_suppress
+
+    subroutine progress_note(text)
+        !! One complete line on stderr, safe from a parallel region. Used for
+        !! per-case completion lines; honours FO_NO_PROGRESS and
+        !! progress_suppress like the bar.
+        character(len=*), intent(in) :: text
+        character(len=8) :: off
+        integer :: ln, st
+
+        if (g_suppressed) return
+        call get_environment_variable('FO_NO_PROGRESS', off, ln, st)
+        if (st == 0 .and. ln > 0) return
+        !$omp critical (fo_progress_note)
+        call process_write_stderr(text//new_line('a'))
+        !$omp end critical (fo_progress_note)
+    end subroutine progress_note
 
     subroutine render(done)
         integer, intent(in) :: done

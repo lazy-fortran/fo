@@ -57,8 +57,8 @@ program test_test_human_summary
     call assert_true(index(result%stdout, 'attempts: first failed, retry passed') > &
         0, 'the flaky attempts are described')
     call assert_true(index(result%stdout, &
-        'Summary: 2 passed, 0 failed, 0 skipped (') > 0, &
-        'summary mode still prints the exact pass, fail and skip counts')
+        '1 pass, 1 flaky (') > 0, &
+        'summary mode ends in the exact verdict counts')
 
     call remove_tree(scratch)
     call finish_assertions()

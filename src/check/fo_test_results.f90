@@ -1,7 +1,7 @@
 module fo_test_results
     use, intrinsic :: iso_fortran_env, only: iostat_end, iostat_eor, real64
     use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
-    use fo_util, only: json_int, read_text_file_alloc
+    use fo_util, only: json_int, read_text_file_alloc, temporary_root
     use fx_json_build, only: json_escape_string
     implicit none
     private
@@ -13,6 +13,13 @@ module fo_test_results
     !! more tests than this still reports every result: truncating the list used
     !! to hide failures behind a passing-looking count.
     integer, parameter :: MAX_TEST_RESULTS_ENTRIES = 256
+
+    !! Bounds of a failure excerpt in agent-facing output: the head and tail
+    !! of a case's captured output, at most this many lines and bytes.
+    integer, parameter :: EXCERPT_LINES = 20, EXCERPT_HEAD = 12
+    integer, parameter :: EXCERPT_BYTES = 2048
+    !! Failing cases beyond this many list name, status and time only.
+    integer, parameter :: MAX_EXCERPT_CASES = 10
 
     type :: test_result_entry_t
         character(len=:), allocatable :: name, reason
@@ -442,78 +449,70 @@ contains
     end subroutine extract_word
 
     subroutine format_test_results_text(entries, n_entries, log_file, &
-            summary_mode, output)
-        !! Whole human report. A bounded buffer would drop late failures and the
-        !! summary once diagnostics pass its length, so the result is allocatable.
+            summary_mode, output, bounded)
+        !! Whole human report, ending in the verdict line. A bounded buffer
+        !! would drop late failures and the verdict once diagnostics pass its
+        !! length, so the result is allocatable. With bounded, a failing case's
+        !! captured output is cut to a head/tail excerpt and the full log is
+        !! kept and named.
         type(test_result_entry_t), intent(in) :: entries(:)
         integer, intent(in) :: n_entries
         character(len=*), intent(in) :: log_file
         logical, intent(in) :: summary_mode
         character(len=:), allocatable, intent(out) :: output
+        logical, optional, intent(in) :: bounded
 
-        integer :: i, n_pass, n_fail, n_skip, n_untested, n_shown
+        integer :: i, n_pass, n_fail, n_skip, n_untested, n_flaky
         real(real64) :: total_secs
-        character(len=:), allocatable :: line, captured
+        character(len=:), allocatable :: line, captured, excerpt, source_log, handle
+        logical :: cut, limit_output
 
-        n_pass = 0
-        n_fail = 0
-        n_skip = 0
-        n_untested = 0
-        n_shown = 0
-        total_secs = 0.0
-
-        do i = 1, n_entries
-            total_secs = total_secs + real(entries(i)%seconds, real64)
-            if (trim(entries(i)%status) == 'PASS' .or. &
-                trim(entries(i)%status) == 'FLAKY') then
-                n_pass = n_pass + 1
-            else if (trim(entries(i)%status) == 'FAIL' .or. &
-                    trim(entries(i)%status) == 'TIMEOUT') then
-                n_fail = n_fail + 1
-            else if (entries(i)%status == 'UNTESTED') then
-                n_untested = n_untested + 1
-            else
-                n_skip = n_skip + 1
-            end if
-        end do
+        limit_output = .false.
+        if (present(bounded)) limit_output = bounded
+        call count_statuses(entries, n_entries, n_pass, n_fail, n_skip, &
+            n_untested, n_flaky, total_secs)
+        source_log = log_file
+        handle = ''
+        if (limit_output .and. (n_fail > 0 .or. n_flaky > 0)) then
+            handle = retain_log(log_file)
+            if (len(handle) > 0) source_log = handle
+        end if
 
         output = ''
         do i = 1, n_entries
             if (summary_mode .and. trim(entries(i)%status) == 'PASS') cycle
             call format_single_test_entry(entries(i), line)
-            output = trim(output)//trim(line)//achar(10)
-            n_shown = n_shown + 1
+            output = output//trim(line)//achar(10)
             if (allocated(entries(i)%reason)) then
                 if (len(entries(i)%reason) > 0) &
                     output = output//'  '//entries(i)%reason//achar(10)
             end if
             if (trim(entries(i)%status) == 'FLAKY') then
-                output = trim(output)//'  attempts: first failed, retry passed'//achar(10)
+                output = output//'  attempts: first failed, retry passed'//achar(10)
             end if
             ! A timed-out test's output ends with the line naming the limit
             ! that killed it (CPU budget or wall-clock cap).
             if (trim(entries(i)%status) == 'FAIL' .or. &
                 trim(entries(i)%status) == 'TIMEOUT' .or. &
                 trim(entries(i)%status) == 'FLAKY') then
-                call extract_captured_stdout(log_file, entries(i)%name, captured)
+                call extract_captured_stdout(source_log, entries(i)%name, captured)
                 if (len(captured) > 0) then
-                    output = trim(output)//'  --- captured stdout ---'//achar(10)
+                    cut = .false.
+                    if (limit_output) then
+                        call bounded_excerpt(captured, excerpt, cut)
+                        captured = excerpt
+                    end if
+                    output = output//'  --- captured stdout ---'//achar(10)
                     output = output//captured//achar(10)
-                    output = trim(output)//'  --- end captured stdout ---'//achar(10)
+                    if (cut) output = output//'  --- excerpt only; full output in '// &
+                        'the log below ---'//achar(10)
+                    output = output//'  --- end captured stdout ---'//achar(10)
                 end if
             end if
         end do
-
-        if (n_entries == n_shown) then
-            call format_summary_line(output, n_pass, n_fail, n_skip, &
-                n_untested, total_secs)
-        else if (n_fail > 0 .or. n_shown > 0) then
-            call format_summary_line(output, n_pass, n_fail, n_skip, &
-                n_untested, total_secs)
-        else if (n_shown == 0) then
-            output = 'Tests: '//trim(json_int(n_pass))//' passed ('// &
-                format_seconds(total_secs)//'s)'
-        end if
+        if (len(handle) > 0) output = output//'log: '//handle//achar(10)
+        output = output//verdict_line(n_pass, n_fail, n_skip, n_untested, &
+            n_flaky, read_wall_seconds(log_file), total_secs)
     end subroutine format_test_results_text
 
     subroutine format_single_test_entry(entry, line)
@@ -543,20 +542,6 @@ contains
         field = trim(status(1:nlen))//repeat(' ', 8 - nlen)
     end function format_status_field
 
-    subroutine format_summary_line(output, n_pass, n_fail, n_skip, &
-            n_untested, total_secs)
-        character(len=:), allocatable, intent(inout) :: output
-        integer, intent(in) :: n_pass, n_fail, n_skip, n_untested
-        real(real64), intent(in) :: total_secs
-
-        character(len=512) :: line
-
-        write (line, '(a,i0,a,i0,a,i0,a)') &
-            'Summary: ', n_pass, ' passed, ', n_fail, ' failed, ', n_skip, ' skipped'
-        if (n_untested > 0) line = trim(line)//', '// &
-            trim(json_int(n_untested))//' untested'
-        output = output//trim(line)//' ('//format_seconds(total_secs)//'s)'
-    end subroutine format_summary_line
 
     subroutine extract_captured_stdout(log_file, test_name, captured)
         !! Return the stdout the build side wrote for test_name, wrapped in
@@ -645,37 +630,33 @@ contains
         is_summary = verify(line(:percent - 1), '0123456789') == 0
     end function is_ctest_summary_line
 
-    subroutine format_test_results_json(entries, n_entries, exit_code, output, log_file)
+    subroutine format_test_results_json(entries, n_entries, exit_code, output, &
+            log_file, compact)
+        !! Legacy full report by default: every case with its complete output.
+        !! With compact, the one report shared by `fo test --json` and the MCP
+        !! test tool: verdict first, passing cases counted not listed, bounded
+        !! failure excerpts and a handle to the retained full log.
         type(test_result_entry_t), intent(in) :: entries(:)
         integer, intent(in) :: n_entries
         integer, intent(in) :: exit_code
         character(len=:), allocatable, intent(out) :: output
         character(len=*), optional, intent(in) :: log_file
+        logical, optional, intent(in) :: compact
         character(len=:), allocatable :: captured
 
-        integer :: i, n_pass, n_fail, n_skip, n_untested, read_error
+        integer :: i, n_pass, n_fail, n_skip, n_untested, n_flaky, read_error
         real(real64) :: total_secs
 
-        n_pass = 0
-        n_fail = 0
-        n_skip = 0
-        n_untested = 0
-        total_secs = 0.0
-
-        do i = 1, n_entries
-            total_secs = total_secs + real(entries(i)%seconds, real64)
-            if (trim(entries(i)%status) == 'PASS' .or. &
-                trim(entries(i)%status) == 'FLAKY') then
-                n_pass = n_pass + 1
-            else if (trim(entries(i)%status) == 'FAIL' .or. &
-                    trim(entries(i)%status) == 'TIMEOUT') then
-                n_fail = n_fail + 1
-            else if (entries(i)%status == 'UNTESTED') then
-                n_untested = n_untested + 1
-            else
-                n_skip = n_skip + 1
+        if (present(compact)) then
+            if (compact) then
+                call format_compact_json(entries, n_entries, exit_code, output, &
+                    log_file)
+                return
             end if
-        end do
+        end if
+        call count_statuses(entries, n_entries, n_pass, n_fail, n_skip, &
+            n_untested, n_flaky, total_secs)
+        n_pass = n_pass + n_flaky
 
         output = '{"tests":['
         do i = 1, n_entries
@@ -718,6 +699,403 @@ contains
         end if
         output = output//'}'
     end subroutine format_test_results_json
+
+    subroutine format_compact_json(entries, n_entries, exit_code, output, log_file)
+        !! Keys: v verdict line, ok, pass/fail/skip (untested, flaky when
+        !! nonzero), wall_s or sum_s (the run's wall clock, or the sum of the
+        !! per-case times when the wall clock is unknown), exit, log (retained
+        !! full log, only when something failed), cases (every non-passing case:
+        !! n name, st status, s seconds, at file:line, msg first diagnostic line,
+        !! out bounded excerpt, cut excerpt was shortened, why reason), and,
+        !! when no case ran, at/out/cut for the bounded log excerpt.
+        type(test_result_entry_t), intent(in) :: entries(:)
+        integer, intent(in) :: n_entries, exit_code
+        character(len=:), allocatable, intent(out) :: output
+        character(len=*), optional, intent(in) :: log_file
+
+        integer :: i, n_pass, n_fail, n_skip, n_untested, n_flaky, read_error
+        integer :: n_listed
+        real(real64) :: total_secs, wall
+        character(len=:), allocatable :: handle, captured, excerpt, at, msg, log_text
+        character(len=:), allocatable :: source_log
+        logical :: cut, failing
+
+        call count_statuses(entries, n_entries, n_pass, n_fail, n_skip, &
+            n_untested, n_flaky, total_secs)
+        failing = n_fail > 0 .or. n_flaky > 0 .or. exit_code /= 0
+        wall = -1.0_real64
+        handle = ''
+        source_log = ''
+        if (present(log_file)) then
+            source_log = log_file
+            wall = read_wall_seconds(log_file)
+            if (failing) handle = retain_log(log_file)
+            if (len(handle) > 0) source_log = handle
+        end if
+        output = '{"v":"'//verdict_line(n_pass, n_fail, n_skip, n_untested, &
+            n_flaky, wall, total_secs)//'"'
+        if (exit_code == 0 .and. n_fail == 0) then
+            output = output//',"ok":true'
+        else
+            output = output//',"ok":false'
+        end if
+        output = output//',"pass":'//trim(json_int(n_pass))
+        output = output//',"fail":'//trim(json_int(n_fail))
+        output = output//',"skip":'//trim(json_int(n_skip))
+        if (n_untested > 0) output = output//',"untested":'//trim(json_int(n_untested))
+        if (n_flaky > 0) output = output//',"flaky":'//trim(json_int(n_flaky))
+        if (wall >= 0.0_real64) then
+            output = output//',"wall_s":'//format_seconds(wall)
+        else
+            output = output//',"sum_s":'//format_seconds(total_secs)
+        end if
+        output = output//',"exit":'//trim(json_int(exit_code))
+        if (len(handle) > 0) output = output//',"log":"'// &
+            json_escape_string(handle)//'"'
+        if (n_entries > n_pass) then
+            output = output//',"cases":['
+            n_listed = 0
+            do i = 1, n_entries
+                if (trim(entries(i)%status) == 'PASS') cycle
+                if (n_listed > 0) output = output//','
+                n_listed = n_listed + 1
+                output = output//'{"n":"'//json_escape_string(entries(i)%name)// &
+                    '","st":"'//lower_status(entries(i)%status)//'","s":'// &
+                    format_seconds(real(entries(i)%seconds, real64))
+                if (allocated(entries(i)%reason)) then
+                    if (len(entries(i)%reason) > 0) output = output//',"why":"'// &
+                        json_escape_string(entries(i)%reason)//'"'
+                end if
+                select case (trim(entries(i)%status))
+                case ('FAIL', 'TIMEOUT', 'FLAKY')
+                    captured = ''
+                    if (len(source_log) > 0 .and. n_listed <= MAX_EXCERPT_CASES) &
+                        call extract_captured_stdout(source_log, entries(i)%name, &
+                        captured)
+                    if (len(captured) > 0) then
+                        call find_location(captured, at, msg)
+                        if (len(at) > 0) output = output//',"at":"'// &
+                            json_escape_string(at)//'"'
+                        if (len(msg) > 0) output = output//',"msg":"'// &
+                            json_escape_string(msg)//'"'
+                        call bounded_excerpt(captured, excerpt, cut)
+                        output = output//',"out":"'//json_escape_string(dedent(excerpt))//'"'
+                        if (cut) output = output//',"cut":true'
+                    end if
+                end select
+                output = output//'}'
+            end do
+            output = output//']'
+        end if
+        if (n_entries == 0 .and. exit_code /= 0 .and. len(source_log) > 0) then
+            call read_text_file_alloc(source_log, log_text, read_error)
+            if (read_error == 0) then
+                call find_location(log_text, at, msg)
+                if (len(at) > 0) output = output//',"at":"'//json_escape_string(at)//'"'
+                call bounded_excerpt(log_text, excerpt, cut)
+                output = output//',"out":"'//json_escape_string(excerpt)//'"'
+                if (cut) output = output//',"cut":true'
+            else
+                output = output//',"error":"could not read test diagnostics"'
+            end if
+        end if
+        output = output//'}'
+    end subroutine format_compact_json
+
+    subroutine count_statuses(entries, n_entries, n_pass, n_fail, n_skip, &
+            n_untested, n_flaky, total_secs)
+        type(test_result_entry_t), intent(in) :: entries(:)
+        integer, intent(in) :: n_entries
+        integer, intent(out) :: n_pass, n_fail, n_skip, n_untested, n_flaky
+        real(real64), intent(out) :: total_secs
+
+        integer :: i
+
+        n_pass = 0
+        n_fail = 0
+        n_skip = 0
+        n_untested = 0
+        n_flaky = 0
+        total_secs = 0.0_real64
+        do i = 1, n_entries
+            total_secs = total_secs + real(entries(i)%seconds, real64)
+            select case (trim(entries(i)%status))
+            case ('PASS')
+                n_pass = n_pass + 1
+            case ('FLAKY')
+                n_flaky = n_flaky + 1
+            case ('FAIL', 'TIMEOUT')
+                n_fail = n_fail + 1
+            case ('UNTESTED')
+                n_untested = n_untested + 1
+            case default
+                n_skip = n_skip + 1
+            end select
+        end do
+    end subroutine count_statuses
+
+    function verdict_line(n_pass, n_fail, n_skip, n_untested, n_flaky, wall, &
+            total_secs) result(line)
+        !! `12 pass, 1 FAIL, 2 skip (4.10s wall)`. Zero counts other than pass
+        !! are omitted. The time is the run's wall clock when known, otherwise
+        !! the sum of the per-case times, and says which.
+        integer, intent(in) :: n_pass, n_fail, n_skip, n_untested, n_flaky
+        real(real64), intent(in) :: wall, total_secs
+        character(len=:), allocatable :: line
+
+        line = trim(json_int(n_pass))//' pass'
+        if (n_fail > 0) line = line//', '//trim(json_int(n_fail))//' FAIL'
+        if (n_flaky > 0) line = line//', '//trim(json_int(n_flaky))//' flaky'
+        if (n_skip > 0) line = line//', '//trim(json_int(n_skip))//' skip'
+        if (n_untested > 0) line = line//', '//trim(json_int(n_untested))// &
+            ' untested'
+        if (wall >= 0.0_real64) then
+            line = line//' ('//format_seconds(wall)//'s wall)'
+        else
+            line = line//' ('//format_seconds(total_secs)//'s summed)'
+        end if
+    end function verdict_line
+
+    function read_wall_seconds(log_file) result(wall)
+        !! The last `TEST_WALL <seconds>` record of the log, or -1 when the
+        !! runner recorded none (the CTest route has no run-level clock).
+        character(len=*), intent(in) :: log_file
+        real(real64) :: wall
+
+        character(len=:), allocatable :: line
+        integer :: u, ios, read_ios
+        real :: value
+
+        wall = -1.0_real64
+        open (newunit=u, file=trim(log_file), status='old', iostat=ios)
+        if (ios /= 0) return
+        do
+            call read_logical_line(u, line, ios)
+            if (ios /= 0) exit
+            if (index(line, 'TEST_WALL ') /= 1) cycle
+            read (line(11:), *, iostat=read_ios) value
+            if (read_ios == 0) then
+                if (ieee_is_finite(value) .and. value >= 0.0) &
+                    wall = real(value, real64)
+            end if
+        end do
+        close (u)
+    end function read_wall_seconds
+
+    function retain_log(log_file) result(handle)
+        !! Copy the run's full log to `fo-test-last.log` in the temporary root,
+        !! so the report can name a path that outlives the run. One file, the
+        !! last failing run wins. Empty when the copy fails.
+        character(len=*), intent(in) :: log_file
+        character(len=:), allocatable :: handle
+
+        character(len=:), allocatable :: text
+        integer :: ierr, u, ios
+
+        handle = ''
+        call read_text_file_alloc(log_file, text, ierr)
+        if (ierr /= 0) return
+        handle = temporary_root()//'/fo-test-last.log'
+        open (newunit=u, file=handle, status='replace', action='write', &
+            access='stream', form='unformatted', iostat=ios)
+        if (ios /= 0) then
+            handle = ''
+            return
+        end if
+        write (u, iostat=ios) text
+        close (u)
+        if (ios /= 0) handle = ''
+    end function retain_log
+
+    subroutine find_location(text, at, msg)
+        !! The first diagnostic line carrying a source location: a `file.ext:N`
+        !! token or gfortran's `At line N of file F`. msg is that line,
+        !! trimmed and clamped; with no location it is the first nonblank line.
+        character(len=*), intent(in) :: text
+        character(len=:), allocatable, intent(out) :: at, msg
+
+        integer :: pos, nl, stop_at
+        character(len=:), allocatable :: line
+
+        at = ''
+        msg = ''
+        pos = 1
+        do while (pos <= len(text))
+            nl = index(text(pos:), achar(10))
+            if (nl == 0) then
+                stop_at = len(text)
+            else
+                stop_at = pos + nl - 2
+            end if
+            line = trim(adjustl(text(pos:stop_at)))
+            if (len(line) > 0) then
+                if (len(msg) == 0) msg = clamp_line(line)
+                at = line_location(line)
+                if (len(at) > 0) then
+                    msg = clamp_line(line)
+                    return
+                end if
+            end if
+            if (nl == 0) exit
+            pos = pos + nl
+        end do
+    end subroutine find_location
+
+    function line_location(line) result(at)
+        character(len=*), intent(in) :: line
+        character(len=:), allocatable :: at
+
+        integer :: p, q, r, s, of_pos
+
+        at = ''
+        ! gfortran runtime: "At line 12 of file src/x.f90 (Unit 6 ...)"
+        p = index(line, 'At line ')
+        of_pos = index(line, ' of file ')
+        if (p > 0 .and. of_pos > p) then
+            q = of_pos + len(' of file ')
+            r = index(line(q:), ' ')
+            if (r == 0) then
+                r = len(line)
+            else
+                r = q + r - 2
+            end if
+            at = line(q:r)//':'//trim(adjustl(line(p + 8:of_pos - 1)))
+            return
+        end if
+        ! "file.ext:N": a token with a dot, a colon and a digit after it.
+        q = 1
+        do
+            p = index(line(q:), ':')
+            if (p == 0) return
+            p = q + p - 1
+            q = p + 1
+            if (p == 1 .or. p == len(line)) cycle
+            if (index('0123456789', line(p + 1:p + 1)) == 0) cycle
+            r = p + 1
+            do while (r < len(line))
+                if (index('0123456789', line(r + 1:r + 1)) == 0) exit
+                r = r + 1
+            end do
+            s = p - 1
+            do while (s > 1)
+                if (index(' "''(,=<>', line(s - 1:s - 1)) > 0) exit
+                s = s - 1
+            end do
+            if (index(line(s:p - 1), '.') == 0) cycle
+            if (line(p - 1:p - 1) == '.') cycle
+            at = line(s:r)
+            return
+        end do
+    end function line_location
+
+    function dedent(text) result(out)
+        !! Drop the two-space prefix extract_captured_stdout puts on each line.
+        character(len=*), intent(in) :: text
+        character(len=:), allocatable :: out
+
+        integer :: pos, nl, stop_at
+
+        out = ''
+        pos = 1
+        do while (pos <= len(text))
+            nl = index(text(pos:), achar(10))
+            if (nl == 0) then
+                stop_at = len(text)
+            else
+                stop_at = pos + nl - 2
+            end if
+            if (pos + 1 <= stop_at .and. text(pos:pos + 1) == '  ') then
+                out = out//text(pos + 2:stop_at)
+            else
+                out = out//text(pos:stop_at)
+            end if
+            if (nl == 0) exit
+            out = out//achar(10)
+            pos = pos + nl
+        end do
+    end function dedent
+
+    function clamp_line(line) result(out)
+        !! At most 240 bytes, cut on a UTF-8 character boundary.
+        character(len=*), intent(in) :: line
+        character(len=:), allocatable :: out
+
+        integer, parameter :: limit = 240
+
+        if (len(line) <= limit) then
+            out = line
+        else
+            out = line(:utf8_boundary(line, limit))//' ...'
+        end if
+    end function clamp_line
+
+    integer function utf8_boundary(text, pos) result(last)
+        !! Largest index <= pos that ends a complete UTF-8 character.
+        character(len=*), intent(in) :: text
+        integer, intent(in) :: pos
+
+        last = min(pos, len(text))
+        if (last >= len(text)) return
+        do while (last > 0)
+            if (iand(iachar(text(last + 1:last + 1)), 192) /= 128) exit
+            last = last - 1
+        end do
+    end function utf8_boundary
+
+    subroutine bounded_excerpt(text, excerpt, cut)
+        !! At most EXCERPT_LINES lines and EXCERPT_BYTES bytes: the head and the
+        !! tail of the text (a failure usually ends with the cause) with a
+        !! marker for what was left out. cut tells the caller to point at the
+        !! full log.
+        character(len=*), intent(in) :: text
+        character(len=:), allocatable, intent(out) :: excerpt
+        logical, intent(out) :: cut
+
+        integer :: n_lines, pos, nl, stop_at, k, keep, head
+        character(len=:), allocatable :: line
+
+        n_lines = 0
+        pos = 1
+        do while (pos <= len(text))
+            n_lines = n_lines + 1
+            nl = index(text(pos:), achar(10))
+            if (nl == 0) exit
+            pos = pos + nl
+        end do
+        cut = .false.
+        excerpt = ''
+        head = n_lines
+        if (n_lines > EXCERPT_LINES) head = EXCERPT_HEAD
+        pos = 1
+        k = 0
+        do while (pos <= len(text))
+            k = k + 1
+            nl = index(text(pos:), achar(10))
+            if (nl == 0) then
+                stop_at = len(text)
+            else
+                stop_at = pos + nl - 2
+            end if
+            if (k <= head .or. k > n_lines - (EXCERPT_LINES - EXCERPT_HEAD)) then
+                line = clamp_line(text(pos:stop_at))
+                if (len(line) < stop_at - pos + 1) cut = .true.
+                if (len(excerpt) > 0) excerpt = excerpt//achar(10)
+                excerpt = excerpt//line
+            else if (k == head + 1) then
+                cut = .true.
+                if (len(excerpt) > 0) excerpt = excerpt//achar(10)
+                excerpt = excerpt//'  ... '//trim(json_int(n_lines - EXCERPT_LINES))// &
+                    ' lines omitted ...'
+            end if
+            if (nl == 0) exit
+            pos = pos + nl
+        end do
+        if (len(excerpt) > EXCERPT_BYTES) then
+            cut = .true.
+            keep = utf8_boundary(excerpt, EXCERPT_BYTES - 40)
+            excerpt = excerpt(:keep)//achar(10)//'  ... truncated ...'
+        end if
+    end subroutine bounded_excerpt
 
     function format_seconds(seconds) result(text)
         real(real64), intent(in) :: seconds

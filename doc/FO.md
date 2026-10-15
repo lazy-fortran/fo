@@ -310,9 +310,50 @@ clean, lint, format, and release installation. MCP clean preserves the shared
 CAS unless `cache=true`. MCP installation accepts a prefix and always requests
 the release profile.
 
-MCP `test` accepts `json="full"` or `json="compact"` for the complete structured
-test report, including every failing and passing entry. The report and its MCP
-response grow with the results rather than truncating at a fixed byte limit.
+### Test output
+
+Every `fo test` run reports one verdict line, such as
+`12 pass, 1 FAIL, 2 skip (4.10s wall)`. Counts other than pass are omitted when
+zero; `flaky` and `untested` appear when nonzero. The time is the run's wall
+clock (`wall`) when the runner recorded it, otherwise the sum of the per-case
+times (`summed`). Per-case slow-test warnings are CPU time and say `CPU`.
+
+- Human text lists failing, flaky, skipped and untested cases (passing cases only
+  for named runs, filters, `--random`, `--only-changed` or `--verbose`) and
+  **ends** with the verdict line. `--quiet` or `--summary` forces the
+  failures-only listing and silences the live lines. A failing case shows the
+  head and tail of its output (at most 20 lines and 2 KiB, 240 bytes per line)
+  unless `--verbose` is given; when anything failed the next line is
+  `log: PATH`.
+- While cases run, one line per completed case is written to **stderr**:
+  `fo: [3/200] PASS test_x 0.01s`, in completion order, so the peers of a slow
+  case are visible while it runs. A failed first run prints `fail (retrying)`:
+  failures are rerun alone once, and the report has the final FAIL or FLAKY.
+  The report's case order stays the scan order. `--json`, `--quiet`,
+  `--summary`, the MCP tool and `FO_NO_PROGRESS` suppress these lines.
+- `fo test --json` and the MCP `test` tool (default, or `json="compact"`) return
+  the same compact object, **starting** with the verdict. Passing cases are
+  counted, not listed:
+
+  ```text
+  v        verdict line            pass/fail/skip   counts (untested, flaky if > 0)
+  ok       true when exit == 0     wall_s | sum_s   wall clock, or sum of case times
+  exit     process exit status     log              retained full log (only on failure)
+  cases[]  every non-passing case:
+    n name, st status (fail timeout flaky skip untested), s seconds,
+    why reason, at first file:line found, msg that diagnostic line,
+    out head/tail excerpt, cut true when out is shortened
+  at, out, cut   when no case ran (build failure): bounded excerpt of the log
+  ```
+
+  The report stays under about 4 KiB for one failing case; only the first ten
+  failing cases carry `out`, the others name, status and time. `log` is the full
+  log of the last failing run, `fo-test-last.log` in the temporary directory
+  (overwritten by the next failing run): read it, or rerun one case with
+  `fo test NAME`.
+- `fo test --json=full` and MCP `json="full"` return the complete structured
+  report with every failing and passing entry and its whole output, growing with
+  the results instead of truncating at a byte limit.
 
 `fo lint --deep [paths...]` adds Fluff diagnostics to the native source checks
 and compiler warnings. Install `fluff` on PATH, then use `--json` to receive the

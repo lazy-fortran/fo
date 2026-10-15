@@ -67,7 +67,7 @@ program test_platform_link_cli
             call assert_process_ok(result, mode // ' app links Git and static archive dependencies')
             call assert_equal_string(result%stdout, '42' // new_line('a'), &
                 mode // ' app resolves native archive symbol')
-            arguments = words([character(len=32) :: 'test', '--all', '--json'])
+            arguments = words([character(len=32) :: 'test', '--all', '--json=full'])
             call run_fo(driver, arguments, consumer, join_path(scratch, '.fo-cache'), &
                 result, environment)
             call assert_process_ok(result, mode // ' test links dependencies')
@@ -164,7 +164,7 @@ contains
                 profile = 'profile-two'
                 marker = join_path(scratch, profile)
             end if
-            command = words([character(len=32) :: 'test', '--all', '--json', '--flag'])
+            command = words([character(len=32) :: 'test', '--all', '--json=full', '--flag'])
             call list_add(command, '-Wl,-rpath,' // marker)
             call run_fo(driver, command, consumer, join_path(scratch, '.fo-cache'), child, environment)
             call assert_process_ok(child, 'macOS shared image test for ' // profile)

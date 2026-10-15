@@ -53,7 +53,7 @@ program test_archive_publication
     call find_output(lib_dir, 'objects_', '.a', archive, count)
     call assert_equal_integer(count, 1, 'one keyed archive is visible after build')
     call verify_archive(archive)
-    args = words([character(len=32) :: 'test', '--all', '--json'])
+    args = words([character(len=32) :: 'test', '--all', '--json=full'])
     call invoke(args, 'normal', 'normal', 'normal', result)
     call assert_process_ok(result, 'tests consume published archive')
     call parse_json_report(result, report, 'archive consumer test report')
@@ -144,7 +144,7 @@ program test_archive_publication
     call assert_equal_integer(count, 1, 'one complete archive becomes visible')
     call verify_archive(archive)
 
-    args = words([character(len=32) :: 'test', '--all', '--json'])
+    args = words([character(len=32) :: 'test', '--all', '--json=full'])
     digest_before = directory_digest(bin_dir)
     call write_text(join_path(project, 'test/test_alpha.f90'), &
         test_source('test_alpha', 'force-link-failure'))
@@ -155,13 +155,13 @@ program test_archive_publication
     call assert_no_stages(bin_dir, '.fo-link.tmp-')
     call write_text(join_path(project, 'test/test_alpha.f90'), &
         test_source('test_alpha', 'force-truncated-link'))
-    call invoke(words([character(len=32) :: 'test', '--all', '--json']), &
+    call invoke(words([character(len=32) :: 'test', '--all', '--json=full']), &
         'normal', 'truncated', 'normal', result)
     call assert_true(result%exit_code /= 0, 'magic-only executable is rejected')
     call assert_equal_string(directory_digest(bin_dir), digest_before, &
         'truncated staged executable preserves stable binaries')
     call assert_no_stages(bin_dir, '.fo-link.tmp-')
-    call invoke(words([character(len=32) :: 'test', '--all', '--json']), &
+    call invoke(words([character(len=32) :: 'test', '--all', '--json=full']), &
         'normal', 'normal', 'normal', result)
     call assert_process_ok(result, 'clean link retry recovers after staged failures')
     call parse_json_report(result, report, 'recovered test report')
@@ -175,14 +175,14 @@ program test_archive_publication
     call list_add(args, driver)
     call list_add(args, 'test')
     call list_add(args, '--all')
-    call list_add(args, '--json')
+    call list_add(args, '--json=full')
     call spawn_process(args, project, child, env)
     call wait_for(marker, 150, child, found)
     call assert_true(found, 'shared linker pauses inside private stage')
     call assert_file_exists(marker, 'shared linker pauses inside private stage')
     call find_output(lib_dir, 'libproject_', shared_extension, archive, count)
     call assert_equal_integer(count, 0, 'partial shared library is not published')
-    call call_fo([character(len=32) :: 'test', '--all', '--json'], &
+    call call_fo([character(len=32) :: 'test', '--all', '--json=full'], &
         'normal', 'normal', 'normal', child_result)
     call assert_process_ok(child_result, 'concurrent shared-library consumer succeeds')
     call poll_until(child, status)
@@ -199,7 +199,7 @@ program test_archive_publication
     before_calls = log_lines(join_path(scratch, 'shared.log'))
     call write_text(join_path(project, 'test/test_beta.f90'), &
         test_source('test_beta', 'shared-warm'))
-    call invoke(words([character(len=32) :: 'test', '--all', '--json']), &
+    call invoke(words([character(len=32) :: 'test', '--all', '--json=full']), &
         'normal', 'normal', 'normal', result)
     call assert_process_ok(result, 'warm shared-library consumers pass')
     call parse_json_report(result, report, 'warm shared test report')
@@ -209,19 +209,19 @@ program test_archive_publication
 
     call write_text(archive, 'invalid prior shared library')
     call write_text(join_path(project, 'test/test_alpha.f90'), test_source('test_alpha', 'repair'))
-    call invoke(words([character(len=32) :: 'test', '--all', '--json']), &
+    call invoke(words([character(len=32) :: 'test', '--all', '--json=full']), &
         'normal', 'normal', 'fail', result)
     call assert_true(result%exit_code /= 0, 'shared-linker failure propagates')
     call assert_no_stages(lib_dir, '.fo-shared.tmp-')
     call assert_equal_string(read_file(archive), 'invalid prior shared library', &
         'failed shared stage leaves prior final path intact')
-    call invoke(words([character(len=32) :: 'test', '--all', '--json']), &
+    call invoke(words([character(len=32) :: 'test', '--all', '--json=full']), &
         'normal', 'normal', 'truncated', result)
     call assert_true(result%exit_code /= 0, 'truncated shared image is rejected')
     call assert_no_stages(lib_dir, '.fo-shared.tmp-')
     call assert_equal_string(read_file(archive), 'invalid prior shared library', &
         'rejected shared stage preserves old library')
-    call invoke(words([character(len=32) :: 'test', '--all', '--json']), &
+    call invoke(words([character(len=32) :: 'test', '--all', '--json=full']), &
         'normal', 'normal', 'normal', result)
     call assert_process_ok(result, 'valid shared-library retry succeeds')
     call invoke(words([character(len=32) :: 'exec', 'probe']), &
@@ -408,13 +408,13 @@ contains
             left_impl_source(21))
         call write_text(join_path(project, 'test/test_alpha.f90'), &
             test_source('test_alpha', 'alpha observes 43', 43))
-        call invoke(words([character(len=32) :: 'test', '--json', 'test_alpha']), &
+        call invoke(words([character(len=32) :: 'test', '--json=full', 'test_alpha']), &
             'normal', 'normal', 'normal', result)
         call assert_process_ok(result, 'selected alpha links the changed library')
         call parse_json_report(result, report, 'selected alpha library report')
         call check_tests_pass(report, 1, 'alpha observes the changed implementation')
 
-        call invoke(words([character(len=32) :: 'test', '--json', 'test_beta']), &
+        call invoke(words([character(len=32) :: 'test', '--json=full', 'test_beta']), &
             'normal', 'normal', 'normal', result)
         call assert_true(result%exit_code /= 0, &
             'untouched beta fails against the changed library implementation')
@@ -431,7 +431,7 @@ contains
             left_impl_source(20))
         call write_text(join_path(project, 'test/test_alpha.f90'), &
             test_source('test_alpha', 'alpha'))
-        call invoke(words([character(len=32) :: 'test', '--all', '--json']), &
+        call invoke(words([character(len=32) :: 'test', '--all', '--json=full']), &
             'normal', 'normal', 'normal', result)
         call assert_process_ok(result, 'warm tests recover after restoring the library')
         call parse_json_report(result, report, 'restored library test report')
@@ -945,7 +945,7 @@ contains
         call write_text(join_path(project, 'test/test_alpha.f90'), source)
         expected_digest = file_digest(archive_path)
         before = log_lines(join_path(scratch, 'ar.log'))
-        call invoke(words([character(len=32) :: 'test', 'test_alpha', '--json']), &
+        call invoke(words([character(len=32) :: 'test', 'test_alpha', '--json=full']), &
             'normal', 'normal', 'normal', result)
         call assert_process_ok(result, 'warm named case uses validated archive')
         call parse_json_report(result, report, 'warm named archive report')
@@ -960,7 +960,7 @@ contains
         call write_text(join_path(fake_bin, 'ar'), ar_wrapper()//nl//'# revised archiver image'//nl)
         call chmod_executable(join_path(fake_bin, 'ar'))
         call write_text(join_path(project, 'test/test_alpha.f90'), source//'! new tool action'//nl)
-        call invoke(words([character(len=32) :: 'test', 'test_alpha', '--json']), &
+        call invoke(words([character(len=32) :: 'test', 'test_alpha', '--json=full']), &
             'fail', 'normal', 'normal', result)
         call assert_true(result%exit_code /= 0, &
             'a changed archiver image invalidates the receipt and exposes actual archiver failure')
@@ -969,7 +969,7 @@ contains
         call write_text(join_path(fake_bin, 'ar'), ar_wrapper())
         call chmod_executable(join_path(fake_bin, 'ar'))
         call remove_path(execution_marker)
-        call invoke(words([character(len=32) :: 'test', 'test_alpha', '--json']), &
+        call invoke(words([character(len=32) :: 'test', 'test_alpha', '--json=full']), &
             'normal', 'normal', 'normal', result)
         call assert_process_ok(result, 'restored archiver consumes its unchanged validated artifact')
         call assert_equal_string(read_text(execution_marker), 'warm-current'//nl, &
@@ -988,14 +988,14 @@ contains
         call write_text(shared_path, 'invalidate image without a CAS directory')
         call write_text(join_path(project, 'test/test_alpha.f90'), &
             test_source('test_alpha', 'no-cache-shared-rebuild'))
-        call invoke(words([character(len=32) :: 'test', '--all', '--json']), &
+        call invoke(words([character(len=32) :: 'test', '--all', '--json=full']), &
             'normal', 'normal', 'normal', result)
         call assert_no_stages(lib_dir, '.fo-shared.tmp-')
 
         call write_text(shared_path, 'invalidate image before failed no-cache link')
         call write_text(join_path(project, 'test/test_alpha.f90'), &
             test_source('test_alpha', 'no-cache-shared-failure'))
-        call invoke(words([character(len=32) :: 'test', '--all', '--json']), &
+        call invoke(words([character(len=32) :: 'test', '--all', '--json=full']), &
             'normal', 'normal', 'fail', result)
         call assert_true(result%exit_code /= 0, &
             'shared-link failure propagates when cache initialization is unavailable')

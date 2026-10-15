@@ -84,7 +84,7 @@ program test_dispatcher_cli
     call expect_rejected('test_flat_source')
     call expect_rejected('test_does_not_exist')
 
-    arguments = words([character(len=32) :: 'test', 'test_dispatcher', '--json'])
+    arguments = words([character(len=32) :: 'test', 'test_dispatcher', '--json=full'])
     call invoke_fo(arguments, result)
     call assert_true(result%exit_code /= 0, 'explicit dispatcher has no implicit self argument')
     call parse_json_report(result, report, 'explicit dispatcher report')
@@ -249,7 +249,7 @@ contains
             call remove_if_present(join_path(scratch, trim(all_cases(i)) // '.receipt'))
         end do
         call list_extend(command, arguments)
-        call list_add(command, '--json')
+        call list_add(command, '--json=full')
         call invoke_fo(command, child, environment)
         call assert_process_ok(child, 'selected dispatcher tests succeed')
         call parse_json_report(child, document, 'dispatcher test report')
@@ -299,7 +299,7 @@ contains
 
         call list_add(command, 'test')
         call list_add(command, name)
-        call list_add(command, '--json')
+        call list_add(command, '--json=full')
         call invoke_fo(command, child, environment)
         call assert_true(child%exit_code /= 0, 'unknown target fails: ' // name)
         call assert_contains(child%stderr, 'fo: unknown test: ' // name, &
@@ -317,7 +317,7 @@ contains
         end do
         call list_add(command, 'test')
         call list_extend(command, names)
-        call list_add(command, '--json')
+        call list_add(command, '--json=full')
         call invoke_fo(command, child)
         call assert_true(child%exit_code /= 0, 'explicit slow selection needs --all')
         call assert_contains(child%stderr, 'fo: slow test test_probe_slow requires --all', &
@@ -345,7 +345,7 @@ contains
         call list_add(command, '--seed')
         call list_add(command, '42')
         if (include_all) call list_add(command, '--all')
-        call list_add(command, '--json')
+        call list_add(command, '--json=full')
         call invoke_fo(command, child)
         call assert_true(child%exit_code /= 0, 'empty random selection fails')
         call assert_contains(child%stderr, 'fo: no eligible tests for --random', &

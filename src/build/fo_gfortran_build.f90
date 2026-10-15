@@ -36,7 +36,8 @@ module fo_gfortran_build
         fs_delete_suffix, fs_collect_files, fs_collect_mod_dirs, fs_copy_exec, &
         fs_find_executable, fs_rename, fs_mkdir_excl, fs_identity, fs_path_is_absolute, &
         fs_is_windows
-    use fo_progress, only: progress_begin, progress_step, progress_end
+    use fo_progress, only: progress_begin, progress_step, progress_end, &
+        progress_note
     use fo_compiler_dialect, only: compiler_dialect, compiler_dialect_t, &
         selected_compiler_command, COMPILER_NVFORTRAN, COMPILER_IFX, &
         COMPILER_FLANG
@@ -58,6 +59,8 @@ module fo_gfortran_build
     !! OpenMP threads each concurrently running test may use; 0 outside a
     !! concurrent team. Set before the team starts and only read inside it.
     integer, save :: team_omp_threads = 0
+    !> Cases finished so far in the running team, for the per-case lines.
+    integer, save :: team_cases_done = 0
     integer, parameter :: MAX_DEP_OBJS = 1024
     integer, parameter :: MAX_SRC_OBJS = 2048
     character(len=512), save :: detected_fc = ''
@@ -1100,6 +1103,8 @@ contains
         type(current_test_t), allocatable :: tests(:)
         integer :: n_units, n_tests, ierr, warn_s, i
         character(len=MAX_PATH) :: execution_cwd
+        integer(8) :: wall0, wall1, wall_rate
+        real :: wall_secs
 
         exitcode = 0
         call fpm_config_allocate(config)
@@ -1124,9 +1129,13 @@ contains
         end if
         call prepare_test_app_outputs(project_dir, execution_cwd, bin_dir, exitcode)
         if (exitcode /= 0) return
+        call system_clock(wall0, wall_rate)
         call run_current_team(project_dir, execution_cwd, config, tests, n_tests)
+        call system_clock(wall1)
+        wall_secs = 0.0
+        if (wall_rate > 0) wall_secs = real(wall1 - wall0) / real(wall_rate)
         call report_current_tests(project_dir, log_file, tests, n_tests, warn_s, &
-            exitcode)
+            exitcode, wall_secs)
         do i = 1, n_tests
             if (allocated(tests(i)%args)) deallocate (tests(i)%args)
         end do
@@ -1493,10 +1502,12 @@ contains
         team_omp_threads = 0
         if (n_tests > 1) &
             team_omp_threads = max(1, native_jobs() / min(n_tests, native_jobs()))
+        team_cases_done = 0
         !$omp parallel do if (n_tests > 1) num_threads(max(1, min(n_tests, native_jobs()))) &
         !$omp& schedule(dynamic) private(i, rerun_log, clk0, clk1, clk_rate)
         do i = 1, n_tests
-            call run_one_current_test(project_dir, execution_cwd, config, tests(i))
+            call run_one_current_test(project_dir, execution_cwd, config, tests(i), &
+                n_tests)
         end do
         !$omp end parallel do
         ! Reruns are serial, in isolation, with the machine to themselves.
@@ -1529,13 +1540,20 @@ contains
         end if
     end subroutine rerun_failed_current_test
 
-    subroutine run_one_current_test(project_dir, execution_cwd, config, test)
-        !! One worker: run and time one test; reruns happen after the team.
+    subroutine run_one_current_test(project_dir, execution_cwd, config, test, &
+            n_tests)
+        !! One worker: run and time one test; reruns happen after the team. The
+        !! completion line is written as the case finishes, so peers of a slow
+        !! case are visible while it still runs; the log keeps scan order.
         character(len=*), intent(in) :: project_dir, execution_cwd
         type(fpm_config_t), intent(in) :: config
         type(current_test_t), intent(inout) :: test
+        integer, intent(in) :: n_tests
 
         integer(8) :: clk0, clk1, clk_rate
+        integer :: done
+        character(len=16) :: status_text, count_text
+        character(len=24) :: secs_text
 
         call system_clock(clk0, clk_rate)
         call run_test_binary(execution_cwd, test%bin, test%args, &
@@ -1543,22 +1561,49 @@ contains
         call system_clock(clk1, clk_rate)
         test%ran = .true.
         if (clk_rate > 0) test%secs = real(clk1 - clk0) / real(clk_rate)
+        status_text = 'PASS'
+        if (test%exit == 124) then
+            status_text = 'TIMEOUT'
+        else if (test%exit /= 0) then
+            status_text = 'fail (retrying)'
+        end if
+        write (secs_text, '(f0.2)') test%secs
+        !$omp critical (fo_team_cases_done)
+        team_cases_done = team_cases_done + 1
+        done = team_cases_done
+        !$omp end critical (fo_team_cases_done)
+        write (count_text, '(i0,a,i0)') done, '/', n_tests
+        ! fail (retrying) is provisional: a failure is rerun alone after the team, and the
+        ! final verdict (FAIL or FLAKY) is in the report.
+        call progress_note('fo: ['//trim(count_text)//'] '//trim(status_text)// &
+            ' '//trim(test%name)//' '//trim(adjustl(secs_text))//'s')
     end subroutine run_one_current_test
 
     subroutine report_current_tests(project_dir, log_file, tests, n_tests, warn_s, &
-            exitcode)
+            exitcode, wall_secs)
         !! Emit result lines in scan order, never in completion order, so the
-        !! fail-name set does not depend on how wide the team ran.
+        !! fail-name set does not depend on how wide the team ran. The team's
+        !! wall clock is recorded once, so a summary can tell it from the sum of
+        !! the per-case times.
         character(len=*), intent(in) :: project_dir, log_file
         type(current_test_t), intent(in) :: tests(:)
         integer, intent(in) :: n_tests, warn_s
         integer, intent(out) :: exitcode
+        real, intent(in) :: wall_secs
 
         character(len=8) :: exit_str
+        character(len=24) :: wall_text
         real :: secs
-        integer :: i
+        integer :: i, u, ios
 
         exitcode = 0
+        write (wall_text, '(f0.2)') wall_secs
+        open (newunit=u, file=trim(log_file), position='append', status='old', &
+            iostat=ios)
+        if (ios == 0) then
+            write (u, '(a)') 'TEST_WALL '//trim(adjustl(wall_text))
+            close (u)
+        end if
         do i = 1, n_tests
             if (.not. tests(i)%ran) cycle
             if (tests(i)%flaky) then

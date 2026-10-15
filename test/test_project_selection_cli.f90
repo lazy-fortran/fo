@@ -177,7 +177,7 @@ contains
             result)
         call assert_equal_integer(result%exit_code, 1, 'empty selection exits 1')
 
-        call fo(fpm_dir, fpm_env, [character(len=48) :: 'test', 'test_f*', '--json'], &
+        call fo(fpm_dir, fpm_env, [character(len=48) :: 'test', 'test_f*', '--json=full'], &
             result)
         call assert_equal_integer(result%exit_code, 0, 'glob run passes: ' // &
             result%stderr)
@@ -252,7 +252,7 @@ contains
             'plan omits unselected targets')
 
         call fo(cmake_dir, cmake_env, [character(len=48) :: 'test', '-L', 'unit', &
-            '--json'], result)
+            '--json=full'], result)
         call assert_equal_integer(result%exit_code, 0, 'label run passes: ' // &
             result%stderr)
         call json_parse(result%stdout, report, valid, message)

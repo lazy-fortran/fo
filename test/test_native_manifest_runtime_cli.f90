@@ -234,7 +234,7 @@ contains
         call list_add(args, 'test')
         call list_add(args, 'nested-alpha')
         call list_add(args, 'outside-beta')
-        call list_add(args, '--json')
+        call list_add(args, '--json=full')
         call run_fo(driver, args, project, scratch//'/cache', result, environment)
         call assert_true((result%exit_code == 0) .eqv. alpha_pass, &
             'selected root/helper edit changes the public runtime verdict')
@@ -272,7 +272,7 @@ contains
 
         call list_add(args, 'test')
         call list_add(args, name)
-        call list_add(args, '--json')
+        call list_add(args, '--json=full')
         call run_fo(driver, args, project, scratch//'/cache', result, environment)
         if (expected_pass) then
             call assert_process_ok(result, 'public native runtime oracle: '//name)

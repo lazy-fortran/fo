@@ -53,7 +53,7 @@ program test_test_results_json
     call assert_process_ok(result, 'configure CTest report fixture')
     arguments = string_list_t()
     call list_add(arguments, 'test')
-    call list_add(arguments, '--json')
+    call list_add(arguments, '--json=full')
     call run_fo(driver, arguments, scratch, join_path(scratch, 'fo-cache'), result, environment)
     call assert_equal_integer(result%term_signal, 0, 'large test report command exits normally')
     call assert_equal_integer(result%exit_code, 1, 'late CTest failure propagates nonzero status')
@@ -140,7 +140,7 @@ program test_test_results_json
         'aggregate duration remains a complete exact JSON number')
     call format_test_results_text(parsed, n_parsed, &
         join_path(scratch, 'long-duration.log'), .false., formatted)
-    call assert_true(index(formatted, '120001.00s)') > 0, &
+    call assert_true(index(formatted, '120001.00s summed)') > 0, &
         'human summary retains duration beyond its former numeric width')
     call write_text(join_path(scratch, 'negative-zero.log'), &
         'TEST_RESULT zero PASS - -0.0'//new_line('a'))
@@ -218,7 +218,7 @@ program test_test_results_json
         call format_test_results_text(parsed, n_parsed, &
             join_path(scratch, 'status-words-in-names.log'), .true., formatted)
         call assert_true(index(formatted, &
-            'Summary: 1 passed, 0 failed, 2 skipped, 1 untested (') > 0, &
+            '1 pass, 2 skip, 1 untested (') > 0, &
             'human CTest summary separates skipped and untested work')
     end if
     call remove_tree(scratch)
@@ -240,7 +240,7 @@ contains
             'add_test(NAME malformed_ctest_record COMMAND "${CMAKE_COMMAND}"'// &
             ' -P "${CMAKE_CURRENT_SOURCE_DIR}/malformed-result.cmake")'//new_line('a'))
         call list_add(malformed_arguments, 'test')
-        call list_add(malformed_arguments, '--json')
+        call list_add(malformed_arguments, '--json=full')
         call list_add(malformed_arguments, 'malformed_ctest_record')
         call run_fo(driver, malformed_arguments, scratch, &
             join_path(scratch, 'fo-cache'), malformed_result, environment)
@@ -276,7 +276,7 @@ contains
             'CLI_COMPILE_DIAGNOSTIC_TOKEN_119'//new_line('a')// &
             'end program'//new_line('a'))
         call list_add(failure_arguments, 'test')
-        call list_add(failure_arguments, '--json')
+        call list_add(failure_arguments, '--json=full')
         call list_add(failure_arguments, 'test_compile_failure')
         call run_fo(driver, failure_arguments, project, &
             join_path(project, 'fo-cache'), failure_result, environment)

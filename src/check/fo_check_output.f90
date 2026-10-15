@@ -63,13 +63,14 @@ contains
         type(json_builder_t), intent(inout) :: jb
         type(check_result_t), intent(in) :: res
         character(len=32) :: elapsed
-        integer :: i
+        integer :: i, n_listed
 
         write (elapsed, '(f12.3)') res%elapsed
+        ! The verdict comes first so a reader can stop after one line.
+        call json_key_string(jb, 'summary', trim(agent_summary(res)))
         call json_key_bool(jb, 'ok', res%build_ok .and. res%tests_ok)
         call json_key_string(jb, 'stage', trim(res%stage))
         call json_key_string(jb, 'target', trim(res%target))
-        call json_key_string(jb, 'summary', trim(agent_summary(res)))
         call json_key_string(jb, 'hint', trim(res%hint))
         call json_key_string(jb, 'rerun', trim(res%rerun))
         call json_key_string(jb, 'log_path', trim(res%log_path))
@@ -78,12 +79,21 @@ contains
         call json_key_int(jb, 'modules', res%n_modules)
         call json_key_int(jb, 'cached', res%n_cached)
         call json_key_int(jb, 'changed', res%n_changed)
-        ! Every test and every failing test by name, so an agent sees the full
-        ! set in one call instead of only the primary diagnostic.
+        ! Every test that did not pass, and every failing test by name, so an
+        ! agent sees the whole problem in one call; passing suites are counted.
+        n_listed = 0
+        do i = 1, res%n_test_results
+            if (trim(res%test_results(i)%status) /= 'pass') n_listed = n_listed + 1
+        end do
         if (res%n_test_results > 0) then
+            call json_key_int(jb, 'tests_total', res%n_test_results)
+            call json_key_int(jb, 'tests_passed', res%n_test_results - n_listed)
+        end if
+        if (n_listed > 0) then
             call json_key(jb, 'tests')
             call json_array_start(jb)
             do i = 1, res%n_test_results
+                if (trim(res%test_results(i)%status) == 'pass') cycle
                 call json_object_start(jb)
                 call json_key_string(jb, 'name', trim(res%test_results(i)%name))
                 call json_key_string(jb, 'status', trim(res%test_results(i)%status))

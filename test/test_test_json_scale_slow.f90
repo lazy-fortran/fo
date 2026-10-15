@@ -52,7 +52,7 @@ program test_test_json_scale_slow
     call list_add(environment, 'FO_BIN=' // driver)
     arguments = string_list_t()
     call list_add(arguments, 'test')
-    call list_add(arguments, '--json')
+    call list_add(arguments, '--json=full')
     call run_arguments(driver, arguments, scratch, result, environment, &
         suite_timeout_ms)
     call assert_equal_integer(result%term_signal, 0, &

@@ -45,6 +45,7 @@ program test_test_human_output
     call list_add(environment, 'FO_BIN=' // driver)
     arguments = string_list_t()
     call list_add(arguments, 'test')
+    call list_add(arguments, '--verbose')
     call run_arguments(driver, arguments, scratch, result, environment, 600000)
     call assert_equal_integer(result%term_signal, 0, &
         'human suite command exits normally')
@@ -52,8 +53,8 @@ program test_test_human_output
         'human suite with failing cases exits nonzero')
     call assert_true(len(result%stdout) > 16384, &
         'human suite output exceeds the former 16 KB limit')
-    call assert_equal_integer(count_text(result%stdout, ' FAIL '), n_failing, &
-        'every failing case has a status line, including the late failure')
+    call assert_equal_integer(count_text(result%stdout, ' FAIL '), n_failing + 1, &
+        'every failing case has a status line, plus the verdict line')
     do i = 1, n_cases
         if (mod(i, fail_stride) /= 0) cycle
         name = stem // three_digits(i)
@@ -63,8 +64,8 @@ program test_test_human_output
             'DIAG ' // name // ' line 25 ') > 0, &
             'the last diagnostic line of each failing case is printed')
     end do
-    call assert_true(index(result%stdout, 'Summary: 30 passed, 10 failed, ' // &
-        '0 skipped (') > 0, 'the summary with exact counts is printed last')
+    call assert_true(index(result%stdout, '30 pass, 10 FAIL (') > 0, &
+        'the verdict with exact counts is printed last')
 
     call remove_tree(scratch)
     call finish_assertions()

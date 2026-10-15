@@ -54,7 +54,7 @@ program test_scan_dependency_capacity_cli
     call list_add(env, 'FO_JOBS=4')
     call list_add(args, 'test')
     call list_add(args, 'test_payload')
-    call list_add(args, '--json')
+    call list_add(args, '--json=full')
     call check(.true., 'cold Fo dependency graph')
     call check(.true., 'warm serialized dependency graph')
     call write_leaf(dependencies, dependencies + 1000)
