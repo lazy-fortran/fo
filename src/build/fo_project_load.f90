@@ -22,11 +22,17 @@ module fo_project_load
         model_find_case, model_selected_names, SELECT_OK, &
         SELECT_UNKNOWN_NAME, SELECT_EMPTY, SELECT_NAMED_EXCLUDED, &
         CASE_DEFAULT_EXCLUDED
+    use fo_project_model, only: model_unit_t, model_layering_t, model_layering, &
+        model_layering_sources
+    use fo_scan, only: scan_unit_t, scan_file
+    use fo_process, only: process_has_fortran_source_ext
+    use fx_json_build, only: json_key_int
     implicit none
     private
 
     public :: project_has_model, project_load, project_resolve, project_run_names
     public :: project_list_text, project_list_json
+    public :: project_layering, project_layering_text, project_layering_json
 
 contains
 
@@ -278,5 +284,194 @@ contains
         call json_object_end(jb)
         text = json_to_string(jb)
     end subroutine project_list_json
+
+    subroutine project_layering(b, flags, model, report, unscanned, ierr, message)
+        !! Load the model and run the layering check (`fo graph --layers`).
+        !! The covered sources are the Fortran sources of the project targets
+        !! and layers (fpm: also the scanned sources in no layer), each scanned
+        !! by fo's source scanner on both backends. Sources the scanner cannot
+        !! read (a generated source not yet generated) are returned in
+        !! unscanned and not checked. ierr /= 0: model unavailable.
+        type(backend_t), intent(inout) :: b
+        character(len=*), intent(in) :: flags
+        type(project_model_t), intent(out) :: model
+        type(model_layering_t), intent(out) :: report
+        type(string_t), allocatable, intent(out) :: unscanned(:)
+        integer, intent(out) :: ierr
+        character(len=:), allocatable, intent(out) :: message
+        type(string_t), allocatable :: extra(:), paths(:)
+        type(model_unit_t), allocatable :: units(:)
+        type(scan_unit_t) :: scanned
+        logical, allocatable :: failed(:)
+        integer :: k, n, status, m, n_extra, k_extra
+
+        allocate (extra(0))
+        if (b%kind == BACKEND_NATIVE) then
+            ! fpm_model_load reports the scanned sources in no layer; they
+            ! are no target source when they are test helpers.
+            call fpm_model_load(trim(b%project_dir), model, ierr, message, &
+                unlayered=extra)
+            if (ierr /= 0) return
+            do k = 1, size(extra)
+                if (len(extra(k)%s) == 0) cycle
+                if (extra(k)%s(1:1) == '/') cycle
+                extra(k)%s = trim(b%project_dir)//'/'//extra(k)%s
+            end do
+        else
+            call project_load(b, flags, model, ierr, message)
+            if (ierr /= 0) return
+        end if
+        call model_layering_sources(model, extra, paths)
+        allocate (units(size(paths)), failed(size(paths)))
+        failed = .false.
+        n = 0
+        do k = 1, size(paths)
+            if (.not. process_has_fortran_source_ext(paths(k)%s)) cycle
+            call scan_file(paths(k)%s, scanned, status)
+            if (status /= 0) then
+                failed(k) = .true.
+                cycle
+            end if
+            n = n + 1
+            units(n)%path = paths(k)%s
+            n_extra = 0
+            if (allocated(scanned%additional_modules)) &
+                n_extra = size(scanned%additional_modules)
+            m = 0
+            if (len_trim(scanned%module_name) > 0) m = 1
+            allocate (units(n)%provides(m + n_extra))
+            if (m == 1) units(n)%provides(1)%s = trim(scanned%module_name)
+            do k_extra = 1, n_extra
+                units(n)%provides(m + k_extra)%s = &
+                    trim(scanned%additional_modules(k_extra))
+            end do
+            allocate (units(n)%uses(scanned%n_deps))
+            do m = 1, scanned%n_deps
+                units(n)%uses(m)%s = trim(scanned%deps(m))
+            end do
+        end do
+        allocate (unscanned(count(failed)))
+        m = 0
+        do k = 1, size(paths)
+            if (.not. failed(k)) cycle
+            m = m + 1
+            unscanned(m) = paths(k)
+        end do
+        call model_layering(model, units(1:n), report)
+    end subroutine project_layering
+
+    function project_relative(project_dir, path) result(rel)
+        !! path relative to project_dir when it lies below it.
+        character(len=*), intent(in) :: project_dir, path
+        character(len=:), allocatable :: rel, prefix
+
+        prefix = trim(project_dir)//'/'
+        rel = path
+        if (len(path) <= len(prefix)) return
+        if (path(1:len(prefix)) == prefix) rel = path(len(prefix) + 1:)
+    end function project_relative
+
+    subroutine project_layering_text(project_dir, model, report, unscanned, text)
+        !! One line per violation (source, module, both layers, missing edge),
+        !! then the unlayered and unscanned sources and a verdict line.
+        character(len=*), intent(in) :: project_dir
+        type(project_model_t), intent(in) :: model
+        type(model_layering_t), intent(in) :: report
+        type(string_t), intent(in) :: unscanned(:)
+        character(len=:), allocatable, intent(out) :: text
+        character(len=*), parameter :: nl = new_line('a')
+        character(len=24) :: count
+        integer :: k
+
+        write (count, '(i0)') model%n_layers
+        text = 'backend: '//model%backend//nl//'layers: '//trim(count)
+        write (count, '(i0)') report%checked
+        text = text//'  checked sources: '//trim(count)//nl
+        do k = 1, size(report%violations)
+            associate (v => report%violations(k))
+                text = text//'violation: '//project_relative(project_dir, v%source)// &
+                    ' (layer '//v%layer//') uses module '//v%module//' from '// &
+                    project_relative(project_dir, v%provider)//' (layer '// &
+                    v%provider_layer//'); missing edge '//v%layer//' -> '// &
+                    v%provider_layer//nl
+            end associate
+        end do
+        do k = 1, size(report%unlayered)
+            text = text//'unlayered: '// &
+                project_relative(project_dir, report%unlayered(k)%s)//nl
+        end do
+        do k = 1, size(unscanned)
+            text = text//'unscanned: '//project_relative(project_dir, unscanned(k)%s)//nl
+        end do
+        write (count, '(i0)') size(report%violations)
+        if (size(report%violations) == 0) then
+            text = text//'layering: ok'//nl
+        else
+            text = text//'layering: '//trim(count)//' violation(s)'//nl
+        end if
+    end subroutine project_layering_text
+
+    subroutine project_layering_json(project_dir, model, report, unscanned, text)
+        character(len=*), intent(in) :: project_dir
+        type(project_model_t), intent(in) :: model
+        type(model_layering_t), intent(in) :: report
+        type(string_t), intent(in) :: unscanned(:)
+        character(len=:), allocatable, intent(out) :: text
+        type(json_builder_t) :: jb
+        integer :: k, j
+
+        jb = json_new()
+        call json_object_start(jb)
+        call json_key_string(jb, 'backend', model%backend)
+        call json_key_bool(jb, 'ok', size(report%violations) == 0)
+        call json_key_int(jb, 'checked', report%checked)
+        call json_key(jb, 'layers')
+        call json_array_start(jb)
+        do k = 1, model%n_layers
+            call json_object_start(jb)
+            call json_key_string(jb, 'name', model%layers(k)%name)
+            call json_key(jb, 'uses')
+            call json_array_start(jb)
+            do j = 1, size(model%layers(k)%uses)
+                call json_value_string(jb, model%layers(model%layers(k)%uses(j))%name)
+            end do
+            call json_array_end(jb)
+            call json_object_end(jb)
+        end do
+        call json_array_end(jb)
+        call json_key(jb, 'violations')
+        call json_array_start(jb)
+        do k = 1, size(report%violations)
+            associate (v => report%violations(k))
+                call json_object_start(jb)
+                call json_key_string(jb, 'source', project_relative(project_dir, &
+                    v%source))
+                call json_key_string(jb, 'module', v%module)
+                call json_key_string(jb, 'layer', v%layer)
+                call json_key_string(jb, 'provider', project_relative(project_dir, &
+                    v%provider))
+                call json_key_string(jb, 'provider_layer', v%provider_layer)
+                call json_key_string(jb, 'missing_edge', v%layer//' -> '// &
+                    v%provider_layer)
+                call json_object_end(jb)
+            end associate
+        end do
+        call json_array_end(jb)
+        call json_key(jb, 'unlayered')
+        call json_array_start(jb)
+        do k = 1, size(report%unlayered)
+            call json_value_string(jb, project_relative(project_dir, &
+                report%unlayered(k)%s))
+        end do
+        call json_array_end(jb)
+        call json_key(jb, 'unscanned')
+        call json_array_start(jb)
+        do k = 1, size(unscanned)
+            call json_value_string(jb, project_relative(project_dir, unscanned(k)%s))
+        end do
+        call json_array_end(jb)
+        call json_object_end(jb)
+        text = json_to_string(jb)
+    end subroutine project_layering_json
 
 end module fo_project_load

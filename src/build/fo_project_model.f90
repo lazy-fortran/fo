@@ -184,6 +184,32 @@ module fo_project_model
         type(string_t), allocatable :: reasons(:)
     end type model_plan_t
 
+    type, public :: model_unit_t
+        !! One scanned project source for model_layering: its path spelled as
+        !! the model spells it (a target or layer source) and the modules it
+        !! defines and uses (compared case-insensitively).
+        character(len=:), allocatable :: path
+        type(string_t), allocatable :: provides(:)
+        type(string_t), allocatable :: uses(:)
+    end type model_unit_t
+
+    type, public :: model_violation_t
+        !! source (in layer) uses module, defined by provider (in
+        !! provider_layer), and layer does not reach provider_layer.
+        character(len=:), allocatable :: source, module, layer
+        character(len=:), allocatable :: provider, provider_layer
+    end type model_violation_t
+
+    type, public :: model_layering_t
+        !! Sources that belong to at least one layer.
+        integer :: checked = 0
+        type(model_violation_t), allocatable :: violations(:)
+        !! Units in no layer, in unit order (empty when there are no layers).
+        type(string_t), allocatable :: unlayered(:)
+    end type model_layering_t
+
+    public :: model_layering, model_layering_sources
+
     public :: model_init, model_add_target, model_add_layer, model_add_case
     public :: model_finalize, model_select, model_plan, model_selected_names
     public :: model_find_target, model_find_artifact, model_find_layer
@@ -825,6 +851,324 @@ contains
     end subroutine push
 
 end subroutine model_plan
+
+subroutine model_layering_sources(model, extra, paths)
+    !! Project sources a layering check covers: the sources of every
+    !! project-origin target and of every layer, then extra, each once in
+    !! first-seen order. Dependency-origin targets contribute nothing.
+    type(project_model_t), intent(in) :: model
+    type(string_t), intent(in) :: extra(:)
+    type(string_t), allocatable, intent(out) :: paths(:)
+    type(string_t), allocatable :: trimmed(:)
+    type(name_index_t) :: seen
+    integer :: n, i, k
+
+    n = 0
+    allocate(paths(16))
+    do i = 1, model%n_targets
+        if (model%targets(i)%origin /= ORIGIN_PROJECT) cycle
+        if (.not. allocated(model%targets(i)%sources)) cycle
+        do k = 1, size(model%targets(i)%sources)
+            call add(model%targets(i)%sources(k)%s)
+        end do
+    end do
+    do i = 1, model%n_layers
+        if (.not. allocated(model%layers(i)%sources)) cycle
+        do k = 1, size(model%layers(i)%sources)
+            call add(model%layers(i)%sources(k)%s)
+        end do
+    end do
+    do k = 1, size(extra)
+        call add(extra(k)%s)
+    end do
+    allocate(trimmed(n))
+    trimmed(:) = paths(1:n)
+    call move_alloc(trimmed, paths)
+
+contains
+
+    subroutine add(path)
+        character(len=*), intent(in) :: path
+        type(string_t), allocatable :: grown(:)
+        integer :: existing
+
+        if (len(path) == 0) return
+        call index_insert(seen, path, n + 1, existing)
+        if (existing /= 0) return
+        n = n + 1
+        if (n > size(paths)) then
+            allocate(grown(2*size(paths)))
+            grown(1:n - 1) = paths(1:n - 1)
+            call move_alloc(grown, paths)
+        end if
+        paths(n)%s = path
+    end subroutine add
+
+end subroutine model_layering_sources
+
+subroutine model_layering(model, units, report)
+    !! Layering check, the same for every backend. A source in layer A that
+    !! uses a module defined by a source in layer B violates the layering
+    !! when B is outside the uses closure of A (A included). On CMake the
+    !! layers are the project libraries and their uses the link graph.
+    !!
+    !! A source's layers are the layers listing it as a source or containing
+    !! a target that lists it. Only modules defined by units are checked:
+    !! intrinsic, external and dependency modules are ignored, as is a
+    !! module the source defines itself or one with a provider in no layer.
+    !! With several providers, any reachable one satisfies the use. Duplicate
+    !! unit paths count once (the first). Cost: hashed lookups, linear in
+    !! units, layer memberships and module uses, plus one closure walk per
+    !! layer that has member sources.
+    type(project_model_t), intent(in) :: model
+    type(model_unit_t), intent(in) :: units(:)
+    type(model_layering_t), intent(out) :: report
+    type(name_index_t) :: path_index, module_index
+    logical, allocatable :: active(:)
+    integer, allocatable :: layer_first(:), layer_units(:)
+    integer, allocatable :: unit_first(:), unit_layers(:), fill(:)
+    integer, allocatable :: module_head(:), provider_next(:), provider_unit(:)
+    integer, allocatable :: stamp(:), mark(:), queue(:), module_seen(:)
+    integer :: nu, nl, n_pairs, n_modules, n_providers, n_violations
+    integer :: u, l, k, j, t, s, m, e, p, existing, token, a, best, head, tail
+    logical :: reached, unlayered_provider, other_provider
+
+    if (.not. model%finalized) error stop 'model_layering: model not finalized'
+    nu = size(units)
+    nl = model%n_layers
+    allocate(active(nu))
+    do u = 1, nu
+        call index_insert(path_index, units(u)%path, u, existing)
+        active(u) = existing == 0
+    end do
+
+    ! Layer -> member units (CSR in layer order, each unit once per layer).
+    allocate(layer_first(nl + 1), layer_units(max(16, nu)), stamp(nu))
+    stamp = 0
+    n_pairs = 0
+    do l = 1, nl
+        layer_first(l) = n_pairs + 1
+        associate (ly => model%layers(l))
+            if (allocated(ly%sources)) then
+                do k = 1, size(ly%sources)
+                    call add_member(ly%sources(k)%s, l)
+                end do
+            end if
+            if (allocated(ly%targets)) then
+                do k = 1, size(ly%targets)
+                    t = ly%targets(k)
+                    do s = 1, size(model%targets(t)%sources)
+                        call add_member(model%targets(t)%sources(s)%s, l)
+                    end do
+                end do
+            end if
+        end associate
+    end do
+    layer_first(nl + 1) = n_pairs + 1
+
+    ! Unit -> layers (CSR, ascending layer index) by counting.
+    allocate(unit_first(nu + 1), unit_layers(max(1, n_pairs)), fill(nu))
+    fill = 0
+    do j = 1, n_pairs
+        fill(layer_units(j)) = fill(layer_units(j)) + 1
+    end do
+    unit_first(1) = 1
+    do u = 1, nu
+        unit_first(u + 1) = unit_first(u) + fill(u)
+        fill(u) = unit_first(u)
+    end do
+    do l = 1, nl
+        do j = layer_first(l), layer_first(l + 1) - 1
+            u = layer_units(j)
+            unit_layers(fill(u)) = l
+            fill(u) = fill(u) + 1
+        end do
+    end do
+
+    ! Module name -> providing units (linked lists over provider entries).
+    allocate(module_head(16), provider_next(16), provider_unit(16))
+    n_modules = 0
+    n_providers = 0
+    do u = 1, nu
+        if (.not. active(u)) cycle
+        if (.not. allocated(units(u)%provides)) cycle
+        do k = 1, size(units(u)%provides)
+            m = index_lookup(module_index, lower_text(units(u)%provides(k)%s))
+            if (m == 0) then
+                n_modules = n_modules + 1
+                call index_insert(module_index, &
+                    lower_text(units(u)%provides(k)%s), n_modules, existing)
+                call grow_ints(module_head, n_modules)
+                module_head(n_modules) = 0
+                m = n_modules
+            end if
+            n_providers = n_providers + 1
+            call grow_ints(provider_next, n_providers)
+            call grow_ints(provider_unit, n_providers)
+            provider_unit(n_providers) = u
+            provider_next(n_providers) = module_head(m)
+            module_head(m) = n_providers
+        end do
+    end do
+
+    allocate(report%violations(8))
+    n_violations = 0
+    allocate(mark(max(1, nl)), queue(max(1, nl)), module_seen(max(1, n_modules)))
+    mark = 0
+    module_seen = 0
+    token = 0
+    do a = 1, nl
+        if (layer_first(a) == layer_first(a + 1)) cycle
+        ! Uses closure of a: mark(x) == a.
+        mark(a) = a
+        queue(1) = a
+        head = 1
+        tail = 1
+        do while (head <= tail)
+            l = queue(head)
+            head = head + 1
+            do k = 1, size(model%layers(l)%uses)
+                if (mark(model%layers(l)%uses(k)) == a) cycle
+                mark(model%layers(l)%uses(k)) = a
+                tail = tail + 1
+                queue(tail) = model%layers(l)%uses(k)
+            end do
+        end do
+        do j = layer_first(a), layer_first(a + 1) - 1
+            u = layer_units(j)
+            if (.not. allocated(units(u)%uses)) cycle
+            token = token + 1
+            do k = 1, size(units(u)%uses)
+                m = index_lookup(module_index, lower_text(units(u)%uses(k)%s))
+                if (m == 0) cycle
+                if (module_seen(m) == token) cycle
+                module_seen(m) = token
+                call judge(u, m)
+                if (reached .or. unlayered_provider .or. .not. other_provider) cycle
+                call add_violation(u, units(u)%uses(k)%s, a, best)
+            end do
+        end do
+    end do
+    if (nl > 0) then
+        allocate(report%unlayered(count(active .and. &
+            unit_first(2:nu + 1) == unit_first(1:nu))))
+    else
+        allocate(report%unlayered(0))
+    end if
+    j = 0
+    do u = 1, nu
+        if (.not. active(u)) cycle
+        if (unit_first(u + 1) > unit_first(u)) then
+            report%checked = report%checked + 1
+        else if (nl > 0) then
+            j = j + 1
+            report%unlayered(j)%s = units(u)%path
+        end if
+    end do
+    call shrink_violations()
+
+contains
+
+    subroutine add_member(path, layer)
+        character(len=*), intent(in) :: path
+        integer, intent(in) :: layer
+        integer :: unit
+
+        unit = index_lookup(path_index, path)
+        if (unit == 0) return
+        if (stamp(unit) == layer) return
+        stamp(unit) = layer
+        n_pairs = n_pairs + 1
+        call grow_ints(layer_units, n_pairs)
+        layer_units(n_pairs) = unit
+    end subroutine add_member
+
+    subroutine judge(user, module)
+        !! Providers of module seen from user in the layer being checked.
+        integer, intent(in) :: user, module
+        integer :: i
+
+        reached = .false.
+        unlayered_provider = .false.
+        other_provider = .false.
+        best = 0
+        e = module_head(module)
+        do while (e /= 0)
+            p = provider_unit(e)
+            e = provider_next(e)
+            if (p == user) then
+                reached = .true.
+                cycle
+            end if
+            other_provider = .true.
+            if (unit_first(p + 1) == unit_first(p)) then
+                unlayered_provider = .true.
+                cycle
+            end if
+            do i = unit_first(p), unit_first(p + 1) - 1
+                if (mark(unit_layers(i)) == a) reached = .true.
+            end do
+            if (best == 0) then
+                best = p
+            else if (p < best) then
+                best = p
+            end if
+        end do
+    end subroutine judge
+
+    subroutine add_violation(user, module, layer, provider)
+        integer, intent(in) :: user, layer, provider
+        character(len=*), intent(in) :: module
+        type(model_violation_t), allocatable :: grown(:)
+
+        n_violations = n_violations + 1
+        if (n_violations > size(report%violations)) then
+            allocate(grown(2*size(report%violations)))
+            grown(1:n_violations - 1) = report%violations(1:n_violations - 1)
+            call move_alloc(grown, report%violations)
+        end if
+        associate (v => report%violations(n_violations))
+            v%source = units(user)%path
+            v%module = module
+            v%layer = model%layers(layer)%name
+            v%provider = units(provider)%path
+            v%provider_layer = model%layers(unit_layers(unit_first(provider)))%name
+        end associate
+    end subroutine add_violation
+
+    subroutine shrink_violations()
+        type(model_violation_t), allocatable :: kept(:)
+
+        allocate(kept(n_violations))
+        kept(:) = report%violations(1:n_violations)
+        call move_alloc(kept, report%violations)
+    end subroutine shrink_violations
+
+end subroutine model_layering
+
+subroutine grow_ints(items, needed)
+    !! Ensure size(items) >= needed, doubling.
+    integer, allocatable, intent(inout) :: items(:)
+    integer, intent(in) :: needed
+    integer, allocatable :: grown(:)
+
+    if (needed <= size(items)) return
+    allocate(grown(max(needed, 2*size(items))))
+    grown(1:size(items)) = items
+    call move_alloc(grown, items)
+end subroutine grow_ints
+
+function lower_text(text) result(low)
+    character(len=*), intent(in) :: text
+    character(len=len(text)) :: low
+    integer :: i, c
+
+    low = text
+    do i = 1, len(text)
+        c = iachar(text(i:i))
+        if (c >= iachar('A') .and. c <= iachar('Z')) low(i:i) = achar(c + 32)
+    end do
+end function lower_text
 
 function model_digest(model) result(digest)
     !! Length-prefixed canonical serialization hashed with SHA-256.

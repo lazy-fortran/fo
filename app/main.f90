@@ -382,6 +382,7 @@ contains
         write (output_unit, '(a)') '  changed    list changed and affected modules'
         write (output_unit, '(a)') '  graph      module dependency graph'
         write (output_unit, '(a)') '  graph --dot  graph in Graphviz DOT format'
+        write (output_unit, '(a)') '  graph --layers [--json]  layering check (exit 1 on violation)'
         write (output_unit, '(a)') '  fmt [paths...]  format sources (project fprettify config if present)'
         write (output_unit, '(a)') '  fmt --changed  format Git-dirty Fortran sources'
         write (output_unit, '(a)') '  fmt --check  check formatting without modifying files'
@@ -1747,6 +1748,10 @@ contains
         logical :: dot_mode
         character(len=:), allocatable :: dot_output
 
+        if (has_arg('--layers')) then
+            call graph_layers()
+            return
+        end if
         allocate (units(MAX_UNITS))
         b = detect_backend('.')
         scan_root = '.'
@@ -1779,6 +1784,49 @@ contains
             end do
         end if
     end subroutine cmd_graph
+
+    subroutine graph_layers()
+        !! `fo graph --layers [--json]`: layering check on the project model.
+        !! Exit 0 clean, 1 on a violation, 2 when no model can be loaded.
+        use fo_build_backend, only: backend_profile, profile_flags
+        use fo_project_model, only: project_model_t, model_layering_t
+        use fo_project_load, only: project_has_model, project_layering, &
+            project_layering_text, project_layering_json
+        type(backend_t) :: b
+        type(project_model_t) :: model
+        type(model_layering_t) :: report
+        type(string_t), allocatable :: unscanned(:)
+        character(len=:), allocatable :: message, text
+        integer :: ierr
+
+        b = detect_backend('.')
+        if (b%kind == BACKEND_NONE) then
+            write (error_unit, '(a)') 'fo: no fpm.toml or CMakeLists.txt found'
+            call process_exit(2)
+        end if
+        if (.not. project_has_model(b)) then
+            write (error_unit, '(a)') &
+                'fo graph --layers: no project model with FO_CMAKE_NATIVE'
+            call process_exit(2)
+        end if
+        call backend_profile(b, '')
+        call project_layering(b, trim(profile_flags('')), model, report, &
+            unscanned, ierr, message)
+        if (ierr /= 0) then
+            write (error_unit, '(a)') 'fo graph --layers: '//message
+            call process_exit(2)
+        end if
+        if (has_arg('--json')) then
+            call project_layering_json(trim(b%project_dir), model, report, &
+                unscanned, text)
+        else
+            call project_layering_text(trim(b%project_dir), model, report, &
+                unscanned, text)
+            text = text(1:len(text) - 1)
+        end if
+        write (output_unit, '(a)') text
+        if (size(report%violations) > 0) call process_exit(1)
+    end subroutine graph_layers
 
     subroutine cmd_doc()
         type(backend_t) :: b

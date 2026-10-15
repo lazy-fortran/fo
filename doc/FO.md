@@ -196,6 +196,29 @@ fo test --list [--json] [same selection]
 MCP `test` uses the same selection for its names. `--list`, labels and layers
 are not available with `--random`, `--only-changed` or `FO_CMAKE_NATIVE`.
 
+## Layering check
+
+```text
+fo graph --layers [--json]
+```
+
+checks the layers of the project model with one rule on both backends: a
+source in layer A that uses a module defined by a source in layer B is a
+violation when B is outside the `uses` closure of A. fpm layers are
+`[extra.fo.layers]`; on CMake every project library is a layer whose `uses` are
+its link dependencies, so a library using a module of a library it does not link
+violates. Module definitions and uses come from fo's source scan; CMake sources
+are mapped to targets through the File API (configure only, nothing is built).
+Intrinsic and dependency modules (fpm dependencies, FetchContent or external
+CMake targets) are ignored, as are providers in no layer.
+
+Each violation names the source, the module, the provider, both layers and the
+missing edge `A -> B`. The output also lists the project sources in no layer
+(CMake executables, for instance) and sources the scanner could not read.
+The exit status is 0 when clean, 1 on a violation and 2 when no project model
+is available. `--json` prints one object with `ok`, `checked`, `layers`,
+`violations`, `unlayered` and `unscanned`.
+
 ## Agent interfaces
 
 `fo check --json=compact` and MCP check return a bounded JSON result. MCP supports
