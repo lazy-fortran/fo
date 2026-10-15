@@ -14,6 +14,7 @@ program test_gremlin_cmake
     character(:), allocatable :: owner, generation, previous, dependency
     character(:), allocatable :: provider, provider_source, revision, raw_archive
     character(:), allocatable :: child_builds, generation_builds, child_runs
+    character(:), allocatable :: first_model, first_model_generation
     type(string_list_t) :: args
     type(process_result_t) :: process
     type(json_value_t) :: reply
@@ -95,6 +96,11 @@ program test_gremlin_cmake
                     'add_executable(unselected_generated_target EXCLUDE_FROM_ALL '// &
                     'unselected_generated.f90)'//new_line('a')// &
                     'add_executable(marker marker.f90)'//new_line('a')// &
+                    'add_executable(probe EXCLUDE_FROM_ALL probe.f90)'// &
+                    new_line('a')// &
+                    'add_test(NAME excluded_probe COMMAND probe)'//new_line('a')// &
+                    'set_tests_properties(excluded_probe PROPERTIES '// &
+                    'LABELS "probe;unit")'//new_line('a')// &
                     'install(TARGETS marker RUNTIME DESTINATION lib)'//new_line('a')// &
                     'add_executable(unselected broken.f90)'//new_line('a')// &
                     'target_link_libraries(marker PRIVATE value_dep raw_dep)'// &
@@ -117,6 +123,8 @@ program test_gremlin_cmake
                     'WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/sandbox" '// &
                     'PASS_REGULAR_EXPRESSION "text never printed")'//new_line('a'))
     call write_text(project//'/broken.f90', 'unselected target is intentionally invalid')
+    call write_text(project//'/probe.f90', 'program probe'//new_line('a')// &
+        'print *, "probe passed"'//new_line('a')//'end program probe'//new_line('a'))
     call write_marker(.false.)
     call write_text(project//'/CMakePresets.json', &
                     '{"version":3,"configurePresets":[{"name":"cpu",'// &
@@ -145,10 +153,15 @@ program test_gremlin_cmake
     call install_tool_trap()
     rc = c_setenv('FO_CMAKE_CONFIGURE_PRESET'//c_null_char, 'cpu'//c_null_char, 1_c_int)
     rc = c_setenv('FO_CMAKE_BUILD_PRESET'//c_null_char, 'cpu'//c_null_char, 1_c_int)
-    rc = c_setenv('FO_CMAKE_BUILD_TARGETS'//c_null_char, 'marker'//c_null_char, 1_c_int)
+    ! No FO_CMAKE_BUILD_TARGETS: the generation build plans the targets of the
+    ! campaign's cases from the model, so the invalid `unselected` stays unbuilt.
     rc = c_setenv('FO_CMAKE_TEST_PRESET'//c_null_char, 'cpu'//c_null_char, 1_c_int)
     rc = c_setenv('FO_CMAKE_BUILD_DIR'//c_null_char, 'build'//c_null_char, 1_c_int)
     call gremlin_start_args(args, project, 'cmake', 'registered_marker')
+    ! An EXCLUDE_FROM_ALL test executable outside FO_CMAKE_BUILD_TARGETS: the
+    ! generation build plans it from the model.
+    call list_add(args, '--target')
+    call list_add(args, 'excluded_probe')
     call list_add(args, '--random')
     call list_add(args, '0')
     call gremlin_json(driver, project, cache, state, args, reply, process, 20000)
@@ -164,6 +177,13 @@ program test_gremlin_cmake
         call finish_assertions()
     end if
     previous = generation
+    call assert_probe_receipt(generation)
+    first_model = status_field('active_model')
+    first_model_generation = status_field('active_model_generation')
+    call assert_true(len(first_model) == 64, &
+        'the active generation has a project model')
+    call assert_equal_string(first_model_generation, generation, &
+        'the first generation loads its own project model')
     call assert_true(file_present(child_runs), 'case children run the CTest case')
     call assert_true(file_present(generation_builds), &
         'the generation build reaches cmake --build through the trap')
@@ -183,6 +203,10 @@ program test_gremlin_cmake
     call write_dependency(9)
     call wait_result(previous, 'FAIL', generation)
     call assert_true(generation /= previous, 'external dependency edit wakes resident')
+    call assert_equal_string(status_field('active_model'), first_model, &
+        'a source-only edit reuses the project model')
+    call assert_equal_string(status_field('active_model_generation'), &
+        first_model_generation, 'the reused model keeps its loading generation')
     previous = generation
     call write_dependency(7)
     call write_text(project//'/marker.f90', read_text(project//'/marker.f90')// &
@@ -195,6 +219,14 @@ program test_gremlin_cmake
     previous = generation
     call write_provider(17)
     call wait_result(previous, 'PASS', generation)
+    previous = generation
+    call write_text(project//'/CMakeLists.txt', &
+        read_text(project//'/CMakeLists.txt')//'# model input edit'//new_line('a'))
+    call wait_result(previous, 'PASS', generation)
+    call assert_equal_string(status_field('active_model_generation'), generation, &
+        'a CMakeLists edit loads the model again')
+    call assert_true(status_field('active_model') /= first_model, &
+        'the refreshed model has a new identity')
     previous = generation
     call write_text(scratch//'/outside.f90', read_text(dependency//'/value.f90'))
     rc = c_unlink(dependency//'/package/leaf.f90'//c_null_char)
@@ -273,6 +305,80 @@ contains
             if (text(k:k) == new_line('a')) line_count = line_count + 1
         end do
     end function line_count
+
+    function status_field(name) result(value)
+        character(len=*), intent(in) :: name
+        character(:), allocatable :: value
+        type(string_list_t) :: query
+        type(json_value_t) :: status
+        type(process_result_t) :: observed
+
+        query = string_list_t()
+        call list_add(query, 'gremlin')
+        call list_add(query, 'status')
+        call list_add(query, '--detail')
+        call list_add(query, 'full')
+        call list_add(query, '--dir')
+        call list_add(query, project)
+        call list_add(query, '--lane')
+        call list_add(query, 'cmake')
+        call list_add(query, '--session')
+        call list_add(query, owner)
+        call gremlin_json(driver, project, cache, state, query, status, observed, 10000)
+        value = gremlin_field(status, name)
+    end function status_field
+
+    subroutine assert_probe_receipt(active)
+        !! The EXCLUDE_FROM_ALL case passed in the generation and its receipt
+        !! carries the model's labels.
+        character(len=*), intent(in) :: active
+        type(string_list_t) :: query
+        type(json_value_t) :: status, events, receipt, labels
+        type(process_result_t) :: observed
+        integer :: k, attempt
+        logical :: found
+
+        found = .false.
+        do attempt = 1, 3000
+            query = string_list_t()
+            call list_add(query, 'gremlin')
+            call list_add(query, 'status')
+            call list_add(query, '--detail')
+            call list_add(query, 'full')
+            call list_add(query, '--dir')
+            call list_add(query, project)
+            call list_add(query, '--lane')
+            call list_add(query, 'cmake')
+            call list_add(query, '--session')
+            call list_add(query, owner)
+            call list_add(query, '--max-records')
+            call list_add(query, '128')
+            call gremlin_json(driver, project, cache, state, query, status, &
+                observed, 10000)
+            events = json_member(status, 'events')
+            do k = 1, json_size(events)
+                receipt = json_element(events, k)
+                if (json_string_value(json_member(receipt, 'case_id')) /= &
+                    'excluded_probe') cycle
+                if (json_string_value(json_member(receipt, 'generation')) /= &
+                    active) cycle
+                found = .true.
+                call assert_equal_string( &
+                    json_string_value(json_member(receipt, 'status')), 'PASS', &
+                    'the EXCLUDE_FROM_ALL case runs on the generation build')
+                labels = json_member(receipt, 'labels')
+                call assert_equal_integer(json_size(labels), 2, &
+                    'receipt carries case labels')
+                if (json_size(labels) == 2) call assert_equal_string( &
+                    json_string_value(json_element(labels, 1))// &
+                    json_string_value(json_element(labels, 2)), 'probeunit', &
+                    'receipt labels are the CTest LABELS')
+            end do
+            if (found) exit
+            call gremlin_wait_ms(20)
+        end do
+        call assert_true(found, 'the EXCLUDE_FROM_ALL case has a receipt')
+    end subroutine assert_probe_receipt
 
     subroutine assert_build_failure_once()
         !! The failed candidate has exactly one BUILD_FAIL receipt and no case

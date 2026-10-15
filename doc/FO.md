@@ -196,9 +196,10 @@ fo test --list [--json] [same selection]
   one object.
 - Running (CMake, also plain `fo test`): select, plan, build, run. CMake is
   configured once and the loaded model is reused. Only the plan targets are
-  built (merged with `FO_CMAKE_BUILD_TARGETS`; a case whose command maps to no
-  target, such as a script, widens the plan to the default build unless that
-  variable scopes it). A case's command is taken from CTest, or from the
+  built (merged with `FO_CMAKE_BUILD_TARGETS`). A case whose command maps to no
+  target, such as a script, widens the plan: it builds the default target set,
+  or the `FO_CMAKE_BUILD_TARGETS` targets when that variable is set, plus the
+  targets of the mapped cases. A case's command is taken from CTest, or from the
   generated `CTestTestfile.cmake` before its executable exists, so an unbuilt
   tree plans exactly. The cases then run through `ctest -R` with exact
   anchored names in batches, so a fixture runs once per batch. A case the test
@@ -206,11 +207,24 @@ fo test --list [--json] [same selection]
   for the run. No label is excluded except through the default exclusions above.
 - `--no-build` runs the selected cases without building (CMake: whatever is
   built; a missing executable fails the case).
-- `fo build --tests` also builds the fpm test programs, slow ones included
-  (CMake builds its configured target set, scoped by `FO_CMAKE_BUILD_TARGETS`).
-  Gremlin builds each generation once this way; its case runs and `reproduce`
+- `fo build --tests` builds what every test case needs, slow ones included:
+  fpm builds its test programs, CMake builds the plan targets of the model's
+  cases (cases a test preset filters out excluded), with the widening rule
+  above, so an `EXCLUDE_FROM_ALL` test executable is built. `--case NAME`
+  (repeatable) builds only what the named cases need.
+  Gremlin builds each generation once this way (a campaign with explicit
+  targets and no random cases, and `reproduce`, pass their cases); its case runs and `reproduce`
   use `fo test --no-build` on that build, and a failed build is reported once
   for the generation without running any case.
+- Gremlin loads the project model once per built generation and takes its
+  campaign cases from it. A later generation reuses the model when the content
+  of its manifests, locks, CMake scripts, presets and caches, test and program
+  mains, and the set of input paths are unchanged (fpm with source layers:
+  every source counts), so a library or CMake source edit reuses it.
+  `gremlin status --detail full` reports `active_model` (model identity) and
+  `active_model_generation` (the generation that loaded it). Case receipts
+  carry the case `labels` and `layer`, and a label-excluded case runs with
+  `--all`.
 
 - `--only-changed` restricts the selection to the cases the files changed
   against Git HEAD affect (tracked edits, staged or not, deletions and

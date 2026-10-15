@@ -8,7 +8,7 @@ program test_gremlin_manifest
     use fo_input_inventory, only: input_inventory_t, input_declaration_t, &
         input_inventory_discover, INPUT_FILE
     use fo_gremlin_generation, only: generation_context_t, generation_t, &
-        generation_capture
+        generation_capture, generation_model_key
     use fo_generation_manifest, only: generation_manifest_metadata_t, &
         generation_manifest_materialize, generation_manifest_capture, &
         generation_manifest_execution_identity, generation_manifest_release
@@ -92,6 +92,7 @@ program test_gremlin_manifest
     type(generation_t) :: other_worktree, failed_capture
     type(generation_t) :: legacy_worktree, crash_worktree
     logical :: found_aliases
+    character(len=:), allocatable :: manifest_text
 
     root = temporary_root()//'/fo-generation-manifest-'//int_text(process_getpid())
     project = trim(root)//'/project'
@@ -114,13 +115,13 @@ program test_gremlin_manifest
     status = c_setenv('FO_CACHE_DIR'//c_null_char, &
         trim(cache)//c_null_char, 1_c_int)
     call require(status == 0, 'isolated Fx cache is configured')
-    call write(trim(project)//'/fpm.toml', &
-        'name = "manifest-fixture"'//new_line('a')// &
+    manifest_text = 'name = "manifest-fixture"'//new_line('a')// &
         '[dependencies]'//new_line('a')// &
             'shared-one = { path = "../shared" }'//new_line('a')// &
             'shared-two = { path = "../shared-alias" }'//new_line('a')// &
             '[dev-dependencies]'//new_line('a')// &
-            'fo_test_os = { path = "test-support/fo_test_os" }')
+            'fo_test_os = { path = "test-support/fo_test_os" }'
+    call write(trim(project)//'/fpm.toml', manifest_text)
     call write(trim(dependency)//'/fpm.toml', 'name = "shared"')
     call write(trim(nested_dependency)//'/fpm.toml', 'name = "fo_test_os"')
     call write(trim(nested_dependency)//'/src/fo_test_os.f90', &
@@ -284,6 +285,7 @@ program test_gremlin_manifest
             'reuse rejects changed bytes in the materialized generation')
     end if
 
+    call verify_model_key()
     call write(trim(project)//'/fixture.dat', 'source-one')
     call discover(inventory)
     context%input_inventory = inventory
@@ -293,6 +295,31 @@ program test_gremlin_manifest
     stop
 
 contains
+
+    subroutine verify_model_key()
+        !! The project model is reused across a source-only edit and loaded
+        !! again after a manifest edit (#167): its reuse key says so.
+        type(input_inventory_t) :: edited
+
+        call write(trim(project)//'/src/main.f90', 'program main ! edited')
+        call discover(edited)
+        call require(edited%digest /= inventory%digest, &
+            'the source edit changes the input inventory')
+        call require(generation_model_key(edited, driver_digest, .false.) == &
+            generation_model_key(inventory, driver_digest, .false.), &
+            'a source-only edit keeps the project model key')
+        call require(generation_model_key(edited, driver_digest, .true.) /= &
+            generation_model_key(inventory, driver_digest, .true.), &
+            'a full model key (fpm source layers) follows source content')
+        call write(trim(project)//'/fpm.toml', manifest_text//new_line('a')// &
+            '# manifest edit')
+        call discover(edited)
+        call require(generation_model_key(edited, driver_digest, .false.) /= &
+            generation_model_key(inventory, driver_digest, .false.), &
+            'a manifest edit changes the project model key')
+        call write(trim(project)//'/fpm.toml', manifest_text)
+        call write(trim(project)//'/src/main.f90', 'program main')
+    end subroutine verify_model_key
 
     subroutine register_generation(path, status, detail)
         character(len=*), intent(in) :: path

@@ -476,8 +476,9 @@ contains
 
     subroutine backend_set_build_targets(self, targets, widened)
         !! CMake build targets of a plan: the planned targets merged with any
-        !! FO_CMAKE_BUILD_TARGETS the user set. A widened plan builds the
-        !! user's targets, or the default target set when there are none.
+        !! FO_CMAKE_BUILD_TARGETS the user set. A widened plan (a case whose
+        !! needs are unknown) builds the user's targets, or the default
+        !! target set when there are none, plus the targets it does know.
         type(backend_t), intent(inout) :: self
         type(string_t), intent(in) :: targets(:)
         logical, intent(in) :: widened
@@ -487,12 +488,12 @@ contains
         logical :: seen
 
         if (self%kind /= BACKEND_CMAKE) return
-        if (widened) then
-            ! Unknown needs: build the default set, unless the user scoped the
-            ! build with FO_CMAKE_BUILD_TARGETS.
-            if (.not. allocated(self%cmake%build_targets)) &
-                allocate (character(len=1) :: self%cmake%build_targets(0))
-            return
+        if (.not. allocated(self%cmake%build_targets)) &
+            allocate (character(len=1) :: self%cmake%build_targets(0))
+        if (widened .and. size(targets) == 0) return
+        if (widened .and. size(self%cmake%build_targets) == 0) then
+            ! The default set has a name only when other targets join it.
+            call append_arg_list(self%cmake%build_targets, default_target_name())
         end if
         allocate (merged(size(targets) + size(self%cmake%build_targets)))
         n = 0
@@ -520,6 +521,31 @@ contains
             kept(i) = merged(i)%s
         end do
         call move_alloc(kept, self%cmake%build_targets)
+
+    contains
+
+        function default_target_name() result(name)
+            !! CMake's name of the default build target for the generator.
+            character(len=:), allocatable :: name
+
+            name = 'all'
+            if (.not. allocated(self%cmake%reported_generator)) return
+            if (index(self%cmake%reported_generator, 'Visual Studio') == 1 .or. &
+                self%cmake%reported_generator == 'Xcode') name = 'ALL_BUILD'
+        end function default_target_name
+
+        subroutine append_arg_list(values, token)
+            character(len=:), allocatable, intent(inout) :: values(:)
+            character(len=*), intent(in) :: token
+            character(len=:), allocatable :: grown(:)
+
+            allocate (character(len=max(len(values), len(token))) :: &
+                grown(size(values) + 1))
+            grown(:size(values)) = values
+            grown(size(values) + 1) = token
+            call move_alloc(grown, values)
+        end subroutine append_arg_list
+
     end subroutine backend_set_build_targets
 
     subroutine backend_test_cases(self, names, n_names, exitcode, log_file, &

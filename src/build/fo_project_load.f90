@@ -14,13 +14,14 @@ module fo_project_load
     use fo_scan, only: is_slow_test
     use fo_build_backend, only: backend_t, BACKEND_NATIVE, BACKEND_CMAKE, &
         cmake_configure, backend_test_names, backend_test_cases, backend_test, &
-        backend_set_build_targets
+        backend_set_build_targets, backend_build
     use fo_cmake_native_config, only: native_cmake_selected
     use fo_cmake_model, only: cmake_model_load
+    use fo_cmake_context, only: cmake_context_adopt_query
     use fo_fpm_model, only: fpm_model_load
     use fo_project_model, only: project_model_t, model_request_t, &
         model_selection_t, model_plan_t, model_select, model_plan, &
-        model_find_case, SELECT_OK, &
+        model_find_case, SELECT_OK, MAP_UNKNOWN, &
         SELECT_UNKNOWN_NAME, SELECT_EMPTY, SELECT_NAMED_EXCLUDED, &
         CASE_DEFAULT_EXCLUDED
     use fo_project_model, only: model_unit_t, model_layering_t, model_layering, &
@@ -35,6 +36,7 @@ module fo_project_load
 
     public :: project_has_model, project_load, project_resolve, project_run_cases
     public :: project_affected, project_changed_files, project_run_affected
+    public :: project_load_configured, project_inventory_cases, project_build_cases
     public :: project_list_text, project_list_json
     public :: project_layering, project_layering_text, project_layering_json
 
@@ -97,6 +99,82 @@ contains
         call cmake_model_load(b%cmake, model, ierr, message)
         if (ierr /= 0) message = 'CMake project model unavailable: '//message
     end subroutine project_load
+
+    subroutine project_load_configured(b, model, ierr, message, input_digest)
+        !! Load the model of a tree an earlier fo command configured (the
+        !! Gremlin generation build, same flags): CMake reads that configure's
+        !! File API reply and CTest registry and does not configure again,
+        !! except for a configure preset without a build-root hint, whose
+        !! build tree only a configure run reveals; fpm scans.
+        type(backend_t), intent(inout) :: b
+        type(project_model_t), intent(out) :: model
+        integer, intent(out) :: ierr
+        character(len=:), allocatable, intent(out) :: message
+        character(len=*), intent(in), optional :: input_digest
+
+        ierr = 0
+        message = ''
+        if (.not. project_has_model(b)) then
+            ierr = 1
+            message = 'no project model for this backend configuration'
+            return
+        end if
+        if (b%kind == BACKEND_NATIVE) then
+            call fpm_model_load(trim(b%project_dir), model, ierr, message)
+            return
+        end if
+        if (len_trim(b%cmake%configure_preset) > 0 .and. &
+            .not. b%cmake%build_root_hint) then
+            ! The preset's build tree is only known from a configure run.
+            call project_load(b, '', model, ierr, message)
+            return
+        end if
+        call cmake_context_adopt_query(b%cmake)
+        call cmake_model_load(b%cmake, model, ierr, message, input_digest)
+        if (ierr /= 0) message = 'CMake project model unavailable: '//message
+    end subroutine project_load_configured
+
+    function project_inventory_cases(model) result(cases)
+        !! The cases a continuous campaign may run: every case except those a
+        !! test preset filters out and explicit-only cases (the dispatcher).
+        !! Label exclusions (slow) stay in; their runs pass --all.
+        type(project_model_t), intent(in) :: model
+        integer, allocatable :: cases(:)
+        integer :: k, n
+
+        allocate (cases(model%n_cases))
+        n = 0
+        do k = 1, model%n_cases
+            if (model%cases(k)%default_excluded) cycle
+            if (model%cases(k)%explicit_only) cycle
+            n = n + 1
+            cases(n) = k
+        end do
+        cases = cases(:n)
+    end function project_inventory_cases
+
+    subroutine project_build_cases(b, model, cases, flags, log_file, exitcode)
+        !! Build what the cases need without running them. The model is
+        !! loaded (CMake is configured): CMake builds the plan targets of the
+        !! cases; fpm builds every test program, slow ones included.
+        type(backend_t), intent(inout) :: b
+        type(project_model_t), intent(in) :: model
+        integer, intent(in) :: cases(:)
+        character(len=*), intent(in) :: flags, log_file
+        integer, intent(out) :: exitcode
+        type(model_plan_t) :: plan
+        type(string_t), allocatable :: targets(:)
+
+        if (b%kind == BACKEND_CMAKE) then
+            call plan_names(model, cases, plan, targets)
+            call backend_set_build_targets(b, targets, plan%widened)
+            call backend_build(b, exitcode, flags, log_file, with_tests=.true., &
+                configured=.true.)
+        else
+            call backend_build(b, exitcode, flags, log_file, with_tests=.true., &
+                include_slow=.true.)
+        end if
+    end subroutine project_build_cases
 
     subroutine project_resolve(b, flags, request, model, selection, ierr, message)
         !! Load the model and select. ierr = 0: the selection is usable (an
@@ -487,17 +565,45 @@ contains
     end subroutine project_run_cases
 
     subroutine plan_names(model, cases, plan, names)
+        !! Target names of the plan. A widened plan still names the exact
+        !! targets of its mapped cases, so a build widened by a script case
+        !! also builds them (EXCLUDE_FROM_ALL executables included).
         type(project_model_t), intent(in) :: model
         integer, intent(in) :: cases(:)
         type(model_plan_t), intent(out) :: plan
         type(string_t), allocatable, intent(out) :: names(:)
+        type(model_plan_t) :: mapped_plan
+        integer, allocatable :: mapped(:)
         integer :: k
 
         call model_plan(model, cases, plan)
-        allocate (names(size(plan%targets)))
-        do k = 1, size(plan%targets)
-            names(k)%s = model%targets(plan%targets(k))%name
+        if (.not. plan%widened) then
+            allocate (names(size(plan%targets)))
+            do k = 1, size(plan%targets)
+                names(k)%s = model%targets(plan%targets(k))%name
+            end do
+            return
+        end if
+        allocate (names(0))
+        mapped = pack(cases, [(valid_mapped(cases(k)), k=1, size(cases))])
+        call model_plan(model, mapped, mapped_plan)
+        if (mapped_plan%widened) return
+        deallocate (names)
+        allocate (names(size(mapped_plan%targets)))
+        do k = 1, size(mapped_plan%targets)
+            names(k)%s = model%targets(mapped_plan%targets(k))%name
         end do
+
+    contains
+
+        logical function valid_mapped(i)
+            integer, intent(in) :: i
+
+            valid_mapped = .false.
+            if (i < 1 .or. i > model%n_cases) return
+            valid_mapped = model%cases(i)%mapping /= MAP_UNKNOWN
+        end function valid_mapped
+
     end subroutine plan_names
 
     function joined_labels(model, i) result(text)

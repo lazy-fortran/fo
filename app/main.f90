@@ -27,7 +27,8 @@ program fo_main
         project_model_t, model_find_case, SELECT_EMPTY, CASE_SELECTED
     use fo_project_load, only: project_has_model, project_resolve, &
         project_run_cases, project_list_text, project_list_json, &
-        project_affected, project_changed_files, project_run_affected
+        project_affected, project_changed_files, project_run_affected, &
+        project_load, project_inventory_cases, project_build_cases
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
     use fo_fmt, only: fo_fmt_run, fo_fmt_files, fo_fmt_changed_run, &
@@ -353,7 +354,7 @@ contains
         write (output_unit, '(a)') '  verify     static -> build -> test -> lint -> fmt hint'
         write (output_unit, '(a)') '  build      build only (--flag "-O0")'
         write (output_unit, '(a)') &
-            '  build --tests   also build test programs'
+            '  build --tests   also build test programs (--case NAME: what NAME needs)'
         write (output_unit, '(a)') &
             '  build --debug   add -g -O0 -fcheck=all -fbacktrace'
         write (output_unit, '(a)') &
@@ -992,7 +993,10 @@ contains
 
     subroutine cmd_build()
         type(backend_t) :: b
-        integer :: exitcode
+        type(project_model_t) :: model
+        character(len=:), allocatable :: model_message
+        integer :: exitcode, model_error
+        integer, allocatable :: cases(:)
         character(len=512) :: flags, build_log
         character(len=64) :: profile
         character(len=1024) :: all_flags
@@ -1019,11 +1023,23 @@ contains
             end if
         end if
         call make_tmpfile('fo-build', build_log)
-        ! --tests also builds the fpm test programs, slow ones included
-        ! (CMake: the configured target set), so `fo test --no-build` can run
-        ! any of them afterwards.
-        call backend_build(b, exitcode, trim(all_flags), build_log, &
-            with_tests=has_arg('--tests'), include_slow=.true.)
+        ! --tests builds what every test case needs, slow ones included (fpm:
+        ! all test programs; CMake: the plan targets of the model's cases), so
+        ! `fo test --no-build` can run any of them afterwards.
+        if (has_arg('--tests') .and. b%kind == BACKEND_CMAKE .and. &
+            project_has_model(b)) then
+            call project_load(b, trim(all_flags), model, model_error, model_message)
+            if (model_error /= 0) then
+                write (error_unit, '(a)') 'fo: '//model_message
+                call process_exit(1)
+            end if
+            call build_case_indices(model, cases)
+            call project_build_cases(b, model, cases, trim(all_flags), build_log, &
+                exitcode)
+        else
+            call backend_build(b, exitcode, trim(all_flags), build_log, &
+                with_tests=has_arg('--tests'), include_slow=.true.)
+        end if
         if (exitcode /= 0) then
             call report_build_result(build_log)
             call process_exit(1)
@@ -1032,6 +1048,29 @@ contains
         call delete_tmpfile(build_log)
         call report_private_fo_driver(b, all_flags)
     end subroutine cmd_build
+
+    subroutine build_case_indices(model, cases)
+        !! Cases named by `fo build --tests --case NAME` (repeatable), or every
+        !! inventory case. An unknown name is an error.
+        type(project_model_t), intent(in) :: model
+        integer, allocatable, intent(out) :: cases(:)
+        character(len=1024) :: arg
+        integer :: i, k
+
+        allocate (cases(0))
+        do i = 2, command_argument_count() - 1
+            call get_command_argument(i, arg)
+            if (trim(arg) /= '--case') cycle
+            call get_command_argument(i + 1, arg)
+            k = model_find_case(model, trim(arg))
+            if (k == 0) then
+                write (error_unit, '(a)') 'fo: unknown test case: '//trim(arg)
+                call process_exit(1)
+            end if
+            cases = [cases, k]
+        end do
+        if (size(cases) == 0) cases = project_inventory_cases(model)
+    end subroutine build_case_indices
 
     subroutine report_private_fo_driver(b, request_flags)
         ! A self-build already creates its current driver inside this

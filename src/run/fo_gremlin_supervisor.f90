@@ -18,7 +18,11 @@ module fo_gremlin_supervisor
     use fx_json_parse, only: json_parser_t, json_event_t, json_parser_init_strict, &
         json_parser_next, JSON_OBJECT_START, JSON_OBJECT_END, JSON_ARRAY_START, &
         JSON_ARRAY_END, JSON_KEY, JSON_STRING, JSON_ERROR, JSON_END_OF_INPUT
-    use fo_gremlin_generation, only: generation_t, generation_driver_identity
+    use fo_gremlin_generation, only: generation_t, generation_driver_identity, &
+        generation_model_key
+    use fo_project_load, only: project_has_model, project_load_configured, &
+        project_inventory_cases
+    use fo_project_model, only: project_model_t, model_find_case
     use fo_gremlin_log_text, only: gremlin_retain_build_log, gremlin_log_tail
     use fo_gremlin_execution_view, only: execution_view_t, execution_view_create, &
         execution_view_release
@@ -1230,15 +1234,6 @@ contains
         sequence = int(system_clock_count())
         write (reproduction_id, '(i0)') sequence
         call log_path(session, 'reproduce-'//trim(reproduction_id)//'.log', log_file)
-        n_args = 0
-        call argv_push(packed, n_args, trim(executable))
-        call argv_push(packed, n_args, 'test')
-        call argv_push(packed, n_args, '--no-build')
-        call argv_push(packed, n_args, '--json')
-        if (is_slow_test(trim(request%case_id))) then
-            call argv_push(packed, n_args, '--all')
-        end if
-        call argv_push(packed, n_args, trim(request%case_id))
         reproduction_timeout = case_wall_timeout(active_project, request%case_id, &
             request%timeout_seconds)
         write(view_owner, '(a,"-reproduce-",i0)') trim(session%session_id), sequence
@@ -1308,8 +1303,7 @@ contains
             selection_request%targets(1) = request%case_id
             selection_request%n_targets = 1
             selection_request%random_count = 0
-            call discover_campaign(campaign_project(generation), &
-                generation%identity, session, selection_request, selected, &
+            call discover_campaign(generation, session, selection_request, selected, &
                 n_selected, mandatory_count, seed, ierr, message, &
                 bypass_coverage=.true.)
             if (ierr == 0) then
@@ -1332,6 +1326,8 @@ contains
             call argv_push(build_packed, n_build_args, trim(executable))
             call argv_push(build_packed, n_build_args, 'build')
             call argv_push(build_packed, n_build_args, '--tests')
+            call argv_push(build_packed, n_build_args, '--case')
+            call argv_push(build_packed, n_build_args, trim(request%case_id))
             call process_start_argv_logged(trim(build_view%cwd), build_packed, &
                 n_build_args, trim(build_log), build_pid, spawn_exit, &
                 'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
@@ -1366,6 +1362,14 @@ contains
             if (build_exit /= 0) exitcode = 1
             return
         end if
+        n_args = 0
+        call argv_push(packed, n_args, trim(executable))
+        call argv_push(packed, n_args, 'test')
+        call argv_push(packed, n_args, '--no-build')
+        call argv_push(packed, n_args, '--json')
+        if (case_needs_all(generation, request%case_id)) &
+            call argv_push(packed, n_args, '--all')
+        call argv_push(packed, n_args, trim(request%case_id))
         execution_env = 'FO_BIN='//trim(executable)//';FO='//trim(executable)//';'// &
             'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
             'FO_GREMLIN_EXECUTION_CWD='//trim(execution_view%cwd)//';'// &
@@ -1636,8 +1640,8 @@ contains
                     fatal_error = .true.
                     fatal_message = trim(message)
                 else if (.not. stop_requested) then
-                    call start_build(session, candidate_generation, build_child, &
-                        ierr, message)
+                    call start_build(session, owner_request, candidate_generation, &
+                        build_child, ierr, message)
                 end if
                 if (ierr /= 0) then
                     launch_error = ierr
@@ -2316,7 +2320,8 @@ contains
         candidate_lease = current_lease
         current_lease%lock_fd = -1
         have_candidate_lease = .true.
-        call start_build(session, candidate, build_child, spawn_error, message)
+        call start_build(session, request, candidate, build_child, spawn_error, &
+            message)
         if (spawn_error /= 0) then
             have_candidate = .false.
             last_failed = candidate%identity
@@ -2348,8 +2353,12 @@ contains
         end if
     end subroutine maybe_capture_latest
 
-    subroutine start_build(session, generation, child, ierr, message)
+    subroutine start_build(session, request, generation, child, ierr, message)
+        !! Build the generation once for its campaigns: a focused campaign
+        !! (explicit targets, no random cases) builds what its cases need,
+        !! any other campaign what every inventory case needs.
         type(gremlin_session_t), intent(in) :: session
+        type(gremlin_request_t), intent(in) :: request
         type(generation_t), intent(inout) :: generation
         type(child_t), intent(out) :: child
         integer, intent(out) :: ierr
@@ -2357,7 +2366,7 @@ contains
 
         character(len=PATH_LEN) :: executable, view_message
         character(len=:), allocatable :: packed
-        integer :: n_args, spawn_exit, view_status
+        integer :: n_args, spawn_exit, view_status, i
         logical :: exists
 
         child = child_t()
@@ -2391,6 +2400,12 @@ contains
         call argv_push(packed, n_args, trim(executable))
         call argv_push(packed, n_args, 'build')
         call argv_push(packed, n_args, '--tests')
+        if (request%random_count == 0) then
+            do i = 1, request%n_targets
+                call argv_push(packed, n_args, '--case')
+                call argv_push(packed, n_args, trim(request%targets(i)))
+            end do
+        end if
         call process_start_argv_logged(trim(child%execution_view%cwd), packed, &
             n_args, trim(child%log_file), child%pid, spawn_exit, &
             'FO_DISABLE_SELF_REFRESH=1;FO_SELF_REFRESH=0;'// &
@@ -2561,6 +2576,11 @@ contains
         request%has_previous_generation = was_active
         request%requirement_digest = ''
         request%gate_cases = ''
+        if (was_active) then
+            call generation_model_adopt(active, candidate)
+        else if (allocated(candidate%model)) then
+            deallocate (candidate%model)
+        end if
         active = candidate
         have_active = .true.
         request%input_changed = .false.
@@ -2580,7 +2600,7 @@ contains
         if (was_active) seed = next_campaign_seed(seed)
         selection_request = request
         selection_request%seed = seed
-        call discover_campaign(campaign_project(active), active%identity, session, &
+        call discover_campaign(active, session, &
             selection_request, selected, selected_count, mandatory_count, seed, &
             inventory_status, message)
         request%requirement_digest = selection_request%requirement_digest
@@ -2728,11 +2748,132 @@ contains
             project = generation%build_project_root
     end function campaign_project
 
-    subroutine discover_campaign(project_dir, generation_id, session, request, &
+    subroutine generation_model_ensure(generation, ierr, message)
+        !! Load the generation's project model once, from its built view
+        !! (CMake: the configure of the generation build, not repeated).
+        !! A model reused from an earlier generation is kept as is. The
+        !! frozen FO_CMAKE_NATIVE route has no model and loads nothing.
+        type(generation_t), intent(inout) :: generation
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        type(backend_t) :: backend
+        character(len=:), allocatable :: detail
+        integer :: restore_status
+
+        ierr = 0
+        message = ''
+        if (allocated(generation%model)) return
+        backend = detect_backend(campaign_project(generation))
+        if (.not. project_has_model(backend)) return
+        ! Without its inventory the model has no reuse key; it still loads.
+        if (.not. generation%input_inventory_ready) &
+            call generation_inventory_restore(generation, restore_status, message)
+        message = ''
+        allocate (generation%model)
+        call project_load_configured(backend, generation%model, ierr, detail)
+        if (ierr /= 0) then
+            deallocate (generation%model)
+            message = 'cannot load the generation project model: '//detail
+            return
+        end if
+        generation%model_generation = generation%identity
+        ! fpm source layers follow module use, so every source counts.
+        generation%model_full_key = backend%kind == BACKEND_NATIVE .and. &
+            generation%model%n_layers > 0
+        generation%model_key = ''
+        if (generation%input_inventory_ready) generation%model_key = &
+            generation_model_key(generation%input_inventory, &
+            generation%driver_digest, generation%model_full_key)
+    end subroutine generation_model_ensure
+
+    function active_model_identity(generation) result(identity)
+        type(generation_t), intent(in) :: generation
+        character(len=HASH_LEN) :: identity
+
+        identity = ''
+        if (allocated(generation%model)) identity = generation%model%identity
+    end function active_model_identity
+
+    subroutine generation_model_adopt(previous, candidate)
+        !! Reuse the previous generation's model when the candidate's model
+        !! key (manifest, CMake script, preset and cache content, input
+        !! paths) is the same; otherwise the candidate loads its own.
+        type(generation_t), intent(in) :: previous
+        type(generation_t), intent(inout) :: candidate
+        character(len=HASH_LEN) :: key
+        character(len=PATH_LEN) :: message
+        integer :: ierr
+
+        if (allocated(candidate%model)) deallocate (candidate%model)
+        candidate%model_key = ''
+        candidate%model_generation = ''
+        if (.not. allocated(previous%model)) return
+        if (len_trim(previous%model_key) /= HASH_LEN) return
+        if (.not. candidate%input_inventory_ready) then
+            call generation_inventory_restore(candidate, ierr, message)
+            if (ierr /= 0) return
+        end if
+        key = generation_model_key(candidate%input_inventory, &
+            candidate%driver_digest, previous%model_full_key)
+        if (key /= previous%model_key) return
+        candidate%model = previous%model
+        candidate%model_key = key
+        candidate%model_generation = previous%model_generation
+        candidate%model_full_key = previous%model_full_key
+    end subroutine generation_model_adopt
+
+    logical function case_needs_all(generation, name) result(needs)
+        !! The case is excluded by default through a label (slow), so its
+        !! run passes --all. Without a model: the slow name rule.
+        type(generation_t), intent(in) :: generation
+        character(len=*), intent(in) :: name
+        integer :: k, j, d
+
+        needs = is_slow_test(trim(name))
+        if (.not. allocated(generation%model)) return
+        k = model_find_case(generation%model, trim(name))
+        if (k == 0) return
+        needs = .false.
+        associate (c => generation%model%cases(k))
+            do j = 1, size(c%labels)
+                do d = 1, size(generation%model%default_exclude)
+                    if (c%labels(j)%s == generation%model%default_exclude(d)%s) &
+                        needs = .true.
+                end do
+            end do
+        end associate
+    end function case_needs_all
+
+    function case_attributes_json(generation, name) result(text)
+        !! ,"labels":[...],"layer":"..." of a model case; '' otherwise.
+        type(generation_t), intent(in) :: generation
+        character(len=*), intent(in) :: name
+        character(len=:), allocatable :: text
+        integer :: k, j
+
+        text = ''
+        if (.not. allocated(generation%model)) return
+        k = model_find_case(generation%model, trim(name))
+        if (k == 0) return
+        associate (c => generation%model%cases(k))
+            text = ',"labels":['
+            do j = 1, size(c%labels)
+                if (j > 1) text = text//','
+                text = text//'"'//json_escape_string(c%labels(j)%s)//'"'
+            end do
+            text = text//'],"layer":"'
+            if (c%layer > 0) text = text// &
+                json_escape_string(generation%model%layers(c%layer)%name)
+            text = text//'"'
+        end associate
+    end function case_attributes_json
+
+    subroutine discover_campaign(generation, session, request, &
             selected, n_selected, &
             n_mandatory_selected, seed, ierr, message, bypass_coverage)
-        character(len=*), intent(in) :: project_dir
-        character(len=*), intent(in) :: generation_id
+        !! Select a campaign from the cases of the generation's project model
+        !! (loaded once per generation, see generation_model_ensure).
+        type(generation_t), intent(inout) :: generation
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(inout) :: request
         character(len=*), intent(out) :: selected(:)
@@ -2746,20 +2887,34 @@ contains
         integer :: n_changed, n_affected, n_cached, i, n_all, n_impacted
         integer :: n_history, n_debt, cursor_seed, n_priorities, limit
         integer :: n_selected_priorities
-        integer, allocatable :: candidate_ids(:)
         integer :: shuffle_status, coverage_status
         character(len=MAX_PATH), allocatable :: filenames(:)
         character(len=NAME_LEN), allocatable :: all_names(:), impacted(:)
         character(len=NAME_LEN), allocatable :: history(:), debt(:), priorities(:)
         type(coverage_epoch_t) :: coverage
         character(len=PATH_LEN) :: coverage_path
+        character(len=PATH_LEN) :: project_dir
+        character(len=HASH_LEN) :: generation_id
         logical, allocatable :: is_test_arr(:)
         logical :: reproduce_only, focused_targets
+        integer, allocatable :: model_cases(:)
+        integer :: capacity, kept
 
+        project_dir = campaign_project(generation)
+        generation_id = generation%identity
+        ierr = 0
+        message = ''
+        call generation_model_ensure(generation, ierr, message)
+        if (ierr /= 0) return
+        capacity = MAX_NODES
+        if (allocated(generation%model)) then
+            model_cases = project_inventory_cases(generation%model)
+            capacity = max(capacity, size(model_cases))
+        end if
         allocate (changed_ids(MAX_NODES), affected_ids(MAX_NODES), &
-            candidate_ids(MAX_NODES), filenames(MAX_NODES), &
-            all_names(MAX_NODES), impacted(MAX_NODES), history(MAX_NODES), &
-            debt(MAX_NODES), priorities(MAX_NODES), is_test_arr(MAX_NODES))
+            filenames(MAX_NODES), &
+            all_names(capacity), impacted(capacity), history(capacity), &
+            debt(capacity), priorities(capacity), is_test_arr(MAX_NODES))
         selected = ''
         impacted = ''
         n_selected = 0
@@ -2770,18 +2925,33 @@ contains
             if (seed == 0) seed = 1
         end if
         backend = detect_backend(project_dir)
-        ierr = 0
-        message = ''
-        if (backend%kind == BACKEND_CMAKE) then
+        if (backend%kind /= BACKEND_CMAKE .and. backend%kind /= BACKEND_NATIVE) then
+            ierr = 1
+            message = 'Gremlin currently requires the native fpm test backend'
+            return
+        end if
+        n_all = 0
+        n_affected = 0
+        if (allocated(generation%model)) then
+            do i = 1, size(model_cases)
+                associate (name => generation%model%cases(model_cases(i))%name)
+                    if (len(name) > len(all_names)) then
+                        ierr = 1
+                        message = 'test case name exceeds supported length: '//name
+                        return
+                    end if
+                    n_all = n_all + 1
+                    all_names(n_all) = name
+                end associate
+            end do
+        else
+            ! The frozen FO_CMAKE_NATIVE route has no project model.
             call cmake_registered_names(backend, all_names, n_all, ierr, message)
             if (ierr /= 0) return
-            n_affected = 0
-        else
-            if (backend%kind /= BACKEND_NATIVE) then
-                ierr = 1
-                message = 'Gremlin currently requires the native fpm test backend'
-                return
-            end if
+        end if
+        if (backend%kind == BACKEND_NATIVE .and. request%only_changed .and. &
+            .not. request%has_previous_generation) then
+            ! First-generation affected tests of the working-tree change.
             call fo_changed_modules(project_dir, dag, changed_ids, n_changed, &
                 affected_ids, n_affected, n_cached, ierr, filenames=filenames, &
                 is_test_arr=is_test_arr)
@@ -2789,11 +2959,6 @@ contains
                 message = 'cannot scan frozen project test inventory'
                 return
             end if
-            do i = 1, dag%n_nodes
-                candidate_ids(i) = i
-            end do
-            call gfortran_selected_test_names(project_dir, filenames, candidate_ids, &
-                dag%n_nodes, .true., all_names, n_all)
         end if
         call read_campaign_history(session, all_names, n_all, history, n_history, &
             debt, n_debt, cursor_seed, ierr, message)
@@ -2812,6 +2977,14 @@ contains
         else if (request%only_changed) then
             call gfortran_selected_test_names(project_dir, filenames, affected_ids, &
                 n_affected, .false., impacted, n_impacted)
+            ! Affected names outside the model inventory are not campaign cases.
+            kept = 0
+            do i = 1, n_impacted
+                if (.not. any(all_names(:n_all) == impacted(i))) cycle
+                kept = kept + 1
+                impacted(kept) = impacted(i)
+            end do
+            n_impacted = kept
         end if
         n_priorities = 0
         ! Zero-random campaigns keep their explicit gate across source edits.
@@ -3337,7 +3510,7 @@ contains
         call argv_push(packed, n_args, 'test')
         call argv_push(packed, n_args, '--no-build')
         call argv_push(packed, n_args, '--json')
-        if (is_slow_test(trim(selected(index_case)))) then
+        if (case_needs_all(generation, selected(index_case))) then
             call argv_push(packed, n_args, '--all')
         end if
         call argv_push(packed, n_args, trim(selected(index_case)))
@@ -3386,7 +3559,7 @@ contains
         character(len=*), intent(in) :: project_dir
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(inout) :: request
-        type(generation_t), intent(in) :: generation
+        type(generation_t), intent(inout) :: generation
         character(len=*), intent(inout) :: selected(:)
         integer, intent(inout) :: n_selected, index_case, seed, campaign
         integer(int64), intent(inout) :: campaign_started_ms
@@ -3452,7 +3625,7 @@ contains
             seed = next_campaign_seed(seed)
             next_request = request
             next_request%seed = seed
-            call discover_campaign(campaign_project(generation), generation%identity, &
+            call discover_campaign(generation, &
                 session, next_request, selected, n_selected, mandatory_count, seed, &
                 ierr, message)
             request%requirement_digest = next_request%requirement_digest
@@ -3550,7 +3723,7 @@ contains
         logical :: credit, is_gate
         character(len=160) :: gate_identity
         character(len=256) :: completion_id
-        character(len=32768) :: record
+        character(len=:), allocatable :: record
         character(len=16) :: journal_outcome
         character(len=PATH_LEN) :: journal_path
         character(len=PATH_LEN) :: coverage_path
@@ -3588,7 +3761,7 @@ contains
                 trim(receipt_epoch)// &
                 ',"inventory_digest":"'//trim(inventory_digest)//'"'
         end if
-        write (record, '(a)') '{"completion_id":"'//trim(completion_id)// &
+        record = '{"completion_id":"'//trim(completion_id)// &
             '","session_id":"'//trim(json_escape_string(session%session_id))// &
             '","lane_id":"'//trim(json_escape_string(request%lane_id))// &
             '","generation":"'//generation%identity// &
@@ -3596,8 +3769,9 @@ contains
             trim(json_escape_string(trim(generation%driver_path)))// &
             '","driver_digest":"'//generation%driver_digest// &
             '","driver_size":'//trim(int64_text(generation%driver_size))// &
-            ',"case_id":"'//trim(json_escape_string(case_name))// &
-            '","outcome":"'//trim(journal_outcome)//'","status":"'// &
+            ',"case_id":"'//trim(json_escape_string(case_name))//'"'// &
+            case_attributes_json(generation, case_name)// &
+            ',"outcome":"'//trim(journal_outcome)//'","status":"'// &
             trim(outcome)//'","exitcode":'// &
             trim(json_int(exitcode))//',"seed":'//trim(json_int(seed))// &
             trim(receipt_identity)//trim(gate_identity)// &
@@ -3701,6 +3875,8 @@ contains
             '","candidate_driver_size":'// &
             trim(int64_text(candidate%driver_size))// &
             ',"active_generation":"'//trim(active%identity)// &
+            '","active_model":"'//trim(active_model_identity(active))// &
+            '","active_model_generation":"'//trim(active%model_generation)// &
             '","candidate_generation":"'//trim(candidate%identity)// &
             '","active_project":"'//trim(json_escape_string(active_project))// &
             '","candidate_project":"'//trim(json_escape_string(candidate_project))// &

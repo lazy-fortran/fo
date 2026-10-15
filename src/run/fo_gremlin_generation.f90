@@ -13,6 +13,8 @@ module fo_gremlin_generation
         generation_manifest_capture, generation_manifest_load, &
         generation_manifest_materialize, generation_manifest_execution_identity, &
         generation_manifest_release
+    use fo_project_model, only: project_model_t
+    use fx_hash, only: sha256_string
     implicit none
     private
 
@@ -48,10 +50,17 @@ module fo_gremlin_generation
         logical :: input_inventory_ready = .false.
         logical :: input_inventory_complete = .false.
         character(len=1024) :: input_inventory_diagnostic = ''
+        ! Project model (#167): loaded once for a built generation, or reused
+        ! from the generation model_generation whose model_key is the same.
+        type(project_model_t), allocatable :: model
+        character(len=HASH_LEN) :: model_key = ''
+        character(len=HASH_LEN) :: model_generation = ''
+        ! The model depends on all source content (fpm source layers).
+        logical :: model_full_key = .false.
     end type generation_t
 
     public :: generation_capture, generation_driver_identity, &
-        generation_load_inventory
+        generation_load_inventory, generation_model_key
 
     interface
         integer(c_int) function fo_c_generation_validate_root(root) &
@@ -98,6 +107,55 @@ module fo_gremlin_generation
     end interface
 
 contains
+
+    function generation_model_key(inventory, driver_digest, full) result(key)
+        !! Reuse key of a generation's project model: the content of the
+        !! inputs that define targets and cases (manifests, locks, CMake
+        !! scripts, presets and caches, the configuration context, test and
+        !! program mains) plus the path, role and kind of every input. A
+        !! library or CMake source edit keeps the key; adding, removing or
+        !! renaming a file changes it. full: every content digest counts.
+        type(input_inventory_t), intent(in) :: inventory
+        character(len=*), intent(in) :: driver_digest
+        logical, intent(in) :: full
+        character(len=HASH_LEN) :: key
+        character(len=:), allocatable :: text
+        integer :: i
+
+        text = 'model-key|1|'//trim(driver_digest)
+        do i = 1, inventory%entry_count
+            associate (e => inventory%entries(i))
+                text = text//new_line('a')//trim(e%root_alias)//'|'// &
+                    trim(e%relative_path)//'|'//trim(e%role)//'|'// &
+                    char(48 + modulo(e%kind, 10))//'|'//trim(e%link_target)
+                if (full .or. defines_model(e)) &
+                    text = text//'|'//trim(e%content_digest)
+            end associate
+        end do
+        key = sha256_string(text)
+    end function generation_model_key
+
+    logical function defines_model(entry)
+        type(input_entry_t), intent(in) :: entry
+        character(len=:), allocatable :: base
+        integer :: slash
+
+        select case (trim(entry%role))
+        case ('project-manifest', 'dependency-manifest', 'dependency-lock', &
+                'dependency-git-identity', 'registry-config', &
+                'registry-configuration', 'cmake-configuration', 'test-oracle', &
+                'test-main', 'executable-main', 'example-main')
+            defines_model = .true.
+            return
+        end select
+        slash = index(entry%relative_path, '/', back=.true.)
+        base = trim(entry%relative_path(slash + 1:))
+        defines_model = base == 'CMakeLists.txt' .or. base == 'CMakePresets.json' &
+            .or. base == 'CMakeUserPresets.json' .or. base == 'CMakeCache.txt'
+        if (len(base) > 6) then
+            if (base(len(base) - 5:) == '.cmake') defines_model = .true.
+        end if
+    end function defines_model
 
     subroutine generation_capture(project_root, cas_root, context, generation, &
             ierr, message)

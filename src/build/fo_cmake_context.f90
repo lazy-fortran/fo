@@ -38,7 +38,7 @@ module fo_cmake_context
 
     public :: cmake_context_init, cmake_context_query, cmake_context_read_reply
     public :: cmake_context_build_path, cmake_context_validate_hint
-    public :: cmake_context_read_file
+    public :: cmake_context_read_file, cmake_context_adopt_query
 
 contains
 
@@ -143,6 +143,27 @@ contains
             '{"kind":"toolchains","version":1}],"client":'// &
             '{"fo_request":"'//context%request_token//'"}}')
     end subroutine cmake_context_query
+
+    subroutine cmake_context_adopt_query(context)
+        !! Take the request token of the File API query already in the build
+        !! tree (written by the fo process that configured it), so a reply
+        !! that answers that query counts as current. A reply older than the
+        !! query still does not match.
+        type(cmake_context_t), intent(inout) :: context
+        character(:), allocatable :: text
+        character(len=*), parameter :: key = '"fo_request":"'
+        integer :: start, finish
+
+        call cmake_context_read_file(cmake_context_build_path(context)// &
+            '/.cmake/api/v1/query/client-fo/query.json', text)
+        if (.not. allocated(text)) return
+        start = index(text, key)
+        if (start == 0) return
+        start = start + len(key)
+        finish = index(text(start:), '"')
+        if (finish < 2) return
+        context%request_token = text(start:start + finish - 2)
+    end subroutine cmake_context_adopt_query
 
     subroutine create_empty_file(path)
         character(len=*), intent(in) :: path
