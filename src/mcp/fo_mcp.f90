@@ -1270,29 +1270,35 @@ contains
         type(json_builder_t), intent(inout) :: jb
         character(len=*), intent(in) :: name, type_name
         character(len=*), intent(in), optional :: description, choices
-        integer :: start, comma
 
         call json_key(jb, name)
         call json_object_start(jb)
         call json_key_string(jb, 'type', type_name)
-        if (present(choices)) then
-            call json_key(jb, 'enum')
-            call json_array_start(jb)
-            start = 1
-            do
-                comma = index(choices(start:), ',')
-                if (comma == 0) then
-                    call json_value_string(jb, trim(choices(start:)))
-                    exit
-                end if
-                call json_value_string(jb, choices(start:start + comma - 2))
-                start = start + comma
-            end do
-            call json_array_end(jb)
-        end if
+        if (present(choices)) call enum_array(jb, choices)
         if (present(description)) call json_key_string(jb, 'description', description)
         call json_object_end(jb)
     end subroutine schema_property
+
+    subroutine enum_array(jb, choices)
+        !! "enum": [...] from a comma separated list.
+        type(json_builder_t), intent(inout) :: jb
+        character(len=*), intent(in) :: choices
+        integer :: start, comma
+
+        call json_key(jb, 'enum')
+        call json_array_start(jb)
+        start = 1
+        do
+            comma = index(choices(start:), ',')
+            if (comma == 0) then
+                call json_value_string(jb, trim(choices(start:)))
+                exit
+            end if
+            call json_value_string(jb, choices(start:start + comma - 2))
+            start = start + comma
+        end do
+        call json_array_end(jb)
+    end subroutine enum_array
 
     subroutine make_tools_list_response(id_str, response)
         character(len=*), intent(in) :: id_str
@@ -1348,7 +1354,6 @@ contains
         use fo_gremlin_request, only: gremlin_option_t, GA_UNBOUNDED
         type(json_builder_t), intent(inout) :: jb
         type(gremlin_option_t), intent(in) :: option
-        integer :: start, comma
 
         call json_key(jb, trim(option%key))
         call json_object_start(jb)
@@ -1378,21 +1383,7 @@ contains
             call json_key_string(jb, 'type', 'boolean')
         case default
             call json_key_string(jb, 'type', 'string')
-            if (len_trim(option%choices) > 0) then
-                call json_key(jb, 'enum')
-                call json_array_start(jb)
-                start = 1
-                do
-                    comma = index(option%choices(start:), ',')
-                    if (comma == 0) then
-                        call json_value_string(jb, trim(option%choices(start:)))
-                        exit
-                    end if
-                    call json_value_string(jb, option%choices(start:start + comma - 2))
-                    start = start + comma
-                end do
-                call json_array_end(jb)
-            end if
+            if (len_trim(option%choices) > 0) call enum_array(jb, option%choices)
         end select
         if (len_trim(option%note) > 0) &
             call json_key_string(jb, 'description', trim(option%note))
