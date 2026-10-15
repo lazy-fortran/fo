@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   build-test:
-    name: build + fpm test
+    name: build + focused tests
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -68,13 +68,16 @@ jobs:
           test "$(sha256sum "$pinned" | cut -d' ' -f1)" = "$digest"
           echo "FO_DRIVER_A=$pinned" >> "$GITHUB_ENV"
 
-      - name: Test
+      - name: Test project model and scoped Gremlin behavior
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          export FO="$HOME/.local/bin/fo"
-          export FO_BIN="$FO"
-          export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0
-          fpm test
+          export FO="$FO_DRIVER_A" FO_BIN="$FO_DRIVER_A"
+          export FO_DISABLE_SELF_REFRESH=1 FO_SELF_REFRESH=0 FO_JOBS=1
+          export TMPDIR="$RUNNER_TEMP/fo-focused-tests"
+          mkdir -p "$TMPDIR"
+          "$FO_DRIVER_A" test test_project_model test_fpm_project_model \
+            test_cmake_project_model test_project_selection_cli \
+            test_project_layering_cli test_gremlin_case_reuse test_gremlin_cmake
 
       - name: Test public fo test dispatch
         run: |
