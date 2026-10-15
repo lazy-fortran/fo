@@ -90,6 +90,8 @@ module fo_gremlin_supervisor
     integer, parameter :: GREMLIN_POLICY_RECEIPT_LIMIT = 512
     integer, parameter :: GREMLIN_MIN_RECEIPT_LIMIT = 16
     integer, parameter :: GREMLIN_HEAVY_LANE_CAPACITY = 2
+    !! Upper bound of concurrently running case children in one lane.
+    integer, parameter :: GREMLIN_MAX_LANE_JOBS = 16
     character(len=*), parameter :: GREMLIN_HEAVY_LEASE = 'gremlin-heavy-work'
 
 
@@ -114,6 +116,14 @@ module fo_gremlin_supervisor
         character(len=16) :: last_status = ''
         character(len=HASH_LEN) :: pass_digest = '', pass_generation = ''
     end type case_index_entry_t
+
+    !! Running-case summary (JSON) of the owner process, set by
+    !! set_running_summary and embedded in every published state.
+    integer, save :: running_summary_count = 0
+    !! Parallel fan-out of this owner; > 1 makes the lane hold the whole host
+    !! heavy-work capacity (see gremlin_heavy_work_weight).
+    integer, save :: lane_admission_jobs = 1
+    character(len=2048), save :: running_summary_cases = ''
 
     interface
         integer(c_int) function c_publish_file(path, data, data_len) &
@@ -314,8 +324,10 @@ contains
         call argv_push(packed, n_args, int_text(request%timeout_seconds))
         call argv_push(packed, n_args, '--campaign-seconds')
         call argv_push(packed, n_args, int_text(request%campaign_seconds))
-        call argv_push(packed, n_args, '--jobs')
-        call argv_push(packed, n_args, int_text(request%jobs))
+        if (request%jobs > 0) then
+            call argv_push(packed, n_args, '--jobs')
+            call argv_push(packed, n_args, int_text(request%jobs))
+        end if
         if (request%only_changed) call argv_push(packed, n_args, '--only-changed')
         if (request%shuffle) call argv_push(packed, n_args, '--shuffle')
         do i = 1, request%n_targets
@@ -1503,7 +1515,7 @@ contains
         type(gremlin_lease_group_t) :: heavy_work_lease
         type(generation_t) :: active_generation, candidate_generation
         type(change_watch_t) :: change_watch
-        type(child_t) :: build_child, test_child
+        type(child_t) :: build_child, test_children(GREMLIN_MAX_LANE_JOBS)
         character(len=PATH_LEN) :: message, state_name, last_failed_identity
         character(len=PATH_LEN) :: capture_diagnostic
         character(len=PATH_LEN) :: fatal_message, state_message
@@ -1515,6 +1527,7 @@ contains
         character(len=65536) :: status_text
         character(len=128) :: stored_session_id
         integer :: ierr, build_exit, test_exit, launch_error, completed, selected_count
+        integer :: lane_jobs, slot
         integer :: cancel_error, release_error, capture_error, state_error
         integer :: registration_error
         integer :: build_view_cleanup_status
@@ -1523,6 +1536,7 @@ contains
         integer(int64) :: capture_debounce_ms, campaign_started_ms, freshness_ticket
         integer(int64) :: last_idle_reap_ms, last_cache_maintenance_ms, now_ms
         character(len=PATH_LEN) :: freshness_path
+        character(len=NAME_LEN) :: finished_case
         real(dp) :: test_timeout
         logical :: have_active, have_candidate, stop_requested, capture_ok
         logical :: capture_failed, provider_quiet
@@ -1536,7 +1550,10 @@ contains
         candidate_generation = generation_t()
         owner_request = request
         build_child = child_t()
-        test_child = child_t()
+        test_children = child_t()
+        lane_jobs = lane_job_count(request)
+        lane_admission_jobs = lane_jobs
+        call set_running_summary(test_children)
         completed = 0
         selected_count = 0
         sequence = 0
@@ -1738,7 +1755,7 @@ contains
 
         do
             if (fatal_error) exit
-            if (build_child%pid <= 0 .and. test_child%pid <= 0) then
+            if (build_child%pid <= 0 .and. running_count(test_children) == 0) then
                 call clock_milliseconds(now_ms)
                 if (now_ms == 0_int64 .or. &
                         now_ms - last_idle_reap_ms >= 1000_int64) then
@@ -1773,7 +1790,7 @@ contains
                 if (build_done) then
                     call complete_build(project_dir, session, owner_request, candidate_generation, &
                         build_child, build_exit, active_generation, have_active, &
-                        test_child, active_lease, candidate_lease, &
+                        test_children, active_lease, candidate_lease, &
                         have_active_lease, have_candidate_lease, active_pinned, &
                         candidate_pinned, selected, selected_count, campaign_seed, &
                         completed, state_name, last_failed_identity, sequence, ierr, message)
@@ -1793,19 +1810,13 @@ contains
                     end if
                     if (build_exit == 0 .and. have_active .and. selected_count > 0) then
                         campaign_number = campaign_number + 1
-                        test_index = 1
+                        test_index = 0
                         call clock_milliseconds(campaign_started_ms)
-                        call launch_selected_case(session, owner_request, active_generation, &
-                            selected, selected_count, test_index, campaign_seed, &
-                            campaign_number, test_child, ierr, message, completed, sequence)
-                        if (ierr == 0 .and. test_child%reused) then
-                            completed = completed + 1
-                            call advance_campaign(project_dir, session, owner_request, &
-                                active_generation, selected, selected_count, &
-                                test_index, campaign_seed, campaign_number, &
-                                campaign_started_ms, test_child, ierr, message, &
-                                completed, state_name, sequence)
-                        end if
+                        call advance_campaign(project_dir, session, owner_request, &
+                            active_generation, selected, selected_count, &
+                            test_index, campaign_seed, campaign_number, &
+                            campaign_started_ms, test_children, lane_jobs, .true., &
+                            ierr, message, completed, state_name, sequence)
                         if (ierr /= 0) then
                             fatal_error = .true.
                             exit
@@ -1816,83 +1827,70 @@ contains
             end if
             if (fatal_error) exit
 
-            if (test_child%pid > 0) then
+            do slot = 1, GREMLIN_MAX_LANE_JOBS
+                if (test_children(slot)%pid <= 0) cycle
                 test_timeout = real(case_wall_timeout(active_generation%project_root, &
-                    test_child%case_name, request%timeout_seconds), dp)
-                call process_poll_pid(test_child%pid, test_done, test_exit)
+                    test_children(slot)%case_name, request%timeout_seconds), dp)
+                call process_poll_pid(test_children(slot)%pid, test_done, test_exit)
                 if (test_done) then
                     state_name = 'testing'
-                    observed_outcome = runner_case_outcome(test_child%log_file, &
-                        test_child%case_name)
-                    call append_execution_provenance(test_child%log_file, &
-                        test_child%execution_view)
+                    observed_outcome = runner_case_outcome(test_children(slot)%log_file, &
+                        test_children(slot)%case_name)
+                    call append_execution_provenance(test_children(slot)%log_file, &
+                        test_children(slot)%execution_view)
                     call record_case(session, owner_request, active_generation, &
-                        test_child, test_exit, observed_outcome, sequence, campaign_seed, &
-                        ierr, message)
-                    call execution_view_release(test_child%execution_view, &
+                        test_children(slot), test_exit, observed_outcome, sequence, &
+                        campaign_seed, ierr, message)
+                    call execution_view_release(test_children(slot)%execution_view, &
                         test_exit /= 0 .or. trim(observed_outcome) /= 'PASS', &
                         release_error, state_message)
-                    test_child%pid = 0
-                    completed = completed + 1
-                    if (ierr /= 0) then
-                        fatal_error = .true.
-                        exit
-                    end if
-                    call publish_state(session, owner_request, state_name, &
-                        active_generation, candidate_generation, test_child%case_name, &
-                        completed, selected_count, campaign_seed, observed_outcome, &
-                        test_exit, ierr, message)
-                    if (ierr /= 0) then
-                        fatal_error = .true.
-                        exit
-                    end if
-                    call advance_campaign(project_dir, session, owner_request, &
-                        active_generation, selected, &
-                        selected_count, test_index, campaign_seed, campaign_number, &
-                        campaign_started_ms, test_child, ierr, message, completed, &
-                        state_name, sequence)
-                    if (ierr /= 0) then
-                        fatal_error = .true.
-                        exit
-                    end if
-                else if (elapsed_seconds(test_child%started_at) >= test_timeout) then
-                    call cancel_owned_process(test_child%pid, test_exit)
+                else if (elapsed_seconds(test_children(slot)%started_at) >= test_timeout) then
+                    call cancel_owned_process(test_children(slot)%pid, test_exit)
                     if (test_exit /= 0) then
                         message = 'cannot cancel timed-out Gremlin test process'
                         fatal_error = .true.
                         exit
                     end if
-                    call append_execution_provenance(test_child%log_file, &
-                        test_child%execution_view)
-                    call execution_view_release(test_child%execution_view, .true., &
-                        release_error, state_message)
+                    call append_execution_provenance(test_children(slot)%log_file, &
+                        test_children(slot)%execution_view)
+                    call execution_view_release(test_children(slot)%execution_view, &
+                        .true., release_error, state_message)
+                    test_exit = 124
+                    observed_outcome = 'TIMEOUT'
                     call record_case(session, owner_request, active_generation, &
-                        test_child, 124, 'TIMEOUT', sequence, campaign_seed, ierr, message)
-                    test_child%pid = 0
-                    completed = completed + 1
-                    if (ierr /= 0) then
-                        fatal_error = .true.
-                        exit
-                    end if
-                    call publish_state(session, owner_request, state_name, &
-                        active_generation, candidate_generation, test_child%case_name, &
-                        completed, selected_count, campaign_seed, 'TIMEOUT', 124, &
+                        test_children(slot), 124, 'TIMEOUT', sequence, campaign_seed, &
                         ierr, message)
-                    if (ierr /= 0) then
-                        fatal_error = .true.
-                        exit
-                    end if
-                    call advance_campaign(project_dir, session, owner_request, &
-                        active_generation, selected, &
-                        selected_count, test_index, campaign_seed, campaign_number, &
-                        campaign_started_ms, test_child, ierr, message, completed, &
-                        state_name, sequence)
-                    if (ierr /= 0) then
-                        fatal_error = .true.
-                        exit
-                    end if
+                else
+                    cycle
                 end if
-            end if
+                ! One child finished (or timed out): its receipt was allocated
+                ! its sequence number just now, in completion order.
+                finished_case = test_children(slot)%case_name
+                test_children(slot)%pid = 0
+                call set_running_summary(test_children)
+                completed = completed + 1
+                if (ierr /= 0) then
+                    fatal_error = .true.
+                    exit
+                end if
+                call publish_state(session, owner_request, state_name, &
+                    active_generation, candidate_generation, finished_case, &
+                    completed, selected_count, campaign_seed, observed_outcome, &
+                    test_exit, ierr, message)
+                if (ierr /= 0) then
+                    fatal_error = .true.
+                    exit
+                end if
+                call advance_campaign(project_dir, session, owner_request, &
+                    active_generation, selected, &
+                    selected_count, test_index, campaign_seed, campaign_number, &
+                    campaign_started_ms, test_children, lane_jobs, .false., ierr, &
+                    message, completed, state_name, sequence)
+                if (ierr /= 0) then
+                    fatal_error = .true.
+                    exit
+                end if
+            end do
             if (fatal_error) exit
 
             ! Snapshot consumers before the provider poll: a request arriving
@@ -1931,7 +1929,7 @@ contains
                 end if
                 ierr = 0
             end if
-            if (build_child%pid <= 0 .and. test_child%pid <= 0 .and. &
+            if (build_child%pid <= 0 .and. running_count(test_children) == 0 .and. &
                     have_heavy_work_lease) then
                 call release_heavy_work_slot(heavy_work_lease, &
                     have_heavy_work_lease, ierr, message)
@@ -1954,12 +1952,8 @@ contains
             if (len_trim(fatal_message) == 0) &
                 fatal_message = 'Gremlin stopped after an evidence or process error'
             cancel_error = 0
-            if (test_child%pid > 0) then
-                call cancel_test_case(session, active_generation, test_child, &
-                test_exit, state_message)
-                if (test_exit /= 0) cancel_error = test_exit
-                if (test_exit == 0) test_child%pid = 0
-            end if
+            call cancel_all_test_cases(session, active_generation, test_children, &
+                cancel_error, state_message)
             if (build_child%pid > 0) then
                 call cancel_owned_process(build_child%pid, build_exit)
                 if (build_exit /= 0 .and. cancel_error == 0) cancel_error = build_exit
@@ -2014,14 +2008,11 @@ contains
             exitcode = 2
             return
         end if
-        stop_requested = stop_requested .or. test_child%pid > 0 .or. build_child%pid > 0
+        stop_requested = stop_requested .or. running_count(test_children) > 0 .or. &
+            build_child%pid > 0
         cancel_error = 0
-        if (test_child%pid > 0) then
-            call cancel_test_case(session, active_generation, test_child, &
-                test_exit, state_message)
-            if (test_exit /= 0) cancel_error = test_exit
-            if (test_exit == 0) test_child%pid = 0
-        end if
+        call cancel_all_test_cases(session, active_generation, test_children, &
+            cancel_error, state_message)
         if (build_child%pid > 0) then
             call cancel_owned_process(build_child%pid, build_exit)
             if (build_exit /= 0 .and. cancel_error == 0) cancel_error = build_exit
@@ -2232,11 +2223,12 @@ contains
         limit = max(GREMLIN_MIN_RECEIPT_LIMIT, min(GREMLIN_POLICY_RECEIPT_LIMIT, parsed))
     end function receipt_limit
 
-    integer function gremlin_heavy_work_weight() result(weight)
+    integer function gremlin_host_jobs() result(jobs)
+        !! Host job budget; matches native_jobs(): unset/invalid FO_JOBS keeps
+        !! the host default.
         character(len=32) :: value
-        integer :: jobs, status, parse_status
+        integer :: status, parse_status
 
-        ! Match native_jobs(): unset/invalid FO_JOBS keeps the host default.
         jobs = process_detect_nproc()
         if (jobs < 1) jobs = 1
         call get_environment_variable('FO_JOBS', value, status=status)
@@ -2247,7 +2239,15 @@ contains
                 if (jobs < 1) jobs = 1
             end if
         end if
-        weight = min(GREMLIN_HEAVY_LANE_CAPACITY, jobs)
+    end function gremlin_host_jobs
+
+    integer function gremlin_heavy_work_weight() result(weight)
+        !! Host admission weight of this lane out of GREMLIN_HEAVY_LANE_CAPACITY:
+        !! min(capacity, FO_JOBS). A lane that fans out (jobs > 1) holds the
+        !! whole capacity, so parallel lanes never overlap on the host while two
+        !! serial FO_JOBS=1 lanes still share it.
+        weight = min(GREMLIN_HEAVY_LANE_CAPACITY, gremlin_host_jobs())
+        if (lane_admission_jobs > 1) weight = GREMLIN_HEAVY_LANE_CAPACITY
     end function gremlin_heavy_work_weight
 
     subroutine maybe_capture_latest(project_dir, session, driver_pin, request, &
@@ -2501,7 +2501,7 @@ contains
 
     subroutine complete_build(live_dir, session, request, candidate, build_child, &
             build_exit, &
-            active, have_active, test_child, active_lease, candidate_lease, &
+            active, have_active, test_children, active_lease, candidate_lease, &
             have_active_lease, have_candidate_lease, active_pinned, candidate_pinned, &
             selected, selected_count, seed, completed, state_name, last_failed, &
             sequence, ierr, message)
@@ -2511,7 +2511,7 @@ contains
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(inout) :: request
         type(generation_t), intent(inout) :: candidate, active
-        type(child_t), intent(inout) :: build_child, test_child
+        type(child_t), intent(inout) :: build_child, test_children(:)
         type(gremlin_lease_t), intent(inout) :: active_lease, candidate_lease
         integer, intent(in) :: build_exit
         logical, intent(inout) :: have_active
@@ -2529,7 +2529,7 @@ contains
         type(gremlin_lease_t) :: new_active_lease
         type(gremlin_request_t), allocatable :: selection_request
         integer :: inventory_status, cancel_exit, mandatory_count, state_status
-        integer :: release_status, pin_status
+        integer :: release_status, pin_status, i
         character(len=PATH_LEN) :: state_message, release_message
         character(len=PATH_LEN) :: coverage_path, discovery_diagnostic
         type(gremlin_coverage_view_t) :: coverage_view
@@ -2553,9 +2553,12 @@ contains
             last_failed = candidate%identity
             state_name = 'build_failed'
             active_case = ''
-            if (test_child%pid > 0) then
-                active_case = test_child%case_name
-            end if
+            do i = 1, size(test_children)
+                if (test_children(i)%pid > 0) then
+                    active_case = test_children(i)%case_name
+                    exit
+                end if
+            end do
             call publish_state(session, request, state_name, active, candidate, &
                 trim(active_case), &
                 completed, selected_count, seed, 'BUILD_FAIL', build_exit, ierr, message)
@@ -2598,8 +2601,10 @@ contains
             return
         end if
         candidate_pinned = .true.
-        if (test_child%pid > 0) then
-            call cancel_test_case(session, active, test_child, cancel_exit, message)
+        if (running_count(test_children) > 0) then
+            ! Supersession: every in-flight child of the old generation goes.
+            call cancel_all_test_cases(session, active, test_children, cancel_exit, &
+                message)
             if (cancel_exit /= 0) then
                 ierr = cancel_exit
                 message = 'cannot cancel obsolete generation test process'
@@ -2609,7 +2614,6 @@ contains
                 call gremlin_lease_release(new_active_lease, release_status, release_message)
                 return
             end if
-            test_child%pid = 0
         end if
 
         if (active_pinned) then
@@ -3528,6 +3532,78 @@ contains
         values(1) = name
     end subroutine move_to_priority
 
+    integer function running_count(children) result(n)
+        type(child_t), intent(in) :: children(:)
+
+        n = count(children%pid > 0)
+    end function running_count
+
+    function first_running_case(children) result(name)
+        type(child_t), intent(in) :: children(:)
+        character(len=NAME_LEN) :: name
+        integer :: i
+
+        name = ''
+        do i = 1, size(children)
+            if (children(i)%pid > 0) then
+                name = children(i)%case_name
+                return
+            end if
+        end do
+    end function first_running_case
+
+    subroutine set_running_summary(children)
+        !! Record the running cases (dispatch order by slot) for publish_state.
+        type(child_t), intent(in) :: children(:)
+        integer :: i
+
+        running_summary_count = running_count(children)
+        running_summary_cases = ''
+        do i = 1, size(children)
+            if (children(i)%pid <= 0) cycle
+            if (len_trim(running_summary_cases) + len_trim(children(i)%case_name) + 6 &
+                    > len(running_summary_cases)) exit
+            if (len_trim(running_summary_cases) > 0) running_summary_cases = &
+                trim(running_summary_cases)//','
+            running_summary_cases = trim(running_summary_cases)//'"'// &
+                trim(json_escape_string(trim(children(i)%case_name)))//'"'
+        end do
+    end subroutine set_running_summary
+
+    subroutine cancel_all_test_cases(session, generation, children, ierr, message)
+        !! Cancel every in-flight case; ierr is the first failure, the others
+        !! are still attempted so no child outlives the generation.
+        type(gremlin_session_t), intent(in) :: session
+        type(generation_t), intent(in) :: generation
+        type(child_t), intent(inout) :: children(:)
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+        integer :: i, status
+        character(len=PATH_LEN) :: child_message
+
+        ierr = 0
+        message = ''
+        do i = 1, size(children)
+            if (children(i)%pid <= 0) cycle
+            call cancel_test_case(session, generation, children(i), status, child_message)
+            if (status /= 0 .and. ierr == 0) then
+                ierr = status
+                message = child_message
+            end if
+        end do
+        call set_running_summary(children)
+    end subroutine cancel_all_test_cases
+
+    integer function lane_job_count(request) result(k)
+        !! Case children one lane runs at once: the request's jobs, else the
+        !! host heavy-work weight (1 for FO_JOBS=1).
+        type(gremlin_request_t), intent(in) :: request
+
+        k = request%jobs
+        if (k < 1) k = min(GREMLIN_HEAVY_LANE_CAPACITY, gremlin_host_jobs())
+        k = max(1, min(GREMLIN_MAX_LANE_JOBS, k))
+    end function lane_job_count
+
     subroutine cancel_test_case(session, generation, child, ierr, message)
         type(gremlin_session_t), intent(in) :: session
         type(generation_t), intent(in) :: generation
@@ -3571,12 +3647,12 @@ contains
     end subroutine append_execution_provenance
 
     subroutine launch_selected_case(session, request, generation, selected, n_selected, &
-            index_case, seed, campaign, child, ierr, message, completed, sequence)
+            index_case, seed, campaign, lane_jobs, child, ierr, message, sequence)
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(in) :: request
         type(generation_t), intent(in) :: generation
         character(len=*), intent(in) :: selected(:)
-        integer, intent(in) :: n_selected, index_case, seed, campaign, completed
+        integer, intent(in) :: n_selected, index_case, seed, campaign, lane_jobs
         type(child_t), intent(out) :: child
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
@@ -3649,6 +3725,10 @@ contains
             'FO_GREMLIN_EXECUTION_CWD='//trim(child%execution_view%cwd)//';'// &
             'FO_GREMLIN_FROZEN_ROOT='//trim(test_project)//';'// &
             'TMPDIR='//trim(child%execution_view%tmpdir)
+        ! Parallel cases split the host job budget; a serial lane keeps the
+        ! children's own OpenMP default.
+        if (lane_jobs > 1) execution_env = execution_env//';OMP_NUM_THREADS='// &
+            trim(int_text(max(1, gremlin_host_jobs()/lane_jobs)))
         n_args = 0
         call argv_push(packed, n_args, trim(executable))
         ! The generation was built once by start_build; a case never builds.
@@ -3694,15 +3774,14 @@ contains
             return
         end if
         call clock_seconds(child%started_at)
-        call publish_state(session, request, 'testing', generation, generation, &
-            child%case_name, completed, n_selected, seed, 'RUNNING', 0, ierr, message)
     end subroutine launch_selected_case
 
     subroutine advance_campaign(project_dir, session, request, generation, selected, &
-            n_selected, index_case, seed, campaign, campaign_started_ms, child, ierr, message, &
-            completed, state_name, sequence)
-        !! Launch the next case; a reused case completes at once and the
-        !! campaign advances again.
+            n_selected, index_case, seed, campaign, campaign_started_ms, children, &
+            lane_jobs, first, ierr, message, completed, state_name, sequence)
+        !! Dispatch cases in selection order until lane_jobs children run or
+        !! nothing is left to dispatch now; a reused case completes at once.
+        !! first: the campaign's first dispatch (no gate check, no rotation).
         character(len=*), intent(in) :: project_dir
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(inout) :: request
@@ -3710,26 +3789,36 @@ contains
         character(len=*), intent(inout) :: selected(:)
         integer, intent(inout) :: n_selected, index_case, seed, campaign
         integer(int64), intent(inout) :: campaign_started_ms
-        type(child_t), intent(inout) :: child
+        type(child_t), intent(inout) :: children(:)
+        integer, intent(in) :: lane_jobs
+        logical, intent(in) :: first
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message, state_name
         integer, intent(inout) :: completed
         integer, intent(inout) :: sequence
 
+        logical :: started, reused, first_dispatch
+
+        first_dispatch = first
         do
-            child%reused = .false.
             call advance_campaign_step(project_dir, session, request, generation, &
                 selected, n_selected, index_case, seed, campaign, &
-                campaign_started_ms, child, ierr, message, completed, state_name, &
-                sequence)
-            if (ierr /= 0 .or. .not. child%reused) return
-            completed = completed + 1
+                campaign_started_ms, children, lane_jobs, first_dispatch, started, &
+                reused, ierr, message, completed, state_name, sequence)
+            first_dispatch = .false.
+            if (ierr /= 0) return
+            if (reused) then
+                completed = completed + 1
+            else if (.not. started .or. running_count(children) >= lane_jobs) then
+                return
+            end if
         end do
     end subroutine advance_campaign
 
     subroutine advance_campaign_step(project_dir, session, request, generation, &
             selected, n_selected, index_case, seed, campaign, campaign_started_ms, &
-            child, ierr, message, completed, state_name, sequence)
+            children, lane_jobs, first, started, reused, ierr, message, completed, &
+            state_name, sequence)
         character(len=*), intent(in) :: project_dir
         type(gremlin_session_t), intent(in) :: session
         type(gremlin_request_t), intent(inout) :: request
@@ -3737,12 +3826,17 @@ contains
         character(len=*), intent(inout) :: selected(:)
         integer, intent(inout) :: n_selected, index_case, seed, campaign
         integer(int64), intent(inout) :: campaign_started_ms
-        type(child_t), intent(inout) :: child
+        type(child_t), intent(inout) :: children(:)
+        integer, intent(in) :: lane_jobs
+        logical, intent(in) :: first
+        logical, intent(out) :: started, reused
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message, state_name
         integer, intent(in) :: completed
         integer, intent(inout) :: sequence
 
+        type(child_t) :: child
+        integer :: slot, in_flight
         integer(int64) :: now_ms
         integer :: status, mandatory_count, launch_error
         integer :: owner_pid
@@ -3756,7 +3850,14 @@ contains
 
         ierr = 0
         message = ''
+        started = .false.
+        reused = .false.
+        in_flight = running_count(children)
+        if (in_flight >= lane_jobs) return
         call clock_milliseconds(now_ms)
+        if (first) then
+            index_case = 1
+        else
         if (request%random_count == 0) then
             call gremlin_session_read(project_dir, request%lane_id, &
                 active_session, owner_pid, owner_start, status_text, status, message)
@@ -3777,7 +3878,10 @@ contains
                 call compute_readiness(session, trim(status_text), coverage_view, &
                     .true., readiness, ierr, message)
                 if (ierr /= 0) return
-                if (readiness%local_gate_green) then
+                if (readiness%local_gate_green .and. in_flight > 0) then
+                    ! Quiescence only when nothing is in flight: drain first.
+                    return
+                else if (readiness%local_gate_green) then
                     selected = ''
                     n_selected = 0
                     state_name = 'quiescent'
@@ -3795,6 +3899,9 @@ contains
             now_ms - campaign_started_ms < &
             int(request%campaign_seconds, int64)*1000_int64) then
             index_case = index_case + 1
+        else if (in_flight > 0) then
+            ! Rotate the campaign only when no child is in flight.
+            return
         else
             seed = next_campaign_seed(seed)
             next_request = request
@@ -3814,6 +3921,7 @@ contains
             campaign = campaign + 1
             index_case = 1
             call clock_milliseconds(campaign_started_ms)
+        end if
         end if
         if (n_selected == 0) then
             state_name = 'idle'
@@ -3835,8 +3943,21 @@ contains
             return
         end if
         state_name = 'testing'
+        slot = 1
+        do while (children(slot)%pid > 0)
+            slot = slot + 1
+        end do
         call launch_selected_case(session, request, generation, selected, n_selected, &
-            index_case, seed, campaign, child, ierr, message, completed, sequence)
+            index_case, seed, campaign, lane_jobs, child, ierr, message, sequence)
+        children(slot) = child
+        reused = child%reused
+        if (ierr == 0 .and. child%pid > 0) then
+            started = .true.
+            call set_running_summary(children)
+            call publish_state(session, request, 'testing', generation, generation, &
+                first_running_case(children), completed, n_selected, seed, 'RUNNING', &
+                0, ierr, message)
+        end if
         if (ierr /= 0) then
             launch_error = ierr
             launch_message = message
@@ -4090,7 +4211,9 @@ contains
             '","active_project":"'//trim(json_escape_string(active_project))// &
             '","candidate_project":"'//trim(json_escape_string(candidate_project))// &
             '","current_test":"'//trim(json_escape_string(current_case))// &
-            '","completed":'//trim(json_int(completed))// &
+            '","running":'//trim(json_int(running_summary_count))// &
+            ',"running_cases":['//trim(running_summary_cases)// &
+            '],"completed":'//trim(json_int(completed))// &
             ',"selected":'//trim(json_int(selected_count))// &
             ',"seed":'//trim(json_int(seed))//',"last_outcome":"'// &
             trim(last_outcome)//'","last_exitcode":'// &
@@ -4763,11 +4886,13 @@ contains
         character(len=:), allocatable :: canonical
         integer :: i
 
+        ! jobs 0 (host-derived default) keys like 1: only an explicit fan-out
+        ! makes a lane incompatible with a default start.
         canonical = 'v1|r='//trim(int_text(request%random_count))// &
             '|s='//trim(int_text(request%seed))//'|c='// &
             trim(int_text(request%campaign_seconds))//'|t='// &
             trim(int_text(request%timeout_seconds))//'|j='// &
-            trim(int_text(request%jobs))//'|changed='// &
+            trim(int_text(max(1, request%jobs)))//'|changed='// &
             trim(json_bool(request%only_changed))//'|shuffle='// &
             trim(json_bool(request%shuffle))
         do i = 1, request%n_targets
