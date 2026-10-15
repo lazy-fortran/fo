@@ -32,7 +32,7 @@ contains
         !! backend is 'fpm' or 'cmake'.
         character(len=*), intent(in) :: dir, backend
         character(len=64) :: used(n_cases)
-        character(len=48) :: lines(4)
+        character(len=64) :: lines(4)
         integer :: i
 
         used = [character(len=64) :: 'use tw_core, only: core_value', &
