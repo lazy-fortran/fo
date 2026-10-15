@@ -5,6 +5,7 @@ module fo_fmt
     use fo_cache, only: cache_store_root, HASH_LEN
     use fx_hash, only: sha256_file
     use fo_format, only: format_file_with_indent
+    use fo_lint, only: skip_generated_source
     use fo_process, only: process_run_argv_logged, argv_push
     use fx_string, only: to_lower
     use fx_path, only: path_dirname
@@ -35,7 +36,7 @@ contains
             call fs_collect_files(trim(scan_root), '', trim(suffixes(s)), '', &
                 hits, n_hits)
             do i = 1, n_hits
-                if (skip_generated_source(scan_root, hits(i))) cycle
+                if (skip_generated_source(scan_root, hits(i), .false.)) cycle
                 if (n_files >= size(files)) exit
                 n_files = n_files + 1
                 files(n_files) = hits(i)
@@ -63,46 +64,6 @@ contains
         deallocate (hits)
         deallocate (files)
     end subroutine write_source_list
-
-    logical function skip_generated_source(root, path)
-        character(len=*), intent(in) :: root, path
-
-        character(len=512) :: rel, first, padded
-        integer :: root_len, slash
-
-        rel = trim(path)
-        root_len = len_trim(root)
-        if (root_len > 0 .and. len_trim(path) > root_len) then
-            if (path(1:root_len) == root(1:root_len)) then
-                rel = path(root_len + 1:)
-                if (rel(1:1) == '/') rel = rel(2:)
-            end if
-        end if
-
-        first = rel
-        slash = index(first, '/')
-        if (slash > 0) first = first(1:slash - 1)
-
-        skip_generated_source = .true.
-        if (index(trim(first), 'build') == 1) return
-        if (trim(first) == 'SRC') return
-        if (len_trim(first) > 0) then
-            if (first(1:1) == '.') return
-        end if
-
-        padded = '/'//trim(rel)//'/'
-        if (index(padded, '/_skbuild/') > 0) return
-        if (index(padded, '/_deps/') > 0) return
-        if (index(padded, '/dependencies/') > 0) return
-        if (index(padded, '/deps-src/') > 0) return
-        if (index(padded, '/.git/') > 0) return
-        if (index(padded, '/.venv/') > 0) return
-        if (index(padded, '/venv/') > 0) return
-        if (index(padded, '/site-packages/') > 0) return
-        if (index(padded, '/node_modules/') > 0) return
-
-        skip_generated_source = .false.
-    end function skip_generated_source
 
     subroutine fmt_sources(dir, selection, check, deep, files, n_files, output, exitcode)
         !! Format or check Fortran sources. `selection` picks all project sources,
@@ -310,7 +271,7 @@ contains
         if (len_trim(fpath) == 0) return
         if (.not. is_fortran_source(fpath)) return
         if (fpath(1:1) /= '/') fpath = trim(project_dir)//'/'//trim(fpath)
-        if (skip_generated_source(project_dir, fpath)) return
+        if (skip_generated_source(project_dir, fpath, .false.)) return
         inquire (file=trim(fpath), exist=exists)
         if (.not. exists) return
 

@@ -22,6 +22,7 @@ module fo_project_model
     use fx_hash, only: sha256_string, fnv1a_string
     use fo_pattern, only: pattern_t, pattern_compile, pattern_compile_glob, &
         pattern_matches, pattern_is_glob
+    use fo_util, only: int_text
     implicit none
     private
 
@@ -2048,14 +2049,5 @@ function joined(items) result(text)
         text = text//items(k)%s
     end do
 end function joined
-
-function int_text(value) result(text)
-    integer, intent(in) :: value
-    character(len=:), allocatable :: text
-    character(len=16) :: buffer
-
-    write (buffer, '(i0)') value
-    text = trim(buffer)
-end function int_text
 
 end module fo_project_model

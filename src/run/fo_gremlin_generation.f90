@@ -17,6 +17,8 @@ module fo_gremlin_generation
     use fo_project_model, only: project_model_t, model_unit_t
     use fx_string, only: string_t
     use fx_hash, only: sha256_string
+    use fo_util, only: int_text
+    use fo_generation_manifest, only: value_or_empty
     implicit none
     private
 
@@ -918,13 +920,6 @@ contains
         if (ios /= 0) ierr = ios
     end subroutine write_identity
 
-    function value_or_empty(value) result(text)
-        character(len=:), allocatable, intent(in) :: value
-        character(len=:), allocatable :: text
-        text = ''
-        if (allocated(value)) text = value
-    end function value_or_empty
-
     logical function identity_field_fits(value)
         character(len=:), allocatable, intent(in) :: value
 
@@ -932,12 +927,5 @@ contains
         if (.not. allocated(value)) return
         identity_field_fits = len(value) <= PART_LEN
     end function identity_field_fits
-
-    function int_text(value) result(text)
-        integer, intent(in) :: value
-        character(len=32) :: text
-        write (text, '(i0)') value
-        text = trim(adjustl(text))
-    end function int_text
 
 end module fo_gremlin_generation

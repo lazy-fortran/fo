@@ -1781,7 +1781,7 @@ contains
         deallocate (cfiles)
 
         call compile_dep_c_sources(deps, n_deps_resolved, project_dir, obj_dir, &
-            log_file, src_objs, n_src_objs, is_prog_arr, exitcode)
+            log_file, src_objs, n_src_objs, exitcode, is_prog_arr)
     end subroutine compile_sources
 
     logical function app_program_selected(source, project_dir, app_dir, config) &
@@ -2066,54 +2066,18 @@ contains
     end subroutine append_module_units
 
     subroutine compile_dep_c_sources(deps, n_deps, project_dir, obj_dir, &
-            log_file, src_objs, n_src_objs, is_prog_arr, exitcode)
-        !! Compile each path-dependency's C sources (e.g. fortfront's
-        !! stdout_sanitizer.c) and add the objects to the link set, so symbols
-        !! a dep's Fortran calls into are resolved.
+            log_file, objects, n_objects, exitcode, is_prog_arr)
+        !! Compile each dependency's C and C++ sources (e.g. fortfront's
+        !! stdout_sanitizer.c) and append the objects to the link set, so symbols
+        !! the dependency's Fortran calls into are resolved. A full link set
+        !! fails the build rather than dropping an object.
         type(resolved_src_t), intent(in) :: deps(MAX_RESOLVED)
         integer, intent(in) :: n_deps
         character(len=*), intent(in) :: project_dir, obj_dir, log_file
-        character(len=512), intent(inout) :: src_objs(MAX_SRC_OBJS)
-        integer, intent(inout) :: n_src_objs
-        logical, intent(inout) :: is_prog_arr(MAX_SRC_OBJS)
-        integer, intent(inout) :: exitcode
-
-        character(len=512), allocatable :: cfiles(:)
-        character(len=512) :: c_line, obj_path
-        integer :: d, ic, n_cfiles
-
-        allocate (cfiles(MAX_SRC_OBJS))
-        do d = 1, n_deps
-            call collect_c_family(trim(deps(d)%src_dir), cfiles, n_cfiles)
-            do ic = 1, n_cfiles
-                c_line = cfiles(ic)
-                if (len_trim(c_line) == 0) cycle
-                call make_obj_path(trim(c_line), project_dir, obj_dir, obj_path)
-                call compile_c_family(trim(c_line), obj_path, &
-                    trim(deps(d)%dir), log_file, exitcode, .false.)
-                if (exitcode /= 0) then
-                    deallocate (cfiles)
-                    return
-                end if
-                if (n_src_objs < MAX_SRC_OBJS) then
-                    n_src_objs = n_src_objs + 1
-                    src_objs(n_src_objs) = obj_path
-                    is_prog_arr(n_src_objs) = .false.
-                end if
-            end do
-        end do
-        deallocate (cfiles)
-    end subroutine compile_dep_c_sources
-
-    subroutine compile_test_dev_c_sources(deps, n_deps, project_dir, obj_dir, &
-            log_file, objects, n_objects, exitcode)
-        !! Compile C/C++ sources from dev-dependencies into test-only links.
-        type(resolved_src_t), intent(in) :: deps(MAX_RESOLVED)
-        integer, intent(in) :: n_deps
-        character(len=*), intent(in) :: project_dir, obj_dir, log_file
-        character(len=512), intent(inout) :: objects(MAX_DEP_OBJS)
+        character(len=512), intent(inout) :: objects(:)
         integer, intent(inout) :: n_objects
         integer, intent(inout) :: exitcode
+        logical, intent(inout), optional :: is_prog_arr(:)
 
         character(len=512), allocatable :: cfiles(:)
         character(len=512) :: source, object_path
@@ -2123,25 +2087,23 @@ contains
         do d = 1, n_deps
             call collect_c_family(trim(deps(d)%src_dir), cfiles, n_cfiles)
             do i = 1, n_cfiles
-                if (n_objects >= MAX_DEP_OBJS) then
+                source = cfiles(i)
+                if (len_trim(source) == 0) cycle
+                if (n_objects >= size(objects)) then
+                    write (error_unit, '(a)') 'fo: too many dependency objects to link'
                     exitcode = 1
-                    deallocate (cfiles)
                     return
                 end if
-                source = cfiles(i)
                 call make_obj_path(trim(source), project_dir, obj_dir, object_path)
                 call compile_c_family(trim(source), object_path, &
                     trim(deps(d)%dir), log_file, exitcode, .false.)
-                if (exitcode /= 0) then
-                    deallocate (cfiles)
-                    return
-                end if
+                if (exitcode /= 0) return
                 n_objects = n_objects + 1
                 objects(n_objects) = object_path
+                if (present(is_prog_arr)) is_prog_arr(n_objects) = .false.
             end do
         end do
-        deallocate (cfiles)
-    end subroutine compile_test_dev_c_sources
+    end subroutine compile_dep_c_sources
 
     subroutine add_external_dep_keys(units, n_units, source_path, &
             dep_includes, n_dep_includes, dep_keys, n_dep)
@@ -3043,7 +3005,7 @@ contains
 
         test_dep_objs = dep_objs
         n_test_dep_objs = n_dep_objs
-        call compile_test_dev_c_sources(devsrcs, n_dev, project_dir, obj_dir, &
+        call compile_dep_c_sources(devsrcs, n_dev, project_dir, obj_dir, &
             log_file, test_dep_objs, n_test_dep_objs, exitcode)
         if (exitcode /= 0) return
 
@@ -4032,31 +3994,6 @@ contains
         end if
         if (w > timeout_s) w = timeout_s
     end function test_warn_seconds
-
-    subroutine warn_slow_tests(filenames, run_nodes, run_exits, run_secs, run_cpu, &
-            n_run, test_warn, log_file)
-        !! Advise renaming fast-suite tests that approach their budget. CPU time
-        !! is used where known (run_cpu >= 0): wall time also measures host load.
-        character(len=MAX_PATH), intent(in) :: filenames(:)
-        integer, intent(in) :: run_nodes(:), run_exits(:), n_run, test_warn
-        real, intent(in) :: run_secs(:), run_cpu(:)
-        character(len=*), intent(in) :: log_file
-
-        integer :: i
-        character(len=MAX_PATH) :: tname
-
-        do i = 1, n_run
-            if (run_exits(i) /= 0) cycle
-            call file_basename(filenames(run_nodes(i)), tname)
-            if (run_cpu(i) >= 0.0) then
-                if (run_cpu(i) < real(test_warn)) cycle
-                call warn_current_slow_test(tname, run_cpu(i), .true., log_file)
-            else
-                if (run_secs(i) < real(test_warn)) cycle
-                call warn_current_slow_test(tname, run_secs(i), .false., log_file)
-            end if
-        end do
-    end subroutine warn_slow_tests
 
     subroutine append_timeout_status(log_file, test_name)
         !! The test's own log already names the limit that fired

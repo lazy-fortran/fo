@@ -22,7 +22,7 @@ module fo_generation_manifest
         INPUT_SYMLINK, input_inventory_revalidate, alias_root, hex_value, &
         safe_relative_path
     use fo_fs, only: fs_make_dir
-    use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_util, only: make_tmpfile, delete_tmpfile, int_text
     implicit none
     private
 
@@ -42,6 +42,7 @@ module fo_generation_manifest
     end type generation_manifest_metadata_t
 
     public :: generation_manifest_capture, generation_manifest_load
+    public :: value_or_empty
     public :: generation_manifest_materialize
     public :: generation_manifest_execution_identity
     public :: generation_manifest_release
@@ -506,15 +507,6 @@ contains
         text = ''
         if (allocated(value)) text = value
     end function value_or_empty
-
-    function int_text(value) result(text)
-        integer, intent(in) :: value
-        character(len=:), allocatable :: text
-        character(len=32) :: buffer
-
-        write (buffer, '(i0)') value
-        text = trim(buffer)
-    end function int_text
 
     function bool_text(value) result(text)
         logical, intent(in) :: value

@@ -20,6 +20,7 @@ module fo_lint
     public :: lint_dedup_warnings
     public :: lint_fix_dir
     public :: collect_fortran_sources
+    public :: skip_generated_source
     public :: MAX_FINDINGS, MAX_WARNINGS
 
     integer, parameter :: MAX_FINDINGS = 512
@@ -486,7 +487,7 @@ contains
         do s = 1, size(suffixes)
             call fs_collect_files(dir, '', trim(suffixes(s)), '', hits, n_hits)
             do i = 1, n_hits
-                if (skip_generated_source(dir, hits(i))) cycle
+                if (skip_generated_source(dir, hits(i), .true.)) cycle
                 if (n_files >= size(files)) exit
                 n_files = n_files + 1
                 files(n_files) = hits(i)
@@ -511,8 +512,11 @@ contains
         deallocate (hits)
     end subroutine collect_fortran_sources
 
-    logical function skip_generated_source(root, path)
+    logical function skip_generated_source(root, path, nested_build_dirs)
+        !! True for a path under a generated, vendored or hidden directory.
+        !! nested_build_dirs also skips build and CMakeFiles below the top level.
         character(len=*), intent(in) :: root, path
+        logical, intent(in) :: nested_build_dirs
 
         character(len=512) :: rel, first, padded
         integer :: root_len, slash
@@ -538,9 +542,9 @@ contains
         end if
 
         padded = '/'//trim(rel)//'/'
-        if (index(padded, '/build/') > 0) return
+        if (nested_build_dirs .and. index(padded, '/build/') > 0) return
         if (index(padded, '/_skbuild/') > 0) return
-        if (index(padded, '/CMakeFiles/') > 0) return
+        if (nested_build_dirs .and. index(padded, '/CMakeFiles/') > 0) return
         if (index(padded, '/_deps/') > 0) return
         if (index(padded, '/dependencies/') > 0) return
         if (index(padded, '/deps-src/') > 0) return

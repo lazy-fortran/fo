@@ -12,6 +12,7 @@ module fo_util
     public :: strip_toml_comment
     public :: jsonrpc_error, jsonrpc_null
     public :: json_bool, json_int
+    public :: int_text
     public :: wall_time_seconds
 
     interface
@@ -321,6 +322,15 @@ contains
             text = 'false'
         end if
     end function json_bool
+
+    function int_text(value) result(text)
+        integer, intent(in) :: value
+        character(len=:), allocatable :: text
+        character(len=32) :: buffer
+
+        write (buffer, '(i0)') value
+        text = trim(buffer)
+    end function int_text
 
     function json_int(value) result(text)
         integer, intent(in) :: value
