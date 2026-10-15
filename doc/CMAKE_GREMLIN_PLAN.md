@@ -52,11 +52,12 @@ replaces the per-backend branches in `fo_build_backend`, `app/main.f90`
   the declared closure is the target link graph, which CMake itself does not
   enforce for Fortran module use); impact mapping (`test_impact_select`
   consumes model cases).
-- **Primitives.** `build(targets)`: CMake `cmake --build --target ...`; fpm the
-  native builder restricted to the selected executables (the library remains
-  one unit until a layer-subset build is needed). `run(cases)`: CMake always
-  through `ctest` with exact anchored names and the project's preset or `-C`,
-  so CTest keeps fixture/resource/verdict semantics (#194); fpm the fo runner.
+- **Primitives.** `build(targets)`: fpm the native builder restricted to the
+  selected executables; CMake the native split route below, with
+  `cmake --build --target ...` for targets that need custom commands or
+  generated sources. `run(cases)`: fpm the fo runner; CMake the native CTest
+  runner below, with `ctest` and exact anchored names as the fallback for
+  properties it does not yet implement.
 - **Gremlin.** The same service path as `fo test` (#167): the cached model is
   reused per generation unless manifest, CMake, preset or cache inputs change;
   selection is computed once; one build per generation (#196) and case
@@ -72,11 +73,22 @@ replaces the per-backend branches in `fo_build_backend`, `app/main.f90`
   the same sources, layers, labels and tests) must give identical selections,
   plans and layering verdicts through both backends in `fo test` and Gremlin.
 
-**Native interpreter.** `fo_cmake_native*` (opt-in `FO_CMAKE_NATIVE=1`; only
-`test_native_cmake_cli`, `fo_exec_target` and backend/generation branches
-depend on it) is frozen: no new features, File API is the authority. This
-defers the standalone (CMake-absent) destination below and in #192/#193/#194;
-deleting the slice (#205) needs an explicit decision on that destination.
+**Native CMake (decision 2026-10-15, revised).** Two stages, both native:
+
+1. **Split route (now).** CMake only configures. Fo reads File API
+   `codemodel-v2` compile groups (language, fragments, includes, defines,
+   source indexes), link and archive fragments, generated-source flags and
+   `toolchains-v1` compilers, then compiles and links natively with its own
+   scheduler, module scanning, interface cutoff and shared cache. Tests run
+   natively from `ctest --show-only=json-v1` properties (command argv,
+   WORKING_DIRECTORY, ENVIRONMENT, TIMEOUT, pass/fail regex, WILL_FAIL,
+   SKIP_RETURN_CODE, REQUIRED_FILES, DISABLED, FIXTURES, DEPENDS,
+   RESOURCE_LOCK, RUN_SERIAL, PROCESSORS). Configure reruns only when CMake
+   inputs change. CMake remains the authority on project meaning.
+2. **Interpreter track (later).** `fo_cmake_native*` (opt-in
+   `FO_CMAKE_NATIVE=1`) is kept and grows profile by profile toward the
+   standalone (CMake-absent) destination, starting with GORILLA, each profile
+   checked against the split route (#192, #198). It is not deleted.
 
 ## Current implementation
 

@@ -151,16 +151,24 @@ pytest-testmon, ccache and ninja, mapped onto fo:
 
 Coverage-based selection (testmon style) remains an opt-in audit experiment, never default.
 
-## Pending decisions
+## Decisions (2026-10-15)
 
-- **Standalone CMake destination.** The native interpreter is frozen and File
-  API is the authority. Recommendation: delete the frozen `fo_cmake_native*`
-  slice, its branches and test (about 2,000 lines) and close #192 as not planned
-  for the CMake-absent part, while keeping delegated parity under #193–#198.
-- **Product boundary of side commands.** `fo bench` (belongs under `bench/` and
-  #190), `fo doc`, `fo cover` and the FFC native route (about 1,150 lines with tests).
-- **POSIX `sh` in tests.** Accept it as a test prerequisite, or port the
-  fake-tool scripts for Windows qualification (#163).
+- **Native CMake, in two stages.** Now: the split route. CMake only configures;
+  fo compiles and links natively from File API compile groups and link
+  fragments, and runs tests natively from CTest JSON properties (#193, #194,
+  #196). Later: the `fo_cmake_native*` interpreter grows profile by profile
+  toward the CMake-absent destination, starting with GORILLA (#192, #198). See
+  [the CMake plan](doc/CMAKE_GREMLIN_PLAN.md#backend-neutral-project-model-decision-2026-10-15).
+- **Side commands.** `fo bench` moves into the `bench/` audit tool (#190);
+  `fo doc` is removed; `fo cover` and the FFC route stay.
+- **No shell anywhere.** Product code and tests use native process calls; the
+  generated `#!/bin/sh` fake tools become one compiled test-support program (#163).
+- **Execution.** Parallel worktree agents (Sonnet first, Opus on failure or a
+  rejected review) take exclusive file ownership per wave. The controller
+  reviews, reruns focused gates on the integrated candidate and pushes small
+  increments to main. Waves: 1 bugs, 2 robustness and de-duplication,
+  3 native CMake split route, parallel Gremlin and agent output, 4 case-level
+  testing, one PASS cache, storage and native tests.
 
 ## Issue map
 
