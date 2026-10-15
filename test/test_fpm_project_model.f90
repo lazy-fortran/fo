@@ -12,6 +12,7 @@ program test_fpm_project_model
     use fo_gfortran_build, only: gfortran_selected_test_names
     use fx_string, only: string_t
     use fo_fpm_model, only: fpm_model_load
+    use fo_project_model, only: model_find_layer
     use fo_project_model, only: project_model_t, model_request_t, &
         model_selection_t, model_plan_t, model_select, model_plan, &
         model_selected_names, model_find_case, model_find_target, &
@@ -29,6 +30,7 @@ program test_fpm_project_model
     call write_project()
     call test_model()
     call test_inventory()
+    call test_layers()
     call fs_remove_tree(root)
 
     write (output_unit, '(a,i0,a,i0,a)') 'fpm project model: ', n_pass, &
@@ -196,5 +198,203 @@ contains
                 'model has inventory case '//trim(inventory(i)))
         end do
     end subroutine test_inventory
+
+    subroutine write_layered(tail)
+        !! Three layers (base <- mid <- top), an unlayered source, five tests.
+        character(len=*), intent(in) :: tail
+        character(len=1) :: nl
+
+        nl = new_line('a')
+        call fs_remove_tree(trim(root)//'_layers')
+        call fs_make_dir(trim(root)//'_layers')
+        call fs_make_dir(trim(root)//'_layers/src')
+        call fs_make_dir(trim(root)//'_layers/test')
+        call lput('fpm.toml', 'name = "lay"'//nl//'[extra.fo]'//nl// &
+            '[[extra.fo.inputs]]'//nl//'path = "data/cfg.nml"'//nl//tail)
+        call lput('src/l_base.f90', 'module l_base'//nl//'end module l_base')
+        call lput('src/l_mid.f90', 'module l_mid'//nl//'use l_base'//nl// &
+            'end module l_mid')
+        call lput('src/l_top.f90', 'module l_top'//nl//'use l_mid'//nl// &
+            'end module l_top')
+        call lput('src/l_orphan.f90', 'module l_orphan'//nl//'end module l_orphan')
+        call lput('test/test_base.f90', 'program test_base'//nl//'use l_base'//nl// &
+            'end program test_base')
+        call lput('test/test_mid.f90', 'program test_mid'//nl//'use l_mid'//nl// &
+            'end program test_mid')
+        call lput('test/test_top.f90', 'program test_top'//nl//'use l_top'//nl// &
+            'end program test_top')
+        call lput('test/test_free.f90', 'program test_free'//nl// &
+            'end program test_free')
+        call lput('test/test_lay_slow.f90', 'program test_lay_slow'//nl// &
+            'use l_base'//nl//'end program test_lay_slow')
+    end subroutine write_layered
+
+    subroutine lput(path, text)
+        character(len=*), intent(in) :: path, text
+
+        call fs_write_text(trim(root)//'_layers/'//path, text//new_line('a'))
+    end subroutine lput
+
+    function layers_toml() result(text)
+        character(len=:), allocatable :: text
+        character(len=1) :: nl
+
+        nl = new_line('a')
+        text = '[extra.fo.layers]'//nl// &
+            'base = { source = ["src/l_base.f90"] }'//nl// &
+            "mid = { modules = ['l_mid'], uses = ['base'] }"//nl// &
+            'top = { source = ["src/l_t*.f90"], uses = ["mid"] }'//nl// &
+            '[extra.fo.test-groups]'//nl// &
+            'physics = { tests = ["test_mid", "test/test_top*"], '// &
+            'inputs = ["data/cfg.nml"] }'//nl// &
+            'smoke = { tests = ["test_f*"] }'//nl
+    end function layers_toml
+
+    integer function case_layer_name_check(model, case_name, layer_name) result(ok)
+        type(project_model_t), intent(in) :: model
+        character(len=*), intent(in) :: case_name, layer_name
+        integer :: c
+
+        ok = 0
+        c = model_find_case(model, case_name)
+        if (c == 0) return
+        if (len(layer_name) == 0) then
+            if (model%cases(c)%layer == 0) ok = 1
+        else if (model%cases(c)%layer > 0) then
+            if (model%layers(model%cases(c)%layer)%name == layer_name) ok = 1
+        end if
+    end function case_layer_name_check
+
+    logical function has_label(model, case_name, label) result(found)
+        type(project_model_t), intent(in) :: model
+        character(len=*), intent(in) :: case_name, label
+        integer :: c, i
+
+        found = .false.
+        c = model_find_case(model, case_name)
+        if (c == 0) return
+        do i = 1, size(model%cases(c)%labels)
+            if (model%cases(c)%labels(i)%s == label) found = .true.
+        end do
+    end function has_label
+
+    logical function listed(names, text) result(found)
+        type(string_t), intent(in) :: names(:)
+        character(len=*), intent(in) :: text
+        integer :: i
+
+        found = .false.
+        do i = 1, size(names)
+            if (names(i)%s == text) found = .true.
+        end do
+    end function listed
+
+    subroutine test_layers()
+        type(project_model_t) :: model
+        type(string_t), allocatable :: unlayered(:)
+        character(len=:), allocatable :: message
+        integer :: ierr, c, l
+
+        ! Layers, groups, default exclusion untouched (slow).
+        call write_layered(layers_toml())
+        call fpm_model_load(trim(root)//'_layers', model, ierr, message, unlayered)
+        call check(ierr == 0, 'layered model loads: '//message)
+        if (ierr /= 0) return
+        call check(model%n_layers == 3, 'three layers')
+        call check(model_find_layer(model, 'base') == 1, 'layers keep their order')
+        l = model_find_layer(model, 'mid')
+        call check(l == 2, 'mid layer')
+        if (l > 0) then
+            call check(size(model%layers(l)%uses) == 1, 'mid uses one layer')
+            if (size(model%layers(l)%uses) == 1) call check( &
+                model%layers(l)%uses(1) == 1, 'mid uses base')
+            call check(size(model%layers(l)%sources) == 1, 'module list resolves')
+        end if
+        call check(case_layer_name_check(model, 'test_base', 'base') == 1, &
+            'test_base is in base')
+        call check(case_layer_name_check(model, 'test_mid', 'mid') == 1, &
+            'closure through l_mid reaches base, own source is mid')
+        call check(case_layer_name_check(model, 'test_top', 'top') == 1, &
+            'highest layer of the closure wins')
+        call check(case_layer_name_check(model, 'test_free', '') == 1, &
+            'case reaching no layered source has no layer')
+        call check(case_layer_name_check(model, 'test_lay_slow', 'base') == 1, &
+            'slow case still layered')
+        call check(size(unlayered) == 6, 'unlayered sources are reported')
+        call check(listed(unlayered, 'src/l_orphan.f90'), 'orphan is reported')
+        call check(listed(unlayered, 'test/test_free.f90'), 'test source reported')
+        call check(.not. listed(unlayered, 'src/l_mid.f90'), &
+            'module-list member is not reported')
+
+        call check(has_label(model, 'test_mid', 'physics'), 'group by name')
+        call check(has_label(model, 'test_top', 'physics'), 'group by path glob')
+        call check(.not. has_label(model, 'test_base', 'physics'), &
+            'group does not leak')
+        call check(has_label(model, 'test_free', 'smoke'), 'second group')
+        call check(has_label(model, 'test_lay_slow', 'slow'), 'slow label kept')
+        c = model_find_case(model, 'test_mid')
+        call check(size(model%cases(c)%attrs) == 1, 'group input recorded')
+        if (size(model%cases(c)%attrs) == 1) call check( &
+            model%cases(c)%attrs(1)%key == 'input' .and. &
+            model%cases(c)%attrs(1)%value == 'data/cfg.nml', 'input value')
+        c = model_find_case(model, 'test_base')
+        call check(size(model%cases(c)%attrs) == 0, 'ungrouped case has no inputs')
+        call check(size(model%default_exclude) == 1, 'default stays [slow]')
+
+        ! Explicit exclude replaces [slow]; slow cases then run by default.
+        call write_layered(layers_toml()// &
+            '[extra.fo.test-defaults]'//new_line('a')//'exclude = ["smoke"]')
+        call fpm_model_load(trim(root)//'_layers', model, ierr, message)
+        call check(ierr == 0, 'explicit exclude loads: '//message)
+        call check(size(model%default_exclude) == 1, 'one explicit exclusion')
+        if (size(model%default_exclude) == 1) call check( &
+            model%default_exclude(1)%s == 'smoke', 'explicit exclusion replaces slow')
+        call check(excluded_by_default(model, 'test_free'), 'smoke case excluded')
+        call check(.not. excluded_by_default(model, 'test_lay_slow'), &
+            'slow case no longer excluded')
+
+        ! An explicitly empty list means no exclusions at all.
+        call write_layered(layers_toml()// &
+            '[extra.fo.test-defaults]'//new_line('a')//'exclude = []')
+        call fpm_model_load(trim(root)//'_layers', model, ierr, message)
+        call check(ierr == 0, 'empty exclude loads: '//message)
+        call check(size(model%default_exclude) == 0, 'empty exclude: none')
+        call check(.not. excluded_by_default(model, 'test_lay_slow'), &
+            'empty exclude keeps slow cases')
+        call check(has_label(model, 'test_lay_slow', 'slow'), &
+            'slow label survives an empty exclude')
+
+        ! No layers: nothing reported, cases unlayered.
+        call write_layered('')
+        call fpm_model_load(trim(root)//'_layers', model, ierr, message, unlayered)
+        call check(ierr == 0, 'plain project loads')
+        call check(model%n_layers == 0 .and. size(unlayered) == 0, &
+            'no layers, no report')
+
+        ! A layer naming nothing is an error, not an empty layer.
+        call write_layered('[extra.fo.layers]'//new_line('a')// &
+            "base = { modules = ['no_such_mod'] }")
+        call fpm_model_load(trim(root)//'_layers', model, ierr, message)
+        call check(ierr /= 0 .and. index(message, 'no_such_mod') > 0, &
+            'unknown layer module is rejected')
+        call write_layered('[extra.fo.layers]'//new_line('a')// &
+            'base = { source = ["nowhere/*.f90"] }')
+        call fpm_model_load(trim(root)//'_layers', model, ierr, message)
+        call check(ierr /= 0 .and. index(message, 'nowhere') > 0, &
+            'glob matching nothing is rejected')
+        call fs_remove_tree(trim(root)//'_layers')
+    end subroutine test_layers
+
+    logical function excluded_by_default(model, case_name) result(excluded)
+        type(project_model_t), intent(in) :: model
+        character(len=*), intent(in) :: case_name
+        type(model_request_t) :: request
+        type(model_selection_t) :: selection
+        type(string_t), allocatable :: names(:)
+
+        call model_select(model, request, selection)
+        call model_selected_names(model, selection, names)
+        excluded = .not. listed(names, case_name)
+    end function excluded_by_default
 
 end program test_fpm_project_model
