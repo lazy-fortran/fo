@@ -165,6 +165,12 @@ failure output, named filters, and slow-test label exclusion. fo reads CMake's
 File API and CTest registry as a project model for test selection (see below)
 but does not replace CMake's target model.
 
+## Gremlin tuning
+
+`FO_GREMLIN_RECEIPT_LIMIT` sets how many campaign receipts a lane retains in
+its journal tail. It is clamped to 16 through 512, the default. PASS reuse does
+not depend on it: a per-case index keeps the latest reusable PASS of every case.
+
 ## Test selection
 
 `fo test` selects cases on one project model for both backends: the fpm

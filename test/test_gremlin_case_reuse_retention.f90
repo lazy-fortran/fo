@@ -1,4 +1,4 @@
-program test_gremlin_case_reuse_retention_slow
+program test_gremlin_case_reuse_retention
     !! PASS reuse does not depend on the campaign journal tail (#140): a CMake
     !! project with more cases than the journal retains reuses every unchanged
     !! case after an edit that only affects another target.
@@ -6,20 +6,24 @@ program test_gremlin_case_reuse_retention_slow
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: write_text, make_directory, assert_true
     use fo_test_harness, only: finish_assertions
-    use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json
+    use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json, gremlin_run
     use fo_test_gremlin_oracle, only: gremlin_field, gremlin_wait_ms
     use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_stop_lane
     use fo_test_json, only: json_value_t, json_member, json_boolean_value
     use fo_test_json, only: json_string_value, json_size, json_element
     use fo_test_json, only: json_number_value
+    use fo_test_json, only: json_parse
     implicit none
 
-    integer, parameter :: n_cases = 530
+    integer, parameter :: n_cases = 40
     character(:), allocatable :: driver, scratch, project, cache, state, session
     character(:), allocatable :: first, second
     character(len=*), parameter :: lane = 'reuse-retention'
     character, parameter :: nl = new_line('a')
     type(string_list_t) :: args
+    type(string_list_t) :: environment
+    character(:), allocatable :: parse_message
+    logical :: valid
     type(process_result_t) :: process
     type(json_value_t) :: reply
     integer :: reused, ran
@@ -39,7 +43,11 @@ program test_gremlin_case_reuse_retention_slow
         'end program probe'//nl)
     call write_other(1)
     call gremlin_start_args(args, project, lane, 'test_other')
-    call gremlin_json(driver, project, cache, state, args, reply, process, 60000)
+    ! The lane owner keeps only 16 receipts: far fewer than the cases.
+    call list_add(environment, 'FO_GREMLIN_RECEIPT_LIMIT=16')
+    call gremlin_run(driver, project, cache, state, args, process, environment, 60000)
+    call json_parse(process%stdout, reply, valid, parse_message)
+    call assert_true(valid, 'start reply is JSON')
     session = gremlin_field(reply, 'session_id')
     call assert_true(process%exit_code == 0 .and. len(session) > 0, 'lane starts')
     if (len(session) == 0) call finish_assertions(retain_failed_scratch=.true.)
@@ -158,4 +166,4 @@ contains
         end do
     end subroutine count_receipts
 
-end program test_gremlin_case_reuse_retention_slow
+end program test_gremlin_case_reuse_retention

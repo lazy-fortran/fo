@@ -88,6 +88,7 @@ module fo_gremlin_supervisor
     character(len=*), parameter :: SUMMARY_TRUNCATION = '...[truncated]'
     integer, parameter :: GREMLIN_HISTORY_LIMIT = 128
     integer, parameter :: GREMLIN_POLICY_RECEIPT_LIMIT = 512
+    integer, parameter :: GREMLIN_MIN_RECEIPT_LIMIT = 16
     integer, parameter :: GREMLIN_HEAVY_LANE_CAPACITY = 2
     character(len=*), parameter :: GREMLIN_HEAVY_LEASE = 'gremlin-heavy-work'
 
@@ -883,8 +884,8 @@ contains
         if (len_trim(generation) /= HASH_LEN) return
         cursor = 0_int64
         n_read = 0
-        do while (n_read < GREMLIN_POLICY_RECEIPT_LIMIT)
-            n_page = min(64, GREMLIN_POLICY_RECEIPT_LIMIT - n_read)
+        do while (n_read < receipt_limit())
+            n_page = min(64, receipt_limit() - n_read)
             page_bytes = int(n_page, int64) * int(JOURNAL_MAX_RECORD_BYTES, int64)
             call journal_read_page(trim(state_dir)//'/campaign-journal.jsonl', &
                 cursor, n_page, page_bytes, records, next_cursor, journal_status, &
@@ -2216,6 +2217,20 @@ contains
         if (ierr /= 0) message = &
             'cannot release Gremlin host work slot: '//trim(message)
     end subroutine release_heavy_work_slot
+
+    integer function receipt_limit() result(limit)
+        !! Campaign journal retention: FO_GREMLIN_RECEIPT_LIMIT clamped to
+        !! [GREMLIN_MIN_RECEIPT_LIMIT, GREMLIN_POLICY_RECEIPT_LIMIT].
+        character(len=32) :: value
+        integer :: status, parsed
+
+        limit = GREMLIN_POLICY_RECEIPT_LIMIT
+        call get_environment_variable('FO_GREMLIN_RECEIPT_LIMIT', value, status=status)
+        if (status /= 0) return
+        read (value, *, iostat=status) parsed
+        if (status /= 0) return
+        limit = max(GREMLIN_MIN_RECEIPT_LIMIT, min(GREMLIN_POLICY_RECEIPT_LIMIT, parsed))
+    end function receipt_limit
 
     integer function gremlin_heavy_work_weight() result(weight)
         character(len=32) :: value
@@ -3992,7 +4007,7 @@ contains
                 return
             end if
             call journal_compact_tail(trim(session%state_dir)// &
-                '/campaign-journal.jsonl', GREMLIN_POLICY_RECEIPT_LIMIT, status, message)
+                '/campaign-journal.jsonl', receipt_limit(), status, message)
             if (status /= JOURNAL_OK) then
                 ierr = status
                 return
