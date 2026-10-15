@@ -507,7 +507,7 @@ contains
             return
         end if
         if ((core_action == 'status' .or. core_action == 'wait') .and. &
-                detail_count == 0) then
+            detail_count == 0) then
             if (len(request_json) > 1) request_json = request_json//','
             request_json = request_json//'"detail":"summary"'
         end if
@@ -610,8 +610,8 @@ contains
         call extract_json_string_member(line, 'json', json_mode, &
             option_count, option_error)
         if (option_count > 1 .or. (option_count == 1 .and. &
-                (option_error /= 0 .or. &
-                (trim(json_mode) /= 'compact' .and. trim(json_mode) /= 'full')))) then
+            (option_error /= 0 .or. &
+            (trim(json_mode) /= 'compact' .and. trim(json_mode) /= 'full')))) then
             call jsonrpc_error(id_str, -32602, 'invalid json mode', response)
             return
         end if
@@ -704,9 +704,13 @@ contains
 
     subroutine handle_backend_test_named(line, id_str, dir, tmpfile, response)
         use fo_build_backend, only: backend_t, detect_backend, backend_test, &
-            backend_test_names, BACKEND_NONE, BACKEND_NATIVE
-        use fo_gfortran_build, only: gfortran_named_test_exists
+            backend_test_names, BACKEND_NONE
         use fo_scan, only: is_slow_test
+        use fx_string, only: string_t
+        use fo_project_model, only: model_request_t, model_selection_t, &
+            project_model_t, SELECT_EMPTY
+        use fo_project_load, only: project_has_model, project_resolve, &
+            project_run_names
         use fo_test_results, only: test_result_entry_t, parse_test_results, &
             format_test_results_text, format_test_results_json
         character(len=*), intent(in) :: line, id_str, dir, tmpfile
@@ -720,6 +724,11 @@ contains
         integer :: n_names
         type(test_result_entry_t), allocatable :: entries(:)
         integer :: n_entries, ierr, i, mode_count, mode_error
+        type(model_request_t) :: request
+        type(model_selection_t) :: selection
+        type(project_model_t) :: model
+        type(string_t), allocatable :: extra(:)
+        character(len=:), allocatable :: run_names(:), message
 
         b = detect_backend(trim(dir))
         if (b%kind == BACKEND_NONE) then
@@ -741,34 +750,48 @@ contains
         call extract_json_string_member(line, 'json', json_mode, &
             mode_count, mode_error)
         if (mode_count > 1 .or. (mode_count == 1 .and. &
-                (mode_error /= 0 .or. &
-                (json_mode /= 'compact' .and. json_mode /= 'full')))) then
+            (mode_error /= 0 .or. &
+            (json_mode /= 'compact' .and. json_mode /= 'full')))) then
             call delete_tmpfile(tmpfile)
             call jsonrpc_error(id_str, -32602, 'invalid test json mode', response)
             return
         end if
 
         if (n_names > 0) then
+            allocate (request%names(n_names), request%include_labels(0), &
+                request%exclude_labels(0), request%layers(0))
             do i = 1, n_names
-                if (b%kind == BACKEND_NATIVE) then
-                    if (.not. gfortran_named_test_exists(b%project_dir, &
-                        test_names(i))) then
-                        output_text = 'fo: unknown test: '//trim(test_names(i))
-                        call delete_tmpfile(tmpfile)
-                        call make_tool_text_response(id_str, output_text, 1, response)
-                        return
-                    end if
+                request%names(i)%s = trim(test_names(i))
+            end do
+            if (project_has_model(b)) then
+                ! Same selection as `fo test`: the project model decides.
+                call project_resolve(b, '', request, model, selection, ierr, &
+                    message, extra)
+                if (ierr == 0 .and. selection%status == SELECT_EMPTY .and. &
+                    size(extra) == 0) then
+                    ierr = 1
+                    message = selection%message
                 end if
-                if (is_slow_test(test_names(i))) then
+                if (ierr /= 0) then
+                    output_text = 'fo: '//message
+                    call delete_tmpfile(tmpfile)
+                    call make_tool_text_response(id_str, output_text, 1, response)
+                    return
+                end if
+                call project_run_names(model, selection, extra, run_names)
+            else
+                do i = 1, n_names
+                    if (.not. is_slow_test(test_names(i))) cycle
                     output_text = 'fo: slow test '//trim(test_names(i))// &
                         ' requires --all'
                     call delete_tmpfile(tmpfile)
                     call make_tool_text_response(id_str, output_text, 1, response)
                     return
-                end if
-            end do
-            call backend_test_names(b, test_names, n_names, exitcode, &
-                log_file=tmpfile)
+                end do
+                run_names = test_names(1:n_names)
+            end if
+            call backend_test_names(b, run_names, size(run_names), exitcode, &
+                .true., tmpfile)
         else
             call backend_test(b, exitcode, log_file=tmpfile)
         end if
@@ -778,8 +801,8 @@ contains
             output_text = 'fo: could not parse test results'
             exitcode = 1
         else if (&
-            mode_error == 0 .and. mode_count == 1 .and. &
-            (json_mode == 'compact' .or. json_mode == 'full')) then
+                mode_error == 0 .and. mode_count == 1 .and. &
+                (json_mode == 'compact' .or. json_mode == 'full')) then
             call format_test_results_json(entries, n_entries, exitcode, &
                 output_text, tmpfile)
         else if (n_entries > 0) then
@@ -1146,8 +1169,8 @@ contains
         call extract_json_string_member(line, 'json', output_mode, &
             mode_count, mode_error)
         if (mode_count > 1 .or. (mode_count == 1 .and. &
-                (mode_error /= 0 .or. &
-                (output_mode /= 'compact' .and. output_mode /= 'full')))) then
+            (mode_error /= 0 .or. &
+            (output_mode /= 'compact' .and. output_mode /= 'full')))) then
             call jsonrpc_error(id_str, -32602, 'invalid json mode', response)
             return
         end if
@@ -1412,7 +1435,7 @@ contains
                 return
             end if
         else if (run_event%event_type == JSON_INTEGER .and. &
-            allocated(run_event%raw_val)) then
+                allocated(run_event%raw_val)) then
             if (len(run_event%raw_val) > len(run_text)) then
                 ierr = 1
                 return

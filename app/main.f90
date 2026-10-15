@@ -21,8 +21,13 @@ program fo_main
     use fo_test_results, only: test_result_entry_t, &
         parse_test_results, format_test_results_text, format_test_results_json
     use fo_test_random, only: select_random_tests
-    use fo_gfortran_build, only: gfortran_selected_test_names, &
-        gfortran_named_test_exists
+    use fo_gfortran_build, only: gfortran_selected_test_names
+    use fx_string, only: string_t
+    use fo_project_model, only: model_request_t, model_selection_t, &
+        project_model_t, SELECT_EMPTY
+    use fo_project_load, only: project_has_model, project_resolve, &
+        project_run_names, &
+        project_list_text, project_list_json
     use fo_capabilities, only: capabilities_t, detect_capabilities, &
         capabilities_json
     use fo_fmt, only: fo_fmt_run, fo_fmt_files, fo_fmt_changed_run, &
@@ -519,13 +524,18 @@ contains
         out = output_unit
         if (present(unit)) out = unit
         write (out, '(a)') &
-            'usage: fo test [--profile NAME] [--flag FLAGS] [options] [name ...]'
+            'usage: fo test [--profile NAME] [--flag FLAGS] [options] [name|glob ...]'
         write (out, '(a)') ''
-        write (out, '(a)') 'Run project tests from fpm.toml.'
+        write (out, '(a)') 'Run project tests from fpm.toml or CTest.'
         write (out, '(a)') ''
         write (out, '(a)') 'options:'
         write (out, '(a)') '  --only-changed  run tests affected by changed modules'
         write (out, '(a)') '  --all           include slow tests'
+        write (out, '(a)') '  -L, --label RE  select cases with a label matching RE (repeat: AND)'
+        write (out, '(a)') '  -LE, --exclude-label RE'
+        write (out, '(a)') '                  drop cases whose labels match RE (repeat: AND)'
+        write (out, '(a)') '  --layer NAME    select cases of layer NAME (repeat: union)'
+        write (out, '(a)') '  --list          print the selection and build plan; no build'
         write (out, '(a)') '  --random N      sample N tests without replacement'
         write (out, '(a)') '  --seed S        replay a random sample with seed S'
         write (out, '(a)') '  --verbose       show all tests (default for named runs)'
@@ -537,6 +547,8 @@ contains
         write (out, '(a)') 'examples:'
         write (out, '(a)') '  fo test'
         write (out, '(a)') '  fo test test_cpp6d_vs_gc'
+        write (out, '(a)') '  fo test ''test_core_*'' -LE slow'
+        write (out, '(a)') '  fo test --list --json -L unit'
         write (out, '(a)') '  fo test --only-changed'
         write (out, '(a)') '  fo test --random 12 --seed 1729'
     end subroutine print_test_usage
@@ -1180,9 +1192,15 @@ contains
         integer :: affected_ids(MAX_NODES), n_affected
         integer :: n_cached, ierr, i, n_test_names, n_arg_names
         integer :: random_count, random_seed, clock_count
-        integer :: argument_status
+        integer :: argument_status, eq
         logical :: only_changed, include_all, verbose, use_json, skip_next
-        logical :: end_options, flags_seen
+        logical :: end_options, flags_seen, list_mode, filtered, use_model
+        type(model_request_t) :: request
+        type(model_selection_t) :: selection
+        type(project_model_t) :: model
+        type(string_t), allocatable :: extra(:)
+        character(len=:), allocatable :: run_names(:)
+        character(len=:), allocatable :: text, message
         character(len=1024) :: arg
         character(len=1024), allocatable :: test_names(:), random_candidates(:)
         character(len=512) :: test_log, flags
@@ -1206,6 +1224,9 @@ contains
         random_seed = 0
         skip_next = .false.
         end_options = .false.
+        list_mode = .false.
+        allocate (request%include_labels(0), request%exclude_labels(0), &
+            request%layers(0))
         do i = 2, command_argument_count()
             call get_command_argument(i, arg, status=argument_status)
             if (argument_status /= 0) then
@@ -1230,6 +1251,24 @@ contains
                 if (len_trim(arg) <= 10) call test_usage_error('--profile needs NAME')
                 profile = arg(11:)
                 cycle
+            end if
+            eq = index(arg, '=')
+            if (eq > 2 .and. arg(1:2) == '--') then
+                select case (arg(1:eq - 1))
+                case ('--label')
+                    if (len_trim(arg) <= eq) call test_usage_error('--label needs RE')
+                    call append_request_string(request%include_labels, arg(eq + 1:))
+                    cycle
+                case ('--exclude-label')
+                    if (len_trim(arg) <= eq) &
+                        call test_usage_error('--exclude-label needs RE')
+                    call append_request_string(request%exclude_labels, arg(eq + 1:))
+                    cycle
+                case ('--layer')
+                    if (len_trim(arg) <= eq) call test_usage_error('--layer needs NAME')
+                    call append_request_string(request%layers, arg(eq + 1:))
+                    cycle
+                end select
             end if
             select case (trim(arg))
             case ('--flag')
@@ -1259,6 +1298,20 @@ contains
                 read (arg, *, iostat=ierr) random_seed
                 if (ierr /= 0) call test_usage_error('invalid --seed S')
                 skip_next = .true.
+            case ('-L', '--label')
+                call test_option_value(i, '--label needs RE', arg)
+                call append_request_string(request%include_labels, arg)
+                skip_next = .true.
+            case ('-LE', '--exclude-label')
+                call test_option_value(i, '--exclude-label needs RE', arg)
+                call append_request_string(request%exclude_labels, arg)
+                skip_next = .true.
+            case ('--layer')
+                call test_option_value(i, '--layer needs NAME', arg)
+                call append_request_string(request%layers, arg)
+                skip_next = .true.
+            case ('--list')
+                list_mode = .true.
             case ('--only-changed')
                 only_changed = .true.
             case ('--all')
@@ -1302,6 +1355,24 @@ contains
                 all_flags = trim(flags)
             end if
         end if
+
+        filtered = size(request%include_labels) > 0 .or. &
+            size(request%exclude_labels) > 0 .or. size(request%layers) > 0
+        if (filtered .or. list_mode) then
+            if (random_count > 0 .or. only_changed) then
+                write (error_unit, '(a)') 'fo test: --random and --only-changed '// &
+                    'conflict with -L, -LE, --layer and --list'
+                stop 1
+            end if
+            if (.not. project_has_model(b)) then
+                write (error_unit, '(a)') 'fo test: -L, -LE, --layer and --list '// &
+                    'need the project model (unsupported with FO_CMAKE_NATIVE)'
+                stop 1
+            end if
+        end if
+        use_model = (filtered .or. list_mode .or. n_arg_names > 0) .and. &
+            random_count == 0 .and. .not. only_changed
+        if (use_model) use_model = project_has_model(b)
 
         if (random_count > 0) then
             if (n_arg_names > 0 .or. only_changed) then
@@ -1356,25 +1427,44 @@ contains
             call report_test_result(exitcode, test_log, .false., use_json, &
                 require_results=.true.)
             call delete_tmpfile(test_log)
-        else if (n_arg_names > 0) then
-            ! Validate names against the inventory owned by this backend.
-            ! An unknown name must fail loudly with exit 1, not run nothing
-            ! and exit 0 (#137) nor crash downstream.
+        else if (use_model) then
+            ! One selection path for CLI and MCP: load the project model of
+            ! the backend (CMake is configured, nothing is built) and select.
+            allocate (request%names(n_arg_names))
             do i = 1, n_arg_names
-                if (b%kind == BACKEND_NATIVE) then
-                    if (gfortran_named_test_exists(b%project_dir, test_names(i))) cycle
-                else if (b%kind == BACKEND_CMAKE) then
-                    ! The configured CTest registry is authoritative for CMake
-                    ! IDs. backend_test_names builds first, then CTest applies
-                    ! the exact filter and --no-tests=error rejects no-match.
-                    cycle
-                else
-                    if (dag_find_test_index(dag, test_names(i)) /= 0) cycle
-                end if
-                write (error_unit, '(a,a)') &
-                    'fo: unknown test: '//trim(test_names(i))
-                stop 1
+                request%names(i)%s = trim(test_names(i))
             end do
+            request%all = include_all
+            call project_resolve(b, all_flags, request, model, selection, ierr, &
+                message, extra)
+            if (ierr /= 0) then
+                write (error_unit, '(a)') 'fo: '//message
+                stop 1
+            end if
+            if (list_mode) then
+                if (use_json) then
+                    call project_list_json(model, selection, text)
+                else
+                    call project_list_text(model, selection, text)
+                end if
+                write (output_unit, '(a)') text
+                return
+            end if
+            if (selection%status == SELECT_EMPTY .and. size(extra) == 0) then
+                write (error_unit, '(a)') 'fo: '//selection%message
+                stop 1
+            end if
+            call project_run_names(model, selection, extra, run_names)
+            call make_tmpfile('fo-test', test_log)
+            ! The model already applied the default exclusions and --all.
+            call backend_test_names(b, run_names, size(run_names), exitcode, &
+                .true., test_log, flags=all_flags)
+            call report_test_result(exitcode, test_log, .false., use_json, &
+                require_results=.true.)
+            call delete_tmpfile(test_log)
+        else if (n_arg_names > 0) then
+            ! FO_CMAKE_NATIVE has no project model: the CTest registry is
+            ! authoritative and no-match is rejected by the run.
             if (.not. include_all) then
                 do i = 1, n_arg_names
                     if (.not. is_slow_test(test_names(i))) cycle
@@ -1438,6 +1528,30 @@ contains
         end if
     end subroutine cmd_test
 
+    subroutine test_option_value(i, message, value)
+        integer, intent(in) :: i
+        character(len=*), intent(in) :: message
+        character(len=*), intent(out) :: value
+
+        value = ''
+        if (i >= command_argument_count()) call test_usage_error(message)
+        call get_command_argument(i + 1, value)
+        if (len_trim(value) == 0) call test_usage_error(message)
+    end subroutine test_option_value
+
+    subroutine append_request_string(list, value)
+        type(string_t), allocatable, intent(inout) :: list(:)
+        character(len=*), intent(in) :: value
+        type(string_t), allocatable :: grown(:)
+        integer :: n
+
+        n = size(list)
+        allocate (grown(n + 1))
+        if (n > 0) grown(1:n) = list
+        grown(n + 1)%s = trim(value)
+        call move_alloc(grown, list)
+    end subroutine append_request_string
+
     subroutine test_usage_error(message)
         character(len=*), intent(in) :: message
 
@@ -1446,30 +1560,6 @@ contains
         stop 2
     end subroutine test_usage_error
 
-    integer function dag_find_test_index(dag, name) result(index)
-        ! First test-node whose label matches NAME exactly or whose path
-        ! basename without suffix matches (fpm-style bare target name);
-        ! 0 when the graph contains no such test.
-        type(dag_t), intent(in) :: dag
-        character(len=*), intent(in) :: name
-        character(len=512) :: label
-        integer :: i, slash, dot
-        index = 0
-        do i = 1, dag%n_nodes
-            label = trim(dag%nodes(i)%label)
-            if (label == trim(name)) then
-                index = i
-                return
-            end if
-            slash = index_of_last_char(label, '/')
-            if (slash > 0 .and. slash < len(label)) label = label(slash+1:)
-            dot = last_dot_before_f90(label)
-            if (dot > 1 .and. label(1:dot-1) == trim(name)) then
-                index = i
-                return
-            end if
-        end do
-    end function dag_find_test_index
 
     integer function index_of_last_char(text, ch) result(position)
         character(len=*), intent(in) :: text

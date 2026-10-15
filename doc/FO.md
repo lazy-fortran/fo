@@ -161,8 +161,40 @@ separate system/environment package manager.
 CMake mode configures `cmake -S . -B build -G Ninja`, forwards `FC`,
 `FO_CMAKE_ARGS`, and effective Fortran flags, then calls
 `cmake --build build -j <FO_JOBS>`. Tests run through CTest with parallelism,
-failure output, named filters, and slow-test label exclusion. fo does not parse
-or replace CMake's target model.
+failure output, named filters, and slow-test label exclusion. fo reads CMake's
+File API and CTest registry as a project model for test selection (see below)
+but does not replace CMake's target model.
+
+## Test selection
+
+`fo test` selects cases on one project model for both backends: the fpm
+manifest and source scan, or CMake targets and CTest cases after configure.
+
+```text
+fo test [name|glob ...] [-L RE] [-LE RE] [--layer NAME] [--all]
+fo test --list [--json] [same selection]
+```
+
+- Names are exact case names or whole-name globs (`*`, `?`, `[...]`). An exact
+  name that is no case exits 1 (`unknown test`). A glob that matches nothing
+  selects nothing.
+- `-L, --label RE` keeps cases with a label matching RE; repeated options must
+  all match. `-LE, --exclude-label RE` drops cases whose labels match every
+  repeated RE; it also wins over `--all`. Regexes use the CTest subset documented
+  in `src/util/fo_pattern.f90`.
+- `--layer NAME` keeps cases of a layer; repeated options form a union.
+- Default exclusions: the `slow` label (fpm: `test-defaults.exclude` when set;
+  CMake with a test preset: the cases the preset filters out). `--all` lifts
+  them; `-L slow` lifts the matching label. A default-excluded case named
+  exactly needs `--all`.
+- `--list` prints the selected cases (labels, layer, reason), the targets that
+  must be built for them, and whether the plan widened to every target with the
+  reasons. It configures CMake but builds nothing. `--json` emits the same as
+  one object. On a CMake tree whose test executables are not built yet CTest
+  reports no commands, so the plan widens.
+
+MCP `test` uses the same selection for its names. `--list`, labels and layers
+are not available with `--random`, `--only-changed` or `FO_CMAKE_NATIVE`.
 
 ## Agent interfaces
 
