@@ -1,4 +1,5 @@
 module fo_format
+    use fx_string, only: to_lower
     implicit none
     private
     public :: format_lines, format_file, format_file_with_indent, MAX_LINE_LEN
@@ -583,19 +584,8 @@ contains
     end function continuation_pending
 
     ! Case-insensitive tolower for ASCII.
-    pure function to_lower(s) result(r)
-        character(len=*), intent(in) :: s
-        character(len=len(s)) :: r
-        integer :: i, c
-        r = s
-        do i = 1, len(s)
-            c = iachar(s(i:i))
-            if (c >= 65 .and. c <= 90) r(i:i) = achar(c + 32)
-        end do
-    end function to_lower
-
     ! True if the lowercased line starts with kw followed by space, '(', or EOL.
-    pure logical function kw_starts(line, kw)
+    logical function kw_starts(line, kw)
         character(len=*), intent(in) :: line, kw
         integer :: n
         n = len(kw)
@@ -606,7 +596,7 @@ contains
     end function kw_starts
 
     ! True if the entire (trimmed) lowercased line equals kw or kw+optional name.
-    pure logical function kw_eq(line, kw)
+    logical function kw_eq(line, kw)
         character(len=*), intent(in) :: line, kw
         integer :: n
         n = len(kw)
@@ -619,7 +609,7 @@ contains
     end function kw_eq
 
     ! True if trimmed line exactly equals kw, or starts with 'kw ' or 'kw('.
-    pure logical function matches(line, kw)
+    logical function matches(line, kw)
         character(len=*), intent(in) :: line, kw
         integer :: n, tlen
         n = len(kw)

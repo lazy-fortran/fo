@@ -8,6 +8,7 @@ module fo_change_watch
     use fo_gremlin_generation, only: generation_context_t
     use fo_util, only: read_text_file
     use fo_fs, only: fs_realpath
+    use fx_path, only: path_basename
     implicit none
     private
 
@@ -481,17 +482,8 @@ contains
         if (len_trim(root) > 0) return
         parent = canonical_root(parent_path(trim(path)))
         if (len_trim(parent) == 0) return
-        root = trim(parent)//'/'//basename(trim(path))
+        root = trim(parent)//'/'//path_basename(trim(path))
     end function canonical_or_entry
-
-    function basename(path) result(name)
-        character(len=*), intent(in) :: path
-        character(len=PATH_LEN) :: name
-        integer :: slash
-
-        slash = index(trim(path), '/', back=.true.)
-        name = path(slash + 1:)
-    end function basename
 
     logical function directory_exists(path) result(exists)
         character(len=*), intent(in) :: path

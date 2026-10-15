@@ -86,7 +86,7 @@ contains
                 return
             end if
 
-            call parent_dir(current, parent)
+            call fs_parent_path(current, parent)
             if (trim(parent) == trim(current)) exit
             current = parent
         end do
@@ -187,13 +187,6 @@ contains
             end if
         end if
     end function absolute_dir
-
-    subroutine parent_dir(path, parent)
-        character(len=*), intent(in) :: path
-        character(len=*), intent(out) :: parent
-
-        call fs_parent_path(path, parent)
-    end subroutine parent_dir
 
     function detect_nproc() result(np)
         integer :: np

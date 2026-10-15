@@ -18,7 +18,7 @@ module fo_project_model
     !! lookups are hashed; selection is linear in cases times patterns and a
     !! plan is O(targets + link edges).
     use, intrinsic :: iso_fortran_env, only: int64
-    use fx_string, only: string_t, builder_t, builder_append, builder_to_string
+    use fx_string, only: string_t, builder_t, builder_append, builder_to_string, to_lower
     use fx_hash, only: sha256_string, fnv1a_string
     use fo_pattern, only: pattern_t, pattern_compile, pattern_compile_glob, &
         pattern_matches, pattern_is_glob
@@ -1062,11 +1062,11 @@ subroutine model_layering(model, units, report)
         if (.not. active(u)) cycle
         if (.not. allocated(units(u)%provides)) cycle
         do k = 1, size(units(u)%provides)
-            m = index_lookup(module_index, lower_text(units(u)%provides(k)%s))
+            m = index_lookup(module_index, to_lower(units(u)%provides(k)%s))
             if (m == 0) then
                 n_modules = n_modules + 1
                 call index_insert(module_index, &
-                    lower_text(units(u)%provides(k)%s), n_modules, existing)
+                    to_lower(units(u)%provides(k)%s), n_modules, existing)
                 call grow_ints(module_head, n_modules)
                 module_head(n_modules) = 0
                 m = n_modules
@@ -1108,7 +1108,7 @@ subroutine model_layering(model, units, report)
             if (.not. allocated(units(u)%uses)) cycle
             token = token + 1
             do k = 1, size(units(u)%uses)
-                m = index_lookup(module_index, lower_text(units(u)%uses(k)%s))
+                m = index_lookup(module_index, to_lower(units(u)%uses(k)%s))
                 if (m == 0) cycle
                 if (module_seen(m) == token) cycle
                 module_seen(m) = token
@@ -1505,14 +1505,14 @@ subroutine graph_build(g, model, units, roots)
     module_used = .false.
     do u = 1, nu
         do k = 1, size(units(u)%uses)
-            m = index_lookup(g%module_index, lower_text(units(u)%uses(k)%s))
+            m = index_lookup(g%module_index, to_lower(units(u)%uses(k)%s))
             if (m > 0) module_used(m) = .true.
         end do
     end do
     do u = 1, nu
         g%plain_unit(u) = .true.
         do k = 1, size(units(u)%provides)
-            m = index_lookup(g%module_index, lower_text(units(u)%provides(k)%s))
+            m = index_lookup(g%module_index, to_lower(units(u)%provides(k)%s))
             if (module_used(m)) g%plain_unit(u) = .false.
         end do
         if (units(u)%other_units) g%plain_unit(u) = .true.
@@ -1626,7 +1626,7 @@ subroutine graph_closure(g, model, units, ci)
         u = g%queue(head)
         head = head + 1
         do q = 1, size(units(u)%uses)
-            m = index_lookup(g%module_index, lower_text(units(u)%uses(q)%s))
+            m = index_lookup(g%module_index, to_lower(units(u)%uses(q)%s))
             if (m == 0) cycle
             e = g%module_head(m)
             do while (e > 0)
@@ -1688,10 +1688,10 @@ integer function graph_module_id(g, name, add) result(id)
     logical, intent(in) :: add
     integer :: existing
 
-    id = index_lookup(g%module_index, lower_text(name))
+    id = index_lookup(g%module_index, to_lower(name))
     if (id > 0 .or. .not. add) return
     g%n_modules = g%n_modules + 1
-    call index_insert(g%module_index, lower_text(name), g%n_modules, existing)
+    call index_insert(g%module_index, to_lower(name), g%n_modules, existing)
     call grow_ints(g%module_head, g%n_modules)
     g%module_head(g%n_modules) = 0
     id = g%n_modules
@@ -1766,7 +1766,7 @@ logical function build_description(path) result(yes)
     yes = base == 'fpm.toml' .or. base == 'CMakeLists.txt' .or. &
         base == 'CMakePresets.json' .or. base == 'CMakeUserPresets.json'
     if (yes) return
-    if (len(base) > 6) yes = lower_text(base(len(base) - 5:)) == '.cmake'
+    if (len(base) > 6) yes = to_lower(base(len(base) - 5:)) == '.cmake'
 end function build_description
 
 logical function source_like(path) result(yes)
@@ -1777,7 +1777,7 @@ logical function source_like(path) result(yes)
     yes = .false.
     dot = index(path, '.', back=.true.)
     if (dot == 0 .or. dot < index(path, '/', back=.true.)) return
-    ext = lower_text(path(dot + 1:))
+    ext = to_lower(path(dot + 1:))
     select case (ext)
     case ('f', 'for', 'ftn', 'f77', 'f90', 'f95', 'f03', 'f08', 'f18', &
             'fpp', 'fi', 'inc', 'h', 'hh', 'hpp', 'hxx', 'c', 'cc', 'cpp', 'cxx', &
@@ -1795,7 +1795,7 @@ logical function header_like(path) result(yes)
     yes = .false.
     dot = index(path, '.', back=.true.)
     if (dot == 0 .or. dot < index(path, '/', back=.true.)) return
-    ext = lower_text(path(dot + 1:))
+    ext = to_lower(path(dot + 1:))
     yes = any(ext == ['h  ', 'hh ', 'hpp', 'hxx', 'inc', 'fi '])
 end function header_like
 
@@ -1807,7 +1807,7 @@ logical function documentation_like(path) result(yes)
     integer :: dot, slash
 
     slash = index(path, '/', back=.true.)
-    base = lower_text(path(slash + 1:))
+    base = to_lower(path(slash + 1:))
     yes = .true.
     if (path(1:min(len(path), 5)) == 'docs/' .or. &
         path(1:min(len(path), 4)) == 'doc/') return
@@ -1836,18 +1836,6 @@ subroutine grow_ints(items, needed)
     grown(1:size(items)) = items
     call move_alloc(grown, items)
 end subroutine grow_ints
-
-function lower_text(text) result(low)
-    character(len=*), intent(in) :: text
-    character(len=len(text)) :: low
-    integer :: i, c
-
-    low = text
-    do i = 1, len(text)
-        c = iachar(text(i:i))
-        if (c >= iachar('A') .and. c <= iachar('Z')) low(i:i) = achar(c + 32)
-    end do
-end function lower_text
 
 function model_digest(model) result(digest)
     !! Length-prefixed canonical serialization hashed with SHA-256.

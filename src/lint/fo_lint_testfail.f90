@@ -28,6 +28,7 @@ module fo_lint_testfail
         next_token, skip_blanks
     use fo_lint_failpath, only: failpath_line_exits_nonzero, &
         failpath_line_calls_helper, failpath_load_helpers
+    use fx_string, only: to_lower
     implicit none
     private
     public :: testfail_scan_file
@@ -348,7 +349,7 @@ contains
         p = 1
         if (text(1:1) == '#') p = 2
         if (len_trim(text) < p + 7) return
-        if (lower_str(text(p:p + 6)) /= 'include') return
+        if (to_lower(text(p:p + 6)) /= 'include') return
         if (is_ident_char(text(p + 7:p + 7))) return
 
         lo = index(text, "'")
@@ -359,15 +360,5 @@ contains
         if (hi == 0) return
         name = text(lo + 1:lo + hi - 1)
     end subroutine include_name
-
-    function lower_str(s) result(out)
-        character(len=*), intent(in) :: s
-        character(len=len(s)) :: out
-        integer :: i
-
-        do i = 1, len(s)
-            out(i:i) = lower_ch(s(i:i))
-        end do
-    end function lower_str
 
 end module fo_lint_testfail

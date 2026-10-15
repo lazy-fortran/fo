@@ -29,7 +29,7 @@ module fo_fpm_model
     !!    still attached to slow-named cases.
     !!  * sources of no layer are returned in `unlayered` (project-relative)
     !!    when layers are declared, never dropped silently.
-    use fx_string, only: string_t
+    use fx_string, only: string_t, to_lower
     use fx_hash, only: sha256_string
     use fo_fpm_config, only: fpm_config_t, fpm_string_t, fpm_config_parse, &
         fpm_config_allocate
@@ -349,18 +349,6 @@ contains
         end do
     end function has_input
 
-    function lowered(text) result(low)
-        character(len=*), intent(in) :: text
-        character(len=len(text)) :: low
-        integer :: i, c
-
-        low = text
-        do i = 1, len(text)
-            c = iachar(text(i:i))
-            if (c >= iachar('A') .and. c <= iachar('Z')) low(i:i) = achar(c + 32)
-        end do
-    end function lowered
-
     subroutine build_layering(project_dir, config, units, lay, ierr, message)
         !! Resolve every layer of config over units: membership, rank and the
         !! module providers each unit uses.
@@ -399,13 +387,13 @@ contains
         do u = 1, n
             if (len_trim(units(u)%module_name) > 0) then
                 n_mod = n_mod + 1
-                mod_name(n_mod)%s = lowered(trim(units(u)%module_name))
+                mod_name(n_mod)%s = to_lower(trim(units(u)%module_name))
                 mod_unit(n_mod) = u
             end if
             if (.not. allocated(units(u)%additional_modules)) cycle
             do k = 1, size(units(u)%additional_modules)
                 n_mod = n_mod + 1
-                mod_name(n_mod)%s = lowered(trim(units(u)%additional_modules(k)))
+                mod_name(n_mod)%s = to_lower(trim(units(u)%additional_modules(k)))
                 mod_unit(n_mod) = u
             end do
         end do
@@ -429,7 +417,7 @@ contains
                     end if
                 end do
                 do k = 1, size(ly%modules)
-                    p = find_sorted(mod_name, order, lowered(ly%modules(k)%s))
+                    p = find_sorted(mod_name, order, to_lower(ly%modules(k)%s))
                     if (p == 0) then
                         ierr = 1
                         message = 'layer '//ly%name//': module '// &
@@ -437,7 +425,7 @@ contains
                         return
                     end if
                     do while (p <= n_mod)
-                        if (mod_name(order(p))%s /= lowered(ly%modules(k)%s)) exit
+                        if (mod_name(order(p))%s /= to_lower(ly%modules(k)%s)) exit
                         lay%member(mod_unit(order(p)), l) = .true.
                         p = p + 1
                     end do
@@ -471,10 +459,10 @@ contains
         do u = 1, n
             lay%first(u) = pos
             do k = 1, units(u)%n_deps
-                p = find_sorted(mod_name, order, lowered(trim(units(u)%deps(k))))
+                p = find_sorted(mod_name, order, to_lower(trim(units(u)%deps(k))))
                 if (p == 0) cycle
                 do while (p <= n_mod)
-                    if (mod_name(order(p))%s /= lowered(trim(units(u)%deps(k)))) &
+                    if (mod_name(order(p))%s /= to_lower(trim(units(u)%deps(k)))) &
                         exit
                     if (mod_unit(order(p)) /= u) then
                         if (pos > size(lay%provider)) call grow(lay%provider)

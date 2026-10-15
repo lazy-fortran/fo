@@ -10,6 +10,7 @@ module fo_lint
     use fo_fpm_config, only: fpm_config_t, fpm_config_init, fpm_config_parse
     use fo_compiler_flags, only: ARRAY_TEMPORARY_WARNING_FLAG
     use fx_json_build, only: json_escape_string
+    use fx_string, only: to_lower
     implicit none
     private
     public :: lint_finding_t, lint_file, lint_files, lint_dir
@@ -1137,19 +1138,6 @@ contains
         json = json//'}'
     end function lint_all_json
 
-    pure function to_lower(str) result(low)
-        character(len=*), intent(in) :: str
-        character(len=len(str)) :: low
-        integer :: i, ic
-
-        low = str
-        do i = 1, len_trim(low)
-            ic = iachar(low(i:i))
-            if (ic >= iachar('A') .and. ic <= iachar('Z')) &
-                low(i:i) = achar(ic + 32)
-        end do
-    end function to_lower
-
     pure subroutine strip_leading(str)
         character(len=*), intent(inout) :: str
         integer :: i
@@ -1459,7 +1447,7 @@ contains
         if (len_trim(comment) > 0) newline = newline//' '//trim(comment)
     end subroutine rewrite_use_line
 
-    pure function normalize_sym(s) result(norm)
+    function normalize_sym(s) result(norm)
         !! Lowercase and strip all blanks so renames compare regardless of the
         !! spacing around '=>'.
         character(len=*), intent(in) :: s

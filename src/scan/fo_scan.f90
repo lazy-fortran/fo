@@ -9,6 +9,7 @@ module fo_scan
         compiler_frontend_result_t, compile_frontend_from_file, &
         query_program_units, query_program_unit, query_use_statements, &
         program_unit_query_t, use_statement_query_t, INPUT_MODE_STANDARD
+    use fx_string, only: to_lower
     implicit none
     private
 
@@ -144,7 +145,7 @@ contains
             if (allocated(program_units(i)%unit_kind)) then
                 unit_kind = program_units(i)%unit_kind
             end if
-            call to_lower(unit_kind)
+            unit_kind = to_lower(unit_kind)
             select case (trim(unit_kind))
             case ('module', 'submodule', 'program', 'function', &
                     'subroutine', 'block_data')
@@ -165,7 +166,7 @@ contains
         unit_kind = ''
         if (allocated(selected_unit%unit_kind)) &
             unit_kind = selected_unit%unit_kind
-        call to_lower(unit_kind)
+        unit_kind = to_lower(unit_kind)
         program_unit = 0
         if (trim(unit_kind) == 'module') then
             do i = 1, size(program_units)
@@ -173,7 +174,7 @@ contains
                 unit_kind = ''
                 if (allocated(program_units(i)%unit_kind)) &
                     unit_kind = program_units(i)%unit_kind
-                call to_lower(unit_kind)
+                unit_kind = to_lower(unit_kind)
                 if (trim(unit_kind) /= 'program') cycle
                 program_unit = i
                 exit
@@ -183,7 +184,7 @@ contains
             unit_info%is_program = .true.
             if (allocated(program_units(program_unit)%name)) then
                 unit_info%program_name = program_units(program_unit)%name
-                call to_lower(unit_info%program_name)
+                unit_info%program_name = to_lower(unit_info%program_name)
             end if
         end if
 
@@ -191,12 +192,12 @@ contains
         if (allocated(selected_unit%unit_kind)) then
             unit_kind = selected_unit%unit_kind
         end if
-        call to_lower(unit_kind)
+        unit_kind = to_lower(unit_kind)
         name = ''
         if (allocated(selected_unit%name)) then
             name = selected_unit%name
         end if
-        call to_lower(name)
+        name = to_lower(name)
         if (trim(unit_kind) == 'program' .and. trim(name) == 'main') then
             do j = 1, size(selected_unit%body_indices)
                 candidate_unit = query_program_unit(result%arena, &
@@ -206,7 +207,7 @@ contains
                 if (allocated(candidate_unit%unit_kind)) then
                     unit_kind = candidate_unit%unit_kind
                 end if
-                call to_lower(unit_kind)
+                unit_kind = to_lower(unit_kind)
                 if (trim(unit_kind) /= 'function' .and. &
                     trim(unit_kind) /= 'subroutine') cycle
                 ! An explicit or implicit host program contains its procedures.
@@ -220,13 +221,13 @@ contains
         if (allocated(selected_unit%unit_kind)) then
             unit_kind = selected_unit%unit_kind
         end if
-        call to_lower(unit_kind)
+        unit_kind = to_lower(unit_kind)
         if (allocated(selected_unit%name)) then
             name = selected_unit%name
         else
             name = ''
         end if
-        call to_lower(name)
+        name = to_lower(name)
         unit_info%source_line = selected_unit%line
         unit_info%source_column = selected_unit%column
         select case (trim(unit_kind))
@@ -245,14 +246,14 @@ contains
             if (program_units(i)%unit_kind /= 'module') cycle
             if (.not. allocated(program_units(i)%name)) cycle
             name = program_units(i)%name
-            call to_lower(name)
+            name = to_lower(name)
             call add_module_provider(unit_info, name)
         end do
 
         if (trim(unit_kind) == 'submodule' .and. &
             allocated(selected_unit%parent_identifier)) then
             parent_identifier = selected_unit%parent_identifier
-            call to_lower(parent_identifier)
+            parent_identifier = to_lower(parent_identifier)
             call split_parent_identifier(parent_identifier, ancestor_name, &
                 parent_name)
             if (len_trim(ancestor_name) > 0) then
@@ -273,7 +274,7 @@ contains
             if (allocated(use_statements(i)%module_name)) then
                 name = use_statements(i)%module_name
             end if
-            call to_lower(name)
+            name = to_lower(name)
             if (len_trim(name) == 0) cycle
             call add_dep(unit_info, name, use_statements(i)%line, &
                 use_statements(i)%column)
@@ -295,7 +296,7 @@ contains
             if (.not. program_units(i)%found) cycle
             if (.not. allocated(program_units(i)%unit_kind)) cycle
             unit_kind = program_units(i)%unit_kind
-            call to_lower(unit_kind)
+            unit_kind = to_lower(unit_kind)
             select case (trim(unit_kind))
             case ('module', 'submodule')
                 has_module = .true.
@@ -519,7 +520,7 @@ contains
                 if (result%tokens(i)%column >= procedure_unit%column) exit
             end if
             text = result%tokens(i)%text
-            call to_lower(text)
+            text = to_lower(text)
             if (trim(text) /= 'program' .and. trim(text) /= 'contains') cycle
             has_host = .true.
             return
@@ -581,7 +582,7 @@ contains
         ! bootstrap phase can pass allow_regex_fallback=.true. explicitly.
         policy = ''
         call get_environment_variable('FO_SCAN_FALLBACK', policy)
-        call to_lower(policy)
+        policy = to_lower(policy)
         enabled = trim(policy) == 'regex' .or. trim(policy) == 'true' .or. &
             trim(policy) == '1'
     end function regex_fallback_policy
@@ -729,7 +730,7 @@ contains
 
         if (fin >= start) then
             name = line(start:fin)
-            call to_lower(name)
+            name = to_lower(name)
         end if
     end subroutine extract_use
 
@@ -743,7 +744,7 @@ contains
 
         name = ''
         lower_line = line
-        call to_lower(lower_line)
+        lower_line = to_lower(lower_line)
 
         if (len_trim(lower_line) < 8) return
         if (lower_line(1:7) /= 'module ') return
@@ -759,14 +760,14 @@ contains
             fin = fin + 1
         end do
         first_name = adjustl(line(start:fin - 1))
-        call to_lower(first_name)
+        first_name = to_lower(first_name)
 
         if (trim(first_name) == 'procedure') return
         if (trim(first_name) == 'subroutine') return
         if (trim(first_name) == 'function') return
 
         name = first_name
-        call to_lower(name)
+        name = to_lower(name)
     end subroutine extract_module_def
 
     subroutine extract_submodule_def(line, name, ancestor, parent)
@@ -781,7 +782,7 @@ contains
         ancestor = ''
         parent = ''
         lower_line = line
-        call to_lower(lower_line)
+        lower_line = to_lower(lower_line)
 
         if (len_trim(lower_line) < 11) return
         if (index(lower_line, 'submodule') /= 1) return
@@ -811,7 +812,7 @@ contains
 
         if (fin > start) then
             name = adjustl(line(start:fin - 1))
-            call to_lower(name)
+            name = to_lower(name)
         end if
     end subroutine extract_submodule_def
 
@@ -824,7 +825,7 @@ contains
 
         name = ''
         lower_line = line
-        call to_lower(lower_line)
+        lower_line = to_lower(lower_line)
 
         if (index(lower_line, 'subroutine ') == 1) then
             start = 12
@@ -843,7 +844,7 @@ contains
         if (index(name, '(') > 0) name = name(1:index(name, '(') - 1)
         if (index(name, ' ') > 0) name = name(1:index(name, ' ') - 1)
         if (index(name, '!') > 0) name = name(1:index(name, '!') - 1)
-        call to_lower(name)
+        name = to_lower(name)
     end subroutine extract_external_procedure_def
 
     subroutine extract_program_def(line, name)
@@ -855,7 +856,7 @@ contains
 
         name = ''
         lower_line = line
-        call to_lower(lower_line)
+        lower_line = to_lower(lower_line)
 
         if (len_trim(lower_line) < 9) return
         if (lower_line(1:8) /= 'program ') return
@@ -869,7 +870,7 @@ contains
         name = adjustl(line(start:))
         if (index(name, ' ') > 0) name = name(1:index(name, ' ') - 1)
         if (index(name, '!') > 0) name = name(1:index(name, '!') - 1)
-        call to_lower(name)
+        name = to_lower(name)
     end subroutine extract_program_def
 
     logical function is_intrinsic(name)
@@ -931,18 +932,6 @@ contains
         end do
     end function leading_column
 
-    subroutine to_lower(str)
-        character(len=*), intent(inout) :: str
-        integer :: i, ic
-
-        do i = 1, len_trim(str)
-            ic = iachar(str(i:i))
-            if (ic >= iachar('A') .and. ic <= iachar('Z')) then
-                str(i:i) = achar(ic + 32)
-            end if
-        end do
-    end subroutine to_lower
-
     logical function is_slow_test(name)
         character(len=*), intent(in) :: name
 
@@ -951,7 +940,7 @@ contains
 
         is_slow_test = .false.
         lower_name = name
-        call to_lower(lower_name)
+        lower_name = to_lower(lower_name)
         n = len_trim(lower_name)
         if (n == 0) return
 

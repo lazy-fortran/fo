@@ -13,6 +13,8 @@ module fo_external_modules
     !! distributions, this searches the system module directories for the
     !! declared module file itself and returns the directories that hold one.
 
+    use fx_string, only: to_lower
+
     implicit none
     private
 
@@ -48,7 +50,7 @@ contains
 
         do i = 1, n_names
             if (len_trim(names(i)) == 0) cycle
-            call to_lower(trim(names(i)), lower_name)
+            lower_name = to_lower(trim(names(i)))
             do j = 1, n_search
                 candidate = trim(search(j))//'/'//trim(lower_name)//'.mod'
                 inquire (file=trim(candidate), exist=exists)
@@ -125,22 +127,5 @@ contains
         n_dirs = n_dirs + 1
         dirs(n_dirs) = trim(dir)
     end subroutine add_unique_dir
-
-    subroutine to_lower(text, lowered)
-        character(len=*), intent(in) :: text
-        character(len=*), intent(out) :: lowered
-
-        integer :: i, code
-
-        lowered = ''
-        do i = 1, min(len_trim(text), len(lowered))
-            code = iachar(text(i:i))
-            if (code >= iachar('A') .and. code <= iachar('Z')) then
-                lowered(i:i) = achar(code - iachar('A') + iachar('a'))
-            else
-                lowered(i:i) = text(i:i)
-            end if
-        end do
-    end subroutine to_lower
 
 end module fo_external_modules

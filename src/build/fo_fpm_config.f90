@@ -4,7 +4,8 @@ module fo_fpm_config
         fs_realpath, fs_identity
     use, intrinsic :: iso_c_binding, only: c_long_long
     use fo_process, only: process_run_argv_logged, argv_push
-    use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file
+    use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file, &
+        strip_toml_comment
     use, intrinsic :: iso_fortran_env, only: error_unit
     implicit none
     private
@@ -415,7 +416,7 @@ contains
             if (ios /= 0) exit
             if (is_fo_model_section(section) .and. &
                     .not. is_header_line(raw)) then
-                call strip_comment(raw)
+                call strip_toml_comment(raw)
                 raw = trim(adjustl(raw))
                 if (len(raw) == 0) cycle
                 if (in_array) then
@@ -447,7 +448,7 @@ contains
                 return
             end if
             line = raw
-            call strip_comment(line)
+            call strip_toml_comment(line)
             line = adjustl(line)
             if (len_trim(line) == 0) cycle
 
@@ -1024,55 +1025,73 @@ contains
     subroutine parse_include_directories(val, config)
         character(len=*), intent(in) :: val
         type(fpm_config_t), intent(inout) :: config
-        character(:), allocatable :: input
-        character(len=1) :: quote
-        integer :: position, start, last
-        logical :: array
+        type(fpm_string_t), allocatable :: dirs(:)
+        character(len=256) :: err
+        integer :: i
 
-        input = trim(adjustl(val))
         config%n_include_dirs = 0
         config%include_dirs = ''
-        last = len(input)
-        if (last == 0) goto 900
-        array = input(1:1) == '['
-        position = 1
-        if (array) then
-            if (input(last:last) /= ']') goto 900
-            position = 2
-            last = last - 1
+        call string_values(val, dirs, err)
+        if (len_trim(err) == 0) then
+            if (size(dirs) > size(config%include_dirs)) err = 'too many paths'
         end if
-        do while (position <= last)
-            if (input(position:position) == ' ') then
-                position = position + 1
-                cycle
-            end if
-            quote = input(position:position)
-            if (quote /= '"' .and. quote /= "'") goto 900
-            start = position + 1
-            position = start
-            do while (position <= last)
-                if (input(position:position) == quote) exit
-                position = position + 1
+        if (len_trim(err) == 0) then
+            do i = 1, size(dirs)
+                if (len(dirs(i)%s) > len(config%include_dirs(1))) err = 'path too long'
             end do
-            if (position > last .or. position == start) goto 900
-            if (position - start > len(config%include_dirs(1))) goto 900
-            if (config%n_include_dirs == size(config%include_dirs)) goto 900
-            config%n_include_dirs = config%n_include_dirs + 1
-            config%include_dirs(config%n_include_dirs) = input(start:position - 1)
-            position = position + 1
-            do while (position <= last)
-                if (input(position:position) /= ' ') exit
-                position = position + 1
-            end do
-            if (position > last) exit
-            if (.not. array) goto 900
-            if (input(position:position) /= ',') goto 900
-            position = position + 1
+        end if
+        if (len_trim(err) > 0) then
+            config%manifest_parse_error = &
+                '[library] include-dir requires a quoted path or list of quoted paths'
+            return
+        end if
+        do i = 1, size(dirs)
+            config%include_dirs(i) = dirs(i)%s
         end do
-        return
-        900     config%manifest_parse_error = &
-            '[library] include-dir requires a quoted path or list of quoted paths'
+        config%n_include_dirs = size(dirs)
     end subroutine parse_include_directories
+
+    subroutine string_values(val, list, err)
+        !! A manifest value that is one quoted string or an array of them.
+        character(len=*), intent(in) :: val
+        type(fpm_string_t), allocatable, intent(out) :: list(:)
+        character(len=*), intent(out) :: err
+
+        character(len=:), allocatable :: text
+        integer :: q
+
+        err = ''
+        text = trim(adjustl(val))
+        q = len(text)
+        if (q >= 3 .and. scalar_quoted(text)) then
+            allocate (list(1))
+            list(1)%s = text(2:q - 1)
+        else
+            call parse_string_list(text, list, err)
+        end if
+        if (len_trim(err) > 0 .and. allocated(list)) deallocate (list)
+        if (.not. allocated(list)) allocate (list(0))
+    contains
+        logical function scalar_quoted(t)
+            character(len=*), intent(in) :: t
+
+            scalar_quoted = (t(1:1) == '"' .or. t(1:1) == "'") .and. &
+                t(len(t):len(t)) == t(1:1) .and. index(t(2:len(t) - 1), t(1:1)) == 0
+        end function scalar_quoted
+    end subroutine string_values
+
+    subroutine manifest_strings(field, val, list, config)
+        !! Parse a string-valued manifest field; a malformed value fails the manifest.
+        character(len=*), intent(in) :: field, val
+        type(fpm_string_t), allocatable, intent(out) :: list(:)
+        type(fpm_config_t), intent(inout) :: config
+
+        character(len=256) :: err
+
+        call string_values(val, list, err)
+        if (len_trim(err) > 0) config%manifest_parse_error = &
+            field//' requires a quoted string or an array of quoted strings'
+    end subroutine manifest_strings
 
     subroutine parse_fortran(key, val, config)
         character(len=*), intent(in) :: key, val
@@ -1318,8 +1337,8 @@ contains
         character(len=*), intent(in) :: name_key, val
         type(fpm_dep_t), intent(out) :: dep
 
-        character(len=64)  :: ikeys(8)
-        character(len=512) :: ivals(8)
+        type(fpm_string_t), allocatable :: ikeys(:), ivals(:)
+        character(len=256) :: table_error
         integer :: n_fields, i
         character(len=512) :: str_val
 
@@ -1333,10 +1352,12 @@ contains
         if (len_trim(val) == 0) return
 
         if (val(1:1) == '{') then
-            call parse_inline_table(val, ikeys, ivals, n_fields)
+            table_error = ''
+            call split_fo_table(val, ikeys, ivals, n_fields, table_error)
+            if (len_trim(table_error) > 0) dep%unsupported_field = 'malformed inline table'
             do i = 1, n_fields
-                call extract_string(ivals(i), str_val)
-                select case (trim(ikeys(i)))
+                call extract_string(ivals(i)%s, str_val)
+                select case (trim(ikeys(i)%s))
                 case ('git')
                     dep%git_seen = .true.
                     dep%git = trim(str_val)
@@ -1355,19 +1376,19 @@ contains
                 case ('namespace')
                     dep%namespace_seen = .true.
                     dep%namespace = trim(str_val)
-                    if (.not. quoted_dependency_value(ivals(i))) &
+                    if (.not. quoted_dependency_value(ivals(i)%s)) &
                         dep%unsupported_field = 'unquoted registry identity'
                     if (len_trim(str_val) > len(dep%namespace)) &
                         dep%unsupported_field = 'oversized registry identity'
                 case ('v')
                     dep%registry_v_seen = .true.
                     dep%registry_v = trim(str_val)
-                    if (.not. quoted_dependency_value(ivals(i))) &
+                    if (.not. quoted_dependency_value(ivals(i)%s)) &
                         dep%unsupported_field = 'unquoted registry identity'
                     if (len_trim(str_val) > len(dep%registry_v)) &
                         dep%unsupported_field = 'oversized registry identity'
                 case default
-                    dep%unsupported_field = trim(ikeys(i))
+                    dep%unsupported_field = trim(ikeys(i)%s)
                 end select
             end do
         else
@@ -1415,84 +1436,43 @@ contains
     subroutine parse_link_libs(val, config)
         character(len=*), intent(in) :: val
         type(fpm_config_t), intent(inout) :: config
+        type(fpm_string_t), allocatable :: libs(:)
+        integer :: i
 
-        integer :: pos, start, n
-        logical :: in_str
-
-        pos = 1
-        n = len_trim(val)
-        in_str = .false.
-
-        do while (pos <= n)
-            if (val(pos:pos) == '"') then
-                if (.not. in_str) then
-                    in_str = .true.
-                    start = pos + 1
-                else
-                    in_str = .false.
-                    if (len_trim(val(start:pos - 1)) > 0) &
-                        call push_link_lib(config, val(start:pos - 1))
-                end if
-            end if
-            pos = pos + 1
+        call manifest_strings('[build] link', val, libs, config)
+        do i = 1, size(libs)
+            call push_link_lib(config, libs(i)%s)
         end do
     end subroutine parse_link_libs
 
     subroutine parse_external_modules(val, config)
         character(len=*), intent(in) :: val
         type(fpm_config_t), intent(inout) :: config
+        type(fpm_string_t), allocatable :: names(:)
+        integer :: i
 
-        integer :: pos, start, n
-        character(len=1024) :: name
-        logical :: in_str
-
-        pos = 1
-        n = len_trim(val)
-        in_str = .false.
-
-        do while (pos <= n)
-            if (val(pos:pos) == '"') then
-                if (.not. in_str) then
-                    in_str = .true.
-                    start = pos + 1
-                else
-                    in_str = .false.
-                    name = val(start:pos - 1)
-                    if (len_trim(name) > 0 .and. &
-                        config%n_external_modules < MAX_EXTERNAL_MODULES) then
-                        config%n_external_modules = config%n_external_modules + 1
-                        config%external_modules(config%n_external_modules) = &
-                            trim(name)
-                    end if
-                end if
+        call manifest_strings('[build] external-modules', val, names, config)
+        do i = 1, size(names)
+            if (config%n_external_modules >= MAX_EXTERNAL_MODULES .or. &
+                len(names(i)%s) > len(config%external_modules(1))) then
+                config%manifest_parse_error = &
+                    '[build] external-modules exceeds the supported count or length'
+                return
             end if
-            pos = pos + 1
+            config%n_external_modules = config%n_external_modules + 1
+            config%external_modules(config%n_external_modules) = names(i)%s
         end do
     end subroutine parse_external_modules
 
     subroutine parse_flags(val, config)
         character(len=*), intent(in) :: val
         type(fpm_config_t), intent(inout) :: config
+        type(fpm_string_t), allocatable :: flags(:)
+        integer :: i
 
-        integer :: pos, start, n
-        logical :: in_str
-
-        pos = 1
-        n = len_trim(val)
-        in_str = .false.
-
-        do while (pos <= n)
-            if (val(pos:pos) == '"') then
-                if (.not. in_str) then
-                    in_str = .true.
-                    start = pos + 1
-                else
-                    in_str = .false.
-                    if (len_trim(val(start:pos - 1)) > 0) &
-                        call push_config_flag(val(start:pos - 1), config)
-                end if
-            end if
-            pos = pos + 1
+        call manifest_strings('[build] flags', val, flags, config)
+        do i = 1, size(flags)
+            call push_config_flag(flags(i)%s, config)
         end do
     end subroutine parse_flags
 
@@ -2168,9 +2148,8 @@ contains
         character(len=*), intent(in) :: name, val
         type(fpm_config_t), intent(inout) :: config
 
-        integer :: pos, start, n, slot
-        character(len=512) :: arg
-        logical :: in_str
+        type(fpm_string_t), allocatable :: args(:)
+        integer :: slot, i
 
         if (config%n_test_arg_sets >= MAX_TEST_ARG_SETS) then
             write (config%manifest_parse_error, '(a,i0)') &
@@ -2182,27 +2161,12 @@ contains
         slot = config%n_test_arg_sets
         config%test_arg_sets(slot)%name = trim(name)
         config%test_arg_sets(slot)%args = ''
-        pos = 1
-        n = len_trim(val)
-        in_str = .false.
-
-        do while (pos <= n)
-            if (val(pos:pos) == '"') then
-                if (.not. in_str) then
-                    in_str = .true.
-                    start = pos + 1
-                else
-                    in_str = .false.
-                    arg = val(start:pos - 1)
-                    if (len_trim(config%test_arg_sets(slot)%args) > 0) then
-                        config%test_arg_sets(slot)%args = &
-                            trim(config%test_arg_sets(slot)%args)//new_line('a')
-                    end if
-                    config%test_arg_sets(slot)%args = &
-                        trim(config%test_arg_sets(slot)%args)//trim(arg)
-                end if
-            end if
-            pos = pos + 1
+        call manifest_strings('test arguments "'//trim(name)//'"', val, args, config)
+        do i = 1, size(args)
+            if (i > 1) config%test_arg_sets(slot)%args = &
+                trim(config%test_arg_sets(slot)%args)//new_line('a')
+            config%test_arg_sets(slot)%args = &
+                trim(config%test_arg_sets(slot)%args)//args(i)%s
         end do
     end subroutine parse_test_args
 
@@ -2210,83 +2174,41 @@ contains
         character(len=*), intent(in) :: key, val
         type(fpm_config_t), intent(inout) :: config
 
-        character(len=1024) :: macros
-
         if (trim(key) /= 'macros' .and. trim(key) /= 'cpp.macros') return
-        macros = val
-        call parse_macro_flags(macros, config)
+        call parse_macro_flags(val, config)
     end subroutine parse_preprocess
 
     subroutine parse_macro_flags(val, config)
         character(len=*), intent(in) :: val
         type(fpm_config_t), intent(inout) :: config
 
-        integer :: pos, start, n, equals
+        type(fpm_string_t), allocatable :: macros(:)
+        integer :: i, equals
         character(len=:), allocatable :: macro
-        logical :: in_str
 
-        pos = 1
-        n = len_trim(val)
-        in_str = .false.
-        if (index(val, '"') > 0) call push_config_flag('-cpp', config)
-        do while (pos <= n)
-            if (val(pos:pos) == '"') then
-                if (.not. in_str) then
-                    in_str = .true.
-                    start = pos + 1
-                else
-                    in_str = .false.
-                    macro = val(start:pos - 1)
-                    equals = index(macro, '=')
-                    if (equals > 0) then
-                        if (trim(adjustl(macro(equals + 1:))) == '{version}') then
-                            if (len_trim(config%version) > 0) then
-                                macro = macro(:equals)//trim(config%version)
-                            else
-                                ! Native fpm defaults a missing package version to 0.
-                                macro = macro(:equals)//'0'
-                            end if
-                        end if
+        call manifest_strings('[preprocess] macros', val, macros, config)
+        if (size(macros) > 0) call push_config_flag('-cpp', config)
+        do i = 1, size(macros)
+            macro = macros(i)%s
+            equals = index(macro, '=')
+            if (equals > 0) then
+                if (trim(adjustl(macro(equals + 1:))) == '{version}') then
+                    if (len_trim(config%version) > 0) then
+                        macro = macro(:equals)//trim(config%version)
+                    else
+                        ! Native fpm defaults a missing package version to 0.
+                        macro = macro(:equals)//'0'
                     end if
-                    if (len_trim(macro) + 2 > len(config%flags)) then
-                        config%manifest_parse_error = &
-                            'preprocessor macro exceeds supported flag length'
-                        return
-                    end if
-                    if (len_trim(macro) > 0) &
-                        call push_config_flag('-D'//trim(macro), config)
                 end if
             end if
-            pos = pos + 1
+            if (len_trim(macro) + 2 > len(config%flags)) then
+                config%manifest_parse_error = &
+                    'preprocessor macro exceeds supported flag length'
+                return
+            end if
+            if (len_trim(macro) > 0) call push_config_flag('-D'//trim(macro), config)
         end do
     end subroutine parse_macro_flags
-
-    subroutine strip_comment(line)
-        character(len=*), intent(inout) :: line
-
-        integer :: i
-        character :: quote
-
-        quote = achar(0)
-        i = 1
-        do while (i <= len_trim(line))
-            if (quote == achar(0)) then
-                select case (line(i:i))
-                case ('"', "'")
-                    quote = line(i:i)
-                case ('#')
-                    line(i:) = ' '
-                    return
-                end select
-            else if (quote == '"' .and. line(i:i) == achar(92)) then
-                ! Basic-string escapes do not end the surrounding string.
-                i = i + 1
-            else if (line(i:i) == quote) then
-                quote = achar(0)
-            end if
-            i = i + 1
-        end do
-    end subroutine strip_comment
 
     subroutine parse_dependency_subtable(section, key, val, config)
         !! [dependencies.NAME] with key = value lines is the same dependency as
@@ -2411,71 +2333,6 @@ contains
         q2 = 1 + q2
         if (q2 > 2) str_val = value(2:q2 - 1)
     end subroutine extract_string
-
-    subroutine parse_inline_table(val, keys, vals, n_fields)
-        character(len=*), intent(in) :: val
-        character(len=*), intent(out) :: keys(:), vals(:)
-        integer, intent(out) :: n_fields
-
-        character(len=1024) :: inner
-        integer :: i1, i2, max_fields, pos, eq_pos, comma_pos, n
-
-        n_fields = 0
-        max_fields = min(size(keys), size(vals))
-
-        ! find content between { }
-        i1 = index(val, '{')
-        i2 = index(val, '}')
-        if (i1 == 0 .or. i2 <= i1) return
-        inner = adjustl(val(i1 + 1:i2 - 1))
-
-        pos = 1
-        n = len_trim(inner)
-        do while (pos <= n .and. n_fields < max_fields)
-            ! skip whitespace and commas
-            do while (pos <= n .and. &
-                    (inner(pos:pos) == ' ' .or. inner(pos:pos) == ','))
-                pos = pos + 1
-            end do
-            if (pos > n) exit
-
-            ! find '=' for this key
-            eq_pos = index(inner(pos:), '=')
-            if (eq_pos == 0) exit
-            eq_pos = pos + eq_pos - 1
-
-            n_fields = n_fields + 1
-            keys(n_fields) = trim(adjustl(inner(pos:eq_pos - 1)))
-
-            ! find the value (quoted string or bare)
-            pos = eq_pos + 1
-            do while (pos <= n .and. inner(pos:pos) == ' ')
-                pos = pos + 1
-            end do
-            if (pos > n) exit
-
-            if (inner(pos:pos) == '"') then
-                ! quoted string: find closing quote
-                i1 = index(inner(pos + 1:), '"')
-                if (i1 == 0) then
-                    vals(n_fields) = ''
-                    exit
-                end if
-                vals(n_fields) = inner(pos:pos + i1)
-                pos = pos + i1 + 1
-            else
-                ! bare value: ends at comma or end of string
-                comma_pos = index(inner(pos:), ',')
-                if (comma_pos == 0) then
-                    vals(n_fields) = trim(inner(pos:n))
-                    pos = n + 1
-                else
-                    vals(n_fields) = trim(inner(pos:pos + comma_pos - 2))
-                    pos = pos + comma_pos
-                end if
-            end if
-        end do
-    end subroutine parse_inline_table
 
     subroutine resolve_metapackages(config, ierr)
         !! Resolve every metapackage currently understood by fpm.  The parser

@@ -2,6 +2,7 @@ module fo_registry
     !! Native, offline FPM registry resolution. Remote/authenticated registries
     !! are rejected explicitly; local registry trees are the source authority.
     use fo_fpm_config, only: fpm_dep_t, valid_registry_version
+    use fo_util, only: strip_toml_comment
     use fo_fs, only: fs_identity, fs_path_is_absolute, fs_native_path, &
         fs_is_windows, fs_parent_path
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_long_long, c_null_char
@@ -108,7 +109,7 @@ contains
                     ierr)
                 exit
             end if
-            call remove_comment(line)
+            call strip_toml_comment(line)
             line = adjustl(line)
             if (len_trim(line) == 0) cycle
             if (line(1:1) == '[') then
@@ -308,23 +309,6 @@ contains
         ! Numeric ties have a stable lexical selection independent of readdir.
         version_after = lgt(trim(left), trim(right))
     end function version_after
-
-    subroutine remove_comment(line)
-        character(len=*), intent(inout) :: line
-        character :: quote
-        integer :: i
-        quote = ' '
-        do i = 1, len_trim(line)
-            if (quote /= ' ') then
-                if (line(i:i) == quote) quote = ' '
-            else if (line(i:i) == '"' .or. line(i:i) == "'") then
-                quote = line(i:i)
-            else if (line(i:i) == '#') then
-                line(i:) = ''
-                return
-            end if
-        end do
-    end subroutine remove_comment
 
     subroutine registry_error(message, ierr)
         character(len=*), intent(in) :: message

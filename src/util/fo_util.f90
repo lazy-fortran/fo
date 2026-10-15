@@ -3,13 +3,13 @@ module fo_util
     use, intrinsic :: iso_c_binding, only: c_int, c_char, c_null_char
     use fo_fs, only: fs_collect_files, fs_remove_file, fs_native_path, &
         fs_path_root_len
-    use fx_mcp, only: mcp_send_response, MCP_FRAME_UNKNOWN
     implicit none
     private
     public :: make_tmpfile, make_sibling_tmpfile, delete_tmpfile, read_text_file
     public :: temporary_root
     public :: clean_root_build_artifacts, read_text_file_alloc
     public :: strip_path_prefix_in_str
+    public :: strip_toml_comment
     public :: jsonrpc_error, jsonrpc_null
     public :: json_bool, json_int
     public :: wall_time_seconds
@@ -231,6 +231,34 @@ contains
         end do
         deallocate (hits)
     end subroutine clean_root_build_artifacts
+
+    subroutine strip_toml_comment(line)
+        !! Blank a TOML comment: everything from a # outside a quoted string.
+        character(len=*), intent(inout) :: line
+
+        integer :: i
+        character :: quote
+
+        quote = achar(0)
+        i = 1
+        do while (i <= len_trim(line))
+            if (quote == achar(0)) then
+                select case (line(i:i))
+                case ('"', "'")
+                    quote = line(i:i)
+                case ('#')
+                    line(i:) = ' '
+                    return
+                end select
+            else if (quote == '"' .and. line(i:i) == achar(92)) then
+                ! Basic-string escapes do not end the surrounding string.
+                i = i + 1
+            else if (line(i:i) == quote) then
+                quote = achar(0)
+            end if
+            i = i + 1
+        end do
+    end subroutine strip_toml_comment
 
     subroutine strip_path_prefix_in_str(text, prefix)
         character(len=*), intent(inout) :: text

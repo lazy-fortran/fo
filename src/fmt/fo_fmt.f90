@@ -1,11 +1,13 @@
 module fo_fmt
-    use fo_util, only: make_tmpfile, delete_tmpfile
+    use fo_util, only: make_tmpfile, delete_tmpfile, strip_toml_comment
     use fo_fs, only: fs_make_dir, fs_write_text, fs_append_file, fs_collect_files
     use fo_build_backend, only: backend_t, detect_backend, BACKEND_NONE
     use fo_cache, only: cache_store_root, HASH_LEN
     use fx_hash, only: sha256_file
     use fo_format, only: format_file_with_indent
     use fo_process, only: process_run_argv_logged, argv_push
+    use fx_string, only: to_lower
+    use fx_path, only: path_dirname
     implicit none
     private
     public :: fmt_sources, FMT_SELECT_ALL, FMT_SELECT_FILES, FMT_SELECT_CHANGED
@@ -463,14 +465,12 @@ contains
         do
             read (u, '(a)', iostat=ios) line
             if (ios /= 0) exit
-            call strip_config_comment(line)
+            call strip_toml_comment(line)
             eq = index(line, '=')
             if (eq <= 0) cycle
             key = adjustl(line(1:eq - 1))
             value = adjustl(line(eq + 1:))
-            call rstrip_local(key)
-            call rstrip_local(value)
-            key = lower_ascii(key)
+            key = to_lower(key)
             if (trim(key) == 'indent') then
                 read (value, *, iostat=ios) parsed
                 if (ios == 0) then
@@ -480,44 +480,6 @@ contains
         end do
         close (u)
     end subroutine fprettify_indent_width
-
-    subroutine strip_config_comment(line)
-        character(len=*), intent(inout) :: line
-
-        integer :: pos
-
-        pos = index(line, '#')
-        if (pos == 0) return
-        if (pos == 1) then
-            line = ''
-        else
-            line = line(1:pos - 1)
-        end if
-    end subroutine strip_config_comment
-
-    subroutine rstrip_local(line)
-        character(len=*), intent(inout) :: line
-
-        integer :: n
-
-        n = len_trim(line)
-        line = line(1:n)
-    end subroutine rstrip_local
-
-    pure function lower_ascii(line) result(lower)
-        character(len=*), intent(in) :: line
-        character(len=len(line)) :: lower
-
-        integer :: i, c
-
-        lower = line
-        do i = 1, len(line)
-            c = iachar(line(i:i))
-            if (c >= 65) then
-                if (c <= 90) lower(i:i) = achar(c + 32)
-            end if
-        end do
-    end function lower_ascii
 
     subroutine fmt_action_id(list_file, config_file, action_id)
         character(len=*), intent(in) :: list_file
@@ -576,7 +538,7 @@ contains
         character(len=512) :: path
 
         call fmt_marker_path(action_id, path)
-        call fs_make_dir(dirname(path))
+        call fs_make_dir(path_dirname(path))
         call fs_write_text(trim(path), '1')
     end subroutine store_fmt_marker
 
@@ -589,20 +551,6 @@ contains
         call cache_store_root(root)
         path = trim(root)//'/'//action_id(1:2)//'/'//trim(action_id)//'-fmt'
     end subroutine fmt_marker_path
-
-    pure function dirname(path) result(dir)
-        character(len=*), intent(in) :: path
-        character(len=len_trim(path)) :: dir
-
-        integer :: slash
-
-        slash = index(trim(path), '/', back=.true.)
-        if (slash > 1) then
-            dir = path(1:slash - 1)
-        else
-            dir = '.'
-        end if
-    end function dirname
 
     subroutine fo_fmt_deep_list(list_file, exitcode)
         character(len=*), intent(in) :: list_file
