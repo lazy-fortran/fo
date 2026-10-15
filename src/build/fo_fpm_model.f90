@@ -90,7 +90,7 @@ contains
         character(len=MAX_PATH) :: case_name
         integer :: n_tests, n_apps, n_lib, n_deps, n_devs, n_unresolved
         integer :: i, dispatcher, lib_index, target_index, layer
-        logical :: has_dispatcher, has_library
+        logical :: has_dispatcher, has_library, is_dispatcher
 
         message = ''
         if (present(unlayered)) allocate (unlayered(0))
@@ -199,17 +199,17 @@ contains
             if (present(unlayered)) unlayered = unlayered_files(layering)
         end if
 
-        ! Cases in inventory order. The dispatcher itself is infrastructure,
-        ! not a case, as in the native test runner.
+        ! Cases in inventory order. The dispatcher is an explicit-only case:
+        ! it runs when named exactly and is never selected otherwise.
         do i = 1, n_tests
             if (.not. eligible(i)) cycle
             case_name = gfortran_test_source_name(config, config%test_dir, &
                 tests(i)%filename)
             if (len_trim(case_name) == 0) cycle
             name = trim(case_name)
-            if (len_trim(config%dispatcher) > 0 .and. &
-                name == trim(config%dispatcher)) cycle
             if (model_find_case(model, name) > 0) cycle
+            is_dispatcher = .false.
+            if (has_dispatcher) is_dispatcher = name == trim(config%dispatcher)
             if (marked(i)) then
                 target_index = dispatcher
             else
@@ -220,7 +220,8 @@ contains
             layer = 0
             if (config%n_layers > 0) layer = unit_layer(layering, n_lib + n_apps + i)
             call model_add_case(model, name, command_target=target_index, &
-                labels=labels, layer=layer, attrs=attrs)
+                labels=labels, layer=layer, attrs=attrs, &
+                explicit_only=is_dispatcher)
         end do
 
         if (config%default_exclude_seen) then

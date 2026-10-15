@@ -17,7 +17,6 @@ module fo_project_load
     use fo_cmake_native_config, only: native_cmake_selected
     use fo_cmake_model, only: cmake_model_load
     use fo_fpm_model, only: fpm_model_load
-    use fo_gfortran_build, only: gfortran_named_test_exists
     use fo_project_model, only: project_model_t, model_request_t, &
         model_selection_t, model_plan_t, model_select, model_plan, &
         model_find_case, model_selected_names, SELECT_OK, &
@@ -89,9 +88,7 @@ contains
         !! Load the model and select. ierr = 0: the selection is usable (an
         !! empty selection has selection%status = SELECT_EMPTY and the caller
         !! decides). ierr /= 0: message is the diagnostic, without prefix.
-        !! extra: names the native inventory accepts although they are no
-        !! model case (a dispatcher program named explicitly); they run as
-        !! named and belong to no plan.
+        !! extra: always empty; kept for callers that still pass it.
         type(backend_t), intent(inout) :: b
         character(len=*), intent(in) :: flags
         type(model_request_t), intent(in) :: request
@@ -101,27 +98,11 @@ contains
         character(len=:), allocatable, intent(out) :: message
         type(string_t), allocatable, intent(out), optional :: extra(:)
         integer :: i, k
-        logical :: all_legacy
 
         if (present(extra)) allocate (extra(0))
         call project_load(b, flags, model, ierr, message)
         if (ierr /= 0) return
         call model_select(model, request, selection)
-        if (selection%status == SELECT_UNKNOWN_NAME .and. b%kind == BACKEND_NATIVE &
-            .and. present(extra)) then
-            all_legacy = .true.
-            do i = 1, size(selection%unknown)
-                if (gfortran_named_test_exists(trim(b%project_dir), &
-                    selection%unknown(i)%s)) cycle
-                all_legacy = .false.
-                exit
-            end do
-            if (all_legacy) then
-                extra = selection%unknown
-                selection%status = SELECT_OK
-                if (size(selection%cases) == 0) selection%status = SELECT_EMPTY
-            end if
-        end if
         select case (selection%status)
         case (SELECT_OK, SELECT_EMPTY)
             ierr = 0
@@ -156,10 +137,11 @@ contains
     end subroutine project_resolve
 
     subroutine project_run_names(model, selection, extra, names)
-        !! Exact names handed to the backend: selected cases, then extras.
+        !! Exact names handed to the backend: the selected cases (extra is
+        !! ignored; kept for callers that still pass it).
         type(project_model_t), intent(in) :: model
         type(model_selection_t), intent(in) :: selection
-        type(string_t), intent(in) :: extra(:)
+        type(string_t), intent(in), optional :: extra(:)
         character(len=:), allocatable, intent(out) :: names(:)
         type(string_t), allocatable :: selected(:)
         integer :: k, width
@@ -169,15 +151,9 @@ contains
         do k = 1, size(selected)
             width = max(width, len(selected(k)%s))
         end do
-        do k = 1, size(extra)
-            width = max(width, len(extra(k)%s))
-        end do
-        allocate (character(len=width) :: names(size(selected) + size(extra)))
+        allocate (character(len=width) :: names(size(selected)))
         do k = 1, size(selected)
             names(k) = selected(k)%s
-        end do
-        do k = 1, size(extra)
-            names(size(selected) + k) = extra(k)%s
         end do
     end subroutine project_run_names
 

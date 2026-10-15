@@ -109,6 +109,9 @@ module fo_project_model
         !! Adapter-level default exclusion independent of labels (a case the
         !! selected CTest preset filters out).
         logical :: default_excluded = .false.
+        !! Runs only when named exactly: never selected by globs, labels,
+        !! layers, --all or an empty name list (the fpm dispatcher program).
+        logical :: explicit_only = .false.
     end type model_case_t
 
     type, public :: name_index_t
@@ -292,7 +295,7 @@ contains
     end subroutine model_add_layer
 
     subroutine model_add_case(model, name, command_target, labels, layer, attrs, &
-            default_excluded, declared_targets, mapping, origin, index)
+            default_excluded, declared_targets, mapping, origin, explicit_only, index)
         !! mapping defaults to MAP_DECLARED with declared_targets, else
         !! MAP_EXACT with a command target, else MAP_UNKNOWN.
         type(project_model_t), intent(inout) :: model
@@ -300,7 +303,7 @@ contains
         integer, intent(in), optional :: command_target, layer, mapping, origin
         type(string_t), intent(in), optional :: labels(:), declared_targets(:)
         type(model_attr_t), intent(in), optional :: attrs(:)
-        logical, intent(in), optional :: default_excluded
+        logical, intent(in), optional :: default_excluded, explicit_only
         integer, intent(out), optional :: index
         type(model_case_t), allocatable :: grown(:)
         integer :: n, existing
@@ -330,6 +333,8 @@ contains
             end if
             c%default_excluded = .false.
             if (present(default_excluded)) c%default_excluded = default_excluded
+            c%explicit_only = .false.
+            if (present(explicit_only)) c%explicit_only = explicit_only
             if (present(mapping)) then
                 c%mapping = mapping
             else if (size(c%declared_target_names) > 0) then
@@ -521,7 +526,8 @@ contains
         !! Select project cases: names/globs, then -L (AND), -LE (AND), layers,
         !! then default exclusion. -LE always wins. Default exclusion is lifted
         !! by --all, or for a label exclusion by an -L regex matching that
-        !! label. Dependency cases are never selected.
+        !! label. Dependency cases are never selected; explicit-only cases only
+        !! when named exactly.
         type(project_model_t), intent(in) :: model
         type(model_request_t), intent(in) :: request
         type(model_selection_t), intent(out) :: selection
@@ -575,6 +581,9 @@ contains
         named = size(names) == 0
         exact = .false.
         do i = 1, model%n_cases
+            if (model%cases(i)%explicit_only) named(i) = .false.
+        end do
+        do i = 1, model%n_cases
             origin(i)%s = 'all cases'
         end do
         do k = 1, size(names)
@@ -598,6 +607,7 @@ contains
             any_match = .false.
             do i = 1, model%n_cases
                 if (model%cases(i)%origin /= ORIGIN_PROJECT) cycle
+                if (model%cases(i)%explicit_only) cycle
                 if (.not. pattern_matches(glob, model%cases(i)%name)) cycle
                 any_match = .true.
                 if (named(i)) cycle

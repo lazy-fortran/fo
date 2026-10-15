@@ -17,7 +17,7 @@ program test_fpm_project_model
         model_selection_t, model_plan_t, model_select, model_plan, &
         model_selected_names, model_find_case, model_find_target, &
         model_find_artifact, TARGET_LIBRARY, TARGET_EXECUTABLE, &
-        ORIGIN_DEPENDENCY, MAP_EXACT, SELECT_OK, SELECT_NAMED_EXCLUDED
+        ORIGIN_DEPENDENCY, MAP_EXACT, SELECT_OK, SELECT_NAMED_EXCLUDED, SELECT_EMPTY
     implicit none
 
     integer :: n_pass, n_fail
@@ -130,8 +130,13 @@ contains
             if (size(model%cases(c)%labels) == 1) call check( &
                 model%cases(c)%labels(1)%s == 'slow', 'label is slow')
         end if
-        call check(model_find_case(model, 'm5_suite') == 0, &
-            'dispatcher is not a case')
+        c = model_find_case(model, 'm5_suite')
+        call check(c > 0, 'dispatcher is a case')
+        if (c > 0) then
+            call check(model%cases(c)%explicit_only, 'dispatcher is explicit-only')
+            call check(model%targets(model%cases(c)%command_target)%name == &
+                'm5_suite', 'dispatcher case runs the dispatcher exe')
+        end if
         call check(model_find_case(model, 'm5_helper') == 0, &
             'helper module is not a case')
         do c = 1, model%n_cases
@@ -155,6 +160,31 @@ contains
         call model_select(model, request, selection)
         call check(selection%status == SELECT_NAMED_EXCLUDED, &
             'named slow case requires --all')
+
+        ! The dispatcher is explicit-only: a matching glob and --all skip it,
+        ! its exact name runs it.
+        request%names(1)%s = 'm5*'
+        call model_select(model, request, selection)
+        call check(selection%status == SELECT_EMPTY, &
+            'glob does not select dispatcher')
+        request%names(1)%s = '*suite'
+        request%all = .true.
+        call model_select(model, request, selection)
+        call check(selection%status == SELECT_EMPTY, '--all glob skips dispatcher')
+        deallocate (request%names)
+        allocate (request%names(0))
+        call model_select(model, request, selection)
+        call model_selected_names(model, selection, names)
+        call check(size(names) == 4, '--all selects the four inventory cases')
+        do c = 1, size(names)
+            call check(names(c)%s /= 'm5_suite', '--all skips dispatcher')
+        end do
+        deallocate (request%names)
+        allocate (request%names(1))
+        request%names(1)%s = 'm5_suite'
+        call model_select(model, request, selection)
+        call check(selection%status == SELECT_OK .and. size(selection%cases) == 1, &
+            'dispatcher runs when named')
     end subroutine test_model
 
     logical function has_target(model, plan, name) result(found)
@@ -192,7 +222,8 @@ contains
         call fpm_model_load(trim(root), model, ierr, message)
         call check(ierr == 0, 'model loads for inventory')
         call check(n_inventory == 4, 'inventory has four cases')
-        call check(model%n_cases == n_inventory, 'model has the inventory size')
+        call check(model%n_cases == n_inventory + 1, &
+            'model has the inventory plus the dispatcher')
         do i = 1, n_inventory
             call check(model_find_case(model, trim(inventory(i))) > 0, &
                 'model has inventory case '//trim(inventory(i)))
