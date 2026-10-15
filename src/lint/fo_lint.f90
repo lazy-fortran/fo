@@ -12,8 +12,8 @@ module fo_lint
     use fx_json_build, only: json_escape_string
     implicit none
     private
-    public :: lint_finding_t, lint_file, lint_files, lint_dir, lint_findings_json
-    public :: lint_warning_t, lint_compiler, lint_warnings_json, lint_all_json
+    public :: lint_finding_t, lint_file, lint_files, lint_dir
+    public :: lint_warning_t, lint_compiler, lint_all_json
     public :: lint_testfail_files
     public :: lint_dedup_warnings
     public :: lint_fix_dir
@@ -691,32 +691,6 @@ contains
         close (u)
     end subroutine file_root_module
 
-    function lint_findings_json(findings, n_findings) result(json)
-        type(lint_finding_t), intent(in) :: findings(*)
-        integer, intent(in) :: n_findings
-        character(len=:), allocatable :: json
-
-        integer :: i
-
-        if (n_findings == 0) then
-            json = '{"unused_imports":[],"count":0}'
-            return
-        end if
-
-        json = '{"unused_imports":['
-        do i = 1, n_findings
-            if (i > 1) json = trim(json)//','
-            json = trim(json)//'{"file":"'// &
-                trim(json_escape_string(findings(i)%file))//'"'// &
-                ',"line":'//trim(json_int(findings(i)%line))// &
-                ',"module":"'// &
-                trim(json_escape_string(findings(i)%module_name))//'"'// &
-                ',"symbol":"'// &
-                trim(json_escape_string(findings(i)%symbol))//'"}'
-        end do
-        json = trim(json)//'],"count":'//trim(json_int(n_findings))//'}'
-    end function lint_findings_json
-
     subroutine lint_compiler(dir, warnings, n_warnings, selected)
         character(len=*), intent(in) :: dir
         type(lint_warning_t), intent(out) :: warnings(MAX_WARNINGS)
@@ -1111,31 +1085,6 @@ contains
         warnings(n_warnings)%column = cur_col
         warnings(n_warnings)%message = trim(clean)
     end subroutine parse_gfortran_warning
-
-    function lint_warnings_json(warnings, n_warnings) result(json)
-        type(lint_warning_t), intent(in) :: warnings(*)
-        integer, intent(in) :: n_warnings
-        character(len=:), allocatable :: json
-
-        integer :: i
-
-        if (n_warnings == 0) then
-            json = '{"warnings":[],"count":0}'
-            return
-        end if
-
-        json = '{"warnings":['
-        do i = 1, n_warnings
-            if (i > 1) json = trim(json)//','
-            json = trim(json)//'{"file":"'// &
-                trim(json_escape_string(warnings(i)%file))//'"'// &
-                ',"line":'//trim(json_int(warnings(i)%line))// &
-                ',"column":'//trim(json_int(warnings(i)%column))// &
-                ',"message":"'// &
-                trim(json_escape_string(warnings(i)%message))//'"}'
-        end do
-        json = trim(json)//'],"count":'//trim(json_int(n_warnings))//'}'
-    end function lint_warnings_json
 
     function lint_all_json(findings, n_findings, warnings, n_warnings, &
             deep_json, deep_count, deep_error) &

@@ -427,7 +427,6 @@ static int wait_posix_child(pid_t process, int *status, int options) {
 }
 
 int fo_test_close(int descriptor) { return close(descriptor); }
-int fo_test_host_is_windows(void) { return 0; }
 int fo_test_pipe_cloexec(int descriptors[2]);
 int fo_test_pipe_mode(int descriptors[2], int parent_reads) {
     (void)parent_reads;
@@ -453,7 +452,6 @@ int fo_test_spawn_unowned(char *const argv[], const char *cwd) {
 int fo_test_ignore_term(void) { return signal(SIGTERM, SIG_IGN) == SIG_ERR ? -1 : 0; }
 int fo_test_terminate_self(void) { return kill(getpid(), SIGTERM); }
 int fo_test_in_job(void) { errno = ENOTSUP; return -1; }
-int fo_test_getpid(void) { return (int)getpid(); }
 int fo_test_is_regular_file(const char *path) {
     struct stat value;
     return stat(path, &value) == 0 && S_ISREG(value.st_mode);

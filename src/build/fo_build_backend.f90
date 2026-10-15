@@ -6,7 +6,7 @@ module fo_build_backend
     use fo_process, only: process_detect_nproc, process_getpid, &
         process_getcwd, process_run_argv_logged, argv_push
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
-        gfortran_test_names, gfortran_run_tests
+        gfortran_run_tests
     use fo_util, only: read_text_file
     use fx_string, only: string_t
     use fo_test_budget, only: test_timeout_seconds, test_wall_cap_seconds
@@ -267,7 +267,7 @@ contains
                     return
                 end if
                 call gfortran_test(self%project_dir, log_path, exitcode, &
-                    include_slow=include_slow, flags=flag_text, build_only=.true., &
+                    include_slow=include_slow, flags=flag_text, &
                     use_cache=use_cache)
             else
                 call gfortran_build(self%project_dir, log_path, exitcode, &
@@ -362,7 +362,7 @@ contains
             select case (self%kind)
             case (BACKEND_NATIVE)
                 call gfortran_test(self%project_dir, log_path, exitcode, &
-                    include_slow=slow, flags=flag_text, build_only=.true., &
+                    include_slow=slow, flags=flag_text, &
                     use_cache=use_cache)
             case (BACKEND_CMAKE)
                 call cmake_build(self%cmake, flag_text, log_path, exitcode)
@@ -438,9 +438,9 @@ contains
             end if
             select case (self%kind)
             case (BACKEND_NATIVE)
-                call gfortran_test_names(self%project_dir, names, n_names, &
-                    log_path, exitcode, include_slow=slow, flags=flag_text, &
-                    use_cache=use_cache, build_only=.true.)
+                call gfortran_test(self%project_dir, log_path, exitcode, &
+                    include_slow=slow, flags=flag_text, use_cache=use_cache, &
+                    names=names, n_names=n_names)
             case (BACKEND_CMAKE)
                 call cmake_build(self%cmake, flag_text, log_path, exitcode)
             end select

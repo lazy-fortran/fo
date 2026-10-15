@@ -760,16 +760,6 @@ int fo_c_generation_freeze_tree(const char *root) {
     return freeze_tree_at(root, "") == 0 ? 0 : (errno == 0 ? 1 : errno);
 }
 
-int fo_c_generation_freeze_directory(const char *path) {
-    struct stat st;
-    if (lstat(path, &st) != 0) return errno == 0 ? 1 : errno;
-    if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) {
-        errno = ENOTDIR;
-        return errno;
-    }
-    return chmod(path, 0555) == 0 ? 0 : (errno == 0 ? 1 : errno);
-}
-
 int fo_c_generation_lock(const char *path) {
     return fo_sys_lock_file(path, 0, 0666, LOCK_EX);
 }

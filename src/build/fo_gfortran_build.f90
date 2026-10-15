@@ -85,14 +85,14 @@ module fo_gfortran_build
         logical :: ran = .false.
     end type current_test_t
 
-    public :: gfortran_build, gfortran_test, gfortran_test_names
+    public :: gfortran_build, gfortran_test
     public :: gfortran_run_tests
     public :: gfortran_app_source_name, gfortran_test_source_name
     public :: scan_project_app_units, scan_project_test_units
     public :: test_source_eligible, scanned_dispatcher_available
     public :: unit_has_dispatcher_marker
     public :: source_has_marker, dispatch_target
-    public :: gfortran_selected_test_names, gfortran_named_test_exists
+    public :: gfortran_selected_test_names
     public :: native_compile_units, native_link_target, native_archive_target
     public :: native_run_test, write_test_result_line
     public :: make_obj_path
@@ -487,119 +487,39 @@ contains
     end subroutine guard_root_mod_shadow
 
     subroutine gfortran_test(project_dir, log_file, exitcode, include_slow, &
-            n_compiled, flags, build_only, use_cache)
+            n_compiled, flags, use_cache, names, n_names)
+        !! Build the test binaries of a project. An absent or empty name list
+        !! selects every test; running them is gfortran_run_tests.
         character(len=*), intent(in) :: project_dir, log_file
         integer, intent(out) :: exitcode
         logical, intent(in), optional :: include_slow
         integer, intent(out), optional :: n_compiled
         character(len=*), intent(in), optional :: flags
-        logical, intent(in), optional :: build_only
         logical, intent(in), optional :: use_cache
+        character(len=*), intent(in), optional :: names(:)
+        integer, intent(in), optional :: n_names
 
         type(fpm_config_t), allocatable :: config
-        integer :: ierr, n_dep_includes, n_dep_objs, n_lib_objs
+        integer :: ierr, n_dep_includes, n_dep_objs, n_lib_objs, n_sel
         character(len=512) :: mod_dir, obj_dir, bin_dir
         character(len=512), allocatable :: dep_includes(:)
         character(len=512), allocatable :: dep_objs(:)
         character(len=512), allocatable :: lib_objs(:)
         character(len=512) :: lf, flag_text, request_flags, test_dir
         character(len=128) :: no_names(1)
-        logical :: slow, bonly, build_current, tests_current, apps_current
-
-        lf = log_file
-        if (len_trim(lf) == 0) lf = '/dev/null'
-        slow = .false.
-        if (present(include_slow)) slow = include_slow
-        flag_text = ''
-        if (present(flags)) flag_text = flags
-        request_flags = flag_text
-        bonly = .false.
-        if (present(build_only)) bonly = build_only
-        if (present(n_compiled)) n_compiled = 0
-
-        call gfortran_build(project_dir, lf, exitcode, flags=flag_text, &
-            use_cache=use_cache, up_to_date=build_current, &
-            tests_ready=tests_current, &
-            build_apps=gremlin_execution_view_requested(), &
-            apps_ready=apps_current, cached_test_dir=test_dir)
-        if (exitcode /= 0) return
-
-        bin_dir = native_output_dir(project_dir, request_flags, 'bin')
-        if (build_current .and. tests_current .and. .not. bonly .and. &
-            len_trim(test_dir) > 0) then
-            call run_current_tests(project_dir, test_dir, bin_dir, no_names, &
-                0, slow, lf, exitcode)
-            return
-        end if
-
-        call fpm_config_allocate(config)
-        call fpm_config_parse(project_dir, config, ierr)
-        if (ierr /= 0) then
-            exitcode = 1
-            return
-        end if
-        call merge_dep_link_libs(project_dir, config)
-        call merge_flags(config, flag_text)
-
-        mod_dir = trim(project_dir)//'/build/fo/mod'
-        obj_dir = trim(project_dir)//'/build/fo/obj'
-        bin_dir = native_output_dir(project_dir, request_flags, 'bin')
-        if (build_current .and. tests_current .and. .not. bonly) then
-            call run_current_tests(project_dir, config%test_dir, bin_dir, no_names, &
-                0, slow, lf, exitcode)
-            return
-        end if
-
-        allocate (dep_includes(MAX_DEP_DIRS), dep_objs(MAX_DEP_OBJS), &
-            lib_objs(MAX_SRC_OBJS))
-        call find_dep_artifacts(project_dir, config, dep_includes, n_dep_includes, &
-            dep_objs, n_dep_objs, .true.)
-        call collect_current_lib_objs(project_dir, config, obj_dir, dep_includes, &
-            n_dep_includes, dep_objs, n_dep_objs, lib_objs, n_lib_objs)
-
-        call compile_and_run_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
-            bin_dir, dep_includes, n_dep_includes, &
-            dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
-            config%link_libs, config%n_link_libs, lf, &
-            no_names, 0, slow, exitcode, n_compiled, &
-            flags=flag_text, &
-            build_only=bonly, use_cache=use_cache)
-        if (exitcode == 0) call refresh_build_stamp(project_dir, flag_text, &
-            request_flags, slow, apps_current, config%test_dir, use_cache)
-        call memo_save()
-    end subroutine gfortran_test
-
-    subroutine gfortran_test_names(project_dir, names, n_names, log_file, &
-            exitcode, include_slow, n_compiled, flags, use_cache, build_only)
-        character(len=*), intent(in) :: project_dir, log_file
-        character(len=*), intent(in) :: names(:)
-        integer, intent(in) :: n_names
-        integer, intent(out) :: exitcode
-        logical, intent(in), optional :: include_slow
-        integer, intent(out), optional :: n_compiled
-        character(len=*), intent(in), optional :: flags
-        logical, intent(in), optional :: use_cache
-        logical, intent(in), optional :: build_only
-
-        type(fpm_config_t), allocatable :: config
-        integer :: ierr, n_dep_includes, n_dep_objs, n_lib_objs
-        character(len=512) :: mod_dir, obj_dir, bin_dir
-        character(len=512), allocatable :: dep_includes(:)
-        character(len=512), allocatable :: dep_objs(:)
-        character(len=512), allocatable :: lib_objs(:)
-        character(len=512) :: lf, flag_text, request_flags, test_dir
-        logical :: slow, bonly, build_current, tests_current, apps_current
+        logical :: slow, build_current, tests_current, apps_current
         logical :: target_outputs_ready
 
         lf = log_file
         if (len_trim(lf) == 0) lf = '/dev/null'
         slow = .false.
         if (present(include_slow)) slow = include_slow
-        bonly = .false.
-        if (present(build_only)) bonly = build_only
         flag_text = ''
         if (present(flags)) flag_text = flags
         request_flags = flag_text
+        no_names = ''
+        n_sel = 0
+        if (present(names) .and. present(n_names)) n_sel = n_names
         if (present(n_compiled)) n_compiled = 0
 
         call gfortran_build(project_dir, lf, exitcode, flags=flag_text, &
@@ -611,15 +531,16 @@ contains
 
         bin_dir = native_output_dir(project_dir, request_flags, 'bin')
         if (build_current .and. tests_current) then
-            call selected_test_targets_ready(project_dir, test_dir, bin_dir, &
-                names, n_names, slow, target_outputs_ready)
+            if (n_sel > 0) then
+                call selected_test_targets_ready(project_dir, test_dir, bin_dir, &
+                    names, n_sel, slow, target_outputs_ready)
+            else
+                call selected_test_targets_ready(project_dir, test_dir, bin_dir, &
+                    no_names, 0, slow, target_outputs_ready)
+            end if
             if (.not. target_outputs_ready) tests_current = .false.
         end if
-        if (build_current .and. tests_current .and. len_trim(test_dir) > 0) then
-            if (.not. bonly) call run_current_tests(project_dir, test_dir, bin_dir, &
-                names, n_names, slow, lf, exitcode)
-            return
-        end if
+        if (build_current .and. tests_current) return
 
         call fpm_config_allocate(config)
         call fpm_config_parse(project_dir, config, ierr)
@@ -632,12 +553,6 @@ contains
 
         mod_dir = trim(project_dir)//'/build/fo/mod'
         obj_dir = trim(project_dir)//'/build/fo/obj'
-        bin_dir = native_output_dir(project_dir, request_flags, 'bin')
-        if (build_current .and. tests_current) then
-            if (.not. bonly) call run_current_tests(project_dir, config%test_dir, &
-                bin_dir, names, n_names, slow, lf, exitcode)
-            return
-        end if
 
         allocate (dep_includes(MAX_DEP_DIRS), dep_objs(MAX_DEP_OBJS), &
             lib_objs(MAX_SRC_OBJS))
@@ -646,16 +561,26 @@ contains
         call collect_current_lib_objs(project_dir, config, obj_dir, dep_includes, &
             n_dep_includes, dep_objs, n_dep_objs, lib_objs, n_lib_objs)
 
-        call compile_and_run_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
-            bin_dir, dep_includes, n_dep_includes, &
-            dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
-            config%link_libs, config%n_link_libs, lf, &
-            names, n_names, slow, exitcode, n_compiled, &
-            flags=flag_text, build_only=bonly, use_cache=use_cache)
+        if (n_sel > 0) then
+            call compile_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
+                bin_dir, dep_includes, n_dep_includes, &
+                dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
+                config%link_libs, config%n_link_libs, lf, &
+                names, n_sel, slow, exitcode, n_compiled, &
+                flags=flag_text, use_cache=use_cache)
+        else
+            call compile_tests(project_dir, config%test_dir, mod_dir, obj_dir, &
+                bin_dir, dep_includes, n_dep_includes, &
+                dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
+                config%link_libs, config%n_link_libs, lf, &
+                no_names, 0, slow, exitcode, n_compiled, &
+                flags=flag_text, use_cache=use_cache)
+        end if
         if (exitcode == 0) call refresh_build_stamp(project_dir, flag_text, &
-            request_flags, n_names == 0 .and. slow, apps_current, &
+            request_flags, n_sel == 0 .and. slow, apps_current, &
             config%test_dir, use_cache)
-    end subroutine gfortran_test_names
+        call memo_save()
+    end subroutine gfortran_test
 
     subroutine gfortran_run_tests(project_dir, log_file, exitcode, include_slow, &
             names, n_names, flags)
@@ -1014,36 +939,6 @@ contains
             return
         end do
     end function scanned_dispatcher_available
-
-    logical function gfortran_named_test_exists(project_dir, name) result(exists)
-        !! Validate public manifest names against runnable sources, including
-        !! the dispatcher itself when explicitly requested.
-        character(len=*), intent(in) :: project_dir, name
-        type(fpm_config_t), allocatable :: config
-        type(scan_unit_t), allocatable :: units(:)
-        character(len=MAX_PATH) :: public_name
-        integer :: i, n_units, ierr
-        logical :: has_dispatcher
-
-        exists = .false.
-        call fpm_config_allocate(config)
-        call fpm_config_parse(project_dir, config, ierr)
-        if (ierr /= 0) return
-        call scan_project_test_units(project_dir, config, units, n_units, ierr)
-        if (ierr /= 0) return
-        has_dispatcher = scanned_dispatcher_available(config, config%test_dir, &
-            units, n_units)
-        do i = 1, n_units
-            if (.not. test_source_eligible(units(i)%filename, &
-                units(i)%is_program, has_dispatcher, &
-                units(i)%is_program .or. len_trim(units(i)%module_name) > 0)) cycle
-            public_name = gfortran_test_source_name(config, config%test_dir, &
-                units(i)%filename)
-            if (trim(public_name) /= trim(name)) cycle
-            exists = .true.
-            return
-        end do
-    end function gfortran_named_test_exists
 
     subroutine dispatch_target(bin_dir, dispatcher, name, bin, args)
         !! Where a marked test actually runs: inside the consolidated binary,
@@ -2950,12 +2845,12 @@ contains
         stem = trim(base)
     end subroutine app_prog_stem
 
-    subroutine compile_and_run_tests(project_dir, test_dir, mod_dir, obj_dir, &
+    subroutine compile_tests(project_dir, test_dir, mod_dir, obj_dir, &
             bin_dir, dep_includes, n_dep_includes, &
             dep_objs, n_dep_objs, lib_objs, n_lib_objs, &
             link_libs, n_link_libs, log_file, &
             selected_names, n_selected, include_slow, &
-            exitcode, n_compiled, flags, build_only, use_cache)
+            exitcode, n_compiled, flags, use_cache)
         character(len=*), intent(in) :: project_dir, test_dir, mod_dir
         character(len=*), intent(in) :: obj_dir, bin_dir, log_file
         character(len=512), intent(in) :: dep_includes(MAX_DEP_DIRS)
@@ -2972,8 +2867,6 @@ contains
         integer, intent(out) :: exitcode
         integer, intent(out), optional :: n_compiled
         character(len=*), intent(in), optional :: flags
-        ! build_only: compile and link the test binaries but do not run them.
-        logical, intent(in), optional :: build_only
         logical, intent(in), optional :: use_cache
 
         type(scan_unit_t), allocatable :: tunits(:)
@@ -2989,18 +2882,14 @@ contains
         character(len=MAX_PATH), allocatable :: run_names(:)
         character(len=4096), allocatable :: run_args(:)
         logical, allocatable :: run_compiled(:)
-        logical, allocatable :: ran(:), flaky(:)
-        real, allocatable :: run_secs(:), run_cpu(:)
-        integer :: test_timeout, test_warn
-        integer(8) :: clk0, clk1, clk_rate
         integer :: n_order
-        logical :: has_cycle, restored, bonly
+        logical :: has_cycle, restored
         logical :: allow_cache
         character(len=512) :: obj_path, bin_path
         character(len=:), allocatable :: incl_flag, helper_includes
         character(len=MAX_PATH) :: tname
         character(len=MAX_PATH) :: fname_local
-        character(len=512) :: log_local, rerun_log
+        character(len=512) :: log_local
         type(cache_t) :: c
         integer :: cache_ierr
         character(len=256) :: compiler
@@ -3018,7 +2907,6 @@ contains
         character(len=512) :: test_dep_objs(MAX_DEP_OBJS)
         integer :: n_test_dep_objs
         character(len=512) :: archive_path
-        character(len=MAX_PATH) :: execution_cwd
         logical :: in_lib
         type(resolved_src_t) :: devsrcs(MAX_RESOLVED)
         character(len=4096), allocatable :: helper_flags(:)
@@ -3026,19 +2914,6 @@ contains
         type(scan_unit_t), allocatable :: udev(:)
         type(fpm_config_t), allocatable :: manifest_config
 
-        bonly = .false.
-        if (present(build_only)) bonly = build_only
-        execution_cwd = project_dir
-        if (.not. bonly) then
-            execution_cwd = test_execution_cwd(project_dir)
-            if (len_trim(execution_cwd) == 0) then
-                exitcode = 1
-                return
-            end if
-            call prepare_test_app_outputs(project_dir, execution_cwd, bin_dir, &
-                exitcode)
-            if (exitcode /= 0) return
-        end if
         test_flags = ''
         if (present(flags)) test_flags = flags
         call append_array_temporary_warning_flag(fc_command(), test_flags)
@@ -3050,12 +2925,7 @@ contains
         allocate (run_build_indices(MAX_NODES), run_bins(MAX_NODES))
         allocate (run_keys(MAX_NODES))
         allocate (run_names(MAX_NODES), run_args(MAX_NODES))
-        allocate (run_compiled(MAX_NODES), run_secs(MAX_NODES), run_cpu(MAX_NODES))
-        allocate (ran(MAX_NODES), flaky(MAX_NODES))
-        ran = .false.
-        flaky = .false.
-        run_secs = 0.0
-        run_cpu = -1.0
+        allocate (run_compiled(MAX_NODES))
         call fpm_config_allocate(manifest_config)
         call fpm_config_parse(project_dir, manifest_config, ierr)
         if (ierr /= 0) return
@@ -3066,8 +2936,6 @@ contains
             return
         end if
         if (n_tests == 0) return
-        test_timeout = test_timeout_seconds(manifest_config)
-        test_warn = test_warn_seconds(test_timeout)
 
         call resolve_dev_dep_srcs(project_dir, devsrcs, n_dev, ierr)
         if (ierr /= 0) then
@@ -3268,16 +3136,11 @@ contains
 
         run_exits = 0
         run_compiled = .false.
-        if (bonly) then
-            call progress_begin('build tests', n_run)
-        else
-            call progress_begin('test', n_run)
-        end if
+        call progress_begin('build tests', n_run)
         team_size = max(1, min(n_run, native_jobs()))
         !$omp parallel do if(n_run > 1) num_threads(team_size) schedule(dynamic) &
         !$omp& private(node_id, fname_local, &
-        !$omp& obj_path, bin_path, tname, log_local, restored, clk0, clk1, &
-        !$omp& clk_rate)
+        !$omp& obj_path, bin_path, tname, log_local, restored)
         do i = 1, n_run
             if (run_build_indices(i) /= i) cycle
             node_id = run_nodes(i)
@@ -3310,51 +3173,13 @@ contains
             if (run_build_indices(i) == i) cycle
             run_exits(i) = run_exits(run_build_indices(i))
         end do
-        !$omp parallel do if(n_run > 1) num_threads(team_size) schedule(dynamic) &
-        !$omp& private(bin_path, log_local, clk0, clk1, clk_rate)
         do i = 1, n_run
-            bin_path = run_bins(i)
-            log_local = run_logs(i)
-            if (run_exits(i) == 0 .and. .not. bonly) then
-                ran(i) = .true.
-                call system_clock(clk0, clk_rate)
-                ! Run from the project root, not from whatever directory fo was
-                ! invoked from, so a test that opens a project-relative path
-                ! behaves the same under the CLI and under the MCP server.
-                call run_test_binary(execution_cwd, bin_path, &
-                    run_args(i), log_local, &
-                    manifest_config, is_slow_test(run_names(i)), run_exits(i), &
-                    run_cpu(i))
-                call system_clock(clk1)
-                if (clk_rate > 0) run_secs(i) = real(clk1 - clk0) / real(clk_rate)
-            end if
             call progress_step()
         end do
-        !$omp end parallel do
         call progress_end()
         if (len_trim(link_base) == 0 .and. len_trim(archive_path) > 0) &
             call remove_ephemeral_link_artifact(archive_path)
 
-        ! Flaky-test diagnosis: a test that compiled and ran but failed may have
-        ! lost a race with a concurrently-running test (shared /tmp path, shared
-        ! global state). Re-run each such failure once, serially and in isolation.
-        ! If it now passes it was flaky: report it as a likely parallel-race
-        ! candidate and do not fail the build on it. A genuine failure fails both
-        ! times and is kept.
-        if (.not. bonly) then
-            do i = 1, n_run
-                if (.not. ran(i)) cycle
-                if (run_exits(i) == 0 .or. run_exits(i) == 124) cycle
-                tname = run_names(i)
-                bin_path = run_bins(i)
-                call make_tmpfile('fo_test_rerun', rerun_log)
-                call run_test_binary(execution_cwd, bin_path, &
-                    run_args(i), rerun_log, manifest_config, is_slow_test(tname), &
-                    run_exits(i))
-                call delete_tmpfile(rerun_log)
-                if (run_exits(i) == 0) flaky(i) = .true.
-            end do
-        end if
 
         do i = 1, n_run
             tname = run_names(i)
@@ -3379,50 +3204,7 @@ contains
             call delete_tmpfile(run_logs(i))
         end do
 
-        do i = 1, n_run
-            if (flaky(i)) then
-                tname = run_names(i)
-                call append_flaky_status(log_file, tname)
-            end if
-        end do
-
-        ! Structured TEST_RESULT lines for downstream consumers (CLI, MCP, agents)
-        if (.not. bonly) then
-            do i = 1, n_run
-                tname = run_names(i)
-                if (flaky(i)) then
-                    call write_test_result_line(log_file, tname, 'FLAKY', '-', &
-                        run_secs(i))
-                else if (ran(i) .and. run_exits(i) == 124) then
-                    call write_test_result_line(log_file, tname, 'TIMEOUT', '124', &
-                        run_secs(i))
-                else if (ran(i) .and. run_exits(i) == 0) then
-                    call write_test_result_line(log_file, tname, 'PASS', '-', &
-                        run_secs(i))
-                else if (ran(i)) then
-                    block
-                        character(len=8) :: exit_str
-                        write (exit_str, '(i0)') run_exits(i)
-                        call write_test_result_line(log_file, tname, 'FAIL', &
-                            trim(exit_str), run_secs(i))
-                    end block
-                else if (run_exits(i) /= 0) then
-                    block
-                        character(len=8) :: exit_str
-                        write (exit_str, '(i0)') run_exits(i)
-                        call write_test_result_line(log_file, tname, 'FAIL', &
-                            trim(exit_str), 0.0)
-                    end block
-                else if (run_compiled(i)) then
-                    call write_test_result_line(log_file, tname, 'SKIP', '-', 0.0)
-                end if
-            end do
-        end if
-
-        if (.not. bonly) &
-            call warn_slow_tests(filenames, run_nodes, run_exits, run_secs, run_cpu, &
-            n_run, test_warn, log_file)
-    end subroutine compile_and_run_tests
+    end subroutine compile_tests
 
     function team_openmp_env() result(extra)
         !! `;OMP_NUM_THREADS=n` for a test running inside a concurrent team;

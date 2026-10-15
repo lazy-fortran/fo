@@ -5,7 +5,7 @@ program test_section_capability
     use fo_capabilities, only: compiler_supports_section_splitting
     use fo_compiler_dialect, only: selected_compiler_command
     use fo_fs, only: fs_find_executable, fs_make_dir, fs_remove_tree
-    use fo_gfortran_build, only: gfortran_test
+    use fo_test_native_run, only: native_test_run
     use fo_process, only: process_getpid
     use fo_util, only: make_tmpfile, temporary_root
     implicit none
@@ -121,7 +121,7 @@ contains
         write (unit, '(a)') 'if (compute() /= 42) error stop 1'
         write (unit, '(a)') 'end program oracle'
         close (unit)
-        call gfortran_test(project, log, result, use_cache=.false.)
+        call native_test_run(project, log, result, use_cache=.false.)
         if (result /= 0) then
             write (error_unit, '(a)') 'native source oracle failed for '//trim(command)
             write (error_unit, '(a)') 'log: '//trim(log)

@@ -22,7 +22,6 @@ extern void fo_c_cancel_pid(int, int *);
 extern int fo_c_mkdir_p(const char *);
 extern int fo_c_rm_rf(const char *);
 int fo_test_host_is_linux(void) { return 0; }
-int fo_test_host_is_windows(void) { return 1; }
 int fo_test_os_initialize(void) {
     if (_setmode(0, _O_BINARY) < 0 || _setmode(1, _O_BINARY) < 0 || _setmode(2, _O_BINARY) < 0) return -1;
     return 162;
@@ -412,7 +411,6 @@ static BOOL WINAPI ignore_console_term(DWORD event) {
 }
 int fo_test_ignore_term(void) { return SetConsoleCtrlHandler(ignore_console_term, TRUE) ? 0 : -1; }
 int fo_test_terminate_self(void) { return TerminateProcess(GetCurrentProcess(), 143) ? 0 : -1; }
-int fo_test_getpid(void) { return (int)GetCurrentProcessId(); }
 int fo_test_chdir(const char *path) {
     wchar_t *wide = fx_win32_utf16(path);
     int result = wide && SetCurrentDirectoryW(wide) && !_wchdir(wide) ? 0 : -1;

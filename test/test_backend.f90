@@ -5,8 +5,8 @@ program test_backend
         detect_jobs, backend_build, backend_test, &
         backend_test_names, backend_clean, &
         BACKEND_NATIVE, BACKEND_CMAKE, BACKEND_NONE
-    use fo_gfortran_build, only: gfortran_build, gfortran_test, &
-        gfortran_test_names
+    use fo_gfortran_build, only: gfortran_build
+    use fo_test_native_run, only: native_test_run
     use fo_fpm_config, only: fpm_config_t
     use fo_process, only: process_getpid, process_getcwd, &
         process_run_argv_logged, argv_push

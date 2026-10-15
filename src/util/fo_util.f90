@@ -10,7 +10,7 @@ module fo_util
     public :: temporary_root
     public :: clean_root_build_artifacts, read_text_file_alloc
     public :: strip_path_prefix_in_str
-    public :: send_jsonrpc, jsonrpc_error, jsonrpc_null
+    public :: jsonrpc_error, jsonrpc_null
     public :: json_bool, json_int
     public :: wall_time_seconds
 
@@ -263,12 +263,6 @@ contains
         text = buf(1:n)
     end subroutine strip_path_prefix_in_str
 
-    subroutine send_jsonrpc(response)
-        character(len=*), intent(in) :: response
-
-        call mcp_send_response(trim(response), MCP_FRAME_UNKNOWN)
-    end subroutine send_jsonrpc
-
     subroutine jsonrpc_error(id_str, code, msg, response)
         character(len=*), intent(in) :: id_str, msg
         integer, intent(in) :: code
@@ -281,12 +275,6 @@ contains
             '"error":{"code":'//trim(code_str)//','// &
             '"message":"'//trim(msg)//'"}}'
     end subroutine jsonrpc_error
-
-    pure function sq(s) result(r)
-        character(len=*), intent(in) :: s
-        character(len=len_trim(s) + 2) :: r
-        r = "'"//trim(s)//"'"
-    end function sq
 
     subroutine jsonrpc_null(id_str, response)
         character(len=*), intent(in) :: id_str

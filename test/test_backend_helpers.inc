@@ -600,9 +600,9 @@
         call make_named_fpm_project(project_dir)
 
         names(1) = 'test_a'
-        call gfortran_test_names(project_dir, names, 1, log_file, exitcode, &
+        call native_test_run(project_dir, log_file, exitcode, names=names, n_names=1, &
             n_compiled=n_first)
-        call gfortran_test_names(project_dir, names, 1, log_file, exitcode, &
+        call native_test_run(project_dir, log_file, exitcode, names=names, n_names=1, &
             n_compiled=n_second)
 
         call assert(exitcode == 0, 'gfortran named cached test succeeds')
@@ -877,11 +877,11 @@
         call make_tmp_path('fo_backend_parallel_tests', log_file)
         call make_many_test_fpm_project(project_dir, 8)
 
-        call gfortran_test(project_dir, log_file, exitcode, n_compiled=n_first)
+        call native_test_run(project_dir, log_file, exitcode, n_compiled=n_first)
         call assert(exitcode == 0, 'parallel gfortran test suite succeeds')
         call assert(n_first == 8, 'parallel gfortran test first run compiles')
 
-        call gfortran_test(project_dir, log_file, exitcode, n_compiled=n_second)
+        call native_test_run(project_dir, log_file, exitcode, n_compiled=n_second)
         call assert(exitcode == 0, 'parallel gfortran test suite rerun succeeds')
         call assert(n_second == 0, &
             'parallel gfortran test second run restores tests')
@@ -902,7 +902,7 @@
         call make_tmp_path('fo_backend_helpers_link', log_file)
         call make_helper_module_project(project_dir)
 
-        call gfortran_test(project_dir, log_file, exitcode)
+        call native_test_run(project_dir, log_file, exitcode)
         call assert(exitcode == 0, &
             'test links module-only test helper and test_ library module')
 
@@ -922,7 +922,7 @@
         call make_helper_module_project(project_dir)
 
         names(1) = 'test_uses_helpers'
-        call gfortran_test_names(project_dir, names, 1, log_file, exitcode)
+        call native_test_run(project_dir, log_file, exitcode, names=names, n_names=1)
         call assert(exitcode == 0, &
             'named test links module-only test helper')
 
@@ -1320,10 +1320,10 @@
         write (u, '(a)') 'end program check'
         close (u)
 
-        call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
+        call native_test_run(project_dir, log_file, exitcode, use_cache=.false.)
         call assert(exitcode /= 0, 'link-failure fixture fails')
-        call assert(file_contains(log_file, 'TEST_RESULT check FAIL'), &
-            'link failure reports TEST_RESULT FAIL')
+        call assert(file_contains(log_file, 'missing_symbol'), &
+            'link failure names the unresolved symbol in the build log')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))

@@ -16,7 +16,7 @@ module fo_driver
         integer(int64) :: size = 0_int64
     end type driver_pin_t
 
-    public :: driver_image_init, driver_pin_current, driver_pin_existing
+    public :: driver_pin_current, driver_pin_existing
 
     interface
         integer(c_int) function c_driver_image_init() &
@@ -61,13 +61,6 @@ module fo_driver
     end interface
 
 contains
-
-    subroutine driver_image_init(ierr)
-        !! Capture the native running-image handle. Called from C at process
-        !! startup and again by clients that use the provider directly.
-        integer, intent(out) :: ierr
-        ierr = int(c_driver_image_init())
-    end subroutine driver_image_init
 
     subroutine driver_pin_current(session_state_dir, pin, ierr, message)
         character(len=*), intent(in) :: session_state_dir

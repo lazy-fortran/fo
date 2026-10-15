@@ -961,12 +961,6 @@ contains
         identity_field_fits = len(value) <= PART_LEN
     end function identity_field_fits
 
-    subroutine remove_stage(path)
-        character(len=*), intent(in) :: path
-        integer(c_int) :: ignored
-        ignored = fo_c_generation_remove_stage(trim(path)//c_null_char)
-    end subroutine remove_stage
-
     function int_text(value) result(text)
         integer, intent(in) :: value
         character(len=32) :: text

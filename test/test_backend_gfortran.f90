@@ -5,8 +5,8 @@ program test_backend_gfortran
         detect_jobs, backend_build, backend_test, &
         backend_test_names, &
         BACKEND_NATIVE, BACKEND_CMAKE, BACKEND_NONE
-    use fo_gfortran_build, only: gfortran_build, gfortran_test, &
-        gfortran_test_names
+    use fo_gfortran_build, only: gfortran_build
+    use fo_test_native_run, only: native_test_run
     use fo_fpm_config, only: fpm_config_t
     use fo_cache, only: cache_t, cache_init, cache_key_for, cache_store_action, &
         HASH_LEN
@@ -445,7 +445,7 @@ contains
         write (u, '(a)') 'end program test_arguments'
         close (u)
 
-        call gfortran_test(project_dir, log_file, exitcode, include_slow=.true., &
+        call native_test_run(project_dir, log_file, exitcode, include_slow=.true., &
             use_cache=.false.)
         call assert(exitcode == 0, 'native test with manifest arguments passes')
         call assert(file_contains(log_file, 'TEST_RESULT test_arguments PASS'), &
@@ -507,7 +507,7 @@ contains
 
         call set_env('FO_TEST_TIMEOUT', '1')
         call set_env('FO_SLOW_TEST_TIMEOUT', '60')
-        call gfortran_test(project_dir, log_file, exitcode, include_slow=.true., &
+        call native_test_run(project_dir, log_file, exitcode, include_slow=.true., &
             use_cache=.false.)
         call assert(exitcode == 0, 'a slow-marked test may exceed the fast budget')
         call assert(file_contains(log_file, 'TEST_RESULT test_patient_slow PASS'), &
@@ -521,7 +521,7 @@ contains
         close (u)
         call write_sleeping_test(trim(project_dir)//'-fast/test/test_patient.f90', &
             'test_patient')
-        call gfortran_test(trim(project_dir)//'-fast', log_file, exitcode, &
+        call native_test_run(trim(project_dir)//'-fast', log_file, exitcode, &
             include_slow=.true., use_cache=.false.)
         call assert(exitcode /= 0, 'an unmarked test still hits the fast budget')
 
@@ -554,7 +554,7 @@ contains
             'test_kernel')
 
         call set_env('FO_TEST_TIMEOUT', '1')
-        call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
+        call native_test_run(project_dir, log_file, exitcode, use_cache=.false.)
         call set_env('FO_TEST_TIMEOUT', '')
         call assert(exitcode == 0, &
             'kernel time: 1.5 s of system CPU stays within a 1 s budget')
@@ -584,7 +584,7 @@ contains
         call write_idle_test(trim(project_dir)//'/test/test_idle.f90', 'test_idle', 2)
 
         call set_env('FO_TEST_TIMEOUT', '1')
-        call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
+        call native_test_run(project_dir, log_file, exitcode, use_cache=.false.)
         if (cpu_measurable) then
             call assert(exitcode == 0, 'cpu budget: an idle test outlives its budget')
             call assert(file_contains(log_file, 'TEST_RESULT test_idle PASS'), &
@@ -599,7 +599,7 @@ contains
 
         call set_env('FO_TEST_WALL_TIMEOUT', '1')
         call write_idle_test(trim(project_dir)//'/test/test_idle.f90', 'test_idle', 30)
-        call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
+        call native_test_run(project_dir, log_file, exitcode, use_cache=.false.)
         call assert(exitcode == 124, 'wall cap: a hung idle test is killed')
         call assert(file_contains(log_file, 'wall-clock cap of 1 s exceeded'), &
             'wall cap: the timeout names the wall-clock cap')
@@ -615,7 +615,7 @@ contains
         close (u)
         call write_sleeping_test(trim(project_dir)//'/test/test_busy.f90', &
             'test_busy')
-        call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
+        call native_test_run(project_dir, log_file, exitcode, use_cache=.false.)
         call assert(exitcode == 124, '[extra.fo] test-timeout: a busy test is killed')
         if (cpu_measurable) then
             call assert(file_contains(log_file, 'CPU budget of 1 s exceeded'), &
@@ -628,7 +628,7 @@ contains
             'cpu budget: the busy test reports a timeout')
 
         call set_env('FO_TEST_TIMEOUT', '60')
-        call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
+        call native_test_run(project_dir, log_file, exitcode, use_cache=.false.)
         call assert(exitcode == 0, 'FO_TEST_TIMEOUT overrides [extra.fo]')
         call set_env('FO_TEST_TIMEOUT', '')
 
@@ -757,9 +757,9 @@ contains
         call set_env('FO_TEST_CHILD_MODE', trim(mode))
         call set_env('FO_TEST_CHILD_PID_FILE', trim(pid_file))
         if (named) then
-            call gfortran_test_names(project_dir, selected, 1, log_file, exitcode)
+            call native_test_run(project_dir, log_file, exitcode, names=selected, n_names=1)
         else
-            call gfortran_test(project_dir, log_file, exitcode)
+            call native_test_run(project_dir, log_file, exitcode)
         end if
         if (expect_timeout) then
             call assert(exitcode /= 0, trim(mode)//' child hits the bounded wall cap')
@@ -1071,7 +1071,7 @@ contains
         close (u)
 
         selected(1) = 'public_name'
-        call gfortran_test_names(project_dir, selected, 1, log_file, exitcode, &
+        call native_test_run(project_dir, log_file, exitcode, names=selected, n_names=1, &
             use_cache=.false.)
         call assert(exitcode == 0 .and. &
             file_contains(log_file, 'TEST_RESULT public_name PASS'), &
@@ -1145,7 +1145,7 @@ contains
         close (u)
         app_path = trim(project_dir)//'/build/fo/bin/fo_test_spaces'
 
-        call gfortran_test(project_dir, log_file, exitcode)
+        call native_test_run(project_dir, log_file, exitcode)
         inquire (file=trim(app_path), exist=app_exists)
         call assert(exitcode == 0 .and. .not. app_exists, &
             'test-only build does not link an unrelated application')
@@ -1250,7 +1250,7 @@ contains
         call set_env('FO_TEST_BACKEND_REAL_COMPILER', trim(real_compiler))
         call set_env('FO_TEST_BACKEND_LLD_MARKER', trim(marker))
         call set_env('FO_TEST_BACKEND_WRAPPER_DEPTH', '')
-        call gfortran_test(project_dir, log_file, exitcode, use_cache=.false.)
+        call native_test_run(project_dir, log_file, exitcode, use_cache=.false.)
         call set_env('PATH', trim(old_path))
         if (linker_status == 0 .and. len_trim(old_linker) > 0) then
             call set_env('FO_LINKER', trim(old_linker))
@@ -1330,7 +1330,7 @@ contains
         test_names = 'test_a'
         selected(1) = 'test_a'
 
-        call gfortran_test_names(project_dir, selected, 1, log_file, exitcode)
+        call native_test_run(project_dir, log_file, exitcode, names=selected, n_names=1)
 
         call assert(exitcode == 0 .and. &
             filenames(MAX_NODES) == project_dir .and. &

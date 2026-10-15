@@ -77,7 +77,7 @@ module fo_gremlin_readiness
 
     public :: gremlin_readiness_compute, gremlin_wait_satisfied
     public :: gremlin_phase_name, gremlin_health_name, gremlin_verification_name
-    public :: gremlin_wait_name, gremlin_wait_code
+    public :: gremlin_wait_code
 
 contains
 
@@ -249,25 +249,5 @@ contains
             name = 'none'
         end select
     end function gremlin_verification_name
-
-    function gremlin_wait_name(until_kind) result(name)
-        integer, intent(in) :: until_kind
-        character(len=32) :: name
-
-        select case (until_kind)
-        case (GREMLIN_WAIT_LOCAL_GATE_GREEN)
-            name = 'local-gate-green'
-        case (GREMLIN_WAIT_ORDINARY_VERIFIED)
-            name = 'ordinary-verified'
-        case (GREMLIN_WAIT_FULLY_VERIFIED)
-            name = 'fully-verified'
-        case (GREMLIN_WAIT_QUIESCENT)
-            name = 'quiescent'
-        case (GREMLIN_WAIT_FAILURE)
-            name = 'failure'
-        case default
-            name = 'unknown'
-        end select
-    end function gremlin_wait_name
 
 end module fo_gremlin_readiness

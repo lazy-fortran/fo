@@ -3,7 +3,7 @@ program test_submodule_build_order
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
     use fo_fs, only: fs_make_dir, fs_remove_file, fs_remove_tree
-    use fo_gfortran_build, only: gfortran_test
+    use fo_test_native_run, only: native_test_run
     use fo_process, only: process_getpid
     implicit none
 
@@ -44,7 +44,7 @@ program test_submodule_build_order
     rc = c_setenv('FO_JOBS'//c_null_char, '1'//c_null_char, 1_c_int)
     if (rc /= 0) error stop 'cannot select one build job'
 
-    call gfortran_test(project_dir, log_file, exitcode, &
+    call native_test_run(project_dir, log_file, exitcode, &
         include_slow=.true., use_cache=.true.)
     call assert(exitcode == 0, &
         'nested submodules compile and execute in ancestry order')
@@ -55,7 +55,7 @@ program test_submodule_build_order
 
     call fs_remove_tree(trim(project_dir)//'/build')
     call fs_remove_file(log_file)
-    call gfortran_test(project_dir, log_file, exitcode, &
+    call native_test_run(project_dir, log_file, exitcode, &
         include_slow=.true., use_cache=.true.)
     warm_count = line_count(count_file)
     call assert(exitcode == 0 .and. warm_count == cold_count, &
@@ -76,7 +76,7 @@ program test_submodule_build_order
     call write_test_expectation(project_dir, 43)
     call fs_remove_tree(trim(project_dir)//'/build')
     call fs_remove_file(log_file)
-    call gfortran_test(project_dir, log_file, exitcode, &
+    call native_test_run(project_dir, log_file, exitcode, &
         include_slow=.true., use_cache=.true.)
     changed_count = line_count(count_file)
     call assert(exitcode == 0 .and. changed_count > warm_count, &
@@ -87,7 +87,7 @@ program test_submodule_build_order
     call append_extra_submodule(project_dir)
     call fs_remove_tree(trim(project_dir)//'/build')
     call fs_remove_file(log_file)
-    call gfortran_test(project_dir, log_file, exitcode, &
+    call native_test_run(project_dir, log_file, exitcode, &
         include_slow=.true., use_cache=.true.)
     multi_cold_count = line_count(count_file)
     call assert(exitcode == 0 .and. multi_cold_count > changed_count, &
@@ -97,7 +97,7 @@ program test_submodule_build_order
     call assert(smod_exists, 'second submodule interface is present')
     call fs_remove_tree(trim(project_dir)//'/build')
     call fs_remove_file(log_file)
-    call gfortran_test(project_dir, log_file, exitcode, &
+    call native_test_run(project_dir, log_file, exitcode, &
         include_slow=.true., use_cache=.true.)
     multi_warm_count = line_count(count_file)
     call assert(exitcode == 0 .and. multi_warm_count == multi_cold_count + 1, &

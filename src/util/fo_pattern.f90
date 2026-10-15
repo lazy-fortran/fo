@@ -27,7 +27,7 @@ module fo_pattern
     private
 
     public :: pattern_t, pattern_compile, pattern_compile_glob, pattern_matches
-    public :: pattern_search, pattern_glob, pattern_is_glob, pattern_check
+    public :: pattern_search, pattern_glob, pattern_is_glob
 
     integer, parameter :: OP_CHAR = 1
     integer, parameter :: OP_ANY = 2
@@ -84,16 +84,6 @@ contains
         if (.not. allocated(pattern%code)) return
         found = run_code(pattern%code, text)
     end function pattern_matches
-
-    subroutine pattern_check(regex, ierr, message)
-        !! Validate a CTest regular expression without matching.
-        character(len=*), intent(in) :: regex
-        integer, intent(out) :: ierr
-        character(len=:), allocatable, intent(out) :: message
-        type(pattern_t) :: pattern
-
-        call pattern_compile(regex, pattern, ierr, message)
-    end subroutine pattern_check
 
     logical function pattern_search(regex, text, ierr) result(found)
         !! True when the CTest regular expression matches anywhere in text.
