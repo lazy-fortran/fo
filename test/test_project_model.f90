@@ -39,6 +39,7 @@ program test_project_model
     call test_scale()
     call test_layering_scale()
     call test_affected()
+    call test_affected_submodule()
 
     write (output_unit, '(a,i0,a,i0,a)') 'project model: ', n_pass, ' pass, ', &
         n_fail, ' fail'
@@ -455,7 +456,7 @@ contains
 
         call model_init(m, 'unit', 'digest')
         call add_target(m, 'lib_a', TARGET_LIBRARY, &
-            '/p/src/a.f90 /p/src/ext.f90 /p/src/mixed.f90', '', '')
+            '/p/src/a.f90 /p/src/ext.f90 /p/src/mixed.f90 /p/src/api.h', '', '')
         call add_target(m, 'lib_b', TARGET_LIBRARY, '/p/src/b.f90', 'lib_a', '')
         call add_target(m, 't1', TARGET_EXECUTABLE, '/p/test/t1.f90', 'lib_a', &
             '/p/build/t1', index=t1)
@@ -502,10 +503,74 @@ contains
         call expect_affected(m, units, '', 'sub/CMakeLists.txt', &
             'c1 c2 c3 c4', .true., &
             'build description')
+        ! Files no unit, target or declared input names can be read by any
+        ! test: they widen instead of selecting nothing (B2).
+        call expect_affected(m, units, '', 'ref/undeclared.dat', 'c1 c2 c3 c4', &
+            .true., 'undeclared reference data')
+        call expect_affected(m, units, '', 'cfg/run.in', 'c1 c2 c3 c4', .true., &
+            'template')
+        call expect_affected(m, units, '', 'src/pre.fypp', 'c1 c2 c3 c4', .true., &
+            'preprocessor source of no target')
+        call expect_affected(m, units, '', 'src/sel.pf', 'c1 c2 c3 c4', .true., &
+            'pFUnit source of no target')
+        ! A header may be included by any case, not only by the cases of
+        ! the target listing it (B15).
+        call expect_affected(m, units, '', 'src/api.h', 'c1 c2 c3 c4', .true., &
+            'header')
+        call expect_affected(m, units, '', 'LICENSE docs/y.txt .github/ci.yml', '', &
+            .false., 'documentation and metadata')
         call expect_affected(m, units, 'n=c1', 'src/b.f90', '', .false., &
             'unselected case stays unselected')
         call expect_digests_follow_affected(m, units)
     end subroutine test_affected
+
+    subroutine test_affected_submodule()
+        !! A submodule of a linked library uses a module no test reaches by
+        !! its own sources: its edit still affects the case (B4), and not a
+        !! case that links nothing of it.
+        type(project_model_t) :: m
+        type(model_unit_t) :: units(5)
+        type(string_t) :: roots(1)
+        type(string_t), allocatable :: files(:), contents(:), names(:)
+        character(len=64), allocatable :: base(:), edited(:)
+        integer :: ierr, t1, t2
+        character(len=:), allocatable :: message
+
+        call model_init(m, 'unit', 'digest')
+        call add_target(m, 'api', TARGET_LIBRARY, &
+            '/p/src/api.f90 /p/src/api_impl.f90 /p/src/internals.f90', '', '')
+        call add_target(m, 't1', TARGET_EXECUTABLE, '/p/test/t1.f90', 'api', &
+            '/p/build/t1', index=t1)
+        call add_target(m, 't2', TARGET_EXECUTABLE, '/p/test/t2.f90', '', &
+            '/p/build/t2', index=t2)
+        call model_add_case(m, 'c1', command_target=t1)
+        call model_add_case(m, 'c2', command_target=t2)
+        call model_finalize(m, ierr, message)
+        call assert(ierr == 0, 'submodule model finalizes: '//message)
+        call set_unit(units(1), '/p/src/api.f90', 'api', '')
+        call set_unit(units(2), '/p/src/api_impl.f90', 'api_impl', 'api internals')
+        call set_unit(units(3), '/p/src/internals.f90', 'internals', '')
+        call set_unit(units(4), '/p/test/t1.f90', '', 'api')
+        call set_unit(units(5), '/p/test/t2.f90', '', '')
+        call expect_affected(m, units, '', 'src/internals.f90', 'c1', .false., &
+            'module used by a submodule of a linked library')
+        call expect_affected(m, units, '', 'src/api_impl.f90', 'c1', .false., &
+            'submodule of a linked library')
+        call expect_affected(m, units, '', 'src/api.f90', 'c1', .false., &
+            'module used by the test')
+        call split_words('src/internals.f90 src/api.f90 test/t1.f90', files)
+        call split_words('c1 c2', names)
+        allocate (contents(size(files)))
+        do ierr = 1, size(files)
+            contents(ierr)%s = 'v0'
+        end do
+        roots(1)%s = '/p'
+        call model_case_digests(m, units, roots, names, files, contents, base)
+        contents(1)%s = 'v1'
+        call model_case_digests(m, units, roots, names, files, contents, edited)
+        call assert(edited(1) /= base(1), 'digest of c1 follows internals.f90')
+        call assert(edited(2) == base(2), 'digest of c2 ignores internals.f90')
+    end subroutine test_affected_submodule
 
     subroutine expect_digests_follow_affected(m, units)
         !! Oracle for model_case_digests: editing one file changes the input
@@ -523,7 +588,8 @@ contains
 
         call split_words('src/a.f90 src/ext.f90 src/mixed.f90 src/b.f90 '// &
             'test/t1.f90 test/t2.f90 test/t3.f90 ref/x.dat ref/y.dat '// &
-            'data/sub/z.txt README.md src/new.f90 sub/CMakeLists.txt', files)
+            'data/sub/z.txt README.md src/new.f90 sub/CMakeLists.txt '// &
+            'ref/undeclared.dat cfg/run.in src/pre.fypp src/api.h', files)
         call split_words('c1 c2 c3 c4', names)
         allocate (contents(size(files)))
         do f = 1, size(files)

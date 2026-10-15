@@ -21,16 +21,19 @@ program test_gremlin_case_reuse
     character, parameter :: nl = new_line('a')
 
     call gremlin_setup(driver, scratch, project, cache, state)
-    call scenario('fpm', scratch//'/fpm-project', .false., .false.)
-    call scenario('cmake', scratch//'/cmake-project', .true., .false.)
-    call scenario('scope', scratch//'/scoped-project', .true., .true.)
+    call scenario('fpm', scratch//'/fpm-project', .false., .false., .false.)
+    call scenario('cmake', scratch//'/cmake-project', .true., .false., .false.)
+    call scenario('scope', scratch//'/scoped-project', .true., .true., .false.)
+    call scenario('data', scratch//'/data-project', .true., .false., .true.)
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
 
-    subroutine scenario(lane, dir, cmake, scoped)
+    subroutine scenario(lane, dir, cmake, scoped, data_edit)
+        !! data_edit: the edit is of an undeclared data file the tests may
+        !! read, which no source closure names: every case runs again.
         character(len=*), intent(in) :: lane, dir
-        logical, intent(in) :: cmake, scoped
+        logical, intent(in) :: cmake, scoped, data_edit
         type(string_list_t) :: args
         type(process_result_t) :: process
         type(json_value_t) :: reply
@@ -61,6 +64,7 @@ contains
         call write_module(dir, 'beta', 1)
         call write_case(dir, 'alpha')
         call write_case(dir, 'beta')
+        if (data_edit) call write_text(dir//'/test/ref.dat', 'reference 1'//nl)
 
         call arguments(lane, dir, 'start', args)
         call list_add(args, '--target')
@@ -90,14 +94,23 @@ contains
             call expect_receipt(lane, dir, session, first, 'test_alpha', 'run', '')
             call expect_receipt(lane, dir, session, first, 'test_beta', &
                 'run', '', absent=scoped)
-            ! Outside test_alpha's closure, inside test_beta's.
-            call write_module(dir, 'beta', 2)
+            if (data_edit) then
+                call write_text(dir//'/test/ref.dat', 'reference 2'//nl)
+            else
+                ! Outside test_alpha's closure, inside test_beta's.
+                call write_module(dir, 'beta', 2)
+            end if
             call wait_for_gate(lane, dir, session, first, second, ready)
             call assert_true(ready, lane//': edited generation passes selected cases')
         end if
         if (ready) then
-            call expect_receipt(lane, dir, session, second, 'test_alpha', &
-                'reused', first)
+            if (data_edit) then
+                call expect_receipt(lane, dir, session, second, 'test_alpha', &
+                    'run', '')
+            else
+                call expect_receipt(lane, dir, session, second, 'test_alpha', &
+                    'reused', first)
+            end if
             call expect_receipt(lane, dir, session, second, 'test_beta', &
                 'run', '', absent=scoped)
         end if

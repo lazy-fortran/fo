@@ -1252,7 +1252,7 @@ subroutine model_affected(model, units, roots, changed, selection, widen_reasons
     integer, allocatable :: kinds(:), change_unit(:), change_source(:), kept(:)
     type(string_t), allocatable :: cause(:)
     integer :: n_kept, k, c, i, ci
-    logical :: relevant, hit
+    logical :: relevant, hit, declared
 
     if (.not. model%finalized) error stop 'model_affected: model not finalized'
     allocate(widen_reasons(0))
@@ -1280,12 +1280,17 @@ subroutine model_affected(model, units, roots, changed, selection, widen_reasons
             relevant = .true.
         end select
         if (kinds(i) == FILE_UNOWNED_SOURCE) cycle
+        declared = .false.
         do ci = 1, model%n_cases
             if (.not. case_input_covers(model, ci, roots, changed(i)%s)) cycle
+            declared = .true.
             relevant = .true.
             if (len(cause(ci)%s) == 0) cause(ci)%s = &
                 'affected: declared input '//changed(i)%s//' changed'
         end do
+        if (kinds(i) == FILE_OTHER .and. .not. declared .and. &
+                .not. documentation_like(changed(i)%s)) &
+            call widen('changed file may be read by tests: '//changed(i)%s)
     end do
 
     ! Per selected case: declared inputs (above), else its closures.
@@ -1431,6 +1436,9 @@ subroutine model_case_digests(model, units, roots, cases, files, contents, diges
             select case (kinds(f))
             case (FILE_BUILD_DESCRIPTION, FILE_UNOWNED_SOURCE)
                 covered(f) = .true.
+            case (FILE_OTHER)
+                if (.not. any_input(f) .and. .not. documentation_like(files(f)%s)) &
+                    covered(f) = .true.
             case (FILE_CLOSURE)
                 if (.not. mapped) then
                     covered(f) = .true.
@@ -1551,6 +1559,9 @@ subroutine graph_classify(g, path, kind, unit_id, source_id)
     kind = FILE_CLOSURE
     if (build_description(path)) then
         kind = FILE_BUILD_DESCRIPTION
+    else if (header_like(path)) then
+        ! Includers are not scanned: a header may be read by any case.
+        kind = FILE_UNOWNED_SOURCE
     else if (unit_id == 0 .and. source_id == 0) then
         kind = FILE_OTHER
         if (source_like(path)) kind = FILE_UNOWNED_SOURCE
@@ -1566,7 +1577,7 @@ subroutine graph_closure(g, model, units, ci)
     type(project_model_t), intent(in) :: model
     type(model_unit_t), intent(in) :: units(:)
     integer, intent(in) :: ci
-    integer :: q, p, r, t, u, m, e, head, tail
+    integer :: q, p, r, t, u, m, e, head, tail, n_case
 
     g%token = g%token + 1
     head = 1
@@ -1578,16 +1589,7 @@ subroutine graph_closure(g, model, units, ci)
             call push_target(model%cases(ci)%declared_targets(q))
         end do
     end if
-    ! Roots of the module walk: the sources of the case targets.
-    do q = 1, tail
-        associate (tg => model%targets(g%queue(q)))
-            if (.not. allocated(tg%sources)) cycle
-            do p = 1, size(tg%sources)
-                r = index_lookup(g%unit_index, graph_relative(g%roots, tg%sources(p)%s))
-                if (r > 0) g%ustamp(r) = -g%token
-            end do
-        end associate
-    end do
+    n_case = tail
     do while (head <= tail)
         t = g%queue(head)
         head = head + 1
@@ -1595,6 +1597,20 @@ subroutine graph_closure(g, model, units, ci)
         do q = 1, size(model%targets(t)%link_deps)
             call push_target(model%targets(t)%link_deps(q))
         end do
+    end do
+    ! Roots of the module walk: every source of the case targets, and the
+    ! units of the other linked targets no module use leads to (programs,
+    ! submodules, external procedures), whose own `use` statements count.
+    do q = 1, tail
+        associate (tg => model%targets(g%queue(q)))
+            if (.not. allocated(tg%sources)) cycle
+            do p = 1, size(tg%sources)
+                r = index_lookup(g%unit_index, graph_relative(g%roots, tg%sources(p)%s))
+                if (r == 0) cycle
+                if (q > n_case .and. .not. g%plain_unit(r)) cycle
+                g%ustamp(r) = -g%token
+            end do
+        end associate
     end do
     ! Module-use closure over the root units.
     head = 1
@@ -1764,10 +1780,50 @@ logical function source_like(path) result(yes)
     ext = lower_text(path(dot + 1:))
     select case (ext)
     case ('f', 'for', 'ftn', 'f77', 'f90', 'f95', 'f03', 'f08', 'f18', &
-            'fpp', 'fi', 'inc', 'h', 'hpp', 'c', 'cc', 'cpp', 'cxx')
+            'fpp', 'fi', 'inc', 'h', 'hh', 'hpp', 'hxx', 'c', 'cc', 'cpp', 'cxx', &
+            'fypp', 'pf')
         yes = .true.
     end select
 end function source_like
+
+logical function header_like(path) result(yes)
+    !! A C or Fortran include file: its includers are not tracked.
+    character(len=*), intent(in) :: path
+    character(len=:), allocatable :: ext
+    integer :: dot
+
+    yes = .false.
+    dot = index(path, '.', back=.true.)
+    if (dot == 0 .or. dot < index(path, '/', back=.true.)) return
+    ext = lower_text(path(dot + 1:))
+    yes = any(ext == ['h  ', 'hh ', 'hpp', 'hxx', 'inc', 'fi '])
+end function header_like
+
+logical function documentation_like(path) result(yes)
+    !! A file no test reads: prose documentation, license files, repository
+    !! metadata and the doc directories.
+    character(len=*), intent(in) :: path
+    character(len=:), allocatable :: base, low, ext
+    integer :: dot, slash
+
+    slash = index(path, '/', back=.true.)
+    base = lower_text(path(slash + 1:))
+    yes = .true.
+    if (path(1:min(len(path), 5)) == 'docs/' .or. &
+        path(1:min(len(path), 4)) == 'doc/') return
+    if (base(1:min(len(base), 4)) == '.git') return
+    if (path(1:min(len(path), 8)) == '.github/') return
+    dot = index(base, '.', back=.true.)
+    ext = ''
+    if (dot > 0) ext = base(dot + 1:)
+    if (ext == 'md' .or. ext == 'rst') return
+    low = base
+    if (low(1:min(len(low), 6)) == 'readme' .or. &
+        low(1:min(len(low), 7)) == 'license' .or. &
+        low(1:min(len(low), 7)) == 'copying' .or. &
+        low(1:min(len(low), 9)) == 'changelog') return
+    yes = .false.
+end function documentation_like
 
 subroutine grow_ints(items, needed)
     !! Ensure size(items) >= needed, doubling.
