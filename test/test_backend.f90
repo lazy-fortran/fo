@@ -3,7 +3,7 @@ program test_backend
     use, intrinsic :: iso_fortran_env, only: output_unit, error_unit
     use fo_build_backend, only: backend_t, detect_backend, detect_nproc, &
         detect_jobs, backend_build, backend_test, &
-        backend_test_names, backend_test_affected, backend_clean, &
+        backend_test_names, backend_clean, &
         BACKEND_NATIVE, BACKEND_CMAKE, BACKEND_NONE
     use fo_gfortran_build, only: gfortran_build, gfortran_test, &
         gfortran_test_names
@@ -36,7 +36,7 @@ program test_backend
     call test_native_combined_build_keeps_apps()
     call test_cmake_named_test_rebuilds_changed_source()
     call test_cmake_exec_target_resolution()
-    call test_cmake_affected_tests_use_registered_names()
+    call test_cmake_named_rejects_source_name()
     call test_native_honors_auto_executables()
     call test_gfortran_named_tests_select_requested()
     call test_gfortran_named_test_restores_cached_object()

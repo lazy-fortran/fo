@@ -709,7 +709,8 @@ contains
         use fo_project_model, only: model_request_t, model_selection_t, &
             project_model_t, SELECT_EMPTY
         use fo_project_load, only: project_has_model, project_resolve, &
-            project_run_cases
+            project_run_cases, project_affected, project_changed_files
+        use fx_string, only: string_t
         use fo_test_results, only: test_result_entry_t, parse_test_results, &
             format_test_results_text, format_test_results_json
         character(len=*), intent(in) :: line, id_str, dir, tmpfile
@@ -726,7 +727,10 @@ contains
         type(model_request_t) :: request
         type(model_selection_t) :: selection
         type(project_model_t) :: model
-        character(len=:), allocatable :: message
+        character(len=:), allocatable :: message, reason
+        type(string_t), allocatable :: changed(:), widen_reasons(:)
+        logical :: only_changed, git_ok
+        integer :: changed_count, changed_error
 
         b = detect_backend(trim(dir))
         if (b%kind == BACKEND_NONE) then
@@ -755,7 +759,24 @@ contains
             return
         end if
 
-        if (n_names > 0 .or. (b%kind == BACKEND_CMAKE .and. project_has_model(b))) then
+        call extract_json_bool_member(line, 'only_changed', only_changed, &
+            changed_count, changed_error)
+        if (changed_count > 1 .or. changed_error /= 0) then
+            call delete_tmpfile(tmpfile)
+            call jsonrpc_error(id_str, -32602, 'only_changed must be a boolean', &
+                response)
+            return
+        end if
+        if (only_changed .and. .not. project_has_model(b)) then
+            output_text = 'fo: only_changed needs the project model '// &
+                '(unsupported with FO_CMAKE_NATIVE)'
+            call delete_tmpfile(tmpfile)
+            call make_tool_text_response(id_str, output_text, 1, response)
+            return
+        end if
+
+        if (n_names > 0 .or. only_changed .or. &
+            (b%kind == BACKEND_CMAKE .and. project_has_model(b))) then
             allocate (request%names(n_names), request%include_labels(0), &
                 request%exclude_labels(0), request%layers(0))
             do i = 1, n_names
@@ -763,8 +784,27 @@ contains
             end do
             if (project_has_model(b)) then
                 ! Same selection as `fo test`: the project model decides.
-                call project_resolve(b, '', request, model, selection, ierr, &
-                    message)
+                if (only_changed) then
+                    call project_changed_files(trim(b%project_dir), changed, &
+                        git_ok, reason)
+                    if (git_ok) then
+                        call project_affected(b, '', request, changed, model, &
+                            selection, widen_reasons, ierr, message)
+                    else
+                        call project_affected(b, '', request, changed, model, &
+                            selection, widen_reasons, ierr, message, &
+                            force_reason=reason)
+                    end if
+                    if (ierr == 0 .and. selection%status == SELECT_EMPTY) then
+                        call delete_tmpfile(tmpfile)
+                        call make_tool_text_response(id_str, 'no affected tests', &
+                            0, response)
+                        return
+                    end if
+                else
+                    call project_resolve(b, '', request, model, selection, ierr, &
+                        message)
+                end if
                 if (ierr == 0 .and. selection%status == SELECT_EMPTY) then
                     ierr = 1
                     message = selection%message

@@ -16,6 +16,7 @@ program test_project_model
         SELECT_EMPTY, SELECT_UNKNOWN_NAME, SELECT_NAMED_EXCLUDED, &
         SELECT_UNKNOWN_LAYER, SELECT_BAD_PATTERN, CASE_DEFAULT_EXCLUDED, &
         CASE_LABEL_EXCLUDED, CASE_SELECTED, CASE_DEPENDENCY
+    use fo_project_model, only: model_unit_t, model_affected, CASE_NOT_AFFECTED
     implicit none
 
     integer :: n_pass, n_fail
@@ -34,6 +35,7 @@ program test_project_model
     call test_plan()
     call test_finalize_errors()
     call test_scale()
+    call test_affected()
 
     write (output_unit, '(a,i0,a,i0,a)') 'project model: ', n_pass, ' pass, ', &
         n_fail, ' fail'
@@ -363,6 +365,105 @@ contains
         seconds = real(finish - start)/real(rate)
         call assert(seconds < 1.0, 'scale: load, select and plan under a second')
     end subroutine test_scale
+
+    subroutine test_affected()
+        !! model_affected: module closure, link closure for sources no unit
+        !! uses as a module (external procedures), declared inputs (file and
+        !! directory), cases without a command target, widening, ignored
+        !! files, and unselected cases staying unselected.
+        type(project_model_t) :: m
+        type(model_unit_t) :: units(6)
+        type(model_attr_t) :: required(1), input(1)
+        integer :: ierr, t1, t2, t3
+        character(len=:), allocatable :: message
+
+        call model_init(m, 'unit', 'digest')
+        call add_target(m, 'lib_a', TARGET_LIBRARY, '/p/src/a.f90 /p/src/ext.f90', &
+            '', '')
+        call add_target(m, 'lib_b', TARGET_LIBRARY, '/p/src/b.f90', 'lib_a', '')
+        call add_target(m, 't1', TARGET_EXECUTABLE, '/p/test/t1.f90', 'lib_a', &
+            '/p/build/t1', index=t1)
+        call add_target(m, 't2', TARGET_EXECUTABLE, '/p/test/t2.f90', 'lib_b', &
+            '/p/build/t2', index=t2)
+        call add_target(m, 't3', TARGET_EXECUTABLE, '/p/test/t3.f90', '', &
+            '/p/build/t3', index=t3)
+        call model_add_case(m, 'c1', command_target=t1)
+        call model_add_case(m, 'c2', command_target=t2)
+        required(1) = model_attr_t('REQUIRED_FILES', '/p/ref/x.dat;/p/ref/y.dat')
+        call model_add_case(m, 'c3', command_target=t3, attrs=required)
+        input(1) = model_attr_t('input', 'data')
+        call model_add_case(m, 'c4', attrs=input)
+        call model_finalize(m, ierr, message)
+        call assert(ierr == 0, 'affected model finalizes: '//message)
+        call set_unit(units(1), '/p/src/a.f90', 'ma', '')
+        call set_unit(units(2), '/p/src/ext.f90', 'ext', '')
+        call set_unit(units(3), '/p/src/b.f90', 'mb', 'ma')
+        call set_unit(units(4), '/p/test/t1.f90', '', 'ma')
+        call set_unit(units(5), '/p/test/t2.f90', '', 'mb')
+        call set_unit(units(6), '/p/test/t3.f90', '', '')
+
+        call expect_affected(m, units, '', 'src/b.f90', 'c2 c4', .false., 'used module')
+        call expect_affected(m, units, '', 'src/a.f90', 'c1 c2 c4', .false., &
+            'base module')
+        call expect_affected(m, units, '', 'src/ext.f90', 'c1 c2 c4', .false., &
+            'external procedure in a linked library')
+        call expect_affected(m, units, '', 'test/t3.f90', 'c3 c4', .false., &
+            'test program')
+        call expect_affected(m, units, '', 'ref/y.dat', 'c3 c4', .false., &
+            'REQUIRED_FILES')
+        call expect_affected(m, units, '', 'data/sub/z.txt', 'c4', .false., &
+            'input directory')
+        call expect_affected(m, units, '', 'README.md docs/x.txt', '', .false., &
+            'unrelated files')
+        call expect_affected(m, units, '', 'src/new.f90', 'c1 c2 c3 c4', .true., &
+            'source of no target')
+        call expect_affected(m, units, '', 'sub/CMakeLists.txt', &
+            'c1 c2 c3 c4', .true., &
+            'build description')
+        call expect_affected(m, units, 'n=c1', 'src/b.f90', '', .false., &
+            'unselected case stays unselected')
+    end subroutine test_affected
+
+    subroutine set_unit(u, path, provides, uses)
+        type(model_unit_t), intent(out) :: u
+        character(len=*), intent(in) :: path, provides, uses
+
+        u%path = path
+        call split_words(provides, u%provides)
+        call split_words(uses, u%uses)
+    end subroutine set_unit
+
+    subroutine expect_affected(m, units, spec, changed, names, widened, what)
+        type(project_model_t), intent(in) :: m
+        type(model_unit_t), intent(in) :: units(:)
+        character(len=*), intent(in) :: spec, changed, names, what
+        logical, intent(in) :: widened
+        type(model_selection_t) :: sel
+        type(string_t), allocatable :: paths(:), reasons(:)
+        type(string_t) :: roots(1)
+        character(len=:), allocatable :: got
+        integer :: k
+
+        call run(m, spec, sel)
+        call split_words(changed, paths)
+        roots(1)%s = '/p'
+        call model_affected(m, units, roots, paths, sel, reasons)
+        got = ''
+        do k = 1, size(sel%cases)
+            if (k > 1) got = got//' '
+            got = got//m%cases(sel%cases(k))%name
+            call assert(sel%reasons(sel%cases(k))%s(1:9) == 'affected:', &
+                what//': affected reason')
+        end do
+        call assert(got == names, what//': got "'//got//'"')
+        call assert((size(reasons) > 0) .eqv. widened, what//': widening')
+        call assert(size(sel%cases) == count(sel%disposition == CASE_SELECTED), &
+            what//': dispositions agree')
+        call assert((len(names) == 0) .eqv. (sel%status == SELECT_EMPTY), &
+            what//': empty status')
+        if (.not. widened) call assert(count(sel%disposition == CASE_NOT_AFFECTED) &
+            > 0, what//': unaffected cases are marked')
+    end subroutine expect_affected
 
     subroutine expect(m, spec, status, names, what)
         type(project_model_t), intent(in) :: m

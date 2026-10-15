@@ -533,12 +533,11 @@
         call execute_command_line('rm -f '//trim(log_file))
     end subroutine test_cmake_named_test_rebuilds_changed_source
 
-    subroutine test_cmake_affected_tests_use_registered_names()
-        use fo_test_results, only: MAX_TEST_RESULTS_ENTRIES, &
-            parse_test_results, test_result_entry_t
+    subroutine test_cmake_named_rejects_source_name()
+        !! A source-file name is no CTest name; affected selection maps
+        !! sources to registered cases through the project model.
         type(backend_t) :: b
-        type(test_result_entry_t), allocatable :: entries(:)
-        integer :: exitcode, n_entries, parse_ierr, u
+        integer :: exitcode, u
         character(len=512) :: project_dir, log_file
         character(len=128) :: names(1)
 
@@ -562,21 +561,13 @@
         b = detect_backend(project_dir)
         call backend_build(b, exitcode, log_file=log_file)
         names(1) = 'test_source_name'
-        call backend_test_affected(b, names, 1, exitcode, log_file=log_file)
-        call assert(exitcode == 0, 'CMake affected tests pass')
-        call parse_test_results(log_file, entries, n_entries, parse_ierr)
-        call assert(parse_ierr == 0 .and. n_entries == 1, &
-            'CMake affected dispatch runs one registered test')
-        call assert(trim(entries(1)%name) == 'registered_test_name', &
-            'CMake affected dispatch uses registered CTest name')
-
         call backend_test_names(b, names, 1, exitcode, log_file=log_file)
         call assert(exitcode /= 0, &
             'CMake named dispatch rejects an unmatched source name')
 
         call remove_tree(project_dir)
         call execute_command_line('rm -f '//trim(log_file))
-    end subroutine test_cmake_affected_tests_use_registered_names
+    end subroutine test_cmake_named_rejects_source_name
 
     subroutine test_gfortran_named_tests_select_requested()
         type(backend_t) :: b

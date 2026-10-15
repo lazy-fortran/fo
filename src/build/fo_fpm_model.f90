@@ -67,16 +67,20 @@ module fo_fpm_model
 
 contains
 
-    subroutine fpm_model_load(project_dir, model, ierr, message, unlayered)
+    subroutine fpm_model_load(project_dir, model, ierr, message, unlayered, &
+            scanned)
         !! Load the model of the fpm project in project_dir. ierr /= 0 with a
         !! message when the manifest, a source scan, a layer or the model is
         !! invalid. With layers declared, unlayered lists the project sources
-        !! (relative paths) that belong to no layer.
+        !! (relative paths) that belong to no layer. scanned lists every
+        !! scanned project source (library, executables, tests, also helpers
+        !! that are no target source), spelled like the target sources.
         character(len=*), intent(in) :: project_dir
         type(project_model_t), intent(out) :: model
         integer, intent(out) :: ierr
         character(len=:), allocatable, intent(out) :: message
         type(string_t), allocatable, intent(out), optional :: unlayered(:)
+        type(string_t), allocatable, intent(out), optional :: scanned(:)
 
         type(fpm_config_t), allocatable :: config
         type(scan_unit_t), allocatable :: tests(:), apps(:), lib(:)
@@ -127,6 +131,18 @@ contains
             return
         end if
 
+        if (present(scanned)) then
+            allocate (scanned(n_lib + n_apps + n_tests))
+            do i = 1, n_lib
+                scanned(i)%s = trim(lib(i)%filename)
+            end do
+            do i = 1, n_apps
+                scanned(n_lib + i)%s = trim(apps(i)%filename)
+            end do
+            do i = 1, n_tests
+                scanned(n_lib + n_apps + i)%s = trim(tests(i)%filename)
+            end do
+        end if
         call model_init(model, 'fpm', input_digest(project_dir, tests, n_tests, &
             apps, n_apps, lib, n_lib))
         bin_dir = native_output_dir(project_dir, '', 'bin')

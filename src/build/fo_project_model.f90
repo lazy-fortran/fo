@@ -61,6 +61,8 @@ module fo_project_model
     integer, parameter, public :: CASE_LAYER_FILTERED = 5
     integer, parameter, public :: CASE_DEFAULT_EXCLUDED = 6
     integer, parameter, public :: CASE_DEPENDENCY = 7
+    !! Selected, but no changed file affects it (model_affected).
+    integer, parameter, public :: CASE_NOT_AFFECTED = 8
 
     type, public :: model_attr_t
         !! Adapter property carried opaquely (e.g. CTest FIXTURES_REQUIRED).
@@ -214,6 +216,7 @@ module fo_project_model
     public :: model_finalize, model_select, model_plan, model_selected_names
     public :: model_find_target, model_find_artifact, model_find_layer
     public :: model_find_case, model_cache_key
+    public :: model_affected
 
 contains
 
@@ -1187,6 +1190,420 @@ contains
     end subroutine shrink_violations
 
 end subroutine model_layering
+
+subroutine model_affected(model, units, roots, changed, selection, widen_reasons, &
+        force_reason)
+    !! Restrict a selection to the cases affected by changed project files,
+    !! the same for every backend (#189, #197). changed holds paths relative
+    !! to the project root; model and unit paths are made relative by
+    !! stripping one of roots (the project root as the model spells it).
+    !! units are the scanned Fortran sources of the project.
+    !!
+    !! A case is affected when a changed file is
+    !!  * a declared input of the case (fpm `input` attribute from a test
+    !!    group, CTest REQUIRED_FILES), or a file below such a directory;
+    !!  * a source in the module-use closure of the sources of its command
+    !!    (or declared) targets; the closure follows `use` to every unit
+    !!    providing the module, on both backends;
+    !!  * a source of a target in the link closure of those targets that is
+    !!    not reached through modules: a source providing no module that any
+    !!    unit uses (programs, submodules, external procedures, unscanned
+    !!    C sources), which the case links without a `use` edge.
+    !! A case without a known command target is affected by every relevant
+    !! change. Every selected case is affected (widened) when a build
+    !! description (fpm.toml, CMakeLists.txt, *.cmake, CMake presets)
+    !! changes, when a changed Fortran/C source belongs to no target and is
+    !! no module some unit uses, or when force_reason is given. Other files
+    !! (documentation, undeclared data) affect nothing. Unselected cases stay
+    !! unselected; the affected subset keeps the selection order.
+    type(project_model_t), intent(in) :: model
+    type(model_unit_t), intent(in) :: units(:)
+    type(string_t), intent(in) :: roots(:), changed(:)
+    type(model_selection_t), intent(inout) :: selection
+    type(string_t), allocatable, intent(out) :: widen_reasons(:)
+    character(len=*), intent(in), optional :: force_reason
+    type(name_index_t) :: unit_index, module_index, source_index
+    integer, allocatable :: module_head(:), provider_next(:), provider_unit(:)
+    integer, allocatable :: owner_head(:), owner_next(:), owner_target(:)
+    integer, allocatable :: change_unit(:), change_source(:), queue(:)
+    integer, allocatable :: tstamp(:), ustamp(:), kept(:)
+    logical, allocatable :: module_used(:), plain_unit(:), is_source(:)
+    type(string_t), allocatable :: cause(:)
+    integer :: nu, n_modules, n_providers, n_sources, n_owners, n_kept
+    integer :: u, k, j, t, m, e, c, i, s, existing, token, head, tail
+    logical :: relevant, hit
+    character(len=:), allocatable :: rel
+
+    if (.not. model%finalized) error stop 'model_affected: model not finalized'
+    allocate(widen_reasons(0))
+    if (selection%status /= SELECT_OK) return
+    nu = size(units)
+
+    ! Units by relative path; module name -> providing units.
+    allocate(module_head(max(16, nu)), provider_next(max(16, nu)), &
+        provider_unit(max(16, nu)), plain_unit(nu))
+    n_modules = 0
+    n_providers = 0
+    do u = 1, nu
+        call index_insert(unit_index, relative(units(u)%path), u, existing)
+        do k = 1, size(units(u)%provides)
+            m = module_id(units(u)%provides(k)%s, .true.)
+            n_providers = n_providers + 1
+            call grow_ints(provider_next, n_providers)
+            call grow_ints(provider_unit, n_providers)
+            provider_unit(n_providers) = u
+            provider_next(n_providers) = module_head(m)
+            module_head(m) = n_providers
+        end do
+    end do
+    allocate(module_used(n_modules))
+    module_used = .false.
+    do u = 1, nu
+        do k = 1, size(units(u)%uses)
+            m = index_lookup(module_index, lower_text(units(u)%uses(k)%s))
+            if (m > 0) module_used(m) = .true.
+        end do
+    end do
+    do u = 1, nu
+        plain_unit(u) = .true.
+        do k = 1, size(units(u)%provides)
+            m = index_lookup(module_index, lower_text(units(u)%provides(k)%s))
+            if (module_used(m)) plain_unit(u) = .false.
+        end do
+    end do
+
+    ! Target sources by relative path -> owning targets.
+    allocate(owner_head(16), owner_next(16), owner_target(16))
+    n_sources = 0
+    n_owners = 0
+    do t = 1, model%n_targets
+        if (.not. allocated(model%targets(t)%sources)) cycle
+        do k = 1, size(model%targets(t)%sources)
+            rel = relative(model%targets(t)%sources(k)%s)
+            s = index_lookup(source_index, rel)
+            if (s == 0) then
+                n_sources = n_sources + 1
+                call index_insert(source_index, rel, n_sources, existing)
+                call grow_ints(owner_head, n_sources)
+                owner_head(n_sources) = 0
+                s = n_sources
+            end if
+            n_owners = n_owners + 1
+            call grow_ints(owner_next, n_owners)
+            call grow_ints(owner_target, n_owners)
+            owner_target(n_owners) = t
+            owner_next(n_owners) = owner_head(s)
+            owner_head(s) = n_owners
+        end do
+    end do
+
+    ! Classify the changes.
+    allocate(change_unit(size(changed)), change_source(size(changed)), &
+        is_source(size(changed)), cause(model%n_cases))
+    do i = 1, model%n_cases
+        cause(i)%s = ''
+    end do
+    relevant = .false.
+    if (present(force_reason)) call widen(force_reason)
+    do i = 1, size(changed)
+        rel = changed(i)%s
+        is_source(i) = .false.
+        change_unit(i) = index_lookup(unit_index, rel)
+        change_source(i) = index_lookup(source_index, rel)
+        if (build_description(rel)) then
+            call widen('build description changed: '//rel)
+            cycle
+        end if
+        hit = declared_input(rel)
+        if (change_unit(i) == 0 .and. change_source(i) == 0) then
+            if (source_like(rel)) then
+                call widen('changed source has no owning target: '//rel)
+            end if
+            cycle
+        end if
+        if (change_source(i) == 0) then
+            if (plain_unit(change_unit(i))) then
+                call widen('changed source has no owning target: '//rel)
+                cycle
+            end if
+        end if
+        is_source(i) = .true.
+        relevant = .true.
+    end do
+
+    ! Per selected case: declared inputs (above), else its closures.
+    allocate(tstamp(model%n_targets), ustamp(nu), queue(max(16, nu)), &
+        kept(size(selection%cases)))
+    tstamp = 0
+    ustamp = 0
+    token = 0
+    n_kept = 0
+    do k = 1, size(selection%cases)
+        c = selection%cases(k)
+        if (size(widen_reasons) > 0) then
+            call keep(c, 'affected: widened, '//widen_reasons(1)%s)
+            cycle
+        end if
+        if (len(cause(c)%s) > 0) then
+            call keep(c, cause(c)%s)
+            cycle
+        end if
+        if (.not. relevant) then
+            call drop(c)
+            cycle
+        end if
+        if (.not. mapped(c)) then
+            call keep(c, 'affected: no known command target')
+            cycle
+        end if
+        token = token + 1
+        call case_closure(c)
+        hit = .false.
+        do i = 1, size(changed)
+            if (.not. is_source(i)) cycle
+            if (reached(i)) then
+                call keep(c, 'affected: '//changed(i)%s//' changed')
+                hit = .true.
+                exit
+            end if
+        end do
+        if (.not. hit) call drop(c)
+    end do
+    selection%cases = kept(1:n_kept)
+    if (n_kept == 0) then
+        selection%status = SELECT_EMPTY
+        selection%message = 'no test case is affected by the changes'
+    end if
+
+contains
+
+    function relative(path) result(out)
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: out
+        integer :: r, n
+
+        out = path
+        do r = 1, size(roots)
+            n = len(roots(r)%s)
+            if (n == 0) cycle
+            if (len(path) <= n + 1) cycle
+            if (path(1:n + 1) /= roots(r)%s//'/') cycle
+            out = path(n + 2:)
+            return
+        end do
+    end function relative
+
+    integer function module_id(name, add) result(id)
+        character(len=*), intent(in) :: name
+        logical, intent(in) :: add
+
+        id = index_lookup(module_index, lower_text(name))
+        if (id > 0 .or. .not. add) return
+        n_modules = n_modules + 1
+        call index_insert(module_index, lower_text(name), n_modules, existing)
+        call grow_ints(module_head, n_modules)
+        module_head(n_modules) = 0
+        id = n_modules
+    end function module_id
+
+    subroutine widen(reason)
+        character(len=*), intent(in) :: reason
+
+        call append_string(widen_reasons, reason)
+        relevant = .true.
+    end subroutine widen
+
+    logical function declared_input(path) result(found)
+        !! Mark the cases declaring path (or a directory above it).
+        character(len=*), intent(in) :: path
+        integer :: ci, a, pos, next
+        character(len=:), allocatable :: list, item
+
+        found = .false.
+        do ci = 1, model%n_cases
+            if (.not. allocated(model%cases(ci)%attrs)) cycle
+            do a = 1, size(model%cases(ci)%attrs)
+                associate (attr => model%cases(ci)%attrs(a))
+                    if (attr%key /= 'input' .and. attr%key /= 'REQUIRED_FILES') cycle
+                    list = attr%value
+                end associate
+                pos = 1
+                do while (pos <= len(list))
+                    next = index(list(pos:), ';')
+                    if (next == 0) next = len(list) - pos + 2
+                    item = relative(list(pos:pos + next - 2))
+                    pos = pos + next
+                    if (len(item) == 0) cycle
+                    if (item /= path) then
+                        if (len(path) <= len(item)) cycle
+                        if (path(1:len(item) + 1) /= item//'/') cycle
+                    end if
+                    found = .true.
+                    relevant = .true.
+                    if (len(cause(ci)%s) == 0) &
+                        cause(ci)%s = 'affected: declared input '//path//' changed'
+                end do
+            end do
+        end do
+    end function declared_input
+
+    logical function mapped(ci)
+        integer, intent(in) :: ci
+
+        mapped = model%cases(ci)%command_target > 0
+        if (allocated(model%cases(ci)%declared_targets)) &
+            mapped = mapped .or. size(model%cases(ci)%declared_targets) > 0
+    end function mapped
+
+    subroutine case_closure(ci)
+        !! tstamp: link closure of the case targets; ustamp: module-use
+        !! closure of their sources.
+        integer, intent(in) :: ci
+        integer :: q, p, r
+
+        head = 1
+        tail = 0
+        if (model%cases(ci)%command_target > 0) &
+            call push_target(model%cases(ci)%command_target)
+        if (allocated(model%cases(ci)%declared_targets)) then
+            do q = 1, size(model%cases(ci)%declared_targets)
+                call push_target(model%cases(ci)%declared_targets(q))
+            end do
+        end if
+        ! Roots of the module walk: the sources of the case targets.
+        do q = 1, tail
+            associate (tg => model%targets(queue(q)))
+                if (.not. allocated(tg%sources)) cycle
+                do p = 1, size(tg%sources)
+                    r = index_lookup(unit_index, relative(tg%sources(p)%s))
+                    if (r > 0) call push_unit_later(r)
+                end do
+            end associate
+        end do
+        do while (head <= tail)
+            t = queue(head)
+            head = head + 1
+            if (.not. allocated(model%targets(t)%link_deps)) cycle
+            do q = 1, size(model%targets(t)%link_deps)
+                call push_target(model%targets(t)%link_deps(q))
+            end do
+        end do
+        ! Module-use closure over the root units.
+        head = 1
+        tail = 0
+        do r = 1, nu
+            if (ustamp(r) == -token) then
+                ustamp(r) = token
+                tail = tail + 1
+                queue(tail) = r
+            end if
+        end do
+        do while (head <= tail)
+            u = queue(head)
+            head = head + 1
+            do q = 1, size(units(u)%uses)
+                m = index_lookup(module_index, lower_text(units(u)%uses(q)%s))
+                if (m == 0) cycle
+                e = module_head(m)
+                do while (e > 0)
+                    r = provider_unit(e)
+                    if (ustamp(r) /= token) then
+                        ustamp(r) = token
+                        tail = tail + 1
+                        queue(tail) = r
+                    end if
+                    e = provider_next(e)
+                end do
+            end do
+        end do
+    end subroutine case_closure
+
+    subroutine push_target(tg)
+        integer, intent(in) :: tg
+
+        if (tg < 1) return
+        if (tstamp(tg) == token) return
+        tstamp(tg) = token
+        tail = tail + 1
+        call grow_ints(queue, tail)
+        queue(tail) = tg
+    end subroutine push_target
+
+    subroutine push_unit_later(r)
+        integer, intent(in) :: r
+
+        ustamp(r) = -token
+    end subroutine push_unit_later
+
+    logical function reached(ic)
+        !! Changed source ic is in the case's module closure, or a source
+        !! without a used module in a linked target.
+        integer, intent(in) :: ic
+        integer :: o
+
+        reached = .false.
+        if (change_unit(ic) > 0) then
+            if (ustamp(change_unit(ic)) == token) then
+                reached = .true.
+                return
+            end if
+            if (.not. plain_unit(change_unit(ic))) return
+        end if
+        if (change_source(ic) == 0) return
+        o = owner_head(change_source(ic))
+        do while (o > 0)
+            if (tstamp(owner_target(o)) == token) then
+                reached = .true.
+                return
+            end if
+            o = owner_next(o)
+        end do
+    end function reached
+
+    subroutine keep(ci, text)
+        integer, intent(in) :: ci
+        character(len=*), intent(in) :: text
+
+        n_kept = n_kept + 1
+        kept(n_kept) = ci
+        selection%reasons(ci)%s = text
+    end subroutine keep
+
+    subroutine drop(ci)
+        integer, intent(in) :: ci
+
+        selection%disposition(ci) = CASE_NOT_AFFECTED
+        selection%reasons(ci)%s = 'not affected by the changes'
+    end subroutine drop
+
+    logical function build_description(path) result(yes)
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: base
+
+        base = path(index(path, '/', back=.true.) + 1:)
+        yes = base == 'fpm.toml' .or. base == 'CMakeLists.txt' .or. &
+            base == 'CMakePresets.json' .or. base == 'CMakeUserPresets.json'
+        if (yes) return
+        if (len(base) > 6) yes = lower_text(base(len(base) - 5:)) == '.cmake'
+    end function build_description
+
+    logical function source_like(path) result(yes)
+        character(len=*), intent(in) :: path
+        character(len=:), allocatable :: ext
+        integer :: dot
+
+        yes = .false.
+        dot = index(path, '.', back=.true.)
+        if (dot == 0 .or. dot < index(path, '/', back=.true.)) return
+        ext = lower_text(path(dot + 1:))
+        select case (ext)
+        case ('f', 'for', 'ftn', 'f77', 'f90', 'f95', 'f03', 'f08', 'f18', &
+                'fpp', 'fi', 'inc', 'h', 'hpp', 'c', 'cc', 'cpp', 'cxx')
+            yes = .true.
+        end select
+    end function source_like
+
+end subroutine model_affected
 
 subroutine grow_ints(items, needed)
     !! Ensure size(items) >= needed, doubling.

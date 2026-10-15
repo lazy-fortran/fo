@@ -2,13 +2,14 @@ module fo_check
     use, intrinsic :: iso_fortran_env, only: real64
     use fo_util, only: make_tmpfile, delete_tmpfile, wall_time_seconds
     use fo_scan, only: scan_unit_t, scan_dir, MAX_NAME, MAX_PATH, &
-        is_slow_test, scan_provides_name
+        scan_provides_name
     use fx_dag, only: dag_t, dag_find_node, dag_topo_sort, dag_affected_set, MAX_NODES
     use fo_dag_bridge, only: build_dag_from_units, dag_find_source_provider
     use fo_process, only: process_run_argv_logged, argv_push
     use fo_build_backend, only: backend_t, detect_backend, backend_build, &
-        backend_test_affected, BACKEND_NONE, BACKEND_NATIVE
-    use fo_gfortran_build, only: gfortran_selected_test_names
+        BACKEND_NONE
+    use fo_project_load, only: project_run_affected
+    use fx_string, only: string_t
     use fo_cache, only: cache_t, cache_init, cache_lookup, cache_key_for, &
         cache_action_mod_key, hash_mod_file, HASH_LEN
     use fo_diagnostics, only: diagnostic_t, diagnostic_from_log, is_runner_crash
@@ -424,14 +425,14 @@ contains
         character(len=512) :: build_log, test_log
         character(len=512) :: no_project
         character(len=512) :: project_dir
-        character(len=4096), allocatable :: test_names(:)
-        integer :: i, n_test_names
+        integer :: i, n_run
         logical :: is_test_arr(MAX_NODES)
         character(len=MAX_PATH), allocatable :: filenames(:)
+        type(string_t), allocatable :: changed(:)
         type(backend_t) :: b
 
         t0 = wall_time_seconds()
-        allocate (filenames(MAX_NODES), test_names(MAX_NODES))
+        allocate (filenames(MAX_NODES))
 
         b = detect_backend(dir)
         project_dir = b%project_dir
@@ -492,32 +493,21 @@ contains
         call delete_tmpfile(build_log)
         res%build_ok = .true.
 
-        n_test_names = 0
-        if (b%kind == BACKEND_NATIVE) then
-            call gfortran_selected_test_names(project_dir, filenames, &
-                affected_ids, n_affected, .false., test_names, n_test_names)
-        else
-            do i = 1, n_affected
-                if (is_test_arr(affected_ids(i))) then
-                    if (.not. is_slow_test(dag%nodes(affected_ids(i))%label)) then
-                        n_test_names = n_test_names + 1
-                        test_names(n_test_names) = &
-                            dag%nodes(affected_ids(i))%label(1:128)
-                    end if
-                end if
-            end do
-        end if
-
-        if (n_test_names == 0) then
+        ! The project model maps the changed sources to the affected cases.
+        allocate (changed(n_changed))
+        do i = 1, n_changed
+            changed(i)%s = trim(filenames(changed_ids(i)))
+        end do
+        call make_tmpfile('fo-test', test_log)
+        call project_run_affected(b, '', changed, .false., test_log, exitcode, &
+            n_run)
+        if (n_run == 0 .and. exitcode == 0) then
+            call delete_tmpfile(test_log)
             res%tests_ok = .true.
             t1 = wall_time_seconds()
             res%elapsed = real(t1 - t0)
             return
         end if
-
-        call make_tmpfile('fo-test', test_log)
-        call backend_test_affected(b, test_names, n_test_names, exitcode, &
-            log_file=test_log)
         res%tests_ok = (exitcode == 0)
         call parse_test_log(test_log, res%test_results, res%n_test_results)
         if (.not. res%tests_ok) then

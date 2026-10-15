@@ -22,7 +22,7 @@ module fo_build_backend
     private
     public :: backend_t, detect_backend, detect_nproc, detect_jobs
     public :: backend_build, backend_test, backend_test_names
-    public :: backend_test_affected, backend_test_cases, backend_set_build_targets
+    public :: backend_test_cases, backend_set_build_targets
     public :: backend_clean
     public :: profile_flags, backend_profile, cmake_configure
     public :: BACKEND_NONE, BACKEND_NATIVE, BACKEND_CMAKE
@@ -473,26 +473,6 @@ contains
             end if
         end select
     end subroutine backend_test_names
-
-    subroutine backend_test_affected(self, names, n_names, exitcode, &
-            include_slow, log_file, flags, use_cache)
-        type(backend_t), intent(inout) :: self
-        character(len=*), intent(in) :: names(:)
-        integer, intent(in) :: n_names
-        integer, intent(out) :: exitcode
-        logical, intent(in), optional :: include_slow
-        character(len=*), intent(in), optional :: log_file
-        character(len=*), intent(in), optional :: flags
-        logical, intent(in), optional :: use_cache
-
-        if (self%kind == BACKEND_CMAKE) then
-            call backend_test(self, exitcode, include_slow, log_file, flags, &
-                use_cache)
-        else
-            call backend_test_names(self, names, n_names, exitcode, &
-                include_slow, log_file, flags, use_cache)
-        end if
-    end subroutine backend_test_affected
 
     subroutine backend_set_build_targets(self, targets, widened)
         !! CMake build targets of a plan: the planned targets merged with any

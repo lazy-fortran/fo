@@ -5,7 +5,9 @@ module fo_test_twin
     !! tests test_core_a (core), test_phys_b (phys), test_io_c, test_slow_d.
     !! Labels: unit (core_a, phys_b), io (io_c), slow (slow_d; excluded by
     !! default). Layers tw_core and tw_phys (uses tw_core): CMake libraries,
-    !! fpm source layers of the same names.
+    !! fpm source layers of the same names. Declared input data/io_ref.dat
+    !! of test_io_c: an `[[extra.fo.inputs]]` row in the io group (fpm), the
+    !! CTest REQUIRED_FILES property (CMake).
     use fo_test_harness, only: join_path, write_lines
     implicit none
     private
@@ -53,6 +55,8 @@ contains
             call write_lines(join_path(dir, 'test/'//trim(case_names(i))//'.f90'), &
                 lines)
         end do
+        lines(1) = '1'
+        call write_lines(join_path(dir, 'data/io_ref.dat'), lines(1:1))
         if (backend == 'fpm') then
             call write_lines(join_path(dir, 'fpm.toml'), [character(len=80) :: &
                 'name = "tw"', '[extra.fo.layers]', &
@@ -60,9 +64,11 @@ contains
                 'tw_phys = { source = ["src/tw_phys.f90"], uses = ["tw_core"] }', &
                 '[extra.fo.test-groups]', &
                 'unit = { tests = ["test/test_core_a*", "test/test_phys_b*"] }', &
-                'io = { tests = ["test/test_io_c*"] }', &
+                'io = { tests = ["test/test_io_c*"], inputs = ["data/io_ref.dat"] }', &
                 'slow = { tests = ["test/test_slow_d*"] }', &
-                '[extra.fo.test-defaults]', 'exclude = ["slow"]'])
+                '[extra.fo.test-defaults]', 'exclude = ["slow"]', &
+                '[[extra.fo.inputs]]', 'path = "data/io_ref.dat"', &
+                'role = "test-fixture"'])
         else
             call write_lines(join_path(dir, 'CMakeLists.txt'), [character(len=96) :: &
                 'cmake_minimum_required(VERSION 3.20)', 'project(tw Fortran)', &
@@ -76,7 +82,8 @@ contains
                 'target_link_libraries(test_core_a tw_core)', &
                 'target_link_libraries(test_phys_b tw_phys)', &
                 'set_tests_properties(test_core_a test_phys_b PROPERTIES LABELS "unit")', &
-                'set_tests_properties(test_io_c PROPERTIES LABELS "io")', &
+                'set_tests_properties(test_io_c PROPERTIES LABELS "io"', &
+                '  REQUIRED_FILES "${CMAKE_CURRENT_SOURCE_DIR}/data/io_ref.dat")', &
                 'set_tests_properties(test_slow_d PROPERTIES LABELS "slow")'])
         end if
     end subroutine twin_write

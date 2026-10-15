@@ -13,7 +13,7 @@ module fo_project_load
     use fo_util, only: make_tmpfile, delete_tmpfile, read_text_file_alloc
     use fo_scan, only: is_slow_test
     use fo_build_backend, only: backend_t, BACKEND_NATIVE, BACKEND_CMAKE, &
-        cmake_configure, backend_test_names, backend_test_cases, &
+        cmake_configure, backend_test_names, backend_test_cases, backend_test, &
         backend_set_build_targets
     use fo_cmake_native_config, only: native_cmake_selected
     use fo_cmake_model, only: cmake_model_load
@@ -24,7 +24,9 @@ module fo_project_load
         SELECT_UNKNOWN_NAME, SELECT_EMPTY, SELECT_NAMED_EXCLUDED, &
         CASE_DEFAULT_EXCLUDED
     use fo_project_model, only: model_unit_t, model_layering_t, model_layering, &
-        model_layering_sources
+        model_layering_sources, model_affected
+    use fo_process, only: argv_push, process_run_argv_logged
+    use fo_fs, only: fs_realpath
     use fo_scan, only: scan_unit_t, scan_file
     use fo_process, only: process_has_fortran_source_ext
     use fx_json_build, only: json_key_int
@@ -32,6 +34,7 @@ module fo_project_load
     private
 
     public :: project_has_model, project_load, project_resolve, project_run_cases
+    public :: project_affected, project_changed_files, project_run_affected
     public :: project_list_text, project_list_json
     public :: project_layering, project_layering_text, project_layering_json
 
@@ -49,14 +52,17 @@ contains
         end if
     end function project_has_model
 
-    subroutine project_load(b, flags, model, ierr, message)
+    subroutine project_load(b, flags, model, ierr, message, scanned)
         !! Load a finalized model. CMake is configured first (File API reply
         !! and CTest registry); nothing is built. ierr /= 0 with message.
+        !! scanned: project sources the adapter scanned beyond the target
+        !! sources (fpm test helpers); empty on CMake.
         type(backend_t), intent(inout) :: b
         character(len=*), intent(in) :: flags
         type(project_model_t), intent(out) :: model
         integer, intent(out) :: ierr
         character(len=:), allocatable, intent(out) :: message
+        type(string_t), allocatable, intent(out), optional :: scanned(:)
         character(len=1024) :: log_file
         character(len=:), allocatable :: text
         integer :: exitcode, status
@@ -69,9 +75,11 @@ contains
             return
         end if
         if (b%kind == BACKEND_NATIVE) then
-            call fpm_model_load(trim(b%project_dir), model, ierr, message)
+            call fpm_model_load(trim(b%project_dir), model, ierr, message, &
+                scanned=scanned)
             return
         end if
+        if (present(scanned)) allocate (scanned(0))
         call make_tmpfile('fo-model-configure', log_file)
         call cmake_configure(b%cmake, flags, trim(log_file), exitcode)
         if (exitcode /= 0) then
@@ -101,10 +109,22 @@ contains
         type(model_selection_t), intent(out) :: selection
         integer, intent(out) :: ierr
         character(len=:), allocatable, intent(out) :: message
-        integer :: i, k
 
         call project_load(b, flags, model, ierr, message)
         if (ierr /= 0) return
+        call resolve_loaded(model, request, selection, ierr, message)
+    end subroutine project_resolve
+
+    subroutine resolve_loaded(model, request, selection, ierr, message)
+        !! model_select with the diagnostics of project_resolve.
+        type(project_model_t), intent(in) :: model
+        type(model_request_t), intent(in) :: request
+        type(model_selection_t), intent(out) :: selection
+        integer, intent(out) :: ierr
+        character(len=:), allocatable, intent(out) :: message
+        integer :: i, k
+
+        message = ''
         call model_select(model, request, selection)
         select case (selection%status)
         case (SELECT_OK, SELECT_EMPTY)
@@ -125,8 +145,303 @@ contains
             ierr = 1
             message = selection%message
         end select
+    end subroutine resolve_loaded
+
+    subroutine project_affected(b, flags, request, changed, model, selection, &
+            widen_reasons, ierr, message, force_reason)
+        !! project_resolve restricted by model_affected to the cases the
+        !! changed files affect (`fo test --only-changed`, MCP only_changed,
+        !! `fo check`). changed: paths below the project root (relative, or
+        !! absolute with the project root as prefix); paths
+        !! below the build trees are ignored. force_reason widens to the whole
+        !! selection (no change baseline). The units are the scanned Fortran
+        !! sources of the targets plus the adapter's other scanned sources.
+        type(backend_t), intent(inout) :: b
+        character(len=*), intent(in) :: flags
+        type(model_request_t), intent(in) :: request
+        type(string_t), intent(in) :: changed(:)
+        type(project_model_t), intent(out) :: model
+        type(model_selection_t), intent(out) :: selection
+        type(string_t), allocatable, intent(out) :: widen_reasons(:)
+        integer, intent(out) :: ierr
+        character(len=:), allocatable, intent(out) :: message
+        character(len=*), intent(in), optional :: force_reason
+        type(string_t), allocatable :: extra(:), paths(:), unscanned(:), roots(:)
+        type(string_t), allocatable :: kept(:), ignored(:)
+        type(model_unit_t), allocatable :: units(:)
+        character(len=4096) :: physical
+        logical :: resolved
+        integer :: k, n
+
+        allocate (widen_reasons(0))
+        call project_load(b, flags, model, ierr, message, scanned=extra)
         if (ierr /= 0) return
-    end subroutine project_resolve
+        call resolve_loaded(model, request, selection, ierr, message)
+        if (ierr /= 0) return
+        allocate (roots(1))
+        roots(1)%s = trim(b%project_dir)
+        call fs_realpath(trim(b%project_dir), physical, resolved)
+        if (resolved) then
+            if (trim(physical) /= roots(1)%s) call push_text(roots, trim(physical))
+        end if
+        ! Build trees hold generated files, never project changes.
+        allocate (ignored(1))
+        ignored(1)%s = 'build'
+        if (len(model%build_dir) > 0) &
+            call push_text(ignored, strip_root(model%build_dir, roots))
+        allocate (kept(size(changed)))
+        n = 0
+        do k = 1, size(changed)
+            n = n + 1
+            kept(n)%s = strip_root(changed(k)%s, roots)
+            if (below_any(kept(n)%s, ignored)) n = n - 1
+        end do
+        call model_layering_sources(model, extra, paths)
+        call scan_units(paths, units, unscanned)
+        call model_affected(model, units, roots, kept(1:n), selection, &
+            widen_reasons, force_reason)
+    end subroutine project_affected
+
+    subroutine project_run_affected(b, flags, changed, include_all, log_file, &
+            exitcode, n_run)
+        !! Build and run the cases the changed files affect (the default
+        !! selection; include_all lifts default exclusions), for `fo check`
+        !! and the `fo` pipeline. changed: paths below the project root,
+        !! absolute or relative. Without a project model (FO_CMAKE_NATIVE)
+        !! every registered test runs (n_run = -1). n_run = 0: no case is
+        !! affected and nothing ran. A model that cannot be loaded fails
+        !! (exitcode 1) with the diagnostic appended to log_file.
+        type(backend_t), intent(inout) :: b
+        character(len=*), intent(in) :: flags
+        type(string_t), intent(in) :: changed(:)
+        logical, intent(in) :: include_all
+        character(len=*), intent(in) :: log_file
+        integer, intent(out) :: exitcode, n_run
+        type(model_request_t) :: request
+        type(project_model_t) :: model
+        type(model_selection_t) :: selection
+        type(string_t), allocatable :: widen_reasons(:)
+        character(len=:), allocatable :: message
+        integer :: ierr, unit, ios
+
+        n_run = 0
+        exitcode = 0
+        if (.not. project_has_model(b)) then
+            n_run = -1
+            call backend_test(b, exitcode, include_all, log_file, flags=flags)
+            return
+        end if
+        allocate (request%names(0), request%include_labels(0), &
+            request%exclude_labels(0), request%layers(0))
+        request%all = include_all
+        call project_affected(b, flags, request, changed, model, selection, &
+            widen_reasons, ierr, message)
+        if (ierr /= 0) then
+            exitcode = 1
+            open (newunit=unit, file=log_file, position='append', &
+                action='write', iostat=ios)
+            if (ios == 0) then
+                write (unit, '(a)') 'fo: '//message
+                close (unit)
+            end if
+            return
+        end if
+        if (selection%status == SELECT_EMPTY) return
+        n_run = size(selection%cases)
+        call project_run_cases(b, model, selection%cases, flags, .false., log_file, &
+            exitcode)
+    end subroutine project_run_affected
+
+    subroutine project_changed_files(project_dir, changed, ok, reason)
+        !! Files that differ from the Git HEAD of the repository holding
+        !! project_dir: tracked changes (staged or not, deletions included)
+        !! and untracked files that are not ignored, relative to project_dir
+        !! and limited to it. ok = .false. with reason when there is no Git
+        !! baseline (no repository, no commit, git unavailable).
+        character(len=*), intent(in) :: project_dir
+        type(string_t), allocatable, intent(out) :: changed(:)
+        logical, intent(out) :: ok
+        character(len=:), allocatable, intent(out) :: reason
+        character(len=1024) :: out_file
+        character(len=:), allocatable :: packed, text
+        integer :: n_args, exitcode, status
+
+        ok = .false.
+        reason = ''
+        allocate (changed(0))
+        call make_tmpfile('fo-changed', out_file)
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, 'git')
+        call argv_push(packed, n_args, '-C')
+        call argv_push(packed, n_args, trim(project_dir))
+        call argv_push(packed, n_args, 'rev-parse')
+        call argv_push(packed, n_args, '--verify')
+        call argv_push(packed, n_args, '--quiet')
+        call argv_push(packed, n_args, 'HEAD')
+        call process_run_argv_logged('', packed, n_args, trim(out_file), .false., &
+            0, exitcode)
+        if (exitcode /= 0) then
+            reason = 'no Git HEAD to compare against'
+            call delete_tmpfile(trim(out_file))
+            return
+        end if
+        n_args = 0
+        packed = ''
+        call argv_push(packed, n_args, 'git')
+        call argv_push(packed, n_args, '-C')
+        call argv_push(packed, n_args, trim(project_dir))
+        call argv_push(packed, n_args, 'diff')
+        call argv_push(packed, n_args, '--name-only')
+        call argv_push(packed, n_args, '--no-renames')
+        call argv_push(packed, n_args, '--relative')
+        call argv_push(packed, n_args, '-z')
+        call argv_push(packed, n_args, 'HEAD')
+        call argv_push(packed, n_args, '--')
+        call process_run_argv_logged('', packed, n_args, trim(out_file), .false., &
+            0, exitcode)
+        if (exitcode == 0) then
+            n_args = 0
+            packed = ''
+            call argv_push(packed, n_args, 'git')
+            call argv_push(packed, n_args, '-C')
+            call argv_push(packed, n_args, trim(project_dir))
+            call argv_push(packed, n_args, 'ls-files')
+            call argv_push(packed, n_args, '--others')
+            call argv_push(packed, n_args, '--exclude-standard')
+            call argv_push(packed, n_args, '-z')
+            call process_run_argv_logged('', packed, n_args, trim(out_file), &
+                .true., 0, exitcode)
+        end if
+        if (exitcode /= 0) then
+            reason = 'git could not list the changed files'
+            call delete_tmpfile(trim(out_file))
+            return
+        end if
+        call read_text_file_alloc(trim(out_file), text, status)
+        call delete_tmpfile(trim(out_file))
+        if (status /= 0) then
+            reason = 'git could not list the changed files'
+            return
+        end if
+        call split_nul(text, changed)
+        ok = .true.
+    end subroutine project_changed_files
+
+    subroutine split_nul(text, items)
+        !! NUL-terminated items of text, each once.
+        character(len=*), intent(in) :: text
+        type(string_t), allocatable, intent(inout) :: items(:)
+        integer :: pos, next, k
+        logical :: seen
+
+        pos = 1
+        do while (pos <= len(text))
+            next = index(text(pos:), achar(0))
+            if (next == 0) next = len(text) - pos + 2
+            if (next > 1) then
+                seen = .false.
+                do k = 1, size(items)
+                    if (items(k)%s == text(pos:pos + next - 2)) seen = .true.
+                end do
+                if (.not. seen) call push_text(items, text(pos:pos + next - 2))
+            end if
+            pos = pos + next
+        end do
+    end subroutine split_nul
+
+    subroutine push_text(items, text)
+        type(string_t), allocatable, intent(inout) :: items(:)
+        character(len=*), intent(in) :: text
+        type(string_t), allocatable :: grown(:)
+        integer :: n
+
+        n = size(items)
+        allocate (grown(n + 1))
+        if (n > 0) grown(1:n) = items
+        grown(n + 1)%s = text
+        call move_alloc(grown, items)
+    end subroutine push_text
+
+    function strip_root(path, roots) result(rel)
+        character(len=*), intent(in) :: path
+        type(string_t), intent(in) :: roots(:)
+        character(len=:), allocatable :: rel
+        integer :: r, n
+
+        rel = path
+        do r = 1, size(roots)
+            n = len(roots(r)%s)
+            if (len(path) <= n + 1) cycle
+            if (path(1:n + 1) /= roots(r)%s//'/') cycle
+            rel = path(n + 2:)
+            return
+        end do
+    end function strip_root
+
+    logical function below_any(path, dirs) result(below)
+        character(len=*), intent(in) :: path
+        type(string_t), intent(in) :: dirs(:)
+        integer :: d, n
+
+        below = .false.
+        do d = 1, size(dirs)
+            n = len(dirs(d)%s)
+            if (n == 0) cycle
+            if (len(path) <= n) cycle
+            if (path(1:n + 1) == dirs(d)%s//'/') below = .true.
+        end do
+    end function below_any
+
+    subroutine scan_units(paths, units, unscanned)
+        !! Scan the Fortran sources among paths into model units; sources
+        !! that cannot be read or parsed are returned in unscanned.
+        type(string_t), intent(in) :: paths(:)
+        type(model_unit_t), allocatable, intent(out) :: units(:)
+        type(string_t), allocatable, intent(out) :: unscanned(:)
+        type(model_unit_t), allocatable :: all(:)
+        type(scan_unit_t) :: scanned
+        logical, allocatable :: failed(:)
+        integer :: k, n, status, m, n_extra, k_extra
+
+        allocate (all(size(paths)), failed(size(paths)))
+        failed = .false.
+        n = 0
+        do k = 1, size(paths)
+            if (.not. process_has_fortran_source_ext(paths(k)%s)) cycle
+            call scan_file(paths(k)%s, scanned, status)
+            if (status /= 0) then
+                failed(k) = .true.
+                cycle
+            end if
+            n = n + 1
+            all(n)%path = paths(k)%s
+            n_extra = 0
+            if (allocated(scanned%additional_modules)) &
+                n_extra = size(scanned%additional_modules)
+            m = 0
+            if (len_trim(scanned%module_name) > 0) m = 1
+            allocate (all(n)%provides(m + n_extra))
+            if (m == 1) all(n)%provides(1)%s = trim(scanned%module_name)
+            do k_extra = 1, n_extra
+                all(n)%provides(m + k_extra)%s = &
+                    trim(scanned%additional_modules(k_extra))
+            end do
+            allocate (all(n)%uses(scanned%n_deps))
+            do m = 1, scanned%n_deps
+                all(n)%uses(m)%s = trim(scanned%deps(m))
+            end do
+        end do
+        allocate (units(n))
+        if (n > 0) units(:) = all(1:n)
+        allocate (unscanned(count(failed)))
+        m = 0
+        do k = 1, size(paths)
+            if (.not. failed(k)) cycle
+            m = m + 1
+            unscanned(m) = paths(k)
+        end do
+    end subroutine scan_units
 
     subroutine project_run_cases(b, model, cases, flags, no_build, log_file, &
             exitcode)
@@ -308,9 +623,7 @@ contains
         character(len=:), allocatable, intent(out) :: message
         type(string_t), allocatable :: extra(:), paths(:)
         type(model_unit_t), allocatable :: units(:)
-        type(scan_unit_t) :: scanned
-        logical, allocatable :: failed(:)
-        integer :: k, n, status, m, n_extra, k_extra
+        integer :: k
 
         allocate (extra(0))
         if (b%kind == BACKEND_NATIVE) then
@@ -329,42 +642,8 @@ contains
             if (ierr /= 0) return
         end if
         call model_layering_sources(model, extra, paths)
-        allocate (units(size(paths)), failed(size(paths)))
-        failed = .false.
-        n = 0
-        do k = 1, size(paths)
-            if (.not. process_has_fortran_source_ext(paths(k)%s)) cycle
-            call scan_file(paths(k)%s, scanned, status)
-            if (status /= 0) then
-                failed(k) = .true.
-                cycle
-            end if
-            n = n + 1
-            units(n)%path = paths(k)%s
-            n_extra = 0
-            if (allocated(scanned%additional_modules)) &
-                n_extra = size(scanned%additional_modules)
-            m = 0
-            if (len_trim(scanned%module_name) > 0) m = 1
-            allocate (units(n)%provides(m + n_extra))
-            if (m == 1) units(n)%provides(1)%s = trim(scanned%module_name)
-            do k_extra = 1, n_extra
-                units(n)%provides(m + k_extra)%s = &
-                    trim(scanned%additional_modules(k_extra))
-            end do
-            allocate (units(n)%uses(scanned%n_deps))
-            do m = 1, scanned%n_deps
-                units(n)%uses(m)%s = trim(scanned%deps(m))
-            end do
-        end do
-        allocate (unscanned(count(failed)))
-        m = 0
-        do k = 1, size(paths)
-            if (.not. failed(k)) cycle
-            m = m + 1
-            unscanned(m) = paths(k)
-        end do
-        call model_layering(model, units(1:n), report)
+        call scan_units(paths, units, unscanned)
+        call model_layering(model, units, report)
     end subroutine project_layering
 
     function project_relative(project_dir, path) result(rel)

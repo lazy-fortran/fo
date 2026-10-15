@@ -171,7 +171,7 @@ but does not replace CMake's target model.
 manifest and source scan, or CMake targets and CTest cases after configure.
 
 ```text
-fo test [name|glob ...] [-L RE] [-LE RE] [--layer NAME] [--all] [--no-build]
+fo test [name|glob ...] [-L RE] [-LE RE] [--layer NAME] [--all] [--only-changed] [--no-build]
 fo test --list [--json] [same selection]
 ```
 
@@ -212,8 +212,27 @@ fo test --list [--json] [same selection]
   use `fo test --no-build` on that build, and a failed build is reported once
   for the generation without running any case.
 
-MCP `test` uses the same selection for its names. `--list`, labels and layers
-are not available with `--random`, `--only-changed` or `FO_CMAKE_NATIVE`.
+- `--only-changed` restricts the selection to the cases the files changed
+  against Git HEAD affect (tracked edits, staged or not, deletions and
+  untracked files that are not ignored; build trees are skipped). It combines
+  with names, labels, layers, `--all` and `--list`, the same on fpm and CMake.
+  A case is affected by a changed file that is a declared input of it (a test
+  group `inputs` path of `[[extra.fo.inputs]]`, or the CTest `REQUIRED_FILES`
+  property; a directory covers the files below it), a source in the module-use
+  closure of its test program, or a source of a target it links that no unit
+  uses as a module (external procedures, submodules, C sources). A case whose
+  command maps to no target is affected by any relevant change. A changed
+  build description (`fpm.toml`, `CMakeLists.txt`, `*.cmake`, CMake presets),
+  a changed Fortran/C source that belongs to no target, or a missing Git
+  baseline widens to the whole selection; fo prints why. Other files
+  (documentation, undeclared data) affect nothing. `--list` shows the reason
+  per case; nothing affected prints `no affected tests` and exits 0.
+
+MCP `test` uses the same selection for its names and for `only_changed`.
+`--list`, labels, layers and `--only-changed` are not available with
+`--random` or `FO_CMAKE_NATIVE`. `fo check` and the `fo` pipeline run the
+cases the sources changed since the last cached build affect, through the same
+model mapping.
 
 ## Layering check
 
