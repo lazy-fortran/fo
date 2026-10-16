@@ -150,6 +150,24 @@ packages are on main:
   - Optional audits (#145, #190).
   - Test-code reduction (#184).
 
+### CMake consumer corrections (2026-10-16)
+
+- `2f979d1` reuses configured CMake replies for `--no-build` selection, avoiding
+  a configure/read race reproduced by the GLISS consumer.
+- `614d951` preserves exact cache type, value and HELPSTRING, including wrapped
+  comments, literal expansions and trailing spaces. Native initialization and
+  explicit-override controls remain distinct.
+- Frozen capture now relocates proven aliases of captured build/source roots,
+  including `/tmp` versus `/private/tmp`, while preserving unrelated authored
+  paths and distinct suffixes. The prior driver reproduces the escaped binary
+  root; the repaired driver passes the same compiled native oracle.
+- Candidate SHA256
+  `ed54363ce4ed44a5d6ec74867f85ec4d692666da5304bba665f2da51936e0c14`
+  uses FortFront `07bfbb441ed67866f2244368be80a188933c9b72` and Fx
+  `eda9d6e4ec5287e07452f7c5402ccb5ccba8dfec`. Its original FortSym consumer
+  builds and passes all four affected resident gates, then stops normally.
+  This is focused consumer evidence, not full FortSym-suite qualification.
+
 ## Stage 1: fix every known bug
 
 All audit bugs are fixed. Each repair started with an independent negative oracle

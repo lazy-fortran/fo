@@ -1,7 +1,8 @@
 program test_gremlin_cmake_impact
+    use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use fo_test_harness, only: string_list_t, process_result_t, list_add
     use fo_test_harness, only: write_text, assert_true, finish_assertions, &
-        run_process, assert_process_ok, assert_contains
+        run_process, assert_process_ok, assert_contains, make_directory
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json
     use fo_test_gremlin_oracle, only: gremlin_field, gremlin_wait_ms
     use fo_test_gremlin_oracle, only: gremlin_stop_lane
@@ -11,14 +12,44 @@ program test_gremlin_cmake_impact
     character(:), allocatable :: driver, scratch, project, cache, state, session
     character(:), allocatable :: first, second, restored
     character(:), allocatable :: cache_help
+    character(:), allocatable :: build_alias, dependency, external_alias
     character(*), parameter :: lane = 'cmake-impact-oracle'
     character, parameter :: nl = new_line('a')
     type(string_list_t) :: args
     type(process_result_t) :: process
     type(json_value_t) :: reply
     logical :: found
+    integer :: rc
+    interface
+        integer(c_int) function c_symlink(target, path) bind(C, name='symlink')
+            import :: c_char, c_int
+            character(kind=c_char), intent(in) :: target(*), path(*)
+        end function c_symlink
+    end interface
 
     call gremlin_setup(driver, scratch, project, cache, state)
+    dependency = scratch//'/dependency'
+    call make_directory(dependency)
+    ! The alias overlaps a captured source root, so root replacement order
+    ! must still select the build root rather than the dependency source.
+    build_alias = dependency//'/build-alias'
+    call make_directory(project//'/build')
+    rc = c_symlink(project//'/build'//c_null_char, build_alias//c_null_char)
+    call assert_true(rc == 0, 'native build directory has a symlink alias')
+    external_alias = scratch//'/external-alias'
+    call make_directory(scratch//'/external')
+    rc = c_symlink(scratch//'/external'//c_null_char, external_alias//c_null_char)
+    call assert_true(rc == 0, 'unrelated directory has a symlink alias')
+    call write_text(dependency//'/CMakeLists.txt', &
+        'cmake_minimum_required(VERSION 3.22)'//nl// &
+        'project(value_dep LANGUAGES Fortran)'//nl// &
+        'add_library(value_dep value.f90)'//nl// &
+        'set_target_properties(value_dep PROPERTIES Fortran_MODULE_DIRECTORY '// &
+        '"${CMAKE_BINARY_DIR}/modules")'//nl// &
+        'target_include_directories(value_dep PUBLIC "${CMAKE_BINARY_DIR}/modules")'//nl)
+    call write_text(dependency//'/value.f90', &
+        'module alias_value'//nl//'implicit none'//nl// &
+        'integer, parameter :: value = 7'//nl//'end module alias_value'//nl)
     cache_help = ' Compiler-discovered help long enough to wrap across cache '// &
         'comment lines; literal ${DO_NOT_EXPAND}, "quotes" and '//achar(92)// &
         'backslash.'//nl//'Second line retains its trailing spaces.  '
@@ -27,8 +58,10 @@ program test_gremlin_cmake_impact
         'cmake_minimum_required(VERSION 3.22)'//nl// &
         'project(impact_probe LANGUAGES Fortran)'//nl// &
         cache_metadata_oracle()// &
+        fetchcontent_oracle()// &
         'enable_testing()'//nl// &
         'add_executable(marker test/marker.f90)'//nl// &
+        'target_link_libraries(marker PRIVATE value_dep)'//nl// &
         'add_test(NAME registered_marker COMMAND marker)'//nl)
     call write_marker(.false.)
     ! FPM sees these program names; CMake registers only registered_marker.
@@ -63,6 +96,30 @@ program test_gremlin_cmake_impact
 
 contains
 
+    function fetchcontent_oracle() result(text)
+        character(:), allocatable :: text
+
+        text = 'file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/_deps")'//nl// &
+            'if(DEFINED FETCHCONTENT_BASE_DIR)'//nl// &
+            'file(REAL_PATH "${FETCHCONTENT_BASE_DIR}" actual_base)'//nl// &
+            'file(REAL_PATH "${CMAKE_BINARY_DIR}/_deps" expected_base)'//nl// &
+            'if(NOT actual_base STREQUAL expected_base)'//nl// &
+            'message(FATAL_ERROR "dependency binary root escaped frozen build")'//nl// &
+            'endif()'//nl//'endif()'//nl// &
+            'include(FetchContent)'//nl// &
+            'FetchContent_Declare(value_dep SOURCE_DIR "'//dependency//'")'//nl// &
+            'FetchContent_MakeAvailable(value_dep)'//nl// &
+            'set(expected_prefix "${value_dep_SOURCE_DIR}/build-alias-suffix")'//nl// &
+            'if(DEFINED PROBE_PREFIX)'//nl// &
+            'cmake_path(NORMAL_PATH PROBE_PREFIX OUTPUT_VARIABLE actual_prefix)'//nl// &
+            'cmake_path(NORMAL_PATH expected_prefix)'//nl// &
+            'if(NOT actual_prefix STREQUAL expected_prefix)'//nl// &
+            'message(FATAL_ERROR "distinct alias suffix changed")'//nl// &
+            'endif()'//nl//'endif()'//nl// &
+            'set(PROBE_PREFIX "${expected_prefix}" CACHE PATH '// &
+            '"Distinct path prefix")'//nl
+    end function fetchcontent_oracle
+
     function cache_metadata_oracle() result(text)
         character(:), allocatable :: text
 
@@ -80,7 +137,11 @@ contains
             'check_cache(PROBE_EMPTY ON BOOL "")'//nl// &
             'set(PROBE_EMPTY ON CACHE BOOL "")'//nl// &
             'check_cache(PROBE_FILE "compiler-tool" FILEPATH "Discovered tool")'//nl// &
-            'set(PROBE_FILE "compiler-tool" CACHE FILEPATH "Discovered tool")'//nl
+            'set(PROBE_FILE "compiler-tool" CACHE FILEPATH "Discovered tool")'//nl// &
+            'check_cache(PROBE_EXTERNAL "'//external_alias// &
+            '/absent/../suffix" PATH "External path spelling")'//nl// &
+            'set(PROBE_EXTERNAL "'//external_alias// &
+            '/absent/../suffix" CACHE PATH "External path spelling")'//nl
     end function cache_metadata_oracle
 
     subroutine native_cache_reference()
@@ -109,6 +170,17 @@ contains
             'native CMake distinguishes a same-value explicit override')
         call assert_contains(observed%stderr, 'cache metadata changed: PROBE_AUTO', &
             'explicit override fails for its changed metadata')
+
+        command = string_list_t()
+        call list_add(command, 'cmake')
+        call list_add(command, '-S')
+        call list_add(command, project)
+        call list_add(command, '-B')
+        call list_add(command, project//'/build')
+        call list_add(command, '-DFETCHCONTENT_BASE_DIR:PATH='//build_alias//'/_deps')
+        call run_process(command, project, observed)
+        call assert_process_ok(observed, &
+            'native CMake accepts the aliased dependency binary root')
     end subroutine native_cache_reference
 
     subroutine arguments(action, values)
@@ -130,7 +202,8 @@ contains
         action = 'print *, "registered marker passed"'
         if (fail) action = 'error stop "registered marker failed"'
         call write_text(project//'/test/marker.f90', &
-            'program native_marker'//nl//'implicit none'//nl// &
+            'program native_marker'//nl//'use alias_value, only: value'//nl// &
+            'implicit none'//nl//'if(value /= 7) error stop "wrong dependency"'//nl// &
             action//nl//'end program native_marker'//nl)
     end subroutine write_marker
 
