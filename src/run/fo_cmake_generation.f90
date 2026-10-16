@@ -24,11 +24,15 @@ module fo_cmake_generation
     integer, parameter :: PATH_LEN = 4096, MAX_ROOTS = 60
     public :: cmake_capture_inventory, cmake_registered_names, cmake_capture_cleanup
 contains
-    subroutine cmake_capture_inventory(backend, inventory, ierr, message, flags)
+    subroutine cmake_capture_inventory(backend, inventory, ierr, message, flags, &
+            configured)
         type(backend_t), intent(inout) :: backend
         !! Configure flags of the tree (default none): the same as the loaded
         !! model's, so capturing never reconfigures a profiled tree.
         character(len=*), intent(in), optional :: flags
+        !! The caller configured the tree with these flags and this backend
+        !! (its File API reply is current): capture does not configure again.
+        logical, intent(in), optional :: configured
         type(input_inventory_t), intent(out) :: inventory
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
@@ -42,6 +46,7 @@ contains
         character(:), allocatable :: generator
         integer :: n_roots, cursor, i, cleanup_status
         logical :: exists, source_key, provider, physical
+        logical :: reuse
         character(len=PATH_LEN) :: project_path, build_path, fetchcontent_base
 
         ierr = 1
@@ -58,18 +63,22 @@ contains
             message = 'resident CMake requires a relocatable build directory'
             return
         end if
-        call make_tmpfile('fo-cmake-capture-configure', log_file)
-        if (present(flags)) then
-            call cmake_configure(backend%cmake, flags, log_file, ierr)
-        else
-            call cmake_configure(backend%cmake, '', log_file, ierr)
+        reuse = .false.
+        if (present(configured)) reuse = configured
+        if (.not. reuse) then
+            call make_tmpfile('fo-cmake-capture-configure', log_file)
+            if (present(flags)) then
+                call cmake_configure(backend%cmake, flags, log_file, ierr)
+            else
+                call cmake_configure(backend%cmake, '', log_file, ierr)
+            end if
+            if (ierr /= 0) then
+                message = 'CMake configuration failed during generation capture; '// &
+                    'diagnostic: '//trim(log_file)
+                return
+            end if
+            call delete_tmpfile(log_file)
         end if
-        if (ierr /= 0) then
-            message = 'CMake configuration failed during generation capture; '// &
-                'diagnostic: '//trim(log_file)
-            return
-        end if
-        call delete_tmpfile(log_file)
         if (backend%cmake%build_root(1:1) == '/') then
             ierr = 1
             message = 'resident CMake requires a relocatable build directory'

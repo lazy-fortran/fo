@@ -134,7 +134,7 @@ contains
         if (.not. found) return
         call sha256_file(trim(executable), driver, ierr)
         if (ierr /= 0) return
-        call case_identity_capture(b, driver, flags, generation, ok)
+        call case_identity_capture(b, driver, flags, generation, ok, configured=.true.)
         if (.not. ok) return
         ! The build profile and --flag text change what the cases run.
         generation%toolchain_key = sha256_string(generation%toolchain_key// &

@@ -174,7 +174,8 @@ contains
         call observe_test_capture(change_watch%capture_count, generation%identity)
     end subroutine capture_candidate
 
-    subroutine case_identity_capture(backend, driver_digest, flags, generation, ok)
+    subroutine case_identity_capture(backend, driver_digest, flags, generation, ok, &
+            configured)
         !! The inputs of the case input closure digests of a project as it is
         !! now (generation_case_digests_ensure), without freezing a
         !! generation: its input inventory, toolchain key and the driver
@@ -184,6 +185,9 @@ contains
         character(len=*), intent(in) :: driver_digest, flags
         type(generation_t), intent(out) :: generation
         logical, intent(out) :: ok
+        !! The backend was configured with these flags by the caller: a CMake
+        !! capture reads that configure's reply instead of configuring again.
+        logical, intent(in), optional :: configured
         character(len=:), allocatable :: project_dir
         type(generation_context_t) :: context
         type(input_inventory_t) :: inventory
@@ -200,7 +204,8 @@ contains
         call capture_toolchain(project_dir, context, ierr, message)
         if (ierr /= 0) return
         if (backend%kind == BACKEND_CMAKE) then
-            call cmake_capture_inventory(backend, inventory, ierr, message, flags)
+            call cmake_capture_inventory(backend, inventory, ierr, message, flags, &
+                configured)
         else
             call input_inventory_declarations_from_config(project_dir, declarations, &
                 ierr, message)
