@@ -563,23 +563,33 @@ int fo_gremlin_lease_acquire(const char *kind, int capacity, int *fdout, int *sl
 
 static int host_lease_base(char *base, size_t cap) {
     struct stat st;
+    /* An explicit admission namespace confines lanes to one private domain,
+       e.g. one test fixture, instead of every lane of this user on the host. */
+    const char *domain = getenv("FO_GREMLIN_ADMISSION_DIR");
+    if (domain && *domain) {
+        if (!fo_path_is_absolute(domain)) return EINVAL;
+        if (snprintf(base, cap, "%s", domain) >= (int)cap) return ENAMETOOLONG;
+        int error = fo_sys_mkdirs(base, 0700);
+        if (error) return error;
+    } else {
 #if defined(_WIN32) && !defined(__CYGWIN__)
-    const char *local = getenv("LOCALAPPDATA");
-    if (!local || !*local) return ENOENT;
-    int n = snprintf(base, cap, "%s/fo/gremlin-host-admission", local);
-    if (n < 0 || n >= (int)cap) return ENAMETOOLONG;
-    int error = fo_sys_mkdirs(base, 0700);
-    if (error) return error;
+        const char *local = getenv("LOCALAPPDATA");
+        if (!local || !*local) return ENOENT;
+        int n = snprintf(base, cap, "%s/fo/gremlin-host-admission", local);
+        if (n < 0 || n >= (int)cap) return ENAMETOOLONG;
+        int error = fo_sys_mkdirs(base, 0700);
+        if (error) return error;
 #else
-    int n = snprintf(base, cap, "/var/tmp/fo-gremlin-admission-%lu",
-                     (unsigned long)geteuid());
-    if (n < 0 || n >= (int)cap) return ENAMETOOLONG;
-    if (mkdir(base, 0700) == 0) {
-        if (chmod(base, 0700) != 0) return errno;
-    } else if (errno != EEXIST) {
-        return errno;
-    }
+        int n = snprintf(base, cap, "/var/tmp/fo-gremlin-admission-%lu",
+                         (unsigned long)geteuid());
+        if (n < 0 || n >= (int)cap) return ENAMETOOLONG;
+        if (mkdir(base, 0700) == 0) {
+            if (chmod(base, 0700) != 0) return errno;
+        } else if (errno != EEXIST) {
+            return errno;
+        }
 #endif
+    }
     if (lstat(base, &st) != 0) return errno;
     if (!S_ISDIR(st.st_mode) || !fo_private_path(base)
 #if !defined(_WIN32) || defined(__CYGWIN__)

@@ -126,6 +126,9 @@ contains
         call set_env('FO_SELF_REFRESH', '0')
         call set_env('FO_DISABLE_SELF_REFRESH', '1')
         call set_env('TMPDIR', join_path(state, 'tmp'))
+        ! Fixture lanes share host work slots only with their own fixture, not
+        ! with every concurrently running test or developer lane on the host.
+        call set_env('FO_GREMLIN_ADMISSION_DIR', join_path(scratch, 'admission'))
         if (present(capture_counter)) then
             capture_counter = join_path(scratch, 'capture-counter.json')
             call set_env('FO_GREMLIN_TEST_CAPTURE_COUNTER', capture_counter)

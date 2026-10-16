@@ -15,6 +15,8 @@ program test_gremlin_reproduce_timeout
     use fo_test_gremlin_oracle, only: gremlin_start_args, gremlin_write_case
     use fo_test_gremlin_oracle, only: gremlin_stop_lane
     use fo_test_json, only: json_value_t, json_member, json_boolean_value
+    use fo_gremlin_state, only: gremlin_lease_group_t, &
+        gremlin_host_lease_acquire_weighted, gremlin_host_lease_release
     implicit none
 
     character(:), allocatable :: driver, scratch, project, cache, state, session
@@ -25,7 +27,9 @@ program test_gremlin_reproduce_timeout
     integer(int64) :: started, now, rate
     integer :: hung_pid, io, status
     character(len=64) :: pid_text
-    logical :: ok
+    character(len=512) :: lease_message
+    type(gremlin_lease_group_t) :: held_slots
+    logical :: ok, busy
     character(len=*), parameter :: lane = 'reproduce-timeout'
 
     call get_environment_variable('FO_TEST_HANG_PIDFILE', length=io, status=status)
@@ -73,6 +77,34 @@ program test_gremlin_reproduce_timeout
         call assert_true(status == 0 .and. .not. process_alive(hung_pid), &
             'hung compiler process is cancelled')
     end if
+
+    ! The case bound also covers the wait for a host work slot. Hold every
+    ! slot of the fixture's admission domain; the child must not delegate to
+    ! this process's scope.
+    do io = 1, 600
+        call gremlin_host_lease_acquire_weighted('gremlin-heavy-work', 2, 2, &
+            held_slots, busy, status, lease_message)
+        if (.not. busy) exit
+        call gremlin_wait_ms(50)
+    end do
+    call assert_true(status == 0, 'oracle holds both fixture work slots: '// &
+        trim(lease_message))
+    environment = string_list_t()
+    call list_add(environment, 'FO_GREMLIN_ADMISSION_SCOPE=')
+    call reproduce_args(args, '2')
+    call system_clock(started, rate)
+    call gremlin_run(driver, project, cache, state, args, process, environment, &
+        timeout=60000)
+    call system_clock(now)
+    call assert_true(.not. process%timed_out .and. .not. process%runner_failed, &
+        'reproduce returns while every host work slot is held')
+    call assert_true(real(now - started)/real(rate) < 30.0, &
+        'slot wait stays within a small multiple of the case bound')
+    call assert_true(process%exit_code /= 0, 'unadmitted reproduction is not a PASS')
+    call assert_contains(process%stdout, 'work slot', &
+        'result names the unavailable host work slot')
+    if (status == 0) call gremlin_host_lease_release(held_slots, status, lease_message)
+    call assert_true(status == 0, 'oracle releases the fixture work slots')
 
     ! A leaked heavy-work slot would block this reproduction forever.
     call reproduce_args(args, '60')

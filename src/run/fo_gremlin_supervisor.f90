@@ -1172,7 +1172,8 @@ contains
         integer :: reproduction_timeout, work_release_error, scope_restore_error
         character(len=128) :: view_owner
         logical :: retain_view, have_reproduction_work_lease, stop_requested, build_stopped
-        logical :: have_reproduction_lease, executable_ok, is_live
+        logical :: have_reproduction_lease, executable_ok, is_live, slot_busy
+        real(dp) :: slot_wait_started, slot_wait_now
 
         exitcode = 0
         have_reproduction_lease = .false.
@@ -1317,8 +1318,24 @@ contains
         end if
         call process_scope_begin(session%state_dir, reproduction_scope, ierr)
         if (ierr == 0) then
-            call acquire_heavy_work_slot(session, reproduction_work_lease, &
-                have_reproduction_work_lease, .false., stop_requested, ierr, message)
+            ! The case wall timeout also bounds the wait for a host work slot,
+            ! so a reproduction never blocks silently behind other lanes.
+            call clock_seconds(slot_wait_started)
+            do
+                call acquire_heavy_work_slot(session, reproduction_work_lease, &
+                    have_reproduction_work_lease, .false., stop_requested, ierr, &
+                    message, slot_busy)
+                if (ierr /= 0 .or. .not. slot_busy) exit
+                call clock_seconds(slot_wait_now)
+                if (slot_wait_now - slot_wait_started >= &
+                        real(reproduction_timeout, dp)) then
+                    ierr = 1
+                    write (message, '(a,i0,a)') 'TIMEOUT: no host Gremlin work '// &
+                        'slot became free within ', reproduction_timeout, ' seconds'
+                    exit
+                end if
+                call fs_sleep_ms(100)
+            end do
         else
             message = 'cannot claim reproduction process ownership: '//trim(int_text(ierr))
         end if
