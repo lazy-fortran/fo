@@ -1,6 +1,7 @@
 program test_gremlin_cmake_impact
     use fo_test_harness, only: string_list_t, process_result_t, list_add
-    use fo_test_harness, only: write_text, assert_true, finish_assertions
+    use fo_test_harness, only: write_text, assert_true, finish_assertions, &
+        run_process, assert_process_ok, assert_contains
     use fo_test_gremlin_oracle, only: gremlin_setup, gremlin_json
     use fo_test_gremlin_oracle, only: gremlin_field, gremlin_wait_ms
     use fo_test_gremlin_oracle, only: gremlin_stop_lane
@@ -9,6 +10,7 @@ program test_gremlin_cmake_impact
 
     character(:), allocatable :: driver, scratch, project, cache, state, session
     character(:), allocatable :: first, second, restored
+    character(:), allocatable :: cache_help
     character(*), parameter :: lane = 'cmake-impact-oracle'
     character, parameter :: nl = new_line('a')
     type(string_list_t) :: args
@@ -17,10 +19,14 @@ program test_gremlin_cmake_impact
     logical :: found
 
     call gremlin_setup(driver, scratch, project, cache, state)
+    cache_help = ' Compiler-discovered help long enough to wrap across cache '// &
+        'comment lines; literal ${DO_NOT_EXPAND}, "quotes" and '//achar(92)// &
+        'backslash.'//nl//'Second line retains its trailing spaces.  '
     call write_text(project//'/fpm.toml', 'name = "cmake_impact_probe"'//nl)
     call write_text(project//'/CMakeLists.txt', &
         'cmake_minimum_required(VERSION 3.22)'//nl// &
         'project(impact_probe LANGUAGES Fortran)'//nl// &
+        cache_metadata_oracle()// &
         'enable_testing()'//nl// &
         'add_executable(marker test/marker.f90)'//nl// &
         'add_test(NAME registered_marker COMMAND marker)'//nl)
@@ -30,6 +36,7 @@ program test_gremlin_cmake_impact
         'program unregistered'//nl//'implicit none'//nl// &
         'error stop "not a registered CTest case"'//nl// &
         'end program unregistered'//nl)
+    call native_cache_reference()
     call arguments('start', args)
     call gremlin_json(driver, project, cache, state, args, reply, process, 30000)
     session = gremlin_field(reply, 'session_id')
@@ -55,6 +62,54 @@ program test_gremlin_cmake_impact
     call finish_assertions(retain_failed_scratch=.true.)
 
 contains
+
+    function cache_metadata_oracle() result(text)
+        character(:), allocatable :: text
+
+        ! Check before ordinary cache initialization, which could replace help.
+        text = 'function(check_cache key expected kind help)'//nl// &
+            'if(DEFINED ${key})'//nl// &
+            'get_property(actual_help CACHE ${key} PROPERTY HELPSTRING)'//nl// &
+            'get_property(actual_kind CACHE ${key} PROPERTY TYPE)'//nl// &
+            'if(NOT "${${key}}" STREQUAL "${expected}" OR '// &
+            'NOT actual_kind STREQUAL kind OR NOT actual_help STREQUAL help)'//nl// &
+            'message(FATAL_ERROR "cache metadata changed: ${key}")'//nl// &
+            'endif()'//nl//'endif()'//nl//'endfunction()'//nl// &
+            'check_cache(PROBE_AUTO "17;23" STRING [==['//cache_help//']==])'//nl// &
+            'set(PROBE_AUTO "17;23" CACHE STRING [==['//cache_help//']==])'//nl// &
+            'check_cache(PROBE_EMPTY ON BOOL "")'//nl// &
+            'set(PROBE_EMPTY ON CACHE BOOL "")'//nl// &
+            'check_cache(PROBE_FILE "compiler-tool" FILEPATH "Discovered tool")'//nl// &
+            'set(PROBE_FILE "compiler-tool" CACHE FILEPATH "Discovered tool")'//nl
+    end function cache_metadata_oracle
+
+    subroutine native_cache_reference()
+        type(string_list_t) :: command
+        type(process_result_t) :: observed
+
+        call list_add(command, 'cmake')
+        call list_add(command, '-S')
+        call list_add(command, project)
+        call list_add(command, '-B')
+        call list_add(command, scratch//'/native-cache')
+        call run_process(command, project, observed)
+        call assert_process_ok(observed, 'native CMake initializes cache metadata')
+        call run_process(command, project, observed)
+        call assert_process_ok(observed, 'native CMake preserves serialized help')
+
+        command = string_list_t()
+        call list_add(command, 'cmake')
+        call list_add(command, '-S')
+        call list_add(command, project)
+        call list_add(command, '-B')
+        call list_add(command, scratch//'/native-explicit')
+        call list_add(command, '-DPROBE_AUTO:STRING=17;23')
+        call run_process(command, project, observed)
+        call assert_true(observed%exit_code /= 0, &
+            'native CMake distinguishes a same-value explicit override')
+        call assert_contains(observed%stderr, 'cache metadata changed: PROBE_AUTO', &
+            'explicit override fails for its changed metadata')
+    end subroutine native_cache_reference
 
     subroutine arguments(action, values)
         character(len=*), intent(in) :: action
@@ -98,7 +153,8 @@ contains
             call gremlin_json(driver, project, cache, state, status_args, &
                 status, status_process, 10000)
             if (status_process%exit_code /= 0) return
-            if (gremlin_field(status, 'state') == 'error') return
+            if (gremlin_field(status, 'state') == 'error' .or. &
+                gremlin_field(status, 'state') == 'build_failed') return
             generation = gremlin_field(status, 'active_generation')
             if (len(generation) == 64 .and. generation /= previous) then
                 if (expect_failure) then
