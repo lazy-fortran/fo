@@ -1,7 +1,7 @@
 module fo_test_cli
     use, intrinsic :: iso_c_binding, only: c_int64_t
     use fo_test_harness, only: string_list_t, process_result_t, list_add, list_extend
-    use fo_test_harness, only: list_with_first, run_process, assert_true
+    use fo_test_harness, only: list_with_first, run_process, assert_true, list_sets_variable
     use fo_test_harness, only: make_scratch, join_path, make_symlink, remove_tree
     use fo_test_harness, only: file_exists, remove_path, read_text, sleep_ms
     use fo_test_process_identity, only: mcp_kill_owned_tree, mcp_process_identity_running
@@ -90,6 +90,13 @@ contains
         call list_add(environment, 'FO_DISABLE_SELF_REFRESH=1')
         call list_add(environment, 'FO_SELF_REFRESH=0')
         call list_add(environment, 'FO_CACHE_DIR=' // trim(cache_directory))
+        ! Tests prove execution: rerun every case unless a test sets FO_TEST_RERUN=0.
+        if (present(extra_environment)) then
+            if (.not. list_sets_variable(extra_environment, 'FO_TEST_RERUN')) &
+                call list_add(environment, 'FO_TEST_RERUN=1')
+        else
+            call list_add(environment, 'FO_TEST_RERUN=1')
+        end if
         if (present(extra_environment)) call list_extend(environment, extra_environment)
         call run_arguments(driver, arguments, cwd, result, environment, timeout_ms)
     end subroutine run_fo

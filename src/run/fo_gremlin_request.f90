@@ -8,6 +8,7 @@ module fo_gremlin_request
         JSON_NULL_VAL, JSON_REAL, &
         JSON_ERROR, JSON_END_OF_INPUT, JSON_ERR_TRAILING
     use fx_dag, only: MAX_NODES
+    use fo_case_filter, only: case_filter_t, filter_parse
     implicit none
     private
 
@@ -31,6 +32,7 @@ module fo_gremlin_request
         integer :: max_records = 32
         integer(int64) :: max_bytes = 262144_int64
         logical :: only_changed = .false.
+        character(len=NAME_LEN) :: filter = ''
         logical :: shuffle = .false.
         character(len=HASH_LEN) :: generation_id = ''
         character(len=32) :: wait_until = ''
@@ -75,7 +77,7 @@ module fo_gremlin_request
         character(len=72) :: note = ''
     end type gremlin_option_t
 
-    integer, parameter, public :: N_GREMLIN_OPTIONS = 22
+    integer, parameter, public :: N_GREMLIN_OPTIONS = 23
     type(gremlin_option_t), parameter, public :: GREMLIN_OPTIONS(N_GREMLIN_OPTIONS) = [ &
         gremlin_option_t('lane_id', '--lane', '', 'string', GA_ANY), &
         gremlin_option_t('session_id', '--session', '', 'string', GA_ANY - GA_START), &
@@ -88,6 +90,8 @@ module fo_gremlin_request
             note='gremlin lane scope: fo test -LE regexes'), &
         gremlin_option_t('layers', '--layer', '', 'list', GA_START, &
             note='gremlin lane scope: layer names (union)'), &
+        gremlin_option_t('filter', '-E', '--filter', 'string', GA_START, &
+            note='case filter expression of fo test -E (no affected()/failed())'), &
         gremlin_option_t('only_changed', '--only-changed', '', 'bool', GA_START), &
         gremlin_option_t('shuffle', '--shuffle', '', 'bool', GA_START), &
         gremlin_option_t('random_count', '--random', '', 'int', GA_START, 0, 32, &
@@ -485,6 +489,8 @@ contains
 
         type(gremlin_option_t) :: option
         character(len=16) :: key
+        type(case_filter_t) :: expression
+        character(len=:), allocatable :: filter_message
         integer :: ios
         integer(int64) :: wide
 
@@ -537,6 +543,21 @@ contains
                     return
                 end if
                 request%generation_id = value
+            case ('filter')
+                if (len_trim(value) > len(request%filter)) then
+                    message = 'filter is too long'
+                    return
+                end if
+                call filter_parse(trim(value), expression, ios, filter_message)
+                if (ios /= 0) then
+                    message = 'filter is invalid: '//filter_message
+                    return
+                end if
+                if (expression%uses_affected .or. expression%uses_failed) then
+                    message = 'filter cannot use affected() or failed() at lane start'
+                    return
+                end if
+                request%filter = value
             case ('wait_until')
                 request%wait_until = value
             case ('detail')

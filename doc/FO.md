@@ -177,7 +177,8 @@ not depend on it: a per-case index keeps the latest reusable PASS of every case.
 manifest and source scan, or CMake targets and CTest cases after configure.
 
 ```text
-fo test [name|glob ...] [-L RE] [-LE RE] [--layer NAME] [--all] [--only-changed] [--no-build]
+fo test [name|glob ...] [-L RE] [-LE RE] [--layer NAME] [-E EXPR] [--all] [--only-changed] [--no-build]
+        [--rerun] [--partition hash:K/N|count:K/N] [--junit PATH]
 fo test --list [--json] [same selection]
 ```
 
@@ -273,9 +274,57 @@ fo test --list [--json] [same selection]
   (documentation, undeclared data) affect nothing. `--list` shows the reason
   per case; nothing affected prints `no affected tests` and exits 0.
 
-MCP `test` uses the same selection for its names and for `only_changed`.
-`--list`, labels, layers and `--only-changed` are not available with
-`--random` or `FO_CMAKE_NATIVE`. `fo check` and the `fo` pipeline run the
+- `-E, --filter EXPR` (MCP `filter`, Gremlin lane start `filter` /
+  `--filter`) is one filter expression over the selected cases, applied by the
+  model selection after names, labels and layers, so every flag above is sugar
+  that it narrows further. Predicates: `name(GLOB)` (whole case name),
+  `label(RE)` (CTest regex, as `-L`), `layer(NAME)`, a bare `WORD` (carries the
+  label WORD, so `!slow` works), `affected()` (the Git delta of
+  `--only-changed` reaches the case; it does not restrict the rest, so
+  `affected() | name(x)` works) and `failed()` (the case failed, or timed out,
+  in the last recorded run of this project). Operators: `!`, `&`, `|` (`&`
+  binds tighter) and parentheses, for example
+  `-E 'name(core_*) & !slow & affected()'`. The filter does not lift default
+  exclusions: add `--all` to select `slow` cases. An invalid expression exits 1
+  (`invalid filter`). A Gremlin lane takes a filter at start and keeps it as
+  part of its lane policy (like `-L`); `affected()` and `failed()` are refused
+  there, and changing the filter of a running lane is not supported (stop and
+  start the lane).
+- `--partition hash:K/N` or `count:K/N` (1 <= K <= N) keeps part K of N of the
+  selected cases, for the user's own CI matrix. `hash` assigns a case by the
+  SHA-256 of its name alone, so a case keeps its part when other cases come and
+  go; `count` cuts the name-sorted list into N contiguous, balanced blocks.
+  The N parts are disjoint and cover the selection. An empty part runs nothing
+  and exits 0.
+- `--junit PATH` also writes JUnit XML of the run to PATH (atomically): one
+  `testcase` per result, `<failure>` for FAIL, `<error>` for TIMEOUT,
+  `<skipped>` for skip and untested; reused and flaky cases pass and say so in
+  their `system-out`. Markup is escaped and characters XML 1.0 forbids become
+  `?`. fo schedules nothing: the CI runs each part itself.
+- PASS reuse (`fo test`, MCP `test`). A selected case whose input closure
+  digest equals the digest of its recorded PASS is reported `reused` (counted
+  in the verdict, `3 reused`, and in the JSON as `reused`) and not run. The
+  digest is Gremlin's `closure_digest` (the same code: the case's input closure
+  files, the files that affect every case, labels and attributes, the toolchain
+  identity and the fo driver), plus the build profile and `--flag` text. An
+  undeclared project file (data), a manifest or any input outside the project
+  files changes every digest, so every case runs; an incomplete or unknown
+  input leaves the case without a digest and it always runs. Only a `PASS`
+  records a digest: FAIL, TIMEOUT and FLAKY record their status (for
+  `failed()`) and are never reused, and a successful build is never a PASS.
+  `--rerun` (MCP `rerun`, or `FO_TEST_RERUN=1`) runs every selected case; `--random` always does.
+  `--no-cache` neither reuses nor records (Gremlin's own case runs use it:
+  they keep their receipts and the frozen view read-only).
+  The record is `build/fo-test-index` (CMake: the model's build directory), one
+  line per model case (dropped when the case disappears), replaced atomically;
+  a missing or damaged file means nothing is reused. A case that depends on
+  state outside its inputs (time, network, environment) needs `--rerun`.
+
+MCP `test` uses the same selection for its names, `filter` and `only_changed`.
+`--list`, labels, layers, `-E`, `--partition` and `--only-changed`
+are not available with `FO_CMAKE_NATIVE`; `--random` conflicts with the
+selection flags, `-E` and `--list`.
+`fo check` and the `fo` pipeline run the
 cases the sources changed since the last cached build affect, through the same
 model mapping.
 
@@ -314,7 +363,7 @@ the release profile.
 
 Every `fo test` run reports one verdict line, such as
 `12 pass, 1 FAIL, 2 skip (4.10s wall)`. Counts other than pass are omitted when
-zero; `flaky` and `untested` appear when nonzero. The time is the run's wall
+zero; `flaky`, `untested` and `reused` (PASS reuse, see above) appear when nonzero. The time is the run's wall
 clock (`wall`) when the runner recorded it, otherwise the sum of the per-case
 times (`summed`). Per-case slow-test warnings are CPU time and say `CPU`.
 

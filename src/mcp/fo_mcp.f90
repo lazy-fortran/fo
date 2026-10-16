@@ -681,8 +681,8 @@ contains
         use fo_build_backend, only: backend_test, backend_test_names
         use fo_project_model, only: model_request_t, model_selection_t, &
             project_model_t, SELECT_EMPTY
-        use fo_project_load, only: project_has_model, project_select, &
-            project_run_cases
+        use fo_project_load, only: project_has_model, project_select
+        use fo_test_cache, only: test_cache_run
         use fx_string, only: string_t
         use fo_test_results, only: test_result_entry_t, parse_test_results, &
             format_test_results_json
@@ -704,8 +704,11 @@ contains
         type(project_model_t) :: model
         character(len=:), allocatable :: message
         type(string_t), allocatable :: widen_reasons(:)
-        logical :: only_changed
+        logical :: only_changed, rerun
         integer :: changed_count, changed_error
+        character(len=1024) :: filter_text
+        integer :: filter_count, filter_error, rerun_count, rerun_error, rerun_len
+        character(len=8) :: rerun_env
 
         b = detect_backend(trim(dir))
         if (b%kind == BACKEND_NONE) then
@@ -741,8 +744,24 @@ contains
             call rpc_error(id_str, -32602, 'only_changed must be a boolean', response)
             return
         end if
-        if (only_changed .and. .not. project_has_model(b)) then
-            output_text = 'fo: only_changed needs the project model '// &
+        call extract_json_string_member(line, 'filter', filter_text, &
+            filter_count, filter_error)
+        if (filter_count > 1 .or. filter_error /= 0) then
+            call delete_tmpfile(tmpfile)
+            call rpc_error(id_str, -32602, 'filter must be a string', response)
+            return
+        end if
+        call extract_json_bool_member(line, 'rerun', rerun, rerun_count, rerun_error)
+        if (rerun_count > 1 .or. rerun_error /= 0) then
+            call delete_tmpfile(tmpfile)
+            call rpc_error(id_str, -32602, 'rerun must be a boolean', response)
+            return
+        end if
+        call get_environment_variable('FO_TEST_RERUN', rerun_env, rerun_len)
+        if (rerun_len > 0 .and. trim(rerun_env) == '1') rerun = .true.
+        if ((only_changed .or. filter_count == 1) .and. &
+            .not. project_has_model(b)) then
+            output_text = 'fo: only_changed and filter need the project model '// &
                 '(unsupported with FO_CMAKE_NATIVE)'
             call delete_tmpfile(tmpfile)
             call make_tool_text_response(id_str, output_text, 1, response)
@@ -767,6 +786,7 @@ contains
             do i = 1, n_names
                 request%names(i)%s = trim(test_names(i))
             end do
+            if (filter_count == 1) request%filter = trim(filter_text)
             call project_select(b, '', request, only_changed, model, selection, &
                 widen_reasons, ierr, message)
             if (ierr == 0 .and. selection%status == SELECT_EMPTY) then
@@ -791,8 +811,8 @@ contains
                 return
             end if
             call progress_suppress(.true.)
-            call project_run_cases(b, model, selection%cases, '', .false., &
-                tmpfile, exitcode)
+            call test_cache_run(b, model, selection%cases, '', .false., tmpfile, &
+                exitcode, rerun)
             call progress_suppress(.false.)
         end if
 
@@ -1347,6 +1367,8 @@ contains
             'lint: remove unused imports in place')
         call schema_property(jb, 'deep', 'boolean', &
             'lint: add the fluff deep diagnostics')
+        call schema_property(jb, 'rerun', 'boolean', &
+            'test: run every selected case; reuse no recorded PASS')
         do i = 1, N_GREMLIN_OPTIONS
             call gremlin_schema_property(jb, GREMLIN_OPTIONS(i))
         end do

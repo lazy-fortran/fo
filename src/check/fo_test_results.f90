@@ -8,6 +8,7 @@ module fo_test_results
     public :: test_result_entry_t, MAX_TEST_RESULTS_ENTRIES
     public :: parse_test_results, format_test_results_json
     public :: format_test_results_text, read_logical_line
+    public :: extract_captured_stdout
 
     !! Initial capacity only. The entry buffer grows on demand, so a suite with
     !! more tests than this still reports every result: truncating the list used
@@ -195,7 +196,7 @@ contains
             exit_local, secs_str, iostat)
         if (iostat /= 0) return
         select case (status_local)
-        case ('PASS', 'FAIL', 'TIMEOUT', 'SKIP', 'FLAKY', 'UNTESTED')
+        case ('PASS', 'FAIL', 'TIMEOUT', 'SKIP', 'FLAKY', 'UNTESTED', 'REUSED')
         case default
             iostat = 1
             return
@@ -480,7 +481,8 @@ contains
 
         output = ''
         do i = 1, n_entries
-            if (summary_mode .and. trim(entries(i)%status) == 'PASS') cycle
+            if (summary_mode .and. (trim(entries(i)%status) == 'PASS' .or. &
+                trim(entries(i)%status) == 'REUSED')) cycle
             call format_single_test_entry(entries(i), line)
             output = output//trim(line)//achar(10)
             if (allocated(entries(i)%reason)) then
@@ -512,7 +514,8 @@ contains
         end do
         if (len(handle) > 0) output = output//'log: '//handle//achar(10)
         output = output//verdict_line(n_pass, n_fail, n_skip, n_untested, &
-            n_flaky, read_wall_seconds(log_file), total_secs)
+            n_flaky, read_wall_seconds(log_file), total_secs, &
+            count_reused(entries, n_entries))
     end subroutine format_test_results_text
 
     subroutine format_single_test_entry(entry, line)
@@ -685,6 +688,8 @@ contains
         output = trim(output)//'"passed":'//trim(json_int(n_pass))
         output = trim(output)//',"failed":'//trim(json_int(n_fail))
         output = trim(output)//',"skipped":'//trim(json_int(n_skip))
+        if (count_reused(entries, n_entries) > 0) output = output//',"reused":'// &
+            trim(json_int(count_reused(entries, n_entries)))
         if (n_untested > 0) output = output//',"untested":'//trim(json_int(n_untested))
         output = trim(output)//',"total_seconds":'//format_seconds(total_secs)
         output = trim(output)//'}'
@@ -733,7 +738,7 @@ contains
             if (len(handle) > 0) source_log = handle
         end if
         output = '{"v":"'//verdict_line(n_pass, n_fail, n_skip, n_untested, &
-            n_flaky, wall, total_secs)//'"'
+            n_flaky, wall, total_secs, count_reused(entries, n_entries))//'"'
         if (exit_code == 0 .and. n_fail == 0) then
             output = output//',"ok":true'
         else
@@ -744,6 +749,8 @@ contains
         output = output//',"skip":'//trim(json_int(n_skip))
         if (n_untested > 0) output = output//',"untested":'//trim(json_int(n_untested))
         if (n_flaky > 0) output = output//',"flaky":'//trim(json_int(n_flaky))
+        if (count_reused(entries, n_entries) > 0) output = output//',"reused":'// &
+            trim(json_int(count_reused(entries, n_entries)))
         if (wall >= 0.0_real64) then
             output = output//',"wall_s":'//format_seconds(wall)
         else
@@ -752,11 +759,12 @@ contains
         output = output//',"exit":'//trim(json_int(exit_code))
         if (len(handle) > 0) output = output//',"log":"'// &
             json_escape_string(handle)//'"'
-        if (n_entries > n_pass) then
+        if (n_entries > n_pass + count_reused(entries, n_entries)) then
             output = output//',"cases":['
             n_listed = 0
             do i = 1, n_entries
-                if (trim(entries(i)%status) == 'PASS') cycle
+                if (trim(entries(i)%status) == 'PASS' .or. &
+                    trim(entries(i)%status) == 'REUSED') cycle
                 if (n_listed > 0) output = output//','
                 n_listed = n_listed + 1
                 output = output//'{"n":"'//json_escape_string(entries(i)%name)// &
@@ -822,6 +830,8 @@ contains
             select case (trim(entries(i)%status))
             case ('PASS')
                 n_pass = n_pass + 1
+            case ('REUSED')
+                ! Counted by count_reused: neither run nor skipped.
             case ('FLAKY')
                 n_flaky = n_flaky + 1
             case ('FAIL', 'TIMEOUT')
@@ -834,16 +844,32 @@ contains
         end do
     end subroutine count_statuses
 
+    integer function count_reused(entries, n_entries) result(n)
+        type(test_result_entry_t), intent(in) :: entries(:)
+        integer, intent(in) :: n_entries
+        integer :: i
+
+        n = 0
+        do i = 1, n_entries
+            if (trim(entries(i)%status) == 'REUSED') n = n + 1
+        end do
+    end function count_reused
+
     function verdict_line(n_pass, n_fail, n_skip, n_untested, n_flaky, wall, &
-            total_secs) result(line)
+            total_secs, n_reused) result(line)
         !! `12 pass, 1 FAIL, 2 skip (4.10s wall)`. Zero counts other than pass
         !! are omitted. The time is the run's wall clock when known, otherwise
         !! the sum of the per-case times, and says which.
         integer, intent(in) :: n_pass, n_fail, n_skip, n_untested, n_flaky
         real(real64), intent(in) :: wall, total_secs
+        !! Cases not run: their PASS at an unchanged input closure was reused.
+        integer, intent(in), optional :: n_reused
         character(len=:), allocatable :: line
 
         line = trim(json_int(n_pass))//' pass'
+        if (present(n_reused)) then
+            if (n_reused > 0) line = line//', '//trim(json_int(n_reused))//' reused'
+        end if
         if (n_fail > 0) line = line//', '//trim(json_int(n_fail))//' FAIL'
         if (n_flaky > 0) line = line//', '//trim(json_int(n_flaky))//' flaky'
         if (n_skip > 0) line = line//', '//trim(json_int(n_skip))//' skip'

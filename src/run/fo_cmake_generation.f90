@@ -24,8 +24,11 @@ module fo_cmake_generation
     integer, parameter :: PATH_LEN = 4096, MAX_ROOTS = 60
     public :: cmake_capture_inventory, cmake_registered_names, cmake_capture_cleanup
 contains
-    subroutine cmake_capture_inventory(backend, inventory, ierr, message)
+    subroutine cmake_capture_inventory(backend, inventory, ierr, message, flags)
         type(backend_t), intent(inout) :: backend
+        !! Configure flags of the tree (default none): the same as the loaded
+        !! model's, so capturing never reconfigures a profiled tree.
+        character(len=*), intent(in), optional :: flags
         type(input_inventory_t), intent(out) :: inventory
         integer, intent(out) :: ierr
         character(len=*), intent(out) :: message
@@ -56,7 +59,11 @@ contains
             return
         end if
         call make_tmpfile('fo-cmake-capture-configure', log_file)
-        call cmake_configure(backend%cmake, '', log_file, ierr)
+        if (present(flags)) then
+            call cmake_configure(backend%cmake, flags, log_file, ierr)
+        else
+            call cmake_configure(backend%cmake, '', log_file, ierr)
+        end if
         if (ierr /= 0) then
             message = 'CMake configuration failed during generation capture; '// &
                 'diagnostic: '//trim(log_file)

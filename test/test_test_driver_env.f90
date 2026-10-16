@@ -68,6 +68,7 @@ contains
         call list_add(command, 'FO_SELF_REFRESH=0')
         call list_add(command, 'FO_CACHE_DIR='//join_path(scratch, 'cache'))
         call list_add(command, 'DRIVER_ENV_MARKER='//marker)
+        call list_add(command, 'FO_TEST_RERUN=1')
         call list_add(command, driver)
         call list_add(command, 'test')
         call list_add(command, 'test_seen')

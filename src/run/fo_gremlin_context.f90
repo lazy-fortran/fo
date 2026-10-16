@@ -10,7 +10,8 @@ module fo_gremlin_context
     use fo_dep_resolve, only: resolved_src_t, MAX_RESOLVED, &
         resolve_dep_srcs, resolve_dev_dep_srcs
     use fo_gremlin_generation, only: generation_context_t, &
-        generation_t, generation_capture, generation_load_inventory
+        generation_t, generation_capture, generation_load_inventory, &
+        generation_toolchain_key
     use fo_driver, only: driver_pin_t
     use fo_input_inventory, only: input_declaration_t, input_inventory_t, &
         input_inventory_discover, input_inventory_declarations_from_config
@@ -26,7 +27,7 @@ module fo_gremlin_context
 
     integer, parameter :: PATH_LEN = 4096
 
-    public :: capture_candidate, generation_inventory_restore
+    public :: capture_candidate, generation_inventory_restore, case_identity_capture
     public :: common_generation_cas_root
 
 contains
@@ -172,6 +173,52 @@ contains
         change_watch%capture_count = change_watch%capture_count + 1
         call observe_test_capture(change_watch%capture_count, generation%identity)
     end subroutine capture_candidate
+
+    subroutine case_identity_capture(backend, driver_digest, flags, generation, ok)
+        !! The inputs of the case input closure digests of a project as it is
+        !! now (generation_case_digests_ensure), without freezing a
+        !! generation: its input inventory, toolchain key and the driver
+        !! digest. ok = .false. when any is unavailable; no reuse then.
+        type(backend_t), intent(inout) :: backend
+        !! flags: the configure flags the model was loaded with.
+        character(len=*), intent(in) :: driver_digest, flags
+        type(generation_t), intent(out) :: generation
+        logical, intent(out) :: ok
+        character(len=:), allocatable :: project_dir
+        type(generation_context_t) :: context
+        type(input_inventory_t) :: inventory
+        type(input_declaration_t), allocatable :: declarations(:)
+        character(len=PATH_LEN) :: message
+        integer :: ierr, cleanup_status
+
+        ok = .false.
+        project_dir = trim(backend%project_dir)
+        if (backend%kind /= BACKEND_CMAKE) then
+            call dep_acquire_sources(project_dir, ierr)
+            if (ierr /= 0) return
+        end if
+        call capture_toolchain(project_dir, context, ierr, message)
+        if (ierr /= 0) return
+        if (backend%kind == BACKEND_CMAKE) then
+            call cmake_capture_inventory(backend, inventory, ierr, message, flags)
+        else
+            call input_inventory_declarations_from_config(project_dir, declarations, &
+                ierr, message)
+            if (ierr /= 0) return
+            call input_inventory_discover(project_dir, declarations, inventory, &
+                ierr, message)
+        end if
+        if (backend%kind == BACKEND_CMAKE) &
+            call cmake_capture_cleanup(inventory, cleanup_status)
+        if (ierr /= 0 .or. .not. inventory%valid) return
+        generation%input_inventory = inventory
+        generation%input_inventory_ready = .true.
+        generation%input_inventory_complete = inventory%complete
+        generation%driver_digest = driver_digest
+        generation%toolchain_key = generation_toolchain_key(context%toolchain, &
+            context%flags, context%environment)
+        ok = .true.
+    end subroutine case_identity_capture
 
     subroutine watch_registry_versions(watch, project_dir, ierr, message)
         type(change_watch_t), intent(inout) :: watch
@@ -320,7 +367,9 @@ contains
         message = ''
     end subroutine common_generation_cas_root
 
-    subroutine capture_context(project_dir, context, ierr, message)
+    subroutine capture_toolchain(project_dir, context, ierr, message)
+        !! Compiler identity, flags and environment of a context: the inputs
+        !! of the toolchain key of a generation (generation_toolchain_key).
         character(len=*), intent(in) :: project_dir
         type(generation_context_t), intent(out) :: context
         integer, intent(out) :: ierr
@@ -328,24 +377,18 @@ contains
 
         type(backend_t) :: backend
         type(fpm_config_t), allocatable :: config
-        character(len=PATH_LEN) :: compiler_path, command_path
+        character(len=PATH_LEN) :: compiler_path
         character(len=:), allocatable :: packed
         character(len=PATH_LEN) :: log_file, output_line
-        character(len=128) :: base_commit
-        character(len=131072) :: git_status
-        character(len=256) :: fingerprint
-        integer(c_long_long) :: tree_sum, tree_mixed, tree_count
         integer :: i, n_args
-        integer :: exitcode, git_exit
-        logical :: found, git_found, fingerprint_ok
+        integer :: exitcode
+        logical :: found
 
         ierr = 0
         message = ''
         context%toolchain = ''
         context%flags = ''
         context%environment = ''
-        context%base_commit = ''
-        context%patch_digest = ''
         backend = detect_backend(project_dir)
         if (backend%kind == BACKEND_CMAKE) then
             call append_environment_value(context%environment, 'FO_BACKEND')
@@ -401,6 +444,29 @@ contains
         call append_environment_value(context%environment, 'FO_FPM_CONFIG_FILE')
         call append_environment_value(context%environment, 'LIBRARY_PATH')
         call append_environment_value(context%environment, 'OMP_NUM_THREADS')
+    end subroutine capture_toolchain
+
+    subroutine capture_context(project_dir, context, ierr, message)
+        character(len=*), intent(in) :: project_dir
+        type(generation_context_t), intent(out) :: context
+        integer, intent(out) :: ierr
+        character(len=*), intent(out) :: message
+
+        character(len=PATH_LEN) :: command_path
+        character(len=:), allocatable :: packed
+        character(len=PATH_LEN) :: log_file, output_line
+        character(len=128) :: base_commit
+        character(len=131072) :: git_status
+        character(len=256) :: fingerprint
+        integer(c_long_long) :: tree_sum, tree_mixed, tree_count
+        integer :: i, n_args
+        integer :: git_exit
+        logical :: found, git_found, fingerprint_ok
+
+        call capture_toolchain(project_dir, context, ierr, message)
+        if (ierr /= 0) return
+        context%base_commit = ''
+        context%patch_digest = ''
         call make_tmpfile('fo-gremlin-git-head', log_file)
         call fs_find_executable('git', command_path, found)
         git_found = found

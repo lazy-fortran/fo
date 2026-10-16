@@ -23,6 +23,7 @@ module fo_project_model
     use fo_pattern, only: pattern_t, pattern_compile, pattern_compile_glob, &
         pattern_matches, pattern_is_glob
     use fo_util, only: int_text
+    use fo_case_filter, only: case_filter_t, filter_parse, filter_eval
     implicit none
     private
 
@@ -64,6 +65,8 @@ module fo_project_model
     integer, parameter, public :: CASE_DEPENDENCY = 7
     !! Selected, but no changed file affects it (model_affected).
     integer, parameter, public :: CASE_NOT_AFFECTED = 8
+    !! Selected by name and labels, but the filter expression rejects it.
+    integer, parameter, public :: CASE_FILTERED = 9
 
     type, public :: model_attr_t
         !! Adapter property carried opaquely (e.g. CTest FIXTURES_REQUIRED).
@@ -166,6 +169,11 @@ module fo_project_model
         type(string_t), allocatable :: exclude_labels(:)
         !! Layer names (union); none = no layer filter.
         type(string_t), allocatable :: layers(:)
+        !! Filter expression (fo_case_filter); empty = none. affected and
+        !! failed are per model case, supplied by the caller when the
+        !! expression uses affected() or failed().
+        character(len=:), allocatable :: filter
+        logical, allocatable :: affected(:), failed(:)
         logical :: all = .false.
     end type model_request_t
 
@@ -595,6 +603,10 @@ contains
         type(model_selection_t), intent(out) :: selection
         type(string_t), allocatable :: names(:), include(:), exclude(:), layers(:)
         type(pattern_t), allocatable :: include_re(:), exclude_re(:)
+        type(case_filter_t) :: expression
+        logical :: filtered
+        integer :: filter_error
+        character(len=:), allocatable :: filter_message
         type(pattern_t) :: glob
         logical, allocatable :: named(:), exact(:), layer_wanted(:)
         type(string_t), allocatable :: origin(:)
@@ -621,6 +633,30 @@ contains
             selection%status = SELECT_BAD_PATTERN
             selection%message = joined(selection%unknown)
             return
+        end if
+
+        filtered = .false.
+        if (allocated(request%filter)) filtered = len_trim(request%filter) > 0
+        if (filtered) then
+            call filter_parse(trim(request%filter), expression, filter_error, &
+                filter_message)
+            if (filter_error == 0 .and. expression%uses_affected .and. &
+                .not. allocated(request%affected)) then
+                filter_error = 1
+                filter_message = 'affected() needs the Git delta of the project, '// &
+                    'which this command does not supply'
+            end if
+            if (filter_error == 0 .and. expression%uses_failed .and. &
+                .not. allocated(request%failed)) then
+                filter_error = 1
+                filter_message = 'failed() needs the last recorded run, '// &
+                    'which this command does not supply'
+            end if
+            if (filter_error /= 0) then
+                selection%status = SELECT_BAD_PATTERN
+                selection%message = 'invalid filter: '//filter_message
+                return
+            end if
         end if
 
         allocate(layer_wanted(0:model%n_layers))
@@ -704,6 +740,15 @@ contains
                     call mark(i, CASE_LAYER_FILTERED, 'not in the requested layers')
                     cycle
                 end if
+                if (filtered) then
+                    if (.not. filter_eval(expression, c%name, c%labels, &
+                            layer_of(c), flag(request%affected, i), &
+                            flag(request%failed, i))) then
+                        call mark(i, CASE_FILTERED, 'excluded by filter '// &
+                            trim(request%filter))
+                        cycle
+                    end if
+                end if
                 call default_exclusion(c, model%default_exclude, include, &
                     include_re, request%all, reason, lifted)
                 if (len(reason) > 0) then
@@ -743,6 +788,22 @@ contains
         end if
 
     contains
+
+        function layer_of(c) result(name)
+            type(model_case_t), intent(in) :: c
+            character(len=:), allocatable :: name
+
+            name = ''
+            if (c%layer > 0) name = model%layers(c%layer)%name
+        end function layer_of
+
+        logical function flag(mask, k)
+            logical, intent(in), allocatable :: mask(:)
+            integer, intent(in) :: k
+
+            flag = .false.
+            if (allocated(mask)) flag = mask(k)
+        end function flag
 
         subroutine sort_by_name(idx)
             !! Bottom-up merge sort of case indices by name: O(n log n), stable.

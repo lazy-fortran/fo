@@ -156,6 +156,10 @@ contains
                         call add_text_probe(option, 'bogus-value', .false.)
                         call add_text_probe(option, first_choice(option%choices), .true.)
                     end if
+                    if (trim(option%key) == 'filter') then
+                        call add_text_probe(option, 'name(', .false.)
+                        call add_text_probe(option, 'affected()', .false.)
+                    end if
                 end select
             end associate
         end do

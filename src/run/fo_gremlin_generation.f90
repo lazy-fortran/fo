@@ -73,6 +73,7 @@ module fo_gremlin_generation
         character(len=HASH_LEN) :: toolchain_key = ''
     end type generation_t
 
+    public :: generation_toolchain_key
     public :: generation_capture, generation_driver_identity, &
         generation_load_inventory, generation_model_key
 
@@ -121,6 +122,15 @@ module fo_gremlin_generation
     end interface
 
 contains
+
+    function generation_toolchain_key(toolchain, flags, environment) result(key)
+        !! Digest of the compiler identity, flags and environment: the global
+        !! part of every case input closure digest (fo_gremlin_case_inputs).
+        character(len=*), intent(in) :: toolchain, flags, environment
+        character(len=HASH_LEN) :: key
+
+        key = sha256_string('toolchain|'//toolchain//'|'//flags//'|'//environment)
+    end function generation_toolchain_key
 
     function generation_model_key(inventory, driver_digest, full) result(key)
         !! Reuse key of a generation's project model: the content of the
@@ -259,8 +269,8 @@ contains
         metadata%patch_digest = value_or_empty(context%patch_digest)
         metadata%execution_identity = generation_manifest_execution_identity( &
             metadata, context%input_inventory)
-        generation%toolchain_key = sha256_string('toolchain|'// &
-            metadata%toolchain//'|'//metadata%flags//'|'//metadata%environment)
+        generation%toolchain_key = generation_toolchain_key(metadata%toolchain, &
+            metadata%flags, metadata%environment)
         call cache_store_root(store_root)
         if (len_trim(store_root) == 0 .or. len_trim(store_root) >= PATH_LEN) then
             message = 'cannot resolve the shared immutable object store'
