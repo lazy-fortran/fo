@@ -72,6 +72,9 @@ program test_cmake_project_model
     print '(a)', 'CMake project model PASS'
 contains
     subroutine write_fixture()
+        ! A fixed-length local avoids gfortran 16 sizing a typed one-element
+        ! constructor of a run-time concatenation by its value, not its type.
+        character(len=256) :: preset
         call write_lines(join_path(project, 'CMakeLists.txt'), [character(len=160) :: &
             'cmake_minimum_required(VERSION 3.20)', &
             'project(pm Fortran)', &
@@ -92,11 +95,11 @@ contains
             'FIXTURES_REQUIRED "a;b")'])
         call write_lines(join_path(project, 'check.cmake'), &
             [character(len=40) :: 'message(STATUS ok)'])
-        call write_lines(join_path(project, 'CMakePresets.json'), &
-            [character(len=256) :: '{"version":3,"configurePresets":[{"name":"c",'// &
+        preset = '{"version":3,"configurePresets":[{"name":"c",'// &
             '"generator":"Ninja","binaryDir":"'//build//'"}],"testPresets":'// &
             '[{"name":"t","configurePreset":"c","filter":{"exclude":'// &
-            '{"label":"perf"}}}]}'])
+            '{"label":"perf"}}}]}'
+        call write_lines(join_path(project, 'CMakePresets.json'), [preset])
         call write_lines(join_path(project, 'core/CMakeLists.txt'), &
             [character(len=160) :: 'add_library(core STATIC core.f90)', &
             'target_link_libraries(core PUBLIC ext)'])

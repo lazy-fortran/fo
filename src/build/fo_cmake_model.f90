@@ -955,7 +955,11 @@ contains
         if (len(root) == 0) return
         if (len(path) < len(root)) return
         if (path(1:len(root)) /= root) return
-        is_within = len(path) == len(root) .or. path(len(root) + 1:len(root) + 1) == '/'
+        if (len(path) == len(root)) then
+            is_within = .true.
+        else
+            is_within = path(len(root) + 1:len(root) + 1) == '/'
+        end if
     end function is_within
 
     function strip_slash(path) result(r)
