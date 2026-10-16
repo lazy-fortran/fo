@@ -399,13 +399,16 @@ static int clone_regular_file(int input, const char *target) {
 
 static int copy_regular_file(int input, const char *target,
                              const struct stat *before, mode_t output_mode,
-                             int sync_output) {
+                             int sync_output, int share_blocks) {
     int output;
     char buffer[65536];
     ssize_t n;
     struct stat after;
-    /* Rebuildable copies (no durability request) share blocks when possible. */
-    if (!sync_output && clone_regular_file(input, target) == 0) {
+    /* Rebuildable copies (no durability request) of immutable sources share
+     * blocks when possible. A live project input is never cloned: APFS reports
+     * the clone as an event on the source, which the change watcher would
+     * take for an edit and recapture. */
+    if (share_blocks && !sync_output && clone_regular_file(input, target) == 0) {
         if (fstat(input, &after) != 0 ||
             before->st_size != after.st_size ||
             before->st_mtime != after.st_mtime ||
@@ -557,7 +560,7 @@ static int walk_directory_at(int root_fd, int dir_fd, const char *rel,
                 } else if (make_parent(target) != 0 ||
                            copy_regular_file(input, target, &st,
                                              st.st_mode & 0777,
-                                             sync_output) != 0) {
+                                             sync_output, 1) != 0) {
                     rc = -1;
                 }
                 close(input);
@@ -670,7 +673,7 @@ int fo_c_generation_copy_declared_file(const char *source, const char *dest,
         errno = saved;
         return errno == 0 ? 1 : errno;
     }
-    rc = copy_regular_file(input, dest, &before, mode, 1);
+    rc = copy_regular_file(input, dest, &before, mode, 1, 0);
     saved = errno;
     close(input);
     if (rc != 0) {
@@ -782,7 +785,7 @@ int fo_c_generation_capture_file(const char *root, const char *relative,
     input_fd = open_inventoried_input(root, relative, device, inode, &before);
     if (input_fd < 0) return errno == 0 ? 1 : errno;
     rc = copy_regular_file(input_fd, destination, &before,
-                           before.st_mode & 0777, 0);
+                           before.st_mode & 0777, 0, 0);
     saved = errno;
     close(input_fd);
     if (rc != 0) unlink(destination);
